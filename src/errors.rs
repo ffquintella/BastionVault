@@ -400,6 +400,7 @@ impl PartialEq for RvError {
             | (RvError::ErrBarrierKeyInvalid, RvError::ErrBarrierKeyInvalid)
             | (RvError::ErrBarrierNotInit, RvError::ErrBarrierNotInit)
             | (RvError::ErrBarrierSealed, RvError::ErrBarrierSealed)
+            | (RvError::ErrBarrierUnsealing, RvError::ErrBarrierUnsealing)
             | (RvError::ErrBarrierUnsealed, RvError::ErrBarrierUnsealed)
             | (RvError::ErrBarrierUnsealFailed, RvError::ErrBarrierUnsealFailed)
             | (RvError::ErrBarrierEpochMismatch, RvError::ErrBarrierEpochMismatch)
