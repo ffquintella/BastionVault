@@ -21,16 +21,14 @@
 //! [Hashicorp Vault]: https://www.hashicorp.com/products/vault
 //! [RESTful API documentation]: https://www.tongsuo.net
 
+use bv_crypto::{KemDemEnvelopeV1, MlKem768Provider, ML_KEM_768_SEED_LEN};
 use chrono::Utc;
+use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{
-    modules::crypto::{AEADCipher, AESKeySize, BlockCipher, CipherMode, AES},
-    shamir::ShamirSecret,
-    utils::BHashSet,
-};
+use crate::{shamir::ShamirSecret, utils::BHashSet};
 
 /// Error types that can occur during SealBox operations.
 ///
@@ -130,12 +128,8 @@ pub enum SealBoxError {
 pub struct SealBox<T> {
     /// The encrypted data (ciphertext)
     sealed_data: Vec<u8>,
-    /// The nonce used for AES-GCM encryption (16 bytes)
-    nonce: [u8; 16],
-    /// Additional Authenticated Data (AAD) for GCM mode (13 bytes)
-    aad: [u8; 13],
-    /// The authentication tag from AES-GCM (16 bytes)
-    tag: [u8; 16],
+    /// Additional authenticated data used when sealing the envelope.
+    aad: Vec<u8>,
     /// The minimum number of shares required to unseal the box
     threshold: u8,
     /// The total number of shares to generate
@@ -146,12 +140,12 @@ pub struct SealBox<T> {
     /// Shares are only stored in memory and not persisted.
     #[serde(skip)]
     shares: Option<Vec<Vec<u8>>>,
-    /// The reconstructed encryption key (32 bytes for AES-256)
+    /// The reconstructed ML-KEM seed material used to derive the decapsulation key.
     ///
     /// This field is skipped during serialization for security reasons.
     /// The key is only stored in memory when the box is unsealed.
     #[serde(skip)]
-    key: Option<[u8; 32]>,
+    key: Option<Vec<u8>>,
     /// The decrypted and deserialized data
     ///
     /// This field is skipped during serialization and zeroization.
@@ -198,36 +192,22 @@ where
         }
 
         let serialized = serde_json::to_vec(&data).unwrap();
-
-        let now_ms = Utc::now().timestamp_millis().to_string().as_bytes().to_vec();
-
-        let mut aes_encrypter = AES::new(true, Some(AESKeySize::AES256), Some(CipherMode::GCM), None, None)
+        let aad = Utc::now().timestamp_millis().to_string().as_bytes().to_vec();
+        let mut seed = [0u8; ML_KEM_768_SEED_LEN];
+        OsRng.fill_bytes(&mut seed);
+        let provider = MlKem768Provider;
+        let keypair = provider.keypair_from_seed(&seed).map_err(|_| SealBoxError::EncryptionFailed)?;
+        let envelope = KemDemEnvelopeV1::seal(&provider, keypair.public_key(), &aad, &serialized)
             .map_err(|_| SealBoxError::EncryptionFailed)?;
-
-        aes_encrypter.set_aad(now_ms.clone()).map_err(|_| SealBoxError::EncryptionFailed)?;
-        let encrypted = aes_encrypter.encrypt(&serialized).map_err(|_| SealBoxError::EncryptionFailed)?;
-
-        let mut tag: [u8; 16] = [0; 16];
-        tag[..16].copy_from_slice(&aes_encrypter.get_tag().map_err(|_| SealBoxError::EncryptionFailed)?);
-
-        let mut key: [u8; 32] = [0; 32];
-        key[..32].copy_from_slice(&aes_encrypter.get_key_iv().0);
-
-        let mut nonce: [u8; 16] = [0; 16];
-        nonce[..16].copy_from_slice(&aes_encrypter.get_key_iv().1);
-
-        let mut aad: [u8; 13] = [0; 13];
-        aad[..13].copy_from_slice(&now_ms);
+        let sealed_data = serde_json::to_vec(&envelope).map_err(|_| SealBoxError::EncryptionFailed)?;
 
         Ok(Self {
-            sealed_data: encrypted,
-            nonce,
+            sealed_data,
             aad,
-            tag,
             threshold,
             total_shares,
             shares: None,
-            key: Some(key),
+            key: Some(seed.to_vec()),
             value: Some(data),
             deprecated_shares: BHashSet::default(),
         })
@@ -322,24 +302,18 @@ where
         }
 
         let key = ShamirSecret::combine(shares.clone()).ok_or(SealBoxError::UnsealFailed)?;
+        if key.len() != ML_KEM_768_SEED_LEN {
+            return Err(SealBoxError::UnsealFailed);
+        }
 
-        let mut aes_decrypter = AES::new(
-            false,
-            Some(AESKeySize::AES256),
-            Some(CipherMode::GCM),
-            Some(key.to_vec()),
-            Some(self.nonce.to_vec()),
-        )
-        .map_err(|_| SealBoxError::DecryptionFailed)?;
-
-        aes_decrypter.set_aad(self.aad.to_vec()).map_err(|_| SealBoxError::DecryptionFailed)?;
-        aes_decrypter.set_tag(self.tag.to_vec()).map_err(|_| SealBoxError::DecryptionFailed)?;
-
-        let decrypted = aes_decrypter.decrypt(&self.sealed_data).map_err(|_| SealBoxError::DecryptionFailed)?;
+        let provider = MlKem768Provider;
+        let keypair = provider.keypair_from_seed(&key).map_err(|_| SealBoxError::UnsealFailed)?;
+        let envelope: KemDemEnvelopeV1 =
+            serde_json::from_slice(&self.sealed_data).map_err(|_| SealBoxError::DecryptionFailed)?;
+        let decrypted =
+            envelope.open(&provider, keypair.secret_key(), &self.aad).map_err(|_| SealBoxError::DecryptionFailed)?;
 
         let value: T = serde_json::from_slice(&decrypted).map_err(|_| SealBoxError::DecryptionFailed)?;
-
-        let key: [u8; 32] = key.try_into().map_err(|_| SealBoxError::UnsealFailed)?;
 
         self.key = Some(key);
         self.value = Some(value);
@@ -575,7 +549,7 @@ mod tests {
 
         sealbox.seal();
 
-        let invalid_share = vec![0u8; 32];
+        let invalid_share = vec![0u8; ML_KEM_768_SEED_LEN];
         assert!(matches!(sealbox.unseal(&invalid_share).unwrap_err(), SealBoxError::Unsealing));
         assert!(matches!(sealbox.unseal(&shares[0]).unwrap_err(), SealBoxError::UnsealFailed));
     }
@@ -688,9 +662,7 @@ mod tests {
 
         assert_eq!(deserialized.threshold, sealbox.threshold);
         assert_eq!(deserialized.sealed_data, sealbox.sealed_data);
-        assert_eq!(deserialized.nonce, sealbox.nonce);
         assert_eq!(deserialized.aad, sealbox.aad);
-        assert_eq!(deserialized.tag, sealbox.tag);
 
         assert!(deserialized.shares.is_none());
         assert!(deserialized.key.is_none());

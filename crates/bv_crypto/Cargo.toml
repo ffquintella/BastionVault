@@ -1,0 +1,21 @@
+[package]
+name = "bv_crypto"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Small, auditable cryptographic primitives for BastionVault migrations."
+
+[features]
+default = ["ml-kem-768"]
+ml-kem-768 = ["dep:ml-kem"]
+
+[dependencies]
+chacha20poly1305 = { version = "0.10", features = ["std"] }
+ml-kem = { version = "0.3.0-rc.2", features = ["getrandom", "zeroize"], optional = true }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+zeroize = { version = "1.7", features = ["zeroize_derive"] }
+
+[lints.clippy]
+result_large_err = "allow"

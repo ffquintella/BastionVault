@@ -26,10 +26,20 @@ This repository handles security-sensitive code. Treat correctness, reviewabilit
 ## Change Discipline
 
 - Keep changes small, scoped, and easy to review.
+- Prefer small code chunks over large rewrites.
 - Do not refactor unrelated code while implementing a security or correctness change.
 - Preserve existing interfaces unless there is a strong reason to change them.
 - If a migration is needed, use versioned formats and compatibility paths.
 - For storage or encryption format changes, support read-old/write-new migrations unless explicitly directed otherwise.
+
+## Code Organization
+
+- Prefer smaller modules with clear ownership boundaries.
+- When a subsystem grows beyond a single file or becomes reusable, split it into smaller modules before adding more behavior.
+- Favor incremental extraction into a `crates/` directory when isolating major capabilities such as crypto providers, storage formats, protocol layers, or migration tooling.
+- New crates should have narrow responsibilities, explicit public APIs, and minimal dependency surfaces.
+- Avoid creating large god-modules that mix parsing, crypto, I/O, persistence, and orchestration logic.
+- If a change touches a large file repeatedly, consider a preparatory split before implementing new behavior.
 
 ## Dependency Rules
 
@@ -76,6 +86,7 @@ When making or reviewing changes, prioritize:
 ## What To Avoid
 
 - speculative rewrites
+- large monolithic patches when smaller sequenced changes would work
 - unnecessary dependency churn
 - custom crypto
 - silent downgrade paths
@@ -89,4 +100,3 @@ When making or reviewing changes, prioritize:
 - identify migration risks before changing persisted formats
 - verify behavior with tests where possible
 - leave the codebase more explicit and more defensible than it was before
-

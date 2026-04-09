@@ -12,7 +12,7 @@ use serde::{
 };
 use serde_json::Value;
 
-use crate::errors::RvError;
+use crate::{errors::RvError, storage::BarrierType};
 
 /// A struct that contains several configurable options of BastionVault server
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -44,6 +44,8 @@ pub struct Config {
     #[serde(default = "default_mounts_monitor_interval")]
     #[default(5)]
     pub mounts_monitor_interval: u64,
+    #[serde(default = "default_barrier_type")]
+    pub barrier_type: BarrierType,
 }
 
 #[derive(Debug, Copy, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -65,6 +67,10 @@ fn default_collection_interval() -> u64 {
 
 fn default_mounts_monitor_interval() -> u64 {
     5
+}
+
+fn default_barrier_type() -> BarrierType {
+    BarrierType::AesGcm
 }
 
 /// A struct that contains several configurable options for networking stuffs
@@ -252,6 +258,10 @@ impl Config {
         if other.mount_entry_hmac_level != MountEntryHMACLevel::None {
             self.mount_entry_hmac_level = other.mount_entry_hmac_level;
         }
+
+        if other.barrier_type != BarrierType::AesGcm {
+            self.barrier_type = other.barrier_type;
+        }
     }
 }
 
@@ -358,7 +368,8 @@ mod test {
     #[test]
     fn test_load_config() {
         let dir = env::temp_dir().join(*TEST_DIR).join("test_load_config");
-        assert!(fs::create_dir(&dir).is_ok());
+        let _ = fs::remove_dir_all(&dir);
+        assert!(fs::create_dir_all(&dir).is_ok());
 
         let file_path = dir.join("config.hcl");
         let path = file_path.to_str().unwrap_or("config.hcl");
@@ -431,6 +442,7 @@ mod test {
         assert_eq!(json_config.daemon_user.as_str(), "");
         assert_eq!(json_config.daemon_group.as_str(), "");
         assert_eq!(json_config.mount_entry_hmac_level, MountEntryHMACLevel::None);
+        assert_eq!(json_config.barrier_type, BarrierType::AesGcm);
 
         let (_, listener) = json_config.listener.iter().next().unwrap();
         assert!(listener.tls_disable);
@@ -447,7 +459,8 @@ mod test {
     #[test]
     fn test_load_config_dir() {
         let dir = env::temp_dir().join(*TEST_DIR).join("test_load_config_dir");
-        assert!(fs::create_dir(&dir).is_ok());
+        let _ = fs::remove_dir_all(&dir);
+        assert!(fs::create_dir_all(&dir).is_ok());
 
         let file_path = dir.join("config1.hcl");
         let path = file_path.to_str().unwrap_or("config1.hcl");
@@ -485,6 +498,7 @@ mod test {
             }
 
             log_level = "info"
+            barrier_type = "chacha20-poly1305"
         "#;
 
         assert!(write_file(path, hcl_config_str).is_ok());
@@ -495,6 +509,7 @@ mod test {
         let hcl_config = config.unwrap();
         println!("hcl config: {:?}", hcl_config);
         assert_eq!(hcl_config.mount_entry_hmac_level, MountEntryHMACLevel::Compat);
+        assert_eq!(hcl_config.barrier_type, BarrierType::Chacha20Poly1305);
 
         let (_, listener) = hcl_config.listener.iter().next().unwrap();
         assert!(listener.tls_disable);
@@ -503,7 +518,8 @@ mod test {
     #[test]
     fn test_load_config_tls() {
         let dir = env::temp_dir().join(*TEST_DIR).join("test_load_config_tls");
-        assert!(fs::create_dir(&dir).is_ok());
+        let _ = fs::remove_dir_all(&dir);
+        assert!(fs::create_dir_all(&dir).is_ok());
 
         let file_path = dir.join("config.hcl");
         let path = file_path.to_str().unwrap_or("config.hcl");
@@ -566,5 +582,36 @@ mod test {
         assert_eq!(storage.config.len(), 1);
         let (_, path) = storage.config.iter().next().unwrap();
         assert_eq!(path.as_str(), Some("./vault/data"));
+    }
+
+    #[test]
+    fn test_load_config_with_chacha_barrier_type() {
+        let dir = env::temp_dir().join(*TEST_DIR).join("test_load_config_with_chacha_barrier_type");
+        let _ = fs::remove_dir_all(&dir);
+        assert!(fs::create_dir_all(&dir).is_ok());
+
+        let file_path = dir.join("config.json");
+        let path = file_path.to_str().unwrap_or("config.json");
+
+        let json_config_str = r#"{
+            "storage": {
+                "file": {
+                    "path": "./vault/data"
+                }
+            },
+            "listener": {
+                "tcp": {
+                    "address": "127.0.0.1:8200"
+                }
+            },
+            "barrier_type": "chacha20-poly1305"
+        }"#;
+
+        assert!(write_file(path, json_config_str).is_ok());
+
+        let config = load_config(path);
+        assert!(config.is_ok());
+        let json_config = config.unwrap();
+        assert_eq!(json_config.barrier_type, BarrierType::Chacha20Poly1305);
     }
 }

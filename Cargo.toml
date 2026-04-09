@@ -19,9 +19,17 @@ exclude = [
     "docs/*",
 ]
 
+[workspace]
+members = [
+    ".",
+    "crates/bv_crypto",
+]
+resolver = "2"
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+bv_crypto = { path = "crates/bv_crypto" }
 anyhow = { version = "^1.0" }
 thiserror = { version = "^1.0" }
 serde = { version = "^1.0", features = ["derive", "rc", "alloc"] }

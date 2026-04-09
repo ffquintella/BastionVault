@@ -711,15 +711,8 @@ mod tests {
     #[ctor::ctor]
     fn init() {
         let dir = env::temp_dir().join(*TEST_DIR);
-        let _ = fs::remove_dir_all(&dir);
         let _ = rustls::crypto::ring::default_provider().install_default();
-        assert!(fs::create_dir(&dir).is_ok());
-    }
-
-    #[ctor::dtor]
-    fn cleanup() {
-        let dir = env::temp_dir().join(*TEST_DIR);
-        let _ = fs::remove_dir_all(&dir);
+        assert!(fs::create_dir_all(&dir).is_ok());
     }
 }
 

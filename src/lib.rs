@@ -42,7 +42,7 @@ use crate::{
         policy::PolicyModule,
     },
     mount::MountsMonitor,
-    storage::Backend,
+    storage::{Backend, BarrierType},
 };
 
 #[cfg(feature = "storage_mysql")]
@@ -95,7 +95,8 @@ pub struct BastionVault {
 #[maybe_async::maybe_async]
 impl BastionVault {
     pub fn new(backend: Arc<dyn Backend>, config: Option<&Config>) -> Result<Self, RvError> {
-        let mut core = Core::new(backend);
+        let barrier_type = config.map(|conf| conf.barrier_type).unwrap_or(BarrierType::AesGcm);
+        let mut core = Core::new_with_barrier(backend, barrier_type);
         if let Some(conf) = config {
             core.mount_entry_hmac_level = conf.mount_entry_hmac_level;
             core.mounts_monitor_interval = conf.mounts_monitor_interval;
@@ -323,5 +324,40 @@ impl BastionVault {
         let mut req = Request::new_list_request(path);
         req.client_token = token.map(Into::into).unwrap_or_else(|| self.token.load().as_ref().clone());
         self.request(&mut req).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+    use crate::{
+        core::SealConfig,
+        storage::{barrier_chacha20_poly1305::BARRIER_CHACHA20_POLY1305_VERSION, BarrierType, StorageEntry},
+        test_utils::new_test_backend,
+    };
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_bastion_vault_uses_chacha_barrier_when_configured() {
+        let test_name = format!(
+            "test_bastion_vault_uses_chacha_barrier_when_configured_{}",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        );
+        let backend = new_test_backend(&test_name);
+        let config = Config { barrier_type: BarrierType::Chacha20Poly1305, ..Default::default() };
+        let rvault = BastionVault::new(backend.clone(), Some(&config)).unwrap();
+
+        let seal_config = SealConfig { secret_shares: 1, secret_threshold: 1 };
+        let init_result = rvault.init(&seal_config).await.unwrap();
+        let unseal_key = init_result.secret_shares[0].clone();
+
+        assert!(rvault.unseal(&[unseal_key.as_slice()]).await.unwrap());
+
+        let entry = StorageEntry { key: "test/chacha".to_string(), value: b"payload".to_vec() };
+        rvault.core.load().barrier.put(&entry).await.unwrap();
+
+        let raw = backend.get(&entry.key).await.unwrap().unwrap();
+        assert_eq!(raw.value[4], BARRIER_CHACHA20_POLY1305_VERSION);
     }
 }

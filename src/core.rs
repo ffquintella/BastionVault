@@ -30,8 +30,8 @@ use crate::{
     router::Router,
     shamir::{ShamirSecret, SHAMIR_OVERHEAD},
     storage::{
-        barrier::SecurityBarrier, barrier_aes_gcm, barrier_view::BarrierView, physical, Backend as PhysicalBackend,
-        BackendEntry as PhysicalBackendEntry,
+        barrier::SecurityBarrier, barrier_view::BarrierView, new_barrier, physical, Backend as PhysicalBackend,
+        BackendEntry as PhysicalBackendEntry, BarrierType,
     },
     utils::BHashSet,
 };
@@ -99,7 +99,7 @@ impl Default for CoreState {
 impl Default for Core {
     fn default() -> Self {
         let backend: Arc<dyn PhysicalBackend> = Arc::new(physical::mock::MockBackend::new());
-        let barrier = Arc::new(barrier_aes_gcm::AESGCMBarrier::new(backend.clone()));
+        let barrier = new_barrier(BarrierType::AesGcm, backend.clone());
         let router = Arc::new(Router::new());
 
         Core {
@@ -128,7 +128,11 @@ impl Default for Core {
 #[maybe_async::maybe_async]
 impl Core {
     pub fn new(backend: Arc<dyn PhysicalBackend>) -> Self {
-        let barrier = Arc::new(barrier_aes_gcm::AESGCMBarrier::new(backend.clone()));
+        Self::new_with_barrier(backend, BarrierType::AesGcm)
+    }
+
+    pub fn new_with_barrier(backend: Arc<dyn PhysicalBackend>, barrier_type: BarrierType) -> Self {
+        let barrier = new_barrier(barrier_type, backend.clone());
         let router = Arc::new(Router::new());
 
         Core {

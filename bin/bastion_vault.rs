@@ -9,8 +9,8 @@
 
 use std::process::ExitCode;
 
-use clap::{CommandFactory, Parser};
 use bastion_vault::cli::Cli;
+use clap::{CommandFactory, Parser};
 
 fn main() -> ExitCode {
     let mut cli = Cli::parse();

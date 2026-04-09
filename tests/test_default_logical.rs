@@ -1,11 +1,11 @@
 use std::{collections::HashMap, env, fs};
 
-use go_defer::defer;
 use bastion_vault::{
     core::{Core, SealConfig},
     logical::{Operation, Request},
     storage, BastionVault,
 };
+use go_defer::defer;
 use serde_json::{json, Map, Value};
 
 #[maybe_async::maybe_async]
@@ -386,7 +386,7 @@ async fn test_default_logical() {
 
     let dir = env::temp_dir().join("bastion_vault_core_init");
     let _ = fs::remove_dir_all(&dir);
-    assert!(fs::create_dir(&dir).is_ok());
+    assert!(fs::create_dir_all(&dir).is_ok());
     defer! (
         assert!(fs::remove_dir_all(&dir).is_ok());
     );

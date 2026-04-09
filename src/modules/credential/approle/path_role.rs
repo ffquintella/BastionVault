@@ -3638,7 +3638,8 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_role_token_bound_cidrs_crud() {
-        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_role_token_bound_cidrs_crud").await;
+        let (_rvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_approle_role_token_bound_cidrs_crud").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;

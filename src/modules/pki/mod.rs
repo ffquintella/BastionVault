@@ -926,8 +926,15 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
         test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-128", "bastion_vault test".as_bytes(), true).await;
         test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-192", "bastion_vault test".as_bytes(), true).await;
         test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-256", "bastion_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-256-bad-key-name", "bastion_vault test".as_bytes(), false)
-            .await;
+        test_pki_encrypt_decrypt(
+            &core,
+            token,
+            path,
+            "aes-gcm-256-bad-key-name",
+            "bastion_vault test".as_bytes(),
+            false,
+        )
+        .await;
 
         //test generate aes-cbc key
         test_pki_generate_key_case(&core, token, path, "aes-cbc-128", "aes-cbc", 128, true, true).await;
@@ -944,8 +951,15 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
         test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-128", "bastion_vault test".as_bytes(), true).await;
         test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-192", "bastion_vault test".as_bytes(), true).await;
         test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-256", "bastion_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-256-bad-key-name", "bastion_vault test".as_bytes(), false)
-            .await;
+        test_pki_encrypt_decrypt(
+            &core,
+            token,
+            path,
+            "aes-cbc-256-bad-key-name",
+            "bastion_vault test".as_bytes(),
+            false,
+        )
+        .await;
 
         //test generate aes-ecb key
         test_pki_generate_key_case(&core, token, path, "aes-ecb-128", "aes-ecb", 128, true, true).await;
@@ -962,8 +976,15 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
         test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-128", "bastion_vault test".as_bytes(), true).await;
         test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-192", "bastion_vault test".as_bytes(), true).await;
         test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-256", "bastion_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-256-bad-key-name", "bastion_vault test".as_bytes(), false)
-            .await;
+        test_pki_encrypt_decrypt(
+            &core,
+            token,
+            path,
+            "aes-ecb-256-bad-key-name",
+            "bastion_vault test".as_bytes(),
+            false,
+        )
+        .await;
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

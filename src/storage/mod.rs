@@ -16,6 +16,7 @@
 
 use std::{any::Any, collections::HashMap, sync::Arc};
 
+use better_default::Default;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -23,12 +24,23 @@ use crate::errors::RvError;
 
 pub mod barrier;
 pub mod barrier_aes_gcm;
+pub mod barrier_chacha20_poly1305;
+pub mod barrier_chacha20_poly1305_init;
 pub mod barrier_view;
 #[cfg(feature = "storage_mysql")]
 pub mod mysql;
 pub mod physical;
+pub mod pq_key_envelope;
 #[cfg(all(not(feature = "sync_handler"), feature = "storage_sqlx"))]
 pub mod sqlx;
+
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BarrierType {
+    #[default]
+    AesGcm,
+    Chacha20Poly1305,
+}
 
 /// A trait that abstracts core methods for all storage barrier types.
 #[maybe_async::maybe_async]
@@ -99,6 +111,13 @@ pub fn new_backend(t: &str, conf: &HashMap<String, Value>) -> Result<Arc<dyn Bac
     }
 }
 
+pub fn new_barrier(barrier_type: BarrierType, backend: Arc<dyn Backend>) -> Arc<dyn barrier::SecurityBarrier> {
+    match barrier_type {
+        BarrierType::AesGcm => Arc::new(barrier_aes_gcm::AESGCMBarrier::new(backend)),
+        BarrierType::Chacha20Poly1305 => Arc::new(barrier_chacha20_poly1305::ChaCha20Poly1305Barrier::new(backend)),
+    }
+}
+
 #[cfg(test)]
 pub mod test {
     use std::{collections::HashMap, env, fs};
@@ -113,7 +132,8 @@ pub mod test {
     #[test]
     fn test_new_backend() {
         let dir = env::temp_dir().join(*TEST_DIR).join("new_backend");
-        assert!(fs::create_dir(&dir).is_ok());
+        let _ = fs::remove_dir_all(&dir);
+        assert!(fs::create_dir_all(&dir).is_ok());
 
         let mut conf: HashMap<String, Value> = HashMap::new();
         conf.insert("path".to_string(), Value::String(dir.to_string_lossy().into_owned()));
