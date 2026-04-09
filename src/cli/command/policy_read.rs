@@ -11,7 +11,7 @@ use crate::{
 #[command(
     author,
     version,
-    about = r#"Prints the contents and metadata of the RustyVault policy named NAME. If the policy
+    about = r#"Prints the contents and metadata of the BastionVault policy named NAME. If the policy
 does not exist, an error is returned.
 
 Read the policy named "my-policy":

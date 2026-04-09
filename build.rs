@@ -8,7 +8,7 @@ use toml::Value;
 //    r#"
 //    No cryptography adaptor is enabled!
 //
-//    In RustyVault, the real cryptographic operations are done via "crypto_adaptor"s.
+//    In BastionVault, the real cryptographic operations are done via "crypto_adaptor"s.
 //
 //    A crypto adaptor is a module that conveys and translates high level cryptography
 //    operations like encryption, signing into the APIs provided by underlying cryptography
@@ -29,7 +29,7 @@ compile_error! {
     r#"
     Only one cryptography adapator can be enabled!
 
-    In RustyVault, the real cryptographic operations are done via "crypto_adaptor"s.
+    In BastionVault, the real cryptographic operations are done via "crypto_adaptor"s.
 
     A crypto adaptor is a module that conveys and translates high level cryptography
     operations like encryption, signing into the APIs provided by underlying cryptography

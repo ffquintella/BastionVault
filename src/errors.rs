@@ -1,7 +1,7 @@
-//! The `rusty_vault::errors` module defines an enumeration of various error code, and implements
+//! The `bastion_vault::errors` module defines an enumeration of various error code, and implements
 //! neccessary traits against it.
 //!
-//! The error code defined in this module are used widely in RustyVault.
+//! The error code defined in this module are used widely in BastionVault.
 
 use std::{
     io,
@@ -59,29 +59,29 @@ pub enum RvError {
     ErrPhysicalBackendPrefixInvalid,
     #[error("Physical backend key is invalid.")]
     ErrPhysicalBackendKeyInvalid,
-    #[error("RustyVault key sanity check failed.")]
+    #[error("BastionVault key sanity check failed.")]
     ErrBarrierKeySanityCheckFailed,
-    #[error("RustyVault is already initialized.")]
+    #[error("BastionVault is already initialized.")]
     ErrBarrierAlreadyInit,
-    #[error("RustyVault unseal key is invalid.")]
+    #[error("BastionVault unseal key is invalid.")]
     ErrBarrierKeyInvalid,
-    #[error("RustyVault unseal key is deprecated.")]
+    #[error("BastionVault unseal key is deprecated.")]
     ErrBarrierKeyDeprecated,
-    #[error("RustyVault is not initialized.")]
+    #[error("BastionVault is not initialized.")]
     ErrBarrierNotInit,
-    #[error("RustyVault is sealed.")]
+    #[error("BastionVault is sealed.")]
     ErrBarrierSealed,
-    #[error("RustyVault is unsealing.")]
+    #[error("BastionVault is unsealing.")]
     ErrBarrierUnsealing,
-    #[error("RustyVault is unsealed.")]
+    #[error("BastionVault is unsealed.")]
     ErrBarrierUnsealed,
-    #[error("RustyVault unseal failed.")]
+    #[error("BastionVault unseal failed.")]
     ErrBarrierUnsealFailed,
     #[error("RustyVualt barrier epoch do not match.")]
     ErrBarrierEpochMismatch,
-    #[error("RustyVault barrier version do not match.")]
+    #[error("BastionVault barrier version do not match.")]
     ErrBarrierVersionMismatch,
-    #[error("RustyVault barrier key generation failed.")]
+    #[error("BastionVault barrier key generation failed.")]
     ErrBarrierKeyGenerationFailed,
     #[error("Router mount conflict.")]
     ErrRouterMountConflict,

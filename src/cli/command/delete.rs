@@ -11,7 +11,7 @@ use crate::{
 #[command(
     author,
     version,
-    about = r#"Deletes secrets and configuration from RustyVault at the given path. The behavior
+    about = r#"Deletes secrets and configuration from BastionVault at the given path. The behavior
 of "delete" is delegated to the backend corresponding to the given path.
 
 Remove data in the status secret backend:

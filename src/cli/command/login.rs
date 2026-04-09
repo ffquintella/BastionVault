@@ -16,13 +16,13 @@ use crate::{
 #[command(
     author,
     version,
-    about = r#"Authenticates users or machines to RustyVault using the provided arguments. A
-successful authentication results in a RustyVault token - conceptually similar to
+    about = r#"Authenticates users or machines to BastionVault using the provided arguments. A
+successful authentication results in a BastionVault token - conceptually similar to
 a session token on a website. By default, this token is cached on the local
 machine for future requests.
 
 The default auth method is "token". If not supplied via the CLI,
-RustyVault will prompt for input. If the argument is "-", the values are read
+BastionVault will prompt for input. If the argument is "-", the values are read
 from stdin.
 
 The -method flag allows using other auth methods, such as userpass, github, or
@@ -84,7 +84,7 @@ path where the authentication is enabled. The default is token."#
         next_line_help = false,
         default_value = "",
         value_name = "string",
-        long_help = r#"Remote path in RustyVault where the auth method is enabled. This defaults to
+        long_help = r#"Remote path in BastionVault where the auth method is enabled. This defaults to
 the TYPE of method (e.g. userpass -> userpass/)."#
     )]
     path: String,
@@ -146,7 +146,7 @@ impl CommandExecutor for Login {
 
         let secret: Secret = serde_json::from_value(response_value)?;
         if secret.auth.is_none() {
-            println!("RustyVault returned a secret, but the secret has no authentication information attached. ");
+            println!("BastionVault returned a secret, but the secret has no authentication information attached. ");
             println!("This should never happen and is likely a bug.");
             std::process::exit(2);
         }

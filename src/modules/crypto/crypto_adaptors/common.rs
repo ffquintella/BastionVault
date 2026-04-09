@@ -207,7 +207,7 @@ macro_rules! common_aes_encrypt_update {
         // this Crypter::update returns a Result<usize, ErrorStack>, we simply ignore the detailed
         // error information by unwrapping it.
         // we also can't use the question mark operatior since the error codes are differently
-        // defined in RustyVault and underlying adaptor, such as rust-openssl.
+        // defined in BastionVault and underlying adaptor, such as rust-openssl.
         let count = $aes.ctx.as_mut().unwrap().ctx.update(&$plaintext, &mut $ciphertext[..])?;
 
         return Ok(count);

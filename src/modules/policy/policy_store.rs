@@ -680,11 +680,11 @@ impl AuthHandler for PolicyStore {
 #[cfg(test)]
 mod mod_policy_store_tests {
     use super::{super::policy::Capability, *};
-    use crate::test_utils::new_unseal_test_rusty_vault;
+    use crate::test_utils::new_unseal_test_bastion_vault;
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_policy_store_crud() {
-        let (_rvault, core, _root_token) = new_unseal_test_rusty_vault("test_policy_store_crud").await;
+        let (_rvault, core, _root_token) = new_unseal_test_bastion_vault("test_policy_store_crud").await;
 
         let policy_store = PolicyStore::new(&core).await.unwrap();
 
@@ -743,7 +743,7 @@ mod mod_policy_store_tests {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_policy_load_default() {
-        let (_rvault, core, _root_token) = new_unseal_test_rusty_vault("test_policy_load_default").await;
+        let (_rvault, core, _root_token) = new_unseal_test_bastion_vault("test_policy_load_default").await;
 
         let policy_store = PolicyStore::new(&core).await.unwrap();
 
@@ -763,7 +763,7 @@ mod mod_policy_store_tests {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_policy_root() {
-        let (_, core, _) = new_unseal_test_rusty_vault("test_policy_root").await;
+        let (_, core, _) = new_unseal_test_bastion_vault("test_policy_root").await;
 
         let policy_store = PolicyStore::new(&core).await.unwrap();
 
@@ -784,7 +784,7 @@ mod mod_policy_store_tests {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_policy_new_acl() {
-        let (_, core, _) = new_unseal_test_rusty_vault("test_policy_new_acl").await;
+        let (_, core, _) = new_unseal_test_bastion_vault("test_policy_new_acl").await;
 
         let policy_store = PolicyStore::new(&core).await.unwrap();
 

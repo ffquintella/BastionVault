@@ -329,16 +329,16 @@ mod test {
         let mut key_bundle = KeyBundle::new("aes-gcm-128", "aes-gcm", 128);
         test_key_encrypt_decrypt(&mut key_bundle, None);
         test_key_encrypt_decrypt(&mut key_bundle, None);
-        test_key_encrypt_decrypt(&mut key_bundle, Some(EncryptExtraData::Aad("rusty_vault".as_bytes())));
+        test_key_encrypt_decrypt(&mut key_bundle, Some(EncryptExtraData::Aad("bastion_vault".as_bytes())));
         let mut key_bundle = KeyBundle::new("aes-gcm-192", "aes-gcm", 192);
         test_key_encrypt_decrypt(&mut key_bundle, None);
         test_key_encrypt_decrypt(&mut key_bundle, None);
-        test_key_encrypt_decrypt(&mut key_bundle, Some(EncryptExtraData::Aad("rusty_vault".as_bytes())));
+        test_key_encrypt_decrypt(&mut key_bundle, Some(EncryptExtraData::Aad("bastion_vault".as_bytes())));
         let mut key_bundle = KeyBundle::new("aes-gcm-256", "aes-gcm", 256);
         test_key_encrypt_decrypt(&mut key_bundle, None);
-        test_key_encrypt_decrypt(&mut key_bundle, Some(EncryptExtraData::Aad("rusty_vault".as_bytes())));
+        test_key_encrypt_decrypt(&mut key_bundle, Some(EncryptExtraData::Aad("bastion_vault".as_bytes())));
         test_key_encrypt_decrypt(&mut key_bundle, None);
-        test_key_encrypt_decrypt(&mut key_bundle, Some(EncryptExtraData::Aad("rusty_vault".as_bytes())));
+        test_key_encrypt_decrypt(&mut key_bundle, Some(EncryptExtraData::Aad("bastion_vault".as_bytes())));
 
         // test aes-cbc
         let mut key_bundle = KeyBundle::new("aes-cbc-128", "aes-cbc", 128);
@@ -364,12 +364,12 @@ mod test {
         let mut key_bundle = KeyBundle::new("sm4-gcm-128", "sm4-gcm", 128);
         test_key_encrypt_decrypt(&mut key_bundle, None);
         test_key_encrypt_decrypt(&mut key_bundle, None);
-        test_key_encrypt_decrypt(&mut key_bundle, Some(EncryptExtraData::Aad("rusty_vault".as_bytes())));
+        test_key_encrypt_decrypt(&mut key_bundle, Some(EncryptExtraData::Aad("bastion_vault".as_bytes())));
 
         // test sm4-ccm
         let mut key_bundle = KeyBundle::new("sm4-ccm-128", "sm4-ccm", 128);
         test_key_encrypt_decrypt(&mut key_bundle, None);
         test_key_encrypt_decrypt(&mut key_bundle, None);
-        test_key_encrypt_decrypt(&mut key_bundle, Some(EncryptExtraData::Aad("rusty_vault".as_bytes())));
+        test_key_encrypt_decrypt(&mut key_bundle, Some(EncryptExtraData::Aad("bastion_vault".as_bytes())));
     }
 }

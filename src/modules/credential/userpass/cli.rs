@@ -52,7 +52,7 @@ impl LoginHandler for UsesPassCliHandler {
         let help = r#"
 Usage: rvault login -method=userpass [CONFIG K=V...]
 
-The userpass auth method allows users to authenticate using RustyVault's internal user database.
+The userpass auth method allows users to authenticate using BastionVault's internal user database.
 
 Authenticate as "sally":
 

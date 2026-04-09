@@ -30,7 +30,7 @@ The new project needs to fulfill most features the a traditional KMS has. It als
 
 Language: Rust
 
-Project Name: RustyVault
+Project Name: BastionVault
 
 Features:
 

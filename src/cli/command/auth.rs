@@ -32,11 +32,11 @@ lazy_static! {
     author,
     version,
     about = "Perform operator-specific tasks",
-    long_about = r#"This command groups subcommands for interacting with RustyVault's auth methods.
+    long_about = r#"This command groups subcommands for interacting with BastionVault's auth methods.
 Users can list, enable, disable, and get help for different auth methods.
 
-To authenticate to RustyVault as a user or machine, use the "rvault login" command instead.
-This command is for interacting with the auth methods themselves, not authenticating to RustyVault.
+To authenticate to BastionVault as a user or machine, use the "rvault login" command instead.
+This command is for interacting with the auth methods themselves, not authenticating to BastionVault.
 
 List all enabled auth methods:
 

@@ -1,10 +1,10 @@
 use std::{collections::HashMap, env, fs};
 
 use go_defer::defer;
-use rusty_vault::{
+use bastion_vault::{
     core::{Core, SealConfig},
     logical::{Operation, Request},
-    storage, RustyVault,
+    storage, BastionVault,
 };
 use serde_json::{json, Map, Value};
 
@@ -296,7 +296,7 @@ async fn test_sys_raw_api_feature(core: &Core, token: &str) {
 }
 
 #[maybe_async::maybe_async]
-async fn test_rvualt_mount(rvault: &RustyVault, token: &str) {
+async fn test_rvualt_mount(rvault: &BastionVault, token: &str) {
     let ret = rvault.mount(Some(token), "kv9/test", "kv").await;
     assert!(ret.is_ok());
 
@@ -382,9 +382,9 @@ async fn test_sys_logical_backend(core: &Core, token: &str) {
 
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn test_default_logical() {
-    use rusty_vault::RustyVault;
+    use bastion_vault::BastionVault;
 
-    let dir = env::temp_dir().join("rusty_vault_core_init");
+    let dir = env::temp_dir().join("bastion_vault_core_init");
     let _ = fs::remove_dir_all(&dir);
     assert!(fs::create_dir(&dir).is_ok());
     defer! (
@@ -399,7 +399,7 @@ async fn test_default_logical() {
 
     let backend = storage::new_backend("file", &conf).unwrap();
 
-    let rvault = RustyVault::new(backend, None).unwrap();
+    let rvault = BastionVault::new(backend, None).unwrap();
     let core = rvault.core.load();
 
     let seal_config = SealConfig { secret_shares: 10, secret_threshold: 5 };

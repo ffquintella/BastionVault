@@ -10,7 +10,7 @@ use crate::{cli::command::CommandExecutor, EXIT_CODE_INSUFFICIENT_PARAMS};
     version,
     about = "Interact with policies",
     long_about = r#"This command groups subcommands for interacting with policies.
-Users can write, read, and list policies in RustyVault.
+Users can write, read, and list policies in BastionVault.
 
 List all enabled policies:
 

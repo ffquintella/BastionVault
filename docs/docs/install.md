@@ -3,18 +3,18 @@ sidebar_position: 2
 title: Install
 ---
 
-# Install RustyVault
+# Install BastionVault
 
-RustyVault must be installed properly in your environment before it actually works. Currently RustyVault is only available by source code. RustyVault can be used as an application or a library, thus:
+BastionVault must be installed properly in your environment before it actually works. Currently BastionVault is only available by source code. BastionVault can be used as an application or a library, thus:
 
-1. RustyVault is available to compile from source code only, or
-2. RustyVault is availabe on [crates.io](https://crates.io/crates/rusty_vault) for other Rust projects.
+1. BastionVault is available to compile from source code only, or
+2. BastionVault is availabe on [crates.io](https://crates.io/crates/bastion_vault) for other Rust projects.
 
-This document is about how to build and install RustyVault in the application form. For the library form, please go to [docs.rs](https://docs.rs/rusty_vault/latest/rusty_vault) for more information.
+This document is about how to build and install BastionVault in the application form. For the library form, please go to [docs.rs](https://docs.rs/bastion_vault/latest/bastion_vault) for more information.
 
 ## Operating System
 
-RustyVault is supposed to work on the following operating systems:
+BastionVault is supposed to work on the following operating systems:
 
 * Linux
 * macOS
@@ -24,22 +24,22 @@ In this document, macOS is used as the demonstration operating system.
 
 ## Prerequisite
 
-RustyVault is developed in [Rust](https://rust-lang.org) programming language, so Rust must be properly installed in your environment before building RustyVault.
+BastionVault is developed in [Rust](https://rust-lang.org) programming language, so Rust must be properly installed in your environment before building BastionVault.
 
 Read [this](https://www.rust-lang.org/tools/install) to make Rust work for you.
 
 ## Build from Source
 
-Clone the latest RustyVault source code from Github:
+Clone the latest BastionVault source code from Github:
 
 ~~~bash
-git clone https://github.com/Tongsuo-Project/RustyVault.git
+git clone https://github.com/ffquintella/BastionVault.git
 ~~~
 
-Then you have a directory called RustyVault now. Change directory into it.
+Then you have a directory called BastionVault now. Change directory into it.
 
 ~~~bash
-cd RustyVault
+cd BastionVault
 ~~~
 
 Simply build the binary by using the tool Cargo.
@@ -48,9 +48,9 @@ Simply build the binary by using the tool Cargo.
 cargo build
 ~~~
 
-Rust toolchain is responsible for taking care of almost everything during the build process. After RustyVault is successfully built, you get a bundle of files in the `RustyVault/target/debug` directory. There will be a executable file called `rvault`, which is the application of RustyVault.
+Rust toolchain is responsible for taking care of almost everything during the build process. After BastionVault is successfully built, you get a bundle of files in the `BastionVault/target/debug` directory. There will be a executable file called `rvault`, which is the application of BastionVault.
 
-## Verify RustyVault
+## Verify BastionVault
 
 Simply run the following command:
 
@@ -66,7 +66,7 @@ A secure and high performance secret management software that is compatible with
 Usage: rvault [COMMAND]
 
 Commands:
-  server  Start a rusty_vault server
+  server  Start a bastion_vault server
   status  Print seal and HA status
   help    Print this message or the help of the given subcommand(s)
 
@@ -75,4 +75,4 @@ Options:
   -V, --version  Print version
 ~~~
 
-That means you now have a ready-to-use RustyVault binary.
+That means you now have a ready-to-use BastionVault binary.

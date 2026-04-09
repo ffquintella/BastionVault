@@ -1,17 +1,19 @@
 [package]
-name = "rusty_vault"
+name = "bastion_vault"
 version = "0.3.1"
 edition = "2021"
 license = "Apache-2.0"
 description = """
-RustyVault is a powerful identity-based secrets management software, providing features such as
+BastionVault is a powerful identity-based secrets management software, providing features such as
 cryptographic key management, encryption as a service, public key cryptography, certificates management, identity credentials
 management and so forth.
 
-RustyVault's RESTful API is designed to be fully compatible with Hashicorp Vault.
+BastionVault is a fork of RustyVault and reflects a different direction for the library.
+
+BastionVault's RESTful API is designed to be fully compatible with Hashicorp Vault.
 """
-repository = "https://github.com/Tongsuo-Project/RustyVault"
-documentation = "https://docs.rs/rusty_vault/latest/rusty_vault/"
+repository = "https://github.com/ffquintella/BastionVault"
+documentation = "https://docs.rs/bastion_vault/latest/bastion_vault/"
 build = "build.rs"
 exclude = [
     "docs/*",
@@ -131,7 +133,7 @@ unnecessary_map_or = "allow"
 
 [[bin]]
 name = "rvault"
-path = "bin/rusty_vault.rs"
+path = "bin/bastion_vault.rs"
 
 [[test]]
 name = "test_default_logical"

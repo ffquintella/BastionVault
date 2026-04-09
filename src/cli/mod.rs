@@ -1,4 +1,4 @@
-//! The `rusty_vault::cli` module is used to serve the RustyVault application.
+//! The `bastion_vault::cli` module is used to serve the BastionVault application.
 //! This module basically accepts options from command-line and starts a server up.
 
 use clap::{Parser, Subcommand};

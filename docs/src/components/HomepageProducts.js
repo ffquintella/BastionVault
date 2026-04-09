@@ -89,10 +89,10 @@ export default function HomepageProducts() {
       <div className="container">
         <div className="row">
           <div className="col col--12">
-              <h2 className="text--center">Who's using RustyVault?</h2>
+              <h2 className="text--center">Who's using BastionVault?</h2>
               <br/>
               <p className="text--center">
-                The following startups are using RustyVault:
+                The following startups are using BastionVault:
               </p>
           </div>
         </div>
@@ -109,7 +109,7 @@ export default function HomepageProducts() {
         <div className="row">
           <div className="col col--12">
             <p className="text--center">
-              For more projects, see <a href="https://github.com/SeaQL/sea-orm/blob/master/COMMUNITY.md#built-with-seaorm" target="_blank">Built with RustyVault</a>.
+              For more projects, see <a href="https://github.com/SeaQL/sea-orm/blob/master/COMMUNITY.md#built-with-seaorm" target="_blank">Built with BastionVault</a>.
             </p>
           </div>
         </div>

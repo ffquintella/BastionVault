@@ -1,4 +1,4 @@
-//! The `rusty_vault::api` module which contains code useful for interacting with a RustyVault server.
+//! The `bastion_vault::api` module which contains code useful for interacting with a BastionVault server.
 
 use serde_json::Value;
 

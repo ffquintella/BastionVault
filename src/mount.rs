@@ -1,5 +1,5 @@
-//! Simply speaking, the `rusty_vault::mount` module manages the relationship between a 'path' and
-//! the real RustyVault module which is responsible for that feature. In RustyVault, everything is
+//! Simply speaking, the `bastion_vault::mount` module manages the relationship between a 'path' and
+//! the real BastionVault module which is responsible for that feature. In BastionVault, everything is
 //! exposed to outside by RESTful API, which is defined by 'path'.
 //!
 //! The binding logic here is managed by `MountEntry` struct.

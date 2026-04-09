@@ -22,7 +22,7 @@ use crate::{
 corresponding to their TYPE, but users can customize the path using the
 -path option.
 
-Once enabled, RustyVault will route all requests which begin with the path to the
+Once enabled, BastionVault will route all requests which begin with the path to the
 secrets engine.
 
 Enable the AWS secrets engine at aws/:
@@ -79,7 +79,7 @@ engine."#
         next_line_help = false,
         value_name = "duration",
         long_help = r#"The default lease TTL for this secrets engine. If unspecified,
-this defaults to the RustyVault server's globally configured default lease TTL."#
+this defaults to the BastionVault server's globally configured default lease TTL."#
     )]
     default_lease_ttl: Option<humantime::Duration>,
 
@@ -88,7 +88,7 @@ this defaults to the RustyVault server's globally configured default lease TTL."
         next_line_help = false,
         value_name = "duration",
         long_help = r#"The maximum lease TTL for this secrets engine. If unspecified,
-this defaults to the RustyVault server's globally configured maximum lease TTL."#
+this defaults to the BastionVault server's globally configured maximum lease TTL."#
     )]
     max_lease_ttl: Option<humantime::Duration>,
 

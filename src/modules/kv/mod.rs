@@ -1,5 +1,5 @@
 //! The secure key-value object storage module. The user can use this module to store arbitary data
-//! into RustyVault. The data stored in RustyVault is encrypted.
+//! into BastionVault. The data stored in BastionVault is encrypted.
 
 use std::{any::Any, collections::HashMap, sync::Arc, time::Duration};
 
@@ -22,7 +22,7 @@ use crate::{
 
 static KV_BACKEND_HELP: &str = r#"
 The generic backend reads and writes arbitrary secrets to the backend.
-The secrets are encrypted/decrypted by RustyVault: they are never stored
+The secrets are encrypted/decrypted by BastionVault: they are never stored
 unencrypted in the backend and the backend never has an opportunity to
 see the unencrypted value.
 

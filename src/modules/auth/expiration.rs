@@ -725,17 +725,17 @@ mod mod_expiration_tests {
         mount::{MountEntry, MOUNT_TABLE_TYPE},
         new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
         new_path_internal, new_secret, new_secret_internal,
-        test_utils::{new_unseal_test_rusty_vault, NoopBackend},
+        test_utils::{new_unseal_test_bastion_vault, NoopBackend},
     };
 
     macro_rules! mock_expiration_manager {
         () => {{
             let name = format!("{}_{}", file!(), line!()).replace("/", "_").replace("\\", "_").replace(".", "_");
-            println!("init_test_rusty_vault, name: {}", name);
+            println!("init_test_bastion_vault, name: {}", name);
             #[cfg(not(feature = "sync_handler"))]
-            let (_, core, _) = new_unseal_test_rusty_vault(&name).await;
+            let (_, core, _) = new_unseal_test_bastion_vault(&name).await;
             #[cfg(feature = "sync_handler")]
-            let (_, core, _) = new_unseal_test_rusty_vault(&name);
+            let (_, core, _) = new_unseal_test_bastion_vault(&name);
 
             let expiration = ExpirationManager::new(&core).unwrap().wrap();
             #[cfg(not(feature = "sync_handler"))]

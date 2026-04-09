@@ -1,5 +1,5 @@
-//! The `rusty_vault::context` module is intent to provide a generic key value storage.
-//! This module is currently not used by any other part of `crate::rusty_vault`.
+//! The `bastion_vault::context` module is intent to provide a generic key value storage.
+//! This module is currently not used by any other part of `crate::bastion_vault`.
 
 use std::{
     any::Any,

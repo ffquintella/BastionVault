@@ -408,6 +408,8 @@ mod test {
             0, 0, 0, 1, 2, 146, 4, 80, 230, 214, 110, 208, 132, 3, 230, 0, 186, 251, 246, 9, 166, 168, 126, 134, 95,
             20, 28, 253, 33, 169, 84, 146, 234, 7, 140, 98, 119, 42, 14, 35, 26, 213, 131, 32, 139, 216, 68, 148, 136,
         ];
+        // This fixture validates decryption of a historical ciphertext blob, so the
+        // expected plaintext must remain unchanged even after the project rebrand.
         let plaintext = "rusty vault test";
 
         let res = barrier.decrypt("test2/", ciphertext2);

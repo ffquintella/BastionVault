@@ -925,17 +925,17 @@ mod mod_token_store_tests {
     use crate::{
         context::Context,
         logical::{Backend, Request, Response, Secret},
-        test_utils::new_unseal_test_rusty_vault,
+        test_utils::new_unseal_test_bastion_vault,
     };
 
     macro_rules! mock_token_store {
         () => {{
             let name = format!("{}_{}", file!(), line!()).replace("/", "_").replace("\\", "_").replace(".", "_");
-            println!("init_test_rusty_vault, name: {}", name);
+            println!("init_test_bastion_vault, name: {}", name);
             #[cfg(not(feature = "sync_handler"))]
-            let (_, core, _) = new_unseal_test_rusty_vault(&name).await;
+            let (_, core, _) = new_unseal_test_bastion_vault(&name).await;
             #[cfg(feature = "sync_handler")]
-            let (_, core, _) = new_unseal_test_rusty_vault(&name);
+            let (_, core, _) = new_unseal_test_bastion_vault(&name);
 
             let expiration = ExpirationManager::new(&core).unwrap().wrap();
             #[cfg(not(feature = "sync_handler"))]

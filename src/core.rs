@@ -1,11 +1,11 @@
-//! The `rusty_vault::core` module implements several key functions that are
-//! in charge of the whole process of RustyVault. For instance, to seal or unseal the RustyVault we
+//! The `bastion_vault::core` module implements several key functions that are
+//! in charge of the whole process of BastionVault. For instance, to seal or unseal the BastionVault we
 //! have the `seal()` and `unseal()` functions in this module. Also, the `handle_request()`
 //! function in this module is to route an API call to its correct backend and get the result back
 //! to the caller.
 //!
 //! This module is very low-level and usually it should not disturb end users and module developers
-//! of RustyVault.
+//! of BastionVault.
 
 use std::{
     ops::{Deref, DerefMut},
@@ -432,7 +432,7 @@ impl Core {
         self.do_unseal(key, false).await
     }
 
-    /// Unseals the rusty_vault once and immediately generates new unseal keys.
+    /// Unseals the bastion_vault once and immediately generates new unseal keys.
     ///
     /// This method performs a one-time unseal operation that automatically invalidates
     /// the used unseal keys and generates a fresh set of keys for future use. This is
@@ -496,7 +496,7 @@ impl Core {
     /// Generates new unseal keys using Shamir's Secret Sharing.
     ///
     /// This method creates a new set of unseal keys by splitting the current Key Encryption Key (KEK)
-    /// using Shamir's Secret Sharing scheme. The generated keys can be used to unseal the rusty_vault
+    /// using Shamir's Secret Sharing scheme. The generated keys can be used to unseal the bastion_vault
     /// in the future. This is typically called after a successful unseal operation to provide
     /// new keys for the next seal/unseal cycle.
     ///
@@ -515,7 +515,7 @@ impl Core {
     /// - Generated keys are cryptographically independent of previous keys
     ///
     /// # Usage
-    /// This method should only be called when the rusty_vault is unsealed and a valid KEK exists.
+    /// This method should only be called when the bastion_vault is unsealed and a valid KEK exists.
     /// It's commonly used in key rotation scenarios or after unseal_once operations.
     pub async fn generate_unseal_keys(&self) -> Result<Zeroizing<Vec<Vec<u8>>>, RvError> {
         if self.state.load().sealed {
@@ -694,16 +694,16 @@ impl Core {
 
 #[cfg(test)]
 mod test {
-    use crate::{errors::RvError, test_utils::new_unseal_test_rusty_vault};
+    use crate::{errors::RvError, test_utils::new_unseal_test_bastion_vault};
 
     #[test]
     fn test_core_init() {
-        let _ = new_unseal_test_rusty_vault("test_core_init");
+        let _ = new_unseal_test_bastion_vault("test_core_init");
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_generate_unseal_keys_basic() {
-        let (_rvault, core, _) = new_unseal_test_rusty_vault("test_generate_unseal_keys_basic").await;
+        let (_rvault, core, _) = new_unseal_test_bastion_vault("test_generate_unseal_keys_basic").await;
 
         // Test that generate_unseal_keys works when unsealed
         let result = core.generate_unseal_keys().await;
@@ -728,7 +728,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_generate_unseal_keys_when_sealed() {
-        let (_rvault, core, _) = new_unseal_test_rusty_vault("test_generate_unseal_keys_when_sealed").await;
+        let (_rvault, core, _) = new_unseal_test_bastion_vault("test_generate_unseal_keys_when_sealed").await;
 
         // Seal the vault
         let seal_result = core.seal().await;
@@ -741,7 +741,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_generate_unseal_keys_multiple_calls() {
-        let (_rvault, core, _) = new_unseal_test_rusty_vault("test_generate_unseal_keys_multiple_calls").await;
+        let (_rvault, core, _) = new_unseal_test_bastion_vault("test_generate_unseal_keys_multiple_calls").await;
 
         // Generate keys multiple times
         let keys1 = core.generate_unseal_keys().await.unwrap();
@@ -759,7 +759,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_unseal_once_basic() {
-        let (_rvault, core, _) = new_unseal_test_rusty_vault("test_unseal_once_basic").await;
+        let (_rvault, core, _) = new_unseal_test_bastion_vault("test_unseal_once_basic").await;
 
         // Get initial keys for testing
         let initial_keys = core.generate_unseal_keys().await.unwrap();
@@ -793,7 +793,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_unseal_once_insufficient_keys() {
-        let (_rvault, core, _) = new_unseal_test_rusty_vault("test_unseal_once_insufficient_keys").await;
+        let (_rvault, core, _) = new_unseal_test_bastion_vault("test_unseal_once_insufficient_keys").await;
 
         // Get initial keys
         let initial_keys = core.generate_unseal_keys().await.unwrap();
@@ -811,7 +811,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_unseal_once_key_deprecation() {
-        let (_rvault, core, _) = new_unseal_test_rusty_vault("test_unseal_once_key_deprecation").await;
+        let (_rvault, core, _) = new_unseal_test_bastion_vault("test_unseal_once_key_deprecation").await;
 
         // Get initial keys
         let initial_keys = core.generate_unseal_keys().await.unwrap();
@@ -872,7 +872,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_unseal_once_when_already_unsealed() {
-        let (_rvault, core, _) = new_unseal_test_rusty_vault("test_unseal_once_when_already_unsealed").await;
+        let (_rvault, core, _) = new_unseal_test_bastion_vault("test_unseal_once_when_already_unsealed").await;
 
         // Get keys for testing
         let keys = core.generate_unseal_keys().await.unwrap();
@@ -884,7 +884,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_unseal_once_forward_secrecy() {
-        let (_rvault, core, _) = new_unseal_test_rusty_vault("test_unseal_once_forward_secrecy").await;
+        let (_rvault, core, _) = new_unseal_test_bastion_vault("test_unseal_once_forward_secrecy").await;
 
         // Get initial keys
         let keys1 = core.generate_unseal_keys().await.unwrap();

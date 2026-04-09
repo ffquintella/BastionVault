@@ -1,4 +1,4 @@
-//! This module handles almost everything related to RustyVault's HTTP(S) server, including basic
+//! This module handles almost everything related to BastionVault's HTTP(S) server, including basic
 //! connection, HTTP request reading, HTTP response writing, data encoding/decoding, TLS stuffs, etc.
 //! This module utilize `actix_web` crate as the underlying provider.
 
@@ -23,7 +23,7 @@ pub mod metrics;
 pub mod sys;
 
 pub const AUTH_COOKIE_NAME: &str = "token";
-pub const AUTH_HEADER_NAME: &str = "X-RustyVault-Token";
+pub const AUTH_HEADER_NAME: &str = "X-BastionVault-Token";
 pub const VAULT_AUTH_HEADER_NAME: &str = "X-Vault-Token";
 
 #[derive(Debug, Clone)]

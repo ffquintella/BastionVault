@@ -1,4 +1,4 @@
-//! The `rusty_vault::pki` module implements public key cryptography features, including
+//! The `bastion_vault::pki` module implements public key cryptography features, including
 //! manipulating certificates as a CA or encrypting a piece of data by using a public key.
 
 use std::{
@@ -159,7 +159,7 @@ mod test {
     use super::*;
     use crate::{
         core::Core,
-        test_utils::{new_unseal_test_rusty_vault, test_delete_api, test_mount_api, test_read_api, test_write_api},
+        test_utils::{new_unseal_test_bastion_vault, test_delete_api, test_mount_api, test_read_api, test_write_api},
     };
 
     #[maybe_async::maybe_async]
@@ -408,7 +408,7 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_pki_config_ca() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_pki_config_ca").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_pki_config_ca").await;
         let token = &root_token;
         let path = "pki/";
 
@@ -437,7 +437,7 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_pki_config_role() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_pki_config_role").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_pki_config_role").await;
         let token = &root_token;
         let path = "pki/";
         let role_name = "test";
@@ -474,7 +474,7 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_pki_issue_cert() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_pki_issue_cert").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_pki_issue_cert").await;
         let token = &root_token;
         let path = "pki/";
         let role_name = "test";
@@ -571,7 +571,7 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_pki_generate_root() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_pki_generate_root").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_pki_generate_root").await;
         let token = &root_token;
         let path = "pki/";
         let role_name = "test";
@@ -596,7 +596,7 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
     #[cfg(feature = "crypto_adaptor_tongsuo")]
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_pki_sm2_generate_root() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_pki_sm2_generate_root").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_pki_sm2_generate_root").await;
         let token = &root_token;
         let path = "sm2pki/";
         let role_name = "test";
@@ -867,7 +867,7 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_pki_generate_key() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_pki_generate_key").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_pki_generate_key").await;
         let token = &root_token;
         let path = "pki";
 
@@ -886,10 +886,10 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
         test_pki_generate_key_case(&core, token, path, "rsa-2048-bad-bits", "rsa", 2049, true, false).await;
 
         //test rsa sign and verify
-        test_pki_sign_verify(&core, token, path, "rsa-2048", "rusty_vault test".as_bytes(), true).await;
-        test_pki_sign_verify(&core, token, path, "rsa-3072", "rusty_vault test".as_bytes(), true).await;
-        test_pki_sign_verify(&core, token, path, "rsa-4096", "rusty_vault test".as_bytes(), true).await;
-        test_pki_sign_verify(&core, token, path, "rsa-4096-bad-key-name", "rusty_vault test".as_bytes(), false).await;
+        test_pki_sign_verify(&core, token, path, "rsa-2048", "bastion_vault test".as_bytes(), true).await;
+        test_pki_sign_verify(&core, token, path, "rsa-3072", "bastion_vault test".as_bytes(), true).await;
+        test_pki_sign_verify(&core, token, path, "rsa-4096", "bastion_vault test".as_bytes(), true).await;
+        test_pki_sign_verify(&core, token, path, "rsa-4096-bad-key-name", "bastion_vault test".as_bytes(), false).await;
 
         //test generate ec key
         test_pki_generate_key_case(&core, token, path, "ec-224", "ec", 224, true, true).await;
@@ -905,11 +905,11 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
         test_pki_generate_key_case(&core, token, path, "ec-224-bad_bits", "ec", 250, true, false).await;
 
         //test ec sign and verify
-        test_pki_sign_verify(&core, token, path, "ec-224", "rusty_vault test".as_bytes(), true).await;
-        test_pki_sign_verify(&core, token, path, "ec-256", "rusty_vault test".as_bytes(), true).await;
-        test_pki_sign_verify(&core, token, path, "ec-384", "rusty_vault test".as_bytes(), true).await;
-        test_pki_sign_verify(&core, token, path, "ec-521", "rusty_vault test".as_bytes(), true).await;
-        test_pki_sign_verify(&core, token, path, "ec-224-bad-key-name", "rusty_vault test".as_bytes(), false).await;
+        test_pki_sign_verify(&core, token, path, "ec-224", "bastion_vault test".as_bytes(), true).await;
+        test_pki_sign_verify(&core, token, path, "ec-256", "bastion_vault test".as_bytes(), true).await;
+        test_pki_sign_verify(&core, token, path, "ec-384", "bastion_vault test".as_bytes(), true).await;
+        test_pki_sign_verify(&core, token, path, "ec-521", "bastion_vault test".as_bytes(), true).await;
+        test_pki_sign_verify(&core, token, path, "ec-224-bad-key-name", "bastion_vault test".as_bytes(), false).await;
 
         //test generate aes-gcm key
         test_pki_generate_key_case(&core, token, path, "aes-gcm-128", "aes-gcm", 128, true, true).await;
@@ -923,10 +923,10 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
         test_pki_generate_key_case(&core, token, path, "aes-gcm-128-bad-bits", "aes-gcm", 129, true, false).await;
 
         //test aes-gcm encrypt and decrypt
-        test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-128", "rusty_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-192", "rusty_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-256", "rusty_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-256-bad-key-name", "rusty_vault test".as_bytes(), false)
+        test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-128", "bastion_vault test".as_bytes(), true).await;
+        test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-192", "bastion_vault test".as_bytes(), true).await;
+        test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-256", "bastion_vault test".as_bytes(), true).await;
+        test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-256-bad-key-name", "bastion_vault test".as_bytes(), false)
             .await;
 
         //test generate aes-cbc key
@@ -941,10 +941,10 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
         test_pki_generate_key_case(&core, token, path, "aes-cbc-128-bad-bits", "aes-cbc", 129, true, false).await;
 
         //test aes-cbc encrypt and decrypt
-        test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-128", "rusty_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-192", "rusty_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-256", "rusty_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-256-bad-key-name", "rusty_vault test".as_bytes(), false)
+        test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-128", "bastion_vault test".as_bytes(), true).await;
+        test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-192", "bastion_vault test".as_bytes(), true).await;
+        test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-256", "bastion_vault test".as_bytes(), true).await;
+        test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-256-bad-key-name", "bastion_vault test".as_bytes(), false)
             .await;
 
         //test generate aes-ecb key
@@ -959,16 +959,16 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
         test_pki_generate_key_case(&core, token, path, "aes-ecb-128-bad-bits", "aes-ecb", 129, true, false).await;
 
         //test aes-ecb encrypt and decrypt
-        test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-128", "rusty_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-192", "rusty_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-256", "rusty_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-256-bad-key-name", "rusty_vault test".as_bytes(), false)
+        test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-128", "bastion_vault test".as_bytes(), true).await;
+        test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-192", "bastion_vault test".as_bytes(), true).await;
+        test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-256", "bastion_vault test".as_bytes(), true).await;
+        test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-256-bad-key-name", "bastion_vault test".as_bytes(), false)
             .await;
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_pki_import_key() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_pki_import_key").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_pki_import_key").await;
         let token = &root_token;
         let path = "pki";
 
@@ -1333,9 +1333,9 @@ srlAra2xKovU8At81EhC3oarMYLbY9w=
         .await;
 
         //test rsa sign and verify
-        test_pki_sign_verify(&core, token, path, "rsa-2048-import", "rusty_vault test".as_bytes(), true).await;
-        test_pki_sign_verify(&core, token, path, "rsa-3072-import", "rusty_vault test".as_bytes(), true).await;
-        test_pki_sign_verify(&core, token, path, "rsa-4096-import", "rusty_vault test".as_bytes(), true).await;
+        test_pki_sign_verify(&core, token, path, "rsa-2048-import", "bastion_vault test".as_bytes(), true).await;
+        test_pki_sign_verify(&core, token, path, "rsa-3072-import", "bastion_vault test".as_bytes(), true).await;
+        test_pki_sign_verify(&core, token, path, "rsa-4096-import", "bastion_vault test".as_bytes(), true).await;
 
         //test import ec key
         test_pki_import_key_case(
@@ -1460,10 +1460,10 @@ xxxxxxxxxxxxxx
         .await;
 
         //test ec sign and verify
-        test_pki_sign_verify(&core, token, path, "ec-224-import", "rusty_vault test".as_bytes(), true).await;
-        test_pki_sign_verify(&core, token, path, "ec-256-import", "rusty_vault test".as_bytes(), true).await;
-        test_pki_sign_verify(&core, token, path, "ec-384-import", "rusty_vault test".as_bytes(), true).await;
-        test_pki_sign_verify(&core, token, path, "ec-521-import", "rusty_vault test".as_bytes(), true).await;
+        test_pki_sign_verify(&core, token, path, "ec-224-import", "bastion_vault test".as_bytes(), true).await;
+        test_pki_sign_verify(&core, token, path, "ec-256-import", "bastion_vault test".as_bytes(), true).await;
+        test_pki_sign_verify(&core, token, path, "ec-384-import", "bastion_vault test".as_bytes(), true).await;
+        test_pki_sign_verify(&core, token, path, "ec-521-import", "bastion_vault test".as_bytes(), true).await;
 
         //test import aes-gcm key
         test_pki_import_key_case(
@@ -1540,9 +1540,9 @@ xxxxxxxxxxxxxx
         .await;
 
         //test aes-gcm encrypt and decrypt
-        test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-128-import", "rusty_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-192-import", "rusty_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-256-import", "rusty_vault test".as_bytes(), true).await;
+        test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-128-import", "bastion_vault test".as_bytes(), true).await;
+        test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-192-import", "bastion_vault test".as_bytes(), true).await;
+        test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-256-import", "bastion_vault test".as_bytes(), true).await;
 
         //test import aes-cbc key
         test_pki_import_key_case(
@@ -1619,9 +1619,9 @@ xxxxxxxxxxxxxx
         .await;
 
         //test aes-cbc encrypt and decrypt
-        test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-128-import", "rusty_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-192-import", "rusty_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-256-import", "rusty_vault test".as_bytes(), true).await;
+        test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-128-import", "bastion_vault test".as_bytes(), true).await;
+        test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-192-import", "bastion_vault test".as_bytes(), true).await;
+        test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-256-import", "bastion_vault test".as_bytes(), true).await;
 
         //test import aes-ecb key
         test_pki_import_key_case(
@@ -1688,8 +1688,8 @@ xxxxxxxxxxxxxx
         .await;
 
         //test aes-gcm encrypt and decrypt
-        test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-128-import", "rusty_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-192-import", "rusty_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-256-import", "rusty_vault test".as_bytes(), true).await;
+        test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-128-import", "bastion_vault test".as_bytes(), true).await;
+        test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-192-import", "bastion_vault test".as_bytes(), true).await;
+        test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-256-import", "bastion_vault test".as_bytes(), true).await;
     }
 }

@@ -15,8 +15,8 @@ use crate::{
 #[command(
     author,
     version,
-    about = r#"Provide a portion of the root key to unseal a RustyVault server.
-RustyVault starts in a sealed state. It cannot perform operations until it is unsealed.
+    about = r#"Provide a portion of the root key to unseal a BastionVault server.
+BastionVault starts in a sealed state. It cannot perform operations until it is unsealed.
 This command accepts a portion of the root key (an "unseal key").
 
 The unseal key can be supplied as an argument to the command, but this is

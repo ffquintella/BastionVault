@@ -1,8 +1,8 @@
-//! The `rusty_vault::metrics` module instruments RustyVault with Prometheus, allowing it to capture performance metrics.
+//! The `bastion_vault::metrics` module instruments BastionVault with Prometheus, allowing it to capture performance metrics.
 //!
 //! # Methodology
 //!
-//! From a monitoring perspective, [Prometheus](https://prometheus.io/docs/practices/instrumentation/#the-three-types-of-services) categorizes services into three types: online services, offline processing, and batch jobs. As a modern key management system, RustyVault provides a set of RESTful APIs, so it is classified as an online service.
+//! From a monitoring perspective, [Prometheus](https://prometheus.io/docs/practices/instrumentation/#the-three-types-of-services) categorizes services into three types: online services, offline processing, and batch jobs. As a modern key management system, BastionVault provides a set of RESTful APIs, so it is classified as an online service.
 //!
 //! In online service systems, the key metrics include the number of executed queries, error rates, and latency. In this project, the monitored content is divided into two parts: the target operating system and the target application service.
 //!

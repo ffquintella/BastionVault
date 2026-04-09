@@ -13,16 +13,16 @@ use crate::{
 #[command(
     author,
     version,
-    about = r#"Initializes a RustyVault server. Initialization is the process by which RustyVault's storage
-backend is prepared to receive data. Since RustyVault servers share the same storage backend
-in HA mode, you only need to initialize one RustyVault to initialize the storage backend.
+    about = r#"Initializes a BastionVault server. Initialization is the process by which BastionVault's storage
+backend is prepared to receive data. Since BastionVault servers share the same storage backend
+in HA mode, you only need to initialize one BastionVault to initialize the storage backend.
 
-During initialization, RustyVault generates an in-memory root key and applies Shamir's secret
+During initialization, BastionVault generates an in-memory root key and applies Shamir's secret
 sharing algorithm to disassemble that root key into a configuration number of key shares such
 that a configurable subset of those key shares must come together to regenerate the root key.
-These keys are often called "unseal keys" in RustyVault's documentation.
+These keys are often called "unseal keys" in BastionVault's documentation.
 
-This command cannot be run against an already-initialized RustyVault cluster.
+This command cannot be run against an already-initialized BastionVault cluster.
 
 Start initialization with the default options:
 

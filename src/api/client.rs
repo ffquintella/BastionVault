@@ -174,7 +174,7 @@ impl Client {
 
         req = req.set("Accept", "application/json");
         if !path.ends_with("/login") {
-            req = req.set("X-RustyVault-Token", &self.token);
+            req = req.set("X-BastionVault-Token", &self.token);
         }
 
         let mut ret = HttpResponse { method: method.to_string(), url, ..Default::default() };

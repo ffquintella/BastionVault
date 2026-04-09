@@ -1,4 +1,4 @@
-//! The approle auth method allows machines or apps to authenticate with RustyVault-defined roles.
+//! The approle auth method allows machines or apps to authenticate with BastionVault-defined roles.
 //! The open design of AppRole enables a varied set of workflows and configurations to handle
 //! large numbers of apps. This auth method is oriented to automated workflows (machines and
 //! services), and is less useful for human operators. We recommend using batch tokens with
@@ -71,7 +71,7 @@ const SECRET_ID_ACCESSOR_PREFIX: &str = "accessor/";
 const SECRET_ID_ACCESSOR_LOCAL_PREFIX: &str = "accessor_local/";
 
 static APPROLE_BACKEND_HELP: &str = r#"
-Any registered Role can authenticate itself with RustyVault. The credentials
+Any registered Role can authenticate itself with BastionVault. The credentials
 depends on the constraints that are set on the Role. One common required
 credential is the 'role_id' which is a unique identifier of the Role.
 It can be retrieved from the 'role/<appname>/role-id' endpoint.
@@ -208,7 +208,7 @@ mod test {
         core::Core,
         logical::{field::FieldTrait, Operation, Request, Response},
         test_utils::{
-            new_unseal_test_rusty_vault, test_delete_api, test_mount_auth_api, test_read_api, test_write_api,
+            new_unseal_test_bastion_vault, test_delete_api, test_mount_auth_api, test_read_api, test_write_api,
         },
     };
 
@@ -547,7 +547,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_credential_approle_module() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_credential_approle_module").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_credential_approle_module").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle/").await;

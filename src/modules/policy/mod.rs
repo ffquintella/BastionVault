@@ -166,7 +166,7 @@ mod mod_policy_tests {
     use crate::{
         logical::{Operation, Request},
         test_utils::{
-            new_unseal_test_rusty_vault, test_delete_api, test_list_api, test_mount_api, test_mount_auth_api,
+            new_unseal_test_bastion_vault, test_delete_api, test_list_api, test_mount_api, test_mount_auth_api,
             test_read_api, test_write_api, TestHttpServer,
         },
     };
@@ -248,7 +248,7 @@ mod mod_policy_tests {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_policy_curd_api() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_policy_curd_api").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_policy_curd_api").await;
 
         let policy1_name = "policy1";
         let policy1_hcl = r#"
@@ -355,7 +355,7 @@ mod mod_policy_tests {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_policy_acl_check() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_policy_acl_check").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_policy_acl_check").await;
 
         let policy1_name = "policy1";
         let policy1_hcl = r#"
@@ -448,7 +448,7 @@ mod mod_policy_tests {
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_policy_acl_check_with_policy_parameters() {
         let (_rvault, core, root_token) =
-            new_unseal_test_rusty_vault("test_policy_acl_check_with_policy_parameters").await;
+            new_unseal_test_bastion_vault("test_policy_acl_check_with_policy_parameters").await;
 
         let policy1_name = "policy1";
         let policy1_hcl = r#"

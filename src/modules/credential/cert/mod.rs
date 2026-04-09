@@ -9,7 +9,7 @@
 //! to lower-case.
 //!
 //! Please note that to use this auth method, `tls_disable` and `tls_disable_client_certs`
-//! must be false in the RustyVault configuration. This is because the certificates are
+//! must be false in the BastionVault configuration. This is because the certificates are
 //! sent through TLS communication itself.
 
 use std::{any::Any, sync::Arc};
@@ -36,7 +36,7 @@ pub use path_crls::CRLInfo;
 
 static CERT_BACKEND_HELP: &str = r#"
 The "cert" credential provider allows authentication using
-TLS client certificates. A client connects to RustyVault and uses
+TLS client certificates. A client connects to BastionVault and uses
 the "login" endpoint to generate a client token.
 
 Trusted certificates are configured using the "certs/" endpoint

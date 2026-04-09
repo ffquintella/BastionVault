@@ -26,7 +26,7 @@ HashiCorp Vault是云原生领域被广泛使用的Secret Management产品，也
 
 语言：Rust
 
-名字：RustyVault
+名字：BastionVault
 
 功能：
 

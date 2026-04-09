@@ -1,8 +1,8 @@
-//! `rusty_vault::modules` contains a set of real RustyVault modules. Each sub module needs to
-//! implement the `rusty_vault::modules::Module` trait defined here and then the module
+//! `bastion_vault::modules` contains a set of real BastionVault modules. Each sub module needs to
+//! implement the `bastion_vault::modules::Module` trait defined here and then the module
 //! could be added to module manager.
 //!
-//! It's important for the developers who want to implement a new RustyVault module themselves to
+//! It's important for the developers who want to implement a new BastionVault module themselves to
 //! get the `trait Module` implemented correctly.
 
 use std::{any::Any, sync::Arc};

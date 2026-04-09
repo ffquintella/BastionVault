@@ -18,15 +18,15 @@ function getNextMinorVersionName() {
 
 /** @type {import('@docusaurus/types').DocusaurusConfig} */
 module.exports = {
-  title: 'RustyVault 🧰 A rusted vault that can do many awesome secrets management stuff...',
-  tagline: '🧰 RustyVault is a modern secret management system, written in Rust. ',
-  url: 'https://www.rustyvault.net',
+  title: 'BastionVault',
+  tagline: 'A Rust secret management fork with a different library direction.',
+  url: 'https://ffquintella.github.io',
   baseUrl: '/',
   onBrokenLinks: 'throw',
   onBrokenMarkdownLinks: 'throw',
-  favicon: 'img/RV-logo-gold.png',
-  organizationName: 'Tongsuo-Project',
-  projectName: 'RustyVault',
+  favicon: 'img/bastionvault-mark.svg',
+  organizationName: 'ffquintella',
+  projectName: 'BastionVault',
   trailingSlash: true,
   i18n: {
     defaultLocale: 'en',
@@ -38,16 +38,16 @@ module.exports = {
       disableSwitch: false,
       respectPrefersColorScheme: false,
     },
-    image: 'img/RustyVault-arch.png',
+    image: 'img/BastionVault-arch.png',
     metadata: [
       {name: 'keywords', content: 'rust, hashicorp-vault, key-management, secure-storage, secrets-management, key-manager-service, secrets-manager, cloudnative-services'},
     ],
     navbar: {
-      title: 'RustyVault',
-      // logo: {
-      //   alt: 'RustyVault Logo',
-      //   src: 'img/RV-logo-gold.png',
-      // },
+      title: 'BastionVault',
+      logo: {
+        alt: 'BastionVault Logo',
+        src: 'img/bastionvault-mark.svg',
+      },
       items: [
         {
           type: 'docSidebar',
@@ -61,12 +61,12 @@ module.exports = {
           position: 'left'
         },
         {
-          to: 'https://crates.io/crates/rusty_vault',
+          to: 'https://crates.io/crates/bastion_vault',
           label: 'Crate',
           position: 'right',
         },
         {
-          to: 'https://github.com/Tongsuo-Project/RustyVault',
+          to: 'https://github.com/ffquintella/BastionVault',
           label: 'GitHub',
           position: 'right',
         },
@@ -93,7 +93,7 @@ module.exports = {
             },
             {
               label: 'API Reference',
-              to: 'https://docs.rs/rusty_vault/',
+              to: 'https://docs.rs/bastion_vault/',
             },
           ],
         },
@@ -102,7 +102,7 @@ module.exports = {
           items: [
             {
               label: 'GitHub',
-              to: 'https://github.com/Tongsuo-Project/RustyVault/discussions',
+              to: 'https://github.com/ffquintella/BastionVault/discussions',
             },
             {
               label: 'OSPP',
@@ -124,7 +124,7 @@ module.exports = {
           ],
         },
       ],
-      copyright: `Copyright © 2021-${new Date().getFullYear()} OpenAtom Tongsuo Built with Docusaurus. <br/><a class="footer__link-item" href="https://beian.miit.gov.cn/">网站备案：京ICP备2020036654号-15</a> <img src="img/police.png" width="15" /> 京公网安备11030102011687号`,
+      copyright: `Copyright © 2021-${new Date().getFullYear()} BastionVault. Built with Docusaurus.`,
     },
     prism: {
       additionalLanguages: [
@@ -137,8 +137,8 @@ module.exports = {
       darkTheme: darkTheme,
     },
     announcementBar: {
-      id: 'rustyvault-bar',
-      content: 'If you like 🧰 RustyVault, please give us a <a target="_blank" href="https://github.com/Tongsuo-Project/RustyVault">⭐️ on GitHub</a>',
+      id: 'bastionvault-bar',
+      content: 'BastionVault is a fork of RustyVault with a different library approach. <a target="_blank" href="https://github.com/ffquintella/BastionVault">Follow the fork on GitHub</a>.',
     },
   },
   themes: [
@@ -159,7 +159,7 @@ module.exports = {
       {
         docs: {
           sidebarPath: require.resolve('./sidebars.js'),
-          editUrl: 'https://github.com/SeaQL/seaql.github.io/edit/master/SeaORM/',
+          editUrl: 'https://github.com/ffquintella/BastionVault/edit/main/docs/',
           showLastUpdateAuthor: true,
           showLastUpdateTime: true,
           versions: {

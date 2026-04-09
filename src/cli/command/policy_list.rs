@@ -7,7 +7,7 @@ use crate::{
 };
 
 #[derive(Parser, Deref)]
-#[command(author, version, about = r#"Lists the names of the policies that are installed on the RustyVault server."#)]
+#[command(author, version, about = r#"Lists the names of the policies that are installed on the BastionVault server."#)]
 pub struct List {
     #[deref]
     #[command(flatten, next_help_heading = "HTTP Options")]

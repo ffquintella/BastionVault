@@ -1,6 +1,8 @@
-# SeaORM Documentation
+# BastionVault Documentation
 
 This website is built using [Docusaurus 2](https://docusaurus.io/), a modern static website generator.
+
+It documents BastionVault, a fork of RustyVault that was rebranded because this repository is taking a different approach in the library.
 
 ## Installation
 

@@ -9,18 +9,18 @@ use crate::{cli::command::CommandExecutor, EXIT_CODE_INSUFFICIENT_PARAMS};
     author,
     version,
     about = "Perform operator-specific tasks",
-    long_about = r#"This command groups subcommands for operators interacting with RustyVault.
+    long_about = r#"This command groups subcommands for operators interacting with BastionVault.
 Most users will not need to interact with these commands.
 
-Initialize a new RustyVault server:
+Initialize a new BastionVault server:
 
   $ rvault operator init
 
-Unseals the RustyVault server:
+Unseals the BastionVault server:
 
   $ rvault operator unseal
 
-Seals the RustyVault server:
+Seals the BastionVault server:
 
   $ rvault operator seal"#
 )]

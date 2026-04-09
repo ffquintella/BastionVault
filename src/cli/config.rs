@@ -1,5 +1,5 @@
-//! This module defines and handles the config file options for RustyVault application.
-//! For instance, the IP address and port for the RustyVault to listen on is handled in this
+//! This module defines and handles the config file options for BastionVault application.
+//! For instance, the IP address and port for the BastionVault to listen on is handled in this
 //! module.
 
 use std::{collections::HashMap, fmt, fs, path::Path};
@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use crate::errors::RvError;
 
-/// A struct that contains several configurable options of RustyVault server
+/// A struct that contains several configurable options of BastionVault server
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(deserialize_with = "validate_listener")]
@@ -375,7 +375,7 @@ mod test {
             api_addr = "http://127.0.0.1:8200"
             log_level = "debug"
             log_format = "{date} {req.path}"
-            pid_file = "/tmp/rusty_vault.pid"
+            pid_file = "/tmp/bastion_vault.pid"
         "#;
 
         assert!(write_file(path, hcl_config_str).is_ok());
@@ -399,7 +399,7 @@ mod test {
             "api_addr": "http://127.0.0.1:8200",
             "log_level": "debug",
             "log_format": "{date} {req.path}",
-            "pid_file": "/tmp/rusty_vault.pid"
+            "pid_file": "/tmp/bastion_vault.pid"
         }"#;
 
         let file_path = dir.join("config.json");
@@ -425,7 +425,7 @@ mod test {
         assert_eq!(json_config.api_addr.as_str(), "http://127.0.0.1:8200");
         assert_eq!(json_config.log_format.as_str(), "{date} {req.path}");
         assert_eq!(json_config.log_level.as_str(), "debug");
-        assert_eq!(json_config.pid_file.as_str(), "/tmp/rusty_vault.pid");
+        assert_eq!(json_config.pid_file.as_str(), "/tmp/bastion_vault.pid");
         assert_eq!(json_config.work_dir.as_str(), "");
         assert_eq!(json_config.daemon, false);
         assert_eq!(json_config.daemon_user.as_str(), "");
@@ -465,7 +465,7 @@ mod test {
             api_addr = "http://127.0.0.1:8200"
             log_level = "debug"
             log_format = "{date} {req.path}"
-            pid_file = "/tmp/rusty_vault.pid"
+            pid_file = "/tmp/bastion_vault.pid"
             mount_entry_hmac_level = "compat"
         "#;
 
@@ -526,7 +526,7 @@ mod test {
             api_addr = "http://127.0.0.1:8200"
             log_level = "debug"
             log_format = "{date} {req.path}"
-            pid_file = "/tmp/rusty_vault.pid"
+            pid_file = "/tmp/bastion_vault.pid"
             mount_entry_hmac_level = "high"
         "#;
 
@@ -542,7 +542,7 @@ mod test {
         assert_eq!(hcl_config.api_addr.as_str(), "http://127.0.0.1:8200");
         assert_eq!(hcl_config.log_format.as_str(), "{date} {req.path}");
         assert_eq!(hcl_config.log_level.as_str(), "debug");
-        assert_eq!(hcl_config.pid_file.as_str(), "/tmp/rusty_vault.pid");
+        assert_eq!(hcl_config.pid_file.as_str(), "/tmp/bastion_vault.pid");
         assert_eq!(hcl_config.work_dir.as_str(), "");
         assert_eq!(hcl_config.daemon, false);
         assert_eq!(hcl_config.daemon_user.as_str(), "");

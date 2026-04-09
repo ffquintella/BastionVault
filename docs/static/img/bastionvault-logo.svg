@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 180" role="img" aria-labelledby="title desc">
+  <title id="title">BastionVault logo</title>
+  <desc id="desc">A fortress-inspired shield mark with the BastionVault wordmark.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1f3b73"/>
+      <stop offset="100%" stop-color="#0b172a"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#e3b86d"/>
+      <stop offset="100%" stop-color="#c68a2b"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="760" height="180" rx="24" fill="#f7f1e3"/>
+
+  <g transform="translate(18 18)">
+    <path d="M84 8l20 16h20V8l20 16h20V48c0 50-29 94-80 108C33 142 4 98 4 48V24h20L44 8v16h20L84 8z" fill="url(#bg)"/>
+    <path d="M84 36c21 0 38 17 38 38 0 29-19 46-38 61-19-15-38-32-38-61 0-21 17-38 38-38z" fill="none" stroke="url(#accent)" stroke-width="10"/>
+    <path d="M58 117V52h33c18 0 29 8 29 24 0 11-6 18-16 22l21 19H97L78 101h-4v16H58zm16-29h15c9 0 14-4 14-11 0-8-5-12-14-12H74v23z" fill="#f6e7bf"/>
+  </g>
+
+  <g fill="#10223f">
+    <path d="M222 125V53h54c31 0 48 12 48 35 0 16-9 26-23 31l29 6H304l-25-5h-29v5h-28zm28-27h23c15 0 24-5 24-15 0-11-9-16-24-16h-23v31z"/>
+    <path d="M338 125V53h29l31 45 31-45h29v72h-27V92l-20 29h-26l-20-29v33h-27z"/>
+    <path d="M468 125V53h28v72h-28z"/>
+    <path d="M509 125l37-72h34l37 72h-31l-6-13h-35l-6 13h-30zm48-34h18l-9-21-9 21z"/>
+    <path d="M617 53h31l23 44 23-44h30l-39 72h-29l-39-72z"/>
+  </g>
+
+  <rect x="219" y="133" width="505" height="6" rx="3" fill="#c68a2b"/>
+</svg>

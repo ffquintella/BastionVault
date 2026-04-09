@@ -11,12 +11,12 @@ use crate::{
 #[command(
     author,
     version,
-    about = r#"Writes data to RustyVault at the given path. The data can be credentials, secrets,
+    about = r#"Writes data to BastionVault at the given path. The data can be credentials, secrets,
 configuration, or arbitrary data. The specific behavior of this command is determined
 at the thing mounted at the path.
 
 Data is specified as "key=value" pairs. If the value begins with an "@", then it is
-loaded from a file. If the value is "-", RustyVault will read the value from stdin.
+loaded from a file. If the value is "-", BastionVault will read the value from stdin.
 
 Persist data in the generic secrets engine:
 

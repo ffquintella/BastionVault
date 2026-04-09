@@ -12,7 +12,7 @@ import {useColorMode} from '@docusaurus/theme-common';
 
 function HomepageHeader() {
   const {siteConfig} = useDocusaurusContext();
-  const {colorMode, setColorMode} = useColorMode();
+  const {colorMode} = useColorMode();
 
   return (
     <header className={styles.heroBanner}>
@@ -20,10 +20,15 @@ function HomepageHeader() {
       <img 
           className={styles.homepageBanner} 
           width="90%" 
-          src={colorMode == "light" ? require('@site/static/img/RustyVault-home.gif').default : require('@site/static/img/RustyVault-home-Dark.gif').default}
+          src={colorMode == "light" ? require('@site/static/img/BastionVault-home.gif').default : require('@site/static/img/BastionVault-home-Dark.gif').default}
       />
         {/* <h2 className="hero__subtitle">{siteConfig.tagline}</h2> */}
-        <br/><a href="https://github.com/Tongsuo-Project/RustyVault" target="_blank"><img src="https://img.shields.io/github/stars/Tongsuo-Project/RustyVault.svg?style=social&label=Star"/></a>
+        <br/><a href="https://github.com/ffquintella/BastionVault" target="_blank" rel="noreferrer"><img src="https://img.shields.io/github/stars/ffquintella/BastionVault.svg?style=social&label=Star"/></a>
+        <p>
+          <Translate description="Fork note">
+            BastionVault is a fork of RustyVault, rebranded to reflect a different library approach.
+          </Translate>
+        </p>
         <br/><Translate description="Start">Every ⭐ counts!</Translate>
         <br/>
         <br/>

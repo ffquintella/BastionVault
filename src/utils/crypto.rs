@@ -1,22 +1,22 @@
-//! This crate is the 'library' part of RustyVault, a Rust and real free replica of Hashicorp Vault.
-//! RustyVault is focused on identity-based secrets management and works in two ways independently:
+//! This crate is the 'library' part of BastionVault, a Rust and real free replica of Hashicorp Vault.
+//! BastionVault is focused on identity-based secrets management and works in two ways independently:
 //!
 //! 1. A standalone application serving secrets management via RESTful API;
 //! 2. A Rust crate that provides same features for other application to integrate.
 //!
-//! This document is only about the crate part of RustyVault. For the first working mode,
-//! please go to RustyVault's [RESTful API documentation], which documents all RustyVault's RESTful API.
-//! Users can use an HTTP client tool (curl, e.g.) to send commands to a running RustyVault server and
+//! This document is only about the crate part of BastionVault. For the first working mode,
+//! please go to BastionVault's [RESTful API documentation], which documents all BastionVault's RESTful API.
+//! Users can use an HTTP client tool (curl, e.g.) to send commands to a running BastionVault server and
 //! then have relevant secret management features.
 //!
-//! The second working mode, which works as a typical Rust crate called `rusty_vault`, allows Rust
-//! application developers to integrate RustyVault easily into their own applications to have the
+//! The second working mode, which works as a typical Rust crate called `bastion_vault`, allows Rust
+//! application developers to integrate BastionVault easily into their own applications to have the
 //! ability of secrets management such as secure key/vaule storage, public key cryptography, data
 //! encryption and so forth.
 //!
-//! This is the official documentation of crate `rusty_vault`, and it's mainly for developers.
-//! Once again, if you are looking for how to use the RustyVault server via a set of RESTful API,
-//! then you may prefer the RustyVault's [RESTful API documentation].
+//! This is the official documentation of crate `bastion_vault`, and it's mainly for developers.
+//! Once again, if you are looking for how to use the BastionVault server via a set of RESTful API,
+//! then you may prefer the BastionVault's [RESTful API documentation].
 //!
 //! [Hashicorp Vault]: https://www.hashicorp.com/products/vault
 //! [RESTful API documentation]: https://www.tongsuo.net
@@ -68,12 +68,12 @@ pub enum CryptoError {
         source: openssl::error::ErrorStack,
     },
 
-    /// An error that occurred in the RustyVault core system.
+    /// An error that occurred in the BastionVault core system.
     ///
     /// This error is automatically converted from `crate::errors::RvError`
     /// and typically occurs when the cryptographic operation interacts
-    /// with other parts of the RustyVault system.
-    #[error("Some rusty_vault error happened, {:?}", .source)]
+    /// with other parts of the BastionVault system.
+    #[error("Some bastion_vault error happened, {:?}", .source)]
     RvError {
         #[from]
         source: crate::errors::RvError,

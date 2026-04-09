@@ -2262,14 +2262,14 @@ mod test {
         modules::auth::expiration::MAX_LEASE_DURATION_SECS,
         storage::Storage,
         test_utils::{
-            new_unseal_test_rusty_vault, test_delete_api, test_list_api, test_mount_auth_api, test_read_api,
+            new_unseal_test_bastion_vault, test_delete_api, test_list_api, test_mount_auth_api, test_read_api,
             test_write_api,
         },
     };
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_read_local_secret_ids() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_approle_read_local_secret_ids").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_read_local_secret_ids").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -2294,7 +2294,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_local_non_secret_ids() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_approle_local_non_secret_ids").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_local_non_secret_ids").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -2348,7 +2348,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_upgrade_secret_id_prefix() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_approle_upgrade_secret_id_prefix").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_upgrade_secret_id_prefix").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -2392,7 +2392,7 @@ mod test {
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_local_secret_id_immutablility() {
         let (_rvault, core, root_token) =
-            new_unseal_test_rusty_vault("test_approle_local_secret_id_immutablility").await;
+            new_unseal_test_bastion_vault("test_approle_local_secret_id_immutablility").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -2415,7 +2415,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_upgrade_bound_cidr_list() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_approle_upgrade_bound_cidr_list").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_upgrade_bound_cidr_list").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -2482,7 +2482,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_role_name_lower_casing() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_approle_role_name_lower_casing").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_role_name_lower_casing").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -2613,7 +2613,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_role_read_set_index() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_approle_role_read_set_index").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_role_read_set_index").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -2689,7 +2689,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_cidr_subset() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_approle_cidr_subset").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_cidr_subset").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -2738,7 +2738,7 @@ mod test {
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_token_bound_cidr_subset_32_mask() {
         let (_rvault, core, root_token) =
-            new_unseal_test_rusty_vault("test_approle_token_bound_cidr_subset_32_mask").await;
+            new_unseal_test_bastion_vault("test_approle_token_bound_cidr_subset_32_mask").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -2780,7 +2780,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_role_constraints() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_approle_role_constraints").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_role_constraints").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -2814,7 +2814,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_update_role_id() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_approle_update_role_id").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_update_role_id").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -2843,7 +2843,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_role_id_uniqueness() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_approle_role_id_uniqueness").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_role_id_uniqueness").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -2900,7 +2900,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_role_delete_secret_id() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_approle_role_delete_secret_id").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_role_delete_secret_id").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -2924,7 +2924,7 @@ mod test {
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_lookup_and_destroy_role_secret_id() {
         let (_rvault, core, root_token) =
-            new_unseal_test_rusty_vault("test_approle_lookup_and_destroy_role_secret_id").await;
+            new_unseal_test_bastion_vault("test_approle_lookup_and_destroy_role_secret_id").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -2964,7 +2964,7 @@ mod test {
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_lookup_and_destroy_role_secret_id_accessor() {
         let (_rvault, core, root_token) =
-            new_unseal_test_rusty_vault("test_approle_lookup_and_destroy_role_secret_id_accessor").await;
+            new_unseal_test_bastion_vault("test_approle_lookup_and_destroy_role_secret_id_accessor").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -3011,7 +3011,7 @@ mod test {
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_lookup_role_secret_id_accessor() {
         let (_rvault, core, root_token) =
-            new_unseal_test_rusty_vault("test_approle_lookup_role_secret_id_accessor").await;
+            new_unseal_test_bastion_vault("test_approle_lookup_role_secret_id_accessor").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -3031,7 +3031,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_list_role_secret_id() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_approle_list_role_secret_id").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_list_role_secret_id").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -3054,7 +3054,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_list_role() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_approle_list_role").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_list_role").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -3078,7 +3078,7 @@ mod test {
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_role_secret_id_without_fields() {
         let (_rvault, core, root_token) =
-            new_unseal_test_rusty_vault("test_approle_role_secret_id_without_fields").await;
+            new_unseal_test_bastion_vault("test_approle_role_secret_id_without_fields").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -3132,7 +3132,7 @@ mod test {
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_role_secret_id_with_valid_fields() {
         let (_rvault, core, root_token) =
-            new_unseal_test_rusty_vault("test_approle_role_secret_id_with_valid_fields").await;
+            new_unseal_test_bastion_vault("test_approle_role_secret_id_with_valid_fields").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -3196,7 +3196,7 @@ mod test {
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_role_secret_id_with_invalid_fields() {
         let (_rvault, core, root_token) =
-            new_unseal_test_rusty_vault("test_approle_role_secret_id_with_invalid_fields").await;
+            new_unseal_test_bastion_vault("test_approle_role_secret_id_with_invalid_fields").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -3309,7 +3309,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_role_crud() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_approle_role_crud").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_role_crud").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -3638,7 +3638,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_role_token_bound_cidrs_crud() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_approle_role_token_bound_cidrs_crud").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_role_token_bound_cidrs_crud").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -3802,7 +3802,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_role_token_type_crud() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_approle_role_token_type_crud").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_role_token_type_crud").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -3885,7 +3885,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_role_token_util_upgrade() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_approle_role_token_util_upgrade").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_role_token_util_upgrade").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -4005,7 +4005,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_role_secret_id_with_ttl() {
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_approle_role_secret_id_with_ttl").await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_role_secret_id_with_ttl").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
@@ -4058,7 +4058,7 @@ mod test {
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_approle_role_secret_id_accessor_cross_delete() {
         let (_rvault, core, root_token) =
-            new_unseal_test_rusty_vault("test_approle_role_secret_id_accessor_cross_delete").await;
+            new_unseal_test_bastion_vault("test_approle_role_secret_id_accessor_cross_delete").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;

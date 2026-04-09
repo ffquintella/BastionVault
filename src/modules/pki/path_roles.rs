@@ -269,14 +269,14 @@ include the Common Name (cn); use use_csr_common_name for that. defaults to true
                     field_type: FieldType::Bool,
                     default: false,
                     description: r#"
-If set, certificates issued/signed against this role will have RustyVault leases
+If set, certificates issued/signed against this role will have BastionVault leases
 attached to them. Defaults to "false". Certificates can be added to the CRL by
 "vault revoke <lease_id>" when certificates are associated with leases.  It can
 also be done using the "pki/revoke" endpoint. However, when lease generation is
 disabled, invoking "pki/revoke" would be the only way to add the certificates
 to the CRL.  When large number of certificates are generated with long
 lifetimes, it is recommended that lease generation be disabled, as large amount of
-leases adversely affect the startup time of RustyVault."#
+leases adversely affect the startup time of BastionVault."#
                 },
                 "no_store": {
                     field_type: FieldType::Bool,

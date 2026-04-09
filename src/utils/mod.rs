@@ -58,7 +58,7 @@ pub use db::DatabaseName;
 ///
 /// # Example
 /// ```
-/// use rusty_vault::utils::BHashSet;
+/// use bastion_vault::utils::BHashSet;
 ///
 /// let mut set = BHashSet::default();
 ///
@@ -100,7 +100,7 @@ impl BHashSet {
     ///
     /// # Example
     /// ```
-    /// use rusty_vault::utils::BHashSet;
+    /// use bastion_vault::utils::BHashSet;
     ///
     /// let mut set = BHashSet::default();
     /// set.insert(b"example_key");
@@ -131,7 +131,7 @@ impl BHashSet {
     ///
     /// # Example
     /// ```
-    /// use rusty_vault::utils::BHashSet;
+    /// use bastion_vault::utils::BHashSet;
     ///
     /// let mut set = BHashSet::default();
     /// set.insert(b"secure_token");
@@ -160,7 +160,7 @@ impl BHashSet {
     ///
     /// # Example
     /// ```
-    /// use rusty_vault::utils::BHashSet;
+    /// use bastion_vault::utils::BHashSet;
     ///
     /// let mut set = BHashSet::default();
     /// set.insert(b"temporary_key");
@@ -185,7 +185,7 @@ impl BHashSet {
     ///
     /// # Example
     /// ```
-    /// use rusty_vault::utils::BHashSet;
+    /// use bastion_vault::utils::BHashSet;
     ///
     /// let mut set = BHashSet::default();
     /// set.insert(b"key1");
@@ -215,7 +215,7 @@ impl BHashSet {
     ///
     /// # Example
     /// ```
-    /// use rusty_vault::utils::BHashSet;
+    /// use bastion_vault::utils::BHashSet;
     ///
     /// let mut set = BHashSet::default();
     /// assert_eq!(set.len(), 0);
@@ -244,7 +244,7 @@ impl BHashSet {
     ///
     /// # Example
     /// ```
-    /// use rusty_vault::utils::BHashSet;
+    /// use bastion_vault::utils::BHashSet;
     ///
     /// let mut set = BHashSet::default();
     /// assert!(set.is_empty());
@@ -280,7 +280,7 @@ impl BHashSet {
     ///
     /// # Example
     /// ```
-    /// use rusty_vault::utils::BHashSet;
+    /// use bastion_vault::utils::BHashSet;
     ///
     /// let mut set = BHashSet::default();
     /// set.insert(b"key1");

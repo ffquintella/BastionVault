@@ -10,7 +10,7 @@ use crate::{
 #[command(
     author,
     version,
-    about = r#"Deletes the policy named NAME in the RustyVault server. Once the policy is deleted,
+    about = r#"Deletes the policy named NAME in the BastionVault server. Once the policy is deleted,
 all tokens associated with the policy are affected immediately.
 
 Delete the policy named "my-policy":

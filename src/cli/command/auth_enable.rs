@@ -16,7 +16,7 @@ use crate::{
     author,
     version,
     about = r#"Enables a new auth method. An auth method is responsible for authenticating users
-or machines and assigning them policies with which they can access RustyVault.
+or machines and assigning them policies with which they can access BastionVault.
 
 Enable the userpass auth method at userpass/:
 

@@ -53,6 +53,6 @@ jobs:
             oss-endpoint: oss-cn-beijing.aliyuncs.com
             oss-accesskey-id: ${{ secrets.ALIYUN_OSS_ACCESSKEY_ID }}
             oss-accesskey-secret: ${{ secrets.ALIYUN_OSS_ACCESSKEY_SECRET }}
-            oss-path: oss://rustyvault-doc/
+            oss-path: oss://bastionvault-doc/
             local-path: docs/build
             delete-first: true

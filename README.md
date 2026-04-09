@@ -1,22 +1,24 @@
-# RustyVault
+# BastionVault
 
-![RustVault logo](docs/static/img/RV-logo-gold.png)
+![BastionVault logo](docs/static/img/bastionvault-logo.svg)
 
-[![Crates.io Version](https://img.shields.io/crates/v/rusty_vault)](https://crates.io/crates/rusty_vault)
+[![Crates.io Version](https://img.shields.io/crates/v/bastion_vault)](https://crates.io/crates/bastion_vault)
 
 ## Overview
 
-RustyVault is a modern secret management system, written in Rust. RustyVault provides various features which support many scenarios including secure storage, cloud identity management, secret management, Kubernetes integration, PKI infrastructure, cryptographic computing, traditional key management, etc.
+BastionVault is a modern secret management system, written in Rust. BastionVault provides various features which support many scenarios including secure storage, cloud identity management, secret management, Kubernetes integration, PKI infrastructure, cryptographic computing, traditional key management, etc.
 
-RustyVault can be deployed in either cloud or physical environments. Depending on different requirements, RustyVault may run as standalone application with a set of RESTful APIs provided, and it can also be used as a crate thus you can easily integrate it into your own Rust application.
+BastionVault can be deployed in either cloud or physical environments. Depending on different requirements, BastionVault may run as standalone application with a set of RESTful APIs provided, and it can also be used as a crate thus you can easily integrate it into your own Rust application.
 
-The core cryptographic module which provides cryptography functionality to RustVault can be configurable, for instance it could be [OpenSSL](https://github.com/openssl/openssl) or [Tongsuo](https://github.com/Tongsuo-Project/Tongsuo) project depending on the actual scenarios.
+BastionVault is a fork of RustyVault. We decided to rebrand because this fork is taking a different direction in the library design and API surface, while keeping the same general problem space around secret management and Vault-compatible workflows.
 
-One of the goals of RustyVault is to replace Hashicorp Vault seamlessly if you are seeking for an OSI-approved open-source license and enterprise level features.
+The core cryptographic module which provides cryptography functionality to BastionVault can be configurable, for instance it could be [OpenSSL](https://github.com/openssl/openssl) or [Tongsuo](https://github.com/Tongsuo-Project/Tongsuo) project depending on the actual scenarios.
+
+One of the goals of BastionVault is to replace Hashicorp Vault seamlessly if you are seeking for an OSI-approved open-source license and enterprise level features.
 
 ## Feature
 
-Part of the features provided by RustyVault are as follows:
+Part of the features provided by BastionVault are as follows:
 
 * Working Mode
   * standalone process w/HTTP APIs

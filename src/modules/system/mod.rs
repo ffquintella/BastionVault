@@ -1,5 +1,5 @@
-//! The system module is mainly used to configure RustyVault itself. For instance, the 'mount/'
-//! path is provided here to support mounting new modules in RustyVault via RESTful HTTP request.
+//! The system module is mainly used to configure BastionVault itself. For instance, the 'mount/'
+//! path is provided here to support mounting new modules in BastionVault via RESTful HTTP request.
 
 use std::{
     any::Any,
@@ -28,8 +28,8 @@ use crate::{
 };
 
 static SYSTEM_BACKEND_HELP: &str = r#"
-The system backend is built-in to RustyVault and cannot be remounted or
-unmounted. It contains the paths that are used to configure RustyVault itself
+The system backend is built-in to BastionVault and cannot be remounted or
+unmounted. It contains the paths that are used to configure BastionVault itself
 as well as perform core operations.
 "#;
 

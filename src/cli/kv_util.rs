@@ -14,7 +14,7 @@ pub fn kv_preflight_version_request(client: &Client, path: &str) -> Result<(Stri
     let resp = client.request_read(format!("/v1/sys/internal/ui/mounts/{path}"))?;
 
     if resp.response_status == 404 {
-        // If we get a 404 we are using an older version of rusty_vault, default to version 1
+        // If we get a 404 we are using an older version of bastion_vault, default to version 1
         return Ok(("".to_string(), 1));
     }
 

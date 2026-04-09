@@ -12,7 +12,7 @@ use crate::{
 #[command(
     author,
     version,
-    about = r#"Lists the enabled auth methods on the RustyVault server. This command also outputs
+    about = r#"Lists the enabled auth methods on the BastionVault server. This command also outputs
 information about the method including configuration and human-friendly descriptions.
 A TTL of "system" indicates that the system default is in use.
 

@@ -10,7 +10,7 @@ use crate::{
 #[command(
     author,
     version,
-    about = r#"Lists data from RustyVault at the given path. This can be used to list keys in a,
+    about = r#"Lists data from BastionVault at the given path. This can be used to list keys in a,
 given secret engine.
 
 List values under the "my-app" folder of the generic secret engine:

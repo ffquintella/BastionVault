@@ -9,7 +9,7 @@ use crate::{cli::command::CommandExecutor, EXIT_CODE_INSUFFICIENT_PARAMS};
     author,
     version,
     about = "Perform operator-specific tasks",
-    long_about = r#"This command groups subcommands for interacting with RustyVault's secrets engines.
+    long_about = r#"This command groups subcommands for interacting with BastionVault's secrets engines.
 Each secret engine behaves differently. Please see the documentation for more information.
 
 List all enabled secrets engines:

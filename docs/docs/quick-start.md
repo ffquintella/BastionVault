@@ -3,42 +3,42 @@ sidebar_position: 1
 title: Quick Start
 ---
 
-# RustyVault Quick Start
+# BastionVault Quick Start
 
-In this document, we demonstrate several minimum but necessary steps for starting up a RustyVault server and make it functional for real features.
+In this document, we demonstrate several minimum but necessary steps for starting up a BastionVault server and make it functional for real features.
 
 This quick start document includes examples to:
 
-1. how to build RustyVault binary from source
-2. how to start a basic RustyVault server
-3. how to configure a RustyVault server
-4. how to use a RustyVault server to store sensitive data (the 'secrets', for instance)
+1. how to build BastionVault binary from source
+2. how to start a basic BastionVault server
+3. how to configure a BastionVault server
+4. how to use a BastionVault server to store sensitive data (the 'secrets', for instance)
 
 ## Build from Source
 
 Read [install.md](./install.md) if you want more detailed information on installation.
 
-Clone RustyVault from Github:
+Clone BastionVault from Github:
 
 ~~~bash
-git clone https://github.com/Tongsuo-Project/RustyVault.git
+git clone https://github.com/ffquintella/BastionVault.git
 
-cd RustyVault
+cd BastionVault
 ~~~
 
-Build RustyVault by using Rust toolchain:
+Build BastionVault by using Rust toolchain:
 
 ~~~bash
 cargo build
 ~~~
 
-If the build is successful, then you now have an executable binary file called `rvault` in `RustyVault/target/debug` directory.
+If the build is successful, then you now have an executable binary file called `rvault` in `BastionVault/target/debug` directory.
 
 ## Run the Server
 
-RustyVault runs as a daemon in the operation system. It's basically a server that provides a set of RESTful HTTP APIs. So after the server is running in the background, you can send HTTP requests to ask the server to do the jobs.
+BastionVault runs as a daemon in the operation system. It's basically a server that provides a set of RESTful HTTP APIs. So after the server is running in the background, you can send HTTP requests to ask the server to do the jobs.
 
-To launch a RustyVault server, a configuration file is needed. As Hashicorp Vault, RustyVault can also parse HCL configuration files. A typical usable example RustyVault configuration file is as follows:
+To launch a BastionVault server, a configuration file is needed. As Hashicorp Vault, BastionVault can also parse HCL configuration files. A typical usable example BastionVault configuration file is as follows:
 
 ~~~conf
 storage "file" {
@@ -58,16 +58,16 @@ daemon = true
 daemon_user = "paul"
 daemon_group = "staff"
 
-work_dir = "/Users/paul/work/tmp/rusty_vault/"
+work_dir = "/Users/paul/work/tmp/bastion_vault/"
 
 api_addr = "http://127.0.0.1:8200"
 log_level = "debug"
-pid_file = "rusty_vault.pid"
+pid_file = "bastion_vault.pid"
 ~~~
 
 You need to change the variables like `daemon_user`, `daemon_group` and `work_dir` to the actual value in your environment. Then just copy and paste it to a local file, say, `rvault.hcl` somewhere on your machine.
 
-Then launch the server (assume you are still in `RustyVault` directory):
+Then launch the server (assume you are still in `BastionVault` directory):
 
 ~~~bash
 target/debug/rvault server --config /path/to/rvault.hcl
@@ -86,9 +86,9 @@ There should be an `rvault` process running in background.
 
 Now the server is listening on TCP port 8200 and it's ready for incoming HTTP requests.
 
-## Initialize RustyVault
+## Initialize BastionVault
 
-Before it's fully usable, a RustyVault server needs to be initialized. For instance, a master key is generated during the initialization procedure and is used to `seal` and `unseal` RustyVault, thus the data in RustyVault can be correctly encrypted.
+Before it's fully usable, a BastionVault server needs to be initialized. For instance, a master key is generated during the initialization procedure and is used to `seal` and `unseal` BastionVault, thus the data in BastionVault can be correctly encrypted.
 
 In this section, we use command line tool `curl` to manipulate the server and use `jq` to parse the JSON data in the HTTP responses. `jq` is not required, but we highly recommend to install it on your machine. Click [here](https://jqlang.github.io/jq/download/) for more information on installing `jq`.
 
@@ -109,7 +109,7 @@ The response should be similar to this:
 }
 ~~~
 
-Now we have a key to unseal RustyVault and a root token.
+Now we have a key to unseal BastionVault and a root token.
 
 You can check the initialization status by sending:
 
@@ -120,9 +120,9 @@ curl http://127.0.0.1:8200/v1/sys/init | jq
 }
 ~~~
 
-## Unseal the RustyVault Server
+## Unseal the BastionVault Server
 
-When RustyVault is initialized properly, it's in the *sealed* status. *Seald* here means everything in RustyVault is encrypted and protected, thus no one can use any functionality RustyVault. You need to *unseal* it to make it fully functional.
+When BastionVault is initialized properly, it's in the *sealed* status. *Seald* here means everything in BastionVault is encrypted and protected, thus no one can use any functionality BastionVault. You need to *unseal* it to make it fully functional.
 
 To unseal, the key generated in previous section will be used:
 
@@ -141,15 +141,15 @@ If everything went smoothly, then a response with `sealed: false` will be return
 }
 ~~~
 
-This indicates the RustyVault server is not sealed and it's ready to do more real jobs.
+This indicates the BastionVault server is not sealed and it's ready to do more real jobs.
 
-## Write Secrets to RustyVault
+## Write Secrets to BastionVault
 
 A frequently used feature of RustyVautl is *secret*, it's basically a secure key-value storage that can retain arbitary sensitive values such as password, credentials, tokens, keys and so forth.
 
-RustyVault needs client authentication for further operations. In this demonstration, we utilize the `root_token` generated in previous section for simplicity.
+BastionVault needs client authentication for further operations. In this demonstration, we utilize the `root_token` generated in previous section for simplicity.
 
-Let's ask RustyVault to store a `foo: bar` value under the key `test`:
+Let's ask BastionVault to store a `foo: bar` value under the key `test`:
 
 ~~~bash
 curl --Header "Cookie: token=bc9e904b-acff-db3d-4cfd-f575cb36428a" --request POST --data '{ "foo": "bar" }' http://127.0.0.1:8200/v1/secret/test | jq
@@ -174,9 +174,9 @@ In the `data` section of the responsed JSON, you can see the `foo:bar` value onc
 
 ## Next Steps
 
-In this document, we built a RustyVault server, started it up and configured it to accept user commands such as storing sensitive data. All examples here are only for demonstration purposes, they may not safe in real production scenarios. Some more features are introduced in RustyVault to make it production ready:
+In this document, we built a BastionVault server, started it up and configured it to accept user commands such as storing sensitive data. All examples here are only for demonstration purposes, they may not safe in real production scenarios. Some more features are introduced in BastionVault to make it production ready:
 
-* Authentication methods: RustyVault offers different authentication methods, which allow you create new client tokens with fine-grained access policy,
-* More storage types: This demonstration uses local file as storage, but in reality it's neither efficient nor secure. RustyVault also supports other remote storage types like database, remote file system or so.
-* Running status: a log file is located in the working directory of RustyVault, important information is logged in it for debug or other purposes.
-* Compatibility with Hashicorp Vault: RustyVault is compatible with Hashicorp Vault, so most Hashicorp Vault documentation is also worth to read to help you understand RustyVault ;-) 
+* Authentication methods: BastionVault offers different authentication methods, which allow you create new client tokens with fine-grained access policy,
+* More storage types: This demonstration uses local file as storage, but in reality it's neither efficient nor secure. BastionVault also supports other remote storage types like database, remote file system or so.
+* Running status: a log file is located in the working directory of BastionVault, important information is logged in it for debug or other purposes.
+* Compatibility with Hashicorp Vault: BastionVault is compatible with Hashicorp Vault, so most Hashicorp Vault documentation is also worth to read to help you understand BastionVault ;-) 

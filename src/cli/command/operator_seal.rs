@@ -12,17 +12,17 @@ use crate::{
 #[command(
     author,
     version,
-    about = r#"Seals the RustyVault server. Sealing tells the RustyVault server to stop responding
-to any operations until it is unsealed. When sealed, the RustyVault server discards
+    about = r#"Seals the BastionVault server. Sealing tells the BastionVault server to stop responding
+to any operations until it is unsealed. When sealed, the BastionVault server discards
 its in-memory root key to unlock the data, so it is physically blocked from responding
 to operations unsealed.
 
 If an unseal is in progress, sealing the Vault will reset the unsealing process. Users
 will have to re-enter their portions of the root key again.
 
-This command does nothing if the RustyVault server is already sealed.
+This command does nothing if the BastionVault server is already sealed.
 
-Seal the RustyVault server:
+Seal the BastionVault server:
 
   $ rvault operator seal"#
 )]
@@ -51,7 +51,7 @@ impl CommandExecutor for Seal {
 
         match sys.seal() {
             Ok(_) => {
-                println!("Success! RustyVault is sealed.");
+                println!("Success! BastionVault is sealed.");
             }
             Err(e) => eprintln!("Error sealing: {e}"),
         }
@@ -79,7 +79,7 @@ mod test {
 
         // rvault operator seal
         let ret = test_http_server.cli(&["operator", "seal"], &[]);
-        assert_eq!(ret, Ok("Success! RustyVault is sealed.\n".into()));
+        assert_eq!(ret, Ok("Success! BastionVault is sealed.\n".into()));
 
         // rvault status
         let ret = test_http_server.cli(&["status"], &["--format=raw"]);

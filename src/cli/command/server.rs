@@ -25,18 +25,18 @@ use crate::{
     errors::RvError,
     http,
     metrics::{manager::MetricsManager, middleware::metrics_midleware},
-    storage, RustyVault, EXIT_CODE_INSUFFICIENT_PARAMS, EXIT_CODE_LOAD_CONFIG_FAILURE, EXIT_CODE_OK,
+    storage, BastionVault, EXIT_CODE_INSUFFICIENT_PARAMS, EXIT_CODE_LOAD_CONFIG_FAILURE, EXIT_CODE_OK,
 };
 
-pub const WORK_DIR_PATH_DEFAULT: &str = "/tmp/rusty_vault";
+pub const WORK_DIR_PATH_DEFAULT: &str = "/tmp/bastion_vault";
 
 #[derive(Parser, Deref)]
 #[command(
     author,
     version,
-    about = r#"This command starts a RustyVault server that responds to API requests. By default,
-RustyVault will start in a "sealed" state. The RustyVault cluster must be initialized
-before use, usually by the "rvault operator init" command. Each RustyVault server must
+    about = r#"This command starts a BastionVault server that responds to API requests. By default,
+BastionVault will start in a "sealed" state. The BastionVault cluster must be initialized
+before use, usually by the "rvault operator init" command. Each BastionVault server must
 also be unsealed using the "rvault operator unseal" command or the API before the
 server can respond to requests.
 
@@ -98,7 +98,7 @@ impl Server {
         #[cfg(not(windows))]
         if config.daemon {
             // start daemon
-            let log_path = format!("{work_dir}/rusty_vault.log");
+            let log_path = format!("{work_dir}/bastion_vault.log");
             let mut pid_path = config.pid_file.clone();
             if !config.pid_file.starts_with('/') {
                 pid_path = work_dir.clone() + pid_path.as_str();
@@ -131,12 +131,12 @@ impl Server {
                 .stderr(log_file)
                 .pid_file(pid_path.clone())
                 .chown_pid_file(true)
-                .privileged_action(|| log::info!("Start rusty_vault server daemon"));
+                .privileged_action(|| log::info!("Start bastion_vault server daemon"));
 
             match daemonize.start() {
                 Ok(_) => {
                     let pid = std::fs::read_to_string(pid_path)?;
-                    log::info!("The rusty_vault server daemon process started successfully, pid is {pid}");
+                    log::info!("The bastion_vault server daemon process started successfully, pid is {pid}");
                     log::debug!("run user: {user}, group: {group}");
                 }
                 Err(e) => log::error!("Error, {e}"),
@@ -152,7 +152,7 @@ impl Server {
         let metrics_manager = Arc::new(RwLock::new(MetricsManager::new(config.collection_interval)));
         let system_metrics = metrics_manager.read().unwrap().system_metrics.clone();
 
-        let rvault = RustyVault::new(backend, Some(&config))?;
+        let rvault = BastionVault::new(backend, Some(&config))?;
         let core = rvault.core.load().clone();
 
         let mut http_server = HttpServer::new(move || {
@@ -225,7 +225,7 @@ impl Server {
             http_server = http_server.bind_openssl(listener.address, builder)?;
         }
 
-        log::info!("rusty_vault server starts, waiting for request...");
+        log::info!("bastion_vault server starts, waiting for request...");
 
         server.block_on(async {
             tokio::spawn(async {

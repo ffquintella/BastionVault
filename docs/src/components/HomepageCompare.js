@@ -16,14 +16,14 @@ export default function render() {
               </Translate>
               </h2>
             <p className="text--center">
-              <Link to="https://github.com/Tongsuo-Project/RustyVault">RustyVault</Link> &nbsp;
+              <Link to="https://github.com/ffquintella/BastionVault">BastionVault</Link> &nbsp;
               <Translate description="The architecture description">
-                is structured into three principal components: RustyVault Core, 
-                RustyVault Modules and RustyVault Surface.
+                is structured into three principal components: BastionVault Core, 
+                BastionVault Modules and BastionVault Surface.
               </Translate>
             </p>
             <div className="text--center padding-horiz--md">
-              <img className={styles.seaography} src={require('@site/static/img/RustyVault-arch.png').default}/>
+              <img className={styles.seaography} src={require('@site/static/img/BastionVault-arch.png').default}/>
             </div>
           </div>
         </div>

@@ -1,12 +1,12 @@
-//! The rusty_vault::crypto module abstracts a set of generic cryptography methods. These methods
-//! are used by other modules in RustyVault.
+//! The bastion_vault::crypto module abstracts a set of generic cryptography methods. These methods
+//! are used by other modules in BastionVault.
 //!
 //! This module depends on underlying cryptography library. One crypto adaptors MUST be specified
-//! during the configuration, then it's compiled into RustyVault.
+//! during the configuration, then it's compiled into BastionVault.
 //!
 //! # Crypto Adaptor Configurations
 //!
-//! In RustyVault, the real cryptographic operations are done via "crypto_adaptor"s.
+//! In BastionVault, the real cryptographic operations are done via "crypto_adaptor"s.
 //!
 //! A crypto adaptor is a module that conveys and translates high level cryptography
 //! operations like encryption, signing into the APIs provided by underlying cryptography
@@ -27,10 +27,10 @@
 //! # Enable the Tongsuo adaptor
 //!
 //! Tongsuo is a variant of OpenSSL but with more features on SMx algorithms and protocols.
-//! RustyVault can use SM algorithms only if Tongsuo is built as the crypto adaptor.
+//! BastionVault can use SM algorithms only if Tongsuo is built as the crypto adaptor.
 //!
 //! You need to build and install Tongsuo first into your local environment before building
-//! RustyVault with Tongsuo. Check the following link for detailed installation steps:
+//! BastionVault with Tongsuo. Check the following link for detailed installation steps:
 //! [Tongsuo](https://github.com/Tongsuo-Project/Tongsuo)
 //!
 //! ~~~text
@@ -123,7 +123,7 @@ pub struct SM4 {
 /// ## One-shot encryption and decryption
 ///
 /// ~~~
-/// use rusty_vault::modules::crypto::{AES, AESKeySize, CipherMode, BlockCipher};
+/// use bastion_vault::modules::crypto::{AES, AESKeySize, CipherMode, BlockCipher};
 ///
 /// let data = b"The best way to not feel hopeless is to get up and do something.".to_vec();
 /// let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F".to_vec();
@@ -144,7 +144,7 @@ pub struct SM4 {
 ///
 #[cfg_attr(feature = "crypto_adaptor_tongsuo", doc = "~~~")]
 #[cfg_attr(not(feature = "crypto_adaptor_tongsuo"), doc = "~~~ignore")]
-/// use rusty_vault::modules::crypto::{SM4, CipherMode, BlockCipher};
+/// use bastion_vault::modules::crypto::{SM4, CipherMode, BlockCipher};
 ///
 /// let data: [&[u8]; 2] = [b"The best way to not feel hopeless ",
 ///                         b"is to get up and do something."];
@@ -196,7 +196,7 @@ pub struct SM4 {
 /// ## Use an auto-generated key
 ///
 /// ~~~
-/// use rusty_vault::modules::crypto::{AES, AESKeySize, CipherMode, BlockCipher};
+/// use bastion_vault::modules::crypto::{AES, AESKeySize, CipherMode, BlockCipher};
 ///
 /// let data = b"The best way to not feel hopeless is to get up and do something.".to_vec();
 /// let mut aes_encrypter = AES::new(true, Some(AESKeySize::AES128),
@@ -261,7 +261,7 @@ pub trait BlockCipher {
 /// # One-shot encryption and decryption using AEAD cipher
 ///
 /// ~~~
-/// use rusty_vault::modules::crypto::{AES, AESKeySize, CipherMode, BlockCipher, AEADCipher};
+/// use bastion_vault::modules::crypto::{AES, AESKeySize, CipherMode, BlockCipher, AEADCipher};
 ///
 /// let data = b"The best way to not feel hopeless is to get up and do something.".to_vec();
 /// let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F".to_vec();
@@ -293,7 +293,7 @@ pub trait BlockCipher {
 #[cfg_attr(feature = "crypto_adaptor_tongsuo", doc = "~~~")]
 #[cfg_attr(not(feature = "crypto_adaptor_tongsuo"), doc = "~~~ignore")]
 /// ~~~
-/// use rusty_vault::modules::crypto::{SM4, CipherMode, BlockCipher, AEADCipher};
+/// use bastion_vault::modules::crypto::{SM4, CipherMode, BlockCipher, AEADCipher};
 ///
 /// let data: [&[u8]; 2] = [b"The best way to not feel hopeless ",
 ///                         b"is to get up and do something."];

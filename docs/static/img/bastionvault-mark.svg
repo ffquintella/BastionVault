@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="title desc">
+  <title id="title">BastionVault mark</title>
+  <desc id="desc">Square BastionVault shield and monogram icon.</desc>
+  <defs>
+    <linearGradient id="shield" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1f3b73"/>
+      <stop offset="100%" stop-color="#0b172a"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#e3b86d"/>
+      <stop offset="100%" stop-color="#c68a2b"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="160" height="160" rx="28" fill="#f7f1e3"/>
+  <path d="M80 14l16 13h16V14l16 13h16v19c0 41-23 77-64 89C39 123 16 87 16 46V27h16L48 14v13h16V14l16 13z" fill="url(#shield)"/>
+  <path d="M80 41c17 0 30 13 30 30 0 23-15 38-30 50-15-12-30-27-30-50 0-17 13-30 30-30z" fill="none" stroke="url(#gold)" stroke-width="8"/>
+  <path d="M60 104V55h26c14 0 24 7 24 19 0 8-5 14-12 17l16 13H92L79 93h-3v11H60zm16-24h9c6 0 10-3 10-8s-4-8-10-8h-9v16z" fill="#f6e7bf"/>
+</svg>

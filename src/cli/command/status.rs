@@ -10,7 +10,7 @@ use crate::{
 #[command(
     author,
     version,
-    about = r#"Prints the current state of RustyVault including whether it is sealed and if HA
+    about = r#"Prints the current state of BastionVault including whether it is sealed and if HA
 mode is enabled. This command prints regardless of whether the Vault is sealed."#
 )]
 pub struct Status {

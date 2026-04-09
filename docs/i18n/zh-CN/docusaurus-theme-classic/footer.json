@@ -17,11 +17,11 @@
   },
   "link.item.label.API Reference": {
     "message": "API Reference",
-    "description": "The label of footer link with label=API Reference linking to https://docs.rs/rusty_vault/"
+    "description": "The label of footer link with label=API Reference linking to https://docs.rs/bastion_vault/"
   },
   "link.item.label.GitHub": {
     "message": "GitHub",
-    "description": "The label of footer link with label=GitHub linking to https://github.com/Tongsuo-Project/RustyVault/discussions"
+    "description": "The label of footer link with label=GitHub linking to https://github.com/ffquintella/BastionVault/discussions"
   },
   "link.item.label.OSPP": {
     "message": "OSPP",

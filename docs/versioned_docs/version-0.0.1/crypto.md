@@ -2,9 +2,9 @@
 sidebar_position: 3
 title: Crypto Adaptor
 ---
-# RustyVault Crypto Adaptor
+# BastionVault Crypto Adaptor
 
-In RustyVault, we provide a mechanism for the users to build with selectable underlying cryptography libraries. This is the "crypto adaptor" mechanism.
+In BastionVault, we provide a mechanism for the users to build with selectable underlying cryptography libraries. This is the "crypto adaptor" mechanism.
 
 Currently, only two adaptors are supported:
 
@@ -15,7 +15,7 @@ Currently, only two adaptors are supported:
 
 The following steps require a properly installed OpenSSL library. There are many ways of installing an OpenSSL on various platforms, so in this docuemnt we don't discuss that part.
 
-The OpenSSL crypto adaptor is configured by default in RustyVault, so you can simply build RustyVault to enable it:
+The OpenSSL crypto adaptor is configured by default in BastionVault, so you can simply build BastionVault to enable it:
 
 ~~~
 cargo build
@@ -31,7 +31,7 @@ But this is not necessary.
 
 ## The Tongsuo Crypto Adaptor
 
-Tongsuo is a fork of OpenSSL aiming to have a better support on Chinese cryptography algorithms and standards. To use Tongsuo as the cryptography functionality provider in RustyVault, typically you need to build RustyVault as follows.
+Tongsuo is a fork of OpenSSL aiming to have a better support on Chinese cryptography algorithms and standards. To use Tongsuo as the cryptography functionality provider in BastionVault, typically you need to build BastionVault as follows.
 
 ### Download and Install Tongsuo
 
@@ -39,9 +39,9 @@ Firstly, you need to have a copy of Tongsuo code and successfully build it into 
 
 Go to [https://tongsuo.net/docs/compilation/compile-and-install](https://tongsuo.net/docs/compilation/compile-and-install) for more detailed information.
 
-### Configure RustyVault to use Tongsuo
+### Configure BastionVault to use Tongsuo
 
-RustyVault uses rust-tongsuo crate to call C APIs provided by Tongsuo. So we need to configure Cargo to use it, let's assume Tongsuo is successfully installed to `/path/to/tongsuo` directory: 
+BastionVault uses rust-tongsuo crate to call C APIs provided by Tongsuo. So we need to configure Cargo to use it, let's assume Tongsuo is successfully installed to `/path/to/tongsuo` directory: 
 
 ~~~
 OPENSSL_DIR=/path/to/tongsuo cargo build \
@@ -63,10 +63,10 @@ OPENSSL_DIR=/path/to/tongsuo cargo build \
 
 ### The `LD_LIBRARY_PATH` Variable
 
-If you are using Linux, then you may need to specify which path for RustyVault to look for the Tongsuo libraries. There are many ways of having this done, but in this document we demonstrate with the global environment variable way.
+If you are using Linux, then you may need to specify which path for BastionVault to look for the Tongsuo libraries. There are many ways of having this done, but in this document we demonstrate with the global environment variable way.
 
 ~~~
 export LD_LIBRARY_PATH=/path/to/tongsuol/lib
 ~~~
 
-Then you can run RustyVault smoothly.
+Then you can run BastionVault smoothly.

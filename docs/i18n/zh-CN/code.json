@@ -11,8 +11,8 @@
     "message": "📖 架构图",
     "description": "The architecture heading"
   },
-  "is structured into three principal components: RustyVault Core, RustyVault Modules and RustyVault Surface.": {
-    "message": "整体上分为三大部分：RustyVault Core, RustyVault Modules 和 RustyVault Surface",
+  "is structured into three principal components: BastionVault Core, BastionVault Modules and BastionVault Surface.": {
+    "message": "整体上分为三大部分：BastionVault Core, BastionVault Modules 和 BastionVault Surface",
     "description": "The architecture description"
   },
   "theme.ErrorPageContent.title": {

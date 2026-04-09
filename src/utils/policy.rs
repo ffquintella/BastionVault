@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use super::string::remove_duplicates;
 
 // sanitize_policies performs the common input validation tasks
-// which are performed on the list of policies across RustyVault.
+// which are performed on the list of policies across BastionVault.
 // The resulting collection will have no duplicate elements.
 // If 'root' policy was present in the list of policies, then
 // all other policies will be ignored, the result will contain

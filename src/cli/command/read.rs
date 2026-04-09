@@ -10,7 +10,7 @@ use crate::{
 #[command(
     author,
     version,
-    about = r#"Reads data from RustyVault at the given path. This can be used to read secrets,
+    about = r#"Reads data from BastionVault at the given path. This can be used to read secrets,
 generate dynamic credentials, get configuration details, and more.
 
 Read a secret from the static secrets engine:

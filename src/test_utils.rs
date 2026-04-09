@@ -54,11 +54,11 @@ use crate::{
     rv_error_response, rv_error_string,
     storage::{self, Backend},
     utils::cert::Certificate,
-    RustyVault,
+    BastionVault,
 };
 
 lazy_static! {
-    pub static ref TEST_DIR: &'static str = "rusty_vault_test";
+    pub static ref TEST_DIR: &'static str = "bastion_vault_test";
 }
 
 #[derive(Debug, Clone)]
@@ -113,7 +113,7 @@ impl TestHttpServer {
 
         let k: Vec<&[u8]> = keys.iter().map(|v| v.as_slice()).collect();
 
-        let result = unseal_test_rusty_vault_core(core.as_ref(), &k).await;
+        let result = unseal_test_bastion_vault_core(core.as_ref(), &k).await;
         assert!(result);
 
         root_token = init_result.root_token.clone();
@@ -127,7 +127,7 @@ impl TestHttpServer {
     pub fn new_without_init(name: &str, tls_enable: bool) -> Self {
         let barrier = Arc::new(Barrier::new(2));
         let (stop_tx, stop_rx) = oneshot::channel();
-        let rvault = new_test_rusty_vault(name);
+        let rvault = new_test_bastion_vault(name);
         let core = rvault.core.load().clone();
 
         let mut scheme = "http";
@@ -207,7 +207,7 @@ impl TestHttpServer {
         let config = Config::default();
         let barrier = Arc::new(Barrier::new(2));
         let (stop_tx, stop_rx) = oneshot::channel();
-        let rvault = RustyVault::new(backend, Some(&config)).unwrap();
+        let rvault = BastionVault::new(backend, Some(&config)).unwrap();
         let core = rvault.core.load().clone();
 
         let mut scheme = "http";
@@ -286,7 +286,7 @@ impl TestHttpServer {
     pub async fn new_with_prometheus(name: &str, tls_enable: bool) -> Self {
         let barrier = Arc::new(Barrier::new(2));
         let (stop_tx, stop_rx) = oneshot::channel();
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault(name).await;
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault(name).await;
 
         let mut scheme = "http";
         let mut ca_cert_pem = "".into();
@@ -496,7 +496,7 @@ impl TestHttpServer {
 
         req = req.set("Accept", "application/json");
         if !path.ends_with("/login") {
-            req = req.set("X-RustyVault-Token", tk);
+            req = req.set("X-BastionVault-Token", tk);
         }
 
         let response_result = if let Some(send_data) = data { req.send_json(send_data) } else { req.call() };
@@ -588,7 +588,7 @@ impl TestHttpServer {
 
         req = req.set("Accept", "application/json");
         if !path.ends_with("/login") {
-            req = req.set("X-RustyVault-Token", tk);
+            req = req.set("X-BastionVault-Token", tk);
         }
 
         let response_result = if let Some(send_data) = data { req.send_json(send_data) } else { req.call() };
@@ -1028,12 +1028,12 @@ pub fn new_test_file_backend(path: &str) -> Arc<dyn Backend> {
     backend.unwrap()
 }
 
-pub fn new_test_rusty_vault(name: &str) -> RustyVault {
-    RustyVault::new(new_test_backend(name), None).unwrap()
+pub fn new_test_bastion_vault(name: &str) -> BastionVault {
+    BastionVault::new(new_test_backend(name), None).unwrap()
 }
 
 #[maybe_async::maybe_async]
-pub async fn init_test_rusty_vault(rvault: &RustyVault, seal_config: &SealConfig) -> InitResult {
+pub async fn init_test_bastion_vault(rvault: &BastionVault, seal_config: &SealConfig) -> InitResult {
     let result = rvault.init(seal_config).await;
     assert!(result.is_ok());
 
@@ -1041,12 +1041,12 @@ pub async fn init_test_rusty_vault(rvault: &RustyVault, seal_config: &SealConfig
 }
 
 #[maybe_async::maybe_async]
-pub async fn unseal_test_rusty_vault(rvault: &RustyVault, keys: &[&[u8]]) -> bool {
-    unseal_test_rusty_vault_core(rvault.core.load().as_ref(), keys).await
+pub async fn unseal_test_bastion_vault(rvault: &BastionVault, keys: &[&[u8]]) -> bool {
+    unseal_test_bastion_vault_core(rvault.core.load().as_ref(), keys).await
 }
 
 #[maybe_async::maybe_async]
-pub async fn unseal_test_rusty_vault_core(core: &Core, keys: &[&[u8]]) -> bool {
+pub async fn unseal_test_bastion_vault_core(core: &Core, keys: &[&[u8]]) -> bool {
     let mut unsealed = false;
     for key in keys.iter() {
         let unseal = core.unseal(key).await;
@@ -1058,12 +1058,12 @@ pub async fn unseal_test_rusty_vault_core(core: &Core, keys: &[&[u8]]) -> bool {
 }
 
 #[maybe_async::maybe_async]
-pub async fn new_unseal_test_rusty_vault(name: &str) -> (RustyVault, Arc<Core>, String) {
+pub async fn new_unseal_test_bastion_vault(name: &str) -> (BastionVault, Arc<Core>, String) {
     let seal_config = SealConfig { secret_shares: 9, secret_threshold: 5 };
     let root_token;
 
-    let rvault = new_test_rusty_vault(name);
-    let init_result = init_test_rusty_vault(&rvault, &seal_config).await;
+    let rvault = new_test_bastion_vault(name);
+    let init_result = init_test_bastion_vault(&rvault, &seal_config).await;
 
     println!("init_result: {:?}", init_result);
 
@@ -1075,7 +1075,7 @@ pub async fn new_unseal_test_rusty_vault(name: &str) -> (RustyVault, Arc<Core>, 
 
     let k: Vec<&[u8]> = keys.iter().map(|v| v.as_slice()).collect();
 
-    let result = unseal_test_rusty_vault(&rvault, &k).await;
+    let result = unseal_test_bastion_vault(&rvault, &k).await;
     assert!(result);
 
     root_token = init_result.root_token.clone();

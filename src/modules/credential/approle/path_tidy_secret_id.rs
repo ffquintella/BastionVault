@@ -378,7 +378,7 @@ impl AppRoleBackendInner {
 
         resp.set_request_id(&req.id);
         resp.add_warning(
-            "Tidy operation successfully started. Any information from the operation will be printed to RustyVault's \
+            "Tidy operation successfully started. Any information from the operation will be printed to BastionVault's \
              server logs.",
         );
 
@@ -413,16 +413,16 @@ mod test {
     use crate::{
         logical::{Operation, Request},
         storage::{Storage, StorageEntry},
-        test_utils::{new_unseal_test_rusty_vault, test_mount_auth_api},
+        test_utils::{new_unseal_test_bastion_vault, test_mount_auth_api},
     };
 
     #[actix_rt::test]
     async fn test_approle_tidy_dangling_accessors_normal() {
         #[cfg(feature = "sync_handler")]
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_approle_tidy_dangling_accessors_normal");
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_tidy_dangling_accessors_normal");
         #[cfg(not(feature = "sync_handler"))]
         let (_rvault, core, root_token) =
-            new_unseal_test_rusty_vault("test_approle_tidy_dangling_accessors_normal").await;
+            new_unseal_test_bastion_vault("test_approle_tidy_dangling_accessors_normal").await;
 
         // Mount approle auth to path: auth/approle
         #[cfg(feature = "sync_handler")]
@@ -535,9 +535,9 @@ mod test {
     async fn test_approle_tidy_dangling_accessors_race() {
         #[cfg(not(feature = "sync_handler"))]
         let (_rvault, core, root_token) =
-            new_unseal_test_rusty_vault("test_approle_tidy_dangling_accessors_race").await;
+            new_unseal_test_bastion_vault("test_approle_tidy_dangling_accessors_race").await;
         #[cfg(feature = "sync_handler")]
-        let (_rvault, core, root_token) = new_unseal_test_rusty_vault("test_approle_tidy_dangling_accessors_race");
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_tidy_dangling_accessors_race");
 
         // Mount approle auth to path: auth/approle
         #[cfg(feature = "sync_handler")]

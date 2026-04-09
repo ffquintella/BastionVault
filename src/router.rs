@@ -1,6 +1,6 @@
-//! The `rusty_vault::router` module contains the functions that are used to do the routing work.
+//! The `bastion_vault::router` module contains the functions that are used to do the routing work.
 //! All router entries are organized in a Trie structure which is suitable for locating prefix.
-//! The core router is the final 'glue' that mounts the pieces together for RustyVault's API.
+//! The core router is the final 'glue' that mounts the pieces together for BastionVault's API.
 
 use std::sync::{Arc, RwLock};
 

@@ -1,6 +1,6 @@
-//! This module provides different commands for the RustyVault application.
+//! This module provides different commands for the BastionVault application.
 //! For instance, we have a 'server' command to indicate the application running in the server mode
-//! and starts to accept HTTP request to do real RustyVault functionality.
+//! and starts to accept HTTP request to do real BastionVault functionality.
 
 use std::path::PathBuf;
 
@@ -52,7 +52,7 @@ pub struct HttpOptions {
         next_line_help = true,
         value_name = "string",
         default_value = "https://127.0.0.1:8200",
-        long_help = r#"Address of the RustyVault server. This can also be specified via the
+        long_help = r#"Address of the BastionVault server. This can also be specified via the
 VAULT_ADDR or RUSTY_VAULT_ADDR environment variable."#
     )]
     address: String,
@@ -64,7 +64,7 @@ VAULT_ADDR or RUSTY_VAULT_ADDR environment variable."#
         value_hint = ValueHint::FilePath,
         env = "VAULT_CACERT",
         long_help = r#"Path on the local disk to a single PEM-encoded CA certificate to verify
-the RustyVault server's SSL certificate. This takes precedence over -ca-path.
+the BastionVault server's SSL certificate. This takes precedence over -ca-path.
 This can also be specified via the VAULT_CACERT environment variable."#
     )]
     ca_cert: Option<PathBuf>,
@@ -76,7 +76,7 @@ This can also be specified via the VAULT_CACERT environment variable."#
         value_hint = ValueHint::DirPath,
         env = "VAULT_CAPATH",
         long_help = r#"Path on the local disk to a directory of PEM-encoded CA certificates to
-verify the RustyVault server's SSL certificate. This can also be specified
+verify the BastionVault server's SSL certificate. This can also be specified
 via the VAULT_CAPATH environment variable."#
     )]
     ca_path: Option<PathBuf>,
@@ -121,7 +121,7 @@ This can also be specified via the VAULT_TLS_SERVER_NAME environment variable."#
         env = "VAULT_SKIP_VERIFY",
         long_help = r#"Disable verification of TLS certificates. Using this option is highly
 discouraged as it decreases the security of data transmissions to and
-from the RustyVault server. The default is false. This can also be specified
+from the BastionVault server. The default is false. This can also be specified
 via the VAULT_SKIP_VERIFY environment variable."#
     )]
     tls_skip_verify: bool,
