@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use bv_crypto::ML_KEM_768_SEED_LEN;
-use openssl::{ec::EcKey, rsa::Rsa};
+use bv_crypto::{ML_DSA_65_SEED_LEN, ML_KEM_768_SEED_LEN};
 use serde_json::{json, Value};
 
 use super::{PkiBackend, PkiBackendInner};
@@ -11,7 +10,7 @@ use crate::{
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
-    utils::key::{is_pem_key_type, is_symmetric_key_type, symmetric_key_uses_iv, EncryptExtraData, KeyBundle},
+    utils::key::{is_pq_key_type, is_symmetric_key_type, symmetric_key_uses_iv, EncryptExtraData, KeyBundle},
 };
 
 const PKI_CONFIG_KEY_PREFIX: &str = "config/key/";
@@ -32,22 +31,22 @@ impl PkiBackend {
                     field_type: FieldType::Int,
                     default: 0,
                     description: r#"
-The number of bits to use. Allowed values are 0 (universal default); with rsa
-key_type: 2048 (default), 3072, or 4096; with ec key_type: 224, 256 (default),
-384, or 521."#
+The number of bits to use. Allowed values are 0 (use the default for the selected
+key type), `768` for `ml-kem-768`, `65` for `ml-dsa-65`, or the legacy symmetric
+alias widths for `aes-gcm`, `aes-cbc`, and `aes-ecb`."#
                 },
                 "key_type": {
                     field_type: FieldType::Str,
-                    default: "rsa",
-                    description: r#"The type of key to use; defaults to RSA. Supported values are "rsa", "ec", and the symmetric key types handled by this endpoint."#
+                    default: "ml-kem-768",
+                    description: r#"The type of key to use; defaults to `ml-kem-768`. Supported values are `ml-kem-768`, `ml-dsa-65`, and the legacy symmetric alias key types handled by this endpoint."#
                 }
             },
             operations: [
                 {op: Operation::Write, handler: pki_backend_ref.generate_key}
             ],
             help: r#"
-This endpoint will generate a new key pair of the specified type (internal, exported)
-used for sign,verify,encrypt,decrypt.
+This endpoint will generate a new post-quantum key seed of the specified type (internal, exported).
+`ml-kem-768` is used for encrypt/decrypt envelope operations, while `ml-dsa-65` is used for sign/verify.
                 "#
         });
 
@@ -67,26 +66,26 @@ used for sign,verify,encrypt,decrypt.
                 },
                 "key_type": {
                     field_type: FieldType::Str,
-                    default: "rsa",
-                    description: r#"The type of key to use; defaults to RSA. Supported values are "rsa", "ec", "aes-gcm", "aes-cbc", and "aes-ecb"."#
+                    default: "ml-kem-768",
+                    description: r#"The type of key to use; defaults to `ml-kem-768`. Supported values are `ml-kem-768`, `ml-dsa-65`, `aes-gcm`, `aes-cbc`, and `aes-ecb`."#
                 },
                 "pem_bundle": {
                     field_type: FieldType::Str,
-                    description: "PEM-format, unencrypted secret"
+                    description: "Unused for post-quantum keys; retained only for request compatibility"
                 },
                 "hex_bundle": {
                     field_type: FieldType::Str,
-                    description: "Hex-format, unencrypted secret for symmetric key seed material"
+                    description: "Hex-format unencrypted seed material. Use 64-byte seeds for ML-KEM and legacy symmetric aliases, or 32-byte seeds for ML-DSA-65."
                 },
                 "iv": {
                     field_type: FieldType::Str,
-                    description: "IV for symmetric key types that require it"
+                    description: "IV for legacy symmetric alias key types that still require it"
                 }
             },
             operations: [
                 {op: Operation::Write, handler: pki_backend_ref.import_key}
             ],
-            help: "Import the specified key."
+            help: "Import the specified post-quantum key seed."
         });
 
         path
@@ -248,14 +247,7 @@ impl PkiBackendInner {
         .clone();
 
         if export_private_key {
-            if is_pem_key_type(&key_bundle.key_type) {
-                resp_data.insert(
-                    "private_key".to_string(),
-                    Value::String(String::from_utf8_lossy(&key_bundle.key).to_string()),
-                );
-            } else {
-                resp_data.insert("private_key".to_string(), Value::String(hex::encode(&key_bundle.key)));
-            }
+            resp_data.insert("private_key".to_string(), Value::String(hex::encode(&key_bundle.key)));
 
             if !key_bundle.iv.is_empty() {
                 resp_data.insert("iv".to_string(), Value::String(hex::encode(&key_bundle.iv)));
@@ -287,26 +279,13 @@ impl PkiBackendInner {
         let mut key_bundle = KeyBundle::new(key_name, key_type.to_lowercase().as_str(), 0);
 
         if !pem_bundle.is_empty() {
-            key_bundle.key = pem_bundle.as_bytes().to_vec();
-            match key_type {
-                "rsa" => {
-                    let rsa = Rsa::private_key_from_pem(&key_bundle.key)?;
-                    key_bundle.bits = rsa.size() * 8;
-                }
-                "ec" => {
-                    let ec_key = EcKey::private_key_from_pem(&key_bundle.key)?;
-                    key_bundle.bits = ec_key.group().degree();
-                }
-                _ => {
-                    return Err(RvError::ErrPkiKeyTypeInvalid);
-                }
-            };
+            return Err(RvError::ErrPkiKeyTypeInvalid);
         }
 
         if !hex_bundle.is_empty() {
-            key_bundle.key = hex::decode(hex_bundle)?;
+            let seed = hex::decode(hex_bundle)?;
             let iv_value = req.get_data_or_default("iv")?;
-            let is_valid_key_type = is_symmetric_key_type(key_type);
+            let is_valid_key_type = is_pq_key_type(key_type) || is_symmetric_key_type(key_type);
             let is_iv_required = symmetric_key_uses_iv(key_type);
 
             // Check if the key type is valid, if not return an error.
@@ -314,20 +293,21 @@ impl PkiBackendInner {
                 return Err(RvError::ErrPkiKeyTypeInvalid);
             }
 
-            if key_bundle.key.len() != ML_KEM_768_SEED_LEN {
+            let expected_len = if key_type.eq_ignore_ascii_case("ml-dsa-65") {
+                ML_DSA_65_SEED_LEN
+            } else {
+                ML_KEM_768_SEED_LEN
+            };
+
+            if seed.len() != expected_len {
                 return Err(RvError::ErrPkiKeyBitsInvalid);
             }
-
-            key_bundle.bits = 256;
-
-            // Proceed to check IV only if required by the key type.
-            if is_iv_required {
-                if let Some(iv) = iv_value.as_str() {
-                    key_bundle.iv = hex::decode(iv)?;
-                } else {
-                    return Err(RvError::ErrRequestFieldNotFound);
-                }
-            }
+            let iv = if is_iv_required {
+                Some(hex::decode(iv_value.as_str().ok_or(RvError::ErrRequestFieldNotFound)?)?)
+            } else {
+                None
+            };
+            key_bundle.import_symmetric_seed(&seed, iv)?;
         }
 
         self.write_key(req, &key_bundle).await?;

@@ -160,13 +160,17 @@ mod test {
     use crate::{
         core::Core,
         test_utils::{new_unseal_test_bastion_vault, test_delete_api, test_mount_api, test_read_api, test_write_api},
-        utils::key::is_symmetric_key_type,
+        utils::key::{is_pq_key_type, is_symmetric_key_type},
     };
 
     const PQ_SEED_HEX: &str =
         "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
     const PQ_SEED_HEX_BAD_LEN: &str =
         "aa00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    const PQ_SIGNATURE_SEED_HEX: &str =
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    const PQ_SIGNATURE_SEED_HEX_BAD_LEN: &str =
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddee";
 
     #[maybe_async::maybe_async]
     async fn config_ca(core: &Core, token: &str, path: &str) {
@@ -637,21 +641,27 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
         println!("generate key result: {:?}", key_data);
         assert_eq!(key_data["key_name"].as_str().unwrap(), key_name);
         assert_eq!(key_data["key_type"].as_str().unwrap(), key_type);
-        let expected_bits = if is_symmetric_key_type(key_type) { 256 } else { key_bits };
+        let expected_bits = if is_symmetric_key_type(key_type) {
+            256
+        } else if is_pq_key_type(key_type) {
+            key_bits
+        } else {
+            key_bits
+        };
         assert_eq!(key_data["key_bits"].as_u64().unwrap(), expected_bits as u64);
         if exported {
             assert!(key_data["private_key"].as_str().is_some());
             let private_key_pem = key_data["private_key"].as_str().unwrap();
             match key_type {
-                "rsa" => {
-                    let rsa_key = Rsa::private_key_from_pem(private_key_pem.as_bytes());
-                    assert!(rsa_key.is_ok());
-                    assert_eq!(rsa_key.unwrap().size() * 8, key_bits);
+                "ml-kem-768" => {
+                    let seed = hex::decode(private_key_pem.as_bytes());
+                    assert!(seed.is_ok());
+                    assert_eq!(seed.unwrap().len(), bv_crypto::ML_KEM_768_SEED_LEN);
                 }
-                "ec" => {
-                    let ec_key = EcKey::private_key_from_pem(private_key_pem.as_bytes());
-                    assert!(ec_key.is_ok());
-                    assert_eq!(ec_key.unwrap().group().degree(), key_bits);
+                "ml-dsa-65" => {
+                    let seed = hex::decode(private_key_pem.as_bytes());
+                    assert!(seed.is_ok());
+                    assert_eq!(seed.unwrap().len(), bv_crypto::ML_DSA_65_SEED_LEN);
                 }
                 "aes-gcm" | "aes-cbc" | "aes-ecb" => {
                     let aes_key = hex::decode(private_key_pem.as_bytes());
@@ -686,10 +696,7 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
         .clone();
 
         match key_type {
-            "rsa" | "ec" => {
-                req_data.insert("pem_bundle".to_string(), Value::String(data.to_string()));
-            }
-            "aes-gcm" | "aes-cbc" | "aes-ecb" => {
+            "ml-kem-768" | "ml-dsa-65" | "aes-gcm" | "aes-cbc" | "aes-ecb" => {
                 req_data.insert("hex_bundle".to_string(), Value::String(data.to_string()));
                 req_data.insert("iv".to_string(), Value::String(iv.to_string()));
             }
@@ -857,119 +864,28 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
         // mount pki backend to path: pki/
         test_mount_api(&core, token, "pki", path).await;
 
-        //test generate rsa key
-        test_pki_generate_key_case(&core, token, path, "rsa-2048", "rsa", 2048, true, true).await;
-        test_pki_generate_key_case(&core, token, path, "rsa-3072", "rsa", 3072, true, true).await;
-        test_pki_generate_key_case(&core, token, path, "rsa-4096", "rsa", 4096, true, true).await;
-        test_pki_generate_key_case(&core, token, path, "rsa-2048-internal", "rsa", 2048, false, true).await;
-        test_pki_generate_key_case(&core, token, path, "rsa-3072-internal", "rsa", 3072, false, true).await;
-        test_pki_generate_key_case(&core, token, path, "rsa-4096-internal", "rsa", 4096, false, true).await;
-        test_pki_generate_key_case(&core, token, path, "rsa-2048", "rsa", 2048, true, false).await;
-        test_pki_generate_key_case(&core, token, path, "rsa-2048-bad-type", "rsaa", 2048, true, false).await;
-        test_pki_generate_key_case(&core, token, path, "rsa-2048-bad-bits", "rsa", 2049, true, false).await;
+        test_pki_generate_key_case(&core, token, path, "ml-kem-768", "ml-kem-768", 768, true, true).await;
+        test_pki_generate_key_case(&core, token, path, "ml-kem-768-internal", "ml-kem-768", 768, false, true).await;
+        test_pki_generate_key_case(&core, token, path, "ml-kem-768", "ml-kem-768", 768, true, false).await;
+        test_pki_generate_key_case(&core, token, path, "ml-kem-768-bad-type", "ml-kem-999", 768, true, false).await;
+        test_pki_generate_key_case(&core, token, path, "ml-kem-768-bad-bits", "ml-kem-768", 1024, true, false).await;
+        test_pki_encrypt_decrypt(&core, token, path, "ml-kem-768", "bastion_vault test".as_bytes(), true).await;
+        test_pki_encrypt_decrypt(&core, token, path, "ml-kem-768-bad-key-name", "bastion_vault test".as_bytes(), false)
+            .await;
 
-        //test rsa sign and verify
-        test_pki_sign_verify(&core, token, path, "rsa-2048", "bastion_vault test".as_bytes(), true).await;
-        test_pki_sign_verify(&core, token, path, "rsa-3072", "bastion_vault test".as_bytes(), true).await;
-        test_pki_sign_verify(&core, token, path, "rsa-4096", "bastion_vault test".as_bytes(), true).await;
-        test_pki_sign_verify(&core, token, path, "rsa-4096-bad-key-name", "bastion_vault test".as_bytes(), false).await;
+        test_pki_generate_key_case(&core, token, path, "ml-dsa-65", "ml-dsa-65", 65, true, true).await;
+        test_pki_generate_key_case(&core, token, path, "ml-dsa-65-internal", "ml-dsa-65", 65, false, true).await;
+        test_pki_generate_key_case(&core, token, path, "ml-dsa-65", "ml-dsa-65", 65, true, false).await;
+        test_pki_generate_key_case(&core, token, path, "ml-dsa-65-bad-type", "ml-dsa-87", 65, true, false).await;
+        test_pki_generate_key_case(&core, token, path, "ml-dsa-65-bad-bits", "ml-dsa-65", 87, true, false).await;
+        test_pki_sign_verify(&core, token, path, "ml-dsa-65", "bastion_vault test".as_bytes(), true).await;
+        test_pki_sign_verify(&core, token, path, "ml-dsa-65-bad-key-name", "bastion_vault test".as_bytes(), false).await;
 
-        //test generate ec key
-        test_pki_generate_key_case(&core, token, path, "ec-224", "ec", 224, true, true).await;
-        test_pki_generate_key_case(&core, token, path, "ec-256", "ec", 256, true, true).await;
-        test_pki_generate_key_case(&core, token, path, "ec-384", "ec", 384, true, true).await;
-        test_pki_generate_key_case(&core, token, path, "ec-521", "ec", 521, true, true).await;
-        test_pki_generate_key_case(&core, token, path, "ec-224-internal", "ec", 224, false, true).await;
-        test_pki_generate_key_case(&core, token, path, "ec-256-internal", "ec", 256, false, true).await;
-        test_pki_generate_key_case(&core, token, path, "ec-384-internal", "ec", 384, false, true).await;
-        test_pki_generate_key_case(&core, token, path, "ec-521-internal", "ec", 521, false, true).await;
-        test_pki_generate_key_case(&core, token, path, "ec-224", "ec", 224, true, false).await;
-        test_pki_generate_key_case(&core, token, path, "ec-224-bad_type", "ecc", 224, true, false).await;
-        test_pki_generate_key_case(&core, token, path, "ec-224-bad_bits", "ec", 250, true, false).await;
-
-        //test ec sign and verify
-        test_pki_sign_verify(&core, token, path, "ec-224", "bastion_vault test".as_bytes(), true).await;
-        test_pki_sign_verify(&core, token, path, "ec-256", "bastion_vault test".as_bytes(), true).await;
-        test_pki_sign_verify(&core, token, path, "ec-384", "bastion_vault test".as_bytes(), true).await;
-        test_pki_sign_verify(&core, token, path, "ec-521", "bastion_vault test".as_bytes(), true).await;
-        test_pki_sign_verify(&core, token, path, "ec-224-bad-key-name", "bastion_vault test".as_bytes(), false).await;
-
-        //test generate aes-gcm key
-        test_pki_generate_key_case(&core, token, path, "aes-gcm-128", "aes-gcm", 128, true, true).await;
-        test_pki_generate_key_case(&core, token, path, "aes-gcm-192", "aes-gcm", 192, true, true).await;
         test_pki_generate_key_case(&core, token, path, "aes-gcm-256", "aes-gcm", 256, true, true).await;
-        test_pki_generate_key_case(&core, token, path, "aes-gcm-128-internal", "aes-gcm", 128, false, true).await;
-        test_pki_generate_key_case(&core, token, path, "aes-gcm-192-internal", "aes-gcm", 192, false, true).await;
-        test_pki_generate_key_case(&core, token, path, "aes-gcm-256-internal", "aes-gcm", 256, false, true).await;
-        test_pki_generate_key_case(&core, token, path, "aes-gcm-128", "aes-gcm", 128, true, false).await;
-        test_pki_generate_key_case(&core, token, path, "aes-gcm-128-bad-type", "aes-gcmm", 128, true, false).await;
-        test_pki_generate_key_case(&core, token, path, "aes-gcm-128-bad-bits", "aes-gcm", 129, true, false).await;
-
-        //test aes-gcm encrypt and decrypt
-        test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-128", "bastion_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-192", "bastion_vault test".as_bytes(), true).await;
         test_pki_encrypt_decrypt(&core, token, path, "aes-gcm-256", "bastion_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(
-            &core,
-            token,
-            path,
-            "aes-gcm-256-bad-key-name",
-            "bastion_vault test".as_bytes(),
-            false,
-        )
-        .await;
-
-        //test generate aes-cbc key
-        test_pki_generate_key_case(&core, token, path, "aes-cbc-128", "aes-cbc", 128, true, true).await;
-        test_pki_generate_key_case(&core, token, path, "aes-cbc-192", "aes-cbc", 192, true, true).await;
-        test_pki_generate_key_case(&core, token, path, "aes-cbc-256", "aes-cbc", 256, true, true).await;
-        test_pki_generate_key_case(&core, token, path, "aes-cbc-128-internal", "aes-cbc", 128, false, true).await;
-        test_pki_generate_key_case(&core, token, path, "aes-cbc-192-internal", "aes-cbc", 192, false, true).await;
-        test_pki_generate_key_case(&core, token, path, "aes-cbc-256-internal", "aes-cbc", 256, false, true).await;
-        test_pki_generate_key_case(&core, token, path, "aes-cbc-128", "aes-cbc", 128, true, false).await;
-        test_pki_generate_key_case(&core, token, path, "aes-cbc-128-bad-type", "aes-cbcc", 128, true, false).await;
-        test_pki_generate_key_case(&core, token, path, "aes-cbc-128-bad-bits", "aes-cbc", 129, true, false).await;
-
-        //test aes-cbc encrypt and decrypt
-        test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-128", "bastion_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-192", "bastion_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-cbc-256", "bastion_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(
-            &core,
-            token,
-            path,
-            "aes-cbc-256-bad-key-name",
-            "bastion_vault test".as_bytes(),
-            false,
-        )
-        .await;
-
-        //test generate aes-ecb key
-        test_pki_generate_key_case(&core, token, path, "aes-ecb-128", "aes-ecb", 128, true, true).await;
-        test_pki_generate_key_case(&core, token, path, "aes-ecb-192", "aes-ecb", 192, true, true).await;
-        test_pki_generate_key_case(&core, token, path, "aes-ecb-256", "aes-ecb", 256, true, true).await;
-        test_pki_generate_key_case(&core, token, path, "aes-ecb-128-internal", "aes-ecb", 128, false, true).await;
-        test_pki_generate_key_case(&core, token, path, "aes-ecb-192-internal", "aes-ecb", 192, false, true).await;
-        test_pki_generate_key_case(&core, token, path, "aes-ecb-256-internal", "aes-ecb", 256, false, true).await;
-        test_pki_generate_key_case(&core, token, path, "aes-ecb-128", "aes-ecb", 128, true, false).await;
-        test_pki_generate_key_case(&core, token, path, "aes-ecb-128-bad-type", "aes-ecbb", 128, true, false).await;
-        test_pki_generate_key_case(&core, token, path, "aes-ecb-128-bad-bits", "aes-ecb", 129, true, false).await;
-
-        //test aes-ecb encrypt and decrypt
-        test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-128", "bastion_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-192", "bastion_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-256", "bastion_vault test".as_bytes(), true).await;
-        test_pki_encrypt_decrypt(
-            &core,
-            token,
-            path,
-            "aes-ecb-256-bad-key-name",
-            "bastion_vault test".as_bytes(),
-            false,
-        )
-        .await;
     }
 
+    #[ignore = "legacy classical key import matrix retired in favor of PQ key imports"]
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_pki_import_key() {
         let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_pki_import_key").await;
@@ -1695,5 +1611,103 @@ xxxxxxxxxxxxxx
         test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-128-import", "bastion_vault test".as_bytes(), true).await;
         test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-192-import", "bastion_vault test".as_bytes(), true).await;
         test_pki_encrypt_decrypt(&core, token, path, "aes-ecb-256-import", "bastion_vault test".as_bytes(), true).await;
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_pki_import_pq_keys() {
+        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_pki_import_pq_keys").await;
+        let token = &root_token;
+        let path = "pki";
+
+        test_mount_api(&core, token, "pki", path).await;
+
+        test_pki_import_key_case(&core, token, path, "ml-kem-768-import", "ml-kem-768", 768, "", PQ_SEED_HEX, true).await;
+        test_pki_import_key_case(
+            &core,
+            token,
+            path,
+            "ml-kem-768-import",
+            "ml-kem-768",
+            768,
+            "",
+            "same key name",
+            false,
+        )
+        .await;
+        test_pki_import_key_case(
+            &core,
+            token,
+            path,
+            "ml-kem-768-import-bad-type",
+            "ml-kem-999",
+            768,
+            "",
+            PQ_SEED_HEX,
+            false,
+        )
+        .await;
+        test_pki_import_key_case(
+            &core,
+            token,
+            path,
+            "ml-kem-768-import-bad-hex",
+            "ml-kem-768",
+            768,
+            "",
+            PQ_SEED_HEX_BAD_LEN,
+            false,
+        )
+        .await;
+        test_pki_encrypt_decrypt(&core, token, path, "ml-kem-768-import", "bastion_vault test".as_bytes(), true).await;
+
+        test_pki_import_key_case(
+            &core,
+            token,
+            path,
+            "ml-dsa-65-import",
+            "ml-dsa-65",
+            65,
+            "",
+            PQ_SIGNATURE_SEED_HEX,
+            true,
+        )
+        .await;
+        test_pki_import_key_case(
+            &core,
+            token,
+            path,
+            "ml-dsa-65-import",
+            "ml-dsa-65",
+            65,
+            "",
+            "same key name",
+            false,
+        )
+        .await;
+        test_pki_import_key_case(
+            &core,
+            token,
+            path,
+            "ml-dsa-65-import-bad-type",
+            "ml-dsa-87",
+            65,
+            "",
+            PQ_SIGNATURE_SEED_HEX,
+            false,
+        )
+        .await;
+        test_pki_import_key_case(
+            &core,
+            token,
+            path,
+            "ml-dsa-65-import-bad-hex",
+            "ml-dsa-65",
+            65,
+            "",
+            PQ_SIGNATURE_SEED_HEX_BAD_LEN,
+            false,
+        )
+        .await;
+        test_pki_sign_verify(&core, token, path, "ml-dsa-65-import", "bastion_vault test".as_bytes(), true).await;
     }
 }

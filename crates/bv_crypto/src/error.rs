@@ -14,6 +14,14 @@ pub enum CryptoError {
     InvalidSecretKey,
     #[error("invalid KEM ciphertext")]
     InvalidKemCiphertext,
+    #[error("invalid signature seed length")]
+    InvalidSignatureSeedLength,
+    #[error("invalid signature public key")]
+    InvalidSignaturePublicKey,
+    #[error("invalid signature secret key")]
+    InvalidSignatureSecretKey,
+    #[error("invalid signature bytes")]
+    InvalidSignature,
     #[error("invalid envelope version")]
     InvalidEnvelopeVersion,
     #[error("unsupported envelope algorithm")]
@@ -22,4 +30,8 @@ pub enum CryptoError {
     EncryptFailed,
     #[error("decryption failed")]
     DecryptFailed,
+    #[error("signing failed")]
+    SignFailed,
+    #[error("verification failed")]
+    VerifyFailed,
 }

@@ -7,7 +7,7 @@ The post-quantum migration is active and already partially implemented in the co
 ## Roadmap Index
 
 - [Post-Quantum Crypto Migration](/Users/felipe/Dev/BastionVault/roadmaps/post-quantum-crypto-migration.md)
-  Active roadmap for removing Tongsuo, reducing OpenSSL coupling, adopting `ChaCha20-Poly1305` for payload encryption, and introducing `ML-KEM-768` for key establishment and key wrapping.
+  Active roadmap for removing Tongsuo, reducing OpenSSL coupling, adopting `ChaCha20-Poly1305` for payload encryption, and introducing `ML-KEM-768` plus `ML-DSA-65` for post-quantum key management.
 - [Post-Quantum Crypto Progress](/Users/felipe/Dev/BastionVault/roadmaps/post-quantum-crypto-progress.md)
   Execution tracker for completed slices, in-flight work, immediate next steps, and recent verification coverage.
 

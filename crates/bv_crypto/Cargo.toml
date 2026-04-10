@@ -6,11 +6,13 @@ license = "Apache-2.0"
 description = "Small, auditable cryptographic primitives for BastionVault migrations."
 
 [features]
-default = ["ml-kem-768"]
+default = ["ml-kem-768", "ml-dsa-65"]
 ml-kem-768 = ["dep:ml-kem"]
+ml-dsa-65 = ["dep:fips204"]
 
 [dependencies]
 chacha20poly1305 = { version = "0.10", features = ["std"] }
+fips204 = { version = "0.4.6", optional = true, default-features = false, features = ["default-rng", "ml-dsa-65"] }
 ml-kem = { version = "0.3.0-rc.2", features = ["getrandom", "zeroize"], optional = true }
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }

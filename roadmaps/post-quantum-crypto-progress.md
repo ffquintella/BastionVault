@@ -12,7 +12,8 @@ The strategy, target architecture, and phase definitions remain in [post-quantum
 Overall state: active, partially implemented
 
 Current focus:
-- continue reducing the remaining OpenSSL-heavy PKI core in `src/utils/cert.rs`
+- keep PQ key-management centered on `ML-KEM-768` for encapsulation and `ML-DSA-65` for signatures
+- continue reducing the remaining OpenSSL-heavy certificate and cert-auth core in `src/utils/cert.rs`
 - keep new crypto work isolated in smaller modules and crates
 - maintain broad validation coverage as the migration advances
 
@@ -24,14 +25,18 @@ Current focus:
 - [x] Add provider-neutral AEAD primitives
 - [x] Implement `ChaCha20-Poly1305`
 - [x] Implement `ML-KEM-768`
+- [x] Implement `ML-DSA-65`
 - [x] Add deterministic ML-KEM seed-derived keypair support
+- [x] Add deterministic ML-DSA seed-derived keypair support
 - [x] Add shared versioned KEM+DEM envelope support
 - [x] Add `chacha20-poly1305` barrier implementation
 - [x] Add PQ-backed barrier bootstrap and unseal flow
 - [x] Expose config-selectable ChaCha barrier path
 - [x] Migrate `seal.rs` to the PQ envelope model
 - [x] Migrate `crypto.rs` to the PQ envelope model
-- [x] Migrate the symmetric path in `key.rs` to the PQ envelope model
+- [x] Migrate the `ml-kem-768` path in `key.rs` to the PQ envelope model
+- [x] Add `ml-dsa-65` sign/verify support in `key.rs`
+- [x] Expose `ml-kem-768` and `ml-dsa-65` through PKI key generate/import/sign/verify paths
 - [x] Remove the Tongsuo Cargo patch
 - [x] Remove the Tongsuo Cargo feature
 - [x] Remove the Tongsuo CI job
@@ -81,7 +86,9 @@ Current focus:
 - added a provider-neutral AEAD surface
 - implemented `ChaCha20-Poly1305`
 - implemented `ML-KEM-768`
+- implemented `ML-DSA-65`
 - added deterministic ML-KEM seed-based keypair derivation
+- added deterministic ML-DSA seed-based keypair derivation
 - added a shared versioned `KemDemEnvelopeV1`
 
 ### Storage and barrier path
@@ -96,7 +103,9 @@ Current focus:
 
 - migrated [seal.rs](/Users/felipe/Dev/BastionVault/src/utils/seal.rs) to `ML-KEM-768 + ChaCha20-Poly1305`
 - migrated [crypto.rs](/Users/felipe/Dev/BastionVault/src/utils/crypto.rs) to the PQ envelope model
-- migrated the symmetric path in [key.rs](/Users/felipe/Dev/BastionVault/src/utils/key.rs) to PQ-backed envelope encryption while keeping the external `KeyBundle` API stable
+- migrated the `ml-kem-768` path in [key.rs](/Users/felipe/Dev/BastionVault/src/utils/key.rs) to PQ-backed envelope encryption while keeping the external `KeyBundle` API stable
+- added `ml-dsa-65` signing and verification to [key.rs](/Users/felipe/Dev/BastionVault/src/utils/key.rs)
+- retired PEM-based PKI key import for active key-management paths in favor of PQ seed import
 
 ### Tongsuo removal
 
@@ -110,8 +119,9 @@ Current focus:
 ### PKI progress
 
 - removed SM2-specific build branches from the active PKI code paths
-- aligned PKI symmetric key import/export with PQ seed semantics
-- updated PKI symmetric test fixtures to use valid ML-KEM seed material
+- aligned PKI key import/export with PQ seed semantics
+- updated PKI key test fixtures to use valid ML-KEM and ML-DSA seed material
+- updated [path_keys.rs](/Users/felipe/Dev/BastionVault/src/modules/pki/path_keys.rs) defaults and field descriptions around `ml-kem-768` and `ml-dsa-65`
 - centralized certificate role validation for RSA and EC issuance
 - corrected stale PKI field/help text that no longer matched the current implementation
 
@@ -157,7 +167,7 @@ What landed:
 
 Remaining work:
 - shrink the remaining OpenSSL type surface in [src/utils/cert.rs](src/utils/cert.rs) data structures and helper internals
-- decide which PKI issuance and validation paths should remain OpenSSL-backed temporarily versus move behind narrower interfaces next
+- decide how far certificate issuance and cert-auth should move away from classical X.509 before a broader PKI redesign
 
 ### OpenSSL exit for runtime networking
 
@@ -170,6 +180,20 @@ What landed:
 
 Remaining work:
 - shrink remaining OpenSSL-heavy type usage in PKI helper signatures and intermediate objects
+
+### PQ key-management surface
+
+State: active and usable
+
+What landed:
+- `crates/bv_crypto` now exposes both `ML-KEM-768` and `ML-DSA-65`
+- [src/utils/key.rs](/Users/felipe/Dev/BastionVault/src/utils/key.rs) now distinguishes PQ KEM and PQ signature key types explicitly
+- [src/modules/pki/path_keys.rs](/Users/felipe/Dev/BastionVault/src/modules/pki/path_keys.rs) now defaults new key-management operations to `ml-kem-768`
+- PKI key generate/import/sign/verify tests now cover both `ml-kem-768` and `ml-dsa-65`
+
+Remaining work:
+- remove or demote remaining legacy symmetric alias handling from PKI key-management APIs once callers are migrated
+- decide whether `ml-dsa-65` should become the default sign/verify key type in higher-level workflows that still assume classical key names
 ## Next
 
 1. Identify the next `Certificate` and `CertBundle` fields that can stop storing OpenSSL types directly.
@@ -179,12 +203,13 @@ Remaining work:
 
 Recently revalidated during the current migration track:
 
+- `cargo test -q -p bv_crypto`
 - `cargo test -q pki --lib -- --test-threads=1`
 - `cargo test -q key_operation --lib`
 - `cargo test -q crypto_key --lib`
 - `cargo test -q pki_generate_root --lib -- --test-threads=1`
 - `cargo test -q pki_generate_key --lib -- --test-threads=1`
-- `cargo test -q pki_import_key --lib -- --test-threads=1`
+- `cargo test -q test_pki_import_pq_keys --lib -- --test-threads=1`
 - `cargo test -q pki_config_role --lib -- --test-threads=1`
 - `cargo test -q pki_issue_cert --lib -- --test-threads=1`
 - `cargo test -q test_barrier_chacha20poly1305 --lib -- --test-threads=1`

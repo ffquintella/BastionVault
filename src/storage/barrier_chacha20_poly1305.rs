@@ -341,10 +341,15 @@ fn map_crypto_error(err: CryptoError) -> RvError {
         | CryptoError::InvalidPublicKey
         | CryptoError::InvalidSecretKey
         | CryptoError::InvalidKemCiphertext
+        | CryptoError::InvalidSignatureSeedLength
+        | CryptoError::InvalidSignaturePublicKey
+        | CryptoError::InvalidSignatureSecretKey
+        | CryptoError::InvalidSignature
         | CryptoError::InvalidEnvelopeVersion
         | CryptoError::UnsupportedAlgorithm => RvError::ErrBarrierKeyInvalid,
-        CryptoError::EncryptFailed => RvError::ErrCryptoCipherInitFailed,
+        CryptoError::EncryptFailed | CryptoError::SignFailed => RvError::ErrCryptoCipherInitFailed,
         CryptoError::DecryptFailed => RvError::ErrBarrierKeyInvalid,
+        CryptoError::VerifyFailed => RvError::ErrBarrierKeyInvalid,
     }
 }
 
