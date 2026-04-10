@@ -156,6 +156,41 @@ pub fn validate_certificate_key_type_and_bits(key_type: &str, key_bits: u64) -> 
     }
 }
 
+/// Build an `X509Name` from individual subject components.  All empty strings are skipped.
+///
+/// This is the single place in the codebase that uses `X509NameBuilder` for PKI subject
+/// construction; both the issuance path and the CA generation path call this helper so the
+/// OpenSSL name-builder is not duplicated across multiple modules.
+pub fn build_x509_subject_name(
+    country: &str,
+    province: &str,
+    locality: &str,
+    organization: &str,
+    ou: &str,
+    common_name: &str,
+) -> X509Name {
+    let mut builder = X509NameBuilder::new().unwrap();
+    if !country.is_empty() {
+        builder.append_entry_by_text("C", country).unwrap();
+    }
+    if !province.is_empty() {
+        builder.append_entry_by_text("ST", province).unwrap();
+    }
+    if !locality.is_empty() {
+        builder.append_entry_by_text("L", locality).unwrap();
+    }
+    if !organization.is_empty() {
+        builder.append_entry_by_text("O", organization).unwrap();
+    }
+    if !ou.is_empty() {
+        builder.append_entry_by_text("OU", ou).unwrap();
+    }
+    if !common_name.is_empty() {
+        builder.append_entry_by_text("CN", common_name).unwrap();
+    }
+    builder.build()
+}
+
 impl CertBundle {
     pub fn new() -> Self {
         CertBundle::default()

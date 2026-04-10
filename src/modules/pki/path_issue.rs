@@ -5,16 +5,15 @@ use std::{
 };
 
 use humantime::parse_duration;
-use openssl::{asn1::Asn1Time, x509::X509NameBuilder};
+use openssl::asn1::Asn1Time;
 use serde_json::{json, Map, Value};
 
-use super::{PkiBackend, PkiBackendInner};
+use super::{util, PkiBackend, PkiBackendInner};
 use crate::{
     context::Context,
     errors::RvError,
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal, utils,
-    utils::cert,
 };
 
 impl PkiBackend {
@@ -67,39 +66,11 @@ requested common name is allowed by the role policy.
 #[maybe_async::maybe_async]
 impl PkiBackendInner {
     pub async fn issue_cert(&self, backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let mut common_names = Vec::new();
-
-        let common_name_value = req.get_data_or_default("common_name")?;
-        let common_name = common_name_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?;
-        if !common_name.is_empty() {
-            common_names.push(common_name.to_string());
-        }
-
-        if let Ok(alt_names_value) = req.get_data("alt_names") {
-            let alt_names = alt_names_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?;
-            if !alt_names.is_empty() {
-                for v in alt_names.split(',') {
-                    common_names.push(v.to_string());
-                }
-            }
-        }
-
         let role = self.get_role(req, req.get_data("role")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?).await?;
         if role.is_none() {
             return Err(RvError::ErrPkiRoleNotFound);
         }
-
         let role_entry = role.unwrap();
-
-        let mut ip_sans = Vec::new();
-        if let Ok(ip_sans_value) = req.get_data("ip_sans") {
-            let ip_sans_str = ip_sans_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?;
-            if !ip_sans_str.is_empty() {
-                for v in ip_sans_str.split(',') {
-                    ip_sans.push(v.to_string());
-                }
-            }
-        }
 
         let ca_bundle = self.fetch_ca_bundle(req).await?;
         let not_before = SystemTime::now() - Duration::from_secs(10);
@@ -125,37 +96,11 @@ impl PkiBackendInner {
             }
         }
 
-        let mut subject_name = X509NameBuilder::new().unwrap();
-        if !role_entry.country.is_empty() {
-            subject_name.append_entry_by_text("C", &role_entry.country).unwrap();
-        }
-        if !role_entry.province.is_empty() {
-            subject_name.append_entry_by_text("ST", &role_entry.province).unwrap();
-        }
-        if !role_entry.locality.is_empty() {
-            subject_name.append_entry_by_text("L", &role_entry.locality).unwrap();
-        }
-        if !role_entry.organization.is_empty() {
-            subject_name.append_entry_by_text("O", &role_entry.organization).unwrap();
-        }
-        if !role_entry.ou.is_empty() {
-            subject_name.append_entry_by_text("OU", &role_entry.ou).unwrap();
-        }
-        if !common_name.is_empty() {
-            subject_name.append_entry_by_text("CN", common_name).unwrap();
-        }
-        let subject = subject_name.build();
-
-        let mut cert = cert::Certificate {
-            not_before,
-            not_after,
-            subject,
-            dns_sans: common_names,
-            ip_sans,
-            key_type: role_entry.key_type.clone(),
-            key_bits: role_entry.key_bits,
-            ..cert::Certificate::default()
-        };
+        // Build the Certificate (subject name + SANs) via the shared utility, then
+        // override not_before/not_after with the CA-TTL-checked values computed above.
+        let mut cert = util::generate_certificate(&role_entry, req)?;
+        cert.not_before = not_before;
+        cert.not_after = not_after;
 
         let cert_bundle = cert.to_cert_bundle(Some(&ca_bundle.certificate), Some(&ca_bundle.private_key))?;
 

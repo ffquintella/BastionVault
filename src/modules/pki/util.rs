@@ -1,13 +1,12 @@
 use std::time::{Duration, SystemTime};
 
 use humantime::{parse_duration, parse_rfc3339};
-use openssl::x509::X509NameBuilder;
 
 use super::path_roles::RoleEntry;
 use crate::{
     errors::RvError,
     logical::Request,
-    utils::cert::{validate_certificate_key_type_and_bits, Certificate},
+    utils::cert::{build_x509_subject_name, validate_certificate_key_type_and_bits, Certificate},
 };
 
 pub const DEFAULT_MAX_TTL: Duration = Duration::from_secs(365 * 24 * 60 * 60_u64);
@@ -104,26 +103,14 @@ pub fn generate_certificate(role_entry: &RoleEntry, req: &mut Request) -> Result
         not_after = not_before + role_entry.max_ttl;
     }
 
-    let mut subject_name = X509NameBuilder::new().unwrap();
-    if !role_entry.country.is_empty() {
-        subject_name.append_entry_by_text("C", &role_entry.country).unwrap();
-    }
-    if !role_entry.province.is_empty() {
-        subject_name.append_entry_by_text("ST", &role_entry.province).unwrap();
-    }
-    if !role_entry.locality.is_empty() {
-        subject_name.append_entry_by_text("L", &role_entry.locality).unwrap();
-    }
-    if !role_entry.organization.is_empty() {
-        subject_name.append_entry_by_text("O", &role_entry.organization).unwrap();
-    }
-    if !role_entry.ou.is_empty() {
-        subject_name.append_entry_by_text("OU", &role_entry.ou).unwrap();
-    }
-    if !common_name.is_empty() {
-        subject_name.append_entry_by_text("CN", common_name).unwrap();
-    }
-    let subject = subject_name.build();
+    let subject = build_x509_subject_name(
+        &role_entry.country,
+        &role_entry.province,
+        &role_entry.locality,
+        &role_entry.organization,
+        &role_entry.ou,
+        common_name,
+    );
 
     let cert = Certificate {
         not_before,

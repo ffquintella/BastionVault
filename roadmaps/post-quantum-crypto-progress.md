@@ -52,16 +52,17 @@ Current focus:
 - [x] Switch `peer_tls_cert` in `src/logical/connection.rs` from `Vec<X509>` to `Vec<CertificateDer<'static>>`
 - [x] Switch `TlsClientInfo.client_cert_chain` in `src/http/mod.rs` to `Vec<CertificateDer<'static>>` and store DER directly from rustls with no conversion
 - [x] Add `der_chain_to_x509` conversion helper in `src/modules/credential/cert/path_login.rs` and convert at the cert-auth module boundary
+- [x] Add `build_x509_subject_name()` helper to `src/utils/cert.rs` as the single point where `X509NameBuilder` is used for PKI subject construction
+- [x] Remove `openssl::x509::X509NameBuilder` import from `src/modules/pki/util.rs`; call `build_x509_subject_name()` from `cert.rs` instead
+- [x] Refactor `path_issue.rs::issue_cert()` to delegate to `util::generate_certificate()` — removed 80 lines of duplicated name-building and SAN parsing; only the CA-TTL comparison (`Asn1Time`) remains unique to `issue_cert`
 
 ### In Progress
 
 - [ ] Continue shrinking OpenSSL-only helper code in `src/utils/cert.rs`
-- [ ] Continue reducing OpenSSL-centric certificate construction assumptions in PKI issuance path
 
 ### Next
 
 - [ ] Shrink [src/utils/cert.rs](src/utils/cert.rs) — replace `CertBundle.private_key: PKey<Private>` with a format-agnostic key type or DER bytes to reduce the OpenSSL `PKey` surface
-- [ ] Replace `X509NameBuilder` usage in PKI issuance ([path_issue.rs](src/modules/pki/path_issue.rs), [util.rs](src/modules/pki/util.rs)) with an OpenSSL-free alternative
 - [ ] Run a broader repository validation pass after PKI type migration lands
 
 ## Completed
@@ -135,8 +136,13 @@ Current focus:
 
 State: ongoing
 
+What landed:
+- added `build_x509_subject_name()` to [src/utils/cert.rs](src/utils/cert.rs) as the single place where `X509NameBuilder` is called
+- removed `X509NameBuilder` import from [src/modules/pki/util.rs](src/modules/pki/util.rs); now calls `build_x509_subject_name()` from `cert.rs`
+- refactored [src/modules/pki/path_issue.rs](src/modules/pki/path_issue.rs) `issue_cert()` to delegate to `util::generate_certificate()` — eliminated 80 lines of duplicated name-building and SAN parsing; CA-TTL comparison (`Asn1Time`) is the only OpenSSL-specific logic remaining in that function
+
 Remaining work:
-- reduce remaining OpenSSL-centric certificate construction assumptions (especially `CertBundle`, `X509NameBuilder` in issuance path, and `PKey<Private>` types)
+- shrink `CertBundle.private_key: PKey<Private>` in [src/utils/cert.rs](src/utils/cert.rs) to reduce the `openssl` `PKey` surface
 
 ### OpenSSL exit for runtime networking
 
@@ -149,13 +155,10 @@ What landed:
 
 Remaining work:
 - shrink [src/utils/cert.rs](src/utils/cert.rs): `CertBundle.private_key: PKey<Private>` still forces an OpenSSL key type as the main key container in the PKI code
-- replace `X509NameBuilder` in [src/modules/pki/path_issue.rs](src/modules/pki/path_issue.rs) and [src/modules/pki/util.rs](src/modules/pki/util.rs) with an OpenSSL-free name builder
-
 ## Next
 
 1. Shrink [src/utils/cert.rs](src/utils/cert.rs) — replace `CertBundle.private_key: PKey<Private>` and reduce `openssl_sys` FFI surface.
-2. Replace `X509NameBuilder` in [src/modules/pki/path_issue.rs](src/modules/pki/path_issue.rs) and [src/modules/pki/util.rs](src/modules/pki/util.rs) with an OpenSSL-free X.509 name builder.
-3. Run a broader repository validation pass after the PKI type migration lands.
+2. Run a broader repository validation pass after the PKI type migration lands.
 
 ## Verification Snapshot
 
