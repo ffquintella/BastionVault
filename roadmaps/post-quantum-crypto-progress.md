@@ -49,6 +49,9 @@ Current focus:
 - [x] Audit PKI CA import and certificate response paths — no stale SM2/SM4 algorithm claims found in active code
 - [x] Update `docs/docs/req.md` to reflect current algorithm support (remove SM2/SM4, add PQ targets)
 - [x] Update zh-CN `design.md` to remove Tongsuo/rust-tongsuo description from Crypto Manager
+- [x] Switch `peer_tls_cert` in `src/logical/connection.rs` from `Vec<X509>` to `Vec<CertificateDer<'static>>`
+- [x] Switch `TlsClientInfo.client_cert_chain` in `src/http/mod.rs` to `Vec<CertificateDer<'static>>` and store DER directly from rustls with no conversion
+- [x] Add `der_chain_to_x509` conversion helper in `src/modules/credential/cert/path_login.rs` and convert at the cert-auth module boundary
 
 ### In Progress
 
@@ -58,12 +61,8 @@ Current focus:
 ### Next
 
 - [ ] Shrink [src/utils/cert.rs](src/utils/cert.rs) — replace `CertBundle.private_key: PKey<Private>` with a format-agnostic key type or DER bytes to reduce the OpenSSL `PKey` surface
-- [ ] Replace `X509NameBuilder` usage in PKI issuance ([path_issue.rs](src/modules/pki/path_issue.rs), [util.rs](src/modules/pki/util.rs)) with an OpenSSL-free alternative (e.g. `x509-cert` crate)
-- [ ] Move [path_login.rs](src/modules/credential/cert/path_login.rs) off `openssl::x509::X509` for peer cert parsing — switch `peer_tls_cert` in [logical/connection.rs](src/logical/connection.rs) to `Vec<CertificateDer<'static>>` and parse with a pure-Rust X.509 library
-- [ ] Run a broader repository validation pass after certificate type migration lands
-- [ ] Migrate `src/http/mod.rs` away from OpenSSL peer-cert handling
-- [ ] Continue shrinking OpenSSL-only helper code in `src/utils/cert.rs`
-- [ ] Run a broader repository validation pass after the TLS slice lands
+- [ ] Replace `X509NameBuilder` usage in PKI issuance ([path_issue.rs](src/modules/pki/path_issue.rs), [util.rs](src/modules/pki/util.rs)) with an OpenSSL-free alternative
+- [ ] Run a broader repository validation pass after PKI type migration lands
 
 ## Completed
 
@@ -112,7 +111,7 @@ Current focus:
 - fixed the shared temp-directory race in [src/test_utils.rs](src/test_utils.rs)
 - kept targeted storage, helper, and PKI tests green through each migration slice
 
-### Runtime networking — OpenSSL exit
+### Runtime networking — OpenSSL fully removed from the TLS stack
 
 - removed dead OpenSSL `TlsStream` handler from [src/http/mod.rs](src/http/mod.rs); server was already on `bind_rustls_0_23`
 - removed `client_verify_result: X509VerifyResult` from `TlsClientInfo` (was only set by the removed OpenSSL path)
@@ -120,6 +119,9 @@ Current focus:
 - replaced `openssl::ssl::SslVersion` in [src/cli/config.rs](src/cli/config.rs) with a local `TlsVersion` enum
 - removed the last `SslVersion` import from [src/cli/command/server.rs](src/cli/command/server.rs)
 - fixed stale `HandshakeSignatureValid` import path in [src/utils/rustls.rs](src/utils/rustls.rs)
+- switched `peer_tls_cert` in [src/logical/connection.rs](src/logical/connection.rs) from `Vec<X509>` to `Vec<CertificateDer<'static>>`
+- switched `TlsClientInfo.client_cert_chain` in [src/http/mod.rs](src/http/mod.rs) to `Vec<CertificateDer<'static>>` — rustls DER bytes now stored directly with no OpenSSL conversion
+- added `der_chain_to_x509` in [src/modules/credential/cert/path_login.rs](src/modules/credential/cert/path_login.rs) to convert `CertificateDer` → `X509` at the cert-auth module boundary only
 
 ### Documentation cleanup
 
@@ -135,27 +137,25 @@ State: ongoing
 
 Remaining work:
 - reduce remaining OpenSSL-centric certificate construction assumptions (especially `CertBundle`, `X509NameBuilder` in issuance path, and `PKey<Private>` types)
-- migrate `peer_tls_cert` in `logical/connection.rs` from `Vec<X509>` to `Vec<CertificateDer<'static>>` to complete the HTTP layer OpenSSL exit
 
 ### OpenSSL exit for runtime networking
 
 State: substantially complete
 
-What landed in this slice:
-- removed the dead OpenSSL `TlsStream` connection handler branch from [src/http/mod.rs](src/http/mod.rs) — the server already used `bind_rustls_0_23` exclusively
-- dropped `client_verify_result: X509VerifyResult` from `TlsClientInfo` since it was only ever populated by the removed OpenSSL path
-- dropped `"openssl"` feature from `actix-web` in [Cargo.toml](Cargo.toml) so actix no longer pulls in the OpenSSL TLS stack
-- replaced `openssl::ssl::SslVersion` in [src/cli/config.rs](src/cli/config.rs) with a local `TlsVersion` enum; removed the same remaining `SslVersion` import from [src/cli/command/server.rs](src/cli/command/server.rs)
+What landed:
+- server never starts an OpenSSL TLS acceptor — `bind_rustls_0_23` is the only TLS path
+- `TlsClientInfo.client_cert_chain` and `Connection.peer_tls_cert` now travel as `Vec<CertificateDer<'static>>`; no OpenSSL type touches the transport or routing layer
+- the DER→X509 conversion is isolated to the cert-auth credential module (`path_login.rs`) where OpenSSL validation logic lives
 
 Remaining work:
-- the `TlsClientInfo.client_cert_chain: Option<Vec<X509>>` field still converts rustls DER bytes back to OpenSSL `X509` objects to feed the cert auth backend — this needs to switch to `CertificateDer`
+- shrink [src/utils/cert.rs](src/utils/cert.rs): `CertBundle.private_key: PKey<Private>` still forces an OpenSSL key type as the main key container in the PKI code
+- replace `X509NameBuilder` in [src/modules/pki/path_issue.rs](src/modules/pki/path_issue.rs) and [src/modules/pki/util.rs](src/modules/pki/util.rs) with an OpenSSL-free name builder
 
 ## Next
 
 1. Shrink [src/utils/cert.rs](src/utils/cert.rs) — replace `CertBundle.private_key: PKey<Private>` and reduce `openssl_sys` FFI surface.
 2. Replace `X509NameBuilder` in [src/modules/pki/path_issue.rs](src/modules/pki/path_issue.rs) and [src/modules/pki/util.rs](src/modules/pki/util.rs) with an OpenSSL-free X.509 name builder.
-3. Switch `peer_tls_cert` in [src/logical/connection.rs](src/logical/connection.rs) to `Vec<CertificateDer<'static>>` and update [src/modules/credential/cert/path_login.rs](src/modules/credential/cert/path_login.rs) accordingly.
-4. Run a broader repository validation pass after the certificate type migration lands.
+3. Run a broader repository validation pass after the PKI type migration lands.
 
 ## Verification Snapshot
 

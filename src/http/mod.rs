@@ -12,7 +12,6 @@ use actix_web::{
     rt::net::TcpStream,
     web, HttpRequest, HttpResponse, ResponseError,
 };
-use openssl::x509::X509;
 use rustls::pki_types::CertificateDer;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -29,7 +28,7 @@ pub const VAULT_AUTH_HEADER_NAME: &str = "X-Vault-Token";
 
 #[derive(Debug, Clone)]
 pub struct TlsClientInfo {
-    pub client_cert_chain: Option<Vec<X509>>,
+    pub client_cert_chain: Option<Vec<CertificateDer<'static>>>,
 }
 
 impl TlsClientInfo {
@@ -65,7 +64,7 @@ pub fn request_on_connect_handler(conn: &dyn Any, ext: &mut Extensions) {
             return;
         }
 
-        let cert_chain = session.peer_certificates().map(rustls_peer_cert_chain_to_x509);
+        let cert_chain = session.peer_certificates().map(|certs| certs.to_vec());
 
         ext.insert(Connection {
             bind: socket.local_addr().unwrap(),
@@ -88,10 +87,6 @@ pub fn request_on_connect_handler(conn: &dyn Any, ext: &mut Extensions) {
     } else {
         unreachable!("socket should be TLS or plaintext");
     }
-}
-
-fn rustls_peer_cert_chain_to_x509(certs: &[CertificateDer<'static>]) -> Vec<X509> {
-    certs.iter().filter_map(|cert| X509::from_der(cert.as_ref()).ok()).collect()
 }
 
 pub fn init_service(cfg: &mut web::ServiceConfig) {

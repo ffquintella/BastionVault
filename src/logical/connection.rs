@@ -1,7 +1,7 @@
-use openssl::x509::X509;
+use rustls::pki_types::CertificateDer;
 
 #[derive(Default, Clone)]
 pub struct Connection {
     pub peer_addr: String,
-    pub peer_tls_cert: Option<Vec<X509>>,
+    pub peer_tls_cert: Option<Vec<CertificateDer<'static>>>,
 }

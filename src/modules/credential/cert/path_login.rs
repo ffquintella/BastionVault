@@ -18,6 +18,7 @@ use openssl_sys::{
     X509_get_ext, X509_get_ext_count, X509_V_ERR_CERT_HAS_EXPIRED, X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT,
     X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY, XKU_ANYEKU, XKU_SSL_CLIENT,
 };
+use rustls::pki_types::CertificateDer;
 use serde::{Deserialize, Serialize};
 
 use super::{CertBackend, CertBackendInner, CertEntry};
@@ -81,12 +82,13 @@ impl CertBackendInner {
 
         let conn = req.connection.as_ref().ok_or(RvError::ErrRequestNotReady)?;
 
-        let client_cert = conn
+        let peer_der = conn
             .peer_tls_cert
-            .as_ref()
-            .filter(|cert| !cert.is_empty())
-            .and_then(|cert| cert.first())
-            .ok_or(rv_error_response!("no client certificate found"))?;
+            .as_deref()
+            .filter(|c| !c.is_empty())
+            .ok_or_else(|| rv_error_response!("no client certificate found"))?;
+        let peer_x509 = der_chain_to_x509(peer_der)?;
+        let client_cert = &peer_x509[0];
 
         let common_name = client_cert
             .subject_name()
@@ -163,12 +165,13 @@ impl CertBackendInner {
 
             let conn = req.connection.as_ref().ok_or(RvError::ErrRequestNotReady)?;
 
-            let client_cert = conn
+            let peer_der = conn
                 .peer_tls_cert
-                .as_ref()
-                .filter(|cert| !cert.is_empty())
-                .and_then(|cert| cert.first())
-                .ok_or(rv_error_response!("no client certificate found"))?;
+                .as_deref()
+                .filter(|c| !c.is_empty())
+                .ok_or_else(|| rv_error_response!("no client certificate found"))?;
+            let peer_x509 = der_chain_to_x509(peer_der)?;
+            let client_cert = &peer_x509[0];
 
             let cert_subject_key_id = client_cert.subject_key_id().map(|asn1_ref| asn1_ref.as_slice()).unwrap_or(b"");
             let cert_authority_key_id =
@@ -208,13 +211,13 @@ impl CertBackendInner {
     }
 
     async fn verify_credentials(&self, req: &Request) -> Result<ParsedCert, RvError> {
-        let peer_tls_cert = req
+        let peer_der = req
             .connection
             .as_ref()
-            .and_then(|conn| conn.peer_tls_cert.as_ref())
-            .filter(|cert| !cert.is_empty())
+            .and_then(|conn| conn.peer_tls_cert.as_deref())
+            .filter(|c| !c.is_empty())
             .ok_or_else(|| rv_error_response!("client certificate must be supplied"))?;
-
+        let peer_tls_cert = der_chain_to_x509(peer_der)?;
         let client_cert = &peer_tls_cert[0];
 
         let cert_name = req
@@ -226,7 +229,7 @@ impl CertBackendInner {
 
         let (roots, trusted, trusted_non_ca, ocsp_config) = self.load_trusted_certs(req, &cert_name).await?;
 
-        let trusted_chains = self.validate_cert(&roots, peer_tls_cert)?;
+        let trusted_chains = self.validate_cert(&roots, &peer_tls_cert)?;
 
         let mut ret_err = Vec::new();
 
@@ -710,4 +713,11 @@ impl CertBackendInner {
 
         false
     }
+}
+
+/// Convert a slice of DER-encoded client certificates (as supplied by rustls) into the OpenSSL
+/// `X509` type that the cert-auth verification logic requires.  The conversion happens only at
+/// the credential-module boundary so the rest of the connection path stays OpenSSL-free.
+fn der_chain_to_x509(certs: &[CertificateDer<'static>]) -> Result<Vec<X509>, RvError> {
+    certs.iter().map(|der| X509::from_der(der.as_ref()).map_err(RvError::from)).collect()
 }
