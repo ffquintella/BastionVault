@@ -1,20 +1,15 @@
-use better_default::Default;
-use openssl::x509::X509;
-
-#[repr(u32)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Default)]
 pub enum FailureMode {
-    OcspFailOpenNotSet = 0,
-    FailOpenTrue = 1,
-    FailOpenFalse = 2,
+    #[default]
+    FailOpenFalse,
+    FailOpenTrue,
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug, Clone, Default)]
 pub struct OcspConfig {
     pub enable: bool,
-    pub extra_ca: Vec<X509>,
+    pub extra_ca_pem: Vec<Vec<u8>>,
     pub servers_override: Vec<String>,
-    #[default(FailureMode::OcspFailOpenNotSet)]
     pub failure_mode: FailureMode,
     pub query_all_servers: bool,
 }

@@ -22,7 +22,7 @@
 //! then you may prefer the BastionVault's [RESTful API documentation].
 //!
 //! [Hashicorp Vault]: https://www.hashicorp.com/products/vault
-//! [RESTful API documentation]: https://www.tongsuo.net
+//! [RESTful API documentation]: https://github.com/ffquintella/BastionVault
 
 use std::sync::Arc;
 
@@ -37,8 +37,7 @@ use crate::{
     logical::{Request, Response},
     modules::{
         auth::AuthModule,
-        credential::{approle::AppRoleModule, cert::CertModule, userpass::UserPassModule},
-        pki::PkiModule,
+        credential::{approle::AppRoleModule, userpass::UserPassModule},
         policy::PolicyModule,
     },
     mount::MountsMonitor,
@@ -118,10 +117,6 @@ impl BastionVault {
         let policy_module = PolicyModule::new(core.clone());
         core.module_manager.add_module(Arc::new(policy_module))?;
 
-        // add pki_module
-        let pki_module = PkiModule::new(core.clone());
-        core.module_manager.add_module(Arc::new(pki_module))?;
-
         // add credential module: userpass
         let userpass_module = UserPassModule::new(core.clone());
         core.module_manager.add_module(Arc::new(userpass_module))?;
@@ -129,10 +124,6 @@ impl BastionVault {
         // add credential module: approle
         let approle_module = AppRoleModule::new(core.clone());
         core.module_manager.add_module(Arc::new(approle_module))?;
-
-        // add credential module: cert
-        let cert_module = CertModule::new(core.clone());
-        core.module_manager.add_module(Arc::new(cert_module))?;
 
         let handlers = core.handlers.load().clone();
         for handler in handlers.iter() {

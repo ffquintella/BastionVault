@@ -56,17 +56,6 @@ pub enum CryptoError {
         source: serde_json::Error,
     },
 
-    /// An error that occurred during OpenSSL cryptographic operations.
-    ///
-    /// This error is automatically converted from `openssl::error::ErrorStack`
-    /// and typically occurs during encryption, decryption, or key generation
-    /// operations when the underlying OpenSSL library encounters an error.
-    #[error("Some openssl error happened, {:?}", .source)]
-    OpenSSL {
-        #[from]
-        source: openssl::error::ErrorStack,
-    },
-
     /// An error that occurred in the BastionVault core system.
     ///
     /// This error is automatically converted from `crate::errors::RvError`
@@ -248,7 +237,7 @@ where
     ///
     /// # Errors
     /// - Returns `CryptoError::Custom` if the ciphertext is invalid
-    /// - Returns `CryptoError::OpenSSL` if decryption fails
+    /// - Returns a decryption error if the PQ envelope cannot be opened
     /// - Returns `CryptoError::SerdeJson` if deserialization fails
     ///
     /// # Security

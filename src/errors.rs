@@ -200,11 +200,6 @@ pub enum RvError {
         #[from]
         source: serde_yaml::Error,
     },
-    #[error("Some openssl error happened, {:?}", .source)]
-    OpenSSL {
-        #[from]
-        source: openssl::error::ErrorStack,
-    },
     #[error("Some pem error happened, {:?}", .source)]
     Pem {
         #[from]

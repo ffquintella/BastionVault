@@ -140,8 +140,6 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - run: echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
-    - name: install openssl
-      run: vcpkg install openssl:x64-windows-static-md
     - name: Setup Rust
       uses: actions-rs/toolchain@v1
       with:
@@ -163,8 +161,6 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - run: echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
-    - name: install openssl
-      run: vcpkg install openssl:x64-windows-static-md
     - name: Download MySQL Connector/C
       run: |
         Invoke-WebRequest -Uri "https://cdn.mysql.com/Downloads/Connector-C/mysql-connector-c-6.1.11-winx64.msi" -OutFile "mysql-connector.msi"
@@ -209,8 +205,6 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - run: echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
-    - name: install openssl
-      run: vcpkg install openssl:x64-windows-static-md
     - name: Download MySQL Connector/C
       run: |
         Invoke-WebRequest -Uri "https://cdn.mysql.com/Downloads/Connector-C/mysql-connector-c-6.1.11-winx64.msi" -OutFile "mysql-connector.msi"

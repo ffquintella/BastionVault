@@ -97,10 +97,6 @@ hmac = "0.12"
 sha1 = "0.10"
 sha2 = "0.10"
 
-# optional dependencies
-openssl = { version = "*", optional = true }
-openssl-sys = { version = "*", optional = true }
-
 [build-dependencies]
 toml = "0.8.19"
 
@@ -108,10 +104,9 @@ toml = "0.8.19"
 serial_test = "3.2"
 
 [features]
-default = ["crypto_adaptor_openssl"]
+default = []
 storage_sqlx = ["sqlx"]
 storage_mysql = ["diesel", "r2d2", "r2d2-diesel"]
-crypto_adaptor_openssl = ["dep:openssl", "dep:openssl-sys"]
 sync_handler = ["maybe-async/is_sync"]
 
 [target.'cfg(unix)'.dependencies]
