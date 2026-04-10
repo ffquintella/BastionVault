@@ -57,6 +57,7 @@ Current focus:
 - [x] Refactor `path_issue.rs::issue_cert()` to delegate to `util::generate_certificate()` — removed 80 lines of duplicated name-building and SAN parsing; only the CA-TTL comparison (`Asn1Time`) remains unique to `issue_cert`
 - [x] Replace `CertBundle.private_key: PKey<Private>` with `Vec<u8>` (PKCS8 PEM bytes) — `CertBundle` no longer holds an OpenSSL type as a stored field; add `private_key_as_pkey()` helper for on-demand conversion; update all callers (`path_config_ca.rs`, `path_issue.rs`, `path_root.rs`)
 - [x] Change `Certificate::to_cert_bundle()` to accept CA key PEM bytes (`Option<&[u8]>`) instead of `Option<&PKey<Private>>`; `path_issue.rs` now passes bytes directly with no OpenSSL key conversion in the caller
+- [x] Change `Certificate::to_x509()` to accept PEM bytes (`ca_key_pem`, `private_key_pem`) instead of `PKey` references in its public signature
 
 ### In Progress
 
@@ -143,6 +144,7 @@ What landed:
 - removed `X509NameBuilder` import from [src/modules/pki/util.rs](src/modules/pki/util.rs); now calls `build_x509_subject_name()` from `cert.rs`
 - refactored [src/modules/pki/path_issue.rs](src/modules/pki/path_issue.rs) `issue_cert()` to delegate to `util::generate_certificate()` — eliminated 80 lines of duplicated name-building and SAN parsing; CA-TTL comparison (`Asn1Time`) is the only OpenSSL-specific logic remaining in that function
 - changed [src/utils/cert.rs](src/utils/cert.rs) `Certificate::to_cert_bundle()` to accept CA key PEM bytes (`Option<&[u8]>`) and parse internally; this removed OpenSSL `PKey` handling from the [src/modules/pki/path_issue.rs](src/modules/pki/path_issue.rs) call site
+- changed [src/utils/cert.rs](src/utils/cert.rs) `Certificate::to_x509()` public signature to accept PEM bytes (`ca_key_pem`, `private_key_pem`) and perform on-demand parsing internally
 
 Remaining work:
 - shrink remaining OpenSSL type surface in the PKI module function signatures and helper types
@@ -160,13 +162,14 @@ Remaining work:
 - shrink remaining OpenSSL-heavy type usage in PKI helper signatures and intermediate objects
 ## Next
 
-1. Run a broader repository validation pass across PKI, credential, and helper modules.
-2. Identify and reduce remaining `openssl` types in PKI function signatures and intermediate data structures.
+1. Identify and reduce remaining `openssl` types in PKI function signatures and intermediate data structures.
+2. Run an even broader repository validation pass (beyond current PKI/helper sweep) before closing this track.
 
 ## Verification Snapshot
 
 Recently revalidated during the current migration track:
 
+- `cargo test -q pki --lib -- --test-threads=1`
 - `cargo test -q key_operation --lib`
 - `cargo test -q crypto_key --lib`
 - `cargo test -q pki_generate_root --lib -- --test-threads=1`

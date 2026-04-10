@@ -270,9 +270,16 @@ impl Certificate {
     pub fn to_x509(
         &mut self,
         ca_cert: Option<&X509Ref>,
-        ca_key: Option<&PKey<Private>>,
-        private_key: &PKey<Private>,
+        ca_key_pem: Option<&[u8]>,
+        private_key_pem: &[u8],
     ) -> Result<X509, RvError> {
+        let private_key = PKey::private_key_from_pem(private_key_pem)?;
+        let ca_key = if let Some(pem) = ca_key_pem {
+            Some(PKey::private_key_from_pem(pem)?)
+        } else {
+            None
+        };
+
         let mut builder = X509::builder()?;
         builder.set_version(self.version)?;
         let serial_number = self.serial_number.to_asn1_integer()?;
@@ -283,7 +290,7 @@ impl Certificate {
         } else {
             builder.set_issuer_name(&self.subject)?;
         }
-        builder.set_pubkey(private_key)?;
+        builder.set_pubkey(&private_key)?;
 
         let not_before_dur = self.not_before.duration_since(UNIX_EPOCH)?;
         let not_before = Asn1Time::from_unix(not_before_dur.as_secs() as i64)?;
@@ -344,7 +351,7 @@ impl Certificate {
         if ca_key.is_some() {
             builder.sign(ca_key.as_ref().unwrap(), digest)?;
         } else {
-            builder.sign(private_key, digest)?;
+            builder.sign(&private_key, digest)?;
         }
 
         Ok(builder.build())
@@ -379,13 +386,8 @@ impl Certificate {
             _ => return Err(RvError::ErrPkiKeyTypeInvalid),
         };
 
-        let ca_key = if let Some(pem) = ca_key_pem {
-            Some(PKey::private_key_from_pem(pem)?)
-        } else {
-            None
-        };
-
-        let cert = self.to_x509(ca_cert, ca_key.as_ref(), &priv_key)?;
+        let priv_key_pem = priv_key.private_key_to_pem_pkcs8()?;
+        let cert = self.to_x509(ca_cert, ca_key_pem, priv_key_pem.as_slice())?;
         let serial_number = cert.serial_number().to_bn()?;
         let serial_number_hex = serial_number.to_hex_str()?;
         let serial_number_hex = serial_number_hex
@@ -534,12 +536,12 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
 -----END PRIVATE KEY-----
         "#;
         let ca_cert = X509::from_pem(ca_cert_pem.as_bytes()).unwrap();
-        let ca_key = PKey::private_key_from_pem(ca_key_pem.as_bytes()).unwrap();
 
         let rsa_key = Rsa::generate(2048).unwrap();
         let pkey = PKey::from_rsa(rsa_key).unwrap();
+        let pkey_pem = pkey.private_key_to_pem_pkcs8().unwrap();
 
-        let x509 = cert.to_x509(Some(&ca_cert), Some(&ca_key), &pkey);
+        let x509 = cert.to_x509(Some(&ca_cert), Some(ca_key_pem.as_bytes()), pkey_pem.as_slice());
         assert!(x509.is_ok());
         let x509_pem = x509.unwrap().to_pem().unwrap();
         println!("x509_pem: \n{}", String::from_utf8_lossy(&x509_pem));
@@ -572,8 +574,9 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
 
         let rsa_key = Rsa::generate(2048).unwrap();
         let pkey = PKey::from_rsa(rsa_key).unwrap();
+        let pkey_pem = pkey.private_key_to_pem_pkcs8().unwrap();
 
-        let x509 = cert.to_x509(None, None, &pkey);
+        let x509 = cert.to_x509(None, None, pkey_pem.as_slice());
         assert!(x509.is_ok());
         let x509_pem = x509.unwrap().to_pem().unwrap();
         println!("x509_pem: \n{}", String::from_utf8_lossy(&x509_pem));
