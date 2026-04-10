@@ -37,7 +37,10 @@ use crate::errors::RvError;
 
 lazy_static! {
     static ref X509_DEFAULT: X509 = X509Builder::new().unwrap().build();
-    static ref PKEY_DEFAULT: PKey<Private> = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
+    static ref PKEY_PEM_DEFAULT: Vec<u8> = PKey::from_rsa(Rsa::generate(2048).unwrap())
+        .unwrap()
+        .private_key_to_pem_pkcs8()
+        .unwrap();
 }
 
 extern "C" {
@@ -52,9 +55,9 @@ pub struct CertBundle {
     pub certificate: X509,
     #[serde(serialize_with = "serialize_vec_x509", deserialize_with = "deserialize_vec_x509")]
     pub ca_chain: Vec<X509>,
-    #[serde(serialize_with = "serialize_pkey", deserialize_with = "deserialize_pkey")]
-    #[default(PKEY_DEFAULT.clone())]
-    pub private_key: PKey<Private>,
+    #[serde(with = "serde_bytes")]
+    #[default(PKEY_PEM_DEFAULT.clone())]
+    pub private_key: Vec<u8>,
     #[serde(default)]
     pub private_key_type: String,
     #[serde(default)]
@@ -100,20 +103,6 @@ where
     Ok(x509_vec)
 }
 
-fn serialize_pkey<S>(key: &PKey<openssl::pkey::Private>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serializer.serialize_bytes(&key.private_key_to_pem_pkcs8().unwrap())
-}
-
-fn deserialize_pkey<'de, D>(deserializer: D) -> Result<PKey<openssl::pkey::Private>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let pem_bytes: &[u8] = &ByteBuf::deserialize(deserializer)?;
-    PKey::private_key_from_pem(pem_bytes).map_err(serde::de::Error::custom)
-}
 
 pub fn is_ca_cert(cert: &X509) -> bool {
     unsafe { X509_check_ca(cert.as_ptr()) != 0 }
@@ -196,9 +185,14 @@ impl CertBundle {
         CertBundle::default()
     }
 
+    pub fn private_key_as_pkey(&self) -> Result<PKey<Private>, RvError> {
+        Ok(PKey::private_key_from_pem(&self.private_key)?)
+    }
+
     pub fn verify(&self) -> Result<(), RvError> {
         let cert_pubkey = self.certificate.public_key()?;
-        if !self.private_key.public_eq(&cert_pubkey) {
+        let pkey = self.private_key_as_pkey()?;
+        if !pkey.public_eq(&cert_pubkey) {
             return Err(RvError::ErrPkiCertKeyMismatch);
         }
 
@@ -399,7 +393,7 @@ impl Certificate {
         let mut cert_bundle = CertBundle {
             certificate: cert,
             ca_chain: Vec::new(),
-            private_key: priv_key.clone(),
+            private_key: priv_key.private_key_to_pem_pkcs8()?,
             private_key_type: self.key_type.clone(),
             serial_number: serial_number_hex.to_lowercase(),
         };
@@ -546,7 +540,7 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
         let cert_bundle = cert.to_cert_bundle(Some(&ca_cert), Some(&ca_key));
         assert!(cert_bundle.is_ok());
         let cert_bundle = cert_bundle.unwrap();
-        assert!(cert_bundle.private_key.public_eq(&cert_bundle.certificate.public_key().unwrap()));
+        assert!(cert_bundle.private_key_as_pkey().unwrap().public_eq(&cert_bundle.certificate.public_key().unwrap()));
     }
 
     #[test]
@@ -581,7 +575,7 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
         let cert_bundle = cert.to_cert_bundle(None, None);
         assert!(cert_bundle.is_ok());
         let cert_bundle = cert_bundle.unwrap();
-        assert!(cert_bundle.private_key.public_eq(&cert_bundle.certificate.public_key().unwrap()));
+        assert!(cert_bundle.private_key_as_pkey().unwrap().public_eq(&cert_bundle.certificate.public_key().unwrap()));
         println!("create ca result:\n{:?}", cert_bundle);
     }
 }

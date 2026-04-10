@@ -102,7 +102,8 @@ impl PkiBackendInner {
         cert.not_before = not_before;
         cert.not_after = not_after;
 
-        let cert_bundle = cert.to_cert_bundle(Some(&ca_bundle.certificate), Some(&ca_bundle.private_key))?;
+        let ca_pkey = ca_bundle.private_key_as_pkey()?;
+        let cert_bundle = cert.to_cert_bundle(Some(&ca_bundle.certificate), Some(&ca_pkey))?;
 
         if !role_entry.no_store {
             let serial_number_hex = cert_bundle.serial_number.replace(':', "-").to_lowercase();
@@ -123,7 +124,7 @@ impl PkiBackendInner {
             "issuing_ca": String::from_utf8_lossy(&ca_bundle.certificate.to_pem()?),
             "ca_chain": ca_chain_pem,
             "certificate": String::from_utf8_lossy(&cert_bundle.certificate.to_pem()?),
-            "private_key": String::from_utf8_lossy(&cert_bundle.private_key.private_key_to_pem_pkcs8()?),
+            "private_key": String::from_utf8_lossy(&cert_bundle.private_key),
             "private_key_type": cert_bundle.private_key_type.clone(),
             "serial_number": cert_bundle.serial_number.clone(),
         })

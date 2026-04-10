@@ -90,7 +90,7 @@ impl PkiBackendInner {
                         cert_bundle.private_key_type = "other".to_string();
                     }
                 }
-                cert_bundle.private_key = key;
+                cert_bundle.private_key = key.private_key_to_pem_pkcs8()?;
                 key_found = true;
             }
         }

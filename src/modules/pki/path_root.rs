@@ -78,7 +78,7 @@ impl PkiBackendInner {
             resp_data.insert(
                 "private_key".to_string(),
                 Value::String(
-                    String::from_utf8_lossy(&cert_bundle.private_key.private_key_to_pem_pkcs8()?).to_string(),
+                    String::from_utf8_lossy(&cert_bundle.private_key).to_string(),
                 ),
             );
             resp_data.insert("private_key_type".to_string(), Value::String(cert_bundle.private_key_type.clone()));

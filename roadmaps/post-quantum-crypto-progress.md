@@ -55,15 +55,16 @@ Current focus:
 - [x] Add `build_x509_subject_name()` helper to `src/utils/cert.rs` as the single point where `X509NameBuilder` is used for PKI subject construction
 - [x] Remove `openssl::x509::X509NameBuilder` import from `src/modules/pki/util.rs`; call `build_x509_subject_name()` from `cert.rs` instead
 - [x] Refactor `path_issue.rs::issue_cert()` to delegate to `util::generate_certificate()` — removed 80 lines of duplicated name-building and SAN parsing; only the CA-TTL comparison (`Asn1Time`) remains unique to `issue_cert`
+- [x] Replace `CertBundle.private_key: PKey<Private>` with `Vec<u8>` (PKCS8 PEM bytes) — `CertBundle` no longer holds an OpenSSL type as a stored field; add `private_key_as_pkey()` helper for on-demand conversion; update all callers (`path_config_ca.rs`, `path_issue.rs`, `path_root.rs`)
 
 ### In Progress
 
-- [ ] Continue shrinking OpenSSL-only helper code in `src/utils/cert.rs`
+- [ ] Continue reducing OpenSSL surface in `src/utils/cert.rs` and PKI modules
 
 ### Next
 
-- [ ] Shrink [src/utils/cert.rs](src/utils/cert.rs) — replace `CertBundle.private_key: PKey<Private>` with a format-agnostic key type or DER bytes to reduce the OpenSSL `PKey` surface
 - [ ] Run a broader repository validation pass after PKI type migration lands
+- [ ] Identify remaining `openssl` types in PKI structs and function signatures
 
 ## Completed
 
@@ -142,7 +143,7 @@ What landed:
 - refactored [src/modules/pki/path_issue.rs](src/modules/pki/path_issue.rs) `issue_cert()` to delegate to `util::generate_certificate()` — eliminated 80 lines of duplicated name-building and SAN parsing; CA-TTL comparison (`Asn1Time`) is the only OpenSSL-specific logic remaining in that function
 
 Remaining work:
-- shrink `CertBundle.private_key: PKey<Private>` in [src/utils/cert.rs](src/utils/cert.rs) to reduce the `openssl` `PKey` surface
+- shrink remaining OpenSSL type surface in the PKI module function signatures and helper types
 
 ### OpenSSL exit for runtime networking
 
@@ -157,8 +158,8 @@ Remaining work:
 - shrink [src/utils/cert.rs](src/utils/cert.rs): `CertBundle.private_key: PKey<Private>` still forces an OpenSSL key type as the main key container in the PKI code
 ## Next
 
-1. Shrink [src/utils/cert.rs](src/utils/cert.rs) — replace `CertBundle.private_key: PKey<Private>` and reduce `openssl_sys` FFI surface.
-2. Run a broader repository validation pass after the PKI type migration lands.
+1. Run a broader repository validation pass across PKI, credential, and helper modules.
+2. Identify and reduce remaining `openssl` types in PKI function signatures and intermediate data structures.
 
 ## Verification Snapshot
 
