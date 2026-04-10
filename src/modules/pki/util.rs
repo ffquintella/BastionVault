@@ -4,7 +4,11 @@ use humantime::{parse_duration, parse_rfc3339};
 use openssl::x509::X509NameBuilder;
 
 use super::path_roles::RoleEntry;
-use crate::{errors::RvError, logical::Request, utils::cert::Certificate};
+use crate::{
+    errors::RvError,
+    logical::Request,
+    utils::cert::{validate_certificate_key_type_and_bits, Certificate},
+};
 
 pub const DEFAULT_MAX_TTL: Duration = Duration::from_secs(365 * 24 * 60 * 60_u64);
 
@@ -21,38 +25,10 @@ pub fn get_role_params(req: &mut Request) -> Result<RoleEntry, RvError> {
     let not_before_duration = Duration::from_secs(not_before_duration_u64);
     let key_type_value = req.get_data_or_default("key_type")?;
     let key_type = key_type_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?;
-    let mut key_bits = req.get_data_or_default("key_bits")?.as_u64().ok_or(RvError::ErrRequestFieldInvalid)?;
-    match key_type {
-        "rsa" => {
-            if key_bits == 0 {
-                key_bits = 2048;
-            }
-
-            if key_bits != 2048 && key_bits != 3072 && key_bits != 4096 {
-                return Err(RvError::ErrPkiKeyBitsInvalid);
-            }
-        }
-        "ec" => {
-            if key_bits == 0 {
-                key_bits = 256;
-            }
-
-            if key_bits != 224 && key_bits != 256 && key_bits != 384 && key_bits != 512 {
-                return Err(RvError::ErrPkiKeyBitsInvalid);
-            }
-        }
-        #[cfg(feature = "crypto_adaptor_tongsuo")]
-        "sm2" => {
-            if key_bits == 0 {
-                key_bits = 256;
-            }
-
-            if key_bits != 256 {
-                return Err(RvError::ErrPkiKeyBitsInvalid);
-            }
-        }
-        _ => return Err(RvError::ErrPkiKeyTypeInvalid),
-    }
+    let key_bits = validate_certificate_key_type_and_bits(
+        key_type,
+        req.get_data_or_default("key_bits")?.as_u64().ok_or(RvError::ErrRequestFieldInvalid)?,
+    )?;
 
     let signature_bits = req.get_data_or_default("signature_bits")?.as_u64().ok_or(RvError::ErrRequestFieldInvalid)?;
     let use_pss = req.get_data_or_default("use_pss")?.as_bool().ok_or(RvError::ErrRequestFieldInvalid)?;
@@ -73,7 +49,7 @@ pub fn get_role_params(req: &mut Request) -> Result<RoleEntry, RvError> {
         not_before_duration,
         use_pss,
         key_type: key_type.to_string(),
-        key_bits: key_bits as u32,
+        key_bits,
         signature_bits: signature_bits as u32,
         country,
         province,

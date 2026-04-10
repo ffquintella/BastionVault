@@ -5,7 +5,6 @@
 use std::{collections::HashMap, fmt, fs, path::Path};
 
 use better_default::Default;
-use openssl::ssl::SslVersion;
 use serde::{
     de::{self, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
@@ -13,6 +12,16 @@ use serde::{
 use serde_json::Value;
 
 use crate::{errors::RvError, storage::BarrierType};
+
+/// Supported TLS protocol versions for the listener.
+///
+/// `rustls` only supports TLS 1.2 and 1.3; any older value in a config file
+/// is rejected at deserialization time.
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum TlsVersion {
+    Tls12,
+    Tls13,
+}
 
 /// A struct that contains several configurable options of BastionVault server
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -96,13 +105,13 @@ pub struct Listener {
         serialize_with = "serialize_tls_version",
         deserialize_with = "deserialize_tls_version"
     )]
-    pub tls_min_version: SslVersion,
+    pub tls_min_version: TlsVersion,
     #[serde(
         default = "default_tls_max_version",
         serialize_with = "serialize_tls_version",
         deserialize_with = "deserialize_tls_version"
     )]
-    pub tls_max_version: SslVersion,
+    pub tls_max_version: TlsVersion,
     #[serde(default = "default_tls_cipher_suites")]
     pub tls_cipher_suites: String,
 }
@@ -138,54 +147,50 @@ where
     }
 }
 
-fn default_tls_min_version() -> SslVersion {
-    SslVersion::TLS1_2
+fn default_tls_min_version() -> TlsVersion {
+    TlsVersion::Tls12
 }
 
-fn default_tls_max_version() -> SslVersion {
-    SslVersion::TLS1_3
+fn default_tls_max_version() -> TlsVersion {
+    TlsVersion::Tls13
 }
 
 fn default_tls_cipher_suites() -> String {
     "HIGH:!PSK:!SRP:!3DES".to_string()
 }
 
-fn serialize_tls_version<S>(version: &SslVersion, serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_tls_version<S>(version: &TlsVersion, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
     match *version {
-        SslVersion::TLS1 => serializer.serialize_str("tls10"),
-        SslVersion::TLS1_1 => serializer.serialize_str("tls11"),
-        SslVersion::TLS1_2 => serializer.serialize_str("tls12"),
-        SslVersion::TLS1_3 => serializer.serialize_str("tls13"),
-        _ => unreachable!("unexpected SSL/TLS version: {:?}", version),
+        TlsVersion::Tls12 => serializer.serialize_str("tls12"),
+        TlsVersion::Tls13 => serializer.serialize_str("tls13"),
     }
 }
 
-fn deserialize_tls_version<'de, D>(deserializer: D) -> Result<SslVersion, D::Error>
+fn deserialize_tls_version<'de, D>(deserializer: D) -> Result<TlsVersion, D::Error>
 where
     D: Deserializer<'de>,
 {
     struct TlsVersionVisitor;
 
     impl Visitor<'_> for TlsVersionVisitor {
-        type Value = SslVersion;
+        type Value = TlsVersion;
 
         fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a string representing an SSL version")
+            formatter.write_str("\"tls12\" or \"tls13\"")
         }
 
-        fn visit_str<E>(self, value: &str) -> Result<SslVersion, E>
+        fn visit_str<E>(self, value: &str) -> Result<TlsVersion, E>
         where
             E: de::Error,
         {
             match value {
-                "tls10" => Ok(SslVersion::TLS1),
-                "tls11" => Ok(SslVersion::TLS1_1),
-                "tls12" => Ok(SslVersion::TLS1_2),
-                "tls13" => Ok(SslVersion::TLS1_3),
-                _ => Err(E::custom(format!("unexpected SSL/TLS version: {value}"))),
+                "tls12" => Ok(TlsVersion::Tls12),
+                "tls13" => Ok(TlsVersion::Tls13),
+                "tls10" | "tls11" => Err(E::custom(format!("TLS version {value} is not supported; use tls12 or tls13"))),
+                _ => Err(E::custom(format!("unexpected TLS version: {value}"))),
             }
         }
     }
@@ -574,8 +579,8 @@ mod test {
         assert_eq!(listener.tls_client_ca_file.as_str(), "./cert/ca.pem");
         assert_eq!(listener.tls_disable_client_certs, false);
         assert_eq!(listener.tls_require_and_verify_client_cert, false);
-        assert_eq!(listener.tls_min_version, SslVersion::TLS1_2);
-        assert_eq!(listener.tls_max_version, SslVersion::TLS1_3);
+        assert_eq!(listener.tls_min_version, TlsVersion::Tls12);
+        assert_eq!(listener.tls_max_version, TlsVersion::Tls13);
 
         let (_, storage) = hcl_config.storage.iter().next().unwrap();
         assert_eq!(storage.stype.as_str(), "file");

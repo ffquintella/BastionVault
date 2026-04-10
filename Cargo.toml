@@ -50,7 +50,7 @@ clap = { version = "4.5", features = ["wrap_help", "derive", "env", "suggestions
 sysexits = { version = "0.7", features = ["std"] }
 build-time = "0.1"
 hcl-rs = "0.18"
-actix-web = { version = "4.9", features = ["openssl"] }
+actix-web = { version = "4.9", features = ["rustls-0_23"] }
 actix-tls = "3.1"
 actix-rt = "2.9"
 log = "0.4"
@@ -97,11 +97,6 @@ blake3 = "1.8"
 openssl = { version = "*", optional = true }
 openssl-sys = { version = "*", optional = true }
 
-# rust-tongsuo is a superset of rust-openssl, so we can use it mandatorily anyway.
-[patch.crates-io]
-openssl = { git = "https://github.com/Tongsuo-Project/rust-tongsuo.git" }
-openssl-sys = { git = "https://github.com/Tongsuo-Project/rust-tongsuo.git" }
-
 [build-dependencies]
 toml = "0.8.19"
 
@@ -113,7 +108,6 @@ default = ["crypto_adaptor_openssl"]
 storage_sqlx = ["sqlx"]
 storage_mysql = ["diesel", "r2d2", "r2d2-diesel"]
 crypto_adaptor_openssl = ["dep:openssl", "dep:openssl-sys"]
-crypto_adaptor_tongsuo = ["dep:openssl", "dep:openssl-sys"]
 sync_handler = ["maybe-async/is_sync"]
 
 [target.'cfg(unix)'.dependencies]

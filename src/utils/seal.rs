@@ -19,7 +19,7 @@
 //! then you may prefer the BastionVault's [RESTful API documentation].
 //!
 //! [Hashicorp Vault]: https://www.hashicorp.com/products/vault
-//! [RESTful API documentation]: https://www.tongsuo.net
+//! [RESTful API documentation]: https://github.com/ffquintella/BastionVault
 
 use bv_crypto::{KemDemEnvelopeV1, MlKem768Provider, ML_KEM_768_SEED_LEN};
 use chrono::Utc;

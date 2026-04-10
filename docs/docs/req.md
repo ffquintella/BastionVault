@@ -47,21 +47,24 @@ Features:
   * Support configuration file
   * Dynamic reload
 * PKI/CA
-  * X.509 issuing: RSA/ECC/SM2
+  * X.509 issuing: RSA/ECC
   * X.509 revocation: OCSP, CRL
 * Key Management
   * Symmetric: generation/storage/rotation
-  * Public key type: RSA/ECC/SM2
+  * Public key type: RSA/ECC
 * Cryptography Algorithm
-  * Symmetric ciphers: AES, SM4
+  * Symmetric ciphers: AES, ChaCha20-Poly1305
   * Public key algorithms:
-      * Signature: RSA/ECDSA/EdDSA/SM2/Ring Signature
-      * Encryption: RSA/SM2
-  * Digest: SHA1/SHA2/SM3
+      * Signature: RSA/ECDSA/EdDSA
+      * Encryption: RSA
+  * Digest: SHA1/SHA2
+* Post Quantum Cryptography
+  * Payload encryption: ChaCha20-Poly1305
+  * Key encapsulation: ML-KEM-768
+  * Transitional key establishment: hybrid (X25519 + ML-KEM-768)
 * Advanced Cryptography Algorithm
   * PHE: Paillier, EC-ElGamal
   * ZKP: Bulletproofs
-  * Post Quantum Cryptography
 * Hardware Support
   * Acceleration card or CPU instruction sets
   * HSMs

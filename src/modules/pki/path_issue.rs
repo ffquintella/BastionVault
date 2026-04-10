@@ -42,7 +42,7 @@ impl PkiBackend {
                 "ip_sans": {
                     required: false,
                     field_type: FieldType::Str,
-                    description: r#"The requested IP SANs, if any, in a common-delimited list"#
+                    description: r#"The requested IP SANs, if any, in a comma-delimited list"#
                 },
                 "ttl": {
                     required: false,

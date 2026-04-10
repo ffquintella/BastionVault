@@ -37,7 +37,7 @@ use crate::errors::RvError;
 
 lazy_static! {
     static ref X509_DEFAULT: X509 = X509Builder::new().unwrap().build();
-    static ref PKEY_DEFAULT: PKey<Private> = PKey::generate_ed25519().unwrap();
+    static ref PKEY_DEFAULT: PKey<Private> = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
 }
 
 extern "C" {
@@ -133,6 +133,26 @@ pub fn has_x509_ext_key_usage_flag(x509: &X509, flag: u32) -> bool {
     unsafe {
         (X509_get_extension_flags(x509.as_ptr()) & EXFLAG_XKUSAGE != 0)
             && (X509_get_extended_key_usage(x509.as_ptr()) & flag) != 0
+    }
+}
+
+pub fn validate_certificate_key_type_and_bits(key_type: &str, key_bits: u64) -> Result<u32, RvError> {
+    match key_type {
+        "rsa" => {
+            let bits = if key_bits == 0 { 2048 } else { key_bits };
+            match bits {
+                2048 | 3072 | 4096 => Ok(bits as u32),
+                _ => Err(RvError::ErrPkiKeyBitsInvalid),
+            }
+        }
+        "ec" => {
+            let bits = if key_bits == 0 { 256 } else { key_bits };
+            match bits {
+                224 | 256 | 384 | 512 => Ok(bits as u32),
+                _ => Err(RvError::ErrPkiKeyBitsInvalid),
+            }
+        }
+        _ => Err(RvError::ErrPkiKeyTypeInvalid),
     }
 }
 
@@ -290,8 +310,6 @@ impl Certificate {
 
         let digest = match self.key_type.as_str() {
             "rsa" | "ec" => MessageDigest::sha256(),
-            #[cfg(feature = "crypto_adaptor_tongsuo")]
-            "sm2" => MessageDigest::sm3(),
             _ => return Err(RvError::ErrPkiKeyTypeInvalid),
         };
         if ca_key.is_some() {
@@ -327,15 +345,6 @@ impl Certificate {
                 };
                 let ec_group = EcGroup::from_curve_name(curve_name)?;
                 let ec_key = EcKey::generate(ec_group.as_ref())?;
-                PKey::from_ec_key(ec_key)?
-            }
-            #[cfg(feature = "crypto_adaptor_tongsuo")]
-            "sm2" => {
-                if key_bits != 256 {
-                    return Err(RvError::ErrPkiKeyBitsInvalid);
-                }
-                let ec_group = EcGroup::from_curve_name(Nid::SM2)?;
-                let ec_key = EcKey::generate(&ec_group)?;
                 PKey::from_ec_key(ec_key)?
             }
             _ => return Err(RvError::ErrPkiKeyTypeInvalid),

@@ -1,8 +1,8 @@
 //! The bastion_vault::crypto module abstracts a set of generic cryptography methods. These methods
 //! are used by other modules in BastionVault.
 //!
-//! This module depends on underlying cryptography library. One crypto adaptors MUST be specified
-//! during the configuration, then it's compiled into BastionVault.
+//! This module depends on an underlying cryptography library. One crypto adaptor MUST be specified
+//! during configuration and compiled into BastionVault.
 //!
 //! # Crypto Adaptor Configurations
 //!
@@ -10,7 +10,7 @@
 //!
 //! A crypto adaptor is a module that conveys and translates high level cryptography
 //! operations like encryption, signing into the APIs provided by underlying cryptography
-//! libraries such as OpenSSL, Tongsuo and so forth.
+//! libraries such as OpenSSL.
 //!
 //! At current stage, only one crypto_adaptor can be enabled at compilation phase and later
 //! be used at run-time. "crypto_adaptor"s are configured as 'feature's in the Cargo context.
@@ -19,46 +19,15 @@
 //! them by adding one '--features crypto_adaptor_name' option when running "cargo build":
 //!
 //! 1. the OpenSSL adaptor: crypto_adaptor_openssl
-//! 2. the Tongsuo adaptor: crypto_adaptor_tongsuo
 //!
 //! If there is no explicit crypto adpator configured, then the `crypto_adaptor_openssl` is used as
 //! the default option.
 //!
-//! # Enable the Tongsuo adaptor
-//!
-//! Tongsuo is a variant of OpenSSL but with more features on SMx algorithms and protocols.
-//! BastionVault can use SM algorithms only if Tongsuo is built as the crypto adaptor.
-//!
-//! You need to build and install Tongsuo first into your local environment before building
-//! BastionVault with Tongsuo. Check the following link for detailed installation steps:
-//! [Tongsuo](https://github.com/Tongsuo-Project/Tongsuo)
-//!
-//! ~~~text
-//! $ export OPENSSL_DIR=/path/to/tongsuo/install/directory
-//! $ cargo build --features crypto_adaptor_tongsuo \
-//!    --no-default-features \
-//!    --config 'patch.crates-io.openssl.git="https://github.com/Tongsuo-Project/rust-tongsuo.git"'\
-//!    --config 'patch.crates-io.openssl-sys.git="https://github.com/Tongsuo-Project/rust-tongsuo.git"'
-//! ~~~
-//!
-//! Or you can just uncomment the following lines in Cargo.toml:
-//!
-//! ~~~text
-//! #[patch.crates-io]
-//! #openssl = { git = "https://github.com/Tongsuo-Project/rust-tongsuo.git" }
-//! #openssl-sys = { git = "https://github.com/Tongsuo-Project/rust-tongsuo.git" }
-//! ~~~
-//!
-//! and then:
-//!
-//! ~~~text
-//! $ cargo build --features crypto_adaptor_tongsuo --no-default-features
-//! ~~~
+//! New post-quantum code is being moved out of this legacy adaptor layer and into smaller crates
+//! such as `bv_crypto`.
 
 #[cfg(feature = "crypto_adaptor_openssl")]
 use crypto_adaptors::openssl_adaptor::AdaptorCTX;
-#[cfg(feature = "crypto_adaptor_tongsuo")]
-use crypto_adaptors::tongsuo_adaptor::AdaptorCTX;
 
 use crate::errors::RvError;
 
@@ -140,10 +109,7 @@ pub struct SM4 {
 ///
 /// ## Stream encryption and decryption
 ///
-/// The following code works only with `crypto_adaptor_tongsuo`.
-///
-#[cfg_attr(feature = "crypto_adaptor_tongsuo", doc = "~~~")]
-#[cfg_attr(not(feature = "crypto_adaptor_tongsuo"), doc = "~~~ignore")]
+/// ~~~ignore
 /// use bastion_vault::modules::crypto::{SM4, CipherMode, BlockCipher};
 ///
 /// let data: [&[u8]; 2] = [b"The best way to not feel hopeless ",
@@ -288,11 +254,7 @@ pub trait BlockCipher {
 ///
 /// # Stream encryption and decryption using AEAD cipher
 ///
-/// The following code works only with `crypto_adaptor_tongsuo`.
-///
-#[cfg_attr(feature = "crypto_adaptor_tongsuo", doc = "~~~")]
-#[cfg_attr(not(feature = "crypto_adaptor_tongsuo"), doc = "~~~ignore")]
-/// ~~~
+/// ~~~ignore
 /// use bastion_vault::modules::crypto::{SM4, CipherMode, BlockCipher, AEADCipher};
 ///
 /// let data: [&[u8]; 2] = [b"The best way to not feel hopeless ",
@@ -402,8 +364,6 @@ pub trait Encryption: PublicKey {
 
 #[cfg(test)]
 mod crypto_test {
-    #[cfg(feature = "crypto_adaptor_tongsuo")]
-    use crate::modules::crypto::SM4;
     use crate::modules::crypto::{AEADCipher, AESKeySize, BlockCipher, CipherMode, AES};
 
     #[test]
@@ -570,159 +530,4 @@ mod crypto_test {
         assert_eq!(data2.to_vec(), pt);
     }
 
-    #[cfg(feature = "crypto_adaptor_tongsuo")]
-    #[test]
-    fn test_sm4_keygen() {
-        let data = b"The best way to not feel hopeless is to get up and do something.".to_vec();
-        let mut sm4_encrypter = SM4::new(true, Some(CipherMode::CBC), None, None).unwrap();
-        let mut sm4_decrypter = SM4::new(
-            false,
-            Some(CipherMode::CBC),
-            Some(sm4_encrypter.get_key_iv().0),
-            Some(sm4_encrypter.get_key_iv().1),
-        )
-        .unwrap();
-
-        let ct = sm4_encrypter.encrypt(&data).unwrap();
-        let pt = sm4_decrypter.decrypt(&ct).unwrap();
-        assert_eq!(data, pt);
-    }
-
-    #[cfg(feature = "crypto_adaptor_tongsuo")]
-    #[test]
-    fn test_sm4_one_shot() {
-        let data = b"The best way to not feel hopeless is to get up and do something.".to_vec();
-        let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F".to_vec();
-        let iv = b"\x00\x01\x02\x03\x04\x05\x06\x07\x00\x01\x02\x03\x04\x05\x06\x07".to_vec();
-        let mut sm4_encrypter = SM4::new(false, Some(CipherMode::CBC), Some(key.clone()), Some(iv.clone())).unwrap();
-        let mut sm4_decrypter = SM4::new(false, Some(CipherMode::CBC), Some(key), Some(iv)).unwrap();
-
-        let ct = sm4_encrypter.encrypt(&data).unwrap();
-        let pt = sm4_decrypter.decrypt(&ct).unwrap();
-        assert_eq!(data.to_vec(), pt);
-    }
-
-    #[cfg(feature = "crypto_adaptor_tongsuo")]
-    #[test]
-    fn test_sm4_aead_one_shot() {
-        let data = b"The best way to not feel hopeless is to get up and do something.".to_vec();
-        let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F".to_vec();
-        let iv = b"\x00\x01\x02\x03\x04\x05\x06\x07\x00\x01\x02\x03\x04\x05\x06\x07".to_vec();
-        let aad = b"some additional authenticated data.".to_vec();
-        let mut sm4_encrypter = SM4::new(false, Some(CipherMode::GCM), Some(key.clone()), Some(iv.clone())).unwrap();
-        let mut sm4_decrypter = SM4::new(false, Some(CipherMode::GCM), Some(key), Some(iv)).unwrap();
-
-        // set aad, encrypt and get tag.
-        sm4_encrypter.set_aad(aad.clone()).unwrap();
-        let ct = sm4_encrypter.encrypt(&data).unwrap();
-        let tag = sm4_encrypter.get_tag().unwrap();
-
-        // set aad, set tag and decrypt.
-        sm4_decrypter.set_aad(aad).unwrap();
-        sm4_decrypter.set_tag(tag).unwrap();
-        let pt = sm4_decrypter.decrypt(&ct).unwrap();
-
-        // evaluate the result.
-        assert_eq!(data.to_vec(), pt);
-    }
-
-    #[cfg(feature = "crypto_adaptor_tongsuo")]
-    #[test]
-    fn test_sm4_stream() {
-        let data: [&[u8]; 2] = [b"The best way to not feel hopeless ", b"is to get up and do something."];
-        let data2 = b"The best way to not feel hopeless is to get up and do something.";
-        let data_len = data.iter().fold(0, |sum, x| sum + x.len());
-        let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F".to_vec();
-        let iv = b"\x00\x01\x02\x03\x04\x05\x06\x07\x00\x01\x02\x03\x04\x05\x06\x07".to_vec();
-        let mut sm4_encrypter = SM4::new(false, Some(CipherMode::CBC), Some(key.clone()), Some(iv.clone())).unwrap();
-        let mut sm4_decrypter = SM4::new(false, Some(CipherMode::CBC), Some(key), Some(iv)).unwrap();
-        let mut ct: Vec<u8> = vec![];
-
-        let mut v1: Vec<u8> = vec![0; data_len + 16];
-        let mut v2: Vec<u8> = vec![0; data_len + 16];
-        let mut v3: Vec<u8> = vec![0; data_len + 16];
-        let mut count = sm4_encrypter.encrypt_update((&data[0]).to_vec(), &mut v1).unwrap();
-        v1.truncate(count);
-        count = sm4_encrypter.encrypt_update((&data[1]).to_vec(), &mut v2).unwrap();
-        v2.truncate(count);
-        count = sm4_encrypter.encrypt_final(&mut v3).unwrap();
-        v3.truncate(count);
-        ct.extend(v1);
-        ct.extend(v2);
-        ct.extend(v3);
-
-        let data_len2 = ct.len();
-        let mut pt1: Vec<u8> = vec![0; data_len2 + 16];
-        let mut pt2: Vec<u8> = vec![0; data_len2 + 16];
-        let mut pt3: Vec<u8> = vec![0; data_len2 + 16];
-        let mut pt: Vec<u8> = vec![];
-        // separate ciphertext into 2 pieces.
-        let cts = [&ct[..9], &ct[9..]];
-
-        count = sm4_decrypter.decrypt_update((&cts[0]).to_vec(), &mut pt1).unwrap();
-        pt1.truncate(count);
-        count = sm4_decrypter.decrypt_update((&cts[1]).to_vec(), &mut pt2).unwrap();
-        pt2.truncate(count);
-        count = sm4_decrypter.decrypt_final(&mut pt3).unwrap();
-        pt3.truncate(count);
-        pt.extend(pt1);
-        pt.extend(pt2);
-        pt.extend(pt3);
-
-        // evaluate the result.
-        assert_eq!(data2.to_vec(), pt);
-    }
-
-    #[cfg(feature = "crypto_adaptor_tongsuo")]
-    #[test]
-    fn test_sm4_aead_stream() {
-        let data: [&[u8]; 2] = [b"The best way to not feel hopeless ", b"is to get up and do something."];
-        let data2 = b"The best way to not feel hopeless is to get up and do something.";
-        let data_len = data.iter().fold(0, |sum, x| sum + x.len());
-        let key = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F".to_vec();
-        let iv = b"\x00\x01\x02\x03\x04\x05\x06\x07\x00\x01\x02\x03\x04\x05\x06\x07".to_vec();
-        let aad = b"some additional authenticated data.".to_vec();
-        let mut sm4_encrypter = SM4::new(false, Some(CipherMode::GCM), Some(key.clone()), Some(iv.clone())).unwrap();
-        let mut sm4_decrypter = SM4::new(false, Some(CipherMode::GCM), Some(key), Some(iv)).unwrap();
-        let mut ct: Vec<u8> = vec![];
-
-        // set aad, encrypt and get tag.
-        sm4_encrypter.set_aad(aad.clone()).unwrap();
-        let mut v1: Vec<u8> = vec![0; data_len + 16];
-        let mut v2: Vec<u8> = vec![0; data_len + 16];
-        let mut v3: Vec<u8> = vec![0; data_len + 16];
-        let mut count = sm4_encrypter.encrypt_update((&data[0]).to_vec(), &mut v1).unwrap();
-        v1.truncate(count);
-        count = sm4_encrypter.encrypt_update((&data[1]).to_vec(), &mut v2).unwrap();
-        v2.truncate(count);
-        count = sm4_encrypter.encrypt_final(&mut v3).unwrap();
-        v3.truncate(count);
-        ct.extend(v1);
-        ct.extend(v2);
-        ct.extend(v3);
-        let tag = sm4_encrypter.get_tag().unwrap();
-
-        // set aad, set tag and decrypt.
-        sm4_decrypter.set_aad(aad).unwrap();
-        sm4_decrypter.set_tag(tag).unwrap();
-        // separate cipher into 2 pieces.
-        let data_len2 = ct.len();
-        let mut pt1: Vec<u8> = vec![0; data_len2 + 16];
-        let mut pt2: Vec<u8> = vec![0; data_len2 + 16];
-        let mut pt3: Vec<u8> = vec![0; data_len2 + 16];
-        let mut pt: Vec<u8> = vec![];
-        let cts = [&ct[..9], &ct[9..]];
-        count = sm4_decrypter.decrypt_update((&cts[0]).to_vec(), &mut pt1).unwrap();
-        pt1.truncate(count);
-        count = sm4_decrypter.decrypt_update((&cts[1]).to_vec(), &mut pt2).unwrap();
-        pt2.truncate(count);
-        count = sm4_decrypter.decrypt_final(&mut pt3).unwrap();
-        pt3.truncate(count);
-        pt.extend(pt1);
-        pt.extend(pt2);
-        pt.extend(pt3);
-
-        // evaluate the result.
-        assert_eq!(data2.to_vec(), pt);
-    }
 }

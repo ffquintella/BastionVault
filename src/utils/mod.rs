@@ -23,6 +23,7 @@ pub mod kv_builder;
 pub mod locks;
 pub mod ocsp;
 pub mod policy;
+pub mod rustls;
 pub mod salt;
 pub mod seal;
 pub mod sock_addr;

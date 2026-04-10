@@ -4,7 +4,7 @@
 
 use std::{any::Any, net::SocketAddr, sync::Arc};
 
-use actix_tls::accept::openssl::TlsStream;
+use actix_tls::accept::rustls_0_23::TlsStream as RustlsTlsStream;
 use actix_web::{
     cookie::Cookie,
     dev::Extensions,
@@ -12,7 +12,8 @@ use actix_web::{
     rt::net::TcpStream,
     web, HttpRequest, HttpResponse, ResponseError,
 };
-use openssl::x509::{X509Ref, X509VerifyResult, X509};
+use openssl::x509::X509;
+use rustls::pki_types::CertificateDer;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
@@ -29,12 +30,11 @@ pub const VAULT_AUTH_HEADER_NAME: &str = "X-Vault-Token";
 #[derive(Debug, Clone)]
 pub struct TlsClientInfo {
     pub client_cert_chain: Option<Vec<X509>>,
-    pub client_verify_result: X509VerifyResult,
 }
 
 impl TlsClientInfo {
     pub fn new() -> Self {
-        TlsClientInfo { client_cert_chain: None, client_verify_result: X509VerifyResult::OK }
+        TlsClientInfo { client_cert_chain: None }
     }
 }
 
@@ -58,36 +58,20 @@ impl Connection {
 }
 
 pub fn request_on_connect_handler(conn: &dyn Any, ext: &mut Extensions) {
-    if let Some(tls_stream) = conn.downcast_ref::<TlsStream<TcpStream>>() {
-        let socket = tls_stream.get_ref();
-        let mut cert_chain = None;
-
+    if let Some(tls_stream) = conn.downcast_ref::<RustlsTlsStream<TcpStream>>() {
+        let (socket, session) = tls_stream.get_ref();
         let peer_addr = socket.peer_addr();
         if peer_addr.is_err() {
             return;
         }
 
-        if let Some(cert_stack) = tls_stream.ssl().peer_cert_chain() {
-            let certs: Vec<X509> = cert_stack.iter().map(X509Ref::to_owned).collect();
-            cert_chain = Some(certs);
-        }
-
-        if let Some(cert) = tls_stream.ssl().peer_certificate() {
-            if let Some(ref mut chain) = cert_chain {
-                chain.push(cert);
-            } else {
-                cert_chain = Some(vec![cert]);
-            }
-        }
+        let cert_chain = session.peer_certificates().map(rustls_peer_cert_chain_to_x509);
 
         ext.insert(Connection {
             bind: socket.local_addr().unwrap(),
             peer: peer_addr.unwrap(),
             ttl: socket.ttl().ok(),
-            tls: Some(TlsClientInfo {
-                client_cert_chain: cert_chain,
-                client_verify_result: tls_stream.ssl().verify_result(),
-            }),
+            tls: Some(TlsClientInfo { client_cert_chain: cert_chain }),
         });
     } else if let Some(socket) = conn.downcast_ref::<TcpStream>() {
         let peer_addr = socket.peer_addr();
@@ -104,6 +88,10 @@ pub fn request_on_connect_handler(conn: &dyn Any, ext: &mut Extensions) {
     } else {
         unreachable!("socket should be TLS or plaintext");
     }
+}
+
+fn rustls_peer_cert_chain_to_x509(certs: &[CertificateDer<'static>]) -> Vec<X509> {
+    certs.iter().filter_map(|cert| X509::from_der(cert.as_ref()).ok()).collect()
 }
 
 pub fn init_service(cfg: &mut web::ServiceConfig) {

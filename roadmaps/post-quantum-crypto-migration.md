@@ -76,10 +76,42 @@ That keeps the system operationally safer while PQ support matures and while cli
 
 1. Remove Tongsuo first, then remove OpenSSL-shaped assumptions.
 2. Migrate storage and envelope encryption before attempting PQ PKI.
-3. Keep old ciphertexts readable during the migration.
+3. For the new `chacha20-poly1305` path, prioritize the PQ target state over backward compatibility.
 4. Introduce new formats with explicit versioning.
 5. Do not break operational unseal or rekey paths during rollout.
 6. Prefer pure Rust or Rust-first libraries where feasible.
+
+## Implementation Status
+
+The roadmap is no longer only a design document. The migration is already underway in small slices.
+
+For the execution tracker and latest completion status, see [post-quantum-crypto-progress.md](/Users/felipe/Dev/BastionVault/roadmaps/post-quantum-crypto-progress.md).
+
+### Completed or in progress
+
+- `crates/bv_crypto` now exists and contains the new AEAD, KEM, and KEM+DEM envelope building blocks.
+- `ChaCha20-Poly1305` is implemented in the new crate behind a small provider-neutral interface.
+- `ML-KEM-768` is implemented in the new crate, including deterministic seed-based keypair derivation for stable unseal and sealing flows.
+- a versioned `KemDemEnvelopeV1` exists and is used as the shared post-quantum envelope primitive.
+- the storage layer now includes:
+  - [src/storage/barrier_chacha20_poly1305.rs](/Users/felipe/Dev/BastionVault/src/storage/barrier_chacha20_poly1305.rs)
+  - [src/storage/barrier_chacha20_poly1305_init.rs](/Users/felipe/Dev/BastionVault/src/storage/barrier_chacha20_poly1305_init.rs)
+  - [src/storage/pq_key_envelope.rs](/Users/felipe/Dev/BastionVault/src/storage/pq_key_envelope.rs)
+- `barrier_type = chacha20-poly1305` is live and the ChaCha barrier now uses PQ bootstrap by default.
+- [src/utils/seal.rs](/Users/felipe/Dev/BastionVault/src/utils/seal.rs) now seals with `ML-KEM-768 + ChaCha20-Poly1305` and Shamir-splits the ML-KEM seed rather than a symmetric AES key.
+- [src/utils/crypto.rs](/Users/felipe/Dev/BastionVault/src/utils/crypto.rs) now uses the same PQ envelope model.
+- [src/utils/key.rs](/Users/felipe/Dev/BastionVault/src/utils/key.rs) has started the same migration for symmetric key encryption while keeping the current `KeyBundle` API stable.
+- the PKI key-management endpoints now validate and test symmetric import/export material as PQ seed input instead of legacy AES-sized raw keys.
+- certificate-role validation for RSA and EC issuance is now centralized instead of duplicated across multiple PKI entry points.
+- the Tongsuo Cargo patch, CI job, and adaptor export have been removed, and Tongsuo is no longer a supported build target.
+- the shared test temp-directory race was fixed in [src/test_utils.rs](/Users/felipe/Dev/BastionVault/src/test_utils.rs), which unblocked parallel test execution for the affected lib tests.
+
+### Still pending
+
+- full Tongsuo feature removal from Cargo, CI, docs, and adaptor wiring
+- removal of remaining OpenSSL-centric helper paths
+- migration of TLS/runtime server paths to `rustls`
+- PKI redesign away from OpenSSL/Tongsuo assumptions
 
 ## Proposed Phases
 
@@ -104,6 +136,8 @@ That keeps the system operationally safer while PQ support matures and while cli
 
 ## Phase 1: Remove Tongsuo as a Supported Backend
 
+Status: in progress
+
 ### Objectives
 
 - remove Tongsuo as a build feature
@@ -119,6 +153,19 @@ That keeps the system operationally safer while PQ support matures and while cli
   - [docs/docs/crypto.md](/Users/felipe/Dev/BastionVault/docs/docs/crypto.md)
   - [docs/docs/design.md](/Users/felipe/Dev/BastionVault/docs/docs/design.md)
 
+### Current State
+
+- complete:
+  - Cargo patch removal
+  - feature removal from [Cargo.toml](/Users/felipe/Dev/BastionVault/Cargo.toml)
+  - adaptor export removal
+  - adaptor file deletion
+  - CI job removal
+  - main crypto adaptor docs cleanup
+- remaining:
+  - remove Tongsuo-specific `cfg` branches and references from PKI, cert, and legacy crypto modules
+  - update the remaining design/docs pages that still mention Tongsuo or SM-only paths
+
 ### Risks
 
 - some current code paths appear to use Tongsuo-only algorithms such as SM4 and SM2
@@ -131,6 +178,8 @@ That keeps the system operationally safer while PQ support matures and while cli
 
 ## Phase 2: Introduce a Provider-Neutral AEAD Interface
 
+Status: substantially complete in the new `crates/bv_crypto` crate, but not yet the only crypto surface in the repository.
+
 ### Objectives
 
 - stop treating the crypto layer as an OpenSSL wrapper
@@ -138,10 +187,10 @@ That keeps the system operationally safer while PQ support matures and while cli
 
 ### Work Items
 
+- keep expanding `crates/bv_crypto` as the narrow PQ-first crypto surface
 - redesign [src/modules/crypto/mod.rs](/Users/felipe/Dev/BastionVault/src/modules/crypto/mod.rs) to expose provider-neutral traits
 - replace the current adaptor layout in [src/modules/crypto/crypto_adaptors](/Users/felipe/Dev/BastionVault/src/modules/crypto/crypto_adaptors)
-- add a `ChaCha20-Poly1305` provider
-- retain explicit format versioning for compatibility
+- retain explicit format versioning where legacy formats still exist
 
 ### Suggested API shape
 
@@ -154,27 +203,30 @@ That keeps the system operationally safer while PQ support matures and while cli
 
 - an internal AEAD trait exists
 - `ChaCha20-Poly1305` is implemented behind it
-- new code paths no longer require OpenSSL for payload encryption
+- new PQ-first code paths no longer require OpenSSL for payload encryption
 
 ## Phase 3: Migrate Barrier Encryption to ChaCha20-Poly1305
+
+Status: in progress, with the new ChaCha barrier live and PQ-backed.
 
 ### Objectives
 
 - replace direct OpenSSL use in storage barrier encryption
-- keep existing stored barrier data readable
+- make the `chacha20-poly1305` barrier path the canonical PQ storage path
 
 ### Work Items
 
-- refactor [src/storage/barrier_aes_gcm.rs](/Users/felipe/Dev/BastionVault/src/storage/barrier_aes_gcm.rs)
-- introduce a new barrier format version using `ChaCha20-Poly1305`
-- preserve support for decrypting previous barrier versions
-- document any changes in barrier metadata and unseal behavior
+- continue reducing the old AES barrier's importance in favor of:
+  - [src/storage/barrier_chacha20_poly1305.rs](/Users/felipe/Dev/BastionVault/src/storage/barrier_chacha20_poly1305.rs)
+  - [src/storage/barrier_chacha20_poly1305_init.rs](/Users/felipe/Dev/BastionVault/src/storage/barrier_chacha20_poly1305_init.rs)
+- keep the barrier type selection explicit in config while the PQ rollout is still being staged
+- document the new unseal behavior for the PQ barrier bootstrap
 
 ### Migration Strategy
 
-- read old barrier versions
-- write new barrier versions
-- provide rekey / rewrite tooling if needed for storage migration
+- keep the AES barrier path available temporarily
+- keep moving new work onto the ChaCha/PQ path
+- add rewrite or promotion tooling later if full cutover automation is needed
 
 ### Risks
 
@@ -183,11 +235,13 @@ That keeps the system operationally safer while PQ support matures and while cli
 
 ### Acceptance Criteria
 
-- existing repositories can still unseal
-- new writes use the new `ChaCha20-Poly1305` barrier version
-- compatibility tests cover old and new formats
+- the `chacha20-poly1305` barrier path is stable
+- new writes on that path use the new `ChaCha20-Poly1305` barrier format
+- barrier bootstrap uses PQ wrapping rather than direct symmetric wrapping
 
 ## Phase 4: Introduce a KEM Abstraction
+
+Status: substantially complete in `crates/bv_crypto`.
 
 ### Objectives
 
@@ -209,14 +263,16 @@ That keeps the system operationally safer while PQ support matures and while cli
 ### Acceptance Criteria
 
 - KEM operations are available through a provider-neutral interface
-- `ML-KEM-768` works through deterministic tests and known-answer vectors
+- `ML-KEM-768` works through deterministic tests and seeded derivation paths needed by BastionVault runtime flows
 
 ## Phase 5: Move Envelope Encryption to Hybrid PQ Mode
 
+Status: partially complete, but currently using `ML-KEM-768` directly rather than a hybrid mode.
+
 ### Objectives
 
-- adopt `ChaCha20-Poly1305 + ML-KEM-768` for key protection
-- avoid a PQ-only cutover as the first deployment mode
+- adopt `ChaCha20-Poly1305 + ML-KEM-768` for key protection across the remaining helper surfaces
+- optionally add hybrid mode later if operational requirements justify it
 
 ### Recommended Envelope Structure
 
@@ -229,29 +285,30 @@ That keeps the system operationally safer while PQ support matures and while cli
 - `kem_ciphertext`
 - optional `hybrid_metadata`
 
-### Recommended Mode
+### Current Mode
 
-Start with:
+Current implementation work is using:
 
-- `X25519 + ML-KEM-768` hybrid key establishment
+- `ML-KEM-768` for key establishment and wrapping
+- `ChaCha20-Poly1305` for payload encryption
 
-Later, if required:
-
-- `ML-KEM-768` only
+Hybrid mode remains a possible later step rather than a current blocker.
 
 ### Work Items
 
-- identify all key wrapping or envelope encryption flows
-- migrate those flows to the new envelope format
-- maintain read compatibility for old envelope formats
+- finish moving remaining helper paths to the new envelope format
+- migrate remaining higher-level key handling away from direct AES/OpenSSL wrapping
+- decide whether any runtime flows actually need hybrid mode before adding more complexity
 
 ### Acceptance Criteria
 
 - all new envelope encryption uses `ChaCha20-Poly1305`
-- key wrapping supports hybrid PQ mode
-- old envelopes remain readable until an explicit removal window
+- the main storage and helper surfaces use `ML-KEM-768` wrapping
+- any remaining direct symmetric wrapping paths are removed or explicitly deprecated
 
 ## Phase 6: Remove OpenSSL from TLS and Runtime Server Paths
+
+Status: pending
 
 ### Objectives
 
@@ -276,6 +333,8 @@ Later, if required:
 - all existing TLS configuration and mTLS behavior has parity or documented differences
 
 ## Phase 7: PKI and Certificate Track
+
+Status: pending
 
 ### Objectives
 
@@ -304,6 +363,8 @@ Treat PQ PKI as a later, optional track.
 
 ## Phase 8: Cleanup and OpenSSL Exit
 
+Status: in progress
+
 ### Objectives
 
 - remove OpenSSL from remaining non-PKI paths
@@ -314,6 +375,16 @@ Treat PQ PKI as a later, optional track.
 - remove OpenSSL usage from helper utilities where feasible
 - replace OpenSSL-based hashing, random, and key helpers with Rust-native implementations
 - review remaining OpenSSL-only test helpers
+
+### Current focus
+
+- continue shrinking helper-level OpenSSL usage in:
+  - [src/utils/key.rs](/Users/felipe/Dev/BastionVault/src/utils/key.rs)
+  - [src/utils/crypto.rs](/Users/felipe/Dev/BastionVault/src/utils/crypto.rs)
+  - [src/utils/seal.rs](/Users/felipe/Dev/BastionVault/src/utils/seal.rs)
+- keep tightening the PKI management surfaces so their key import/export semantics match the PQ-backed symmetric implementation
+- remove the Tongsuo feature and its Cargo/CI/doc wiring
+- isolate the still-OpenSSL-dependent PKI and TLS code so the remaining exit work is explicit
 
 ### Acceptance Criteria
 
@@ -401,4 +472,3 @@ The project should explicitly adopt the following technical position:
 2. define provider-neutral AEAD and KEM traits
 3. prototype a new versioned barrier format based on `ChaCha20-Poly1305`
 4. select the `ML-KEM-768` crate and write conformance tests before integrating it into higher-level flows
-

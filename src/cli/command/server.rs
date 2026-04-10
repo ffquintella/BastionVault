@@ -1,8 +1,6 @@
 use std::{
     default::Default,
     env, fs,
-    fs::File,
-    io::Read,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
@@ -14,18 +12,22 @@ use actix_web::{
 use anyhow::format_err;
 use clap::Parser;
 use derive_more::Deref;
-use openssl::{
-    ssl::{SslAcceptor, SslFiletype, SslMethod, SslOptions, SslVerifyMode, SslVersion},
-    x509::{store::X509StoreBuilder, verify::X509VerifyFlags, X509},
+use rustls::{
+    pki_types::{CertificateDer, PrivateKeyDer},
+    server::WebPkiClientVerifier,
+    RootCertStore, ServerConfig,
 };
+use rustls_pemfile::{certs, private_key};
 use sysexits::ExitCode;
 
 use crate::{
-    cli::{command, config},
+    cli::{command, config, config::TlsVersion},
     errors::RvError,
     http,
     metrics::{manager::MetricsManager, middleware::metrics_midleware},
-    storage, BastionVault, EXIT_CODE_INSUFFICIENT_PARAMS, EXIT_CODE_LOAD_CONFIG_FAILURE, EXIT_CODE_OK,
+    storage,
+    utils::rustls::OptionalClientAuthVerifier,
+    BastionVault, EXIT_CODE_INSUFFICIENT_PARAMS, EXIT_CODE_LOAD_CONFIG_FAILURE, EXIT_CODE_OK,
 };
 
 pub const WORK_DIR_PATH_DEFAULT: &str = "/tmp/bastion_vault";
@@ -176,53 +178,8 @@ impl Server {
         if listener.tls_disable {
             http_server = http_server.bind(listener.address)?;
         } else {
-            let cert_file: &Path = Path::new(&listener.tls_cert_file);
-            let key_file: &Path = Path::new(&listener.tls_key_file);
-
-            let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
-            builder
-                .set_private_key_file(key_file, SslFiletype::PEM)
-                .map_err(|err| format_err!("unable to read proxy key {} - {}", key_file.display(), err))?;
-            builder
-                .set_certificate_chain_file(cert_file)
-                .map_err(|err| format_err!("unable to read proxy cert {} - {}", cert_file.display(), err))?;
-            builder.check_private_key()?;
-
-            builder.set_min_proto_version(Some(listener.tls_min_version))?;
-            builder.set_max_proto_version(Some(listener.tls_max_version))?;
-
-            log::info!("tls_cipher_suites: {}", listener.tls_cipher_suites);
-            builder.set_cipher_list(&listener.tls_cipher_suites)?;
-
-            if listener.tls_max_version == SslVersion::TLS1_3 {
-                builder.clear_options(SslOptions::NO_TLSV1_3);
-                builder
-                    .set_ciphersuites("TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256")?;
-            }
-
-            if !listener.tls_disable_client_certs {
-                builder.set_verify_callback(SslVerifyMode::PEER, |_, _| true);
-            }
-
-            if listener.tls_require_and_verify_client_cert {
-                builder.set_verify_callback(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT, move |p, _x| p);
-
-                if !listener.tls_client_ca_file.is_empty() {
-                    let mut store = X509StoreBuilder::new()?;
-
-                    let mut client_ca_file = File::open(&listener.tls_client_ca_file)?;
-                    let mut client_ca_file_bytes = Vec::new();
-                    client_ca_file.read_to_end(&mut client_ca_file_bytes)?;
-                    let client_ca_x509s = X509::stack_from_pem(&client_ca_file_bytes)?;
-
-                    client_ca_x509s.iter().try_for_each(|cert| store.add_cert(cert.clone()))?;
-
-                    store.set_flags(X509VerifyFlags::PARTIAL_CHAIN)?;
-                    builder.set_verify_cert_store(store.build())?;
-                }
-            }
-
-            http_server = http_server.bind_openssl(listener.address, builder)?;
+            let rustls_config = build_rustls_server_config(&listener)?;
+            http_server = http_server.bind_rustls_0_23(listener.address, rustls_config)?;
         }
 
         log::info!("bastion_vault server starts, waiting for request...");
@@ -237,4 +194,86 @@ impl Server {
 
         Ok(())
     }
+}
+
+fn build_rustls_server_config(listener: &config::Listener) -> Result<ServerConfig, RvError> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let cert_chain = load_rustls_cert_chain(Path::new(&listener.tls_cert_file))?;
+    let private_key = load_rustls_private_key(Path::new(&listener.tls_key_file))?;
+    let versions = rustls_versions(listener.tls_min_version, listener.tls_max_version)?;
+
+    let builder = ServerConfig::builder_with_protocol_versions(versions.as_slice());
+    let mut config = if listener.tls_require_and_verify_client_cert {
+        let ca_file = Path::new(&listener.tls_client_ca_file);
+        if listener.tls_client_ca_file.is_empty() {
+            log::error!("tls_client_ca_file is required when tls_require_and_verify_client_cert is enabled");
+            return Err(RvError::ErrConfigLoadFailed);
+        }
+
+        let client_roots = load_rustls_root_store(ca_file)?;
+        let verifier = WebPkiClientVerifier::builder(Arc::new(client_roots))
+            .build()
+            .map_err(|_| RvError::ErrConfigLoadFailed)?;
+        builder.with_client_cert_verifier(verifier).with_single_cert(cert_chain, private_key)?
+    } else if listener.tls_disable_client_certs {
+        builder.with_no_client_auth().with_single_cert(cert_chain, private_key)?
+    } else {
+        builder
+            .with_client_cert_verifier(Arc::new(OptionalClientAuthVerifier::new()))
+            .with_single_cert(cert_chain, private_key)?
+    };
+
+    log::info!("tls_cipher_suites (rustls): {}", listener.tls_cipher_suites);
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(config)
+}
+
+fn rustls_versions(
+    min: TlsVersion,
+    max: TlsVersion,
+) -> Result<Vec<&'static rustls::SupportedProtocolVersion>, RvError> {
+    if min == TlsVersion::Tls13 && max == TlsVersion::Tls12 {
+        log::error!("invalid TLS version range");
+        return Err(RvError::ErrConfigLoadFailed);
+    }
+
+    let versions = match (min, max) {
+        (TlsVersion::Tls12, TlsVersion::Tls12) => vec![&rustls::version::TLS12],
+        (TlsVersion::Tls13, TlsVersion::Tls13) => vec![&rustls::version::TLS13],
+        (TlsVersion::Tls12, TlsVersion::Tls13) => vec![&rustls::version::TLS13, &rustls::version::TLS12],
+        _ => {
+            log::error!("rustls server mode only supports tls12 and tls13");
+            return Err(RvError::ErrConfigLoadFailed)
+        }
+    };
+
+    Ok(versions)
+}
+
+fn load_rustls_cert_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>, RvError> {
+    let cert_pem = fs::read(path).map_err(|err| format_err!("unable to read proxy cert {} - {}", path.display(), err))?;
+    let mut reader = cert_pem.as_slice();
+    Ok(certs(&mut reader).collect::<Result<Vec<_>, _>>()?)
+}
+
+fn load_rustls_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, RvError> {
+    let key_pem = fs::read(path).map_err(|err| format_err!("unable to read proxy key {} - {}", path.display(), err))?;
+    let mut reader = key_pem.as_slice();
+    private_key(&mut reader)?.ok_or_else(|| {
+        log::error!("no private key found in {}", path.display());
+        RvError::ErrConfigLoadFailed
+    })
+}
+
+fn load_rustls_root_store(path: &Path) -> Result<RootCertStore, RvError> {
+    let ca_pem = fs::read(path).map_err(|err| format_err!("unable to read client CA {} - {}", path.display(), err))?;
+    let mut reader = ca_pem.as_slice();
+    let cert_chain = certs(&mut reader).collect::<Result<Vec<_>, _>>()?;
+
+    let mut roots = RootCertStore::empty();
+    for cert in cert_chain {
+        roots.add(cert)?;
+    }
+    Ok(roots)
 }

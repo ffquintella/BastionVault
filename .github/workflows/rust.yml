@@ -16,7 +16,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  TONGSUO_VERSION: 8.4.0
 
 jobs:
   unix-default-test:
@@ -56,44 +55,6 @@ jobs:
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         slug: wa5i/BastionVault
-
-  unix-tongsuo-test:
-    strategy:
-      matrix:
-        os:
-          - macos-latest
-          - ubuntu-latest
-    runs-on: ${{matrix.os}}
-
-    steps:
-    - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        components: clippy, rustfmt
-        override: true
-    - name: Build Tongsuo
-      run: |
-        wget "https://github.com/Tongsuo-Project/Tongsuo/archive/refs/tags/${TONGSUO_VERSION}.tar.gz"
-        tar zxf "${TONGSUO_VERSION}.tar.gz"
-        pushd "Tongsuo-${TONGSUO_VERSION}"
-        ./config --prefix=${RUNNER_TEMP}/tongsuo --libdir=${RUNNER_TEMP}/tongsuo/lib
-        make -j4
-        make install
-        popd
-    - uses: actions/checkout@v3
-    - name: Build
-      run : |
-        export LD_LIBRARY_PATH=${RUNNER_TEMP}/tongsuo/lib
-        OPENSSL_DIR=${RUNNER_TEMP}/tongsuo RUSTFLAGS="-C link-args=-Wl,-rpath,${RUNNER_TEMP}/tongsuo/lib" cargo build --verbose --features crypto_adaptor_tongsuo --no-default-features
-    - name: Run tests
-      run : |
-        export LD_LIBRARY_PATH=${RUNNER_TEMP}/tongsuo/lib
-        OPENSSL_DIR=${RUNNER_TEMP}/tongsuo RUSTFLAGS="-C link-args=-Wl,-rpath,${RUNNER_TEMP}/tongsuo/lib" cargo test --verbose --features crypto_adaptor_tongsuo --no-default-features
-    - name: Run tests with sync_handler features
-      run : |
-        export LD_LIBRARY_PATH=${RUNNER_TEMP}/tongsuo/lib
-        OPENSSL_DIR=${RUNNER_TEMP}/tongsuo RUSTFLAGS="-C link-args=-Wl,-rpath,${RUNNER_TEMP}/tongsuo/lib" cargo test --verbose --features crypto_adaptor_tongsuo --features sync_handler --no-default-features
 
   unix-mysql-test:
     strategy:

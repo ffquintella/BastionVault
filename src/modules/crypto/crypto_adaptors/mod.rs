@@ -1,13 +1,8 @@
-//! This is a Rust module that contains several adaptors to different cryptography libraries.
-//! The bastion_vault::crypto module utilize these adaptors to do the real crypto operations.
-//!
-//! Only one crypto adaptor can be used in one build. It's configured when building BastionVault.
-//! An adaptor implements a set of methods that perform cryptograhpy operations like encryption,
-//! decription, signing, verification and so on.
+//! This module contains the remaining legacy crypto adaptor implementations.
+//! BastionVault is moving toward smaller PQ-first crates for new crypto work, while the legacy
+//! OpenSSL adaptor still backs older runtime paths during the migration.
 
 #[macro_use]
 pub mod common;
 #[cfg(feature = "crypto_adaptor_openssl")]
 pub mod openssl_adaptor;
-#[cfg(feature = "crypto_adaptor_tongsuo")]
-pub mod tongsuo_adaptor;

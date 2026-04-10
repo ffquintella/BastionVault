@@ -14,7 +14,7 @@ title: 设计
 说明如下：
 
 1. 虚线框中为BastionVault，其整体上分为三大部分：BastionVault Core, BastionVault Modules和BastionVault Surface.
-  * BastionVault Core，此组件是BastionVault的核心组件，由多个Manager组成，不同的Manager分管不同功能。例如Module Manager负责对BastionVault的各个功能模块进行管理，提供模块的热插拔等机制；Crypto Manager则对接底层密码库（铜锁），通过rust-tongsuo的Rust binding来调用铜锁的C API实现各种密码学功能等；
+  * BastionVault Core，此组件是BastionVault的核心组件，由多个Manager组成，不同的Manager分管不同功能。例如Module Manager负责对BastionVault的各个功能模块进行管理，提供模块的热插拔等机制；Crypto Manager则对接底层密码库，通过统一的抽象层调用密码学功能，目前正在向以Rust原生后量子密码组件（ChaCha20-Poly1305 + ML-KEM-768）迁移；
   * BastionVault Modules，此部分由多个Module组成，是BastionVault的实际执行各种功能的环节，即BastionVault的实际功能代码都位于此。例如，PKI Module提供了完整的PKI能力，如扮演CA进行X.509证书的签发、吊销等管理工作；Crypto Module则依赖于BastionVault Core中的Crypto Manager对底层密码学原语进行调用，以实现对外提供诸如加密解密、签名验签等功能；
   * BastionVault Surface，此组件是直接和最终用户打交道的部分，对外提供HTTPS接入能力，并对API请求进行解析后，转发给某个实际功能的Module上，由该Module进行处理后，返回处理结果给用户。此外，此组件还负责整体的配置解析等工作。
 

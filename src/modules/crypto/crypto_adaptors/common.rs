@@ -1,4 +1,4 @@
-//! This module contains some common functions used by openssl and tongsuo adaptors.
+//! This module contains common helpers for the remaining OpenSSL-based adaptor code.
 //! Functions in this module SHOULD NOT be used directly by applications.
 
 use openssl::symm::Cipher;

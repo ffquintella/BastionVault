@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
+use bv_crypto::ML_KEM_768_SEED_LEN;
 use openssl::{ec::EcKey, rsa::Rsa};
 use serde_json::{json, Value};
 
@@ -10,7 +11,7 @@ use crate::{
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
-    utils::key::{EncryptExtraData, KeyBundle},
+    utils::key::{is_pem_key_type, is_symmetric_key_type, symmetric_key_uses_iv, EncryptExtraData, KeyBundle},
 };
 
 const PKI_CONFIG_KEY_PREFIX: &str = "config/key/";
@@ -33,12 +34,12 @@ impl PkiBackend {
                     description: r#"
 The number of bits to use. Allowed values are 0 (universal default); with rsa
 key_type: 2048 (default), 3072, or 4096; with ec key_type: 224, 256 (default),
-384, or 521; ignored with ed25519."#
+384, or 521."#
                 },
                 "key_type": {
                     field_type: FieldType::Str,
                     default: "rsa",
-                    description: r#"The type of key to use; defaults to RSA. "rsa""#
+                    description: r#"The type of key to use; defaults to RSA. Supported values are "rsa", "ec", and the symmetric key types handled by this endpoint."#
                 }
             },
             operations: [
@@ -67,7 +68,7 @@ used for sign,verify,encrypt,decrypt.
                 "key_type": {
                     field_type: FieldType::Str,
                     default: "rsa",
-                    description: r#"The type of key to use; defaults to RSA. "rsa""#
+                    description: r#"The type of key to use; defaults to RSA. Supported values are "rsa", "ec", "aes-gcm", "aes-cbc", and "aes-ecb"."#
                 },
                 "pem_bundle": {
                     field_type: FieldType::Str,
@@ -75,11 +76,11 @@ used for sign,verify,encrypt,decrypt.
                 },
                 "hex_bundle": {
                     field_type: FieldType::Str,
-                    description: "Hex-format, unencrypted secret"
+                    description: "Hex-format, unencrypted secret for symmetric key seed material"
                 },
                 "iv": {
                     field_type: FieldType::Str,
-                    description: "IV for aes-gcm/aes-cbc"
+                    description: "IV for symmetric key types that require it"
                 }
             },
             operations: [
@@ -167,7 +168,7 @@ used for sign,verify,encrypt,decrypt.
                 "aad": {
                     field_type: FieldType::Str,
                     default: "",
-                    description: "Additional Authenticated Data can be provided for aes-gcm/cbc encryption"
+                    description: "Additional Authenticated Data bound to the symmetric key envelope"
                 }
             },
             operations: [
@@ -198,7 +199,7 @@ used for sign,verify,encrypt,decrypt.
                 "aad": {
                     field_type: FieldType::Str,
                     default: "",
-                    description: "Additional Authenticated Data can be provided for aes-gcm/cbc decryption"
+                    description: "Additional Authenticated Data bound to the symmetric key envelope"
                 }
             },
             operations: [
@@ -247,16 +248,13 @@ impl PkiBackendInner {
         .clone();
 
         if export_private_key {
-            match key_type {
-                "rsa" | "ec" | "sm2" => {
-                    resp_data.insert(
-                        "private_key".to_string(),
-                        Value::String(String::from_utf8_lossy(&key_bundle.key).to_string()),
-                    );
-                }
-                _ => {
-                    resp_data.insert("private_key".to_string(), Value::String(hex::encode(&key_bundle.key)));
-                }
+            if is_pem_key_type(&key_bundle.key_type) {
+                resp_data.insert(
+                    "private_key".to_string(),
+                    Value::String(String::from_utf8_lossy(&key_bundle.key).to_string()),
+                );
+            } else {
+                resp_data.insert("private_key".to_string(), Value::String(hex::encode(&key_bundle.key)));
             }
 
             if !key_bundle.iv.is_empty() {
@@ -295,7 +293,7 @@ impl PkiBackendInner {
                     let rsa = Rsa::private_key_from_pem(&key_bundle.key)?;
                     key_bundle.bits = rsa.size() * 8;
                 }
-                "ec" | "sm2" => {
+                "ec" => {
                     let ec_key = EcKey::private_key_from_pem(&key_bundle.key)?;
                     key_bundle.bits = ec_key.group().degree();
                 }
@@ -307,22 +305,20 @@ impl PkiBackendInner {
 
         if !hex_bundle.is_empty() {
             key_bundle.key = hex::decode(hex_bundle)?;
-            key_bundle.bits = (key_bundle.key.len() as u32) * 8;
-            match key_bundle.bits {
-                128 | 192 | 256 => {}
-                _ => return Err(RvError::ErrPkiKeyBitsInvalid),
-            };
             let iv_value = req.get_data_or_default("iv")?;
-            let is_iv_required = matches!(key_type, "aes-gcm" | "aes-cbc" | "sm4-gcm" | "sm4-ccm");
-            #[cfg(feature = "crypto_adaptor_tongsuo")]
-            let is_valid_key_type = matches!(key_type, "aes-gcm" | "aes-cbc" | "aes-ecb" | "sm4-gcm" | "sm4-ccm");
-            #[cfg(not(feature = "crypto_adaptor_tongsuo"))]
-            let is_valid_key_type = matches!(key_type, "aes-gcm" | "aes-cbc" | "aes-ecb");
+            let is_valid_key_type = is_symmetric_key_type(key_type);
+            let is_iv_required = symmetric_key_uses_iv(key_type);
 
             // Check if the key type is valid, if not return an error.
             if !is_valid_key_type {
                 return Err(RvError::ErrPkiKeyTypeInvalid);
             }
+
+            if key_bundle.key.len() != ML_KEM_768_SEED_LEN {
+                return Err(RvError::ErrPkiKeyBitsInvalid);
+            }
+
+            key_bundle.bits = 256;
 
             // Proceed to check IV only if required by the key type.
             if is_iv_required {

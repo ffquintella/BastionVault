@@ -4,12 +4,11 @@ title: Crypto Adaptor
 ---
 # BastionVault Crypto Adaptor
 
-In BastionVault, we provide a mechanism for the users to build with selectable underlying cryptography libraries. This is the "crypto adaptor" mechanism.
+In BastionVault, older runtime crypto paths still use a "crypto adaptor" mechanism to connect to the underlying cryptography library.
 
-Currently, only two adaptors are supported:
+The supported legacy adaptor is:
 
 * OpenSSL crypto adaptor
-* Tongsuo crypto adaptor
 
 ## The OpenSSL Crypto Adaptor
 
@@ -29,44 +28,14 @@ cargo build --features crypto_adaptor_openssl
 
 But this is not necessary.
 
-## The Tongsuo Crypto Adaptor
+## Migration Direction
 
-Tongsuo is a fork of OpenSSL aiming to have a better support on Chinese cryptography algorithms and standards. To use Tongsuo as the cryptography functionality provider in BastionVault, typically you need to build BastionVault as follows.
+New post-quantum work is not being added to the legacy adaptor layer.
 
-### Download and Install Tongsuo
+The current migration direction is:
 
-Firstly, you need to have a copy of Tongsuo code and successfully build it into libraires and finally install it into somewhere in your machine.
+* `ChaCha20-Poly1305` for payload encryption
+* `ML-KEM-768` for key wrapping and key establishment
+* smaller crypto modules and crates such as [crates/bv_crypto](/Users/felipe/Dev/BastionVault/crates/bv_crypto)
 
-Go to [https://tongsuo.net/docs/compilation/compile-and-install](https://tongsuo.net/docs/compilation/compile-and-install) for more detailed information.
-
-### Configure BastionVault to use Tongsuo
-
-BastionVault uses rust-tongsuo crate to call C APIs provided by Tongsuo. So we need to configure Cargo to use it, let's assume Tongsuo is successfully installed to `/path/to/tongsuo` directory: 
-
-~~~
-OPENSSL_DIR=/path/to/tongsuo cargo build \
-  --features crypto_adaptor_tongsuo \
-  --no-default-features \
-  --config 'patch.crates-io.openssl.git="https://github.com/Tongsuo-Project/rust-tongsuo.git"' \
-  --config 'patch.crates-io.openssl-sys.git="https://github.com/Tongsuo-Project/rust-tongsuo.git"'
-~~~
-
-Furthermore, if you choose to use a local copy of rust-tongsuo crate, you can use the file path form as well. Assume the local rust-tongsuo crate is located in `/path/to/rust-tongsuo` directory:
-
-~~~
-OPENSSL_DIR=/path/to/tongsuo cargo build \
-  --features crypto_adaptor_tongsuo \
-  --no-default-features \
-  --config 'patch.crates-io.openssl.path="/path/to/rust-tongsuo/openssl"' \
-  --config 'patch.crates-io.openssl-sys.path="/path/to/rust-tongsuo/openssl-sys"'
-~~~
-
-### The `LD_LIBRARY_PATH` Variable
-
-If you are using Linux, then you may need to specify which path for BastionVault to look for the Tongsuo libraries. There are many ways of having this done, but in this document we demonstrate with the global environment variable way.
-
-~~~
-export LD_LIBRARY_PATH=/path/to/tongsuol/lib
-~~~
-
-Then you can run BastionVault smoothly.
+Tongsuo is no longer a supported BastionVault backend. Remaining OpenSSL-based paths are being reduced incrementally as the PQ migration continues.

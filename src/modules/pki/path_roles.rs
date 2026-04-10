@@ -11,7 +11,7 @@ use crate::{
     logical::{field::FieldTrait, Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
-    utils::{deserialize_duration, serialize_duration},
+    utils::{cert::validate_certificate_key_type_and_bits, deserialize_duration, serialize_duration},
 };
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -160,7 +160,7 @@ See the documentation for more information."#
                     field_type: FieldType::Str,
                     default: "rsa",
                     description: r#"
-        The type of key to use; defaults to RSA. "rsa" "ec", "ed25519" and "any" are the only valid values."#
+        The type of key to use; defaults to RSA. The current implementation supports "rsa" and "ec" for certificate issuance."#
                 },
                 "key_bits": {
                     field_type: FieldType::Int,
@@ -168,7 +168,7 @@ See the documentation for more information."#
                     description: r#"
 The number of bits to use. Allowed values are 0 (universal default); with rsa
 key_type: 2048 (default), 3072, or 4096; with ec key_type: 224, 256 (default),
-384, or 521; ignored with ed25519."#
+384, or 521."#
                 },
                 "signature_bits": {
                     field_type: FieldType::Int,
@@ -346,40 +346,10 @@ impl PkiBackendInner {
         }
         let key_type_value = req.get_data_or_default("key_type")?;
         let key_type = key_type_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?;
-        let mut key_bits = req.get_data_or_default("key_bits")?.as_u64().ok_or(RvError::ErrRequestFieldInvalid)?;
-        match key_type {
-            "rsa" => {
-                if key_bits == 0 {
-                    key_bits = 2048;
-                }
-
-                if key_bits != 2048 && key_bits != 3072 && key_bits != 4096 {
-                    return Err(RvError::ErrPkiKeyBitsInvalid);
-                }
-            }
-            "ec" => {
-                if key_bits == 0 {
-                    key_bits = 256;
-                }
-
-                if key_bits != 224 && key_bits != 256 && key_bits != 384 && key_bits != 512 {
-                    return Err(RvError::ErrPkiKeyBitsInvalid);
-                }
-            }
-            #[cfg(feature = "crypto_adaptor_tongsuo")]
-            "sm2" => {
-                if key_bits == 0 {
-                    key_bits = 256;
-                }
-
-                if key_bits != 256 {
-                    return Err(RvError::ErrPkiKeyBitsInvalid);
-                }
-            }
-            _ => {
-                return Err(RvError::ErrPkiKeyTypeInvalid);
-            }
-        }
+        let key_bits = validate_certificate_key_type_and_bits(
+            key_type,
+            req.get_data_or_default("key_bits")?.as_u64().ok_or(RvError::ErrRequestFieldInvalid)?,
+        )?;
 
         let signature_bits =
             req.get_data_or_default("signature_bits")?.as_u64().ok_or(RvError::ErrRequestFieldInvalid)?;
@@ -427,7 +397,7 @@ impl PkiBackendInner {
             ttl,
             max_ttl,
             key_type: key_type.to_string(),
-            key_bits: key_bits as u32,
+            key_bits,
             signature_bits: signature_bits as u32,
             allow_localhost,
             allow_bare_domains,

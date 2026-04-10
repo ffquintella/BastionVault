@@ -107,7 +107,7 @@ chance to retrieve the private key!"#
             field_type: FieldType::Str,
             default: "rsa",
             description: r#"The type of key to use; defaults to RSA. "rsa" "ec",
-    "ed25519" and "any" are the only valid values."#
+    "ed25519" and "any" are historical API values, but the current implementation supports RSA and EC issuance paths."#
         },
         "key_bits": {
             field_type: FieldType::Int,

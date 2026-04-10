@@ -16,7 +16,6 @@ use actix_web::{
     middleware::{self, from_fn},
     web, App, HttpResponse, HttpServer,
 };
-use anyhow::format_err;
 use foreign_types::ForeignType;
 use humantime::parse_duration;
 use lazy_static::lazy_static;
@@ -26,7 +25,6 @@ use openssl::{
     hash::MessageDigest,
     pkey::{PKey, Private},
     rsa::Rsa,
-    ssl::{SslAcceptor, SslFiletype, SslMethod, SslVerifyMode, SslVersion},
     x509::{
         extension::{
             AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
@@ -39,6 +37,7 @@ use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer},
     ClientConfig, RootCertStore,
 };
+use rustls_pemfile::{certs, private_key};
 use serde_json::{json, Map, Value};
 use tokio::sync::oneshot;
 use ureq::AgentBuilder;
@@ -54,6 +53,7 @@ use crate::{
     rv_error_response, rv_error_string,
     storage::{self, Backend},
     utils::cert::Certificate,
+    utils::rustls::OptionalClientAuthVerifier,
     BastionVault,
 };
 
@@ -1090,28 +1090,8 @@ pub fn new_test_http_server(core: Arc<Core>, tls_config: Option<TestTlsConfig>) 
     .on_connect(http::request_on_connect_handler);
 
     if let Some(tls) = tls_config {
-        let cert_file: &Path = Path::new(&tls.cert_path);
-        let key_file: &Path = Path::new(&tls.key_path);
-
-        let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
-        builder
-            .set_private_key_file(key_file, SslFiletype::PEM)
-            .map_err(|err| format_err!("unable to read proxy key {} - {}", key_file.display(), err))?;
-        builder
-            .set_certificate_chain_file(cert_file)
-            .map_err(|err| format_err!("unable to read proxy cert {} - {}", cert_file.display(), err))?;
-        builder.check_private_key()?;
-
-        builder.set_min_proto_version(Some(SslVersion::TLS1_2))?;
-        builder.set_max_proto_version(Some(SslVersion::TLS1_3))?;
-
-        builder.set_cipher_list(
-            "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:HIGH:!PSK:!SRP:!3DES",
-        )?;
-
-        builder.set_verify_callback(SslVerifyMode::PEER, |_, _| true);
-
-        http_server = http_server.bind_openssl("127.0.0.1:0", builder)?;
+        let tls_config = build_test_rustls_server_config(&tls)?;
+        http_server = http_server.bind_rustls_0_23("127.0.0.1:0", tls_config)?;
     } else {
         http_server = http_server.bind("127.0.0.1:0")?;
     }
@@ -1140,28 +1120,8 @@ pub fn new_test_http_server_with_prometheus(
     .on_connect(http::request_on_connect_handler);
 
     if let Some(tls) = tls_config {
-        let cert_file: &Path = Path::new(&tls.cert_path);
-        let key_file: &Path = Path::new(&tls.key_path);
-
-        let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
-        builder
-            .set_private_key_file(key_file, SslFiletype::PEM)
-            .map_err(|err| format_err!("unable to read proxy key {} - {}", key_file.display(), err))?;
-        builder
-            .set_certificate_chain_file(cert_file)
-            .map_err(|err| format_err!("unable to read proxy cert {} - {}", cert_file.display(), err))?;
-        builder.check_private_key()?;
-
-        builder.set_min_proto_version(Some(SslVersion::TLS1_2))?;
-        builder.set_max_proto_version(Some(SslVersion::TLS1_3))?;
-
-        builder.set_cipher_list(
-            "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:HIGH:!PSK:!SRP:!3DES",
-        )?;
-
-        builder.set_verify_callback(SslVerifyMode::PEER, |_, _| true);
-
-        http_server = http_server.bind_openssl("127.0.0.1:0", builder)?;
+        let tls_config = build_test_rustls_server_config(&tls)?;
+        http_server = http_server.bind_rustls_0_23("127.0.0.1:0", tls_config)?;
     } else {
         http_server = http_server.bind("127.0.0.1:0")?;
     }
@@ -1171,6 +1131,33 @@ pub fn new_test_http_server_with_prometheus(
     println!("HTTP Server is running at {}", addr_info);
 
     Ok((http_server.run(), addr_info))
+}
+
+fn build_test_rustls_server_config(tls: &TestTlsConfig) -> Result<rustls::ServerConfig, RvError> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let cert_chain = load_test_rustls_cert_chain(Path::new(&tls.cert_path))?;
+    let private_key = load_test_rustls_private_key(Path::new(&tls.key_path))?;
+
+    let mut config = rustls::ServerConfig::builder()
+        .with_client_cert_verifier(Arc::new(OptionalClientAuthVerifier::new()))
+        .with_single_cert(cert_chain, private_key)?;
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(config)
+}
+
+fn load_test_rustls_cert_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>, RvError> {
+    let cert_pem = fs::read(path)?;
+    let mut reader = cert_pem.as_slice();
+    Ok(certs(&mut reader).collect::<Result<Vec<_>, _>>()?)
+}
+
+fn load_test_rustls_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, RvError> {
+    let key_pem = fs::read(path)?;
+    let mut reader = key_pem.as_slice();
+    private_key(&mut reader)?.ok_or_else(|| {
+        log::error!("no private key found in {}", path.display());
+        RvError::ErrConfigLoadFailed
+    })
 }
 
 pub fn start_test_http_server(

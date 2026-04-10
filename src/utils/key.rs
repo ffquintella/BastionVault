@@ -1,14 +1,14 @@
 use better_default::Default;
+use bv_crypto::{KemDemEnvelopeV1, MlKem768Provider, ML_KEM_768_SEED_LEN};
 use openssl::{
     ec::{EcGroup, EcKey},
     hash::MessageDigest,
     nid::Nid,
     pkey::PKey,
-    rand::rand_bytes,
     rsa::{Padding, Rsa},
     sign::{Signer, Verifier},
-    symm::{decrypt, decrypt_aead, encrypt, encrypt_aead, Cipher},
 };
+use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 
 use crate::{errors::RvError, utils::generate_uuid};
@@ -34,30 +34,38 @@ pub enum EncryptExtraData<'a> {
 fn key_bits_default(key_type: &str) -> u32 {
     match key_type {
         "rsa" => 2048,
-        "ec" | "sm2" => 256,
-        "aes-gcm" | "aes-cbc" | "aes-ecb" | "sm4-gcm" | "sm4-ccm" => 256,
+        "ec" => 256,
+        "aes-gcm" | "aes-cbc" | "aes-ecb" => 256,
         _ => 0,
     }
 }
 
-// TODO: this function needs to be refactored to use crypto adaptors.
-fn cipher_from_key_type_and_bits(key_type: &str, bits: u32) -> Result<Cipher, RvError> {
+pub fn is_symmetric_key_type(key_type: &str) -> bool {
+    matches!(key_type, "aes-gcm" | "aes-cbc" | "aes-ecb")
+}
+
+pub fn is_pem_key_type(key_type: &str) -> bool {
+    matches!(key_type, "rsa" | "ec")
+}
+
+pub fn symmetric_key_uses_iv(key_type: &str) -> bool {
+    matches!(key_type, "aes-gcm" | "aes-cbc")
+}
+
+fn validate_symmetric_key_bits(key_type: &str, bits: u32) -> Result<(), RvError> {
     match (key_type, bits) {
-        ("aes-gcm", 128) => Ok(Cipher::aes_128_gcm()),
-        ("aes-gcm", 192) => Ok(Cipher::aes_192_gcm()),
-        ("aes-gcm", 256) => Ok(Cipher::aes_256_gcm()),
-        ("aes-cbc", 128) => Ok(Cipher::aes_128_cbc()),
-        ("aes-cbc", 192) => Ok(Cipher::aes_192_cbc()),
-        ("aes-cbc", 256) => Ok(Cipher::aes_256_cbc()),
-        ("aes-ecb", 128) => Ok(Cipher::aes_128_ecb()),
-        ("aes-ecb", 192) => Ok(Cipher::aes_192_ecb()),
-        ("aes-ecb", 256) => Ok(Cipher::aes_256_ecb()),
-        #[cfg(feature = "crypto_adaptor_tongsuo")]
-        ("sm4-gcm", 128) => Ok(Cipher::sm4_gcm()),
-        #[cfg(feature = "crypto_adaptor_tongsuo")]
-        ("sm4-ccm", 128) => Ok(Cipher::sm4_ccm()),
+        ("aes-gcm", 128 | 192 | 256) => Ok(()),
+        ("aes-cbc", 128 | 192 | 256) => Ok(()),
+        ("aes-ecb", 128 | 192 | 256) => Ok(()),
         _ => Err(RvError::ErrPkiKeyBitsInvalid),
     }
+}
+
+fn aad_from_extra<'a>(default_aad: &'a [u8], extra: Option<EncryptExtraData<'a>>) -> &'a [u8] {
+    extra.map_or(default_aad, |ex| match ex {
+        EncryptExtraData::Aad(aad) => aad,
+        _ => default_aad,
+    })
 }
 
 impl KeyBundle {
@@ -88,35 +96,15 @@ impl KeyBundle {
                 let ec_key = EcKey::generate(&ec_group)?;
                 PKey::from_ec_key(ec_key)?.private_key_to_pem_pkcs8()?
             }
-            #[cfg(feature = "crypto_adaptor_tongsuo")]
-            "sm2" => {
+            key_type if is_symmetric_key_type(key_type) => {
+                validate_symmetric_key_bits(self.key_type.as_str(), self.bits)?;
                 self.bits = 256;
-                let ec_group = EcGroup::from_curve_name(Nid::SM2)?;
-                let ec_key = EcKey::generate(&ec_group)?;
-                PKey::from_ec_key(ec_key)?.private_key_to_pem_pkcs8()?
-            }
-            "aes-gcm" | "aes-cbc" | "aes-ecb" | "sm4-gcm" | "sm4-ccm" => {
-                let _ = cipher_from_key_type_and_bits(self.key_type.as_str(), self.bits)?;
 
-                #[cfg(not(feature = "crypto_adaptor_tongsuo"))]
-                if self.key_type.starts_with("sm4-") {
-                    return Err(RvError::ErrPkiKeyTypeInvalid);
-                }
+                self.iv = vec![0u8; 16];
+                OsRng.fill_bytes(&mut self.iv);
 
-                match self.key_type.as_str() {
-                    "aes-ecb" => (),
-                    "sm4-ccm" => {
-                        self.iv = vec![0u8; 12];
-                        rand_bytes(&mut self.iv)?;
-                    }
-                    _ => {
-                        self.iv = vec![0u8; 16];
-                        rand_bytes(&mut self.iv)?;
-                    }
-                }
-
-                let mut key = vec![0u8; key_bits as usize / 8];
-                rand_bytes(&mut key)?;
+                let mut key = vec![0u8; ML_KEM_768_SEED_LEN];
+                OsRng.fill_bytes(&mut key);
                 key
             }
             _ => return Err(RvError::ErrPkiKeyTypeInvalid),
@@ -130,8 +118,6 @@ impl KeyBundle {
     pub fn sign(&self, data: &[u8]) -> Result<Vec<u8>, RvError> {
         let digest = match self.key_type.as_str() {
             "rsa" | "ec" => MessageDigest::sha256(),
-            #[cfg(feature = "crypto_adaptor_tongsuo")]
-            "sm2" => MessageDigest::sm3(),
             _ => return Err(RvError::ErrPkiKeyOperationInvalid),
         };
 
@@ -149,8 +135,6 @@ impl KeyBundle {
     pub fn verify(&self, data: &[u8], signature: &[u8]) -> Result<bool, RvError> {
         let digest = match self.key_type.as_str() {
             "rsa" | "ec" => MessageDigest::sha256(),
-            #[cfg(feature = "crypto_adaptor_tongsuo")]
-            "sm2" => MessageDigest::sm3(),
             _ => return Err(RvError::ErrPkiKeyOperationInvalid),
         };
 
@@ -167,21 +151,15 @@ impl KeyBundle {
 
     pub fn encrypt(&self, data: &[u8], extra: Option<EncryptExtraData>) -> Result<Vec<u8>, RvError> {
         match self.key_type.as_str() {
-            "aes-gcm" | "sm4-gcm" | "sm4-ccm" => {
-                let cipher = cipher_from_key_type_and_bits(self.key_type.as_str(), self.bits)?;
-                let aad = extra.map_or("".as_bytes(), |ex| match ex {
-                    EncryptExtraData::Aad(aad) => aad,
-                    _ => "".as_bytes(),
-                });
-                let mut tag = vec![0u8; 16];
-                let mut ciphertext = encrypt_aead(cipher, &self.key, Some(&self.iv), aad, data, &mut tag)?;
-                ciphertext.extend_from_slice(&tag);
-                Ok(ciphertext)
-            }
-            "aes-cbc" | "aes-ecb" => {
-                let cipher = cipher_from_key_type_and_bits(self.key_type.as_str(), self.bits)?;
-                let iv = if self.key_type == "aes-ecb" { None } else { Some(self.iv.as_slice()) };
-                Ok(encrypt(cipher, &self.key, iv, data)?)
+            key_type if is_symmetric_key_type(key_type) => {
+                validate_symmetric_key_bits(self.key_type.as_str(), self.bits)?;
+                let aad = aad_from_extra(self.iv.as_slice(), extra);
+                let provider = MlKem768Provider;
+                let keypair =
+                    provider.keypair_from_seed(&self.key).map_err(|_| RvError::ErrPkiInternal)?;
+                let envelope =
+                    KemDemEnvelopeV1::seal(&provider, keypair.public_key(), aad, data).map_err(|_| RvError::ErrPkiInternal)?;
+                serde_json::to_vec(&envelope).map_err(From::from)
             }
             "rsa" => {
                 let rsa = Rsa::private_key_from_pem(&self.key)?;
@@ -209,23 +187,14 @@ impl KeyBundle {
 
     pub fn decrypt(&self, data: &[u8], extra: Option<EncryptExtraData>) -> Result<Vec<u8>, RvError> {
         match self.key_type.as_str() {
-            "aes-gcm" | "sm4-gcm" | "sm4-ccm" => {
-                let cipher = cipher_from_key_type_and_bits(self.key_type.as_str(), self.bits)?;
-                let aad = extra.map_or("".as_bytes(), |ex| match ex {
-                    EncryptExtraData::Aad(aad) => aad,
-                    _ => "".as_bytes(),
-                });
-                let tag_len = 16;
-                if data.len() < tag_len {
-                    return Err(RvError::ErrPkiInternal);
-                }
-                let (ciphertext, tag) = data.split_at(data.len() - tag_len);
-                Ok(decrypt_aead(cipher, &self.key, Some(&self.iv), aad, ciphertext, tag)?)
-            }
-            "aes-cbc" | "aes-ecb" => {
-                let cipher = cipher_from_key_type_and_bits(self.key_type.as_str(), self.bits)?;
-                let iv = if self.key_type == "aes-ecb" { None } else { Some(self.iv.as_slice()) };
-                Ok(decrypt(cipher, &self.key, iv, data)?)
+            key_type if is_symmetric_key_type(key_type) => {
+                validate_symmetric_key_bits(self.key_type.as_str(), self.bits)?;
+                let aad = aad_from_extra(self.iv.as_slice(), extra);
+                let envelope: KemDemEnvelopeV1 = serde_json::from_slice(data)?;
+                let provider = MlKem768Provider;
+                let keypair =
+                    provider.keypair_from_seed(&self.key).map_err(|_| RvError::ErrPkiInternal)?;
+                envelope.open(&provider, keypair.secret_key(), aad).map_err(|_| RvError::ErrPkiInternal)
             }
             "rsa" => {
                 let rsa = Rsa::private_key_from_pem(&self.key)?;
@@ -317,13 +286,6 @@ mod test {
     }
 
     #[test]
-    #[cfg(feature = "crypto_adaptor_tongsuo")]
-    fn test_sm2_key_operation() {
-        let mut key_bundle = KeyBundle::new("sm2", "sm2", 256);
-        test_key_sign_verify(&mut key_bundle);
-    }
-
-    #[test]
     fn test_aes_key_operation() {
         // test aes-gcm
         let mut key_bundle = KeyBundle::new("aes-gcm-128", "aes-gcm", 128);
@@ -357,19 +319,4 @@ mod test {
         test_key_encrypt_decrypt(&mut key_bundle, None);
     }
 
-    #[test]
-    #[cfg(feature = "crypto_adaptor_tongsuo")]
-    fn test_sm4_key_operation() {
-        // test sm4-gcm
-        let mut key_bundle = KeyBundle::new("sm4-gcm-128", "sm4-gcm", 128);
-        test_key_encrypt_decrypt(&mut key_bundle, None);
-        test_key_encrypt_decrypt(&mut key_bundle, None);
-        test_key_encrypt_decrypt(&mut key_bundle, Some(EncryptExtraData::Aad("bastion_vault".as_bytes())));
-
-        // test sm4-ccm
-        let mut key_bundle = KeyBundle::new("sm4-ccm-128", "sm4-ccm", 128);
-        test_key_encrypt_decrypt(&mut key_bundle, None);
-        test_key_encrypt_decrypt(&mut key_bundle, None);
-        test_key_encrypt_decrypt(&mut key_bundle, Some(EncryptExtraData::Aad("bastion_vault".as_bytes())));
-    }
 }

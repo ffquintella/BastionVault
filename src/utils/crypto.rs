@@ -19,18 +19,17 @@
 //! then you may prefer the BastionVault's [RESTful API documentation].
 //!
 //! [Hashicorp Vault]: https://www.hashicorp.com/products/vault
-//! [RESTful API documentation]: https://www.tongsuo.net
+//! [RESTful API documentation]: https://github.com/ffquintella/BastionVault
 
 use std::ops::DerefMut;
 
 use blake2b_simd::Params;
-use openssl::rand::rand_priv_bytes;
+use bv_crypto::{KemDemEnvelopeV1, MlKem768Provider, ML_KEM_768_SEED_LEN};
+use rand::{rngs::OsRng, RngCore};
 use serde::Serialize;
 use serde::{de::DeserializeOwned, Deserialize};
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
-
-use crate::modules::crypto::{AEADCipher, AESKeySize, BlockCipher, CipherMode, AES};
 
 /// Error types that can occur during cryptographic operations.
 ///
@@ -84,7 +83,8 @@ type Result<T, E = CryptoError> = std::result::Result<T, E>;
 
 /// A cryptographic key used for encryption and decryption operations.
 ///
-/// This struct provides a secure way to encrypt and decrypt data using AES-256-GCM.
+/// This struct provides a secure way to encrypt and decrypt data using a
+/// post-quantum KEM+DEM envelope.
 /// The key and additional authenticated data (AAD) are automatically zeroized when dropped
 /// for security purposes.
 ///
@@ -96,9 +96,9 @@ type Result<T, E = CryptoError> = std::result::Result<T, E>;
 #[derive(Default, Serialize, Deserialize, Zeroize)]
 #[zeroize(drop)]
 pub struct CryptoKey {
-    /// The encryption key (32 bytes for AES-256)
+    /// ML-KEM-768 deterministic seed material.
     key: Vec<u8>,
-    /// Additional Authenticated Data (AAD) for GCM mode (16 bytes)
+    /// Additional authenticated data bound into the envelope.
     aad: Vec<u8>,
 }
 
@@ -141,16 +141,16 @@ impl CryptoKey {
     /// - Key and AAD are generated independently
     /// - All sensitive data is zeroized on drop
     pub fn new() -> Self {
-        let mut key = Zeroizing::new(vec![0u8; 32]);
-        let _ = rand_priv_bytes(key.deref_mut().as_mut_slice());
+        let mut key = Zeroizing::new(vec![0u8; ML_KEM_768_SEED_LEN]);
+        OsRng.fill_bytes(key.deref_mut().as_mut_slice());
 
         let mut aad = Zeroizing::new(vec![0u8; 16]);
-        let _ = rand_priv_bytes(aad.deref_mut().as_mut_slice());
+        OsRng.fill_bytes(aad.deref_mut().as_mut_slice());
 
         Self { key: key.to_vec(), aad: aad.to_vec() }
     }
 
-    /// Encrypts a serializable value using AES-256-GCM.
+    /// Encrypts a serializable value using an ML-KEM-768 + ChaCha20-Poly1305 envelope.
     ///
     /// This method serializes the input value to JSON, then encrypts it using
     /// AES-256-GCM with a randomly generated nonce. The result includes the nonce,
@@ -166,40 +166,15 @@ impl CryptoKey {
     /// A `Result` containing the encrypted data as a byte vector, or an error if encryption fails.
     ///
     /// # Format
-    /// The returned data has the following structure:
-    /// - Bytes 0-15: Random nonce (16 bytes)
-    /// - Bytes 16-31: Authentication tag (16 bytes)
-    /// - Bytes 32+: Encrypted ciphertext
-    ///
-    /// # Security
-    /// - Uses AES-256-GCM for authenticated encryption
-    /// - Generates a fresh random nonce for each encryption
-    /// - Includes authentication tag for integrity verification
     pub fn encrypt<T: Serialize + DeserializeOwned>(&self, value: &T) -> Result<Vec<u8>> {
         let plaintext = serde_json::to_vec(value)?;
+        let provider = MlKem768Provider;
+        let keypair =
+            provider.keypair_from_seed(&self.key).map_err(|e| CryptoError::Custom(format!("invalid PQ seed: {e}")))?;
+        let envelope = KemDemEnvelopeV1::seal(&provider, keypair.public_key(), &self.aad, &plaintext)
+            .map_err(|e| CryptoError::Custom(format!("PQ encryption failed: {e}")))?;
 
-        let mut nonce = vec![0u8; 16];
-        let _ = rand_priv_bytes(&mut nonce);
-
-        let mut aes_encrypter = AES::new(
-            false,
-            Some(AESKeySize::AES256),
-            Some(CipherMode::GCM),
-            Some(self.key.clone()),
-            Some(nonce.clone()),
-        )?;
-
-        aes_encrypter.set_aad(self.aad.clone())?;
-
-        let ciphertext = aes_encrypter.encrypt(&plaintext)?;
-        let tag = aes_encrypter.get_tag()?;
-
-        let mut result = vec![];
-        result.extend_from_slice(&nonce);
-        result.extend_from_slice(&tag);
-        result.extend_from_slice(&ciphertext);
-
-        Ok(result)
+        Ok(serde_json::to_vec(&envelope)?)
     }
 
     /// Decrypts previously encrypted data and deserializes it to the original type.
@@ -217,31 +192,18 @@ impl CryptoKey {
     /// # Returns
     /// A `Result` containing the decrypted and deserialized value, or an error if decryption fails.
     ///
-    /// # Errors
-    /// - Returns `CryptoError::Custom` if the input data is too short (< 32 bytes)
-    /// - Returns `CryptoError::OpenSSL` if decryption fails
-    /// - Returns `CryptoError::SerdeJson` if deserialization fails
-    ///
-    /// # Security
-    /// - Verifies data integrity using the authentication tag
-    /// - Uses the same AAD that was used during encryption
-    /// - Validates ciphertext length before processing
     pub fn decrypt<T: Serialize + DeserializeOwned>(&self, value: &[u8]) -> Result<T> {
-        if value.len() < 32 {
+        if value.is_empty() {
             return Err(CryptoError::Custom("Invalid ciphertext length".to_string()));
         }
 
-        let nonce = value[0..16].to_vec();
-        let tag = value[16..32].to_vec();
-
-        let mut aes_decrypter =
-            AES::new(false, Some(AESKeySize::AES256), Some(CipherMode::GCM), Some(self.key.clone()), Some(nonce))?;
-
-        aes_decrypter.set_aad(self.aad.clone())?;
-
-        aes_decrypter.set_tag(tag)?;
-
-        let plaintext = aes_decrypter.decrypt(&value[32..].to_vec())?;
+        let envelope: KemDemEnvelopeV1 = serde_json::from_slice(value)?;
+        let provider = MlKem768Provider;
+        let keypair =
+            provider.keypair_from_seed(&self.key).map_err(|e| CryptoError::Custom(format!("invalid PQ seed: {e}")))?;
+        let plaintext = envelope
+            .open(&provider, keypair.secret_key(), &self.aad)
+            .map_err(|e| CryptoError::Custom(format!("PQ decryption failed: {e}")))?;
 
         Ok(serde_json::from_slice(&plaintext)?)
     }
@@ -436,7 +398,7 @@ mod tests {
         let key1 = CryptoKey::new();
         let key2 = CryptoKey::new();
 
-        assert_eq!(key1.key.len(), 32);
+        assert_eq!(key1.key.len(), ML_KEM_768_SEED_LEN);
         assert_eq!(key1.aad.len(), 16);
 
         assert_ne!(key1.key, key2.key);

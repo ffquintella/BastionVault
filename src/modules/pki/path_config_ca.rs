@@ -83,9 +83,6 @@ impl PkiBackendInner {
                     Id::EC => {
                         cert_bundle.private_key_type = "ec".to_string();
                     }
-                    Id::SM2 => {
-                        cert_bundle.private_key_type = "sm2".to_string();
-                    }
                     Id::ED25519 => {
                         cert_bundle.private_key_type = "ed25519".to_string();
                     }

@@ -160,7 +160,13 @@ mod test {
     use crate::{
         core::Core,
         test_utils::{new_unseal_test_bastion_vault, test_delete_api, test_mount_api, test_read_api, test_write_api},
+        utils::key::is_symmetric_key_type,
     };
+
+    const PQ_SEED_HEX: &str =
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    const PQ_SEED_HEX_BAD_LEN: &str =
+        "aa00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
     #[maybe_async::maybe_async]
     async fn config_ca(core: &Core, token: &str, path: &str) {
@@ -593,31 +599,6 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
         delete_root(&core, token, path, true).await;
     }
 
-    #[cfg(feature = "crypto_adaptor_tongsuo")]
-    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn test_pki_sm2_generate_root() {
-        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_pki_sm2_generate_root").await;
-        let token = &root_token;
-        let path = "sm2pki/";
-        let role_name = "test";
-
-        // mount pki backend to path: pki/
-        test_mount_api(&core, token, "pki", path).await;
-
-        // config ca
-        config_ca(&core, token, path).await;
-
-        // config role
-        config_role(&core, token, path, role_name, "sm2", 256).await;
-
-        generate_root(&core, token, path, true, "sm2", 256, true).await;
-        generate_root(&core, token, path, false, "sm2", 256, true).await;
-
-        issue_cert_by_generate_root(&core, token, path, role_name, "sm2", 256).await;
-
-        delete_root(&core, token, path, true).await;
-    }
-
     #[maybe_async::maybe_async]
     async fn test_pki_generate_key_case(
         core: &Core,
@@ -656,7 +637,8 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
         println!("generate key result: {:?}", key_data);
         assert_eq!(key_data["key_name"].as_str().unwrap(), key_name);
         assert_eq!(key_data["key_type"].as_str().unwrap(), key_type);
-        assert_eq!(key_data["key_bits"].as_u64().unwrap(), key_bits as u64);
+        let expected_bits = if is_symmetric_key_type(key_type) { 256 } else { key_bits };
+        assert_eq!(key_data["key_bits"].as_u64().unwrap(), expected_bits as u64);
         if exported {
             assert!(key_data["private_key"].as_str().is_some());
             let private_key_pem = key_data["private_key"].as_str().unwrap();
@@ -674,7 +656,7 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
                 "aes-gcm" | "aes-cbc" | "aes-ecb" => {
                     let aes_key = hex::decode(private_key_pem.as_bytes());
                     assert!(aes_key.is_ok());
-                    assert_eq!(aes_key.unwrap().len() as u32 * 8, key_bits);
+                    assert_eq!(aes_key.unwrap().len(), bv_crypto::ML_KEM_768_SEED_LEN);
                 }
                 _ => {}
             }
@@ -727,7 +709,8 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
         println!("import key result: {:?}", key_data);
         assert_eq!(key_data["key_name"].as_str().unwrap(), key_name);
         assert_eq!(key_data["key_type"].as_str().unwrap(), key_type);
-        assert_eq!(key_data["key_bits"].as_u64().unwrap(), key_bits as u64);
+        let expected_bits = if is_symmetric_key_type(key_type) { 256 } else { key_bits };
+        assert_eq!(key_data["key_bits"].as_u64().unwrap(), expected_bits as u64);
     }
 
     #[maybe_async::maybe_async]
@@ -1495,7 +1478,7 @@ xxxxxxxxxxxxxx
             "aes-gcm",
             128,
             "1c499088cddd0382918bd5650718533d",
-            "cfe0f571fe695c6a4c5e34339d32eb3c",
+            PQ_SEED_HEX,
             true,
         )
         .await;
@@ -1507,7 +1490,7 @@ xxxxxxxxxxxxxx
             "aes-gcm",
             192,
             "1c499088cddd0382918bd5650718533d",
-            "3077fdca16350c85c354a700bbc127972dafe2138874cdea",
+            PQ_SEED_HEX,
             true,
         )
         .await;
@@ -1519,7 +1502,7 @@ xxxxxxxxxxxxxx
             "aes-gcm",
             256,
             "1c499088cddd0382918bd5650718533d",
-            "6349e3032b690f2fe61a824746ac3ab05c1829a4147f4891f595dfb19cddfd06",
+            PQ_SEED_HEX,
             true,
         )
         .await;
@@ -1543,7 +1526,7 @@ xxxxxxxxxxxxxx
             "aes-gcmm",
             256,
             "1c499088cddd0382918bd5650718533d",
-            "6349e3032b690f2fe61a824746ac3ab05c1829a4147f4891f595dfb19cddfd06",
+            PQ_SEED_HEX,
             false,
         )
         .await;
@@ -1555,7 +1538,7 @@ xxxxxxxxxxxxxx
             "aes-gcm",
             256,
             "1c499088cddd0382918bd5650718533d",
-            "aa6349e3032b690f2fe61a824746ac3ab05c1829a4147f4891f595dfb19cddfd06",
+            PQ_SEED_HEX_BAD_LEN,
             false,
         )
         .await;
@@ -1574,7 +1557,7 @@ xxxxxxxxxxxxxx
             "aes-cbc",
             128,
             "1c499088cddd0382918bd5650718533d",
-            "77628ff2c35adc7efdecfb0e86a4576f",
+            PQ_SEED_HEX,
             true,
         )
         .await;
@@ -1586,7 +1569,7 @@ xxxxxxxxxxxxxx
             "aes-cbc",
             192,
             "1c499088cddd0382918bd5650718533d",
-            "807f5f15d2924f104700f058030298c8591d0f6b5163b333",
+            PQ_SEED_HEX,
             true,
         )
         .await;
@@ -1598,7 +1581,7 @@ xxxxxxxxxxxxxx
             "aes-cbc",
             256,
             "1c499088cddd0382918bd5650718533d",
-            "521fc4bb8ee6015ac5a6e3e611854aa7608a17413f72ee007e799dac303853e1",
+            PQ_SEED_HEX,
             true,
         )
         .await;
@@ -1622,7 +1605,7 @@ xxxxxxxxxxxxxx
             "aes-cbcc",
             256,
             "1c499088cddd0382918bd5650718533d",
-            "521fc4bb8ee6015ac5a6e3e611854aa7608a17413f72ee007e799dac303853e1",
+            PQ_SEED_HEX,
             false,
         )
         .await;
@@ -1634,7 +1617,7 @@ xxxxxxxxxxxxxx
             "aes-cbc",
             256,
             "1c499088cddd0382918bd5650718533d",
-            "21521fc4bb8ee6015ac5a6e3e611854aa7608a17413f72ee007e799dac303853e1",
+            PQ_SEED_HEX_BAD_LEN,
             false,
         )
         .await;
@@ -1653,7 +1636,7 @@ xxxxxxxxxxxxxx
             "aes-ecb",
             128,
             "",
-            "38a1f9ad74562db696872cbfa10cc46e",
+            PQ_SEED_HEX,
             true,
         )
         .await;
@@ -1665,7 +1648,7 @@ xxxxxxxxxxxxxx
             "aes-ecb",
             192,
             "",
-            "b80f65a5a334e583bafd18d2e86667384ae16cb0467982de",
+            PQ_SEED_HEX,
             true,
         )
         .await;
@@ -1677,7 +1660,7 @@ xxxxxxxxxxxxxx
             "aes-ecb",
             256,
             "",
-            "95b622ebf838b0b8b4cc60635333f87f9b10bcbe340b710020a6e9789156c052",
+            PQ_SEED_HEX,
             true,
         )
         .await;
@@ -1691,7 +1674,7 @@ xxxxxxxxxxxxxx
             "aes-ecbb",
             256,
             "",
-            "95b622ebf838b0b8b4cc60635333f87f9b10bcbe340b710020a6e9789156c052",
+            PQ_SEED_HEX,
             false,
         )
         .await;
@@ -1703,7 +1686,7 @@ xxxxxxxxxxxxxx
             "aes-ecb",
             256,
             "",
-            "2295b622ebf838b0b8b4cc60635333f87f9b10bcbe340b710020a6e9789156c052",
+            PQ_SEED_HEX_BAD_LEN,
             false,
         )
         .await;
