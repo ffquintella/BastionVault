@@ -353,7 +353,7 @@ impl Certificate {
     pub fn to_cert_bundle(
         &mut self,
         ca_cert: Option<&X509Ref>,
-        ca_key: Option<&PKey<Private>>,
+        ca_key_pem: Option<&[u8]>,
     ) -> Result<CertBundle, RvError> {
         let key_bits = self.key_bits;
         let priv_key = match self.key_type.as_str() {
@@ -379,7 +379,13 @@ impl Certificate {
             _ => return Err(RvError::ErrPkiKeyTypeInvalid),
         };
 
-        let cert = self.to_x509(ca_cert, ca_key, &priv_key)?;
+        let ca_key = if let Some(pem) = ca_key_pem {
+            Some(PKey::private_key_from_pem(pem)?)
+        } else {
+            None
+        };
+
+        let cert = self.to_x509(ca_cert, ca_key.as_ref(), &priv_key)?;
         let serial_number = cert.serial_number().to_bn()?;
         let serial_number_hex = serial_number.to_hex_str()?;
         let serial_number_hex = serial_number_hex
@@ -537,7 +543,7 @@ x/+V28hUf8m8P2NxP5ALaDZagdaMfzjGZo3O3wDv33Cds0P5GMGQYnRXDxcZN/2L
         assert!(x509.is_ok());
         let x509_pem = x509.unwrap().to_pem().unwrap();
         println!("x509_pem: \n{}", String::from_utf8_lossy(&x509_pem));
-        let cert_bundle = cert.to_cert_bundle(Some(&ca_cert), Some(&ca_key));
+        let cert_bundle = cert.to_cert_bundle(Some(&ca_cert), Some(ca_key_pem.as_bytes()));
         assert!(cert_bundle.is_ok());
         let cert_bundle = cert_bundle.unwrap();
         assert!(cert_bundle.private_key_as_pkey().unwrap().public_eq(&cert_bundle.certificate.public_key().unwrap()));
