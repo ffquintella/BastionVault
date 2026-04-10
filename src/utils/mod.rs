@@ -5,10 +5,12 @@ use std::time::{Duration, SystemTime};
 
 use blake3;
 use chrono::prelude::*;
+use hmac::{Hmac, Mac};
 use humantime::{format_rfc3339, parse_duration, parse_rfc3339};
-use openssl::hash::{Hasher, MessageDigest};
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha1::Sha1;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 use crate::errors::RvError;
@@ -330,17 +332,31 @@ pub fn is_str_subset<T: PartialEq>(sub: &Vec<T>, superset: &Vec<T>) -> bool {
 }
 
 pub fn sha1(data: &[u8]) -> String {
-    let mut hasher = Hasher::new(MessageDigest::sha1()).unwrap();
-    hasher.update(data).unwrap();
-    let result = hasher.finish().unwrap();
-    hex::encode(result)
+    let mut hasher = Sha1::new();
+    hasher.update(data);
+    hex::encode(hasher.finalize())
 }
 
 pub fn sha256(data: &[u8]) -> String {
-    let mut hasher = Hasher::new(MessageDigest::sha256()).unwrap();
-    hasher.update(data).unwrap();
-    let result = hasher.finish().unwrap();
-    hex::encode(result)
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hex::encode(hasher.finalize())
+}
+
+pub fn hmac_sha256_hex(key: &[u8], data: &[u8]) -> Result<String, RvError> {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(key).map_err(|_| RvError::ErrResponse("invalid hmac key".to_string()))?;
+    mac.update(data);
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+pub fn verify_hmac_sha256_hex(key: &[u8], data: &[u8], expected_hex: &str) -> Result<bool, RvError> {
+    let expected =
+        hex::decode(expected_hex).map_err(|_| RvError::ErrResponse("invalid hmac hex".to_string()))?;
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(key).map_err(|_| RvError::ErrResponse("invalid hmac key".to_string()))?;
+    mac.update(data);
+    Ok(mac.verify_slice(&expected).is_ok())
 }
 
 pub fn serialize_system_time<S>(time: &SystemTime, serializer: S) -> Result<S::Ok, S::Error>

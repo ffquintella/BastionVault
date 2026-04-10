@@ -18,11 +18,6 @@ use crossbeam_channel::{select, tick};
 use dashmap::DashMap;
 use derive_more::Deref;
 use lazy_static::lazy_static;
-use openssl::{
-    hash::MessageDigest,
-    pkey::PKey,
-    sign::{Signer, Verifier},
-};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -31,7 +26,7 @@ use crate::{
     errors::RvError,
     router::Router,
     storage::{barrier::SecurityBarrier, barrier_view::BarrierView, Storage, StorageEntry},
-    utils::{generate_uuid, is_protect_path},
+    utils::{generate_uuid, hmac_sha256_hex, is_protect_path, verify_hmac_sha256_hex},
 };
 
 pub const LOGICAL_BARRIER_PREFIX: &str = "logical/";
@@ -191,21 +186,14 @@ impl MountEntry {
 
     pub fn calc_hmac(&mut self, key: &[u8]) -> Result<(), RvError> {
         let msg = self.get_hmac_msg();
-        let pkey = PKey::hmac(key)?;
-        let mut signer = Signer::new(MessageDigest::sha256(), &pkey)?;
-        signer.update(msg.as_bytes())?;
-        let hmac = signer.sign_to_vec()?;
-        self.hmac = hex::encode(hmac.as_slice());
+        self.hmac = hmac_sha256_hex(key, msg.as_bytes())?;
 
         Ok(())
     }
 
     pub fn verify_hmac(&self, key: &[u8]) -> Result<bool, RvError> {
         let msg = self.get_hmac_msg();
-        let pkey = PKey::hmac(key)?;
-        let mut verifier = Verifier::new(MessageDigest::sha256(), &pkey).unwrap();
-        verifier.update(msg.as_bytes())?;
-        Ok(verifier.verify(self.hmac.as_bytes())?)
+        verify_hmac_sha256_hex(key, msg.as_bytes(), &self.hmac)
     }
 
     pub fn get_hmac_msg(&self) -> String {

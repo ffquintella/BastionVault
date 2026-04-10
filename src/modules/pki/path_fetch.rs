@@ -1,6 +1,5 @@
 use std::{collections::HashMap, sync::Arc};
 
-use openssl::x509::X509;
 use serde_json::json;
 
 use super::{PkiBackend, PkiBackendInner};
@@ -93,17 +92,10 @@ Using "ca" or "crl" as the value fetches the appropriate information in DER enco
 #[maybe_async::maybe_async]
 impl PkiBackendInner {
     pub async fn handle_fetch_cert_bundle(&self, cert_bundle: &CertBundle) -> Result<Option<Response>, RvError> {
-        let ca_chain_pem: String = cert_bundle
-            .ca_chain
-            .iter()
-            .rev()
-            .map(|x509| x509.to_pem().unwrap())
-            .map(|pem| String::from_utf8_lossy(&pem).to_string())
-            .collect::<Vec<String>>()
-            .join("");
+        let ca_chain_pem = crate::utils::cert::certificate_chain_pem_string(&cert_bundle.ca_chain, true)?;
         let resp_data = json!({
             "ca_chain": ca_chain_pem,
-            "certificate": String::from_utf8_lossy(&cert_bundle.certificate.to_pem()?),
+            "certificate": crate::utils::cert::certificate_pem_string(&cert_bundle.certificate)?,
             "serial_number": cert_bundle.serial_number.clone(),
         })
         .as_object()
@@ -137,23 +129,16 @@ impl PkiBackendInner {
         let serial_number_value = req.get_data("serial")?;
         let serial_number = serial_number_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?;
         let serial_number_hex = serial_number.replace(':', "-").to_lowercase();
-        let cert = self.fetch_cert(req, &serial_number_hex).await?;
+        let cert_der = self.fetch_cert_der(req, &serial_number_hex).await?;
         let ca_bundle = self.fetch_ca_bundle(req).await?;
 
-        let mut ca_chain_pem: String = ca_bundle
-            .ca_chain
-            .iter()
-            .rev()
-            .map(|x509| x509.to_pem().unwrap())
-            .map(|pem| String::from_utf8_lossy(&pem).to_string())
-            .collect::<Vec<String>>()
-            .join("");
+        let mut ca_chain_pem = crate::utils::cert::certificate_chain_pem_string(&ca_bundle.ca_chain, true)?;
 
-        ca_chain_pem = ca_chain_pem + &String::from_utf8_lossy(&ca_bundle.certificate.to_pem().unwrap());
+        ca_chain_pem.push_str(&crate::utils::cert::certificate_pem_string(&ca_bundle.certificate)?);
 
         let resp_data = json!({
             "ca_chain": ca_chain_pem,
-            "certificate": String::from_utf8_lossy(&cert.to_pem()?),
+            "certificate": crate::utils::cert::certificate_pem_string_from_der(&cert_der)?,
             "serial_number": serial_number,
         })
         .as_object()
@@ -170,18 +155,16 @@ impl PkiBackendInner {
         Ok(None)
     }
 
-    pub async fn fetch_cert(&self, req: &Request, serial_number: &str) -> Result<X509, RvError> {
+    pub async fn fetch_cert_der(&self, req: &Request, serial_number: &str) -> Result<Vec<u8>, RvError> {
         let entry = req.storage_get(format!("certs/{serial_number}").as_str()).await?;
         if entry.is_none() {
             return Err(RvError::ErrPkiCertNotFound);
         }
 
-        let cert: X509 = X509::from_der(entry.unwrap().value.as_slice())?;
-        Ok(cert)
+        Ok(entry.unwrap().value)
     }
 
-    pub async fn store_cert(&self, req: &Request, serial_number: &str, cert: &X509) -> Result<(), RvError> {
-        let value = cert.to_der()?;
+    pub async fn store_cert_der(&self, req: &Request, serial_number: &str, value: Vec<u8>) -> Result<(), RvError> {
         let entry = StorageEntry { key: format!("certs/{serial_number}"), value };
         req.storage_put(&entry).await?;
         Ok(())

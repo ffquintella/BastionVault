@@ -5,7 +5,6 @@ use std::{
 };
 
 use humantime::parse_duration;
-use openssl::asn1::Asn1Time;
 use serde_json::{json, Map, Value};
 
 use super::{util, PkiBackend, PkiBackendInner};
@@ -80,20 +79,8 @@ impl PkiBackendInner {
             let ttl = ttl_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?;
             let ttl_dur = parse_duration(ttl)?;
             let req_ttl_not_after_dur = SystemTime::now() + ttl_dur;
-            let req_ttl_not_after =
-                Asn1Time::from_unix(req_ttl_not_after_dur.duration_since(UNIX_EPOCH)?.as_secs() as i64)?;
-            let ca_not_after = ca_bundle.certificate.not_after();
-            match ca_not_after.compare(&req_ttl_not_after) {
-                Ok(ret) => {
-                    if ret == std::cmp::Ordering::Less {
-                        return Err(RvError::ErrRequestInvalid);
-                    }
-                    not_after = req_ttl_not_after_dur;
-                }
-                Err(err) => {
-                    return Err(RvError::OpenSSL { source: err });
-                }
-            }
+            utils::cert::ensure_not_after_within_ca(&ca_bundle.certificate, req_ttl_not_after_dur)?;
+            not_after = req_ttl_not_after_dur;
         }
 
         // Build the Certificate (subject name + SANs) via the shared utility, then
@@ -106,23 +93,17 @@ impl PkiBackendInner {
 
         if !role_entry.no_store {
             let serial_number_hex = cert_bundle.serial_number.replace(':', "-").to_lowercase();
-            self.store_cert(req, &serial_number_hex, &cert_bundle.certificate).await?;
+            self.store_cert_der(req, &serial_number_hex, cert_bundle.certificate.to_der()?).await?;
         }
 
         let cert_expiration = utils::asn1time_to_timestamp(cert_bundle.certificate.not_after().to_string().as_str())?;
-        let ca_chain_pem: String = cert_bundle
-            .ca_chain
-            .iter()
-            .map(|x509| x509.to_pem().unwrap())
-            .map(|pem| String::from_utf8_lossy(&pem).to_string())
-            .collect::<Vec<String>>()
-            .join("");
+        let ca_chain_pem = utils::cert::certificate_chain_pem_string(&cert_bundle.ca_chain, false)?;
 
         let resp_data = json!({
             "expiration": cert_expiration,
-            "issuing_ca": String::from_utf8_lossy(&ca_bundle.certificate.to_pem()?),
+            "issuing_ca": utils::cert::certificate_pem_string(&ca_bundle.certificate)?,
             "ca_chain": ca_chain_pem,
-            "certificate": String::from_utf8_lossy(&cert_bundle.certificate.to_pem()?),
+            "certificate": utils::cert::certificate_pem_string(&cert_bundle.certificate)?,
             "private_key": String::from_utf8_lossy(&cert_bundle.private_key),
             "private_key_type": cert_bundle.private_key_type.clone(),
             "serial_number": cert_bundle.serial_number.clone(),

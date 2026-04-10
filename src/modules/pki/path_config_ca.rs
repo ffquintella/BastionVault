@@ -1,11 +1,5 @@
 use std::{collections::HashMap, sync::Arc};
 
-use openssl::{
-    pkey::{Id, PKey},
-    x509::X509,
-};
-use pem;
-
 use super::{PkiBackend, PkiBackendInner};
 use crate::{
     context::Context,
@@ -49,51 +43,7 @@ impl PkiBackendInner {
     pub async fn write_path_ca(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let pem_bundle_value = req.get_data("pem_bundle")?;
         let pem_bundle = pem_bundle_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?;
-
-        let items = pem::parse_many(pem_bundle)?;
-        let mut key_found = false;
-        let mut i = 0;
-
-        let mut cert_bundle = CertBundle::default();
-
-        for item in items {
-            if item.tag() == "CERTIFICATE" {
-                let cert = X509::from_der(item.contents())?;
-                if !cert::is_ca_cert(&cert) {
-                    return Err(RvError::ErrPkiPemBundleInvalid);
-                }
-
-                if i == 0 {
-                    cert_bundle.certificate = cert;
-                } else {
-                    cert_bundle.ca_chain.push(cert);
-                }
-                i += 1;
-            }
-            if item.tag() == "PRIVATE KEY" {
-                if key_found {
-                    return Err(RvError::ErrPkiPemBundleInvalid);
-                }
-
-                let key = PKey::private_key_from_der(item.contents())?;
-                match key.id() {
-                    Id::RSA => {
-                        cert_bundle.private_key_type = "rsa".to_string();
-                    }
-                    Id::EC => {
-                        cert_bundle.private_key_type = "ec".to_string();
-                    }
-                    Id::ED25519 => {
-                        cert_bundle.private_key_type = "ed25519".to_string();
-                    }
-                    _ => {
-                        cert_bundle.private_key_type = "other".to_string();
-                    }
-                }
-                cert_bundle.private_key = key.private_key_to_pem_pkcs8()?;
-                key_found = true;
-            }
-        }
+        let cert_bundle = cert::cert_bundle_from_pem_bundle(pem_bundle)?;
 
         cert_bundle.verify()?;
 
@@ -126,7 +76,7 @@ impl PkiBackendInner {
         req.storage_put(&entry).await?;
 
         let serial_number_hex = ca_bundle.serial_number.replace(':', "-").to_lowercase();
-        self.store_cert(req, &serial_number_hex, &ca_bundle.certificate).await?;
+        self.store_cert_der(req, &serial_number_hex, ca_bundle.certificate.to_der()?).await?;
 
         Ok(())
     }

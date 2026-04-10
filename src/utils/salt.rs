@@ -3,12 +3,8 @@
 
 use better_default::Default;
 use derivative::Derivative;
-use openssl::{
-    hash::{hash, MessageDigest},
-    nid::Nid,
-    pkey::PKey,
-    sign::Signer,
-};
+use hmac::{Hmac, Mac};
+use sha2::{Digest, Sha256};
 
 use super::generate_uuid;
 use crate::{
@@ -17,6 +13,29 @@ use crate::{
 };
 
 static DEFAULT_LOCATION: &str = "salt";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DigestAlgorithm {
+    Sha1,
+    #[default]
+    Sha256,
+}
+
+impl DigestAlgorithm {
+    fn hmac_label(self) -> &'static str {
+        match self {
+            Self::Sha1 => "hmac-sha1",
+            Self::Sha256 => "hmac-sha256",
+        }
+    }
+
+    fn output_size(self) -> usize {
+        match self {
+            Self::Sha1 => 20,
+            Self::Sha256 => 32,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct Salt {
@@ -33,11 +52,11 @@ pub struct Config {
     #[default(DEFAULT_LOCATION.to_string())]
     pub location: String,
     #[derivative(Debug = "ignore")]
-    #[default(MessageDigest::sha256())]
-    pub hash_type: MessageDigest,
+    #[default(DigestAlgorithm::Sha256)]
+    pub hash_type: DigestAlgorithm,
     #[derivative(Debug = "ignore")]
-    #[default(MessageDigest::sha256())]
-    pub hmac_type: MessageDigest,
+    #[default(DigestAlgorithm::Sha256)]
+    pub hmac_type: DigestAlgorithm,
 }
 
 #[maybe_async::maybe_async]
@@ -79,30 +98,40 @@ impl Salt {
     }
 
     pub fn get_hmac(&self, data: &str) -> Result<String, RvError> {
-        let pkey = PKey::hmac(self.salt.as_bytes())?;
-        let mut signer = Signer::new(self.config.hmac_type, &pkey)?;
-        signer.update(data.as_bytes())?;
-        let hmac = signer.sign_to_vec()?;
-        Ok(hex::encode(hmac.as_slice()))
+        match self.config.hmac_type {
+            DigestAlgorithm::Sha1 => {
+                let mut mac = Hmac::<sha1::Sha1>::new_from_slice(self.salt.as_bytes())
+                    .map_err(|_| RvError::ErrResponse("invalid hmac key".to_string()))?;
+                mac.update(data.as_bytes());
+                Ok(hex::encode(mac.finalize().into_bytes()))
+            }
+            DigestAlgorithm::Sha256 => {
+                let mut mac = Hmac::<Sha256>::new_from_slice(self.salt.as_bytes())
+                    .map_err(|_| RvError::ErrResponse("invalid hmac key".to_string()))?;
+                mac.update(data.as_bytes());
+                Ok(hex::encode(mac.finalize().into_bytes()))
+            }
+        }
     }
 
     pub fn get_identified_hamc(&self, data: &str) -> Result<String, RvError> {
-        let hmac_type = match self.config.hmac_type.type_() {
-            Nid::SHA256 => "hmac-sha256",
-            Nid::SM3 => "hmac-sm3",
-            Nid::MD5 => "hmac-md5",
-            _ => "hmac-unknown",
-        };
-
         let hmac = self.get_hmac(data)?;
-
-        Ok(format!("{hmac_type}:{hmac}"))
+        Ok(format!("{}:{hmac}", self.config.hmac_type.hmac_label()))
     }
 
     pub fn get_hash(&self, data: &str) -> Result<String, RvError> {
-        let ret = hash(self.config.hash_type, data.as_bytes())?;
-        let bytes = ret.to_vec();
-        Ok(hex::encode(bytes.as_slice()))
+        match self.config.hash_type {
+            DigestAlgorithm::Sha1 => {
+                let mut hasher = sha1::Sha1::new();
+                hasher.update(data.as_bytes());
+                Ok(hex::encode(hasher.finalize()))
+            }
+            DigestAlgorithm::Sha256 => {
+                let mut hasher = Sha256::new();
+                hasher.update(data.as_bytes());
+                Ok(hex::encode(hasher.finalize()))
+            }
+        }
     }
 
     pub fn salt_id(&self, id: &str) -> Result<String, RvError> {
@@ -172,6 +201,6 @@ mod test {
         let sid1 = sid1.unwrap();
         let sid2 = sid2.unwrap();
         assert_eq!(sid1, sid2);
-        assert_eq!(sid1.len(), salt.config.hash_type.size() * 2);
+        assert_eq!(sid1.len(), salt.config.hash_type.output_size() * 2);
     }
 }

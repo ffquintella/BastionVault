@@ -7,14 +7,15 @@ use std::{
     sync::Arc,
 };
 
+use aes_gcm::{
+    aead::{AeadInPlace, KeyInit},
+    Aes256Gcm, Nonce, Tag,
+};
 use arc_swap::ArcSwap;
 use better_default::Default;
-use openssl::{
-    hash::{hash, MessageDigest},
-    symm::{Cipher, Crypter, Mode},
-};
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{
@@ -28,6 +29,8 @@ const KEY_EPOCH: u8 = 1;
 const AES_GCM_VERSION1: u8 = 0x1;
 const AES_GCM_VERSION2: u8 = 0x2;
 const AES_BLOCK_SIZE: usize = 16;
+const AES_GCM_NONCE_SIZE: usize = 12;
+const AES_GCM_TAG_SIZE: usize = 16;
 
 // the BarrierInit structure contains the encryption key, so it's zeroized anyway
 // when it's dropped
@@ -220,9 +223,7 @@ impl SecurityBarrier for AESGCMBarrier {
         }
 
         let key = Zeroizing::new(barrier_info.key.clone().unwrap());
-
-        let ret = hash(MessageDigest::sha256(), key.deref().as_slice())?;
-        Ok(ret.to_vec())
+        Ok(Sha256::digest(key.deref().as_slice()).to_vec())
     }
 
     fn as_storage(&self) -> &dyn Storage {
@@ -257,43 +258,40 @@ impl AESGCMBarrier {
             return Err(RvError::ErrBarrierNotInit);
         }
 
-        let cipher = Cipher::aes_256_gcm();
-        let iv_len = cipher.iv_len().unwrap_or(0);
-        let tag_len = 16;
-        let block_size = cipher.block_size();
-
         // XXX: the cloned variable 'key' will be zeroized automatically on drop
         let key = Zeroizing::new(barrier_info.key.clone().unwrap());
+        let cipher =
+            Aes256Gcm::new_from_slice(key.deref().as_slice()).map_err(|_| RvError::ErrBarrierKeyInvalid)?;
 
-        let size: usize = EPOCH_SIZE + 1 + iv_len + plaintext.len() + tag_len;
-        let mut out = vec![0u8; size + block_size];
+        let size: usize = EPOCH_SIZE + 1 + AES_GCM_NONCE_SIZE + plaintext.len() + AES_GCM_TAG_SIZE;
+        let mut out = vec![0u8; size];
         out[3] = KEY_EPOCH;
         out[4] = barrier_info.aes_gcm_version_byte;
 
         // Generate a random nonce
-        let mut nonce = Zeroizing::new(vec![0u8; iv_len]);
-        let iv = match iv_len {
-            0 => None,
-            _ => {
-                thread_rng().fill(nonce.deref_mut().as_mut_slice());
-                out[5..5 + iv_len].copy_from_slice(nonce.deref().as_slice());
-                Some(nonce.deref().as_slice())
-            }
+        let mut nonce = Zeroizing::new(vec![0u8; AES_GCM_NONCE_SIZE]);
+        thread_rng().fill(nonce.deref_mut().as_mut_slice());
+        out[5..5 + AES_GCM_NONCE_SIZE].copy_from_slice(nonce.deref().as_slice());
+
+        let aad = if barrier_info.aes_gcm_version_byte == AES_GCM_VERSION2 {
+            path.as_bytes()
+        } else {
+            &[]
         };
 
-        let mut encrypter = Crypter::new(cipher, Mode::Encrypt, key.deref().as_slice(), iv)?;
+        let ciphertext_start = EPOCH_SIZE + 1 + AES_GCM_NONCE_SIZE;
+        let tag_start = ciphertext_start + plaintext.len();
+        out[ciphertext_start..tag_start].copy_from_slice(plaintext);
 
-        encrypter.pad(false);
+        let tag = cipher
+            .encrypt_in_place_detached(
+                Nonce::from_slice(nonce.deref().as_slice()),
+                aad,
+                &mut out[ciphertext_start..tag_start],
+            )
+            .map_err(|_| RvError::ErrBarrierKeyGenerationFailed)?;
 
-        if barrier_info.aes_gcm_version_byte == AES_GCM_VERSION2 {
-            encrypter.aad_update(path.as_bytes())?;
-        }
-
-        let mut count = encrypter.update(plaintext, &mut out[EPOCH_SIZE + 1 + iv_len..])?;
-        count += encrypter.finalize(&mut out[EPOCH_SIZE + 1 + iv_len + count..])?;
-        out.truncate(EPOCH_SIZE + 1 + iv_len + count + tag_len);
-
-        encrypter.get_tag(&mut out[EPOCH_SIZE + 1 + iv_len + count..])?;
+        out[tag_start..tag_start + AES_GCM_TAG_SIZE].copy_from_slice(tag.as_slice());
 
         Ok(out)
     }
@@ -308,43 +306,32 @@ impl AESGCMBarrier {
             return Err(RvError::ErrBarrierEpochMismatch);
         }
 
-        let cipher = Cipher::aes_256_gcm();
-        let block_size = cipher.block_size();
-        let iv_len = cipher.iv_len().unwrap_or(0);
-        let tag_len = 16;
+        if ciphertext.len() < EPOCH_SIZE + 1 + AES_GCM_NONCE_SIZE + AES_GCM_TAG_SIZE {
+            return Err(RvError::ErrBarrierVersionMismatch);
+        }
 
         let key = Zeroizing::new(barrier_info.key.clone().unwrap());
-
-        let iv = match iv_len {
-            0 => None,
-            _ => Some(&ciphertext[5..5 + iv_len]),
-        };
-
-        let mut decrypter = Crypter::new(cipher, Mode::Decrypt, key.deref().as_slice(), iv)?;
-
-        decrypter.pad(false);
+        let cipher =
+            Aes256Gcm::new_from_slice(key.deref().as_slice()).map_err(|_| RvError::ErrBarrierKeyInvalid)?;
 
         match ciphertext[4] {
             AES_GCM_VERSION1 => {}
             AES_GCM_VERSION2 => {
-                decrypter.aad_update(path.as_bytes())?;
             }
             _ => {
                 return Err(RvError::ErrBarrierVersionMismatch);
             }
         };
 
-        let raw = &ciphertext[5 + iv_len..ciphertext.len() - tag_len];
-        let tag = &ciphertext[ciphertext.len() - tag_len..ciphertext.len()];
-        let size = ciphertext.len() - 5 - iv_len - tag_len;
-        let mut out = vec![0u8; size + block_size];
+        let aad = if ciphertext[4] == AES_GCM_VERSION2 { path.as_bytes() } else { &[] };
+        let nonce = Nonce::from_slice(&ciphertext[5..5 + AES_GCM_NONCE_SIZE]);
+        let raw = &ciphertext[5 + AES_GCM_NONCE_SIZE..ciphertext.len() - AES_GCM_TAG_SIZE];
+        let tag = Tag::from_slice(&ciphertext[ciphertext.len() - AES_GCM_TAG_SIZE..]);
+        let mut out = raw.to_vec();
 
-        let mut count = decrypter.update(raw, &mut out)?;
-
-        decrypter.set_tag(tag)?;
-
-        count += decrypter.finalize(&mut out[count..])?;
-        out.truncate(count);
+        cipher
+            .decrypt_in_place_detached(nonce, aad, &mut out, tag)
+            .map_err(|_| RvError::ErrBarrierUnsealFailed)?;
 
         Ok(out)
     }

@@ -12,9 +12,9 @@ The strategy, target architecture, and phase definitions remain in [post-quantum
 Overall state: active, partially implemented
 
 Current focus:
-- finish the remaining PKI and certificate cleanup
-- migrate TLS and runtime server paths away from OpenSSL
+- continue reducing the remaining OpenSSL-heavy PKI core in `src/utils/cert.rs`
 - keep new crypto work isolated in smaller modules and crates
+- maintain broad validation coverage as the migration advances
 
 ## Checklist
 
@@ -58,15 +58,20 @@ Current focus:
 - [x] Replace `CertBundle.private_key: PKey<Private>` with `Vec<u8>` (PKCS8 PEM bytes) — `CertBundle` no longer holds an OpenSSL type as a stored field; add `private_key_as_pkey()` helper for on-demand conversion; update all callers (`path_config_ca.rs`, `path_issue.rs`, `path_root.rs`)
 - [x] Change `Certificate::to_cert_bundle()` to accept CA key PEM bytes (`Option<&[u8]>`) instead of `Option<&PKey<Private>>`; `path_issue.rs` now passes bytes directly with no OpenSSL key conversion in the caller
 - [x] Change `Certificate::to_x509()` to accept PEM bytes (`ca_key_pem`, `private_key_pem`) instead of `PKey` references in its public signature
+- [x] Move PEM bundle parsing and private-key-type detection out of `path_config_ca.rs` into `utils/cert.rs`
+- [x] Move CA not-after validation out of `path_issue.rs` into `utils/cert.rs`
+- [x] Change PKI cert fetch/store helpers in `path_fetch.rs` to use raw DER bytes at the storage boundary instead of `X509`
+- [x] Run a broad repository lib validation pass (`cargo test -q --lib`)
+- [x] Remove OpenSSL from generic HMAC/hash helpers in `mount.rs`, AppRole validation, `utils/mod.rs`, and `utils/salt.rs`
 
 ### In Progress
 
-- [ ] Continue reducing OpenSSL surface in `src/utils/cert.rs` and PKI modules
+- [ ] Continue reducing OpenSSL surface in `src/utils/cert.rs` and remaining PKI helper internals
 
 ### Next
 
-- [ ] Run a broader repository validation pass after PKI type migration lands
-- [ ] Identify remaining `openssl` types in PKI structs and function signatures
+- [ ] Identify the next `CertBundle` / `Certificate` fields that can stop storing OpenSSL types directly
+- [ ] Reduce OpenSSL usage in PKI test fixtures where it no longer reflects runtime behavior
 
 ## Completed
 
@@ -114,6 +119,7 @@ Current focus:
 
 - fixed the shared temp-directory race in [src/test_utils.rs](src/test_utils.rs)
 - kept targeted storage, helper, and PKI tests green through each migration slice
+- removed OpenSSL from generic hashing/HMAC code paths used by mount HMACs, AppRole secret-id HMACs, and salt hashing
 
 ### Runtime networking — OpenSSL fully removed from the TLS stack
 
@@ -145,9 +151,13 @@ What landed:
 - refactored [src/modules/pki/path_issue.rs](src/modules/pki/path_issue.rs) `issue_cert()` to delegate to `util::generate_certificate()` — eliminated 80 lines of duplicated name-building and SAN parsing; CA-TTL comparison (`Asn1Time`) is the only OpenSSL-specific logic remaining in that function
 - changed [src/utils/cert.rs](src/utils/cert.rs) `Certificate::to_cert_bundle()` to accept CA key PEM bytes (`Option<&[u8]>`) and parse internally; this removed OpenSSL `PKey` handling from the [src/modules/pki/path_issue.rs](src/modules/pki/path_issue.rs) call site
 - changed [src/utils/cert.rs](src/utils/cert.rs) `Certificate::to_x509()` public signature to accept PEM bytes (`ca_key_pem`, `private_key_pem`) and perform on-demand parsing internally
+- moved PEM bundle parsing and private-key-type detection out of [src/modules/pki/path_config_ca.rs](src/modules/pki/path_config_ca.rs) into shared helpers in [src/utils/cert.rs](src/utils/cert.rs)
+- moved CA expiry validation out of [src/modules/pki/path_issue.rs](src/modules/pki/path_issue.rs) into [src/utils/cert.rs](src/utils/cert.rs)
+- changed [src/modules/pki/path_fetch.rs](src/modules/pki/path_fetch.rs) to store and fetch certificate DER bytes directly instead of exposing `X509` in its storage-facing API
 
 Remaining work:
-- shrink remaining OpenSSL type surface in the PKI module function signatures and helper types
+- shrink the remaining OpenSSL type surface in [src/utils/cert.rs](src/utils/cert.rs) data structures and helper internals
+- decide which PKI issuance and validation paths should remain OpenSSL-backed temporarily versus move behind narrower interfaces next
 
 ### OpenSSL exit for runtime networking
 
@@ -162,8 +172,8 @@ Remaining work:
 - shrink remaining OpenSSL-heavy type usage in PKI helper signatures and intermediate objects
 ## Next
 
-1. Identify and reduce remaining `openssl` types in PKI function signatures and intermediate data structures.
-2. Run an even broader repository validation pass (beyond current PKI/helper sweep) before closing this track.
+1. Identify the next `Certificate` and `CertBundle` fields that can stop storing OpenSSL types directly.
+2. Continue narrowing OpenSSL-heavy helper internals in [src/utils/cert.rs](src/utils/cert.rs) without destabilizing issuance and validation paths.
 
 ## Verification Snapshot
 
@@ -178,5 +188,9 @@ Recently revalidated during the current migration track:
 - `cargo test -q pki_config_role --lib -- --test-threads=1`
 - `cargo test -q pki_issue_cert --lib -- --test-threads=1`
 - `cargo test -q test_barrier_chacha20poly1305 --lib -- --test-threads=1`
+- `cargo test -q mount --lib`
+- `cargo test -q approle --lib`
+- `cargo test -q salt --lib`
+- `cargo test -q --lib`
 
-This is not a full repository validation pass.
+This includes a broad lib validation pass, but not an exhaustive workspace or integration-only sweep.

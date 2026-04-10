@@ -104,13 +104,14 @@ For the execution tracker and latest completion status, see [post-quantum-crypto
 - the PKI key-management endpoints now validate and test symmetric import/export material as PQ seed input instead of legacy AES-sized raw keys.
 - certificate-role validation for RSA and EC issuance is now centralized instead of duplicated across multiple PKI entry points.
 - the Tongsuo Cargo patch, CI job, and adaptor export have been removed, and Tongsuo is no longer a supported build target.
+- the runtime TLS stack has been migrated to `rustls`, and transport-layer certificate data now moves as DER rather than OpenSSL `X509` objects.
+- several PKI boundary paths now delegate OpenSSL-heavy parsing and conversion work into shared helpers in [src/utils/cert.rs](/Users/felipe/Dev/BastionVault/src/utils/cert.rs) instead of duplicating it in path handlers.
+- generic hashing and HMAC code paths used by mounts, AppRole validation, and salt handling no longer depend on OpenSSL.
 - the shared test temp-directory race was fixed in [src/test_utils.rs](/Users/felipe/Dev/BastionVault/src/test_utils.rs), which unblocked parallel test execution for the affected lib tests.
 
 ### Still pending
 
-- full Tongsuo feature removal from Cargo, CI, docs, and adaptor wiring
 - removal of remaining OpenSSL-centric helper paths
-- migration of TLS/runtime server paths to `rustls`
 - PKI redesign away from OpenSSL/Tongsuo assumptions
 
 ## Proposed Phases
@@ -163,8 +164,7 @@ Status: in progress
   - CI job removal
   - main crypto adaptor docs cleanup
 - remaining:
-  - remove Tongsuo-specific `cfg` branches and references from PKI, cert, and legacy crypto modules
-  - update the remaining design/docs pages that still mention Tongsuo or SM-only paths
+  - remove any residual Tongsuo-era design/docs references that still survive outside the main cleaned paths
 
 ### Risks
 
@@ -308,7 +308,7 @@ Hybrid mode remains a possible later step rather than a current blocker.
 
 ## Phase 6: Remove OpenSSL from TLS and Runtime Server Paths
 
-Status: pending
+Status: substantially complete
 
 ### Objectives
 
@@ -322,6 +322,12 @@ Status: pending
 - migrate to `rustls`
 - verify mutual TLS parity
 
+### Current State
+
+- server TLS now binds through `rustls`
+- transport-layer client certificate data is carried as DER and converted only at the cert-auth boundary
+- the remaining work is no longer the TLS runtime migration itself; it is the residual OpenSSL usage inside PKI validation and certificate-construction helpers
+
 ### Risks
 
 - certificate handling APIs differ materially
@@ -334,7 +340,7 @@ Status: pending
 
 ## Phase 7: PKI and Certificate Track
 
-Status: pending
+Status: in progress
 
 ### Objectives
 

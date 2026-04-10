@@ -7,7 +7,6 @@ use std::{
 };
 
 use better_default::Default;
-use openssl::{hash::MessageDigest, pkey::PKey, sign::Signer};
 use serde::{Deserialize, Serialize};
 
 use super::{AppRoleBackendInner, SECRET_ID_ACCESSOR_LOCAL_PREFIX, SECRET_ID_ACCESSOR_PREFIX, SECRET_ID_LOCAL_PREFIX};
@@ -15,7 +14,10 @@ use crate::{
     errors::RvError,
     modules::auth::expiration::MAX_LEASE_DURATION_SECS,
     storage::{Storage, StorageEntry},
-    utils::{self, deserialize_duration, deserialize_system_time, serialize_duration, serialize_system_time},
+    utils::{
+        self, deserialize_duration, deserialize_system_time, hmac_sha256_hex, serialize_duration,
+        serialize_system_time,
+    },
 };
 
 const MAX_HMAC_INPUT_LENGTH: usize = 4096;
@@ -371,11 +373,7 @@ pub fn create_hmac(key: &str, value: &str) -> Result<String, RvError> {
         return Err(RvError::ErrResponse(format!("value is longer than maximum of {MAX_HMAC_INPUT_LENGTH} bytes")));
     }
 
-    let pkey = PKey::hmac(key.as_bytes())?;
-    let mut signer = Signer::new(MessageDigest::sha256(), &pkey)?;
-    signer.update(value.as_bytes())?;
-    let hmac = signer.sign_to_vec()?;
-    Ok(hex::encode(hmac.as_slice()))
+    hmac_sha256_hex(key.as_bytes(), value.as_bytes())
 }
 
 pub fn verify_cidr_role_secret_id_subset(

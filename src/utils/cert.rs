@@ -26,6 +26,7 @@ use openssl::{
 use openssl_sys::{
     stack_st_X509, X509_get_extended_key_usage, X509_get_extension_flags, EXFLAG_XKUSAGE, X509_STORE_CTX,
 };
+use pem;
 use rustls::{
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     pki_types::CertificateDer,
@@ -143,6 +144,91 @@ pub fn validate_certificate_key_type_and_bits(key_type: &str, key_bits: u64) -> 
         }
         _ => Err(RvError::ErrPkiKeyTypeInvalid),
     }
+}
+
+pub fn private_key_type_from_der(private_key_der: &[u8]) -> Result<String, RvError> {
+    let key = PKey::private_key_from_der(private_key_der)?;
+    let key_type = match key.id() {
+        openssl::pkey::Id::RSA => "rsa",
+        openssl::pkey::Id::EC => "ec",
+        openssl::pkey::Id::ED25519 => "ed25519",
+        _ => "other",
+    };
+
+    Ok(key_type.to_string())
+}
+
+pub fn cert_bundle_from_pem_bundle(pem_bundle: &str) -> Result<CertBundle, RvError> {
+    let items = pem::parse_many(pem_bundle)?;
+    let mut key_found = false;
+    let mut certificate_index = 0;
+    let mut cert_bundle = CertBundle::default();
+
+    for item in items {
+        if item.tag() == "CERTIFICATE" {
+            let cert = X509::from_der(item.contents())?;
+            if !is_ca_cert(&cert) {
+                return Err(RvError::ErrPkiPemBundleInvalid);
+            }
+
+            if certificate_index == 0 {
+                cert_bundle.certificate = cert;
+            } else {
+                cert_bundle.ca_chain.push(cert);
+            }
+            certificate_index += 1;
+        }
+
+        if item.tag() == "PRIVATE KEY" {
+            if key_found {
+                return Err(RvError::ErrPkiPemBundleInvalid);
+            }
+
+            cert_bundle.private_key_type = private_key_type_from_der(item.contents())?;
+            cert_bundle.private_key = PKey::private_key_from_der(item.contents())?.private_key_to_pem_pkcs8()?;
+            key_found = true;
+        }
+    }
+
+    if !key_found || certificate_index == 0 {
+        return Err(RvError::ErrPkiPemBundleInvalid);
+    }
+
+    Ok(cert_bundle)
+}
+
+pub fn ensure_not_after_within_ca(ca_cert: &X509Ref, requested_not_after: SystemTime) -> Result<(), RvError> {
+    let requested_not_after = Asn1Time::from_unix(requested_not_after.duration_since(UNIX_EPOCH)?.as_secs() as i64)?;
+
+    match ca_cert.not_after().compare(&requested_not_after) {
+        Ok(std::cmp::Ordering::Less) => Err(RvError::ErrRequestInvalid),
+        Ok(_) => Ok(()),
+        Err(err) => Err(RvError::OpenSSL { source: err }),
+    }
+}
+
+pub fn certificate_pem_string(cert: &X509Ref) -> Result<String, RvError> {
+    Ok(String::from_utf8_lossy(&cert.to_pem()?).to_string())
+}
+
+pub fn certificate_pem_string_from_der(cert_der: &[u8]) -> Result<String, RvError> {
+    let cert = X509::from_der(cert_der)?;
+    certificate_pem_string(&cert)
+}
+
+pub fn certificate_chain_pem_string(chain: &[X509], reverse: bool) -> Result<String, RvError> {
+    let iter: Box<dyn Iterator<Item = &X509>> = if reverse {
+        Box::new(chain.iter().rev())
+    } else {
+        Box::new(chain.iter())
+    };
+
+    let mut pem = String::new();
+    for cert in iter {
+        pem.push_str(&certificate_pem_string(cert)?);
+    }
+
+    Ok(pem)
 }
 
 /// Build an `X509Name` from individual subject components.  All empty strings are skipped.
