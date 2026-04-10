@@ -94,7 +94,7 @@ pub struct BastionVault {
 #[maybe_async::maybe_async]
 impl BastionVault {
     pub fn new(backend: Arc<dyn Backend>, config: Option<&Config>) -> Result<Self, RvError> {
-        let barrier_type = config.map(|conf| conf.barrier_type).unwrap_or(BarrierType::AesGcm);
+        let barrier_type = config.map(|conf| conf.barrier_type).unwrap_or(BarrierType::Chacha20Poly1305);
         let mut core = Core::new_with_barrier(backend, barrier_type);
         if let Some(conf) = config {
             core.mount_entry_hmac_level = conf.mount_entry_hmac_level;

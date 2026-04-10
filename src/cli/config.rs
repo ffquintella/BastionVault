@@ -79,7 +79,7 @@ fn default_mounts_monitor_interval() -> u64 {
 }
 
 fn default_barrier_type() -> BarrierType {
-    BarrierType::AesGcm
+    BarrierType::Chacha20Poly1305
 }
 
 /// A struct that contains several configurable options for networking stuffs
@@ -264,7 +264,7 @@ impl Config {
             self.mount_entry_hmac_level = other.mount_entry_hmac_level;
         }
 
-        if other.barrier_type != BarrierType::AesGcm {
+        if other.barrier_type != BarrierType::Chacha20Poly1305 {
             self.barrier_type = other.barrier_type;
         }
     }
@@ -447,7 +447,7 @@ mod test {
         assert_eq!(json_config.daemon_user.as_str(), "");
         assert_eq!(json_config.daemon_group.as_str(), "");
         assert_eq!(json_config.mount_entry_hmac_level, MountEntryHMACLevel::None);
-        assert_eq!(json_config.barrier_type, BarrierType::AesGcm);
+        assert_eq!(json_config.barrier_type, BarrierType::Chacha20Poly1305);
 
         let (_, listener) = json_config.listener.iter().next().unwrap();
         assert!(listener.tls_disable);

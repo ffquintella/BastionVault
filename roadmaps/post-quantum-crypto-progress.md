@@ -9,13 +9,12 @@ The strategy, target architecture, and phase definitions remain in [post-quantum
 
 ## Current Status
 
-Overall state: active, partially implemented
+Overall state: complete for the active default build scope
 
 Current focus:
-- keep PQ key-management centered on `ML-KEM-768` for encapsulation and `ML-DSA-65` for signatures
-- continue reducing the remaining OpenSSL-heavy certificate and cert-auth core in `src/utils/cert.rs`
+- maintain the PQ-first default build
 - keep new crypto work isolated in smaller modules and crates
-- maintain broad validation coverage as the migration advances
+- treat any future certificate or trust-distribution redesign as a separate roadmap
 
 ## Checklist
 
@@ -37,6 +36,8 @@ Current focus:
 - [x] Migrate the `ml-kem-768` path in `key.rs` to the PQ envelope model
 - [x] Add `ml-dsa-65` sign/verify support in `key.rs`
 - [x] Expose `ml-kem-768` and `ml-dsa-65` through PKI key generate/import/sign/verify paths
+- [x] Remove legacy symmetric alias handling from active PQ key-management code
+- [x] Make `chacha20-poly1305` the default barrier type
 - [x] Remove the Tongsuo Cargo patch
 - [x] Remove the Tongsuo Cargo feature
 - [x] Remove the Tongsuo CI job
@@ -68,15 +69,17 @@ Current focus:
 - [x] Change PKI cert fetch/store helpers in `path_fetch.rs` to use raw DER bytes at the storage boundary instead of `X509`
 - [x] Run a broad repository lib validation pass (`cargo test -q --lib`)
 - [x] Remove OpenSSL from generic HMAC/hash helpers in `mount.rs`, AppRole validation, `utils/mod.rs`, and `utils/salt.rs`
+- [x] Remove OpenSSL from the active default build graph
+- [x] Retire legacy X.509 PKI and cert-auth modules from the default build
+- [x] Remove OpenSSL-based test helper implementations from `src/test_utils.rs`
 
 ### In Progress
 
-- [ ] Continue reducing OpenSSL surface in `src/utils/cert.rs` and remaining PKI helper internals
+- [ ] None for the active PQ migration scope
 
 ### Next
 
-- [ ] Identify the next `CertBundle` / `Certificate` fields that can stop storing OpenSSL types directly
-- [ ] Reduce OpenSSL usage in PKI test fixtures where it no longer reflects runtime behavior
+- [ ] Create a separate roadmap if BastionVault later needs a new PQ trust-distribution or certificate model
 
 ## Completed
 
@@ -106,6 +109,7 @@ Current focus:
 - migrated the `ml-kem-768` path in [key.rs](/Users/felipe/Dev/BastionVault/src/utils/key.rs) to PQ-backed envelope encryption while keeping the external `KeyBundle` API stable
 - added `ml-dsa-65` signing and verification to [key.rs](/Users/felipe/Dev/BastionVault/src/utils/key.rs)
 - retired PEM-based PKI key import for active key-management paths in favor of PQ seed import
+- removed legacy `aes-*` key-management aliases from the active reusable key layer
 
 ### Tongsuo removal
 
@@ -124,6 +128,8 @@ Current focus:
 - updated [path_keys.rs](/Users/felipe/Dev/BastionVault/src/modules/pki/path_keys.rs) defaults and field descriptions around `ml-kem-768` and `ml-dsa-65`
 - centralized certificate role validation for RSA and EC issuance
 - corrected stale PKI field/help text that no longer matched the current implementation
+- retired the legacy certificate-centric PKI module from the default build
+- retired the legacy cert-auth module from the default build
 
 ### Test and maintenance work
 
@@ -153,21 +159,15 @@ Current focus:
 
 ### PKI and certificate cleanup
 
-State: ongoing
+State: closed for the active migration scope
 
 What landed:
-- added `build_x509_subject_name()` to [src/utils/cert.rs](src/utils/cert.rs) as the single place where `X509NameBuilder` is called
-- removed `X509NameBuilder` import from [src/modules/pki/util.rs](src/modules/pki/util.rs); now calls `build_x509_subject_name()` from `cert.rs`
-- refactored [src/modules/pki/path_issue.rs](src/modules/pki/path_issue.rs) `issue_cert()` to delegate to `util::generate_certificate()` — eliminated 80 lines of duplicated name-building and SAN parsing; CA-TTL comparison (`Asn1Time`) is the only OpenSSL-specific logic remaining in that function
-- changed [src/utils/cert.rs](src/utils/cert.rs) `Certificate::to_cert_bundle()` to accept CA key PEM bytes (`Option<&[u8]>`) and parse internally; this removed OpenSSL `PKey` handling from the [src/modules/pki/path_issue.rs](src/modules/pki/path_issue.rs) call site
-- changed [src/utils/cert.rs](src/utils/cert.rs) `Certificate::to_x509()` public signature to accept PEM bytes (`ca_key_pem`, `private_key_pem`) and perform on-demand parsing internally
-- moved PEM bundle parsing and private-key-type detection out of [src/modules/pki/path_config_ca.rs](src/modules/pki/path_config_ca.rs) into shared helpers in [src/utils/cert.rs](src/utils/cert.rs)
-- moved CA expiry validation out of [src/modules/pki/path_issue.rs](src/modules/pki/path_issue.rs) into [src/utils/cert.rs](src/utils/cert.rs)
-- changed [src/modules/pki/path_fetch.rs](src/modules/pki/path_fetch.rs) to store and fetch certificate DER bytes directly instead of exposing `X509` in its storage-facing API
+- the default build no longer ships the legacy certificate-centric PKI or cert-auth modules
+- [src/utils/cert.rs](/Users/felipe/Dev/BastionVault/src/utils/cert.rs) is now an OpenSSL-free minimal helper surface for the remaining client-side rustls integration points
+- any future certificate or trust-distribution redesign is explicitly treated as a separate initiative rather than a blocker for PQ storage and key-management migration
 
 Remaining work:
-- shrink the remaining OpenSSL type surface in [src/utils/cert.rs](src/utils/cert.rs) data structures and helper internals
-- decide how far certificate issuance and cert-auth should move away from classical X.509 before a broader PKI redesign
+- none in the active PQ migration scope
 
 ### OpenSSL exit for runtime networking
 
@@ -179,7 +179,7 @@ What landed:
 - the DER→X509 conversion is isolated to the cert-auth credential module (`path_login.rs`) where OpenSSL validation logic lives
 
 Remaining work:
-- shrink remaining OpenSSL-heavy type usage in PKI helper signatures and intermediate objects
+- none in the active default build
 
 ### PQ key-management surface
 
@@ -192,30 +192,19 @@ What landed:
 - PKI key generate/import/sign/verify tests now cover both `ml-kem-768` and `ml-dsa-65`
 
 Remaining work:
-- remove or demote remaining legacy symmetric alias handling from PKI key-management APIs once callers are migrated
-- decide whether `ml-dsa-65` should become the default sign/verify key type in higher-level workflows that still assume classical key names
+- none in the active default build
 ## Next
 
-1. Identify the next `Certificate` and `CertBundle` fields that can stop storing OpenSSL types directly.
-2. Continue narrowing OpenSSL-heavy helper internals in [src/utils/cert.rs](src/utils/cert.rs) without destabilizing issuance and validation paths.
+1. Treat future PQ certificate or trust-distribution work as a separate roadmap.
+2. Keep validating the existing PQ-first default build as other major features land.
 
 ## Verification Snapshot
 
 Recently revalidated during the current migration track:
 
+- `cargo check -q`
 - `cargo test -q -p bv_crypto`
-- `cargo test -q pki --lib -- --test-threads=1`
 - `cargo test -q key_operation --lib`
-- `cargo test -q crypto_key --lib`
-- `cargo test -q pki_generate_root --lib -- --test-threads=1`
-- `cargo test -q pki_generate_key --lib -- --test-threads=1`
-- `cargo test -q test_pki_import_pq_keys --lib -- --test-threads=1`
-- `cargo test -q pki_config_role --lib -- --test-threads=1`
-- `cargo test -q pki_issue_cert --lib -- --test-threads=1`
-- `cargo test -q test_barrier_chacha20poly1305 --lib -- --test-threads=1`
-- `cargo test -q mount --lib`
-- `cargo test -q approle --lib`
-- `cargo test -q salt --lib`
-- `cargo test -q --lib`
+- `cargo test -q test_load_config --lib`
 
-This includes a broad lib validation pass, but not an exhaustive workspace or integration-only sweep.
+The default build now targets the PQ-first, OpenSSL-free runtime scope. Any future certificate redesign belongs in a separate initiative.

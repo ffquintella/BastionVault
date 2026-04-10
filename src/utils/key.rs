@@ -14,7 +14,6 @@ pub struct KeyBundle {
     pub name: String,
     pub key_type: String,
     pub key: Vec<u8>,
-    //for aes-gcm | aes-cbc
     pub iv: Vec<u8>,
     pub bits: u32,
 }
@@ -29,7 +28,6 @@ fn key_bits_default(key_type: &str) -> u32 {
     match key_type {
         "ml-kem-768" => 768,
         "ml-dsa-65" => 65,
-        "aes-gcm" | "aes-cbc" | "aes-ecb" => 256,
         _ => 0,
     }
 }
@@ -46,25 +44,10 @@ pub fn is_pq_signature_key_type(key_type: &str) -> bool {
     matches!(key_type, "ml-dsa-65")
 }
 
-pub fn is_symmetric_key_type(key_type: &str) -> bool {
-    matches!(key_type, "aes-gcm" | "aes-cbc" | "aes-ecb")
-}
-
-pub fn is_envelope_key_type(key_type: &str) -> bool {
-    is_pq_key_type(key_type) || is_symmetric_key_type(key_type)
-}
-
-pub fn symmetric_key_uses_iv(key_type: &str) -> bool {
-    matches!(key_type, "aes-gcm" | "aes-cbc")
-}
-
 fn validate_key_bits(key_type: &str, bits: u32) -> Result<(), RvError> {
     match (key_type, bits) {
         ("ml-kem-768", 768) => Ok(()),
         ("ml-dsa-65", 65) => Ok(()),
-        ("aes-gcm", 128 | 192 | 256) => Ok(()),
-        ("aes-cbc", 128 | 192 | 256) => Ok(()),
-        ("aes-ecb", 128 | 192 | 256) => Ok(()),
         _ => Err(RvError::ErrPkiKeyBitsInvalid),
     }
 }
@@ -83,19 +66,12 @@ impl KeyBundle {
     }
 
     pub fn generate(&mut self) -> Result<(), RvError> {
-        if !is_pq_key_type(self.key_type.as_str()) && !is_symmetric_key_type(self.key_type.as_str()) {
+        if !is_pq_key_type(self.key_type.as_str()) {
             return Err(RvError::ErrPkiKeyTypeInvalid);
         }
 
         validate_key_bits(self.key_type.as_str(), self.bits)?;
-
-        if is_symmetric_key_type(self.key_type.as_str()) {
-            self.bits = 256;
-            self.iv = vec![0u8; 16];
-            OsRng.fill_bytes(&mut self.iv);
-        } else {
-            self.iv.clear();
-        }
+        self.iv.clear();
 
         let seed_len = if is_pq_signature_key_type(self.key_type.as_str()) {
             ML_DSA_65_SEED_LEN
@@ -112,8 +88,8 @@ impl KeyBundle {
         Err(RvError::ErrPkiKeyTypeInvalid)
     }
 
-    pub fn import_symmetric_seed(&mut self, seed: &[u8], iv: Option<Vec<u8>>) -> Result<(), RvError> {
-        if !is_envelope_key_type(self.key_type.as_str()) {
+    pub fn import_pq_seed(&mut self, seed: &[u8]) -> Result<(), RvError> {
+        if !is_pq_key_type(self.key_type.as_str()) {
             return Err(RvError::ErrPkiKeyTypeInvalid);
         }
 
@@ -131,14 +107,9 @@ impl KeyBundle {
         self.bits = match self.key_type.as_str() {
             "ml-kem-768" => 768,
             "ml-dsa-65" => 65,
-            _ => 256,
+            _ => 0,
         };
-
-        if symmetric_key_uses_iv(self.key_type.as_str()) {
-            self.iv = iv.ok_or(RvError::ErrRequestFieldNotFound)?;
-        } else {
-            self.iv.clear();
-        }
+        self.iv.clear();
 
         Ok(())
     }
@@ -166,7 +137,7 @@ impl KeyBundle {
 
     pub fn encrypt(&self, data: &[u8], extra: Option<EncryptExtraData>) -> Result<Vec<u8>, RvError> {
         match self.key_type.as_str() {
-            key_type if is_pq_kem_key_type(key_type) || is_symmetric_key_type(key_type) => {
+            key_type if is_pq_kem_key_type(key_type) => {
                 validate_key_bits(self.key_type.as_str(), self.bits)?;
                 let aad = aad_from_extra(self.iv.as_slice(), extra);
                 let provider = MlKem768Provider;
@@ -182,7 +153,7 @@ impl KeyBundle {
 
     pub fn decrypt(&self, data: &[u8], extra: Option<EncryptExtraData>) -> Result<Vec<u8>, RvError> {
         match self.key_type.as_str() {
-            key_type if is_pq_kem_key_type(key_type) || is_symmetric_key_type(key_type) => {
+            key_type if is_pq_kem_key_type(key_type) => {
                 validate_key_bits(self.key_type.as_str(), self.bits)?;
                 let aad = aad_from_extra(self.iv.as_slice(), extra);
                 let envelope: KemDemEnvelopeV1 = serde_json::from_slice(data)?;
@@ -233,38 +204,14 @@ mod test {
     }
 
     #[test]
-    fn test_aes_key_operation() {
-        // test aes-gcm
-        let mut key_bundle = KeyBundle::new("aes-gcm-128", "aes-gcm", 128);
-        test_key_encrypt_decrypt(&mut key_bundle, None);
-        test_key_encrypt_decrypt(&mut key_bundle, None);
-        test_key_encrypt_decrypt(&mut key_bundle, Some(EncryptExtraData::Aad("bastion_vault".as_bytes())));
-        let mut key_bundle = KeyBundle::new("aes-gcm-192", "aes-gcm", 192);
-        test_key_encrypt_decrypt(&mut key_bundle, None);
-        test_key_encrypt_decrypt(&mut key_bundle, None);
-        test_key_encrypt_decrypt(&mut key_bundle, Some(EncryptExtraData::Aad("bastion_vault".as_bytes())));
-        let mut key_bundle = KeyBundle::new("aes-gcm-256", "aes-gcm", 256);
-        test_key_encrypt_decrypt(&mut key_bundle, None);
-        test_key_encrypt_decrypt(&mut key_bundle, Some(EncryptExtraData::Aad("bastion_vault".as_bytes())));
-        test_key_encrypt_decrypt(&mut key_bundle, None);
-        test_key_encrypt_decrypt(&mut key_bundle, Some(EncryptExtraData::Aad("bastion_vault".as_bytes())));
+    fn test_non_kem_and_non_signature_operations_fail() {
+        let mut key_bundle = KeyBundle::new("ml-dsa-65", "ml-dsa-65", 65);
+        assert!(key_bundle.generate().is_ok());
+        assert!(key_bundle.encrypt(b"123456789", None).is_err());
+        assert!(key_bundle.decrypt(b"payload", None).is_err());
 
-        // test aes-cbc
-        let mut key_bundle = KeyBundle::new("aes-cbc-128", "aes-cbc", 128);
-        test_key_encrypt_decrypt(&mut key_bundle, None);
-        let mut key_bundle = KeyBundle::new("aes-cbc-192", "aes-cbc", 192);
-        test_key_encrypt_decrypt(&mut key_bundle, None);
-        let mut key_bundle = KeyBundle::new("aes-cbc-256", "aes-cbc", 256);
-        test_key_encrypt_decrypt(&mut key_bundle, None);
-
-        // test aes-ecb
-        let mut key_bundle = KeyBundle::new("aes-ecb-128", "aes-ecb", 128);
-        test_key_encrypt_decrypt(&mut key_bundle, None);
-        let mut key_bundle = KeyBundle::new("aes-ecb-192", "aes-ecb", 192);
-        test_key_encrypt_decrypt(&mut key_bundle, None);
-        let mut key_bundle = KeyBundle::new("aes-ecb-256", "aes-ecb", 256);
-        test_key_encrypt_decrypt(&mut key_bundle, None);
-
+        let mut key_bundle = KeyBundle::new("ml-kem-768", "ml-kem-768", 768);
+        assert!(key_bundle.generate().is_ok());
         assert!(key_bundle.sign(b"123456789").is_err());
         assert!(key_bundle.verify(b"123456789", b"signature").is_err());
     }

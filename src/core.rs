@@ -99,7 +99,7 @@ impl Default for CoreState {
 impl Default for Core {
     fn default() -> Self {
         let backend: Arc<dyn PhysicalBackend> = Arc::new(physical::mock::MockBackend::new());
-        let barrier = new_barrier(BarrierType::AesGcm, backend.clone());
+        let barrier = new_barrier(BarrierType::Chacha20Poly1305, backend.clone());
         let router = Arc::new(Router::new());
 
         Core {
@@ -128,7 +128,7 @@ impl Default for Core {
 #[maybe_async::maybe_async]
 impl Core {
     pub fn new(backend: Arc<dyn PhysicalBackend>) -> Self {
-        Self::new_with_barrier(backend, BarrierType::AesGcm)
+        Self::new_with_barrier(backend, BarrierType::Chacha20Poly1305)
     }
 
     pub fn new_with_barrier(backend: Arc<dyn PhysicalBackend>, barrier_type: BarrierType) -> Self {

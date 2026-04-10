@@ -34,7 +34,7 @@ use crate::{
     http,
     logical::{self, Operation, Request, Response},
     metrics::{manager::MetricsManager, middleware::metrics_midleware, system_metrics::SystemMetrics},
-    rv_error_string,
+    rv_error_response, rv_error_string,
     storage::{self, Backend},
     utils::rustls::OptionalClientAuthVerifier,
     BastionVault,
