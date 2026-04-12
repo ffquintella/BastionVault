@@ -250,6 +250,11 @@ pub enum RvError {
         #[from]
         source: ureq::Error,
     },
+    #[error("Some http error happened, {:?}", .source)]
+    HttpError {
+        #[from]
+        source: http::Error,
+    },
     #[error("RwLock was poisoned (reading)")]
     ErrRwLockReadPoison,
     #[error("RwLock was poisoned (writing)")]

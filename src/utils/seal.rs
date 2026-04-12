@@ -23,7 +23,7 @@
 
 use bv_crypto::{KemDemEnvelopeV1, MlKem768Provider, ML_KEM_768_SEED_LEN};
 use chrono::Utc;
-use rand::{rngs::OsRng, RngCore};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
@@ -194,7 +194,7 @@ where
         let serialized = serde_json::to_vec(&data).unwrap();
         let aad = Utc::now().timestamp_millis().to_string().as_bytes().to_vec();
         let mut seed = [0u8; ML_KEM_768_SEED_LEN];
-        OsRng.fill_bytes(&mut seed);
+        rand::rng().fill_bytes(&mut seed);
         let provider = MlKem768Provider;
         let keypair = provider.keypair_from_seed(&seed).map_err(|_| SealBoxError::EncryptionFailed)?;
         let envelope = KemDemEnvelopeV1::seal(&provider, keypair.public_key(), &aad, &serialized)

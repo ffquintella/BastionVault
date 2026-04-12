@@ -25,7 +25,7 @@ use std::ops::DerefMut;
 
 use blake2b_simd::Params;
 use bv_crypto::{KemDemEnvelopeV1, MlKem768Provider, ML_KEM_768_SEED_LEN};
-use rand::{rngs::OsRng, RngCore};
+use rand::Rng;
 use serde::Serialize;
 use serde::{de::DeserializeOwned, Deserialize};
 use thiserror::Error;
@@ -131,10 +131,10 @@ impl CryptoKey {
     /// - All sensitive data is zeroized on drop
     pub fn new() -> Self {
         let mut key = Zeroizing::new(vec![0u8; ML_KEM_768_SEED_LEN]);
-        OsRng.fill_bytes(key.deref_mut().as_mut_slice());
+        rand::rng().fill_bytes(key.deref_mut().as_mut_slice());
 
         let mut aad = Zeroizing::new(vec![0u8; 16]);
-        OsRng.fill_bytes(aad.deref_mut().as_mut_slice());
+        rand::rng().fill_bytes(aad.deref_mut().as_mut_slice());
 
         Self { key: key.to_vec(), aad: aad.to_vec() }
     }

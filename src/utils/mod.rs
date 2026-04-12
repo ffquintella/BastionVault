@@ -5,9 +5,9 @@ use std::time::{Duration, SystemTime};
 
 use blake3;
 use chrono::prelude::*;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use humantime::{format_rfc3339, parse_duration, parse_rfc3339};
-use rand::{thread_rng, Rng};
+use rand::Rng;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
@@ -304,7 +304,7 @@ impl BHashSet {
 
 pub fn generate_uuid() -> String {
     let mut buf = [0u8; 16];
-    thread_rng().fill(&mut buf);
+    rand::rng().fill_bytes(&mut buf);
 
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",

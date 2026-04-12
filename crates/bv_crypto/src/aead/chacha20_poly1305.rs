@@ -2,7 +2,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     ChaCha20Poly1305, Key, Nonce as ChaChaNonce,
 };
-use rand::{rngs::OsRng, RngCore};
+use rand::Rng;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{aead::AeadCipher, CryptoError};
@@ -16,7 +16,7 @@ pub struct SymmetricKey([u8; CHACHA20_POLY1305_KEY_LEN]);
 impl SymmetricKey {
     pub fn generate() -> Self {
         let mut key = [0u8; CHACHA20_POLY1305_KEY_LEN];
-        OsRng.fill_bytes(&mut key);
+        rand::rng().fill_bytes(&mut key);
         Self(key)
     }
 
@@ -41,7 +41,7 @@ pub struct Nonce([u8; CHACHA20_POLY1305_NONCE_LEN]);
 impl Nonce {
     pub fn generate() -> Self {
         let mut nonce = [0u8; CHACHA20_POLY1305_NONCE_LEN];
-        OsRng.fill_bytes(&mut nonce);
+        rand::rng().fill_bytes(&mut nonce);
         Self(nonce)
     }
 

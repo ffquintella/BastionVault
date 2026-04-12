@@ -14,10 +14,10 @@ ml-dsa-65 = ["dep:fips204"]
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 fips204 = { version = "0.4.6", optional = true, default-features = false, features = ["default-rng", "ml-dsa-65"] }
 ml-kem = { version = "0.3.0-rc.2", features = ["getrandom", "zeroize"], optional = true }
-rand = "0.8"
+rand = "0.10"
 serde = { version = "1", features = ["derive"] }
-thiserror = "1"
-zeroize = { version = "1.7", features = ["zeroize_derive"] }
+thiserror = "2"
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
 
 [lints.clippy]
 result_large_err = "allow"

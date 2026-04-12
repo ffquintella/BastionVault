@@ -52,19 +52,19 @@ it ideal for piping to other processes."#
 
 #[derive(Display, ValueEnum, Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Format {
-    #[display(fmt = "table")]
+    #[display("table")]
     Table,
 
-    #[display(fmt = "json")]
+    #[display("json")]
     Json,
 
-    #[display(fmt = "yaml")]
+    #[display("yaml")]
     Yaml,
 
-    #[display(fmt = "yml")]
+    #[display("yml")]
     Yml,
 
-    #[display(fmt = "raw")]
+    #[display("raw")]
     Raw,
 }
 

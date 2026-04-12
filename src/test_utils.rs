@@ -17,14 +17,11 @@ use actix_web::{
     web, App, HttpResponse, HttpServer,
 };
 use lazy_static::lazy_static;
-use rustls::{
-    pki_types::{CertificateDer, PrivateKeyDer},
-    ClientConfig, RootCertStore,
-};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_pemfile::{certs, private_key};
 use serde_json::{json, Map, Value};
 use tokio::sync::oneshot;
-use ureq::AgentBuilder;
+use ureq::tls::{Certificate, ClientCert, PrivateKey, RootCerts, TlsConfig};
 
 use crate::{
     api::{client::TLSConfigBuilder, Client},
@@ -321,79 +318,78 @@ impl TestHttpServer {
         let url = format!("{}/{}", self.url_prefix, path);
         println!("request url: {}, method: {}", url, method);
         let tk = token.unwrap_or(&self.root_token);
-        let mut req = if self.tls_enable {
-            // Create rustls ClientConfig
-            let tls_config;
+        let agent = if self.tls_enable {
+            let mut tls_builder = TlsConfig::builder();
             if let Some(client_auth) = tls_client_auth {
-                let ca_pem = pem::parse(client_auth.ca_pem.as_bytes())?;
-                let ca_cert = CertificateDer::from_slice(ca_pem.contents());
+                let root_certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(client_auth.ca_pem.as_bytes())
+                    .filter_map(|item| match item {
+                        Ok(ureq::tls::PemItem::Certificate(cert)) => Some(cert),
+                        _ => None,
+                    })
+                    .collect();
+                tls_builder = tls_builder.root_certs(RootCerts::Specific(Arc::new(root_certs)));
 
-                let mut ca_store = RootCertStore::empty();
-                ca_store.add(ca_cert)?;
-
-                let mut client_certs = vec![];
-                let mut cert_pem = client_auth.cert_pem.as_bytes();
-                loop {
-                    match rustls_pemfile::read_one_from_slice(cert_pem)? {
-                        Some((rustls_pemfile::Item::X509Certificate(cert), rest)) => {
-                            cert_pem = rest;
-                            client_certs.push(cert);
-                        }
-                        None => break,
-                        _ => return Err(rv_error_response!("client cert format invalid")),
-                    }
-                }
-
-                let client_key: PrivateKeyDer =
-                    match rustls_pemfile::read_one_from_slice(client_auth.key_pem.as_bytes())? {
-                        Some((rustls_pemfile::Item::Pkcs1Key(key), _)) => PrivateKeyDer::Pkcs1(key),
-                        Some((rustls_pemfile::Item::Pkcs8Key(key), _)) => PrivateKeyDer::Pkcs8(key),
-                        _ => return Err(rv_error_response!("client key format invalid")),
-                    };
-
-                tls_config = ClientConfig::builder()
-                    .with_root_certificates(ca_store)
-                    .with_client_auth_cert(client_certs, client_key)?;
+                let client_certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(client_auth.cert_pem.as_bytes())
+                    .filter_map(|item| match item {
+                        Ok(ureq::tls::PemItem::Certificate(cert)) => Some(cert),
+                        _ => None,
+                    })
+                    .collect();
+                let client_key = PrivateKey::from_pem(client_auth.key_pem.as_bytes())
+                    .map_err(|e| rv_error_response!("client key format invalid: {}", e))?;
+                tls_builder = tls_builder.client_cert(Some(ClientCert::new_with_certs(&client_certs, client_key)));
             } else {
-                let cert_pem = pem::parse(self.ca_cert_pem.as_bytes())?;
-                let root_cert = CertificateDer::from_slice(cert_pem.contents());
-
-                // Configure the root certificate
-                let mut root_store = RootCertStore::empty();
-                root_store.add(root_cert)?;
-
-                tls_config = ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth();
+                let root_certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(self.ca_cert_pem.as_bytes())
+                    .filter_map(|item| match item {
+                        Ok(ureq::tls::PemItem::Certificate(cert)) => Some(cert),
+                        _ => None,
+                    })
+                    .collect();
+                tls_builder = tls_builder.root_certs(RootCerts::Specific(Arc::new(root_certs)));
             }
 
-            let agent = AgentBuilder::new()
-                .timeout_connect(Duration::from_secs(10))
-                .timeout(Duration::from_secs(30))
-                .tls_config(Arc::new(tls_config))
-                .build();
-            agent.request(&method.to_uppercase(), &url)
+            ureq::Agent::config_builder()
+                .timeout_connect(Some(Duration::from_secs(10)))
+                .timeout_global(Some(Duration::from_secs(30)))
+                .http_status_as_error(false)
+                .allow_non_standard_methods(true)
+                .tls_config(tls_builder.build())
+                .build()
+                .new_agent()
         } else {
-            ureq::request(&method.to_uppercase(), &url)
+            ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .allow_non_standard_methods(true)
+                .build()
+                .new_agent()
         };
 
-        req = req.set("Accept", "application/json");
+        let method_upper = method.to_uppercase();
+        let mut req_builder = http::Request::builder()
+            .method(method_upper.as_str())
+            .uri(&url)
+            .header("Accept", "application/json");
         if !path.ends_with("/login") {
-            req = req.set("X-BastionVault-Token", tk);
+            req_builder = req_builder.header("X-BastionVault-Token", tk);
         }
 
-        let response_result = if let Some(send_data) = data { req.send_json(send_data) } else { req.call() };
+        let response_result = if let Some(send_data) = data {
+            let body = serde_json::to_vec(&send_data)?;
+            let req = req_builder.header("Content-Type", "application/json").body(body)?;
+            agent.run(req)
+        } else {
+            let req = req_builder.body(())?;
+            agent.run(req)
+        };
 
         match response_result {
-            Ok(response) => {
-                let status = response.status();
+            Ok(mut response) => {
+                let status = response.status().as_u16();
                 if status == 204 {
                     return Ok((status, json!("")));
                 }
-                let json: Value = response.into_json()?;
+                let json: Value = response.body_mut().read_json()?;
                 Ok((status, json))
-            }
-            Err(ureq::Error::Status(code, response)) => {
-                let json: Value = response.into_json()?;
-                Ok((code, json))
             }
             Err(e) => {
                 println!("Request failed: {e}");
@@ -413,80 +409,79 @@ impl TestHttpServer {
         let url = format!("{}/{}", self.url_prefix, path);
         println!("request url: {}, method: {}", url, method);
         let tk = token.unwrap_or(&self.root_token);
-        let mut req = if self.tls_enable {
-            // Create rustls ClientConfig
-            let tls_config;
+        let agent = if self.tls_enable {
+            let mut tls_builder = TlsConfig::builder();
             if let Some(client_auth) = tls_client_auth {
-                let ca_pem = pem::parse(client_auth.ca_pem.as_bytes())?;
-                let ca_cert = CertificateDer::from_slice(ca_pem.contents());
+                let root_certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(client_auth.ca_pem.as_bytes())
+                    .filter_map(|item| match item {
+                        Ok(ureq::tls::PemItem::Certificate(cert)) => Some(cert),
+                        _ => None,
+                    })
+                    .collect();
+                tls_builder = tls_builder.root_certs(RootCerts::Specific(Arc::new(root_certs)));
 
-                let mut ca_store = RootCertStore::empty();
-                ca_store.add(ca_cert)?;
-
-                let mut client_certs = vec![];
-                let mut cert_pem = client_auth.cert_pem.as_bytes();
-                loop {
-                    match rustls_pemfile::read_one_from_slice(cert_pem)? {
-                        Some((rustls_pemfile::Item::X509Certificate(cert), rest)) => {
-                            cert_pem = rest;
-                            client_certs.push(cert);
-                        }
-                        None => break,
-                        _ => return Err(rv_error_response!("client cert format invalid")),
-                    }
-                }
-
-                let client_key: PrivateKeyDer =
-                    match rustls_pemfile::read_one_from_slice(client_auth.key_pem.as_bytes())? {
-                        Some((rustls_pemfile::Item::Pkcs1Key(key), _)) => PrivateKeyDer::Pkcs1(key),
-                        Some((rustls_pemfile::Item::Pkcs8Key(key), _)) => PrivateKeyDer::Pkcs8(key),
-                        _ => return Err(rv_error_response!("client key format invalid")),
-                    };
-
-                tls_config = ClientConfig::builder()
-                    .with_root_certificates(ca_store)
-                    .with_client_auth_cert(client_certs, client_key)?;
+                let client_certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(client_auth.cert_pem.as_bytes())
+                    .filter_map(|item| match item {
+                        Ok(ureq::tls::PemItem::Certificate(cert)) => Some(cert),
+                        _ => None,
+                    })
+                    .collect();
+                let client_key = PrivateKey::from_pem(client_auth.key_pem.as_bytes())
+                    .map_err(|e| rv_error_response!("client key format invalid: {}", e))?;
+                tls_builder = tls_builder.client_cert(Some(ClientCert::new_with_certs(&client_certs, client_key)));
             } else {
-                let cert_pem = pem::parse(self.ca_cert_pem.as_bytes())?;
-                let root_cert = CertificateDer::from_slice(cert_pem.contents());
-
-                // Configure the root certificate
-                let mut root_store = RootCertStore::empty();
-                root_store.add(root_cert)?;
-
-                tls_config = ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth();
+                let root_certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(self.ca_cert_pem.as_bytes())
+                    .filter_map(|item| match item {
+                        Ok(ureq::tls::PemItem::Certificate(cert)) => Some(cert),
+                        _ => None,
+                    })
+                    .collect();
+                tls_builder = tls_builder.root_certs(RootCerts::Specific(Arc::new(root_certs)));
             }
 
-            let agent = AgentBuilder::new()
-                .timeout_connect(Duration::from_secs(10))
-                .timeout(Duration::from_secs(30))
-                .tls_config(Arc::new(tls_config))
-                .build();
-            agent.request(&method.to_uppercase(), &url)
+            ureq::Agent::config_builder()
+                .timeout_connect(Some(Duration::from_secs(10)))
+                .timeout_global(Some(Duration::from_secs(30)))
+                .http_status_as_error(false)
+                .allow_non_standard_methods(true)
+                .tls_config(tls_builder.build())
+                .build()
+                .new_agent()
         } else {
-            ureq::request(&method.to_uppercase(), &url)
+            ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .allow_non_standard_methods(true)
+                .build()
+                .new_agent()
         };
 
-        req = req.set("Accept", "application/json");
+        let method_upper = method.to_uppercase();
+        let mut req_builder = http::Request::builder()
+            .method(method_upper.as_str())
+            .uri(&url)
+            .header("Accept", "application/json");
         if !path.ends_with("/login") {
-            req = req.set("X-BastionVault-Token", tk);
+            req_builder = req_builder.header("X-BastionVault-Token", tk);
         }
 
-        let response_result = if let Some(send_data) = data { req.send_json(send_data) } else { req.call() };
+        let response_result = if let Some(send_data) = data {
+            let body = serde_json::to_vec(&send_data)?;
+            let req = req_builder.header("Content-Type", "application/json").body(body)?;
+            agent.run(req)
+        } else {
+            let req = req_builder.body(())?;
+            agent.run(req)
+        };
 
         match response_result {
-            Ok(response) => {
-                let status = response.status();
+            Ok(mut response) => {
+                let status = response.status().as_u16();
                 if status == 204 {
                     return Ok((status, json!("")));
                 }
-                let text = response.into_string()?;
+                let text = response.body_mut().read_to_string()?;
                 let wrapped_json = json!({"metrics":text});
                 Ok((status, wrapped_json))
-            }
-            Err(ureq::Error::Status(code, response)) => {
-                let json: Value = response.into_json()?;
-                Ok((code, json))
             }
             Err(e) => {
                 println!("Request failed: {e}");
