@@ -9,7 +9,7 @@ use arc_swap::ArcSwap;
 use better_default::Default;
 use blake3::hash;
 use bv_crypto::{AeadCipher, Chacha20Poly1305Cipher, CryptoError, Nonce, SymmetricKey, ML_KEM_768_SEED_LEN};
-use rand::{thread_rng, Rng};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -181,7 +181,7 @@ impl SecurityBarrier for ChaCha20Poly1305Barrier {
 
     fn generate_key(&self) -> Result<Zeroizing<Vec<u8>>, RvError> {
         let mut buf = Zeroizing::new(vec![0u8; ML_KEM_768_SEED_LEN]);
-        thread_rng().fill(buf.as_mut_slice());
+        rand::rng().fill_bytes(buf.as_mut_slice());
         Ok(buf)
     }
 
@@ -247,7 +247,7 @@ impl ChaCha20Poly1305Barrier {
 
     fn generate_encryption_key(&self) -> Result<Zeroizing<Vec<u8>>, RvError> {
         let mut buf = Zeroizing::new(vec![0u8; CHACHA_KEY_SIZE]);
-        thread_rng().fill(buf.as_mut_slice());
+        rand::rng().fill_bytes(buf.as_mut_slice());
         Ok(buf)
     }
 
@@ -362,7 +362,7 @@ mod tests {
     fn barrier_v3_round_trip() {
         let backend = new_test_backend("test_chacha_encrypt_decrypt");
         let mut key = vec![0u8; 32];
-        thread_rng().fill(key.as_mut_slice());
+        rand::rng().fill_bytes(key.as_mut_slice());
 
         let barrier = ChaCha20Poly1305Barrier {
             backend,
@@ -386,7 +386,7 @@ mod tests {
         assert!(barrier.sealed().unwrap());
 
         let mut key = vec![0u8; ML_KEM_768_SEED_LEN];
-        thread_rng().fill(key.as_mut_slice());
+        rand::rng().fill_bytes(key.as_mut_slice());
         barrier.init(key.as_slice()).await.unwrap();
         assert!(barrier.sealed().unwrap());
         barrier.unseal(key.as_slice()).await.unwrap();
@@ -401,7 +401,7 @@ mod tests {
         let barrier = ChaCha20Poly1305Barrier::new(backend.clone());
 
         let mut key = vec![0u8; ML_KEM_768_SEED_LEN];
-        thread_rng().fill(key.as_mut_slice());
+        rand::rng().fill_bytes(key.as_mut_slice());
         barrier.init(key.as_slice()).await.unwrap();
         barrier.unseal(key.as_slice()).await.unwrap();
 

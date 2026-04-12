@@ -1,20 +1,15 @@
-use std::{collections::HashMap, fs, io::BufReader, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, fs, path::PathBuf, sync::Arc, time::Duration};
 
 use better_default::Default;
-use rustls::{
-    pki_types::{pem::PemObject, PrivateKeyDer},
-    ClientConfig, RootCertStore, ALL_VERSIONS,
-};
 use serde_json::{Map, Value};
-use ureq::AgentBuilder;
-use webpki_roots::TLS_SERVER_ROOTS;
+use ureq::tls::{Certificate, ClientCert, PrivateKey, RootCerts, TlsConfig};
 
 use super::HttpResponse;
-use crate::{errors::RvError, utils::cert::DisabledVerifier};
+use crate::errors::RvError;
 
 #[derive(Clone)]
 pub struct TLSConfig {
-    client_config: ClientConfig,
+    tls_config: TlsConfig,
 }
 
 #[derive(Default, Clone)]
@@ -34,7 +29,7 @@ pub struct Client {
     #[default(HashMap::new())]
     pub headers: HashMap<String, String>,
     pub tls_config: Option<TLSConfig>,
-    #[default(ureq::Agent::new())]
+    #[default(ureq::Agent::new_with_defaults())]
     pub http_client: ureq::Agent,
 }
 
@@ -82,41 +77,34 @@ impl TLSConfigBuilder {
     }
 
     pub fn build(self) -> Result<TLSConfig, RvError> {
-        let provider = rustls::crypto::CryptoProvider::get_default()
-            .cloned()
-            .unwrap_or(Arc::new(rustls::crypto::ring::default_provider()));
+        let mut tls_builder = TlsConfig::builder();
 
-        let builder = ClientConfig::builder_with_provider(provider.clone())
-            .with_protocol_versions(ALL_VERSIONS)
-            .expect("all TLS versions");
-
-        let builder = if self.insecure {
+        if self.insecure {
             log::debug!("Certificate verification disabled");
-            builder.dangerous().with_custom_certificate_verifier(Arc::new(DisabledVerifier))
+            tls_builder = tls_builder.disable_verification(true);
         } else if let Some(server_ca) = &self.server_ca_pem {
-            let mut cert_reader = BufReader::new(&server_ca[..]);
-            let root_certs = rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?;
+            let root_certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(server_ca)
+                .filter_map(|item| match item {
+                    Ok(ureq::tls::PemItem::Certificate(cert)) => Some(cert),
+                    _ => None,
+                })
+                .collect();
+            tls_builder = tls_builder.root_certs(RootCerts::Specific(Arc::new(root_certs)));
+        }
 
-            let mut root_store = RootCertStore::empty();
-            let (_added, _ignored) = root_store.add_parsable_certificates(root_certs);
-            builder.with_root_certificates(root_store)
-        } else {
-            let root_store = RootCertStore { roots: TLS_SERVER_ROOTS.to_vec() };
-            builder.with_root_certificates(root_store)
-        };
+        if let (Some(client_cert_pem), Some(client_key_pem)) = (&self.client_cert_pem, &self.client_key_pem) {
+            let client_certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(client_cert_pem)
+                .filter_map(|item| match item {
+                    Ok(ureq::tls::PemItem::Certificate(cert)) => Some(cert),
+                    _ => None,
+                })
+                .collect();
+            let client_key = PrivateKey::from_pem(client_key_pem)
+                .map_err(|e| RvError::ErrResponse(e.to_string()))?;
+            tls_builder = tls_builder.client_cert(Some(ClientCert::new_with_certs(&client_certs, client_key)));
+        }
 
-        let client_config =
-            if let (Some(client_cert_pem), Some(client_key_pem)) = (&self.client_cert_pem, &self.client_key_pem) {
-                let mut cert_reader = BufReader::new(&client_cert_pem[..]);
-                let client_certs = rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?;
-                let client_key = PrivateKeyDer::from_pem_slice(client_key_pem)?;
-
-                builder.with_client_auth_cert(client_certs, client_key)?
-            } else {
-                builder.with_no_client_auth()
-            };
-
-        Ok(TLSConfig { client_config })
+        Ok(TLSConfig { tls_config: tls_builder.build() })
     }
 }
 
@@ -146,13 +134,17 @@ impl Client {
     }
 
     pub fn build(mut self) -> Self {
-        let mut agent = AgentBuilder::new().timeout_connect(Duration::from_secs(10)).timeout(Duration::from_secs(30));
+        let mut config_builder = ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(10)))
+            .timeout_global(Some(Duration::from_secs(30)))
+            .http_status_as_error(false)
+            .allow_non_standard_methods(true);
 
         if let Some(tls_config) = &self.tls_config {
-            agent = agent.tls_config(Arc::new(tls_config.client_config.clone()));
+            config_builder = config_builder.tls_config(tls_config.tls_config.clone());
         }
 
-        self.http_client = agent.build();
+        self.http_client = config_builder.build().new_agent();
         self
     }
 
@@ -170,32 +162,42 @@ impl Client {
         };
         log::debug!("request url: {url}, method: {method}");
 
-        let mut req = self.http_client.request(&method.to_uppercase(), &url);
+        let method_upper = method.to_uppercase();
+        let build_request = |builder: http::request::Builder| -> http::request::Builder {
+            let builder = builder.header("Accept", "application/json");
+            if !path.ends_with("/login") {
+                builder.header("X-BastionVault-Token", &self.token)
+            } else {
+                builder
+            }
+        };
 
-        req = req.set("Accept", "application/json");
-        if !path.ends_with("/login") {
-            req = req.set("X-BastionVault-Token", &self.token);
-        }
+        let mut ret = HttpResponse { method: method.to_string(), url: url.clone(), ..Default::default() };
 
-        let mut ret = HttpResponse { method: method.to_string(), url, ..Default::default() };
-
-        let response_result = if let Some(send_data) = data { req.send_json(send_data) } else { req.call() };
+        let response_result = if let Some(send_data) = data {
+            let body = serde_json::to_vec(&send_data)?;
+            let req = build_request(
+                http::Request::builder()
+                    .method(method_upper.as_str())
+                    .uri(&url)
+                    .header("Content-Type", "application/json"),
+            )
+            .body(body)?;
+            self.http_client.run(req)
+        } else {
+            let req = build_request(http::Request::builder().method(method_upper.as_str()).uri(&url))
+                .body(())?;
+            self.http_client.run(req)
+        };
 
         match response_result {
-            Ok(response) => {
-                ret.response_status = response.status();
+            Ok(mut response) => {
+                ret.response_status = response.status().as_u16();
                 if ret.response_status == 204 {
                     return Ok(ret.clone());
                 }
-                let json: Value = response.into_json()?;
+                let json: Value = response.body_mut().read_json()?;
                 ret.response_data = Some(json);
-                Ok(ret.clone())
-            }
-            Err(ureq::Error::Status(status, response)) => {
-                ret.response_status = status;
-                if let Ok(response_data) = response.into_json() {
-                    ret.response_data = Some(response_data);
-                }
                 Ok(ret.clone())
             }
             Err(e) => {

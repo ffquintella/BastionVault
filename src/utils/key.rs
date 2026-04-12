@@ -2,7 +2,7 @@ use better_default::Default;
 use bv_crypto::{
     KemDemEnvelopeV1, MlDsa65Provider, MlKem768Provider, ML_DSA_65_SEED_LEN, ML_KEM_768_SEED_LEN,
 };
-use rand::{rngs::OsRng, RngCore};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{errors::RvError, utils::generate_uuid};
@@ -79,7 +79,7 @@ impl KeyBundle {
             ML_KEM_768_SEED_LEN
         };
         self.key = vec![0u8; seed_len];
-        OsRng.fill_bytes(&mut self.key);
+        rand::rng().fill_bytes(&mut self.key);
 
         Ok(())
     }

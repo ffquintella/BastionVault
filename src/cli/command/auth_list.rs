@@ -1,6 +1,6 @@
 use clap::Parser;
 use derive_more::Deref;
-use ureq::json;
+use serde_json::json;
 
 use crate::{
     api::sys::MountOutput,

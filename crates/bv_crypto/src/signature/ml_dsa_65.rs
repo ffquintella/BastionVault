@@ -2,7 +2,7 @@ use fips204::{
     ml_dsa_65,
     traits::{KeyGen, SerDes, Signer, Verifier},
 };
-use rand::RngCore;
+use rand::Rng;
 
 use crate::error::CryptoError;
 
@@ -32,7 +32,7 @@ pub struct MlDsa65Provider;
 impl MlDsa65Provider {
     pub fn generate_keypair(&self) -> Result<MlDsa65Keypair, CryptoError> {
         let mut secret_seed = [0u8; ML_DSA_65_SEED_LEN];
-        rand::rngs::OsRng.fill_bytes(&mut secret_seed);
+        rand::rng().fill_bytes(&mut secret_seed);
         let (public_key, _private_key) = ml_dsa_65::KG::keygen_from_seed(&secret_seed);
 
         Ok(MlDsa65Keypair { public_key: public_key.into_bytes().to_vec(), secret_seed })

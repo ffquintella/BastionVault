@@ -3,7 +3,7 @@
 
 use better_default::Default;
 use derivative::Derivative;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
 use super::generate_uuid;
@@ -148,7 +148,7 @@ impl Salt {
 mod test {
     use std::sync::Arc;
 
-    use rand::{thread_rng, Rng};
+    use rand::Rng;
 
     use super::*;
     use crate::{
@@ -162,7 +162,7 @@ mod test {
         let backend = new_test_backend("test_salt");
 
         let mut key = vec![0u8; 32];
-        thread_rng().fill(key.as_mut_slice());
+        rand::rng().fill_bytes(key.as_mut_slice());
         let aes_gcm_view = barrier_aes_gcm::AESGCMBarrier::new(backend);
 
         let init = aes_gcm_view.init(key.as_slice()).await;

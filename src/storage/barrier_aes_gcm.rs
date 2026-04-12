@@ -13,7 +13,7 @@ use aes_gcm::{
 };
 use arc_swap::ArcSwap;
 use better_default::Default;
-use rand::{thread_rng, Rng};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
@@ -161,7 +161,7 @@ impl SecurityBarrier for AESGCMBarrier {
         // will be zeroized on drop
         let mut buf = Zeroizing::new(vec![0u8; key_size]);
 
-        thread_rng().fill(buf.deref_mut().as_mut_slice());
+        rand::rng().fill_bytes(buf.deref_mut().as_mut_slice());
         Ok(buf)
     }
 
@@ -270,7 +270,7 @@ impl AESGCMBarrier {
 
         // Generate a random nonce
         let mut nonce = Zeroizing::new(vec![0u8; AES_GCM_NONCE_SIZE]);
-        thread_rng().fill(nonce.deref_mut().as_mut_slice());
+        rand::rng().fill_bytes(nonce.deref_mut().as_mut_slice());
         out[5..5 + AES_GCM_NONCE_SIZE].copy_from_slice(nonce.deref().as_slice());
 
         let aad = if barrier_info.aes_gcm_version_byte == AES_GCM_VERSION2 {
@@ -347,7 +347,7 @@ mod test {
         let backend = new_test_backend("test_encrypt_decrypt");
 
         let mut key = vec![0u8; 32];
-        thread_rng().fill(key.as_mut_slice());
+        rand::rng().fill_bytes(key.as_mut_slice());
 
         let barrier = AESGCMBarrier {
             backend,
@@ -419,7 +419,7 @@ mod test {
         assert!(sealed.unwrap());
 
         let mut key = vec![0u8; 32];
-        thread_rng().fill(key.as_mut_slice());
+        rand::rng().fill_bytes(key.as_mut_slice());
         let init = barrier.init(key.as_slice()).await;
         assert!(init.is_ok());
 
@@ -449,7 +449,7 @@ mod test {
         let barrier = AESGCMBarrier::new(backend.clone());
 
         let mut key = vec![0u8; 32];
-        thread_rng().fill(key.as_mut_slice());
+        rand::rng().fill_bytes(key.as_mut_slice());
         let init = barrier.init(key.as_slice()).await;
         assert!(init.is_ok());
 
