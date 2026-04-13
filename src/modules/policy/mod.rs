@@ -11,7 +11,7 @@ use crate::{
     errors::RvError,
     handler::AuthHandler,
     logical::{Backend, Request, Response},
-    rv_error_response_status,
+    bv_error_response_status,
 };
 
 #[allow(clippy::module_inception)]
@@ -85,7 +85,7 @@ impl PolicyModule {
 
             return Ok(Some(resp));
         }
-        Err(rv_error_response_status!(404, &format!("No policy named: {name}")))
+        Err(bv_error_response_status!(404, &format!("No policy named: {name}")))
     }
 
     pub async fn handle_policy_write(
@@ -248,7 +248,7 @@ mod mod_policy_tests {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_policy_curd_api() {
-        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_policy_curd_api").await;
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_policy_curd_api").await;
 
         let policy1_name = "policy1";
         let policy1_hcl = r#"
@@ -355,7 +355,7 @@ mod mod_policy_tests {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_policy_acl_check() {
-        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_policy_acl_check").await;
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_policy_acl_check").await;
 
         let policy1_name = "policy1";
         let policy1_hcl = r#"
@@ -447,7 +447,7 @@ mod mod_policy_tests {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_policy_acl_check_with_policy_parameters() {
-        let (_rvault, core, root_token) =
+        let (_bvault, core, root_token) =
             new_unseal_test_bastion_vault("test_policy_acl_check_with_policy_parameters").await;
 
         let policy1_name = "policy1";

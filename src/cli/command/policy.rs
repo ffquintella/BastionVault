@@ -14,15 +14,15 @@ Users can write, read, and list policies in BastionVault.
 
 List all enabled policies:
 
-    $ rvault policy list
+    $ bvault policy list
 
 Create a policy named "my-policy" from contents on local disk:
 
-    $ rvault policy write my-policy ./my-policy.hcl
+    $ bvault policy write my-policy ./my-policy.hcl
 
 Delete the policy named my-policy:
 
-    $ rvault policy delete my-policy
+    $ bvault policy delete my-policy
 
 Please see the individual subcommand help for detailed usage information."#
 )]
@@ -63,7 +63,7 @@ impl Policy {
 
 #[cfg(test)]
 mod test {
-    use crate::{errors::RvError, rv_error_string, test_utils::TestHttpServer};
+    use crate::{errors::RvError, bv_error_string, test_utils::TestHttpServer};
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_cli_policy() {
@@ -73,6 +73,6 @@ mod test {
         // There is no data by default, and reading should fail.
         let ret = test_http_server.cli(&["read"], &["kv/foo"]);
         assert!(ret.is_err());
-        assert_eq!(ret.unwrap_err(), rv_error_string!("No value found at kv/foo\n"));
+        assert_eq!(ret.unwrap_err(), bv_error_string!("No value found at kv/foo\n"));
     }
 }

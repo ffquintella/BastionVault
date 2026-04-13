@@ -494,21 +494,24 @@ impl From<rustls::pki_types::pem::Error> for RvError {
 }
 
 #[macro_export]
-macro_rules! rv_error_string {
+macro_rules! bv_error_string {
     ($message:expr) => {
         RvError::ErrString($message.to_string())
     };
 }
 
 #[macro_export]
-macro_rules! rv_error_response {
+macro_rules! bv_error_response {
     ($message:expr) => {
         RvError::ErrResponse($message.to_string())
+    };
+    ($fmt:expr, $($arg:tt)*) => {
+        RvError::ErrResponse(format!($fmt, $($arg)*))
     };
 }
 
 #[macro_export]
-macro_rules! rv_error_response_status {
+macro_rules! bv_error_response_status {
     ($status:expr, $message:expr) => {
         RvError::ErrResponseStatus($status, $message.to_string())
     };

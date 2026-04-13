@@ -14,11 +14,11 @@ Each secret engine behaves differently. Please see the documentation for more in
 
 List all enabled secrets engines:
 
-    $ rvault secrets list
+    $ bvault secrets list
 
 Enable a new secrets engine:
 
-    $ rvault secrets enable database
+    $ bvault secrets enable database
 
 Please see the individual subcommand help for detailed usage information."#
 )]

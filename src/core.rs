@@ -707,7 +707,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_generate_unseal_keys_basic() {
-        let (_rvault, core, _) = new_unseal_test_bastion_vault("test_generate_unseal_keys_basic").await;
+        let (_bvault, core, _) = new_unseal_test_bastion_vault("test_generate_unseal_keys_basic").await;
 
         // Test that generate_unseal_keys works when unsealed
         let result = core.generate_unseal_keys().await;
@@ -732,7 +732,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_generate_unseal_keys_when_sealed() {
-        let (_rvault, core, _) = new_unseal_test_bastion_vault("test_generate_unseal_keys_when_sealed").await;
+        let (_bvault, core, _) = new_unseal_test_bastion_vault("test_generate_unseal_keys_when_sealed").await;
 
         // Seal the vault
         let seal_result = core.seal().await;
@@ -745,7 +745,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_generate_unseal_keys_multiple_calls() {
-        let (_rvault, core, _) = new_unseal_test_bastion_vault("test_generate_unseal_keys_multiple_calls").await;
+        let (_bvault, core, _) = new_unseal_test_bastion_vault("test_generate_unseal_keys_multiple_calls").await;
 
         // Generate keys multiple times
         let keys1 = core.generate_unseal_keys().await.unwrap();
@@ -763,7 +763,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_unseal_once_basic() {
-        let (_rvault, core, _) = new_unseal_test_bastion_vault("test_unseal_once_basic").await;
+        let (_bvault, core, _) = new_unseal_test_bastion_vault("test_unseal_once_basic").await;
 
         // Get initial keys for testing
         let initial_keys = core.generate_unseal_keys().await.unwrap();
@@ -797,7 +797,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_unseal_once_insufficient_keys() {
-        let (_rvault, core, _) = new_unseal_test_bastion_vault("test_unseal_once_insufficient_keys").await;
+        let (_bvault, core, _) = new_unseal_test_bastion_vault("test_unseal_once_insufficient_keys").await;
 
         // Get initial keys
         let initial_keys = core.generate_unseal_keys().await.unwrap();
@@ -815,7 +815,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_unseal_once_key_deprecation() {
-        let (_rvault, core, _) = new_unseal_test_bastion_vault("test_unseal_once_key_deprecation").await;
+        let (_bvault, core, _) = new_unseal_test_bastion_vault("test_unseal_once_key_deprecation").await;
 
         // Get initial keys
         let initial_keys = core.generate_unseal_keys().await.unwrap();
@@ -876,7 +876,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_unseal_once_when_already_unsealed() {
-        let (_rvault, core, _) = new_unseal_test_bastion_vault("test_unseal_once_when_already_unsealed").await;
+        let (_bvault, core, _) = new_unseal_test_bastion_vault("test_unseal_once_when_already_unsealed").await;
 
         // Get keys for testing
         let keys = core.generate_unseal_keys().await.unwrap();
@@ -888,7 +888,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_unseal_once_forward_secrecy() {
-        let (_rvault, core, _) = new_unseal_test_bastion_vault("test_unseal_once_forward_secrecy").await;
+        let (_bvault, core, _) = new_unseal_test_bastion_vault("test_unseal_once_forward_secrecy").await;
 
         // Get initial keys
         let keys1 = core.generate_unseal_keys().await.unwrap();

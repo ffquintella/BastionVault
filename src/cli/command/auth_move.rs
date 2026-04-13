@@ -26,12 +26,12 @@ WARNING! Moving an auth method will revoke any leases from the old method.
 
 Move the auth method at approle/ to generic/:
 
-    $ rvault auth move approle/ generic/
+    $ bvault auth move approle/ generic/
 
 Move the auth method at ns1/approle/ across namespaces to ns2/generic/,
 where ns1 and ns2 are child namespaces of the current namespace:
 
-    $ rvault auth move ns1/approle/ ns2/generic/"#
+    $ bvault auth move ns1/approle/ ns2/generic/"#
 )]
 pub struct Move {
     #[arg(index = 1, required = true, next_line_help = false, value_name = "SOURCE", help = r#"The path of source."#)]

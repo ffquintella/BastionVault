@@ -20,11 +20,11 @@ or machines and assigning them policies with which they can access BastionVault.
 
 Enable the userpass auth method at userpass/:
 
-    $ rvault auth enable userpass
+    $ bvault auth enable userpass
 
 Enable the cert auth method at cert-prod/:
 
-    $ rvault auth enable -path=cert-prod cert"#
+    $ bvault auth enable -path=cert-prod cert"#
 )]
 pub struct Enable {
     #[arg(next_line_help = false, value_name = "TYPE", long_help = r#"Auth method type"#)]

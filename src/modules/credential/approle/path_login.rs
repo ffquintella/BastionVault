@@ -9,7 +9,7 @@ use crate::{
     context::Context,
     errors::RvError,
     logical::{Auth, Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
-    new_fields, new_fields_internal, new_path, new_path_internal, rv_error_response, rv_error_string,
+    new_fields, new_fields_internal, new_path, new_path_internal, bv_error_response, bv_error_string,
     storage::StorageEntry,
     utils::cidr,
 };
@@ -232,7 +232,7 @@ impl AppRoleBackendInner {
 
     pub async fn login_renew(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         if req.auth.is_none() {
-            return Err(rv_error_string!("invalid request"));
+            return Err(bv_error_string!("invalid request"));
         }
         let mut auth = req.auth.clone().unwrap();
         let role_name = auth.metadata.get("username");
@@ -249,7 +249,7 @@ impl AppRoleBackendInner {
         let role = self
             .get_role(req, role_name)
             .await?
-            .ok_or(rv_error_response!(format!("role {} does not exist during renewal", role_name)))?;
+            .ok_or(bv_error_response!(format!("role {} does not exist during renewal", role_name)))?;
 
         auth.period = role.token_period;
         auth.ttl = role.token_ttl;

@@ -337,16 +337,16 @@ mod tests {
         );
         let backend = new_test_backend(&test_name);
         let config = Config { barrier_type: BarrierType::Chacha20Poly1305, ..Default::default() };
-        let rvault = BastionVault::new(backend.clone(), Some(&config)).unwrap();
+        let bvault = BastionVault::new(backend.clone(), Some(&config)).unwrap();
 
         let seal_config = SealConfig { secret_shares: 1, secret_threshold: 1 };
-        let init_result = rvault.init(&seal_config).await.unwrap();
+        let init_result = bvault.init(&seal_config).await.unwrap();
         let unseal_key = init_result.secret_shares[0].clone();
 
-        assert!(rvault.unseal(&[unseal_key.as_slice()]).await.unwrap());
+        assert!(bvault.unseal(&[unseal_key.as_slice()]).await.unwrap());
 
         let entry = StorageEntry { key: "test/chacha".to_string(), value: b"payload".to_vec() };
-        rvault.core.load().barrier.put(&entry).await.unwrap();
+        bvault.core.load().barrier.put(&entry).await.unwrap();
 
         let raw = backend.get(&entry.key).await.unwrap().unwrap();
         assert_eq!(raw.value[4], BARRIER_CHACHA20_POLY1305_VERSION);

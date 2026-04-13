@@ -19,7 +19,7 @@ engine are revoked and its BastionVault data is removed.
 
 Disable the secrets engine enabled at aws/:
 
-    $ rvault secrets disable aws/"#
+    $ bvault secrets disable aws/"#
 )]
 pub struct Disable {
     #[arg(index = 1, next_line_help = false, value_name = "PATH", help = r#"The path of secrets."#)]

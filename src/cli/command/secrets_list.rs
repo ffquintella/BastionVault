@@ -18,11 +18,11 @@ descriptions. A TTL of "system" indicates that the system default is in use.
 
 List all enabled secrets engines:
 
-    $ rvault secrets list
+    $ bvault secrets list
 
 List all enabled secrets engines with detailed output:
 
-    $ rvault secrets list -detailed"#
+    $ bvault secrets list -detailed"#
 )]
 pub struct List {
     #[deref]

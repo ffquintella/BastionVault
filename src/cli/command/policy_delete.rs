@@ -15,7 +15,7 @@ all tokens associated with the policy are affected immediately.
 
 Delete the policy named "my-policy":
 
-    $ rvault policy delete my-policy
+    $ bvault policy delete my-policy
 
 Note that it is not possible to delete the "default" or "root" policies.
 These are built-in policies.

@@ -48,14 +48,14 @@ Simply build the binary by using the tool Cargo.
 cargo build
 ~~~
 
-Rust toolchain is responsible for taking care of almost everything during the build process. After BastionVault is successfully built, you get a bundle of files in the `BastionVault/target/debug` directory. There will be a executable file called `rvault`, which is the application of BastionVault.
+Rust toolchain is responsible for taking care of almost everything during the build process. After BastionVault is successfully built, you get a bundle of files in the `BastionVault/target/debug` directory. There will be a executable file called `bvault`, which is the application of BastionVault.
 
 ## Verify BastionVault
 
 Simply run the following command:
 
 ~~~bash
-target/debug/rvault --help
+target/debug/bvault --help
 ~~~
 
 And you will get a response similar to:
@@ -63,7 +63,7 @@ And you will get a response similar to:
 ~~~
 A secure and high performance secret management software that is compatible with Hashicorp Vault.
 
-Usage: rvault [COMMAND]
+Usage: bvault [COMMAND]
 
 Commands:
   server    Start a BastionVault server

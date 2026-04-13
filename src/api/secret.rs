@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::{errors::RvError, rv_error_string};
+use crate::{errors::RvError, bv_error_string};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Secret {
@@ -54,7 +54,7 @@ impl Secret {
         };
 
         let Some(renewable) = renewable_value.as_bool() else {
-            return Err(rv_error_string!("token id found but in the wrong format"));
+            return Err(bv_error_string!("token id found but in the wrong format"));
         };
 
         Ok(renewable)
@@ -72,7 +72,7 @@ impl Secret {
         };
 
         let Some(id) = id_value.as_str() else {
-            return Err(rv_error_string!("token id found but in the wrong format"));
+            return Err(bv_error_string!("token id found but in the wrong format"));
         };
 
         Ok(id.to_string())
@@ -90,7 +90,7 @@ impl Secret {
         };
 
         let Some(accessor) = accessor_value.as_str() else {
-            return Err(rv_error_string!("token accessor found but in the wrong format"));
+            return Err(bv_error_string!("token accessor found but in the wrong format"));
         };
 
         Ok(accessor.to_string())
@@ -108,7 +108,7 @@ impl Secret {
         };
 
         let Some(policies) = policies_value.as_array() else {
-            return Err(rv_error_string!("token policies found but in the wrong format"));
+            return Err(bv_error_string!("token policies found but in the wrong format"));
         };
 
         Ok(policies.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
@@ -124,7 +124,7 @@ impl Secret {
         };
 
         let Some(ttl) = ttl_value.as_u64() else {
-            return Err(rv_error_string!("token ttl found but in the wrong format"));
+            return Err(bv_error_string!("token ttl found but in the wrong format"));
         };
 
         Ok(ttl)
@@ -139,7 +139,7 @@ impl Secret {
 
         if let Some(data) = self.data.get("metadata") {
             let Some(metadata) = data.as_object() else {
-                return Err(rv_error_string!("token metadata found but in the wrong format"));
+                return Err(bv_error_string!("token metadata found but in the wrong format"));
             };
 
             return Ok(metadata.into_iter().map(|(k, v)| (k.to_string(), value_to_string(v))).collect());
@@ -147,7 +147,7 @@ impl Secret {
 
         if let Some(data) = self.data.get("meta") {
             let Some(meta) = data.as_object() else {
-                return Err(rv_error_string!("token meta found but in the wrong format"));
+                return Err(bv_error_string!("token meta found but in the wrong format"));
             };
 
             return Ok(meta.into_iter().map(|(k, v)| (k.to_string(), value_to_string(v))).collect());

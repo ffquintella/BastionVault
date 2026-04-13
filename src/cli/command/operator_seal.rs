@@ -24,7 +24,7 @@ This command does nothing if the BastionVault server is already sealed.
 
 Seal the BastionVault server:
 
-  $ rvault operator seal"#
+  $ bvault operator seal"#
 )]
 pub struct Seal {
     #[deref]
@@ -71,17 +71,17 @@ mod test {
     async fn test_cli_operator_seal() {
         let test_http_server = TestHttpServer::new("test_cli_operator_seal", true).await;
 
-        // rvault status
+        // bvault status
         let ret = test_http_server.cli(&["status"], &["--format=raw"]);
         let ret = Value::from_str(ret.unwrap().as_str()).unwrap();
         let status_result = ret.as_object().unwrap();
         assert_eq!(status_result["sealed"], false);
 
-        // rvault operator seal
+        // bvault operator seal
         let ret = test_http_server.cli(&["operator", "seal"], &[]);
         assert_eq!(ret, Ok("Success! BastionVault is sealed.\n".into()));
 
-        // rvault status
+        // bvault status
         let ret = test_http_server.cli(&["status"], &["--format=raw"]);
         let ret = Value::from_str(ret.unwrap().as_str()).unwrap();
         let status_result = ret.as_object().unwrap();

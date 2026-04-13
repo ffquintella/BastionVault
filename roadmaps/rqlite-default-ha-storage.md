@@ -236,15 +236,15 @@ The tool may start as a CLI command group and later grow into API endpoints or a
 
 ### Suggested command areas
 
-- `rvault cluster init`
-- `rvault cluster join`
-- `rvault cluster leave`
-- `rvault cluster remove-node`
-- `rvault cluster status`
-- `rvault cluster leader`
-- `rvault cluster members`
-- `rvault cluster failover`
-- `rvault cluster recover`
+- `bvault cluster init`
+- `bvault cluster join`
+- `bvault cluster leave`
+- `bvault cluster remove-node`
+- `bvault cluster status`
+- `bvault cluster leader`
+- `bvault cluster members`
+- `bvault cluster failover`
+- `bvault cluster recover`
 
 ### Work Items
 
@@ -381,4 +381,4 @@ HA validation complete for failover, restart, and quorum-loss scenarios.
 2. Create `src/storage/rqlite/` with a minimal backend skeleton and config parser.
 3. Update [src/cli/config.rs](/Users/felipe/Dev/BastionVault/src/cli/config.rs) to recognize `rqlite`.
 4. Decide whether `rqlite` access will use raw HTTP requests or a dedicated client crate.
-5. Define the first `rvault cluster` command surface for HA lifecycle management.
+5. Define the first `bvault cluster` command surface for HA lifecycle management.

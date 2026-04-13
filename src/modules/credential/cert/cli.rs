@@ -4,7 +4,7 @@ use serde_json::{Map, Value};
 use crate::{
     api::{auth::LoginHandler, client::Client, HttpResponse},
     errors::RvError,
-    rv_error_response,
+    bv_error_response,
 };
 
 #[derive(Default)]
@@ -16,7 +16,7 @@ pub struct CertAuthCliHandler {
 impl LoginHandler for CertAuthCliHandler {
     fn auth(&self, client: &Client, data: &Map<String, Value>) -> Result<HttpResponse, RvError> {
         if data["name"].as_str().is_none() {
-            return Err(rv_error_response!("'name' must be specified"));
+            return Err(bv_error_response!("'name' must be specified"));
         }
 
         let payload = serde_json::json!({
@@ -36,14 +36,14 @@ impl LoginHandler for CertAuthCliHandler {
 
     fn help(&self) -> String {
         let help = r#"
-Usage: rvault login -method=cert [CONFIG K=V...]
+Usage: bvault login -method=cert [CONFIG K=V...]
 
 The certificate auth method allows users to authenticate with a client certificate passed with the request. 
-The -client-cert and -client-key flags are included with the "rvault login" command, NOT as configuration to the auth method.
+The -client-cert and -client-key flags are included with the "bvault login" command, NOT as configuration to the auth method.
 
 Authenticate using a local client certificate:
 
-    $ rvault login -method=cert -client-cert=cert.pem -client-key=key.pem
+    $ bvault login -method=cert -client-cert=cert.pem -client-key=key.pem
 
 Configuration:
 

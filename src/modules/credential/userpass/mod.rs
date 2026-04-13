@@ -175,7 +175,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_userpass_module() {
-        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_userpass_module").await;
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_userpass_module").await;
 
         // mount userpass auth to path: auth/pass
         test_mount_auth_api(&core, &root_token, "userpass", "pass").await;

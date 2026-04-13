@@ -24,7 +24,7 @@ Build BastionVault:
 make build
 ~~~
 
-After a successful build, the `rvault` executable will be in `target/release/`.
+After a successful build, the `bvault` executable will be in `target/release/`.
 
 ## Configure the Server
 
@@ -52,7 +52,7 @@ For production use, you should enable TLS by providing `tls_cert_file` and `tls_
 Launch the server:
 
 ~~~bash
-target/release/rvault server --config config.hcl
+target/release/bvault server --config config.hcl
 ~~~
 
 Or for development using the included config:

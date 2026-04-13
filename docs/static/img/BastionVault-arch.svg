@@ -30,7 +30,7 @@
   <rect class="group" x="50" y="55" width="800" height="70"/>
   <text class="label-bold" x="70" y="75">BastionVault Interface</text>
   <rect class="box" x="280" y="80" width="100" height="32"/>
-  <text class="label" x="330" y="96">CLI (rvault)</text>
+  <text class="label" x="330" y="96">CLI (bvault)</text>
   <rect class="box" x="420" y="80" width="100" height="32"/>
   <text class="label" x="470" y="96">REST API</text>
   <rect class="box" x="560" y="80" width="100" height="32"/>

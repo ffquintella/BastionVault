@@ -8,7 +8,7 @@ use prettytable::{format::FormatBuilder, Cell, Row, Table};
 use regex::Regex;
 use serde_json::{json, Map, Value};
 
-use crate::{api::secret::Secret, errors::RvError, rv_error_string};
+use crate::{api::secret::Secret, errors::RvError, bv_error_string};
 
 lazy_static! {
     static ref UNDERSCORE_REGEX: Regex = Regex::new(r"_(\w)").unwrap();
@@ -186,7 +186,7 @@ pub fn table_data_add_header(data: &Value, headers: &[&str]) -> Result<Value, Rv
     if let Value::Array(ref mut arr) = array {
         if data.is_object() {
             if headers.len() != 2 {
-                return Err(rv_error_string!("table_data_add_header failed: headers.len() != 2"));
+                return Err(bv_error_string!("table_data_add_header failed: headers.len() != 2"));
             }
             arr.push(json!([headers[0], headers[1]]));
             arr.push(json!([SEPS[headers[0].len().min(SEPS.len())], SEPS[headers[1].len().min(SEPS.len())]]));
@@ -213,12 +213,12 @@ pub fn table_data_add_header(data: &Value, headers: &[&str]) -> Result<Value, Rv
             for item in data_arr.iter() {
                 if item.is_array() {
                     if item.as_array().unwrap().len() != headers.len() {
-                        return Err(rv_error_string!("table_data_add_header failed: headers.len() != data[i].len()"));
+                        return Err(bv_error_string!("table_data_add_header failed: headers.len() != data[i].len()"));
                     }
                     arr.push(item.clone());
                 } else if item.is_object() {
                     if headers.len() != 2 {
-                        return Err(rv_error_string!("table_data_add_header failed: headers.len() != 2"));
+                        return Err(bv_error_string!("table_data_add_header failed: headers.len() != 2"));
                     }
 
                     let data_obj = item.as_object().unwrap();
@@ -227,7 +227,7 @@ pub fn table_data_add_header(data: &Value, headers: &[&str]) -> Result<Value, Rv
                     }
                 } else {
                     if headers.len() != 1 {
-                        return Err(rv_error_string!("table_data_add_header failed: headers.len() != 1"));
+                        return Err(bv_error_string!("table_data_add_header failed: headers.len() != 1"));
                     }
                     arr.push(item.clone());
                 }
@@ -348,12 +348,12 @@ impl OutputOptions {
         let data = if let Some(key) = field {
             if let Some(item) = map.get(key) {
                 if !item.is_string() {
-                    return Err(rv_error_string!(format!(r#"Field "{key}" not present in secret"#)));
+                    return Err(bv_error_string!(format!(r#"Field "{key}" not present in secret"#)));
                 }
                 let secret = item.as_str().unwrap();
                 Value::String(secret.to_string())
             } else {
-                return Err(rv_error_string!(format!(r#"Field "{key}" not present in secret"#)));
+                return Err(bv_error_string!(format!(r#"Field "{key}" not present in secret"#)));
             }
         } else if self.format == Format::Table {
             table_data_add_header(&Value::Object(map.clone()), &["Key", "Value"])?

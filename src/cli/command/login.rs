@@ -29,17 +29,17 @@ The -method flag allows using other auth methods, such as userpass, github, or
 cert. For these, additional "K=V" pairs may be required. For example, to
 authenticate to the userpass auth method:
 
-    $ rvault login -method=userpass username=my-username
+    $ bvault login -method=userpass username=my-username
 
 For more information about the list of configuration parameters available for
-a given auth method, use the "rvault auth help TYPE" command. You can also use
-"rvault auth list" to see the list of enabled auth methods.
+a given auth method, use the "bvault auth help TYPE" command. You can also use
+"bvault auth list" to see the list of enabled auth methods.
 
 If an auth method is enabled at a non-standard path, the -method flag still
 refers to the canonical type, but the -path flag refers to the enabled path.
 If a github auth method was enabled at "github-prod", authenticate like this:
 
-    $ rvault login -method=github -path=github-prod
+    $ bvault login -method=github -path=github-prod
 
 If the authentication is requested with response wrapping (via -wrap-ttl),
 the returned token is automatically unwrapped unless:
@@ -118,7 +118,7 @@ impl CommandExecutor for Login {
         let login_handler = LoginHandlers.get(&auth_method);
         if login_handler.is_none() {
             println!("Unknown auth method: {auth_method}.");
-            println!(r#"Use "rvault auth list" to see the complete list of auth methods."#);
+            println!(r#"Use "bvault auth list" to see the complete list of auth methods."#);
             println!("Additionally, some auth methods are only available via the HTTP API.");
             std::process::exit(1);
         }

@@ -14,15 +14,15 @@ Most users will not need to interact with these commands.
 
 Initialize a new BastionVault server:
 
-  $ rvault operator init
+  $ bvault operator init
 
 Unseals the BastionVault server:
 
-  $ rvault operator unseal
+  $ bvault operator unseal
 
 Seals the BastionVault server:
 
-  $ rvault operator seal"#
+  $ bvault operator seal"#
 )]
 pub struct Operator {
     #[command(subcommand)]

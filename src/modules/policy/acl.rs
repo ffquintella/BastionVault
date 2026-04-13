@@ -31,7 +31,7 @@ use super::{
 use crate::{
     errors::RvError,
     logical::{auth::PolicyInfo, Operation, Request},
-    rv_error_string,
+    bv_error_string,
     utils::string::ensure_no_leading_slash,
 };
 
@@ -129,12 +129,12 @@ impl ACL {
                 acl.rgp_policies.push(policy.clone());
                 continue;
             } else if policy.policy_type != PolicyType::Acl {
-                return Err(rv_error_string!("unable to parse policy (wrong type)"));
+                return Err(bv_error_string!("unable to parse policy (wrong type)"));
             }
 
             if policy.name == "root" {
                 if policies.len() != 1 {
-                    return Err(rv_error_string!("other policies present along with root"));
+                    return Err(bv_error_string!("other policies present along with root"));
                 }
                 acl.root = true;
             }

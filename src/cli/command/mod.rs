@@ -236,7 +236,7 @@ pub trait CommandExecutor {
 
 #[cfg(test)]
 mod test {
-    use crate::{errors::RvError, rv_error_string, test_utils::TestHttpServer};
+    use crate::{errors::RvError, bv_error_string, test_utils::TestHttpServer};
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_cli_logical() {
@@ -246,7 +246,7 @@ mod test {
         // There is no data by default, and reading should fail.
         let ret = test_http_server.cli(&["read"], &["kv/foo"]);
         assert!(ret.is_err());
-        assert_eq!(ret.unwrap_err(), rv_error_string!("No value found at kv/foo\n"));
+        assert_eq!(ret.unwrap_err(), bv_error_string!("No value found at kv/foo\n"));
 
         // Without the mount kv engine, writing data should fail.
         let ret = test_http_server.cli(&["write"], &["kv/foo", "aa=bb", "cc=dd"]);
@@ -289,7 +289,7 @@ mod test {
         assert_eq!(ret, Ok("bb\n".into()));
 
         let ret = test_http_server.cli(&["read"], &["--field=gg", "kv/foo"]);
-        assert_eq!(ret, Err(rv_error_string!("Error: Field \"gg\" not present in secret\n")));
+        assert_eq!(ret, Err(bv_error_string!("Error: Field \"gg\" not present in secret\n")));
 
         // list /
         let ret = test_http_server.cli(&["list"], &[]);
@@ -304,7 +304,7 @@ mod test {
 
         // list kvv/
         let ret = test_http_server.cli(&["list"], &["kvv/"]);
-        assert_eq!(ret, Err(rv_error_string!("No value found at kvv/\n")));
+        assert_eq!(ret, Err(bv_error_string!("No value found at kvv/\n")));
 
         // write kv/goo
         let ret = test_http_server.cli(&["write"], &["kv/goo", "aaa=bbb", "ccc=ddd"]);
@@ -323,7 +323,7 @@ mod test {
 
         // list kv/goo, again
         let ret = test_http_server.cli(&["list"], &["kv/goo"]);
-        assert_eq!(ret, Err(rv_error_string!("No value found at kv/goo\n")));
+        assert_eq!(ret, Err(bv_error_string!("No value found at kv/goo\n")));
 
         // delete kv/koo
         let ret = test_http_server.cli(&["delete"], &["kv/koo"]);

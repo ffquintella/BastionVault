@@ -547,7 +547,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_credential_approle_module() {
-        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_credential_approle_module").await;
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_credential_approle_module").await;
 
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle/").await;

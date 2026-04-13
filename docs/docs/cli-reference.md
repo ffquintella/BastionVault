@@ -5,7 +5,7 @@ title: CLI Reference
 
 # CLI Reference
 
-BastionVault provides the `rvault` command-line tool for interacting with a running server. The CLI is compatible with HashiCorp Vault's command structure.
+BastionVault provides the `bvault` command-line tool for interacting with a running server. The CLI is compatible with HashiCorp Vault's command structure.
 
 ## Global Options
 
@@ -29,7 +29,7 @@ These options apply to all commands that connect to a server:
 Start a BastionVault server.
 
 ~~~bash
-rvault server --config /path/to/config.hcl
+bvault server --config /path/to/config.hcl
 ~~~
 
 | Option | Description |
@@ -43,8 +43,8 @@ rvault server --config /path/to/config.hcl
 Print the seal status of the vault.
 
 ~~~bash
-rvault status
-rvault status --format=json
+bvault status
+bvault status --format=json
 ~~~
 
 Returns the sealed state, number of key shares, threshold, and unseal progress.
@@ -54,8 +54,8 @@ Returns the sealed state, number of key shares, threshold, and unseal progress.
 Initialize a new vault. Generates the root key and splits it using Shamir's Secret Sharing.
 
 ~~~bash
-rvault operator init
-rvault operator init --key-shares=5 --key-threshold=3
+bvault operator init
+bvault operator init --key-shares=5 --key-threshold=3
 ~~~
 
 | Option | Description |
@@ -70,8 +70,8 @@ Returns a list of unseal keys and a root token. Store these securely.
 Provide an unseal key share. Must be called enough times to meet the threshold.
 
 ~~~bash
-rvault operator unseal
-rvault operator unseal 7df5ff90cd9417e04cbb9f6db65e0b16ce265d5108fd07e45bdae1a35bf5da6a
+bvault operator unseal
+bvault operator unseal 7df5ff90cd9417e04cbb9f6db65e0b16ce265d5108fd07e45bdae1a35bf5da6a
 ~~~
 
 If the key is not provided as an argument, you will be prompted for it.
@@ -81,7 +81,7 @@ If the key is not provided as an argument, you will be prompted for it.
 Seal the vault. All secrets become inaccessible until it is unsealed again.
 
 ~~~bash
-rvault operator seal
+bvault operator seal
 ~~~
 
 ## read
@@ -89,9 +89,9 @@ rvault operator seal
 Read data from a path.
 
 ~~~bash
-rvault read secret/my-secret
-rvault read --field=password secret/my-secret
-rvault read --format=json secret/my-secret
+bvault read secret/my-secret
+bvault read --field=password secret/my-secret
+bvault read --format=json secret/my-secret
 ~~~
 
 | Option | Description |
@@ -103,9 +103,9 @@ rvault read --format=json secret/my-secret
 Write data to a path.
 
 ~~~bash
-rvault write secret/my-secret foo=bar
-rvault write secret/my-secret password=@/path/to/file
-rvault write secret/my-secret data=-
+bvault write secret/my-secret foo=bar
+bvault write secret/my-secret password=@/path/to/file
+bvault write secret/my-secret data=-
 ~~~
 
 Values can be specified as:
@@ -118,7 +118,7 @@ Values can be specified as:
 Delete data at a path.
 
 ~~~bash
-rvault delete secret/my-secret
+bvault delete secret/my-secret
 ~~~
 
 ## list
@@ -126,8 +126,8 @@ rvault delete secret/my-secret
 List keys at a path.
 
 ~~~bash
-rvault list secret/
-rvault list --format=json auth/
+bvault list secret/
+bvault list --format=json auth/
 ~~~
 
 ## login
@@ -136,13 +136,13 @@ Authenticate to BastionVault and obtain a token.
 
 ~~~bash
 # Token auth (default)
-rvault login s.my-token-value
+bvault login s.my-token-value
 
 # Username/password
-rvault login --method=userpass username=admin password=secret
+bvault login --method=userpass username=admin password=secret
 
 # Certificate
-rvault login --method=cert --client-cert=client.crt --client-key=client.key
+bvault login --method=cert --client-cert=client.crt --client-key=client.key
 ~~~
 
 | Option | Description |
@@ -156,8 +156,8 @@ rvault login --method=cert --client-cert=client.crt --client-key=client.key
 Enable an authentication method.
 
 ~~~bash
-rvault auth enable userpass
-rvault auth enable --path=my-approle --description="App authentication" approle
+bvault auth enable userpass
+bvault auth enable --path=my-approle --description="App authentication" approle
 ~~~
 
 | Option | Description |
@@ -170,7 +170,7 @@ rvault auth enable --path=my-approle --description="App authentication" approle
 Disable an authentication method. All tokens from this method are revoked.
 
 ~~~bash
-rvault auth disable userpass/
+bvault auth disable userpass/
 ~~~
 
 ## auth list
@@ -178,8 +178,8 @@ rvault auth disable userpass/
 List all enabled authentication methods.
 
 ~~~bash
-rvault auth list
-rvault auth list --format=json
+bvault auth list
+bvault auth list --format=json
 ~~~
 
 ## auth move
@@ -187,7 +187,7 @@ rvault auth list --format=json
 Move an authentication method to a different path.
 
 ~~~bash
-rvault auth move approle/ new-approle/
+bvault auth move approle/ new-approle/
 ~~~
 
 ## policy write
@@ -195,8 +195,8 @@ rvault auth move approle/ new-approle/
 Create or update a policy from a file.
 
 ~~~bash
-rvault policy write my-policy policy.hcl
-rvault policy write my-policy -    # read from stdin
+bvault policy write my-policy policy.hcl
+bvault policy write my-policy -    # read from stdin
 ~~~
 
 ## policy read
@@ -204,7 +204,7 @@ rvault policy write my-policy -    # read from stdin
 Read a policy by name.
 
 ~~~bash
-rvault policy read my-policy
+bvault policy read my-policy
 ~~~
 
 ## policy delete
@@ -212,7 +212,7 @@ rvault policy read my-policy
 Delete a policy by name. The `default` and `root` policies cannot be deleted.
 
 ~~~bash
-rvault policy delete my-policy
+bvault policy delete my-policy
 ~~~
 
 ## policy list
@@ -220,7 +220,7 @@ rvault policy delete my-policy
 List all policies.
 
 ~~~bash
-rvault policy list
+bvault policy list
 ~~~
 
 ## secrets enable
@@ -228,9 +228,9 @@ rvault policy list
 Enable a secrets engine.
 
 ~~~bash
-rvault secrets enable kv
-rvault secrets enable --path=kv-v2 --version=2 kv
-rvault secrets enable --max-lease-ttl=30m --path=short-lived kv
+bvault secrets enable kv
+bvault secrets enable --path=kv-v2 --version=2 kv
+bvault secrets enable --max-lease-ttl=30m --path=short-lived kv
 ~~~
 
 | Option | Description |
@@ -246,7 +246,7 @@ rvault secrets enable --max-lease-ttl=30m --path=short-lived kv
 Disable a secrets engine. All secrets and configuration for this engine are removed.
 
 ~~~bash
-rvault secrets disable kv/
+bvault secrets disable kv/
 ~~~
 
 ## secrets list
@@ -254,8 +254,8 @@ rvault secrets disable kv/
 List all enabled secrets engines.
 
 ~~~bash
-rvault secrets list
-rvault secrets list --format=json
+bvault secrets list
+bvault secrets list --format=json
 ~~~
 
 ## secrets move
@@ -263,7 +263,7 @@ rvault secrets list --format=json
 Move a secrets engine to a different path.
 
 ~~~bash
-rvault secrets move secret/ generic/
+bvault secrets move secret/ generic/
 ~~~
 
 ## Exit Codes

@@ -15,7 +15,7 @@ given secret engine.
 
 List values under the "my-app" folder of the generic secret engine:
 
-  $ rvault list secret/my-app/
+  $ bvault list secret/my-app/
 
 For a full list of examples and paths, please see the documentation that corresponds
 to the secret engine in use. Not all engines support listing."#

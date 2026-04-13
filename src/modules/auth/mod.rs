@@ -18,7 +18,7 @@ use crate::{
     logical::Backend,
     modules::Module,
     mount::{MountEntry, MountTable, MountsRouter},
-    rv_error_response_status,
+    bv_error_response_status,
     storage::{barrier::SecurityBarrier, barrier_view::BarrierView},
     utils::{generate_uuid, is_protect_path},
 };
@@ -104,13 +104,13 @@ impl AuthModule {
             for (_, mount_entry) in auth_table.iter() {
                 let ent = mount_entry.read()?;
                 if ent.path.starts_with(&entry.path) || entry.path.starts_with(&ent.path) {
-                    return Err(rv_error_response_status!(409, &format!("path is already in use at {}", &entry.path)));
+                    return Err(bv_error_response_status!(409, &format!("path is already in use at {}", &entry.path)));
                 }
             }
 
             let match_mount_path = mounts_router.router.matching_mount(&entry.path)?;
             if !match_mount_path.is_empty() {
-                return Err(rv_error_response_status!(409, &format!("path is already in use at {match_mount_path}")));
+                return Err(bv_error_response_status!(409, &format!("path is already in use at {match_mount_path}")));
             }
 
             let backend_new_func = self.get_auth_backend(&entry.logical_type)?;
@@ -179,11 +179,11 @@ impl AuthModule {
         }
 
         if !src.starts_with(AUTH_ROUTER_PREFIX) {
-            return Err(rv_error_response_status!(400, &format!("cannot remount non-auth mount {src}")));
+            return Err(bv_error_response_status!(400, &format!("cannot remount non-auth mount {src}")));
         }
 
         if !dst.starts_with(AUTH_ROUTER_PREFIX) {
-            return Err(rv_error_response_status!(400, &format!("cannot remount auth mount to non-auth mount {dst}")));
+            return Err(bv_error_response_status!(400, &format!("cannot remount auth mount to non-auth mount {dst}")));
         }
 
         if is_protect_path(&PROTECTED_AUTHS, &[&src, &dst]) {

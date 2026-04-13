@@ -21,11 +21,11 @@ loaded from the file at the given path on the local disk.
 
 Upload a policy named "my-policy" from "/tmp/policy.hcl" on the local disk:
 
-    $ rvault policy write my-policy /tmp/policy.hcl
+    $ bvault policy write my-policy /tmp/policy.hcl
 
 Upload a policy from stdin:
 
-    $ cat my-policy.hcl | rvault policy write my-policy -
+    $ cat my-policy.hcl | bvault policy write my-policy -
 "#
 )]
 pub struct Write {

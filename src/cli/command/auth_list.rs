@@ -18,11 +18,11 @@ A TTL of "system" indicates that the system default is in use.
 
 List all enabled auth methods:
 
-    $ rvault auth list
+    $ bvault auth list
 
 List all enabled auth methods with detailed output:
 
-    $ rvault auth list -detailed"#
+    $ bvault auth list -detailed"#
 )]
 pub struct List {
     #[deref]

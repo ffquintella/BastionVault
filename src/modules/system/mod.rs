@@ -23,7 +23,7 @@ use crate::{
     },
     mount::{MountEntry, MOUNT_TABLE_TYPE},
     new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
-    rv_error_response_status,
+    bv_error_response_status,
     storage::StorageEntry,
 };
 
@@ -412,7 +412,7 @@ impl SystemBackend {
 
                 let dst_path_match = self.core.router.matching_mount(to)?;
                 if !dst_path_match.is_empty() {
-                    return Err(rv_error_response_status!(409, &format!("path already in use at {dst_path_match}")));
+                    return Err(bv_error_response_status!(409, &format!("path already in use at {dst_path_match}")));
                 }
 
                 mount_entry_table_type = mount_entry.table.clone();
@@ -429,11 +429,11 @@ impl SystemBackend {
                     self.core.remount(&from_path, &to_path).await?;
                 }
                 _ => {
-                    return Err(rv_error_response_status!(409, "Unknown mount table type."));
+                    return Err(bv_error_response_status!(409, "Unknown mount table type."));
                 }
             }
         } else {
-            return Err(rv_error_response_status!(409, &format!("no matching mount at {from_path}")));
+            return Err(bv_error_response_status!(409, &format!("no matching mount at {from_path}")));
         }
 
         Ok(None)

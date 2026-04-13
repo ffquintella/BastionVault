@@ -22,7 +22,7 @@ revoked. This command will block until all tokens are revoked.
 
 Disable the auth method at userpass/:
 
-    $ rvault auth disable userpass/"#
+    $ bvault auth disable userpass/"#
 )]
 pub struct Disable {
     #[arg(

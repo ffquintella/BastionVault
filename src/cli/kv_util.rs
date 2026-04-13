@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 use crate::{
     api::{Client, HttpResponse},
     errors::RvError,
-    rv_error_string,
+    bv_error_string,
 };
 
 pub fn kv_read_request(client: &Client, path: &str, data: Option<Map<String, Value>>) -> Result<HttpResponse, RvError> {
@@ -19,7 +19,7 @@ pub fn kv_preflight_version_request(client: &Client, path: &str) -> Result<(Stri
     }
 
     let Some(data) = resp.response_data else {
-        return Err(rv_error_string!("nil response from pre-flight request"));
+        return Err(bv_error_string!("nil response from pre-flight request"));
     };
 
     let path = data["path"].as_str().unwrap_or("");

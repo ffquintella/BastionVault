@@ -32,7 +32,7 @@ Build BastionVault by using Rust toolchain:
 cargo build
 ~~~
 
-If the build is successful, then you now have an executable binary file called `rvault` in `BastionVault/target/debug` directory.
+If the build is successful, then you now have an executable binary file called `bvault` in `BastionVault/target/debug` directory.
 
 ## Run the Server
 
@@ -65,24 +65,24 @@ log_level = "debug"
 pid_file = "bastion_vault.pid"
 ~~~
 
-You need to change the variables like `daemon_user`, `daemon_group` and `work_dir` to the actual value in your environment. Then just copy and paste it to a local file, say, `rvault.hcl` somewhere on your machine.
+You need to change the variables like `daemon_user`, `daemon_group` and `work_dir` to the actual value in your environment. Then just copy and paste it to a local file, say, `bvault.hcl` somewhere on your machine.
 
 Then launch the server (assume you are still in `BastionVault` directory):
 
 ~~~bash
-target/debug/rvault server --config /path/to/rvault.hcl
+target/debug/bvault server --config /path/to/bvault.hcl
 ~~~
 
 Check the process is running:
 
 ~~~bash
-ps -xa | grep rvault
+ps -xa | grep bvault
 
-89174 ??         0:00.46 target/debug/rvault server --config /Users/paul/work/tmp/rvault.hcl
-89448 ttys006    0:00.00 grep rvault
+89174 ??         0:00.46 target/debug/bvault server --config /Users/paul/work/tmp/bvault.hcl
+89448 ttys006    0:00.00 grep bvault
 ~~~
 
-There should be an `rvault` process running in background.
+There should be an `bvault` process running in background.
 
 Now the server is listening on TCP port 8200 and it's ready for incoming HTTP requests.
 
