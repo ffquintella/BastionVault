@@ -38,13 +38,13 @@ pub const WORK_DIR_PATH_DEFAULT: &str = "/tmp/bastion_vault";
     version,
     about = r#"This command starts a BastionVault server that responds to API requests. By default,
 BastionVault will start in a "sealed" state. The BastionVault cluster must be initialized
-before use, usually by the "rvault operator init" command. Each BastionVault server must
-also be unsealed using the "rvault operator unseal" command or the API before the
+before use, usually by the "bvault operator init" command. Each BastionVault server must
+also be unsealed using the "bvault operator unseal" command or the API before the
 server can respond to requests.
 
 Start a server with a configuration file:
 
-  $ rvault server --config=/etc/rvault/config.hcl"#
+  $ bvault server --config=/etc/bvault/config.hcl"#
 )]
 pub struct Server {
     #[deref]
@@ -154,8 +154,8 @@ impl Server {
         let metrics_manager = Arc::new(RwLock::new(MetricsManager::new(config.collection_interval)));
         let system_metrics = metrics_manager.read().unwrap().system_metrics.clone();
 
-        let rvault = BastionVault::new(backend, Some(&config))?;
-        let core = rvault.core.load().clone();
+        let bvault = BastionVault::new(backend, Some(&config))?;
+        let core = bvault.core.load().clone();
 
         let mut http_server = HttpServer::new(move || {
             App::new()

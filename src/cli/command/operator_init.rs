@@ -6,7 +6,7 @@ use crate::{
     cli::command::{self, CommandExecutor},
     errors::RvError,
     http::sys::InitRequest,
-    rv_error_string, EXIT_CODE_OK,
+    bv_error_string, EXIT_CODE_OK,
 };
 
 #[derive(Parser, Deref)]
@@ -26,11 +26,11 @@ This command cannot be run against an already-initialized BastionVault cluster.
 
 Start initialization with the default options:
 
-  $ rvault operator init
+  $ bvault operator init
 
 Initialize, but specify key-shares and key-threshold:
 
-  $ rvault operator init \
+  $ bvault operator init \
       -key-shares=3 \
       -key-threshold=2"#
 )]
@@ -76,7 +76,7 @@ impl CommandExecutor for Init {
 
     fn main(&self) -> Result<(), RvError> {
         if self.key_threshold > self.key_shares {
-            return Err(rv_error_string!("invalid seal configuration: threshold cannot be larger than shares"));
+            return Err(bv_error_string!("invalid seal configuration: threshold cannot be larger than shares"));
         }
 
         let client = self.client()?;
@@ -112,13 +112,13 @@ mod test {
     fn test_cli_operator_init() {
         let test_http_server = TestHttpServer::new_without_init("test_cli_operator_init", true);
 
-        // rvault operator init
+        // bvault operator init
         let ret = test_http_server.cli(&["operator", "init"], &["--format=raw", "--key-shares=5", "--key-threshold=3"]);
         assert!(ret.is_ok());
         let ret = Value::from_str(ret.unwrap().as_str()).unwrap();
         let init_result = ret.as_object().unwrap();
 
-        // rvault status
+        // bvault status
         let ret = test_http_server.cli(&["status"], &["--format=json"]);
         let ret = Value::from_str(ret.unwrap().as_str()).unwrap();
         let status_result = ret.as_object().unwrap();

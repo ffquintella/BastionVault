@@ -31,7 +31,7 @@ use crate::{
     http,
     logical::{self, Operation, Request, Response},
     metrics::{manager::MetricsManager, middleware::metrics_midleware, system_metrics::SystemMetrics},
-    rv_error_response, rv_error_string,
+    bv_error_response, bv_error_string,
     storage::{self, Backend},
     utils::rustls::OptionalClientAuthVerifier,
     BastionVault,
@@ -107,8 +107,8 @@ impl TestHttpServer {
     pub fn new_without_init(name: &str, tls_enable: bool) -> Self {
         let barrier = Arc::new(Barrier::new(2));
         let (stop_tx, stop_rx) = oneshot::channel();
-        let rvault = new_test_bastion_vault(name);
-        let core = rvault.core.load().clone();
+        let bvault = new_test_bastion_vault(name);
+        let core = bvault.core.load().clone();
 
         let mut scheme = "http";
         let mut ca_cert_pem = "".into();
@@ -153,8 +153,8 @@ impl TestHttpServer {
         let config = Config::default();
         let barrier = Arc::new(Barrier::new(2));
         let (stop_tx, stop_rx) = oneshot::channel();
-        let rvault = BastionVault::new(backend, Some(&config)).unwrap();
-        let core = rvault.core.load().clone();
+        let bvault = BastionVault::new(backend, Some(&config)).unwrap();
+        let core = bvault.core.load().clone();
 
         let mut scheme = "http";
         let mut ca_cert_pem = "".into();
@@ -198,7 +198,7 @@ impl TestHttpServer {
     pub async fn new_with_prometheus(name: &str, tls_enable: bool) -> Self {
         let barrier = Arc::new(Barrier::new(2));
         let (stop_tx, stop_rx) = oneshot::channel();
-        let (_rvault, core, root_token) = new_unseal_test_bastion_vault(name).await;
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault(name).await;
 
         let mut scheme = "http";
         let mut ca_cert_pem = "".into();
@@ -336,7 +336,7 @@ impl TestHttpServer {
                     })
                     .collect();
                 let client_key = PrivateKey::from_pem(client_auth.key_pem.as_bytes())
-                    .map_err(|e| rv_error_response!("client key format invalid: {}", e))?;
+                    .map_err(|e| bv_error_response!("client key format invalid: {}", e))?;
                 tls_builder = tls_builder.client_cert(Some(ClientCert::new_with_certs(&client_certs, client_key)));
             } else {
                 let root_certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(self.ca_cert_pem.as_bytes())
@@ -365,7 +365,7 @@ impl TestHttpServer {
         };
 
         let method_upper = method.to_uppercase();
-        let mut req_builder = http::Request::builder()
+        let mut req_builder = ::http::Request::builder()
             .method(method_upper.as_str())
             .uri(&url)
             .header("Accept", "application/json");
@@ -427,7 +427,7 @@ impl TestHttpServer {
                     })
                     .collect();
                 let client_key = PrivateKey::from_pem(client_auth.key_pem.as_bytes())
-                    .map_err(|e| rv_error_response!("client key format invalid: {}", e))?;
+                    .map_err(|e| bv_error_response!("client key format invalid: {}", e))?;
                 tls_builder = tls_builder.client_cert(Some(ClientCert::new_with_certs(&client_certs, client_key)));
             } else {
                 let root_certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(self.ca_cert_pem.as_bytes())
@@ -456,7 +456,7 @@ impl TestHttpServer {
         };
 
         let method_upper = method.to_uppercase();
-        let mut req_builder = http::Request::builder()
+        let mut req_builder = ::http::Request::builder()
             .method(method_upper.as_str())
             .uri(&url)
             .header("Accept", "application/json");
@@ -537,10 +537,10 @@ impl TestHttpServer {
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     let stdout = String::from_utf8_lossy(&output.stdout);
-                    Err(rv_error_string!(format!("{}{}", stdout, stderr)))
+                    Err(bv_error_string!(format!("{}{}", stdout, stderr)))
                 }
             }
-            Err(e) => Err(rv_error_string!(format!("Failed to execute command: {e}"))),
+            Err(e) => Err(bv_error_string!(format!("Failed to execute command: {e}"))),
         }
     }
 
@@ -604,7 +604,7 @@ pub fn new_test_cert(
     _ca_cert_pem: Option<String>,
     _ca_key_pem: Option<String>,
 ) -> Result<(String, String), RvError> {
-    Err(rv_error_string!("OpenSSL-based test certificate generation has been removed"))
+    Err(bv_error_string!("OpenSSL-based test certificate generation has been removed"))
 }
 
 pub fn new_test_cert_ext(
@@ -619,7 +619,7 @@ pub fn new_test_cert_ext(
     _ca_cert_pem: Option<String>,
     _ca_key_pem: Option<String>,
 ) -> Result<(String, String), RvError> {
-    Err(rv_error_string!("OpenSSL-based test certificate generation has been removed"))
+    Err(bv_error_string!("OpenSSL-based test certificate generation has been removed"))
 }
 
 pub fn cert_to_x509(
@@ -630,11 +630,11 @@ pub fn cert_to_x509(
     _ca_key: Option<&()>,
     _private_key: &(),
 ) -> Result<(), RvError> {
-    Err(rv_error_string!("OpenSSL-based X.509 test conversion has been removed"))
+    Err(bv_error_string!("OpenSSL-based X.509 test conversion has been removed"))
 }
 
 pub unsafe fn new_test_crl(_revoked_cert_pem: &str, _ca_cert_pem: &str, _ca_key_pem: &str) -> Result<String, RvError> {
-    Err(rv_error_string!("OpenSSL-based test CRL generation has been removed"))
+    Err(bv_error_string!("OpenSSL-based test CRL generation has been removed"))
 }
 
 pub fn new_test_temp_dir(name: &str) -> String {
@@ -667,16 +667,16 @@ pub fn new_test_bastion_vault(name: &str) -> BastionVault {
 }
 
 #[maybe_async::maybe_async]
-pub async fn init_test_bastion_vault(rvault: &BastionVault, seal_config: &SealConfig) -> InitResult {
-    let result = rvault.init(seal_config).await;
+pub async fn init_test_bastion_vault(bvault: &BastionVault, seal_config: &SealConfig) -> InitResult {
+    let result = bvault.init(seal_config).await;
     assert!(result.is_ok());
 
     result.unwrap()
 }
 
 #[maybe_async::maybe_async]
-pub async fn unseal_test_bastion_vault(rvault: &BastionVault, keys: &[&[u8]]) -> bool {
-    unseal_test_bastion_vault_core(rvault.core.load().as_ref(), keys).await
+pub async fn unseal_test_bastion_vault(bvault: &BastionVault, keys: &[&[u8]]) -> bool {
+    unseal_test_bastion_vault_core(bvault.core.load().as_ref(), keys).await
 }
 
 #[maybe_async::maybe_async]
@@ -696,8 +696,8 @@ pub async fn new_unseal_test_bastion_vault(name: &str) -> (BastionVault, Arc<Cor
     let seal_config = SealConfig { secret_shares: 9, secret_threshold: 5 };
     let root_token;
 
-    let rvault = new_test_bastion_vault(name);
-    let init_result = init_test_bastion_vault(&rvault, &seal_config).await;
+    let bvault = new_test_bastion_vault(name);
+    let init_result = init_test_bastion_vault(&bvault, &seal_config).await;
 
     println!("init_result: {:?}", init_result);
 
@@ -709,15 +709,15 @@ pub async fn new_unseal_test_bastion_vault(name: &str) -> (BastionVault, Arc<Cor
 
     let k: Vec<&[u8]> = keys.iter().map(|v| v.as_slice()).collect();
 
-    let result = unseal_test_bastion_vault(&rvault, &k).await;
+    let result = unseal_test_bastion_vault(&bvault, &k).await;
     assert!(result);
 
     root_token = init_result.root_token.clone();
     println!("root_token: {:?}", root_token);
 
-    let core = rvault.core.load().clone();
+    let core = bvault.core.load().clone();
 
-    (rvault, core, root_token)
+    (bvault, core, root_token)
 }
 
 pub fn new_test_http_server(core: Arc<Core>, tls_config: Option<TestTlsConfig>) -> Result<(Server, String), RvError> {
@@ -1091,7 +1091,7 @@ impl Clone for NoopBackend {
 impl logical::Backend for NoopBackend {
     async fn handle_request(&self, req: &mut Request) -> Result<Option<Response>, RvError> {
         if self.rollback_errs && req.operation == Operation::Rollback {
-            return Err(rv_error_string!("no-op backend rollback has erred out"));
+            return Err(bv_error_string!("no-op backend rollback has erred out"));
         }
 
         let resp = self.request_handler.as_ref().map_or(Ok(None), |handler| handler(req))?;
@@ -1103,7 +1103,7 @@ impl logical::Backend for NoopBackend {
         path.push(req.path.clone());
 
         if req.storage.is_none() {
-            return Err(rv_error_string!("missing view"));
+            return Err(bv_error_string!("missing view"));
         }
 
         if req.path == "panic" {

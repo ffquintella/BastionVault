@@ -24,11 +24,11 @@ Token auth is always enabled and cannot be disabled. It is the most basic method
 
 ~~~bash
 # Login with a token
-rvault login s.my-token-value
+bvault login s.my-token-value
 
 # Or set the environment variable
 export VAULT_TOKEN=s.my-token-value
-rvault read secret/my-app
+bvault read secret/my-app
 ~~~
 
 ### Token Types
@@ -54,10 +54,10 @@ Username/password authentication for human operators.
 
 ~~~bash
 # Enable the method
-rvault auth enable userpass
+bvault auth enable userpass
 
 # Create a user
-rvault write auth/userpass/users/alice \
+bvault write auth/userpass/users/alice \
   password=my-password \
   policies=dev-readonly,default
 ~~~
@@ -66,7 +66,7 @@ rvault write auth/userpass/users/alice \
 
 ~~~bash
 # CLI
-rvault login --method=userpass username=alice password=my-password
+bvault login --method=userpass username=alice password=my-password
 
 # API
 curl --request POST \
@@ -78,16 +78,16 @@ curl --request POST \
 
 ~~~bash
 # Update password
-rvault write auth/userpass/users/alice password=new-password
+bvault write auth/userpass/users/alice password=new-password
 
 # Update policies
-rvault write auth/userpass/users/alice policies=admin,default
+bvault write auth/userpass/users/alice policies=admin,default
 
 # List users
-rvault list auth/userpass/users
+bvault list auth/userpass/users
 
 # Delete a user
-rvault delete auth/userpass/users/alice
+bvault delete auth/userpass/users/alice
 ~~~
 
 ## AppRole Authentication
@@ -98,10 +98,10 @@ AppRole is designed for machine-to-machine authentication. It uses a two-part cr
 
 ~~~bash
 # Enable the method
-rvault auth enable approle
+bvault auth enable approle
 
 # Create a role
-rvault write auth/approle/role/my-service \
+bvault write auth/approle/role/my-service \
   secret_id_ttl=10m \
   token_ttl=20m \
   token_max_ttl=30m \
@@ -114,17 +114,17 @@ The Role ID is static per role. The Secret ID is generated on demand.
 
 ~~~bash
 # Get role ID (typically baked into application config)
-rvault read auth/approle/role/my-service/role-id
+bvault read auth/approle/role/my-service/role-id
 
 # Generate secret ID (typically delivered by a deployment pipeline)
-rvault write -f auth/approle/role/my-service/secret-id
+bvault write -f auth/approle/role/my-service/secret-id
 ~~~
 
 ### Login
 
 ~~~bash
 # CLI
-rvault write auth/approle/login \
+bvault write auth/approle/login \
   role_id=xxxx-xxxx \
   secret_id=yyyy-yyyy
 
@@ -166,9 +166,9 @@ The server must have TLS enabled with client certificate support:
 ~~~hcl
 listener "tcp" {
   address                            = "0.0.0.0:8200"
-  tls_cert_file                      = "/etc/rvault/tls/server.crt"
-  tls_key_file                       = "/etc/rvault/tls/server.key"
-  tls_client_ca_file                 = "/etc/rvault/tls/client-ca.pem"
+  tls_cert_file                      = "/etc/bvault/tls/server.crt"
+  tls_key_file                       = "/etc/bvault/tls/server.key"
+  tls_client_ca_file                 = "/etc/bvault/tls/client-ca.pem"
   tls_require_and_verify_client_cert = true
 }
 ~~~
@@ -176,13 +176,13 @@ listener "tcp" {
 Enable the auth method:
 
 ~~~bash
-rvault auth enable cert
+bvault auth enable cert
 ~~~
 
 ### Login
 
 ~~~bash
-rvault login --method=cert \
+bvault login --method=cert \
   --client-cert=/path/to/client.crt \
   --client-key=/path/to/client.key
 ~~~

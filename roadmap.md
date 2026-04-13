@@ -46,7 +46,8 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Plugin System (dynamic loading) | Todo |
 | Namespaces / Multi-tenancy | Partial |
 | Kubernetes Integration | Todo |
-| Web UI | Todo |
+| Web UI / Desktop GUI (Tauri) | Todo |
+| Auth: FIDO2 / WebAuthn / YubiKey | Todo |
 | Compliance Reporting | Todo |
 
 ## Completed Initiatives
@@ -60,6 +61,8 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 
 - [Rqlite Default HA Storage](roadmaps/rqlite-default-ha-storage.md)
   Roadmap for making `rqlite` the default storage engine and making replication the default operating mode so high availability is the standard deployment posture.
+- [Tauri GUI with FIDO2/YubiKey Support](roadmaps/tauri-gui-fido2.md)
+  Cross-platform desktop GUI (Tauri v2 + React + TypeScript) with embedded and remote vault modes, full vault/user/policy management, FIDO2/WebAuthn/YubiKey authentication backend, and machine auth (AppRole) dashboard.
 
 ## Notes
 

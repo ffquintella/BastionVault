@@ -29,7 +29,7 @@ use super::acl::ACLResults;
 use crate::{
     errors::RvError,
     logical::{auth::PolicyInfo, Operation, Request, Response},
-    rv_error_string,
+    bv_error_string,
     utils::{
         deserialize_duration,
         string::{ensure_no_leading_slash, GlobContains},
@@ -241,7 +241,7 @@ impl Policy {
                 if let Some(path_label) = block.labels().first() {
                     let path_str = path_label.as_str().to_string();
                     if path_str.contains("+*") {
-                        return Err(rv_error_string!(&format!(
+                        return Err(bv_error_string!(&format!(
                             "path {path_str}: invalid use of wildcards ('+*' is forbidden)"
                         )));
                     }

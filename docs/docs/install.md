@@ -7,7 +7,7 @@ title: Install
 
 BastionVault can be used as a standalone application or as a Rust library:
 
-1. Build from source to get the `rvault` binary, or
+1. Build from source to get the `bvault` binary, or
 2. Add it as a dependency from [crates.io](https://crates.io/crates/bastion_vault) for other Rust projects.
 
 This document covers building and installing BastionVault as an application. For library usage, see [docs.rs](https://docs.rs/bastion_vault/latest/bastion_vault).
@@ -45,14 +45,14 @@ Or directly with Cargo:
 cargo build --release
 ~~~
 
-After a successful build, the `rvault` executable will be in `target/release/` (or `target/debug/` for debug builds).
+After a successful build, the `bvault` executable will be in `target/release/` (or `target/debug/` for debug builds).
 
 ## Verify BastionVault
 
 Run the following command:
 
 ~~~bash
-target/release/rvault --help
+target/release/bvault --help
 ~~~
 
 You should see output similar to:
@@ -60,7 +60,7 @@ You should see output similar to:
 ~~~
 A secure and high performance secret management software that is compatible with Hashicorp Vault.
 
-Usage: rvault [COMMAND]
+Usage: bvault [COMMAND]
 
 Commands:
   server    Start a BastionVault server

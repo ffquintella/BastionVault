@@ -38,7 +38,7 @@ use crate::{
     modules::policy::policy_store::NON_ASSIGNABLE_POLICIES,
     new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
     router::Router,
-    rv_error_response, rv_error_string,
+    bv_error_response, bv_error_string,
     storage::{Storage, StorageEntry},
     utils::{
         default_system_time, deserialize_duration, deserialize_system_time, generate_uuid, is_str_subset,
@@ -564,12 +564,12 @@ impl TokenStore {
 
         for policy in te.policies.iter() {
             if NON_ASSIGNABLE_POLICIES.contains(&policy.as_str()) {
-                return Err(rv_error_response!(&format!("cannot assign policy {policy}")));
+                return Err(bv_error_response!(&format!("cannot assign policy {policy}")));
             }
         }
 
         if te.policies.contains(&"root".into()) && !parent.policies.contains(&"root".into()) {
-            return Err(rv_error_response!("root tokens may not be created without parent token being root"));
+            return Err(bv_error_response!("root tokens may not be created without parent token being root"));
         }
 
         if data.no_parent {
@@ -615,7 +615,7 @@ impl TokenStore {
 
         if te.ttl == 0 {
             if parent.ttl != 0 {
-                return Err(rv_error_response!("expiring root tokens cannot create non-expiring root tokens"));
+                return Err(bv_error_response!("expiring root tokens cannot create non-expiring root tokens"));
             }
             renewable = false;
         }
@@ -744,11 +744,11 @@ impl TokenStore {
 
     pub async fn auth_renew(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         if req.auth.is_none() {
-            return Err(rv_error_string!("request auth is nil"));
+            return Err(bv_error_string!("request auth is nil"));
         }
 
         let id = &req.auth.as_ref().unwrap().client_token;
-        let te = self.lookup(id).await?.ok_or(rv_error_string!("no token entry found during lookup"))?;
+        let te = self.lookup(id).await?.ok_or(bv_error_string!("no token entry found during lookup"))?;
 
         let auth = req.auth.as_mut().unwrap();
         auth.period = te.period;
@@ -891,7 +891,7 @@ impl Handler for TokenStore {
             // TODO: add identity_policies to all_policies
 
             if all_policies.contains(&"root".to_string()) {
-                return Err(rv_error_response!("auth methods cannot create root tokens"));
+                return Err(bv_error_response!("auth methods cannot create root tokens"));
             }
 
             let mut te = TokenEntry {

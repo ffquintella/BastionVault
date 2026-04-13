@@ -12,7 +12,7 @@ This guide covers day-to-day administration of a BastionVault deployment: initia
 ### Starting the Server
 
 ~~~bash
-rvault server --config /etc/rvault/config.hcl
+bvault server --config /etc/bvault/config.hcl
 ~~~
 
 Or as a daemon:
@@ -20,9 +20,9 @@ Or as a daemon:
 ~~~hcl
 # In config.hcl
 daemon       = true
-daemon_user  = "rvault"
-daemon_group = "rvault"
-pid_file     = "/var/run/rvault.pid"
+daemon_user  = "bvault"
+daemon_group = "bvault"
+pid_file     = "/var/run/bvault.pid"
 ~~~
 
 Use `make run-dev` for local development with the included `config/dev.hcl`.
@@ -33,10 +33,10 @@ A new vault must be initialized before first use. Initialization generates the r
 
 ~~~bash
 # Single key (development only)
-rvault operator init --key-shares=1 --key-threshold=1
+bvault operator init --key-shares=1 --key-threshold=1
 
 # Production: 5 shares, 3 required to unseal
-rvault operator init --key-shares=5 --key-threshold=3
+bvault operator init --key-shares=5 --key-threshold=3
 ~~~
 
 Store each key share separately. Distribute them to different trusted operators.
@@ -49,20 +49,20 @@ When BastionVault starts (or is explicitly sealed), it enters a **sealed** state
 
 ~~~bash
 # Provide key shares one at a time
-rvault operator unseal    # prompts for key
-rvault operator unseal <key-share>
+bvault operator unseal    # prompts for key
+bvault operator unseal <key-share>
 ~~~
 
 Repeat until the threshold is met. Check progress with:
 
 ~~~bash
-rvault status
+bvault status
 ~~~
 
 **Seal:**
 
 ~~~bash
-rvault operator seal
+bvault operator seal
 ~~~
 
 Sealing the vault immediately encrypts all data and revokes all tokens. Use this in emergency situations or during maintenance.
@@ -74,14 +74,14 @@ Secrets engines are mounted at paths and handle read/write operations for that p
 ### Enable a Secrets Engine
 
 ~~~bash
-rvault secrets enable kv
-rvault secrets enable --path=app-secrets --description="Application secrets" kv
+bvault secrets enable kv
+bvault secrets enable --path=app-secrets --description="Application secrets" kv
 ~~~
 
 ### List Secrets Engines
 
 ~~~bash
-rvault secrets list
+bvault secrets list
 ~~~
 
 ### Disable a Secrets Engine
@@ -89,13 +89,13 @@ rvault secrets list
 All data managed by the engine is permanently deleted.
 
 ~~~bash
-rvault secrets disable app-secrets/
+bvault secrets disable app-secrets/
 ~~~
 
 ### Move a Secrets Engine
 
 ~~~bash
-rvault secrets move secret/ generic/
+bvault secrets move secret/ generic/
 ~~~
 
 ### Working with KV Secrets
@@ -103,26 +103,26 @@ rvault secrets move secret/ generic/
 Write a secret:
 
 ~~~bash
-rvault write secret/database host=db.example.com port=5432 password=s3cret
+bvault write secret/database host=db.example.com port=5432 password=s3cret
 ~~~
 
 Read a secret:
 
 ~~~bash
-rvault read secret/database
-rvault read --field=password secret/database
+bvault read secret/database
+bvault read --field=password secret/database
 ~~~
 
 List secrets:
 
 ~~~bash
-rvault list secret/
+bvault list secret/
 ~~~
 
 Delete a secret:
 
 ~~~bash
-rvault delete secret/database
+bvault delete secret/database
 ~~~
 
 ## Policy Management
@@ -156,16 +156,16 @@ Available capabilities: `create`, `read`, `update`, `delete`, `list`, `sudo`, `d
 
 ~~~bash
 # Write a policy from file
-rvault policy write app-readonly policy.hcl
+bvault policy write app-readonly policy.hcl
 
 # List policies
-rvault policy list
+bvault policy list
 
 # Read a policy
-rvault policy read app-readonly
+bvault policy read app-readonly
 
 # Delete a policy
-rvault policy delete app-readonly
+bvault policy delete app-readonly
 ~~~
 
 The `default` and `root` policies are built-in and cannot be deleted.
@@ -175,14 +175,14 @@ The `default` and `root` policies are built-in and cannot be deleted.
 ### Enable an Auth Method
 
 ~~~bash
-rvault auth enable userpass
-rvault auth enable --path=prod-approle approle
+bvault auth enable userpass
+bvault auth enable --path=prod-approle approle
 ~~~
 
 ### List Auth Methods
 
 ~~~bash
-rvault auth list
+bvault auth list
 ~~~
 
 ### Disable an Auth Method
@@ -190,7 +190,7 @@ rvault auth list
 All tokens issued by this auth method are revoked.
 
 ~~~bash
-rvault auth disable userpass/
+bvault auth disable userpass/
 ~~~
 
 ### Configure Userpass
@@ -198,19 +198,19 @@ rvault auth disable userpass/
 Create a user:
 
 ~~~bash
-rvault write auth/userpass/users/admin password=s3cret policies=admin,default
+bvault write auth/userpass/users/admin password=s3cret policies=admin,default
 ~~~
 
 Update password:
 
 ~~~bash
-rvault write auth/userpass/users/admin password=new-password
+bvault write auth/userpass/users/admin password=new-password
 ~~~
 
 Delete a user:
 
 ~~~bash
-rvault delete auth/userpass/users/admin
+bvault delete auth/userpass/users/admin
 ~~~
 
 ### Configure AppRole
@@ -218,7 +218,7 @@ rvault delete auth/userpass/users/admin
 Create a role:
 
 ~~~bash
-rvault write auth/approle/role/my-app \
+bvault write auth/approle/role/my-app \
   secret_id_ttl=10m \
   token_ttl=20m \
   token_max_ttl=30m \
@@ -228,19 +228,19 @@ rvault write auth/approle/role/my-app \
 Get the role ID:
 
 ~~~bash
-rvault read auth/approle/role/my-app/role-id
+bvault read auth/approle/role/my-app/role-id
 ~~~
 
 Generate a secret ID:
 
 ~~~bash
-rvault write -f auth/approle/role/my-app/secret-id
+bvault write -f auth/approle/role/my-app/secret-id
 ~~~
 
 Login with AppRole:
 
 ~~~bash
-rvault write auth/approle/login role_id=<role-id> secret_id=<secret-id>
+bvault write auth/approle/login role_id=<role-id> secret_id=<secret-id>
 ~~~
 
 ## Monitoring

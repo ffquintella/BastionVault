@@ -27,15 +27,15 @@ secrets engine.
 
 Enable the AWS secrets engine at aws/:
 
-    $ rvault secrets enable aws
+    $ bvault secrets enable aws
 
 Enable the SSH secrets engine at ssh-prod/:
 
-    $ rvault secrets enable -path=ssh-prod ssh
+    $ bvault secrets enable -path=ssh-prod ssh
 
 Enable the database secrets engine with an explicit maximum TTL of 30m:
 
-    $ rvault secrets enable -max-lease-ttl=30m database
+    $ bvault secrets enable -max-lease-ttl=30m database
 
 For a full list of secrets engines and examples, please see the documentation."#
 )]

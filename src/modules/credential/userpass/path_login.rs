@@ -5,7 +5,7 @@ use crate::{
     context::Context,
     errors::RvError,
     logical::{Auth, Backend, Field, FieldType, Lease, Operation, Path, PathOperation, Request, Response},
-    new_fields, new_fields_internal, new_path, new_path_internal, rv_error_string,
+    new_fields, new_fields_internal, new_path, new_path_internal, bv_error_string,
     utils::policy::equivalent_policies,
 };
 
@@ -84,7 +84,7 @@ impl UserPassBackendInner {
 
     pub async fn login_renew(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         if req.auth.is_none() {
-            return Err(rv_error_string!("invalid request"));
+            return Err(bv_error_string!("invalid request"));
         }
         let mut auth = req.auth.clone().unwrap();
         let username = auth.metadata.get("username");
@@ -101,7 +101,7 @@ impl UserPassBackendInner {
         let user = user.unwrap();
 
         if !equivalent_policies(&user.policies, &auth.policies) {
-            return Err(rv_error_string!("policies have changed, not renewing"));
+            return Err(bv_error_string!("policies have changed, not renewing"));
         }
 
         auth.period = user.token_period;

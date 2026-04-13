@@ -419,9 +419,9 @@ mod test {
     #[actix_rt::test]
     async fn test_approle_tidy_dangling_accessors_normal() {
         #[cfg(feature = "sync_handler")]
-        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_tidy_dangling_accessors_normal");
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_tidy_dangling_accessors_normal");
         #[cfg(not(feature = "sync_handler"))]
-        let (_rvault, core, root_token) =
+        let (_bvault, core, root_token) =
             new_unseal_test_bastion_vault("test_approle_tidy_dangling_accessors_normal").await;
 
         // Mount approle auth to path: auth/approle
@@ -534,10 +534,10 @@ mod test {
     #[actix_rt::test]
     async fn test_approle_tidy_dangling_accessors_race() {
         #[cfg(not(feature = "sync_handler"))]
-        let (_rvault, core, root_token) =
+        let (_bvault, core, root_token) =
             new_unseal_test_bastion_vault("test_approle_tidy_dangling_accessors_race").await;
         #[cfg(feature = "sync_handler")]
-        let (_rvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_tidy_dangling_accessors_race");
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_approle_tidy_dangling_accessors_race");
 
         // Mount approle auth to path: auth/approle
         #[cfg(feature = "sync_handler")]

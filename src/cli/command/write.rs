@@ -20,11 +20,11 @@ loaded from a file. If the value is "-", BastionVault will read the value from s
 
 Persist data in the generic secrets engine:
 
-  $ rvault write secret/my-secret foo=bar
+  $ bvault write secret/my-secret foo=bar
 
 Upload an AWS IAM policy from a file on disk:
 
-  $ rvault write aws/roles/ops policy=@policy.json"#
+  $ bvault write aws/roles/ops policy=@policy.json"#
 )]
 pub struct Write {
     #[arg(index = 1, required = true, next_line_help = false, value_name = "PATH", help = r#"The path of secret."#)]

@@ -7,7 +7,7 @@ use serde_json::{Map, Value};
 use crate::{
     api::{auth::LoginHandler, client::Client, HttpResponse},
     errors::RvError,
-    rv_error_response,
+    bv_error_response,
 };
 
 #[derive(Default)]
@@ -19,7 +19,7 @@ pub struct UsesPassCliHandler {
 impl LoginHandler for UsesPassCliHandler {
     fn auth(&self, client: &Client, data: &Map<String, Value>) -> Result<HttpResponse, RvError> {
         if data["username"].as_str().is_none() {
-            return Err(rv_error_response!("'username' must be specified"));
+            return Err(bv_error_response!("'username' must be specified"));
         }
         let username = data["username"].as_str().unwrap();
 
@@ -50,18 +50,18 @@ impl LoginHandler for UsesPassCliHandler {
 
     fn help(&self) -> String {
         let help = r#"
-Usage: rvault login -method=userpass [CONFIG K=V...]
+Usage: bvault login -method=userpass [CONFIG K=V...]
 
 The userpass auth method allows users to authenticate using BastionVault's internal user database.
 
 Authenticate as "sally":
 
-    $ rvault login -method=userpass username=sally
+    $ bvault login -method=userpass username=sally
     Password (will be hidden):
 
 Authenticate as "bob":
 
-    $ rvault login -method=userpass username=bob password=password
+    $ bvault login -method=userpass username=bob password=password
 
 Configuration:
 

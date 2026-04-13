@@ -25,11 +25,11 @@ use crate::{
 
 Get usage instructions for the userpass auth method:
 
-    $ rvault auth help userpass
+    $ bvault auth help userpass
 
 Print usage for the auth method enabled at my-method/:
 
-    $ rvault auth help my-method/
+    $ bvault auth help my-method/
 
 Each auth method produces its own help output."#
 )]

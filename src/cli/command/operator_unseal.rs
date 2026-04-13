@@ -22,11 +22,11 @@ This command accepts a portion of the root key (an "unseal key").
 The unseal key can be supplied as an argument to the command, but this is
 not recommended as the unseal key will be available in your history:
 
-  $ rvault operator unseal 05ce1abc1f913de5407c86869bb298e5645748e01bdfd14c7ac43c05c4bc204b01
+  $ bvault operator unseal 05ce1abc1f913de5407c86869bb298e5645748e01bdfd14c7ac43c05c4bc204b01
 
 Instead, run the command with no arguments and it will prompt for the key:
 
-  $ rvault operator unseal
+  $ bvault operator unseal
   Key (will be hidden): 05ce1abc1f913de5407c86869bb298e5645748e01bdfd14c7ac43c05c4bc204b01"#
 )]
 pub struct Unseal {
@@ -96,13 +96,13 @@ mod test {
     fn test_cli_operator_unseal() {
         let test_http_server = TestHttpServer::new_without_init("test_cli_operator_unseal", true);
 
-        // rvault operator init
+        // bvault operator init
         let ret = test_http_server.cli(&["operator", "init"], &["--format=raw", "--key-shares=5", "--key-threshold=3"]);
         assert!(ret.is_ok());
         let ret = Value::from_str(ret.unwrap().as_str()).unwrap();
         let init_result = ret.as_object().unwrap();
 
-        // rvault operator unseal
+        // bvault operator unseal
         let keys = &init_result["keys"];
         let ret = test_http_server.cli(&["operator", "unseal"], &["--format=raw", keys[0].as_str().unwrap()]);
         let ret = Value::from_str(ret.unwrap().as_str()).unwrap();

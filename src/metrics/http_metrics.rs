@@ -158,7 +158,10 @@ mod tests {
                 let count = request.1;
                 for _ in 0..count {
                     if method == "POST" || method == "PUT" {
-                        let random_number: u32 = rand::rng().random_range(0..10000);
+                        let random_number: u32 = {
+                            use rand::RngExt;
+                            rand::rng().random_range(0..10000)
+                        };
                         let data = json!({
                             "password": random_number,
                         })

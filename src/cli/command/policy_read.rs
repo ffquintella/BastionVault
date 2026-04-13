@@ -16,7 +16,7 @@ does not exist, an error is returned.
 
 Read the policy named "my-policy":
 
-    $ rvault policy read my-policy
+    $ bvault policy read my-policy
 "#
 )]
 pub struct Read {
@@ -69,7 +69,7 @@ impl CommandExecutor for Read {
 #[cfg(test)]
 mod test {
     use crate::{
-        errors::RvError, modules::policy::policy_store::DEFAULT_POLICY, rv_error_string, test_utils::TestHttpServer,
+        errors::RvError, modules::policy::policy_store::DEFAULT_POLICY, bv_error_string, test_utils::TestHttpServer,
     };
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
@@ -80,7 +80,7 @@ mod test {
         // read a not exist policy should be failed
         let ret = test_http_server.cli(&["policy", "read"], &["not-a-real-policy"]);
         assert!(ret.is_err());
-        assert_eq!(ret.unwrap_err(), rv_error_string!("No policy named: not-a-real-policy\n"));
+        assert_eq!(ret.unwrap_err(), bv_error_string!("No policy named: not-a-real-policy\n"));
 
         // read default policy
         let ret = test_http_server.cli(&["policy", "read"], &["default"]);

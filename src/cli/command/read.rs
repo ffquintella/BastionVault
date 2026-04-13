@@ -15,7 +15,7 @@ generate dynamic credentials, get configuration details, and more.
 
 Read a secret from the static secrets engine:
 
-  $ rvault read secret/my-secret
+  $ bvault read secret/my-secret
 
 For a full list of examples and paths, please see the documentation that
 corresponds to the secrets engine in use."#

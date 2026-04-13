@@ -25,12 +25,12 @@ WARNING! Moving a secrets engine will revoke any leases from the old engine.
 
 Move the secrets engine at secret/ to generic/:
 
-    $ rvault secrets move secret/ generic/
+    $ bvault secrets move secret/ generic/
 
 Move the secrets engine at ns1/secret/ across namespaces to ns2/generic/,
 where ns1 and ns2 are child namespaces of the current namespace:
 
-    $ rvault secrets move ns1/secret/ ns2/generic/
+    $ bvault secrets move ns1/secret/ ns2/generic/
 "#
 )]
 pub struct Move {

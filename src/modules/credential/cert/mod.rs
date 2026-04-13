@@ -15,7 +15,7 @@ pub mod cli {
     use crate::{
         api::{auth::LoginHandler, client::Client, HttpResponse},
         errors::RvError,
-        rv_error_string,
+        bv_error_string,
     };
 
     #[derive(Default)]
@@ -23,11 +23,11 @@ pub mod cli {
 
     impl LoginHandler for CertAuthCliHandler {
         fn auth(&self, _client: &Client, _data: &Map<String, Value>) -> Result<HttpResponse, RvError> {
-            Err(rv_error_string!("cert auth is disabled in the OpenSSL-free build"))
+            Err(bv_error_string!("cert auth is disabled in the OpenSSL-free build"))
         }
 
         fn help(&self) -> String {
-            "Usage: rvault login -method=cert\n\nThe legacy cert auth method is disabled in the OpenSSL-free build."
+            "Usage: bvault login -method=cert\n\nThe legacy cert auth method is disabled in the OpenSSL-free build."
                 .to_string()
         }
     }

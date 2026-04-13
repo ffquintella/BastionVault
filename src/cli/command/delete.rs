@@ -4,7 +4,7 @@ use derive_more::Deref;
 use crate::{
     cli::command::{self, CommandExecutor},
     errors::RvError,
-    rv_error_string,
+    bv_error_string,
 };
 
 #[derive(Parser, Deref)]
@@ -42,7 +42,7 @@ impl CommandExecutor for Delete {
                     println!("Success! Data deleted (if it existed) at: {}", self.path);
                 } else {
                     ret.print_debug_info();
-                    return Err(rv_error_string!("Unkonwn"));
+                    return Err(bv_error_string!("Unkonwn"));
                 }
             }
             Err(e) => eprintln!("{e}"),

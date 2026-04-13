@@ -13,7 +13,7 @@ use crate::{
     },
     errors::RvError,
     logical::field::FieldTrait,
-    rv_error_string,
+    bv_error_string,
 };
 
 #[derive(Default)]
@@ -33,11 +33,11 @@ impl LoginHandler for TokenCliHandler {
 
         token = token.trim().to_string();
         if token.is_empty() {
-            return Err(rv_error_string!("a token must be passed to auth, please view the help for more information"));
+            return Err(bv_error_string!("a token must be passed to auth, please view the help for more information"));
         }
 
         let lookup = if let Some(lookup_value) = data.get("lookup") {
-            lookup_value.as_bool_ex().ok_or(rv_error_string!("Failed to parse \"lookup\" as boolean"))?
+            lookup_value.as_bool_ex().ok_or(bv_error_string!("Failed to parse \"lookup\" as boolean"))?
         } else {
             true
         };
@@ -84,7 +84,7 @@ impl LoginHandler for TokenCliHandler {
 
     fn help(&self) -> String {
         let help = r#"
-Usage: rvault login TOKEN [CONFIG K=V...]
+Usage: bvault login TOKEN [CONFIG K=V...]
 
 The token auth method allows logging in directly with a token. This
 can be a token from the "token-create" command or API. There are no
@@ -92,20 +92,20 @@ configuration options for this auth method.
 
 Authenticate using a token:
 
-    $ rvault login 96ddf4bc-d217-f3ba-f9bd-017055595017
+    $ bvault login 96ddf4bc-d217-f3ba-f9bd-017055595017
 
 Authenticate but do not lookup information about the token:
 
-    $ rvault login token=96ddf4bc-d217-f3ba-f9bd-017055595017 lookup=false
+    $ bvault login token=96ddf4bc-d217-f3ba-f9bd-017055595017 lookup=false
 
 This token usually comes from a different source such as the API or via the
-built-in "rvault token create" command.
+built-in "bvault token create" command.
 
 Configuration:
 
 token=<string>
     The token to use for authentication. This is usually provided directly
-    via the "rvault login" command.
+    via the "bvault login" command.
 
 lookup=<bool>
     If true, it performs a lookup of the token's metadata and policies."#;

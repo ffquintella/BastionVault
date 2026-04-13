@@ -35,20 +35,20 @@ lazy_static! {
     long_about = r#"This command groups subcommands for interacting with BastionVault's auth methods.
 Users can list, enable, disable, and get help for different auth methods.
 
-To authenticate to BastionVault as a user or machine, use the "rvault login" command instead.
+To authenticate to BastionVault as a user or machine, use the "bvault login" command instead.
 This command is for interacting with the auth methods themselves, not authenticating to BastionVault.
 
 List all enabled auth methods:
 
-    $ rvault auth list
+    $ bvault auth list
 
 Enable a new auth method "userpass";
 
-    $ rvault auth enable userpass
+    $ bvault auth enable userpass
 
 Get detailed help information about how to authenticate to a particular auth method:
 
-    $ rvault auth help github"#
+    $ bvault auth help github"#
 )]
 pub struct Auth {
     #[command(subcommand)]
@@ -101,7 +101,7 @@ mod test {
         // auth help token/
         let ret = test_http_server.cli(&["auth", "help", "token/"], &[]);
         assert!(ret.is_ok());
-        assert!(ret.unwrap().contains("Usage: rvault login TOKEN"));
+        assert!(ret.unwrap().contains("Usage: bvault login TOKEN"));
 
         // auth enable
         let ret = test_http_server.cli(
@@ -114,12 +114,12 @@ mod test {
         // auth help up1/
         let ret = test_http_server.cli(&["auth", "help", "up1/"], &[]);
         assert!(ret.is_ok());
-        assert!(ret.unwrap().contains("Usage: rvault login -method=userpass"));
+        assert!(ret.unwrap().contains("Usage: bvault login -method=userpass"));
 
         // auth help cert
         let ret = test_http_server.cli(&["auth", "help", "cert"], &[]);
         assert!(ret.is_ok());
-        assert!(ret.unwrap().contains("Usage: rvault login -method=cert"));
+        assert!(ret.unwrap().contains("Usage: bvault login -method=cert"));
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

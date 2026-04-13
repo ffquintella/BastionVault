@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use better_default::Default;
 use serde::{Deserialize, Serialize};
 
-use crate::{errors::RvError, rv_error_string};
+use crate::{errors::RvError, bv_error_string};
 
 #[derive(Debug, Clone, Eq, Default, PartialEq, Serialize, Deserialize)]
 pub struct Lease {
@@ -93,7 +93,7 @@ pub fn calculate_ttl(
 
     // Should never happen, but guard anyways
     if max_ttl <= Duration::ZERO {
-        return Err(rv_error_string!("max TTL must be greater than zero"));
+        return Err(bv_error_string!("max TTL must be greater than zero"));
     }
 
     let mut ttl;
@@ -125,7 +125,7 @@ pub fn calculate_ttl(
     if !max_valid_time.is_zero() {
         let max_valid_ttl = max_valid_time - Duration::from_secs(now);
         if max_valid_ttl <= Duration::ZERO {
-            return Err(rv_error_string!("past the max TTL, cannot renew"));
+            return Err(bv_error_string!("past the max TTL, cannot renew"));
         }
 
         if max_valid_ttl < ttl {

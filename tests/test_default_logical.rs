@@ -296,11 +296,11 @@ async fn test_sys_raw_api_feature(core: &Core, token: &str) {
 }
 
 #[maybe_async::maybe_async]
-async fn test_rvualt_mount(rvault: &BastionVault, token: &str) {
-    let ret = rvault.mount(Some(token), "kv9/test", "kv").await;
+async fn test_rvualt_mount(bvault: &BastionVault, token: &str) {
+    let ret = bvault.mount(Some(token), "kv9/test", "kv").await;
     assert!(ret.is_ok());
 
-    let ret = rvault
+    let ret = bvault
         .write(
             Some(token),
             "kv9/test/foo",
@@ -316,7 +316,7 @@ async fn test_rvualt_mount(rvault: &BastionVault, token: &str) {
         .await;
     assert!(ret.is_ok());
 
-    let ret = rvault.read(Some(token), "kv9/test/foo").await;
+    let ret = bvault.read(Some(token), "kv9/test/foo").await;
     assert!(ret.is_ok());
     let ret = ret.unwrap();
     assert!(ret.is_some());
@@ -324,7 +324,7 @@ async fn test_rvualt_mount(rvault: &BastionVault, token: &str) {
     assert!(data.is_some());
     assert_eq!(data.as_ref().unwrap()["foo"].as_str().unwrap(), "bar");
 
-    let ret = rvault
+    let ret = bvault
         .write(
             Some(token),
             "kv9/test/bar/foo",
@@ -340,7 +340,7 @@ async fn test_rvualt_mount(rvault: &BastionVault, token: &str) {
         .await;
     assert!(ret.is_ok());
 
-    let ret = rvault.read(Some(token), "kv9/test/bar/foo").await;
+    let ret = bvault.read(Some(token), "kv9/test/bar/foo").await;
     assert!(ret.is_ok());
     let ret = ret.unwrap();
     assert!(ret.is_some());
@@ -348,7 +348,7 @@ async fn test_rvualt_mount(rvault: &BastionVault, token: &str) {
     assert!(data.is_some());
     assert_eq!(data.as_ref().unwrap()["bar"].as_str().unwrap(), "foo");
 
-    let ret = rvault.list(Some(token), "kv9/test/").await;
+    let ret = bvault.list(Some(token), "kv9/test/").await;
     assert!(ret.is_ok());
     let ret = ret.unwrap();
     assert!(ret.is_some());
@@ -356,10 +356,10 @@ async fn test_rvualt_mount(rvault: &BastionVault, token: &str) {
     assert!(data.is_some());
     assert_eq!(data.as_ref().unwrap()["keys"].as_array().unwrap().len(), 2);
 
-    let ret = rvault.delete(Some(token), "kv9/test/foo", None).await;
+    let ret = bvault.delete(Some(token), "kv9/test/foo", None).await;
     assert!(ret.is_ok());
 
-    let ret = rvault.list(Some(token), "kv9/test/").await;
+    let ret = bvault.list(Some(token), "kv9/test/").await;
     assert!(ret.is_ok());
     let ret = ret.unwrap();
     assert!(ret.is_some());
@@ -367,10 +367,10 @@ async fn test_rvualt_mount(rvault: &BastionVault, token: &str) {
     assert!(data.is_some());
     assert_eq!(data.as_ref().unwrap()["keys"].as_array().unwrap().len(), 1);
 
-    let ret = rvault.unmount(Some(token), "kv9/test").await;
+    let ret = bvault.unmount(Some(token), "kv9/test").await;
     assert!(ret.is_ok());
 
-    let ret = rvault.list(Some(token), "kv9/test/").await;
+    let ret = bvault.list(Some(token), "kv9/test/").await;
     assert!(ret.is_err());
 }
 
@@ -399,12 +399,12 @@ async fn test_default_logical() {
 
     let backend = storage::new_backend("file", &conf).unwrap();
 
-    let rvault = BastionVault::new(backend, None).unwrap();
-    let core = rvault.core.load();
+    let bvault = BastionVault::new(backend, None).unwrap();
+    let core = bvault.core.load();
 
     let seal_config = SealConfig { secret_shares: 10, secret_threshold: 5 };
 
-    let result = rvault.init(&seal_config).await;
+    let result = bvault.init(&seal_config).await;
     assert!(result.is_ok());
     let init_result = result.unwrap();
     println!("init_result: {:?}", init_result);
@@ -412,7 +412,7 @@ async fn test_default_logical() {
     let mut unsealed = false;
     for i in 0..seal_config.secret_threshold {
         let key = &init_result.secret_shares[i as usize];
-        let unseal = rvault.unseal(&[key]).await;
+        let unseal = bvault.unseal(&[key]).await;
         assert!(unseal.is_ok());
         unsealed = unseal.unwrap();
     }
@@ -426,6 +426,6 @@ async fn test_default_logical() {
         test_default_secret(&core, &root_token).await;
         test_kv_logical_backend(&core, &root_token).await;
         test_sys_logical_backend(&core, &root_token).await;
-        test_rvualt_mount(&rvault, &root_token).await;
+        test_rvualt_mount(&bvault, &root_token).await;
     }
 }

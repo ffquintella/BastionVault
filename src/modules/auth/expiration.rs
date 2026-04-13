@@ -23,7 +23,7 @@ use crate::{
     errors::RvError,
     logical::{lease::calculate_ttl, Auth, Request, Response, SecretData},
     router::Router,
-    rv_error_string,
+    bv_error_string,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
     utils::{
         deserialize_system_time, generate_uuid, serialize_system_time,
@@ -342,15 +342,15 @@ impl ExpirationManager {
             && auth.expiration_time() == SystemTime::UNIX_EPOCH
             && (te.policies.len() != 1 || te.policies[0] != "root")
         {
-            return Err(rv_error_string!("refusing to register a lease for a non-root token with no TTL"));
+            return Err(bv_error_string!("refusing to register a lease for a non-root token with no TTL"));
         }
 
         if auth.client_token.is_empty() {
-            return Err(rv_error_string!("cannot register an auth lease with an empty token"));
+            return Err(bv_error_string!("cannot register an auth lease with an empty token"));
         }
 
         if te.path.contains("..") {
-            return Err(rv_error_string!(
+            return Err(bv_error_string!(
                 "cannot register an auth lease with n token entry whose path contains parent references"
             ));
         }

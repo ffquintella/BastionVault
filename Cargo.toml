@@ -134,7 +134,7 @@ large_enum_variant = "allow"
 unnecessary_map_or = "allow"
 
 [[bin]]
-name = "rvault"
+name = "bvault"
 path = "bin/bastion_vault.rs"
 
 [[test]]

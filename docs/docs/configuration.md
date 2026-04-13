@@ -8,7 +8,7 @@ title: Configuration
 BastionVault is configured using HCL or JSON files. Pass the config file path to the server with `--config`.
 
 ~~~bash
-rvault server --config /etc/rvault/config.hcl
+bvault server --config /etc/bvault/config.hcl
 ~~~
 
 You can also pass a directory; all `.hcl` and `.json` files in it will be merged.
@@ -33,15 +33,15 @@ log_level = "info"
 
 ~~~hcl
 storage "file" {
-  path = "/var/lib/rvault/data"
+  path = "/var/lib/bvault/data"
 }
 
 listener "tcp" {
   address                            = "0.0.0.0:8200"
   tls_disable                        = false
-  tls_cert_file                      = "/etc/rvault/tls/server.crt"
-  tls_key_file                       = "/etc/rvault/tls/server.key"
-  tls_client_ca_file                 = "/etc/rvault/tls/ca.pem"
+  tls_cert_file                      = "/etc/bvault/tls/server.crt"
+  tls_key_file                       = "/etc/bvault/tls/server.key"
+  tls_client_ca_file                 = "/etc/bvault/tls/ca.pem"
   tls_require_and_verify_client_cert = false
   tls_min_version                    = "tls12"
   tls_max_version                    = "tls13"
@@ -50,11 +50,11 @@ listener "tcp" {
 api_addr       = "https://vault.example.com:8200"
 log_level      = "info"
 log_format     = "{date} {req.path}"
-pid_file       = "/var/run/rvault.pid"
-work_dir       = "/var/lib/rvault"
+pid_file       = "/var/run/bvault.pid"
+work_dir       = "/var/lib/bvault"
 daemon         = true
-daemon_user    = "rvault"
-daemon_group   = "rvault"
+daemon_user    = "bvault"
+daemon_group   = "bvault"
 barrier_type   = "chacha20-poly1305"
 ~~~
 
@@ -125,9 +125,9 @@ MySQL-backed storage using Diesel.
 ~~~hcl
 storage "mysql" {
   address  = "127.0.0.1:3306"
-  username = "rvault"
+  username = "bvault"
   password = "secret"
-  database = "rvault"
+  database = "bvault"
 }
 ~~~
 
