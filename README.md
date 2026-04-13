@@ -12,7 +12,7 @@ BastionVault can be deployed in either cloud or physical environments. Depending
 
 BastionVault is a fork of RustyVault. We decided to rebrand because this fork is taking a different direction in the library design and API surface, while keeping the same general problem space around secret management and Vault-compatible workflows.
 
-The core cryptographic module which provides cryptography functionality to BastionVault can be configurable, for instance it could be [OpenSSL](https://github.com/openssl/openssl) or [Tongsuo](https://github.com/Tongsuo-Project/Tongsuo) project depending on the actual scenarios.
+The cryptographic core uses a post-quantum-ready stack built on pure Rust libraries, with `ChaCha20-Poly1305` for payload encryption, `ML-KEM-768` for key establishment, and `ML-DSA-65` for post-quantum signatures.
 
 One of the goals of BastionVault is to replace Hashicorp Vault seamlessly if you are seeking for an OSI-approved open-source license and enterprise level features.
 
@@ -23,42 +23,31 @@ Part of the features provided by BastionVault are as follows:
 * Working Mode
   * standalone process w/HTTP APIs
   * Rust crate that can be easily integrated with other applications
-* Configurable underlying Cryptographic Module
-  * OpenSSL library
-  * Tongsuo library
-  * native Rust crypto libraries
+* Cryptography
+  * payload encryption: `ChaCha20-Poly1305`
+  * key establishment: `ML-KEM-768` (post-quantum KEM)
+  * signatures: `ML-DSA-65` (post-quantum signatures)
+  * TLS: `rustls` (pure Rust TLS stack)
 * API
   * RESTful API, compatible with Hashicorp Vault
 * Authentication & Authorization
-  * X.509 certificate
-  * username/password
-  * basic ACL
+  * token-based authentication
+  * AppRole authentication
+  * username/password authentication
+  * certificate authentication
+  * path-based ACL policies
 * Secure Storage
-  * on-disk
-  * remote storage (etcd, etc)
+  * encrypted file backend
+  * MySQL backend
+  * SQLx backend (Postgres/SQLite)
 * Configuration
   * HCL compatible
-* PKI/CA Infrastructure
-  * X.509 certificate signing: RSA/ECC/SM2
-  * X.509 certificate revocation: OCSP, CRL
 * Key Management
-  * symmetric key: create/rotate/store
-  * public key: RSA/ECC/SM2
-* Cryptography Algorithm
-  * encryption: AES, SM4
-  * public Key:
-      * Signature: RSA/ECDSA/EdDSA/SM2
-      * Encryption: RSA/SM2
-  * hash: SHA1/SHA2/SM3
-  * PRNG
-* Cryptographic Computing
-  * PHE: Paillier, EC-ElGamal
-  * ZKP: Bulletproofs w/Twisted-ElGamal
-* Hardware Support
-  * cryptography accelerator
-  * TEE
-* Cluster & HA
-  * support "active/active" mode
+  * post-quantum key wrapping with ML-KEM-768
+  * ML-DSA-65 signing and verification
+  * key rotation and re-encryption
+* Monitoring
+  * Prometheus metrics
 * Logging & Audit
   * log to file
 

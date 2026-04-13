@@ -1,5 +1,5 @@
 {
-  "name": "ustyvault",
+  "name": "bastionvault-docs",
   "version": "0.0.1",
   "private": true,
   "scripts": {
@@ -14,27 +14,30 @@
     "write-heading-ids": "docusaurus write-heading-ids"
   },
   "dependencies": {
-    "@docusaurus/core": "^3.3.2",
-    "@docusaurus/preset-classic": "^3.3.2",
-    "@docusaurus/theme-common": "^3.3.2",
-    "@easyops-cn/docusaurus-search-local": "^0.41.0",
+    "@docusaurus/core": "^3.7.0",
+    "@docusaurus/preset-classic": "^3.7.0",
+    "@docusaurus/theme-common": "^3.7.0",
+    "@easyops-cn/docusaurus-search-local": "^0.46.0",
     "@mdx-js/react": "^3.0.0",
-    "@svgr/webpack": "^5.5.0",
-    "clsx": "^1.1.1",
+    "@svgr/webpack": "^8.1.0",
+    "clsx": "^2.1.0",
     "file-loader": "^6.2.0",
-    "prism-react-renderer": "^2.1.0",
-    "prismjs": "^1.23.0",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "react-icons": "^4.2.0",
+    "prism-react-renderer": "^2.4.0",
+    "prismjs": "^1.29.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "react-icons": "^5.4.0",
     "react-markdown": "^9.0.1",
-    "react-slick": "^0.29.0",
+    "react-slick": "^0.30.0",
     "slick-carousel": "^1.8.1",
     "url-loader": "^4.1.1"
   },
   "devDependencies": {
-    "@docusaurus/module-type-aliases": "^3.3.2",
-    "@docusaurus/types": "^3.3.2"
+    "@docusaurus/module-type-aliases": "^3.7.0",
+    "@docusaurus/types": "^3.7.0"
+  },
+  "overrides": {
+    "webpack": "~5.97.0"
   },
   "engines": {
     "node": ">=18.0"
@@ -50,6 +53,5 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
-  },
-  "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
+  }
 }

@@ -145,20 +145,20 @@ This indicates the BastionVault server is not sealed and it's ready to do more r
 
 ## Write Secrets to BastionVault
 
-A frequently used feature of RustyVautl is *secret*, it's basically a secure key-value storage that can retain arbitary sensitive values such as password, credentials, tokens, keys and so forth.
+A frequently used feature of BastionVault is *secret*, it's basically a secure key-value storage that can retain arbitary sensitive values such as password, credentials, tokens, keys and so forth.
 
 BastionVault needs client authentication for further operations. In this demonstration, we utilize the `root_token` generated in previous section for simplicity.
 
 Let's ask BastionVault to store a `foo: bar` value under the key `test`:
 
 ~~~bash
-curl --Header "Cookie: token=bc9e904b-acff-db3d-4cfd-f575cb36428a" --request POST --data '{ "foo": "bar" }' http://127.0.0.1:8200/v1/secret/test | jq
+curl -H "Cookie: token=bc9e904b-acff-db3d-4cfd-f575cb36428a" --request POST --data '{ "foo": "bar" }' http://127.0.0.1:8200/v1/secret/test | jq
 ~~~
 
 Then read it out:
 
 ~~~bash
-curl --Header "Cookie: token=bc9e904b-acff-db3d-4cfd-f575cb36428a" http://127.0.0.1:8200/v1/secret/test | jq
+curl -H "Cookie: token=bc9e904b-acff-db3d-4cfd-f575cb36428a" http://127.0.0.1:8200/v1/secret/test | jq
 {
   "renewable": false,
   "lease_id": "",

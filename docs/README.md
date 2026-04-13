@@ -1,35 +1,41 @@
 # BastionVault Documentation
 
-This website is built using [Docusaurus 2](https://docusaurus.io/), a modern static website generator.
+This website is built using [Docusaurus](https://docusaurus.io/), a modern static website generator.
 
-It documents BastionVault, a fork of RustyVault that was rebranded because this repository is taking a different approach in the library.
+## Quick Start
 
-## Installation
-
-```console
-yarn install
-```
-
-## Local Development
+From the **project root**, run:
 
 ```console
-yarn start
+make docs
 ```
 
-This command starts a local development server and opens up a browser window. Most changes are reflected live without having to restart the server.
+This installs dependencies and starts the local development server at http://localhost:3000. Changes are reflected live without restarting.
 
-## Build
+## Manual Commands
+
+If you prefer to run commands directly from the `docs/` directory:
 
 ```console
-yarn build
+cd docs
+npm install
+npx docusaurus start
 ```
 
-This command generates static content into the `build` directory and can be served using any static contents hosting service.
-
-## Deployment
+### Build
 
 ```console
-GIT_USER=<Your GitHub username> USE_SSH=true yarn deploy
+cd docs
+npx docusaurus build
 ```
 
-If you are using GitHub pages for hosting, this command is a convenient way to build the website and push to the `gh-pages` branch.
+Generates static content into the `build` directory for deployment.
+
+### Deployment
+
+```console
+cd docs
+GIT_USER=<Your GitHub username> USE_SSH=true npx docusaurus deploy
+```
+
+Builds the website and pushes to the `gh-pages` branch for GitHub Pages hosting.

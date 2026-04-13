@@ -1,41 +1,37 @@
 ---
 sidebar_position: 3
-title: Crypto Adaptor
+title: Cryptography
 ---
-# BastionVault Crypto Adaptor
+# BastionVault Cryptography
 
-In BastionVault, older runtime crypto paths still use a "crypto adaptor" mechanism to connect to the underlying cryptography library.
+BastionVault uses a post-quantum-ready cryptographic stack built on pure Rust libraries. The legacy OpenSSL-based adaptor layer has been fully retired.
 
-The supported legacy adaptor is:
+## Current Cryptographic Stack
 
-* OpenSSL crypto adaptor
+| Purpose | Algorithm | Library |
+|---------|-----------|---------|
+| Payload encryption | `ChaCha20-Poly1305` | `chacha20poly1305` crate via `bv_crypto` |
+| Key establishment | `ML-KEM-768` | `ml-kem` crate via `bv_crypto` |
+| Post-quantum signatures | `ML-DSA-65` | `fips204` crate via `bv_crypto` |
+| TLS | TLS 1.2/1.3 | `rustls` |
+| Hashing / HMAC | BLAKE2b, SHA-256 | `blake2`, `sha2` |
 
-## The OpenSSL Crypto Adaptor
+## Architecture
 
-The following steps require a properly installed OpenSSL library. There are many ways of installing an OpenSSL on various platforms, so in this docuemnt we don't discuss that part.
+All new cryptographic work lives in `crates/bv_crypto`, which provides a provider-neutral interface for:
 
-The OpenSSL crypto adaptor is configured by default in BastionVault, so you can simply build BastionVault to enable it:
+- **AEAD encryption** (`ChaCha20-Poly1305`)
+- **KEM key encapsulation** (`ML-KEM-768`)
+- **Digital signatures** (`ML-DSA-65`)
+- **KEM+DEM envelope encryption** (`KemDemEnvelopeV1`)
 
-~~~
-cargo build
-~~~
+The storage barrier uses `ChaCha20-Poly1305` by default, with keys wrapped via `ML-KEM-768` post-quantum envelopes.
 
-Otherwise if you want to explicitly configure it, you can still use something like:
+## Migration History
 
-~~~
-cargo build --features crypto_adaptor_openssl
-~~~
+BastionVault previously supported OpenSSL and Tongsuo as cryptographic backends through an adaptor mechanism. Both have been removed:
 
-But this is not necessary.
+- **Tongsuo**: fully removed (Cargo feature, CI job, adaptor source, and documentation)
+- **OpenSSL**: fully removed from the default build (runtime TLS, hashing, HMAC, storage encryption)
 
-## Migration Direction
-
-New post-quantum work is not being added to the legacy adaptor layer.
-
-The current migration direction is:
-
-* `ChaCha20-Poly1305` for payload encryption
-* `ML-KEM-768` for key wrapping and key establishment
-* smaller crypto modules and crates such as [crates/bv_crypto](/Users/felipe/Dev/BastionVault/crates/bv_crypto)
-
-Tongsuo is no longer a supported BastionVault backend. Remaining OpenSSL-based paths are being reduced incrementally as the PQ migration continues.
+The legacy PKI certificate issuance and cert-auth modules are disabled in the current build. PQ key-management endpoints (generate, import, sign, verify) for `ml-kem-768` and `ml-dsa-65` remain active.

@@ -1,11 +1,6 @@
-//! This is the 'application' part of BastionVault, a Rust replica of Hashicorp Vault.
-//! The code here will be built into a binary (with a main function which utilize the
+//! This is the 'application' part of BastionVault.
+//! The code here will be built into a binary (with a main function which utilizes the
 //! `bastion_vault::cli` module to run the application).
-//!
-//! This document is generated for the application part of BastionVault. But we don't organize the
-//! real doc here, please go to BastionVault's [documentation site]
-//!
-//! [documentation site]: https://www.tongsuo.net
 
 use std::process::ExitCode;
 

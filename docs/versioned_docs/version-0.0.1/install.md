@@ -60,15 +60,23 @@ target/debug/rvault --help
 
 And you will get a response similar to:
 
-~~~bash
+~~~
 A secure and high performance secret management software that is compatible with Hashicorp Vault.
 
 Usage: rvault [COMMAND]
 
 Commands:
-  server  Start a bastion_vault server
-  status  Print seal and HA status
-  help    Print this message or the help of the given subcommand(s)
+  server    Start a BastionVault server
+  status    Print seal and HA status
+  operator  Perform operator-specific tasks
+  read      Read data from BastionVault
+  write     Write data to BastionVault
+  delete    Delete secrets and configuration
+  list      List data from BastionVault
+  login     Authenticate to BastionVault
+  auth      Manage auth methods
+  policy    Manage policies
+  secrets   Manage secrets engines
 
 Options:
   -h, --help     Print help

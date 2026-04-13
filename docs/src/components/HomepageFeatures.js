@@ -1,7 +1,7 @@
 import React from 'react';
 import clsx from 'clsx';
 import styles from './HomepageFeatures.module.css';
-import { MdCloud, MdCheckCircle, MdFlashOn, MdFlight } from "react-icons/md";
+import { MdCloud, MdCheckCircle, MdFlashOn, MdLock } from "react-icons/md";
 import ReactMarkdown from 'react-markdown';
 import Translate from '@docusaurus/Translate';
 
@@ -10,31 +10,34 @@ const FeatureList = [
     title: <Translate description="The features title">Working Mode</Translate>,
     icon: <MdFlashOn size={26} />,
     description: `
-- standalone process w/HTTP APIs
-- Rust crate that can be easily integrated with other applications
+- Standalone process with HTTP APIs
+- Rust crate that integrates into your own application
     `,
   },
   {
-    title: 'Configurable underlying Cryptographic Module',
-    icon: <MdFlight size={26} />,
+    title: 'Post-Quantum Cryptography',
+    icon: <MdLock size={26} />,
     description: `
-- OpenSSL library
-- Tongsuo library
-- native Rust crypto libraries
+- ChaCha20-Poly1305 payload encryption
+- ML-KEM-768 key encapsulation
+- ML-DSA-65 digital signatures
+- rustls TLS stack
 `,
   },
   {
     title: 'API',
     icon: <MdCheckCircle size={26} />,
-    description: `RESTful API, compatible with Hashicorp Vault`,
+    description: `RESTful API, compatible with HashiCorp Vault`,
   },
   {
-    title: 'Authentication & Authorization',
+    title: 'Authentication',
     icon: <MdCloud size={26} />,
     description: `
-- X.509 certificate
-- username/password
-- basic ACL`,
+- Token-based
+- AppRole
+- Username/password
+- Certificate (mTLS)
+- Path-based ACL policies`,
   },
 ];
 

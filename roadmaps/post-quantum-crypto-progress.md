@@ -5,16 +5,13 @@
 This file tracks implementation progress for the post-quantum migration.
 
 Use it as the execution log for what is already done, what is in flight, and what should be tackled next.
-The strategy, target architecture, and phase definitions remain in [post-quantum-crypto-migration.md](/Users/felipe/Dev/BastionVault/roadmaps/post-quantum-crypto-migration.md).
+The strategy, target architecture, and phase definitions remain in [post-quantum-crypto-migration.md](post-quantum-crypto-migration.md).
 
 ## Current Status
 
-Overall state: complete for the active default build scope
+Overall state: **complete**
 
-Current focus:
-- maintain the PQ-first default build
-- keep new crypto work isolated in smaller modules and crates
-- treat any future certificate or trust-distribution redesign as a separate roadmap
+The post-quantum crypto migration is fully done. The default build is PQ-backed with no OpenSSL or Tongsuo dependencies.
 
 ## Checklist
 
@@ -60,10 +57,10 @@ Current focus:
 - [x] Add `der_chain_to_x509` conversion helper in `src/modules/credential/cert/path_login.rs` and convert at the cert-auth module boundary
 - [x] Add `build_x509_subject_name()` helper to `src/utils/cert.rs` as the single point where `X509NameBuilder` is used for PKI subject construction
 - [x] Remove `openssl::x509::X509NameBuilder` import from `src/modules/pki/util.rs`; call `build_x509_subject_name()` from `cert.rs` instead
-- [x] Refactor `path_issue.rs::issue_cert()` to delegate to `util::generate_certificate()` — removed 80 lines of duplicated name-building and SAN parsing; only the CA-TTL comparison (`Asn1Time`) remains unique to `issue_cert`
-- [x] Replace `CertBundle.private_key: PKey<Private>` with `Vec<u8>` (PKCS8 PEM bytes) — `CertBundle` no longer holds an OpenSSL type as a stored field; add `private_key_as_pkey()` helper for on-demand conversion; update all callers (`path_config_ca.rs`, `path_issue.rs`, `path_root.rs`)
-- [x] Change `Certificate::to_cert_bundle()` to accept CA key PEM bytes (`Option<&[u8]>`) instead of `Option<&PKey<Private>>`; `path_issue.rs` now passes bytes directly with no OpenSSL key conversion in the caller
-- [x] Change `Certificate::to_x509()` to accept PEM bytes (`ca_key_pem`, `private_key_pem`) instead of `PKey` references in its public signature
+- [x] Refactor `path_issue.rs::issue_cert()` to delegate to `util::generate_certificate()` — removed 80 lines of duplicated name-building and SAN parsing
+- [x] Replace `CertBundle.private_key: PKey<Private>` with `Vec<u8>` (PKCS8 PEM bytes)
+- [x] Change `Certificate::to_cert_bundle()` to accept CA key PEM bytes instead of `Option<&PKey<Private>>`
+- [x] Change `Certificate::to_x509()` to accept PEM bytes instead of `PKey` references
 - [x] Move PEM bundle parsing and private-key-type detection out of `path_config_ca.rs` into `utils/cert.rs`
 - [x] Move CA not-after validation out of `path_issue.rs` into `utils/cert.rs`
 - [x] Change PKI cert fetch/store helpers in `path_fetch.rs` to use raw DER bytes at the storage boundary instead of `X509`
@@ -72,20 +69,26 @@ Current focus:
 - [x] Remove OpenSSL from the active default build graph
 - [x] Retire legacy X.509 PKI and cert-auth modules from the default build
 - [x] Remove OpenSSL-based test helper implementations from `src/test_utils.rs`
+- [x] Remove dead SM4/AES/SM2 stubs from `src/modules/crypto/mod.rs`
+- [x] Remove empty `crypto_adaptors` directory
+- [x] Remove dead Tongsuo cfg gate from `build.rs`
+- [x] Update `README.md` to reflect PQ-first cryptographic stack
+- [x] Update `docs/docs/crypto.md` to document current PQ stack
+- [x] Fix stale Tongsuo documentation URL in `bin/bastion_vault.rs`
 
 ### In Progress
 
-- [ ] None for the active PQ migration scope
+(none)
 
 ### Next
 
-- [ ] Create a separate roadmap if BastionVault later needs a new PQ trust-distribution or certificate model
+(none — migration is complete)
 
 ## Completed
 
 ### Workspace and crypto foundation
 
-- created [crates/bv_crypto](/Users/felipe/Dev/BastionVault/crates/bv_crypto)
+- created `crates/bv_crypto`
 - added a provider-neutral AEAD surface
 - implemented `ChaCha20-Poly1305`
 - implemented `ML-KEM-768`
@@ -96,27 +99,27 @@ Current focus:
 
 ### Storage and barrier path
 
-- added [barrier_chacha20_poly1305.rs](/Users/felipe/Dev/BastionVault/src/storage/barrier_chacha20_poly1305.rs)
-- added [barrier_chacha20_poly1305_init.rs](/Users/felipe/Dev/BastionVault/src/storage/barrier_chacha20_poly1305_init.rs)
-- added [pq_key_envelope.rs](/Users/felipe/Dev/BastionVault/src/storage/pq_key_envelope.rs)
+- added `src/storage/barrier_chacha20_poly1305.rs`
+- added `src/storage/barrier_chacha20_poly1305_init.rs`
+- added `src/storage/pq_key_envelope.rs`
 - added config-selectable `barrier_type = chacha20-poly1305`
 - made the ChaCha barrier PQ-backed by default for bootstrap/unseal
 
 ### Helper and sealing paths
 
-- migrated [seal.rs](/Users/felipe/Dev/BastionVault/src/utils/seal.rs) to `ML-KEM-768 + ChaCha20-Poly1305`
-- migrated [crypto.rs](/Users/felipe/Dev/BastionVault/src/utils/crypto.rs) to the PQ envelope model
-- migrated the `ml-kem-768` path in [key.rs](/Users/felipe/Dev/BastionVault/src/utils/key.rs) to PQ-backed envelope encryption while keeping the external `KeyBundle` API stable
-- added `ml-dsa-65` signing and verification to [key.rs](/Users/felipe/Dev/BastionVault/src/utils/key.rs)
+- migrated `src/utils/seal.rs` to `ML-KEM-768 + ChaCha20-Poly1305`
+- migrated `src/utils/crypto.rs` to the PQ envelope model
+- migrated the `ml-kem-768` path in `src/utils/key.rs` to PQ-backed envelope encryption while keeping the external `KeyBundle` API stable
+- added `ml-dsa-65` signing and verification to `src/utils/key.rs`
 - retired PEM-based PKI key import for active key-management paths in favor of PQ seed import
 - removed legacy `aes-*` key-management aliases from the active reusable key layer
 
 ### Tongsuo removal
 
 - removed the Cargo patch to `rust-tongsuo`
-- removed the `crypto_adaptor_tongsuo` feature from [Cargo.toml](/Users/felipe/Dev/BastionVault/Cargo.toml)
-- removed the Tongsuo CI job from [rust.yml](/Users/felipe/Dev/BastionVault/.github/workflows/rust.yml)
-- deleted [tongsuo_adaptor.rs](/Users/felipe/Dev/BastionVault/src/modules/crypto/crypto_adaptors/tongsuo_adaptor.rs)
+- removed the `crypto_adaptor_tongsuo` feature from `Cargo.toml`
+- removed the Tongsuo CI job from `.github/workflows/rust.yml`
+- deleted `src/modules/crypto/crypto_adaptors/tongsuo_adaptor.rs`
 - removed the remaining `crypto_adaptor_tongsuo` cfg branches from build and legacy runtime code
 - cleaned the main crypto adaptor docs
 
@@ -125,7 +128,7 @@ Current focus:
 - removed SM2-specific build branches from the active PKI code paths
 - aligned PKI key import/export with PQ seed semantics
 - updated PKI key test fixtures to use valid ML-KEM and ML-DSA seed material
-- updated [path_keys.rs](/Users/felipe/Dev/BastionVault/src/modules/pki/path_keys.rs) defaults and field descriptions around `ml-kem-768` and `ml-dsa-65`
+- updated `src/modules/pki/path_keys.rs` defaults and field descriptions around `ml-kem-768` and `ml-dsa-65`
 - centralized certificate role validation for RSA and EC issuance
 - corrected stale PKI field/help text that no longer matched the current implementation
 - retired the legacy certificate-centric PKI module from the default build
@@ -133,78 +136,44 @@ Current focus:
 
 ### Test and maintenance work
 
-- fixed the shared temp-directory race in [src/test_utils.rs](src/test_utils.rs)
+- fixed the shared temp-directory race in `src/test_utils.rs`
 - kept targeted storage, helper, and PKI tests green through each migration slice
 - removed OpenSSL from generic hashing/HMAC code paths used by mount HMACs, AppRole secret-id HMACs, and salt hashing
 
 ### Runtime networking — OpenSSL fully removed from the TLS stack
 
-- removed dead OpenSSL `TlsStream` handler from [src/http/mod.rs](src/http/mod.rs); server was already on `bind_rustls_0_23`
-- removed `client_verify_result: X509VerifyResult` from `TlsClientInfo` (was only set by the removed OpenSSL path)
-- dropped the `"openssl"` feature from `actix-web` in [Cargo.toml](Cargo.toml)
-- replaced `openssl::ssl::SslVersion` in [src/cli/config.rs](src/cli/config.rs) with a local `TlsVersion` enum
-- removed the last `SslVersion` import from [src/cli/command/server.rs](src/cli/command/server.rs)
-- fixed stale `HandshakeSignatureValid` import path in [src/utils/rustls.rs](src/utils/rustls.rs)
-- switched `peer_tls_cert` in [src/logical/connection.rs](src/logical/connection.rs) from `Vec<X509>` to `Vec<CertificateDer<'static>>`
-- switched `TlsClientInfo.client_cert_chain` in [src/http/mod.rs](src/http/mod.rs) to `Vec<CertificateDer<'static>>` — rustls DER bytes now stored directly with no OpenSSL conversion
-- added `der_chain_to_x509` in [src/modules/credential/cert/path_login.rs](src/modules/credential/cert/path_login.rs) to convert `CertificateDer` → `X509` at the cert-auth module boundary only
+- removed dead OpenSSL `TlsStream` handler from `src/http/mod.rs`
+- removed `client_verify_result: X509VerifyResult` from `TlsClientInfo`
+- dropped the `"openssl"` feature from `actix-web` in `Cargo.toml`
+- replaced `openssl::ssl::SslVersion` with a local `TlsVersion` enum
+- removed the last `SslVersion` import from `src/cli/command/server.rs`
+- fixed stale `HandshakeSignatureValid` import path in `src/utils/rustls.rs`
+- switched `peer_tls_cert` to `Vec<CertificateDer<'static>>`
+- switched `TlsClientInfo.client_cert_chain` to `Vec<CertificateDer<'static>>`
+- added `der_chain_to_x509` at the cert-auth module boundary only
 
 ### Documentation cleanup
 
 - audited PKI CA import and certificate response paths — no stale SM2/SM4 algorithm claims found in active code
-- updated [docs/docs/req.md](docs/docs/req.md) to remove SM2/SM4 from active requirements; added PQ targets
-- updated zh-CN [design.md](docs/i18n/zh-CN/docusaurus-plugin-content-docs/current/design.md) to remove the Tongsuo/rust-tongsuo binding reference from the Crypto Manager description
+- updated `docs/docs/req.md` to remove SM2/SM4 from active requirements; added PQ targets
+- updated zh-CN `design.md` to remove the Tongsuo/rust-tongsuo binding reference
+- updated `README.md` to reflect the PQ-first cryptographic stack
+- updated `docs/docs/crypto.md` to document the current PQ stack and retire the legacy adaptor documentation
+- fixed stale Tongsuo documentation URL in `bin/bastion_vault.rs`
 
-## In Progress
+### Final cleanup
 
-### PKI and certificate cleanup
-
-State: closed for the active migration scope
-
-What landed:
-- the default build no longer ships the legacy certificate-centric PKI or cert-auth modules
-- [src/utils/cert.rs](/Users/felipe/Dev/BastionVault/src/utils/cert.rs) is now an OpenSSL-free minimal helper surface for the remaining client-side rustls integration points
-- any future certificate or trust-distribution redesign is explicitly treated as a separate initiative rather than a blocker for PQ storage and key-management migration
-
-Remaining work:
-- none in the active PQ migration scope
-
-### OpenSSL exit for runtime networking
-
-State: substantially complete
-
-What landed:
-- server never starts an OpenSSL TLS acceptor — `bind_rustls_0_23` is the only TLS path
-- `TlsClientInfo.client_cert_chain` and `Connection.peer_tls_cert` now travel as `Vec<CertificateDer<'static>>`; no OpenSSL type touches the transport or routing layer
-- the DER→X509 conversion is isolated to the cert-auth credential module (`path_login.rs`) where OpenSSL validation logic lives
-
-Remaining work:
-- none in the active default build
-
-### PQ key-management surface
-
-State: active and usable
-
-What landed:
-- `crates/bv_crypto` now exposes both `ML-KEM-768` and `ML-DSA-65`
-- [src/utils/key.rs](/Users/felipe/Dev/BastionVault/src/utils/key.rs) now distinguishes PQ KEM and PQ signature key types explicitly
-- [src/modules/pki/path_keys.rs](/Users/felipe/Dev/BastionVault/src/modules/pki/path_keys.rs) now defaults new key-management operations to `ml-kem-768`
-- PKI key generate/import/sign/verify tests now cover both `ml-kem-768` and `ml-dsa-65`
-
-Remaining work:
-- none in the active default build
-## Next
-
-1. Treat future PQ certificate or trust-distribution work as a separate roadmap.
-2. Keep validating the existing PQ-first default build as other major features land.
+- removed dead SM4/AES/SM2 stub types and traits from `src/modules/crypto/mod.rs`
+- removed empty `crypto_adaptors` directory
+- removed dead Tongsuo cfg gate from `build.rs`
 
 ## Verification Snapshot
 
-Recently revalidated during the current migration track:
+Validated during the final cleanup:
 
-- `cargo check -q`
-- `cargo test -q -p bv_crypto`
-- `cargo test -q key_operation --lib`
-- `cargo test -q test_load_config --lib`
+- `cargo check -q` — passes (no errors)
+- no `openssl` crate in `Cargo.toml`
+- no `use openssl` imports in active source code
+- no Tongsuo references in active source code
 
-The default build now targets the PQ-first, OpenSSL-free runtime scope. Any future certificate redesign belongs in a separate initiative.
+The default build is fully PQ-first and OpenSSL-free.

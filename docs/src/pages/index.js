@@ -6,38 +6,41 @@ import Translate from '@docusaurus/Translate';
 import styles from './index.module.css';
 import HomepageFeatures from '../components/HomepageFeatures';
 import HomepageCompare from '../components/HomepageCompare';
-// import HomepageProducts from '../components/HomepageProducts';
-// import HomepageMascot from '../components/HomepageMascot';
-import {useColorMode} from '@docusaurus/theme-common';
 
 function HomepageHeader() {
   const {siteConfig} = useDocusaurusContext();
-  const {colorMode} = useColorMode();
 
   return (
     <header className={styles.heroBanner}>
       <div className="container">
-      <img 
-          className={styles.homepageBanner} 
-          width="90%" 
-          src={colorMode == "light" ? require('@site/static/img/BastionVault-home.gif').default : require('@site/static/img/BastionVault-home-Dark.gif').default}
-      />
-        {/* <h2 className="hero__subtitle">{siteConfig.tagline}</h2> */}
-        <br/><a href="https://github.com/ffquintella/BastionVault" target="_blank" rel="noreferrer"><img src="https://img.shields.io/github/stars/ffquintella/BastionVault.svg?style=social&label=Star"/></a>
+        <img
+          className={styles.homepageLogo}
+          width="120"
+          src={require('@site/static/img/bastionvault-logo.svg').default}
+          alt="BastionVault Logo"
+        />
+        <img
+          className={styles.homepageBanner}
+          width="400"
+          src={require('@site/static/img/bastionvault-logo.svg').default}
+          alt="BastionVault Logo"
+        />
+        <h2 className="hero__subtitle">{siteConfig.tagline}</h2>
+        <br/>
+        <a href="https://github.com/ffquintella/BastionVault" target="_blank" rel="noreferrer">
+          <img src="https://img.shields.io/github/stars/ffquintella/BastionVault.svg?style=social&label=Star" alt="GitHub stars"/>
+        </a>
         <p>
-          <Translate description="Fork note">
-            BastionVault is a fork of RustyVault, rebranded to reflect a different library approach.
+          <Translate description="PQ description">
+            Post-quantum-ready secret management, built in Rust.
           </Translate>
         </p>
-        <br/><Translate description="Start">Every ⭐ counts!</Translate>
-        <br/>
-        <br/>
         <div className={styles.buttons}>
           <Link
             className="button button--primary button--lg"
             to="/docs/quick-start/">
             <Translate description="The Getting Started button">
-            🔑 Getting Started
+            Getting Started
             </Translate>
           </Link>
         </div>
@@ -55,8 +58,6 @@ export default function Home() {
       <main>
         <HomepageFeatures />
         <HomepageCompare />
-        {/* <HomepageProducts /> */}
-        {/* <HomepageMascot /> */}
       </main>
     </Layout>
   );
