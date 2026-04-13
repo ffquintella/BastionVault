@@ -5,100 +5,79 @@ title: Quick Start
 
 # BastionVault Quick Start
 
-In this document, we demonstrate several minimum but necessary steps for starting up a BastionVault server and make it functional for real features.
-
-This quick start document includes examples to:
-
-1. how to build BastionVault binary from source
-2. how to start a basic BastionVault server
-3. how to configure a BastionVault server
-4. how to use a BastionVault server to store sensitive data (the 'secrets', for instance)
+This guide covers the minimum steps to start a BastionVault server and use it to store secrets.
 
 ## Build from Source
 
-Read [install.md](./install.md) if you want more detailed information on installation.
+Read [install.md](./install.md) for more detailed information on installation.
 
-Clone BastionVault from Github:
+Clone BastionVault from GitHub:
 
 ~~~bash
 git clone https://github.com/ffquintella/BastionVault.git
-
 cd BastionVault
 ~~~
 
-Build BastionVault by using Rust toolchain:
+Build BastionVault:
 
 ~~~bash
-cargo build
+make build
 ~~~
 
-If the build is successful, then you now have an executable binary file called `rvault` in `BastionVault/target/debug` directory.
+After a successful build, the `rvault` executable will be in `target/release/`.
 
-## Run the Server
+## Configure the Server
 
-BastionVault runs as a daemon in the operation system. It's basically a server that provides a set of RESTful HTTP APIs. So after the server is running in the background, you can send HTTP requests to ask the server to do the jobs.
-
-To launch a BastionVault server, a configuration file is needed. As Hashicorp Vault, BastionVault can also parse HCL configuration files. A typical usable example BastionVault configuration file is as follows:
+BastionVault requires a configuration file. Create a file called `config.hcl`:
 
 ~~~conf
 storage "file" {
-    path    = "./data"
+    path = "./vault/data"
 }
 
 listener "tcp" {
     address     = "127.0.0.1:8200"
-    tls_disable = "true"
-    tls_cert_file = "servercert.pem"
-    tls_key_file = "serverkey.pem"
-    tls_disable_client_certs = false
-    tls_require_and_verify_client_cert = false
+    tls_disable = true
 }
 
-daemon = true
-daemon_user = "paul"
-daemon_group = "staff"
-
-work_dir = "/Users/paul/work/tmp/bastion_vault/"
-
-api_addr = "http://127.0.0.1:8200"
+api_addr  = "http://127.0.0.1:8200"
 log_level = "debug"
-pid_file = "bastion_vault.pid"
+pid_file  = "bastion_vault.pid"
 ~~~
 
-You need to change the variables like `daemon_user`, `daemon_group` and `work_dir` to the actual value in your environment. Then just copy and paste it to a local file, say, `rvault.hcl` somewhere on your machine.
+For production use, you should enable TLS by providing `tls_cert_file` and `tls_key_file` instead of setting `tls_disable = true`.
 
-Then launch the server (assume you are still in `BastionVault` directory):
+## Run the Server
+
+Launch the server:
 
 ~~~bash
-target/debug/rvault server --config /path/to/rvault.hcl
+target/release/rvault server --config config.hcl
 ~~~
 
-Check the process is running:
+Or for development using the included config:
 
 ~~~bash
-ps -xa | grep rvault
-
-89174 ??         0:00.46 target/debug/rvault server --config /Users/paul/work/tmp/rvault.hcl
-89448 ttys006    0:00.00 grep rvault
+make run-dev
 ~~~
 
-There should be an `rvault` process running in background.
-
-Now the server is listening on TCP port 8200 and it's ready for incoming HTTP requests.
+The server will listen on TCP port 8200 and is ready for incoming HTTP requests.
 
 ## Initialize BastionVault
 
-Before it's fully usable, a BastionVault server needs to be initialized. For instance, a master key is generated during the initialization procedure and is used to `seal` and `unseal` BastionVault, thus the data in BastionVault can be correctly encrypted.
+Before it's fully usable, a BastionVault server needs to be initialized. During initialization, a master key is generated and used to seal and unseal BastionVault, ensuring that stored data is properly encrypted.
 
-In this section, we use command line tool `curl` to manipulate the server and use `jq` to parse the JSON data in the HTTP responses. `jq` is not required, but we highly recommend to install it on your machine. Click [here](https://jqlang.github.io/jq/download/) for more information on installing `jq`.
+We use `curl` to interact with the server and `jq` to parse JSON responses. Install `jq` from [here](https://jqlang.github.io/jq/download/) if you don't have it.
 
-To launch the server, simply run:
+Initialize BastionVault:
 
 ~~~bash
-curl --request PUT --data '{"secret_shares": 1, "secret_threshold": 1}' http://127.0.0.1:8200/v1/sys/init | jq
+curl --request PUT \
+  --data '{"secret_shares": 1, "secret_threshold": 1}' \
+  http://127.0.0.1:8200/v1/sys/init | jq
 ~~~
 
-The response should be similar to this:
+The response should look like:
 
 ~~~json
 {
@@ -109,28 +88,25 @@ The response should be similar to this:
 }
 ~~~
 
-Now we have a key to unseal BastionVault and a root token.
-
-You can check the initialization status by sending:
+Save the key and root token. You can verify initialization:
 
 ~~~bash
 curl http://127.0.0.1:8200/v1/sys/init | jq
-{
-  "initialized": true
-}
 ~~~
 
-## Unseal the BastionVault Server
+## Unseal the Server
 
-When BastionVault is initialized properly, it's in the *sealed* status. *Seald* here means everything in BastionVault is encrypted and protected, thus no one can use any functionality BastionVault. You need to *unseal* it to make it fully functional.
+After initialization, BastionVault is in a *sealed* state. Everything is encrypted and inaccessible. You need to *unseal* it to make it functional.
 
-To unseal, the key generated in previous section will be used:
+Use the key from the initialization step:
 
 ~~~bash
-curl --request PUT --data '{"key": "7df5ff90cd9417e04cbb9f6db65e0b16ce265d5108fd07e45bdae1a35bf5da6a"}' http://127.0.0.1:8200/v1/sys/unseal | jq
+curl --request PUT \
+  --data '{"key": "7df5ff90cd9417e04cbb9f6db65e0b16ce265d5108fd07e45bdae1a35bf5da6a"}' \
+  http://127.0.0.1:8200/v1/sys/unseal | jq
 ~~~
 
-If everything went smoothly, then a response with `sealed: false` will be returned:
+A response with `"sealed": false` confirms the server is unsealed:
 
 ~~~json
 {
@@ -141,24 +117,29 @@ If everything went smoothly, then a response with `sealed: false` will be return
 }
 ~~~
 
-This indicates the BastionVault server is not sealed and it's ready to do more real jobs.
+## Write Secrets
 
-## Write Secrets to BastionVault
+BastionVault provides a secure key-value storage for sensitive data such as passwords, credentials, tokens, and keys.
 
-A frequently used feature of RustyVautl is *secret*, it's basically a secure key-value storage that can retain arbitary sensitive values such as password, credentials, tokens, keys and so forth.
+Use the `root_token` from initialization for authentication:
 
-BastionVault needs client authentication for further operations. In this demonstration, we utilize the `root_token` generated in previous section for simplicity.
-
-Let's ask BastionVault to store a `foo: bar` value under the key `test`:
+Write a secret:
 
 ~~~bash
-curl --Header "Cookie: token=bc9e904b-acff-db3d-4cfd-f575cb36428a" --request POST --data '{ "foo": "bar" }' http://127.0.0.1:8200/v1/secret/test | jq
+curl -H "Cookie: token=bc9e904b-acff-db3d-4cfd-f575cb36428a" \
+  --request POST \
+  --data '{ "foo": "bar" }' \
+  http://127.0.0.1:8200/v1/secret/test | jq
 ~~~
 
-Then read it out:
+Read it back:
 
 ~~~bash
-curl --Header "Cookie: token=bc9e904b-acff-db3d-4cfd-f575cb36428a" http://127.0.0.1:8200/v1/secret/test | jq
+curl -H "Cookie: token=bc9e904b-acff-db3d-4cfd-f575cb36428a" \
+  http://127.0.0.1:8200/v1/secret/test | jq
+~~~
+
+~~~json
 {
   "renewable": false,
   "lease_id": "",
@@ -170,13 +151,12 @@ curl --Header "Cookie: token=bc9e904b-acff-db3d-4cfd-f575cb36428a" http://127.0.
 }
 ~~~
 
-In the `data` section of the responsed JSON, you can see the `foo:bar` value once again!
-
 ## Next Steps
 
-In this document, we built a BastionVault server, started it up and configured it to accept user commands such as storing sensitive data. All examples here are only for demonstration purposes, they may not safe in real production scenarios. Some more features are introduced in BastionVault to make it production ready:
+The examples above are for demonstration only. For production deployments, consider:
 
-* Authentication methods: BastionVault offers different authentication methods, which allow you create new client tokens with fine-grained access policy,
-* More storage types: This demonstration uses local file as storage, but in reality it's neither efficient nor secure. BastionVault also supports other remote storage types like database, remote file system or so.
-* Running status: a log file is located in the working directory of BastionVault, important information is logged in it for debug or other purposes.
-* Compatibility with Hashicorp Vault: BastionVault is compatible with Hashicorp Vault, so most Hashicorp Vault documentation is also worth to read to help you understand BastionVault ;-) 
+* **TLS**: Enable TLS with proper certificates instead of `tls_disable = true`.
+* **Authentication methods**: Configure AppRole, userpass, or certificate authentication instead of relying on the root token.
+* **Storage backends**: Use MySQL or PostgreSQL for durable production storage instead of the local file backend.
+* **Shamir's Secret Sharing**: Use multiple key shares (`secret_shares > 1`) so that no single person can unseal the vault alone.
+* **Compatibility with HashiCorp Vault**: BastionVault is API-compatible with HashiCorp Vault, so most Vault documentation and tooling applies.

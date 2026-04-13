@@ -5,70 +5,75 @@ title: Install
 
 # Install BastionVault
 
-BastionVault must be installed properly in your environment before it actually works. Currently BastionVault is only available by source code. BastionVault can be used as an application or a library, thus:
+BastionVault can be used as a standalone application or as a Rust library:
 
-1. BastionVault is available to compile from source code only, or
-2. BastionVault is availabe on [crates.io](https://crates.io/crates/bastion_vault) for other Rust projects.
+1. Build from source to get the `rvault` binary, or
+2. Add it as a dependency from [crates.io](https://crates.io/crates/bastion_vault) for other Rust projects.
 
-This document is about how to build and install BastionVault in the application form. For the library form, please go to [docs.rs](https://docs.rs/bastion_vault/latest/bastion_vault) for more information.
+This document covers building and installing BastionVault as an application. For library usage, see [docs.rs](https://docs.rs/bastion_vault/latest/bastion_vault).
 
 ## Operating System
 
-BastionVault is supposed to work on the following operating systems:
+BastionVault works on the following operating systems:
 
 * Linux
 * macOS
 * Windows (experimental)
 
-In this document, macOS is used as the demonstration operating system.
-
 ## Prerequisite
 
-BastionVault is developed in [Rust](https://rust-lang.org) programming language, so Rust must be properly installed in your environment before building BastionVault.
-
-Read [this](https://www.rust-lang.org/tools/install) to make Rust work for you.
+BastionVault is written in [Rust](https://rust-lang.org), so Rust must be installed before building. Read [this](https://www.rust-lang.org/tools/install) to install Rust.
 
 ## Build from Source
 
-Clone the latest BastionVault source code from Github:
+Clone the repository from GitHub:
 
 ~~~bash
 git clone https://github.com/ffquintella/BastionVault.git
-~~~
-
-Then you have a directory called BastionVault now. Change directory into it.
-
-~~~bash
 cd BastionVault
 ~~~
 
-Simply build the binary by using the tool Cargo.
+Build the binary using `make` or `cargo`:
 
 ~~~bash
-cargo build
+make build
 ~~~
 
-Rust toolchain is responsible for taking care of almost everything during the build process. After BastionVault is successfully built, you get a bundle of files in the `BastionVault/target/debug` directory. There will be a executable file called `rvault`, which is the application of BastionVault.
+Or directly with Cargo:
+
+~~~bash
+cargo build --release
+~~~
+
+After a successful build, the `rvault` executable will be in `target/release/` (or `target/debug/` for debug builds).
 
 ## Verify BastionVault
 
-Simply run the following command:
+Run the following command:
 
 ~~~bash
-target/debug/rvault --help
+target/release/rvault --help
 ~~~
 
-And you will get a response similar to:
+You should see output similar to:
 
-~~~bash
+~~~
 A secure and high performance secret management software that is compatible with Hashicorp Vault.
 
 Usage: rvault [COMMAND]
 
 Commands:
-  server  Start a bastion_vault server
-  status  Print seal and HA status
-  help    Print this message or the help of the given subcommand(s)
+  server    Start a BastionVault server
+  status    Print seal and HA status
+  operator  Perform operator-specific tasks
+  read      Read data from BastionVault
+  write     Write data to BastionVault
+  delete    Delete secrets and configuration
+  list      List data from BastionVault
+  login     Authenticate to BastionVault
+  auth      Manage auth methods
+  policy    Manage policies
+  secrets   Manage secrets engines
 
 Options:
   -h, --help     Print help

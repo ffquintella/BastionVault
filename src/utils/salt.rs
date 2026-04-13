@@ -29,6 +29,7 @@ impl DigestAlgorithm {
         }
     }
 
+    #[cfg(test)]
     fn output_size(self) -> usize {
         match self {
             Self::Sha1 => 20,

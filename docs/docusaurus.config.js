@@ -23,14 +23,18 @@ module.exports = {
   url: 'https://ffquintella.github.io',
   baseUrl: '/',
   onBrokenLinks: 'throw',
-  onBrokenMarkdownLinks: 'throw',
+  markdown: {
+    hooks: {
+      onBrokenMarkdownLinks: 'throw',
+    },
+  },
   favicon: 'img/bastionvault-mark.svg',
   organizationName: 'ffquintella',
   projectName: 'BastionVault',
   trailingSlash: true,
   i18n: {
     defaultLocale: 'en',
-    locales: ['en', 'zh-CN'],
+    locales: ['en'],
   },
   themeConfig: {
     colorMode: {
@@ -38,7 +42,7 @@ module.exports = {
       disableSwitch: false,
       respectPrefersColorScheme: false,
     },
-    image: 'img/BastionVault-arch.png',
+    image: 'img/BastionVault-arch.svg',
     metadata: [
       {name: 'keywords', content: 'rust, hashicorp-vault, key-management, secure-storage, secrets-management, key-manager-service, secrets-manager, cloudnative-services'},
     ],
@@ -55,11 +59,6 @@ module.exports = {
           sidebarId: 'tutorialSidebar',
           label: 'Docs',
         },
-        { 
-          href: 'https://www.tongsuo.net/blog', 
-          label: 'Blog', 
-          position: 'left'
-        },
         {
           to: 'https://crates.io/crates/bastion_vault',
           label: 'Crate',
@@ -74,10 +73,6 @@ module.exports = {
           type: 'docsVersionDropdown',
           position: 'right',
           dropdownActiveClassDisabled: true,
-        },
-        {
-          type: 'localeDropdown',
-          position: 'right',
         },
       ],
     },
@@ -101,25 +96,12 @@ module.exports = {
           title: 'Community',
           items: [
             {
-              label: 'GitHub',
+              label: 'GitHub Discussions',
               to: 'https://github.com/ffquintella/BastionVault/discussions',
             },
             {
-              label: 'OSPP',
-              to: 'https://summer-ospp.ac.cn/org/orgdetail/e4de262f-50b1-4f11-930b-8b8e841de420?lang=zh',
-            },
-          ],
-        },
-        {
-          title: 'More',
-          items: [
-            // {
-            //   label: 'Blog',
-            //   to: '/blog/',
-            // },
-            {
-              label: 'Tongsuo',
-              to: 'https://tongsuo.net',
+              label: 'Issues',
+              to: 'https://github.com/ffquintella/BastionVault/issues',
             },
           ],
         },
@@ -173,7 +155,7 @@ module.exports = {
           customCss: require.resolve('./src/css/custom.css'),
         },
         sitemap: {
-          changefreq: 'daily',
+          changeFreq: 'daily',
           priority: 0.8,
         },
       },

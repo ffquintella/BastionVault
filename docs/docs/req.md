@@ -4,27 +4,23 @@ title: Motivation
 ---
 # Motivation
 
-HashiCorp Vault is the most widely used secret management product in cloud native realm. But in practice, it has some disadvantages:
+HashiCorp Vault is the most widely used secret management product in the cloud native space. But in practice, it has some disadvantages:
 
-1. Open-source license is not OSI-approved any more;
-2. Lack of cryptography compliance ability except FIPS, including:
-  * cryptography algorithms
-  * cryptography validations in other countries and regions
-3. Inadequate cryptography performance especially in  critical scenarios;
-4. Many useful features are not open-sourced
-5. ...
+1. Open-source license is no longer OSI-approved;
+2. Many useful features are not open-sourced;
+3. Limited post-quantum cryptography support;
+4. Inadequate cryptography performance in critical scenarios;
 
-And compared to Hashicorp Vault, there is rare open source key/secret management project available in the market. Thus, we started a new open source project to address the issues.
+Compared to HashiCorp Vault, there are few open-source key/secret management projects available. BastionVault was started to address these issues.
 
-The new project needs to fulfill most features the a traditional KMS has. It also needs to be a replacement for Hashicorp Vault, with the features that even are not included in the open source versions of Vault. As such, the new project should be:
+The project needs to fulfill most features a traditional KMS has, while also serving as a replacement for HashiCorp Vault with features not included in its open-source versions. As such, BastionVault should be:
 
-1. Written in Rust to achieve memory safe
-2. Fully compatible with Hashicorp Vault on APIs and data format
-3. Configurable underlying cryptographic module
-4. High performance on cryptography operations
+1. Written in Rust for memory safety
+2. Fully compatible with HashiCorp Vault on APIs and data format
+3. Post-quantum-ready cryptographic stack
+4. High performance on cryptographic operations
 5. High availability
-6. Support for underlying cryptography hardware
-7. OSI-approved open-source license
+6. OSI-approved open-source license
 
 # Requirements List
 
@@ -36,42 +32,34 @@ Features:
 
 * API
   * RESTful
-     * Compatible with Hashicorp Vault
-  * gRPC (low priority)
-* User and Authentication
-  * X.509 based authentication
-  * Password based authentication
-  * Basic ACL
-  * Role based secret management
+     * Compatible with HashiCorp Vault
+* Authentication
+  * Token-based authentication
+  * AppRole authentication
+  * Username/password authentication
+  * Certificate authentication
+  * Path-based ACL policies
 * Configuration
-  * Support configuration file
-  * Dynamic reload
-* PKI/CA
-  * X.509 issuing: RSA/ECC
-  * X.509 revocation: OCSP, CRL
+  * HCL configuration files
+  * JSON configuration files
 * Key Management
-  * Symmetric: generation/storage/rotation
-  * Public key type: RSA/ECC
-* Cryptography Algorithm
-  * Symmetric ciphers: AES, ChaCha20-Poly1305
-  * Public key algorithms:
-      * Signature: RSA/ECDSA/EdDSA
-      * Encryption: RSA
-  * Digest: SHA1/SHA2
-* Post Quantum Cryptography
+  * Post-quantum key wrapping: ML-KEM-768
+  * Post-quantum signatures: ML-DSA-65
+  * Symmetric key: generation/storage/rotation
+* Cryptography
   * Payload encryption: ChaCha20-Poly1305
   * Key encapsulation: ML-KEM-768
-  * Transitional key establishment: hybrid (X25519 + ML-KEM-768)
-* Advanced Cryptography Algorithm
-  * PHE: Paillier, EC-ElGamal
-  * ZKP: Bulletproofs
-* Hardware Support
-  * Acceleration card or CPU instruction sets
-  * HSMs
-* Cluster and HA
-  * Active - Active mode
+  * Digital signatures: ML-DSA-65
+  * TLS: rustls (TLS 1.2/1.3)
+  * Hashing: BLAKE2b, SHA-256
 * Storage
-  * local disk
-  * etcd/consul...
+  * Encrypted file backend
+  * MySQL backend
+  * SQLx backend (PostgreSQL, SQLite)
+  * Rqlite backend (planned, for HA)
+* Monitoring
+  * Prometheus metrics
 * Logging and Audit
-  * TBD
+  * Log to file
+* Cluster and HA
+  * Rqlite-backed replication (planned)

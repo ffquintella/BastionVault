@@ -23,7 +23,7 @@ export default function render() {
               </Translate>
             </p>
             <div className="text--center padding-horiz--md">
-              <img className={styles.seaography} src={require('@site/static/img/BastionVault-arch.png').default}/>
+              <img className={styles.seaography} src="/img/BastionVault-arch.svg"/>
             </div>
           </div>
         </div>

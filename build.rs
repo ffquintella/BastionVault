@@ -3,10 +3,6 @@ use std::{env, fs, path::Path};
 use toml::Value;
 
 fn main() {
-    if env::var("DEP_OPENSSL_TONGSUO").is_ok() {
-        println!("cargo:rustc-cfg=tongsuo");
-    }
-
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let cargo_toml_path = Path::new(&manifest_dir).join("Cargo.toml");
     let content = match fs::read_to_string(cargo_toml_path) {
