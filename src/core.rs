@@ -717,9 +717,12 @@ mod test {
         let seal_config = core.seal_config().await.unwrap();
         assert_eq!(keys.len(), seal_config.secret_shares as usize); // Default test configuration: 3 shares
 
-        // Each key should have the expected length (32 bytes + 1 byte overhead)
+        // Each key should have the expected length (key bytes + 1 byte Shamir overhead)
+        // ChaCha20Poly1305 barrier uses 64-byte ML-KEM-768 seeds, AES-GCM uses 32-byte keys
+        let (min_key_len, _) = core.barrier.key_length_range();
+        let expected_key_len = min_key_len + crate::shamir::SHAMIR_OVERHEAD;
         for key in keys.iter() {
-            assert_eq!(key.len(), 33);
+            assert_eq!(key.len(), expected_key_len);
         }
 
         // Keys should be unique

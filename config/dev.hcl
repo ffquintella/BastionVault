@@ -1,3 +1,11 @@
+# BastionVault DEVELOPMENT-ONLY configuration.
+#
+# Uses the file backend with no TLS. Do NOT use in production.
+# For production, use config/single-node.hcl or config/ha-cluster.hcl
+# with the hiqlite storage backend.
+#
+# Start with: bvault server --config config/dev.hcl
+
 storage "file" {
   path = "./vault/data"
 }

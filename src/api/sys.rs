@@ -93,6 +93,26 @@ impl Sys<'_> {
         self.request_read("/v1/sys/seal-status")
     }
 
+    pub fn health(&self) -> Result<HttpResponse, RvError> {
+        self.request_read("/v1/sys/health")
+    }
+
+    pub fn cluster_status(&self) -> Result<HttpResponse, RvError> {
+        self.request_read("/v1/sys/cluster-status")
+    }
+
+    pub fn cluster_remove_node(&self, node_id: u64, stay_as_learner: bool) -> Result<HttpResponse, RvError> {
+        let data = serde_json::json!({
+            "node_id": node_id,
+            "stay_as_learner": stay_as_learner,
+        });
+        self.request_write("/v1/sys/cluster/remove-node", data.as_object().cloned())
+    }
+
+    pub fn cluster_leave(&self) -> Result<HttpResponse, RvError> {
+        self.request_write("/v1/sys/cluster/leave", None)
+    }
+
     pub fn seal(&self) -> Result<HttpResponse, RvError> {
         self.request_put("/v1/sys/seal", None)
     }

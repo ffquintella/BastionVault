@@ -15,6 +15,12 @@ use crate::{
 
 pub mod auth;
 pub mod auth_disable;
+pub mod cluster;
+pub mod cluster_leader;
+pub mod cluster_leave;
+pub mod cluster_members;
+pub mod cluster_remove_node;
+pub mod cluster_status;
 pub mod auth_enable;
 pub mod auth_help;
 pub mod auth_list;
@@ -25,6 +31,8 @@ pub mod list;
 pub mod login;
 pub mod operator;
 pub mod operator_init;
+#[cfg(not(feature = "sync_handler"))]
+pub mod operator_migrate;
 pub mod operator_seal;
 pub mod operator_unseal;
 pub mod policy;

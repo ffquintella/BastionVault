@@ -20,6 +20,28 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthResponse {
+    pub initialized: bool,
+    pub sealed: bool,
+    pub standby: bool,
+    pub cluster_healthy: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterStatusResponse {
+    pub storage_type: String,
+    pub cluster: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_leader: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster_healthy: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raft_metrics: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitRequest {
     pub secret_shares: u8,
     pub secret_threshold: u8,
@@ -438,6 +460,131 @@ async fn sys_get_internal_ui_mount_request_handler(
     handle_request(core, &mut r).await
 }
 
+async fn sys_health_request_handler(
+    _req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    #[cfg(not(feature = "sync_handler"))]
+    let initialized = core.inited().await.unwrap_or(false);
+    #[cfg(feature = "sync_handler")]
+    let initialized = core.inited().unwrap_or(false);
+
+    let sealed = core.sealed();
+
+    #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
+    let (standby, cluster_healthy) = {
+        use crate::storage::hiqlite::HiqliteBackend;
+        let backend_any = core.physical.as_ref() as &dyn std::any::Any;
+        if let Some(hiqlite_backend) = backend_any.downcast_ref::<HiqliteBackend>() {
+            (!hiqlite_backend.is_leader().await, hiqlite_backend.is_healthy().await)
+        } else {
+            (false, true)
+        }
+    };
+    #[cfg(not(all(not(feature = "sync_handler"), feature = "storage_hiqlite")))]
+    let (standby, cluster_healthy) = (false, true);
+
+    let resp = HealthResponse { initialized, sealed, standby, cluster_healthy };
+
+    let status = if !initialized {
+        StatusCode::NOT_IMPLEMENTED
+    } else if sealed || !cluster_healthy {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else if standby {
+        StatusCode::TOO_MANY_REQUESTS
+    } else {
+        StatusCode::OK
+    };
+
+    Ok(HttpResponse::build(status).json(resp))
+}
+
+async fn sys_cluster_status_request_handler(
+    req: HttpRequest,
+    _core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let _auth = request_auth(&req);
+
+    let mut resp = ClusterStatusResponse {
+        storage_type: "unknown".to_string(),
+        cluster: false,
+        node_id: None,
+        is_leader: None,
+        cluster_healthy: None,
+        raft_metrics: None,
+    };
+
+    #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
+    {
+        use crate::storage::hiqlite::HiqliteBackend;
+        let backend_any = _core.physical.as_ref() as &dyn std::any::Any;
+        if let Some(hiqlite_backend) = backend_any.downcast_ref::<HiqliteBackend>() {
+            resp.storage_type = "hiqlite".to_string();
+            resp.cluster = true;
+            resp.is_leader = Some(hiqlite_backend.is_leader().await);
+            resp.cluster_healthy = Some(hiqlite_backend.is_healthy().await);
+            resp.raft_metrics = hiqlite_backend.cluster_metrics().await.ok();
+        }
+    }
+
+    if resp.storage_type == "unknown" {
+        resp.storage_type = "file".to_string();
+    }
+
+    Ok(response_json_ok(None, resp))
+}
+
+async fn sys_cluster_remove_node_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    _core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let _auth = request_auth(&req);
+
+    #[derive(Deserialize)]
+    #[allow(dead_code)]
+    struct RemoveNodeRequest {
+        node_id: u64,
+        #[serde(default)]
+        stay_as_learner: bool,
+    }
+
+    let payload = serde_json::from_slice::<RemoveNodeRequest>(&body)?;
+    body.clear();
+
+    #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
+    {
+        use crate::storage::hiqlite::HiqliteBackend;
+        let backend_any = _core.physical.as_ref() as &dyn std::any::Any;
+        if let Some(hiqlite_backend) = backend_any.downcast_ref::<HiqliteBackend>() {
+            hiqlite_backend.remove_node(payload.node_id, payload.stay_as_learner)?;
+            return Ok(response_ok(None, None));
+        }
+    }
+
+    let _ = payload;
+    Ok(response_error(StatusCode::BAD_REQUEST, "cluster operations require hiqlite storage backend"))
+}
+
+async fn sys_cluster_leave_request_handler(
+    req: HttpRequest,
+    _core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let _auth = request_auth(&req);
+
+    #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
+    {
+        use crate::storage::hiqlite::HiqliteBackend;
+        let backend_any = _core.physical.as_ref() as &dyn std::any::Any;
+        if let Some(hiqlite_backend) = backend_any.downcast_ref::<HiqliteBackend>() {
+            hiqlite_backend.leave_cluster().await?;
+            return Ok(response_ok(None, None));
+        }
+    }
+
+    Ok(response_error(StatusCode::BAD_REQUEST, "cluster operations require hiqlite storage backend"))
+}
+
 pub fn init_sys_service(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/v1/sys")
@@ -448,6 +595,10 @@ pub fn init_sys_service(cfg: &mut web::ServiceConfig) {
                     .route(web::put().to(sys_init_put_request_handler)),
             )
             .service(web::resource("/seal-status").route(web::get().to(sys_seal_status_request_handler)))
+            .service(web::resource("/health").route(web::get().to(sys_health_request_handler)))
+            .service(web::resource("/cluster-status").route(web::get().to(sys_cluster_status_request_handler)))
+            .service(web::resource("/cluster/remove-node").route(web::post().to(sys_cluster_remove_node_request_handler)))
+            .service(web::resource("/cluster/leave").route(web::post().to(sys_cluster_leave_request_handler)))
             .service(
                 web::resource("/seal")
                     .route(web::post().to(sys_seal_request_handler))

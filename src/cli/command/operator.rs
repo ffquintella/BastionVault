@@ -2,6 +2,8 @@ use clap::{Parser, Subcommand};
 use sysexits::ExitCode;
 
 use super::{operator_init, operator_seal, operator_unseal};
+#[cfg(not(feature = "sync_handler"))]
+use super::operator_migrate;
 use crate::{cli::command::CommandExecutor, EXIT_CODE_INSUFFICIENT_PARAMS};
 
 #[derive(Parser)]
@@ -22,7 +24,13 @@ Unseals the BastionVault server:
 
 Seals the BastionVault server:
 
-  $ bvault operator seal"#
+  $ bvault operator seal
+
+Migrate data between storage backends:
+
+  $ bvault operator migrate --source-type file --source-config path=./old \
+      --dest-type hiqlite --dest-config data_dir=./new --dest-config node_id=1 \
+      --dest-config secret_raft=secret1234567890 --dest-config secret_api=secret1234567890"#
 )]
 pub struct Operator {
     #[command(subcommand)]
@@ -34,6 +42,8 @@ pub enum Commands {
     Init(operator_init::Init),
     Seal(operator_seal::Seal),
     Unseal(operator_unseal::Unseal),
+    #[cfg(not(feature = "sync_handler"))]
+    Migrate(operator_migrate::Migrate),
 }
 
 impl Commands {
@@ -42,6 +52,8 @@ impl Commands {
             Commands::Init(init) => init.execute(),
             Commands::Seal(seal) => seal.execute(),
             Commands::Unseal(unseal) => unseal.execute(),
+            #[cfg(not(feature = "sync_handler"))]
+            Commands::Migrate(migrate) => migrate.execute(),
         }
     }
 }

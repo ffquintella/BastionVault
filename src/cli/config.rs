@@ -125,7 +125,7 @@ pub struct Storage {
     pub config: HashMap<String, Value>,
 }
 
-static STORAGE_TYPE_KEYWORDS: &[&str] = &["file", "mysql"];
+static STORAGE_TYPE_KEYWORDS: &[&str] = &["file", "mysql", "hiqlite"];
 
 fn default_bool_true() -> bool {
     true
@@ -618,5 +618,44 @@ mod test {
         assert!(config.is_ok());
         let json_config = config.unwrap();
         assert_eq!(json_config.barrier_type, BarrierType::Chacha20Poly1305);
+    }
+
+    #[test]
+    fn test_load_config_hiqlite() {
+        let dir = env::temp_dir().join(*TEST_DIR).join("test_load_config_hiqlite");
+        let _ = fs::remove_dir_all(&dir);
+        assert!(fs::create_dir_all(&dir).is_ok());
+
+        let file_path = dir.join("config.hcl");
+        let path = file_path.to_str().unwrap_or("config.hcl");
+
+        let hcl_config_str = r#"
+            storage "hiqlite" {
+              data_dir    = "/var/lib/bvault/data"
+              node_id     = 1
+              secret_raft = "raft_secret_1234567"
+              secret_api  = "api_secret_12345678"
+            }
+
+            listener "tcp" {
+              address     = "127.0.0.1:8200"
+            }
+
+            api_addr = "http://127.0.0.1:8200"
+        "#;
+
+        assert!(write_file(path, hcl_config_str).is_ok());
+
+        let config = load_config(path);
+        assert!(config.is_ok());
+        let hcl_config = config.unwrap();
+
+        assert_eq!(hcl_config.storage.len(), 1);
+        let (_, storage) = hcl_config.storage.iter().next().unwrap();
+        assert_eq!(storage.stype.as_str(), "hiqlite");
+        assert_eq!(storage.config.get("data_dir").and_then(|v| v.as_str()), Some("/var/lib/bvault/data"));
+        assert_eq!(storage.config.get("node_id").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(storage.config.get("secret_raft").and_then(|v| v.as_str()), Some("raft_secret_1234567"));
+        assert_eq!(storage.config.get("secret_api").and_then(|v| v.as_str()), Some("api_secret_12345678"));
     }
 }

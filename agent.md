@@ -93,6 +93,14 @@ When making or reviewing changes, prioritize:
 - insecure defaults for development convenience
 - mixing unrelated cleanup into security-sensitive changes
 
+## Changelog
+
+- Keep `CHANGELOG.md` updated with all changes.
+- Use [Keep a Changelog](https://keepachangelog.com/) format with sections: Added, Changed, Removed, Fixed, Security.
+- Group entries under the `[Unreleased]` heading until a version is cut.
+- Every commit or PR that modifies behavior, adds features, removes features, fixes bugs, or changes dependencies must have a corresponding changelog entry.
+- Write entries from the operator's perspective: what changed and why it matters, not implementation details.
+
 ## Expected Output From Agents
 
 - explain assumptions clearly

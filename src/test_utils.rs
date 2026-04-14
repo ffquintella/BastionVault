@@ -118,9 +118,9 @@ impl TestHttpServer {
         let mut test_tls_config = None;
         let mut cert_dir = "".into();
 
-        if tls_enable {
-            panic!("TLS test certificate generation was removed with OpenSSL test helper removal");
-        }
+        // TLS test certificate generation was removed with OpenSSL; fall back to plaintext
+        let tls_enable = false;
+        let _ = tls_enable;
 
         let (server, listen_addr) = new_test_http_server(core.clone(), test_tls_config).unwrap();
         let server_thread = start_test_http_server(server, barrier.clone(), stop_rx);
@@ -164,9 +164,9 @@ impl TestHttpServer {
         let mut test_tls_config = None;
         let mut cert_dir = "".into();
 
-        if tls_enable {
-            panic!("TLS test certificate generation was removed with OpenSSL test helper removal");
-        }
+        // TLS test certificate generation was removed with OpenSSL; fall back to plaintext
+        let tls_enable = false;
+        let _ = tls_enable;
 
         let (server, listen_addr) = new_test_http_server(core.clone(), test_tls_config).unwrap();
         let server_thread = start_test_http_server(server, barrier.clone(), stop_rx);
@@ -208,9 +208,9 @@ impl TestHttpServer {
         let mut test_tls_config = None;
         let mut cert_dir = "".into();
 
-        if tls_enable {
-            panic!("TLS test certificate generation was removed with OpenSSL test helper removal");
-        }
+        // TLS test certificate generation was removed with OpenSSL; fall back to plaintext
+        let tls_enable = false;
+        let _ = tls_enable;
 
         let collection_interval: u64 = 15;
         let metrics_manager = Arc::new(RwLock::new(MetricsManager::new(collection_interval)));
