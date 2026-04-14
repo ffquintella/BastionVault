@@ -1,13 +1,16 @@
 # BastionVault DEVELOPMENT-ONLY configuration.
 #
-# Uses the file backend with no TLS. Do NOT use in production.
-# For production, use config/single-node.hcl or config/ha-cluster.hcl
-# with the hiqlite storage backend.
+# Uses hiqlite storage in single-node mode with no replication.
+# TLS is disabled for local development convenience.
+# Do NOT use in production — see config/single-node.hcl or config/ha-cluster.hcl.
 #
 # Start with: bvault server --config config/dev.hcl
 
-storage "file" {
-  path = "./vault/data"
+storage "hiqlite" {
+  data_dir    = "/tmp/bastion_vault/data"
+  node_id     = 1
+  secret_raft = "dev_raft_secret_1"
+  secret_api  = "dev_api_secret_16"
 }
 
 listener "tcp" {

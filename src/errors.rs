@@ -87,6 +87,8 @@ pub enum RvError {
     ErrRouterMountConflict,
     #[error("Router mount not found.")]
     ErrRouterMountNotFound,
+    #[error("API version mismatch: this engine is not available on the requested API version.")]
+    ErrApiVersionMismatch,
     #[error("Mount path is failed, cannot mount.")]
     ErrMountFailed,
     #[error("Mount path is protected, cannot mount.")]
@@ -388,6 +390,7 @@ impl RvError {
             | RvError::ErrClusterUnhealthy => StatusCode::SERVICE_UNAVAILABLE,
             RvError::ErrPermissionDenied => StatusCode::FORBIDDEN,
             RvError::ErrRouterMountNotFound => StatusCode::NOT_FOUND,
+            RvError::ErrApiVersionMismatch => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -427,6 +430,7 @@ impl PartialEq for RvError {
             | (RvError::ErrBarrierKeyGenerationFailed, RvError::ErrBarrierKeyGenerationFailed)
             | (RvError::ErrRouterMountConflict, RvError::ErrRouterMountConflict)
             | (RvError::ErrRouterMountNotFound, RvError::ErrRouterMountNotFound)
+            | (RvError::ErrApiVersionMismatch, RvError::ErrApiVersionMismatch)
             | (RvError::ErrMountFailed, RvError::ErrMountFailed)
             | (RvError::ErrMountPathProtected, RvError::ErrMountPathProtected)
             | (RvError::ErrMountPathExist, RvError::ErrMountPathExist)
