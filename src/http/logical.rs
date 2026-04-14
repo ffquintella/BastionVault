@@ -35,17 +35,38 @@ struct LogicalResponse {
     data: HashMap<String, Value>,
 }
 
-async fn logical_request_handler(
+async fn logical_request_handler_v1(
+    req: HttpRequest,
+    body: web::Bytes,
+    method: Method,
+    path: web::Path<String>,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    logical_request_handler_inner(req, body, method, path, core, 1).await
+}
+
+async fn logical_request_handler_v2(
+    req: HttpRequest,
+    body: web::Bytes,
+    method: Method,
+    path: web::Path<String>,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    logical_request_handler_inner(req, body, method, path, core, 2).await
+}
+
+async fn logical_request_handler_inner(
     req: HttpRequest,
     mut body: web::Bytes,
     method: Method,
     path: web::Path<String>,
     core: web::Data<Arc<Core>>,
+    api_version: u8,
 ) -> Result<HttpResponse, RvError> {
     let Some(conn) = req.conn_data::<Connection>() else {
         return Err(RvError::ErrRequestInvalid);
     };
-    log::debug!("logical request, connection info: {conn:?}, method: {method:?}, path: {path:?}");
+    log::debug!("logical request, connection info: {conn:?}, method: {method:?}, path: {path:?}, api_version: {api_version}");
 
     let mut req_conn = ReqConnection::default();
     req_conn.peer_addr = conn.peer.to_string();
@@ -56,6 +77,7 @@ async fn logical_request_handler(
     let mut r = request_auth(&req);
     r.path.clone_from(&path.into_inner());
     r.connection = Some(req_conn);
+    r.api_version = api_version;
 
     match method {
         Method::GET => {
@@ -143,5 +165,6 @@ fn response_logical(resp: &Response, path: &str) -> Result<HttpResponse, RvError
 }
 
 pub fn init_logical_service(cfg: &mut web::ServiceConfig) {
-    cfg.service(web::scope("/v1").route("/{path:.*}", web::route().to(logical_request_handler)));
+    cfg.service(web::scope("/v1").route("/{path:.*}", web::route().to(logical_request_handler_v1)));
+    cfg.service(web::scope("/v2").route("/{path:.*}", web::route().to(logical_request_handler_v2)));
 }

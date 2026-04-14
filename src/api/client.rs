@@ -31,6 +31,8 @@ pub struct Client {
     pub tls_config: Option<TLSConfig>,
     #[default(ureq::Agent::new_with_defaults())]
     pub http_client: ureq::Agent,
+    #[default(1)]
+    pub api_version: u8,
 }
 
 impl TLSConfigBuilder {
@@ -126,6 +128,18 @@ impl Client {
     pub fn with_tls_config(mut self, tls_config: TLSConfig) -> Self {
         self.tls_config = Some(tls_config);
         self
+    }
+
+    pub fn with_api_version(mut self, version: u8) -> Self {
+        self.api_version = version;
+        self
+    }
+
+    pub fn api_prefix(&self) -> &str {
+        match self.api_version {
+            2 => "/v2",
+            _ => "/v1",
+        }
     }
 
     pub fn add_header(mut self, key: &str, value: &str) -> Self {

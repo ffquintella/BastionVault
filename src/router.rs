@@ -227,6 +227,22 @@ impl Router {
                 req.path = String::new();
             }
 
+            // For v2 API with kv-v2 mounts, auto-prepend "data/" when the path
+            // doesn't already target a sub-command (metadata, destroy, undelete, config)
+            if req.api_version == 2 {
+                let mount_entry = me.mount_entry.read().map_err(|_| RvError::ErrRequestInvalid)?;
+                if mount_entry.logical_type == "kv-v2" {
+                    let kv_v2_prefixes = ["data/", "metadata/", "metadata", "destroy/", "undelete/", "config"];
+                    if !req.path.is_empty()
+                        && !kv_v2_prefixes.iter().any(|prefix| req.path.starts_with(prefix))
+                    {
+                        req.path = format!("data/{}", req.path);
+                    }
+                } else if mount_entry.logical_type == "kv" {
+                    return Err(RvError::ErrApiVersionMismatch);
+                }
+            }
+
             req.storage = Some(me.view.clone());
 
             if !req.path.starts_with("auth/token/") {

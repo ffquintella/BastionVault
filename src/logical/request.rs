@@ -33,6 +33,8 @@ pub struct Request {
     pub handle_phase: HandlePhase,
     #[default(Arc::new(Context::new()))]
     pub ctx: Arc<Context>,
+    #[default(1)]
+    pub api_version: u8,
 }
 
 #[maybe_async::maybe_async]

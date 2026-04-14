@@ -86,19 +86,19 @@ impl Sys<'_> {
             "secret_threshold": init_req.secret_threshold,
         });
 
-        self.request_put("/v1/sys/init", data.as_object().cloned())
+        self.request_put(format!("{}/sys/init", self.api_prefix()), data.as_object().cloned())
     }
 
     pub fn seal_status(&self) -> Result<HttpResponse, RvError> {
-        self.request_read("/v1/sys/seal-status")
+        self.request_read(format!("{}/sys/seal-status", self.api_prefix()))
     }
 
     pub fn health(&self) -> Result<HttpResponse, RvError> {
-        self.request_read("/v1/sys/health")
+        self.request_read(format!("{}/sys/health", self.api_prefix()))
     }
 
     pub fn cluster_status(&self) -> Result<HttpResponse, RvError> {
-        self.request_read("/v1/sys/cluster-status")
+        self.request_read(format!("{}/sys/cluster-status", self.api_prefix()))
     }
 
     pub fn cluster_remove_node(&self, node_id: u64, stay_as_learner: bool) -> Result<HttpResponse, RvError> {
@@ -106,15 +106,15 @@ impl Sys<'_> {
             "node_id": node_id,
             "stay_as_learner": stay_as_learner,
         });
-        self.request_write("/v1/sys/cluster/remove-node", data.as_object().cloned())
+        self.request_write(format!("{}/sys/cluster/remove-node", self.api_prefix()), data.as_object().cloned())
     }
 
     pub fn cluster_leave(&self) -> Result<HttpResponse, RvError> {
-        self.request_write("/v1/sys/cluster/leave", None)
+        self.request_write(format!("{}/sys/cluster/leave", self.api_prefix()), None)
     }
 
     pub fn seal(&self) -> Result<HttpResponse, RvError> {
-        self.request_put("/v1/sys/seal", None)
+        self.request_put(format!("{}/sys/seal", self.api_prefix()), None)
     }
 
     pub fn unseal(&self, key: &str) -> Result<HttpResponse, RvError> {
@@ -122,29 +122,29 @@ impl Sys<'_> {
             "key": key,
         });
 
-        self.request_put("/v1/sys/unseal", data.as_object().cloned())
+        self.request_put(format!("{}/sys/unseal", self.api_prefix()), data.as_object().cloned())
     }
 
     pub fn list_auth(&self) -> Result<HttpResponse, RvError> {
-        self.request_read("/v1/sys/auth")
+        self.request_read(format!("{}/sys/auth", self.api_prefix()))
     }
 
     pub fn enable_auth(&self, path: &str, input: &AuthInput) -> Result<HttpResponse, RvError> {
         let data = serde_json::to_value(input)?;
-        self.request_write(format!("/v1/sys/auth/{path}"), data.as_object().cloned())
+        self.request_write(format!("{}/sys/auth/{path}", self.api_prefix()), data.as_object().cloned())
     }
 
     pub fn disable_auth(&self, path: &str) -> Result<HttpResponse, RvError> {
-        self.request_delete(format!("/v1/sys/auth/{path}"), None)
+        self.request_delete(format!("{}/sys/auth/{path}", self.api_prefix()), None)
     }
 
     pub fn mount(&self, path: &str, input: &MountInput) -> Result<HttpResponse, RvError> {
         let data = serde_json::to_value(input)?;
-        self.request_write(format!("/v1/sys/mounts/{path}"), data.as_object().cloned())
+        self.request_write(format!("{}/sys/mounts/{path}", self.api_prefix()), data.as_object().cloned())
     }
 
     pub fn unmount(&self, path: &str) -> Result<HttpResponse, RvError> {
-        self.request_delete(format!("/v1/sys/mounts/{path}"), None)
+        self.request_delete(format!("{}/sys/mounts/{path}", self.api_prefix()), None)
     }
 
     pub fn remount(&self, from: &str, to: &str) -> Result<HttpResponse, RvError> {
@@ -153,19 +153,19 @@ impl Sys<'_> {
             "to": to,
         });
 
-        self.request_write("/v1/sys/remount", data.as_object().cloned())
+        self.request_write(format!("{}/sys/remount", self.api_prefix()), data.as_object().cloned())
     }
 
     pub fn list_mounts(&self) -> Result<HttpResponse, RvError> {
-        self.request_read("/v1/sys/mounts")
+        self.request_read(format!("{}/sys/mounts", self.api_prefix()))
     }
 
     pub fn list_policy(&self) -> Result<HttpResponse, RvError> {
-        self.request_read("/v1/sys/policies/acl")
+        self.request_read(format!("{}/sys/policies/acl", self.api_prefix()))
     }
 
     pub fn read_policy(&self, name: &str) -> Result<HttpResponse, RvError> {
-        self.request_read(format!("/v1/sys/policies/acl/{name}"))
+        self.request_read(format!("{}/sys/policies/acl/{name}", self.api_prefix()))
     }
 
     pub fn write_policy(&self, name: &str, policy: &str) -> Result<HttpResponse, RvError> {
@@ -173,10 +173,10 @@ impl Sys<'_> {
             "policy": policy,
         });
 
-        self.request_write(format!("/v1/sys/policies/acl/{name}"), data.as_object().cloned())
+        self.request_write(format!("{}/sys/policies/acl/{name}", self.api_prefix()), data.as_object().cloned())
     }
 
     pub fn delete_policy(&self, name: &str) -> Result<HttpResponse, RvError> {
-        self.request_delete(format!("/v1/sys/policies/acl/{name}"), None)
+        self.request_delete(format!("{}/sys/policies/acl/{name}", self.api_prefix()), None)
     }
 }

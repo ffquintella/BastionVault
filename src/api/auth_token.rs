@@ -49,35 +49,35 @@ impl Client {
 impl TokenAuth<'_> {
     pub fn create(&self, input: &TokenInput) -> Result<HttpResponse, RvError> {
         let data = serde_json::to_value(input)?;
-        self.request_write("/v1/auth/token/create", data.as_object().cloned())
+        self.request_write(format!("{}/auth/token/create", self.api_prefix()), data.as_object().cloned())
     }
 
     pub fn create_orphan(&self, input: &TokenInput) -> Result<HttpResponse, RvError> {
         let data = serde_json::to_value(input)?;
-        self.request_write("/v1/auth/token/create-orphan", data.as_object().cloned())
+        self.request_write(format!("{}/auth/token/create-orphan", self.api_prefix()), data.as_object().cloned())
     }
 
     pub fn create_with_role(&self, input: &TokenInput, role_name: &str) -> Result<HttpResponse, RvError> {
         let data = serde_json::to_value(input)?;
-        self.request_write(format!("/v1/auth/token/create/{role_name}"), data.as_object().cloned())
+        self.request_write(format!("{}/auth/token/create/{role_name}", self.api_prefix()), data.as_object().cloned())
     }
 
     pub fn lookup(&self, token: &str) -> Result<HttpResponse, RvError> {
         let data = serde_json::json!({
             "token": token,
         });
-        self.request_write("/v1/auth/token/lookup", data.as_object().cloned())
+        self.request_write(format!("{}/auth/token/lookup", self.api_prefix()), data.as_object().cloned())
     }
 
     pub fn lookup_accessor(&self, accessor: &str) -> Result<HttpResponse, RvError> {
         let data = serde_json::json!({
             "accessor": accessor,
         });
-        self.request_write("/v1/auth/token/lookup-accessor", data.as_object().cloned())
+        self.request_write(format!("{}/auth/token/lookup-accessor", self.api_prefix()), data.as_object().cloned())
     }
 
     pub fn lookup_self(&self) -> Result<HttpResponse, RvError> {
-        self.request_get("/v1/auth/token/lookup-self")
+        self.request_get(format!("{}/auth/token/lookup-self", self.api_prefix()))
     }
 
     pub fn renew(&self, token: &str, increment: u32) -> Result<HttpResponse, RvError> {
@@ -85,7 +85,7 @@ impl TokenAuth<'_> {
             "token": token,
             "increment": increment,
         });
-        self.request_write("/v1/auth/token/renew", data.as_object().cloned())
+        self.request_write(format!("{}/auth/token/renew", self.api_prefix()), data.as_object().cloned())
     }
 
     pub fn renew_accessor(&self, accessor: &str, increment: u32) -> Result<HttpResponse, RvError> {
@@ -93,14 +93,14 @@ impl TokenAuth<'_> {
             "accessor": accessor,
             "increment": increment,
         });
-        self.request_write("/v1/auth/token/renew-accessor", data.as_object().cloned())
+        self.request_write(format!("{}/auth/token/renew-accessor", self.api_prefix()), data.as_object().cloned())
     }
 
     pub fn renew_self(&self, increment: u32) -> Result<HttpResponse, RvError> {
         let data = serde_json::json!({
             "increment": increment,
         });
-        self.request_write("/v1/auth/token/renew-self", data.as_object().cloned())
+        self.request_write(format!("{}/auth/token/renew-self", self.api_prefix()), data.as_object().cloned())
     }
 
     pub fn renew_token_as_self(&self, token: &str, increment: u32) -> Result<HttpResponse, RvError> {
@@ -109,31 +109,31 @@ impl TokenAuth<'_> {
         let data = serde_json::json!({
             "increment": increment,
         });
-        client.request_write("/v1/auth/token/renew-self", data.as_object().cloned())
+        client.request_write(format!("{}/auth/token/renew-self", client.api_prefix()), data.as_object().cloned())
     }
 
     pub fn revoke_accessor(&self, accessor: &str) -> Result<HttpResponse, RvError> {
         let data = serde_json::json!({
             "accessor": accessor,
         });
-        self.request_write("/v1/auth/token/revoke-accessor", data.as_object().cloned())
+        self.request_write(format!("{}/auth/token/revoke-accessor", self.api_prefix()), data.as_object().cloned())
     }
 
     pub fn revoke_orphan(&self, token: &str) -> Result<HttpResponse, RvError> {
         let data = serde_json::json!({
             "token": token,
         });
-        self.request_put("/v1/auth/token/revoke-orphan", data.as_object().cloned())
+        self.request_put(format!("{}/auth/token/revoke-orphan", self.api_prefix()), data.as_object().cloned())
     }
 
     pub fn revoke_self(&self) -> Result<HttpResponse, RvError> {
-        self.request_put("/v1/auth/token/revoke-self", None)
+        self.request_put(format!("{}/auth/token/revoke-self", self.api_prefix()), None)
     }
 
     pub fn revoke_tree(&self, token: &str) -> Result<HttpResponse, RvError> {
         let data = serde_json::json!({
             "token": token,
         });
-        self.request_put("/v1/auth/token/revoke", data.as_object().cloned())
+        self.request_put(format!("{}/auth/token/revoke", self.api_prefix()), data.as_object().cloned())
     }
 }
