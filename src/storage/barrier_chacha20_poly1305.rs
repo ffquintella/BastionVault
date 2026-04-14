@@ -288,6 +288,7 @@ impl ChaCha20Poly1305Barrier {
         envelope.decrypt(path, key.as_slice())
     }
 
+    #[maybe_async::maybe_async]
     pub async fn init_with_pq(&self, public_key: &[u8]) -> Result<(), RvError> {
         if self.inited().await? {
             return Err(RvError::ErrBarrierAlreadyInit);
@@ -309,6 +310,7 @@ impl ChaCha20Poly1305Barrier {
         Ok(())
     }
 
+    #[maybe_async::maybe_async]
     pub async fn unseal_with_pq(&self, secret_key: &[u8]) -> Result<(), RvError> {
         if !self.sealed()? {
             return Ok(());

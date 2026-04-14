@@ -145,6 +145,14 @@ pub enum RvError {
     ErrLeaseNotRenewable,
     #[error("Permission denied.")]
     ErrPermissionDenied,
+    #[error("Cluster has no leader.")]
+    ErrClusterNoLeader,
+    #[error("Cluster lost quorum.")]
+    ErrClusterQuorumLost,
+    #[error("Cluster node is unhealthy.")]
+    ErrClusterUnhealthy,
+    #[error("Cluster error: {0}")]
+    ErrCluster(String),
     #[error("PKI pem bundle is invalid.")]
     ErrPkiPemBundleInvalid,
     #[error("PKI ca public key of certificate does not match private key.")]
@@ -301,13 +309,6 @@ pub enum RvError {
         source: tokio::task::JoinError,
     },
 
-    #[cfg(all(not(feature = "sync_handler"), feature = "storage_sqlx"))]
-    #[error("Some sqlx error happened")]
-    SqlxError {
-        #[from]
-        source: sqlx::Error,
-    },
-
     #[error("Some string utf8 error happened, {:?}", .source)]
     StringUtf8Error {
         #[from]
@@ -366,7 +367,10 @@ impl RvError {
             | RvError::ErrRequestClientTokenMissing
             | RvError::ErrRequestFieldNotFound
             | RvError::ErrRequestFieldInvalid => StatusCode::BAD_REQUEST,
-            RvError::ErrBarrierSealed => StatusCode::SERVICE_UNAVAILABLE,
+            RvError::ErrBarrierSealed
+            | RvError::ErrClusterNoLeader
+            | RvError::ErrClusterQuorumLost
+            | RvError::ErrClusterUnhealthy => StatusCode::SERVICE_UNAVAILABLE,
             RvError::ErrPermissionDenied => StatusCode::FORBIDDEN,
             RvError::ErrRouterMountNotFound => StatusCode::NOT_FOUND,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -443,6 +447,9 @@ impl PartialEq for RvError {
             | (RvError::ErrLeaseNotFound, RvError::ErrLeaseNotFound)
             | (RvError::ErrLeaseNotRenewable, RvError::ErrLeaseNotRenewable)
             | (RvError::ErrPermissionDenied, RvError::ErrPermissionDenied)
+            | (RvError::ErrClusterNoLeader, RvError::ErrClusterNoLeader)
+            | (RvError::ErrClusterQuorumLost, RvError::ErrClusterQuorumLost)
+            | (RvError::ErrClusterUnhealthy, RvError::ErrClusterUnhealthy)
             | (RvError::ErrPkiPemBundleInvalid, RvError::ErrPkiPemBundleInvalid)
             | (RvError::ErrPkiCertKeyMismatch, RvError::ErrPkiCertKeyMismatch)
             | (RvError::ErrPkiCertChainIncorrect, RvError::ErrPkiCertChainIncorrect)

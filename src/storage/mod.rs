@@ -31,8 +31,10 @@ pub mod barrier_view;
 pub mod mysql;
 pub mod physical;
 pub mod pq_key_envelope;
-#[cfg(all(not(feature = "sync_handler"), feature = "storage_sqlx"))]
-pub mod sqlx;
+#[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
+pub mod hiqlite;
+#[cfg(not(feature = "sync_handler"))]
+pub mod migrate;
 
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -71,7 +73,7 @@ impl StorageEntry {
 }
 
 #[maybe_async::maybe_async]
-pub trait Backend: Send + Sync {
+pub trait Backend: Send + Sync + std::any::Any {
     //! This trait decsribes the generic methods that a storage backend needs to implement.
     async fn list(&self, prefix: &str) -> Result<Vec<String>, RvError>;
     async fn get(&self, key: &str) -> Result<Option<BackendEntry>, RvError>;
@@ -101,9 +103,9 @@ pub fn new_backend(t: &str, conf: &HashMap<String, Value>) -> Result<Arc<dyn Bac
             let backend = mysql::mysql_backend::MysqlBackend::new(conf)?;
             Ok(Arc::new(backend))
         }
-        #[cfg(all(not(feature = "sync_handler"), feature = "storage_sqlx"))]
-        "sqlx" => {
-            let backend = sqlx::SqlxBackend::new(conf)?;
+        #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
+        "hiqlite" => {
+            let backend = hiqlite::HiqliteBackend::new(conf)?;
             Ok(Arc::new(backend))
         }
         "mock" => Ok(Arc::new(physical::mock::MockBackend::new())),

@@ -23,8 +23,8 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | **Storage** | |
 | Storage Backend: Encrypted File | Done |
 | Storage Backend: MySQL | Done |
-| Storage Backend: SQLx (Postgres/SQLite) | Done |
-| Storage Backend: Rqlite (HA) | Todo |
+| Storage Backend: SQLx (removed, libsqlite3-sys conflict) | Removed |
+| Storage Backend: Hiqlite (embedded Raft SQLite, HA) | Done (Phase 1) |
 | Import/Export & Backup/Restore | Todo |
 | Caching | Partial |
 | Batch Operations | Todo |
@@ -42,7 +42,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Secret Engine: SSH | Todo |
 | Dynamic Secrets | Todo |
 | **Infrastructure** | |
-| High Availability (Raft consensus) | Todo |
+| High Availability (Raft consensus via Hiqlite) | Done (multi-node fault tests deferred) |
 | Plugin System (dynamic loading) | Todo |
 | Namespaces / Multi-tenancy | Partial |
 | Kubernetes Integration | Todo |
@@ -59,8 +59,8 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 
 ## Active Initiatives
 
-- [Rqlite Default HA Storage](roadmaps/rqlite-default-ha-storage.md)
-  Roadmap for making `rqlite` the default storage engine and making replication the default operating mode so high availability is the standard deployment posture.
+- [Hiqlite Default HA Storage](roadmaps/hiqlite-default-ha-storage.md)
+  Roadmap for making `hiqlite` (embedded Raft-based SQLite) the default storage engine. Phase 1 (backend implementation) is complete. Phases 2-6 cover replication semantics, cluster management, migration tooling, and HA validation.
 - [Tauri GUI with FIDO2/YubiKey Support](roadmaps/tauri-gui-fido2.md)
   Cross-platform desktop GUI (Tauri v2 + React + TypeScript) with embedded and remote vault modes, full vault/user/policy management, FIDO2/WebAuthn/YubiKey authentication backend, and machine auth (AppRole) dashboard.
 

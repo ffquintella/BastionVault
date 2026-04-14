@@ -42,9 +42,19 @@ before use, usually by the "bvault operator init" command. Each BastionVault ser
 also be unsealed using the "bvault operator unseal" command or the API before the
 server can respond to requests.
 
-Start a server with a configuration file:
+The recommended storage backend for production is "hiqlite", which provides built-in
+Raft-based replication and high availability. The "file" backend is intended for
+development only and does not support replication or failover.
 
-  $ bvault server --config=/etc/bvault/config.hcl"#
+Start a production server:
+
+  $ bvault server --config=/etc/bvault/config.hcl
+
+Example configurations are available in the config/ directory:
+
+  config/dev.hcl         - Development (file backend, no TLS)
+  config/single-node.hcl - Single-node hiqlite with TLS
+  config/ha-cluster.hcl  - Multi-node HA cluster with hiqlite"#
 )]
 pub struct Server {
     #[deref]
@@ -148,6 +158,14 @@ impl Server {
         log::debug!("config_path: {}, work_dir_path: {}", config_path.to_string_lossy(), work_dir.as_str());
 
         let server = actix_rt::System::new();
+
+        if storage.stype == "file" {
+            log::warn!(
+                "Using the \"file\" storage backend. This is intended for development only \
+                 and does not support replication or high availability. \
+                 For production, use \"hiqlite\" storage. See config/single-node.hcl or config/ha-cluster.hcl."
+            );
+        }
 
         let backend = storage::new_backend(storage.stype.as_str(), &storage.config).unwrap();
 
