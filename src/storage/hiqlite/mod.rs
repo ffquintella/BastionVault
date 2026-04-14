@@ -216,12 +216,12 @@ impl HiqliteBackend {
         let listen_addr_api = conf
             .get("listen_addr_api")
             .and_then(|v| v.as_str())
-            .unwrap_or("0.0.0.0:8100");
+            .unwrap_or("0.0.0.0:8220");
 
         let listen_addr_raft = conf
             .get("listen_addr_raft")
             .and_then(|v| v.as_str())
-            .unwrap_or("0.0.0.0:8200");
+            .unwrap_or("0.0.0.0:8210");
 
         let nodes = if let Some(nodes_val) = conf.get("nodes") {
             parse_nodes(nodes_val)?
