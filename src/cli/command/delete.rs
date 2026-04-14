@@ -2,9 +2,12 @@ use clap::Parser;
 use derive_more::Deref;
 
 use crate::{
-    cli::command::{self, CommandExecutor},
-    errors::RvError,
     bv_error_string,
+    cli::{
+        command::{self, CommandExecutor},
+        kv_util,
+    },
+    errors::RvError,
 };
 
 #[derive(Parser, Deref)]
@@ -36,7 +39,15 @@ impl CommandExecutor for Delete {
         let client = self.client()?;
         let logical = client.logical();
 
-        match logical.delete(&self.path, None) {
+        let actual_path = match kv_util::is_kv_v2(&client, &self.path) {
+            Ok((mount_path, true)) => {
+                let remainder = self.path.trim_start_matches(&mount_path);
+                format!("{}data/{}", mount_path, remainder)
+            }
+            _ => self.path.clone(),
+        };
+
+        match logical.delete(&actual_path, None) {
             Ok(ret) => {
                 if ret.response_status == 200 || ret.response_status == 204 {
                     println!("Success! Data deleted (if it existed) at: {}", self.path);

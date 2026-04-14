@@ -13,6 +13,7 @@ pub mod auth;
 pub mod credential;
 pub mod crypto;
 pub mod kv;
+pub mod kv_v2;
 pub mod pki;
 pub mod policy;
 pub mod system;

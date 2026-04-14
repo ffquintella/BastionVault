@@ -2,7 +2,10 @@ use clap::Parser;
 use derive_more::Deref;
 
 use crate::{
-    cli::command::{self, CommandExecutor},
+    cli::{
+        command::{self, CommandExecutor},
+        kv_util,
+    },
     errors::RvError,
 };
 
@@ -38,7 +41,15 @@ impl CommandExecutor for Read {
         let client = self.client()?;
         let logical = client.logical();
 
-        match logical.read(&self.path) {
+        let actual_path = match kv_util::is_kv_v2(&client, &self.path) {
+            Ok((mount_path, true)) => {
+                let remainder = self.path.trim_start_matches(&mount_path);
+                format!("{}data/{}", mount_path, remainder)
+            }
+            _ => self.path.clone(),
+        };
+
+        match logical.read(&actual_path) {
             Ok(ret) => {
                 if ret.response_status == 200 {
                     self.output.print_data(ret.response_data.as_ref().unwrap(), self.output.field.as_deref())?;
