@@ -42,7 +42,7 @@ lazy_static! {
             tainted: false,
             uuid: generate_uuid(),
             path: "secret/".to_string(),
-            logical_type: "kv".to_string(),
+            logical_type: "kv-v2".to_string(),
             description: "key/value secret storage".to_string(),
             ..Default::default()
         },

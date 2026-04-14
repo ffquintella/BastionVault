@@ -66,23 +66,39 @@ async fn test_list_api(core: &Core, token: &str, path: &str, is_ok: bool, keys_l
 
 #[maybe_async::maybe_async]
 async fn test_default_secret(core: &Core, token: &str) {
-    // create secret
+    // default secret/ mount is now kv-v2, so use data/ prefix
     let kv_data = json!({
-        "foo": "bar",
-        "zip": "zap",
+        "data": {
+            "foo": "bar",
+            "zip": "zap",
+        }
     })
     .as_object()
     .unwrap()
     .clone();
-    test_write_api(core, token, "secret/goo", true, Some(kv_data.clone())).await;
+    test_write_api(core, token, "secret/data/goo", true, Some(kv_data.clone())).await;
 
-    // get secret
-    test_read_api(core, token, "secret/goo", true, Some(kv_data)).await;
-    test_read_api(core, token, "secret/foo", true, None).await;
+    // get secret - kv-v2 returns nested data
+    let mut req = Request::new("secret/data/goo");
+    req.operation = Operation::Read;
+    req.client_token = token.to_string();
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok());
+    let resp = resp.unwrap();
+    assert!(resp.is_some());
+    let data = resp.unwrap().data.unwrap();
+    assert_eq!(data["data"]["foo"].as_str().unwrap(), "bar");
+    assert_eq!(data["data"]["zip"].as_str().unwrap(), "zap");
+    assert_eq!(data["metadata"]["version"].as_u64().unwrap(), 1);
+
+    // non-existent secret returns None
+    test_read_api(core, token, "secret/data/foo", true, None).await;
+
+    // non-existent mount
     test_read_api(core, token, "secret1/foo", false, None).await;
 
-    // list secret
-    test_list_api(core, token, "secret/", true, 1).await;
+    // list metadata
+    test_list_api(core, token, "secret/metadata/", true, 1).await;
 }
 
 #[maybe_async::maybe_async]
@@ -104,7 +120,7 @@ async fn test_kv_logical_backend(core: &Core, token: &str) {
     .unwrap()
     .clone();
 
-    test_read_api(core, token, "secret/foo", true, None).await;
+    test_read_api(core, token, "secret/data/foo", true, None).await;
 
     // create secret
     test_write_api(core, token, "kv/secret", true, Some(kv_data.clone())).await;
@@ -166,6 +182,275 @@ async fn test_kv_logical_backend(core: &Core, token: &str) {
 
     // Getting the secret should fail
     test_read_api(core, token, "vk/foo", false, None).await;
+}
+
+#[maybe_async::maybe_async]
+async fn test_kv_v2_logical_backend(core: &Core, token: &str) {
+    // mount kv-v2 backend to path: kvv2/
+    let mount_data = json!({
+        "type": "kv-v2",
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    test_write_api(core, token, "sys/mounts/kvv2/", true, Some(mount_data)).await;
+
+    // --- Write v1 ---
+    let write_data = json!({
+        "data": { "username": "admin", "password": "secret1" }
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let mut req = Request::new("kvv2/data/myapp");
+    req.operation = Operation::Write;
+    req.client_token = token.to_string();
+    req.body = Some(write_data);
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok());
+    let resp = resp.unwrap().unwrap();
+    let data = resp.data.unwrap();
+    assert_eq!(data["version"].as_u64().unwrap(), 1);
+
+    // --- Write v2 ---
+    let write_data = json!({
+        "data": { "username": "admin", "password": "secret2" }
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let mut req = Request::new("kvv2/data/myapp");
+    req.operation = Operation::Write;
+    req.client_token = token.to_string();
+    req.body = Some(write_data);
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok());
+    let resp = resp.unwrap().unwrap();
+    let data = resp.data.unwrap();
+    assert_eq!(data["version"].as_u64().unwrap(), 2);
+
+    // --- Read latest (should be v2) ---
+    let mut req = Request::new("kvv2/data/myapp");
+    req.operation = Operation::Read;
+    req.client_token = token.to_string();
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok());
+    let resp = resp.unwrap().unwrap();
+    let data = resp.data.unwrap();
+    assert_eq!(data["data"]["password"].as_str().unwrap(), "secret2");
+    assert_eq!(data["metadata"]["version"].as_u64().unwrap(), 2);
+
+    // --- Read specific version (v1) ---
+    let mut req = Request::new("kvv2/data/myapp");
+    req.operation = Operation::Read;
+    req.client_token = token.to_string();
+    req.body = Some(json!({"version": 1}).as_object().unwrap().clone());
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok());
+    let resp = resp.unwrap().unwrap();
+    let data = resp.data.unwrap();
+    assert_eq!(data["data"]["password"].as_str().unwrap(), "secret1");
+    assert_eq!(data["metadata"]["version"].as_u64().unwrap(), 1);
+
+    // --- Soft-delete v1 ---
+    let mut req = Request::new("kvv2/data/myapp");
+    req.operation = Operation::Delete;
+    req.client_token = token.to_string();
+    req.body = Some(json!({"versions": [1]}).as_object().unwrap().clone());
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok());
+
+    // --- Read soft-deleted v1 — should return with warning ---
+    let mut req = Request::new("kvv2/data/myapp");
+    req.operation = Operation::Read;
+    req.client_token = token.to_string();
+    req.body = Some(json!({"version": 1}).as_object().unwrap().clone());
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok());
+    let resp = resp.unwrap().unwrap();
+    assert!(!resp.warnings.is_empty());
+
+    // --- Undelete v1 ---
+    let mut req = Request::new("kvv2/undelete/myapp");
+    req.operation = Operation::Write;
+    req.client_token = token.to_string();
+    req.body = Some(json!({"versions": [1]}).as_object().unwrap().clone());
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok());
+
+    // --- Read v1 again — should succeed ---
+    let mut req = Request::new("kvv2/data/myapp");
+    req.operation = Operation::Read;
+    req.client_token = token.to_string();
+    req.body = Some(json!({"version": 1}).as_object().unwrap().clone());
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok());
+    let resp = resp.unwrap().unwrap();
+    let data = resp.data.unwrap();
+    assert_eq!(data["data"]["password"].as_str().unwrap(), "secret1");
+
+    // --- Destroy v1 (permanent) ---
+    let mut req = Request::new("kvv2/destroy/myapp");
+    req.operation = Operation::Write;
+    req.client_token = token.to_string();
+    req.body = Some(json!({"versions": [1]}).as_object().unwrap().clone());
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok());
+
+    // --- Read destroyed v1 — should fail ---
+    let mut req = Request::new("kvv2/data/myapp");
+    req.operation = Operation::Read;
+    req.client_token = token.to_string();
+    req.body = Some(json!({"version": 1}).as_object().unwrap().clone());
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_err());
+
+    // --- Undelete destroyed v1 should not work ---
+    let mut req = Request::new("kvv2/undelete/myapp");
+    req.operation = Operation::Write;
+    req.client_token = token.to_string();
+    req.body = Some(json!({"versions": [1]}).as_object().unwrap().clone());
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok());
+
+    // --- v1 still destroyed after undelete attempt ---
+    let mut req = Request::new("kvv2/data/myapp");
+    req.operation = Operation::Read;
+    req.client_token = token.to_string();
+    req.body = Some(json!({"version": 1}).as_object().unwrap().clone());
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_err());
+
+    // --- CAS: write with correct cas ---
+    let write_data = json!({
+        "data": { "username": "admin", "password": "secret3" },
+        "options": { "cas": 2 }
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let mut req = Request::new("kvv2/data/myapp");
+    req.operation = Operation::Write;
+    req.client_token = token.to_string();
+    req.body = Some(write_data);
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok());
+    let resp = resp.unwrap().unwrap();
+    let data = resp.data.unwrap();
+    assert_eq!(data["version"].as_u64().unwrap(), 3);
+
+    // --- CAS: write with wrong cas (should fail) ---
+    let write_data = json!({
+        "data": { "username": "admin", "password": "secret4" },
+        "options": { "cas": 1 }
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let mut req = Request::new("kvv2/data/myapp");
+    req.operation = Operation::Write;
+    req.client_token = token.to_string();
+    req.body = Some(write_data);
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_err());
+
+    // --- Engine config: set max_versions ---
+    let config_data = json!({
+        "max_versions": 2,
+        "cas_required": false,
+        "delete_version_after": "0s"
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let mut req = Request::new("kvv2/config");
+    req.operation = Operation::Write;
+    req.client_token = token.to_string();
+    req.body = Some(config_data);
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok());
+
+    // --- Read config ---
+    let mut req = Request::new("kvv2/config");
+    req.operation = Operation::Read;
+    req.client_token = token.to_string();
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok());
+    let resp = resp.unwrap().unwrap();
+    let data = resp.data.unwrap();
+    assert_eq!(data["max_versions"].as_u64().unwrap(), 2);
+
+    // --- Write v4, v5 to trigger max_versions pruning ---
+    let write_data = json!({
+        "data": { "username": "admin", "password": "secret4" }
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let mut req = Request::new("kvv2/data/myapp");
+    req.operation = Operation::Write;
+    req.client_token = token.to_string();
+    req.body = Some(write_data);
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok());
+    let data = resp.unwrap().unwrap().data.unwrap();
+    assert_eq!(data["version"].as_u64().unwrap(), 4);
+
+    let write_data = json!({
+        "data": { "username": "admin", "password": "secret5" }
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let mut req = Request::new("kvv2/data/myapp");
+    req.operation = Operation::Write;
+    req.client_token = token.to_string();
+    req.body = Some(write_data);
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok());
+    let data = resp.unwrap().unwrap().data.unwrap();
+    assert_eq!(data["version"].as_u64().unwrap(), 5);
+
+    // --- Read metadata to verify pruning ---
+    let mut req = Request::new("kvv2/metadata/myapp");
+    req.operation = Operation::Read;
+    req.client_token = token.to_string();
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok());
+    let resp = resp.unwrap().unwrap();
+    let data = resp.data.unwrap();
+    assert_eq!(data["current_version"].as_u64().unwrap(), 5);
+    let versions = data["versions"].as_object().unwrap();
+    assert_eq!(versions.len(), 2); // only 2 versions kept due to max_versions
+
+    // --- List metadata ---
+    let mut req = Request::new("kvv2/metadata/");
+    req.operation = Operation::List;
+    req.client_token = token.to_string();
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok());
+    let resp = resp.unwrap().unwrap();
+    let data = resp.data.unwrap();
+    let keys = data["keys"].as_array().unwrap();
+    assert_eq!(keys.len(), 1);
+
+    // --- Metadata hard-delete ---
+    let mut req = Request::new("kvv2/metadata/myapp");
+    req.operation = Operation::Delete;
+    req.client_token = token.to_string();
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok());
+
+    // --- Verify secret is gone ---
+    let mut req = Request::new("kvv2/data/myapp");
+    req.operation = Operation::Read;
+    req.client_token = token.to_string();
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok());
+    assert!(resp.unwrap().is_none());
+
+    // --- Unmount ---
+    test_delete_api(core, token, "sys/mounts/kvv2/", true).await;
 }
 
 #[maybe_async::maybe_async]
@@ -425,6 +710,7 @@ async fn test_default_logical() {
         println!("root_token: {:?}", root_token);
         test_default_secret(&core, &root_token).await;
         test_kv_logical_backend(&core, &root_token).await;
+        test_kv_v2_logical_backend(&core, &root_token).await;
         test_sys_logical_backend(&core, &root_token).await;
         test_rvualt_mount(&bvault, &root_token).await;
     }

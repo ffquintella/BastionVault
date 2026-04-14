@@ -124,11 +124,22 @@ impl CommandExecutor for Enable {
             if let Some(dttl) = self.options.default_lease_ttl { dttl.into() } else { DEFAULT_LEASE_TTL };
         let max_lease_ttl = if let Some(mttl) = self.options.max_lease_ttl { mttl.into() } else { MAX_LEASE_TTL };
 
+        let logical_type = if self.engine_type == "kv" && self.options.version == 2 {
+            "kv-v2".to_string()
+        } else {
+            self.engine_type.clone()
+        };
+
+        let mut options = self.options.options.to_map();
+        if self.options.version > 0 {
+            options.insert("version".to_string(), self.options.version.to_string().into());
+        }
+
         let mount_input = MountInput {
-            logical_type: self.engine_type.clone(),
+            logical_type,
             description: self.options.description.clone(),
             config: MountConfigInput { default_lease_ttl, max_lease_ttl, ..Default::default() },
-            options: self.options.options.to_map(),
+            options,
         };
 
         match sys.mount(&mount_path, &mount_input) {

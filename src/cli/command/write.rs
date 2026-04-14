@@ -1,8 +1,12 @@
 use clap::Parser;
 use derive_more::Deref;
+use serde_json::{json, Map, Value};
 
 use crate::{
-    cli::command::{self, CommandExecutor},
+    cli::{
+        command::{self, CommandExecutor},
+        kv_util,
+    },
     errors::RvError,
     utils::kv_builder::KvPairParse,
 };
@@ -53,7 +57,21 @@ impl CommandExecutor for Write {
         let client = self.client()?;
         let logical = client.logical();
 
-        match logical.write(&self.path, Some(self.data.to_map())) {
+        let kv_data = self.data.to_map();
+
+        let (actual_path, actual_data) = match kv_util::is_kv_v2(&client, &self.path) {
+            Ok((mount_path, true)) => {
+                let remainder = self.path.trim_start_matches(&mount_path);
+                let v2_path = format!("{}data/{}", mount_path, remainder);
+                // Wrap data under "data" key for v2
+                let mut wrapped: Map<String, Value> = Map::new();
+                wrapped.insert("data".to_string(), json!(kv_data));
+                (v2_path, wrapped)
+            }
+            _ => (self.path.clone(), kv_data),
+        };
+
+        match logical.write(&actual_path, Some(actual_data)) {
             Ok(ret) => {
                 if ret.response_status == 200 || ret.response_status == 204 {
                     println!("Success! Data written to: {}", self.path);

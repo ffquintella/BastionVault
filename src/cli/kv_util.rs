@@ -14,8 +14,8 @@ pub fn kv_preflight_version_request(client: &Client, path: &str) -> Result<(Stri
     let resp = client.request_read(format!("/v1/sys/internal/ui/mounts/{path}"))?;
 
     if resp.response_status == 404 {
-        // If we get a 404 we are using an older version of bastion_vault, default to version 1
-        return Ok(("".to_string(), 1));
+        // If we get a 404 we are using an older version of bastion_vault, default to version 2
+        return Ok(("".to_string(), 2));
     }
 
     let Some(data) = resp.response_data else {
@@ -25,8 +25,8 @@ pub fn kv_preflight_version_request(client: &Client, path: &str) -> Result<(Stri
     let path = data["path"].as_str().unwrap_or("");
     let version: u32 = if let Some(options) = data.get("options") {
         match options["version"].as_str().unwrap_or("") {
-            "2" => 2,
-            _ => 1,
+            "1" => 1,
+            _ => 2,
         }
     } else {
         1

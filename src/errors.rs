@@ -123,6 +123,16 @@ pub enum RvError {
     ErrHandlerDefault,
     #[error("Module kv data field is missing.")]
     ErrModuleKvDataFieldMissing,
+    #[error("Check-and-set parameter did not match the current version.")]
+    ErrModuleKvV2CasMismatch,
+    #[error("Check-and-set parameter required for this call.")]
+    ErrModuleKvV2CasRequired,
+    #[error("Version has been permanently destroyed.")]
+    ErrModuleKvV2VersionDestroyed,
+    #[error("Version does not exist.")]
+    ErrModuleKvV2VersionNotFound,
+    #[error("Data field is missing from request.")]
+    ErrModuleKvV2DataFieldMissing,
     #[error("Rust downcast failed.")]
     ErrRustDowncastFailed,
     #[error("Shamir share count invalid.")]
@@ -366,7 +376,12 @@ impl RvError {
             | RvError::ErrRequestInvalid
             | RvError::ErrRequestClientTokenMissing
             | RvError::ErrRequestFieldNotFound
-            | RvError::ErrRequestFieldInvalid => StatusCode::BAD_REQUEST,
+            | RvError::ErrRequestFieldInvalid
+            | RvError::ErrModuleKvV2CasMismatch
+            | RvError::ErrModuleKvV2CasRequired
+            | RvError::ErrModuleKvV2DataFieldMissing => StatusCode::BAD_REQUEST,
+            RvError::ErrModuleKvV2VersionDestroyed
+            | RvError::ErrModuleKvV2VersionNotFound => StatusCode::NOT_FOUND,
             RvError::ErrBarrierSealed
             | RvError::ErrClusterNoLeader
             | RvError::ErrClusterQuorumLost
@@ -430,6 +445,11 @@ impl PartialEq for RvError {
             | (RvError::ErrResponseDataInvalid, RvError::ErrResponseDataInvalid)
             | (RvError::ErrHandlerDefault, RvError::ErrHandlerDefault)
             | (RvError::ErrModuleKvDataFieldMissing, RvError::ErrModuleKvDataFieldMissing)
+            | (RvError::ErrModuleKvV2CasMismatch, RvError::ErrModuleKvV2CasMismatch)
+            | (RvError::ErrModuleKvV2CasRequired, RvError::ErrModuleKvV2CasRequired)
+            | (RvError::ErrModuleKvV2VersionDestroyed, RvError::ErrModuleKvV2VersionDestroyed)
+            | (RvError::ErrModuleKvV2VersionNotFound, RvError::ErrModuleKvV2VersionNotFound)
+            | (RvError::ErrModuleKvV2DataFieldMissing, RvError::ErrModuleKvV2DataFieldMissing)
             | (RvError::ErrRustDowncastFailed, RvError::ErrRustDowncastFailed)
             | (RvError::ErrShamirShareCountInvalid, RvError::ErrShamirShareCountInvalid)
             | (RvError::ErrRwLockReadPoison, RvError::ErrRwLockReadPoison)
