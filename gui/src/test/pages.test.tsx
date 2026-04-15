@@ -81,16 +81,33 @@ describe("InitPage", () => {
   });
 
   it("renders initialize button", async () => {
+    // Mock is_vault_initialized returning false so it shows the init form
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "is_vault_initialized") return Promise.resolve(false);
+      return Promise.reject(new Error(`unmocked: ${cmd}`));
+    });
     const { InitPage } = await import("../routes/InitPage");
     renderWithProviders(<InitPage />);
-    expect(screen.getByRole("button", { name: /initialize vault/i })).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /initialize vault/i })).toBeInTheDocument();
+    });
   });
 
   it("shows root token after initialization", async () => {
-    mockInvoke.mockResolvedValueOnce({ root_token: "hvs.root-token-123" });
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "is_vault_initialized") return Promise.resolve(false);
+      if (cmd === "init_vault") return Promise.resolve({ root_token: "hvs.root-token-123" });
+      if (cmd === "save_preferences") return Promise.resolve();
+      return Promise.reject(new Error(`unmocked: ${cmd}`));
+    });
     const user = userEvent.setup();
     const { InitPage } = await import("../routes/InitPage");
     renderWithProviders(<InitPage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /initialize vault/i })).toBeInTheDocument();
+    });
 
     await user.click(screen.getByRole("button", { name: /initialize vault/i }));
 
@@ -106,7 +123,11 @@ describe("ConnectPage", () => {
   });
 
   it("shows local vault option", async () => {
-    mockInvoke.mockResolvedValueOnce(false); // is_vault_initialized
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "load_preferences") return Promise.resolve({ mode: "Embedded", remote_profile: null });
+      if (cmd === "is_vault_initialized") return Promise.resolve(false);
+      return Promise.reject(new Error(`unmocked: ${cmd}`));
+    });
     const { ConnectPage } = await import("../routes/ConnectPage");
     renderWithProviders(<ConnectPage />);
 
@@ -116,7 +137,11 @@ describe("ConnectPage", () => {
   });
 
   it("shows remote option as enabled", async () => {
-    mockInvoke.mockResolvedValueOnce(false);
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "load_preferences") return Promise.resolve({ mode: "Embedded", remote_profile: null });
+      if (cmd === "is_vault_initialized") return Promise.resolve(false);
+      return Promise.reject(new Error(`unmocked: ${cmd}`));
+    });
     const { ConnectPage } = await import("../routes/ConnectPage");
     renderWithProviders(<ConnectPage />);
 

@@ -1,6 +1,7 @@
 mod commands;
 mod embedded;
 mod error;
+mod preferences;
 mod secure_store;
 mod state;
 
@@ -22,10 +23,13 @@ pub fn run() {
             commands::connection::get_remote_status,
             commands::connection::remote_login_token,
             commands::connection::remote_login_userpass,
+            commands::connection::load_preferences,
+            commands::connection::save_preferences,
             // System
             commands::system::init_vault,
             commands::system::open_vault,
             commands::system::seal_vault,
+            commands::system::reset_vault,
             commands::system::get_vault_status,
             commands::system::list_mounts,
             commands::system::list_auth_methods,
@@ -74,6 +78,8 @@ pub fn run() {
             commands::approle::lookup_secret_id_accessor,
             commands::approle::destroy_secret_id_accessor,
             // FIDO2
+            commands::fido2_native::fido2_native_register,
+            commands::fido2_native::fido2_native_login,
             commands::fido2::fido2_config_read,
             commands::fido2::fido2_config_write,
             commands::fido2::fido2_register_begin,

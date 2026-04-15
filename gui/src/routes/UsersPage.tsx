@@ -11,6 +11,7 @@ import {
   useToast,
 } from "../components/ui";
 import * as api from "../lib/api";
+import { extractError } from "../lib/error";
 
 export function UsersPage() {
   const { toast } = useToast();
@@ -21,14 +22,31 @@ export function UsersPage() {
   const [editUser, setEditUser] = useState<string | null>(null);
   const [deleteUser, setDeleteUser] = useState<string | null>(null);
 
+  // Available policies (fetched from vault, excluding "root")
+  const [availablePolicies, setAvailablePolicies] = useState<string[]>([]);
+
   // Form state
   const [formUsername, setFormUsername] = useState("");
   const [formPassword, setFormPassword] = useState("");
-  const [formPolicies, setFormPolicies] = useState("");
+  const [formSelectedPolicies, setFormSelectedPolicies] = useState<string[]>([]);
 
   useEffect(() => {
-    loadUsers();
+    ensureMountAndLoad();
   }, [mountPath]);
+
+  async function ensureMountAndLoad() {
+    setLoading(true);
+    try {
+      const methods = await api.listAuthMethods();
+      const mounted = methods.some((m) => m.path === mountPath);
+      if (!mounted) {
+        await api.enableAuthMethod("userpass/", "userpass", "Username & password authentication");
+      }
+    } catch {
+      // fall through
+    }
+    await Promise.all([loadUsers(), loadPolicies()]);
+  }
 
   async function loadUsers() {
     setLoading(true);
@@ -42,28 +60,48 @@ export function UsersPage() {
     }
   }
 
+  async function loadPolicies() {
+    try {
+      const result = await api.listPolicies();
+      // Filter out "root" — auth methods cannot create root tokens
+      setAvailablePolicies(result.policies.filter((p) => p !== "root"));
+    } catch {
+      setAvailablePolicies([]);
+    }
+  }
+
+  function togglePolicy(policy: string) {
+    setFormSelectedPolicies((prev) =>
+      prev.includes(policy)
+        ? prev.filter((p) => p !== policy)
+        : [...prev, policy],
+    );
+  }
+
   async function handleCreate() {
     try {
-      await api.createUser(mountPath, formUsername, formPassword, formPolicies);
+      const policies = formSelectedPolicies.join(",");
+      await api.createUser(mountPath, formUsername, formPassword, policies);
       toast("success", `User ${formUsername} created`);
       setShowCreate(false);
       resetForm();
       loadUsers();
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
   async function handleEdit() {
     if (!editUser) return;
     try {
-      await api.updateUser(mountPath, editUser, formPassword, formPolicies);
+      const policies = formSelectedPolicies.join(",");
+      await api.updateUser(mountPath, editUser, formPassword, policies);
       toast("success", `User ${editUser} updated`);
       setEditUser(null);
       resetForm();
       loadUsers();
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -75,7 +113,7 @@ export function UsersPage() {
       setDeleteUser(null);
       loadUsers();
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -84,16 +122,70 @@ export function UsersPage() {
       const info = await api.getUser(mountPath, username);
       setEditUser(username);
       setFormPassword("");
-      setFormPolicies(info.policies.join(", "));
+      setFormSelectedPolicies(info.policies);
+      // Refresh policies in case new ones were added
+      await loadPolicies();
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
+  }
+
+  async function openCreate() {
+    setShowCreate(true);
+    await loadPolicies();
   }
 
   function resetForm() {
     setFormUsername("");
     setFormPassword("");
-    setFormPolicies("");
+    setFormSelectedPolicies([]);
+  }
+
+  function PolicySelector() {
+    if (availablePolicies.length === 0) {
+      return (
+        <div>
+          <label className="block text-sm text-[var(--color-text-muted)] mb-1">
+            Policies
+          </label>
+          <p className="text-xs text-[var(--color-text-muted)]">
+            No policies available. Create policies first from the Policies page.
+          </p>
+        </div>
+      );
+    }
+
+    return (
+      <div>
+        <label className="block text-sm text-[var(--color-text-muted)] mb-1">
+          Policies
+        </label>
+        <div className="flex flex-wrap gap-2">
+          {availablePolicies.map((policy) => {
+            const selected = formSelectedPolicies.includes(policy);
+            return (
+              <button
+                key={policy}
+                type="button"
+                onClick={() => togglePolicy(policy)}
+                className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
+                  selected
+                    ? "bg-[var(--color-primary)] border-[var(--color-primary)] text-white"
+                    : "bg-[var(--color-bg)] border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-text-muted)]"
+                }`}
+              >
+                {policy}
+              </button>
+            );
+          })}
+        </div>
+        {formSelectedPolicies.length > 0 && (
+          <p className="text-xs text-[var(--color-text-muted)] mt-1.5">
+            Selected: {formSelectedPolicies.join(", ")}
+          </p>
+        )}
+      </div>
+    );
   }
 
   const columns = [
@@ -101,6 +193,7 @@ export function UsersPage() {
       key: "username",
       header: "Username",
       className: "font-mono text-[var(--color-primary)]",
+      render: (user: string) => user,
     },
     {
       key: "actions",
@@ -124,7 +217,7 @@ export function UsersPage() {
       <div className="max-w-4xl space-y-4">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">Users</h1>
-          <Button size="sm" onClick={() => setShowCreate(true)}>
+          <Button size="sm" onClick={openCreate}>
             Create User
           </Button>
         </div>
@@ -137,7 +230,7 @@ export function UsersPage() {
               title="No users"
               description="Create your first user to enable username/password authentication"
               action={
-                <Button size="sm" onClick={() => setShowCreate(true)}>
+                <Button size="sm" onClick={openCreate}>
                   Create User
                 </Button>
               }
@@ -182,12 +275,7 @@ export function UsersPage() {
               value={formPassword}
               onChange={(e) => setFormPassword(e.target.value)}
             />
-            <Input
-              label="Policies"
-              value={formPolicies}
-              onChange={(e) => setFormPolicies(e.target.value)}
-              hint="Comma-separated list of policy names"
-            />
+            <PolicySelector />
           </div>
         </Modal>
 
@@ -216,12 +304,7 @@ export function UsersPage() {
               onChange={(e) => setFormPassword(e.target.value)}
               hint="Leave empty to keep current password"
             />
-            <Input
-              label="Policies"
-              value={formPolicies}
-              onChange={(e) => setFormPolicies(e.target.value)}
-              hint="Comma-separated list of policy names"
-            />
+            <PolicySelector />
           </div>
         </Modal>
 

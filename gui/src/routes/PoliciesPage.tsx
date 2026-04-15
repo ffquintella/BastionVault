@@ -11,6 +11,7 @@ import {
   useToast,
 } from "../components/ui";
 import * as api from "../lib/api";
+import { extractError } from "../lib/error";
 
 const DEFAULT_POLICY = `# Example policy
 path "secret/data/*" {
@@ -53,7 +54,7 @@ export function PoliciesPage() {
       setPolicyContent(result.policy);
       setDirty(false);
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -64,7 +65,7 @@ export function PoliciesPage() {
       toast("success", `Policy ${selected} saved`);
       setDirty(false);
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -79,7 +80,7 @@ export function PoliciesPage() {
       loadPolicies();
       selectPolicy(newName);
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -95,7 +96,7 @@ export function PoliciesPage() {
       setDeleteTarget(null);
       loadPolicies();
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 

@@ -18,6 +18,11 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "linux-
 chrono = "0.4"
 dirs = "6"
 hex = "0.4"
+sha2 = "0.10"
+serde_cbor = "0.11"
+authenticator = { version = "0.5", default-features = false, features = ["crypto_openssl"] }
+webauthn-rs-proto = "0.5"
+base64urlsafedata = "0.5"
 
 [features]
 default = ["storage_hiqlite"]

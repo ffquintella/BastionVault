@@ -15,6 +15,7 @@ import {
 } from "../components/ui";
 import type { ResourceMetadata, MountInfo } from "../lib/types";
 import * as api from "../lib/api";
+import { extractError } from "../lib/error";
 
 const BUILT_IN_TYPES = [
   { value: "server", label: "Server" },
@@ -105,7 +106,7 @@ export function ResourcesPage() {
       setSelected(name);
       setResourceInfo(info);
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -121,7 +122,7 @@ export function ResourcesPage() {
       setDeleteTarget(null);
       loadResources();
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -442,7 +443,7 @@ function ResourceInfoTab({
       setEditing(false);
       onUpdate();
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -576,7 +577,7 @@ function ResourceSecretsTab({
       setSelectedKey(key);
       setSecretData(result.data);
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -594,7 +595,7 @@ function ResourceSecretsTab({
       setNewPairs([{ key: "", value: "" }]);
       loadKeys();
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -610,7 +611,7 @@ function ResourceSecretsTab({
       setDeleteTarget(null);
       loadKeys();
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -771,7 +772,7 @@ function CreateResourceModal({
       setCustomType("");
       onCreated(form.name);
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 

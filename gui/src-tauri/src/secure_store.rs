@@ -33,3 +33,16 @@ pub fn get_root_token() -> Result<Option<String>, CommandError> {
         Err(e) => Err(e.into()),
     }
 }
+
+pub fn delete_all_keys() -> Result<(), CommandError> {
+    // Best-effort deletion; ignore NoEntry errors.
+    for key in &["unseal-key", "root-token"] {
+        if let Ok(e) = Entry::new(SERVICE, key) {
+            match e.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    Ok(())
+}

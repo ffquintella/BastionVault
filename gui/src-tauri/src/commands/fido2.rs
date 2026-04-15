@@ -6,7 +6,7 @@ use tauri::State;
 use crate::error::{CmdResult, CommandError};
 use crate::state::AppState;
 
-async fn make_request(
+pub(crate) async fn make_request(
     state: &State<'_, AppState>,
     operation: Operation,
     path: String,

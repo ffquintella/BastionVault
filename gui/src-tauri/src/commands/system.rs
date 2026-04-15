@@ -72,6 +72,26 @@ pub async fn get_vault_status(state: State<'_, AppState>) -> CmdResult<VaultStat
     }
 }
 
+#[tauri::command]
+pub async fn reset_vault(state: State<'_, AppState>) -> CmdResult<()> {
+    // Drop the vault instance first.
+    *state.vault.lock().await = None;
+    *state.token.lock().await = None;
+
+    // Remove keychain entries.
+    crate::secure_store::delete_all_keys()?;
+
+    // Remove the data directory.
+    let dir = embedded::data_dir()?;
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| {
+            crate::error::CommandError::from(format!("Failed to remove vault data: {e}"))
+        })?;
+    }
+
+    Ok(())
+}
+
 #[derive(Serialize)]
 pub struct MountInfo {
     pub path: String,

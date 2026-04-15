@@ -2,9 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bastion_vault::core::SealConfig;
+use bastion_vault::logical::{Operation, Request};
 use bastion_vault::storage::new_backend;
 use bastion_vault::BastionVault;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::error::CommandError;
 use crate::secure_store;
@@ -18,10 +19,25 @@ pub fn data_dir() -> Result<std::path::PathBuf, CommandError> {
 }
 
 /// Check if a vault has been previously initialized.
+///
+/// Checks for the barrier init marker file first, then falls back to
+/// checking whether the data directory contains any files at all (the
+/// vault may have been initialized via a different storage backend that
+/// doesn't use `_barrier`).
 pub fn is_initialized() -> Result<bool, CommandError> {
     let dir = data_dir()?;
-    // The barrier init marker file indicates an initialized vault.
-    Ok(dir.exists() && dir.join("_barrier").exists())
+    if !dir.exists() {
+        return Ok(false);
+    }
+    // Primary check: barrier marker file.
+    if dir.join("_barrier").exists() {
+        return Ok(true);
+    }
+    // Fallback: if the directory has any contents, consider it initialized.
+    let has_files = std::fs::read_dir(&dir)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    Ok(has_files)
 }
 
 /// Create a new embedded vault, initialize it, and store keys in the OS keychain.
@@ -53,7 +69,130 @@ pub async fn init_embedded() -> Result<String, CommandError> {
     let key_bytes = &init_result.secret_shares[0];
     vault.unseal(&[key_bytes.as_slice()]).await.map_err(|e| CommandError::from(e))?;
 
+    // Create default policies and enable auth methods.
+    create_default_policies(&vault, &root_token).await?;
+    enable_default_auth_methods(&vault, &root_token).await?;
+
     Ok(root_token)
+}
+
+/// Create default policies on a freshly initialized vault.
+async fn create_default_policies(vault: &BastionVault, root_token: &str) -> Result<(), CommandError> {
+    let core = vault.core.load();
+
+    // "admin" — full access to secrets, auth, policies, and system endpoints.
+    let admin_policy = r#"
+# Full access to all secret engines
+path "secret/*" {
+  capabilities = ["create", "read", "update", "delete", "list"]
+}
+
+# Manage auth methods and users
+path "auth/*" {
+  capabilities = ["create", "read", "update", "delete", "list"]
+}
+
+# Read and manage policies
+path "sys/policies/*" {
+  capabilities = ["create", "read", "update", "delete", "list"]
+}
+
+# Manage mounts
+path "sys/mounts/*" {
+  capabilities = ["create", "read", "update", "delete", "list"]
+}
+
+# System health and status
+path "sys/health" {
+  capabilities = ["read"]
+}
+
+path "sys/seal" {
+  capabilities = ["update"]
+}
+
+path "sys/unseal" {
+  capabilities = ["update"]
+}
+"#;
+
+    let mut body = Map::new();
+    body.insert("policy".to_string(), Value::String(admin_policy.trim().to_string()));
+
+    let mut req = Request::default();
+    req.operation = Operation::Write;
+    req.path = "sys/policies/acl/admin".to_string();
+    req.client_token = root_token.to_string();
+    req.body = Some(body);
+
+    core.handle_request(&mut req).await.map_err(CommandError::from)?;
+
+    // "default" — basic read-only access for regular users.
+    let default_policy = r#"
+# Read and list secrets
+path "secret/*" {
+  capabilities = ["read", "list"]
+}
+
+# Allow users to look up their own token
+path "auth/token/lookup-self" {
+  capabilities = ["read"]
+}
+"#;
+
+    let mut body = Map::new();
+    body.insert("policy".to_string(), Value::String(default_policy.trim().to_string()));
+
+    let mut req = Request::default();
+    req.operation = Operation::Write;
+    req.path = "sys/policies/acl/default".to_string();
+    req.client_token = root_token.to_string();
+    req.body = Some(body);
+
+    core.handle_request(&mut req).await.map_err(CommandError::from)?;
+
+    Ok(())
+}
+
+/// Enable default auth methods (userpass + fido2) on a freshly initialized vault.
+async fn enable_default_auth_methods(vault: &BastionVault, root_token: &str) -> Result<(), CommandError> {
+    let core = vault.core.load();
+
+    let methods = [
+        ("userpass/", "userpass", "Username & password authentication"),
+        ("fido2/", "fido2", "FIDO2/WebAuthn security key authentication"),
+    ];
+
+    for (path, auth_type, description) in methods {
+        let mut body = Map::new();
+        body.insert("type".to_string(), Value::String(auth_type.to_string()));
+        body.insert("description".to_string(), Value::String(description.to_string()));
+
+        let mut req = Request::default();
+        req.operation = Operation::Write;
+        req.path = format!("sys/auth/{path}");
+        req.client_token = root_token.to_string();
+        req.body = Some(body);
+
+        // Ignore errors if already mounted.
+        let _ = core.handle_request(&mut req).await;
+    }
+
+    // Auto-configure FIDO2 with localhost defaults for embedded mode.
+    let mut body = Map::new();
+    body.insert("rp_id".to_string(), Value::String("localhost".to_string()));
+    body.insert("rp_origin".to_string(), Value::String("https://localhost".to_string()));
+    body.insert("rp_name".to_string(), Value::String("BastionVault".to_string()));
+
+    let mut req = Request::default();
+    req.operation = Operation::Write;
+    req.path = "auth/fido2/config".to_string();
+    req.client_token = root_token.to_string();
+    req.body = Some(body);
+
+    let _ = core.handle_request(&mut req).await;
+
+    Ok(())
 }
 
 /// Open and unseal an existing embedded vault using keys from the OS keychain.
