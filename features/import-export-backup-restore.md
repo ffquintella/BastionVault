@@ -15,14 +15,13 @@ BastionVault has no way to recover from data loss, storage corruption, or operat
 
 Without this feature, the only recovery path is to rely on the storage backend's own backup mechanism (filesystem snapshots, MySQL dumps, hiqlite Raft snapshots), which is backend-specific and does not provide a portable format.
 
-## Current State
+## Current State (Implemented)
 
-- The `Backend` trait exposes only `list()`, `get()`, `put()`, `delete()`. No dump, snapshot, or bulk-read operations.
-- No CLI commands for backup or restore.
-- No HTTP API endpoints for snapshots.
-- Hiqlite has built-in backup capabilities (`client.backup()`, `client.backup_file_local()`) that are not exposed through BastionVault.
-- The file backend stores data as individual files, so a filesystem copy is a de-facto backup -- but not portable across backends.
-- Key material import exists only for narrow cases: `import_pem()` and `import_pq_seed()` in `src/utils/key.rs` for cryptographic keys.
+All features described in this spec are now implemented:
+
+- **Backup/Restore**: `src/backup/format.rs` (BVBK binary format with HMAC-SHA256), `src/backup/create.rs`, `src/backup/restore.rs`. CLI: `bvault operator backup/restore`. HTTP: `POST /v1/sys/backup`, `POST /v1/sys/restore`.
+- **Export/Import**: `src/backup/export.rs` (decrypted JSON), `src/backup/import.rs` (with `--force`). CLI: `bvault operator export/import`. HTTP: `GET /v1/sys/export/{path}`, `POST /v1/sys/import/{mount}`.
+- **Backend Migration**: `src/storage/migrate.rs` + `src/cli/command/operator_migrate.rs` for direct encrypted backend-to-backend copy.
 
 ## Design
 

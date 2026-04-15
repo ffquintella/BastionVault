@@ -93,13 +93,37 @@ When making or reviewing changes, prioritize:
 - insecure defaults for development convenience
 - mixing unrelated cleanup into security-sensitive changes
 
-## Changelog
+## Changelog and Tracking
 
-- Keep `CHANGELOG.md` updated with all changes.
-- Use [Keep a Changelog](https://keepachangelog.com/) format with sections: Added, Changed, Removed, Fixed, Security.
+### CHANGELOG.md
+
+- Keep `CHANGELOG.md` updated after **every feature, phase, or roadmap stage**.
+- Use [Keep a Changelog](https://keepachangelog.com/) format with sections: Added, Changed, Deprecated, Removed, Fixed, Security.
 - Group entries under the `[Unreleased]` heading until a version is cut.
 - Every commit or PR that modifies behavior, adds features, removes features, fixes bugs, or changes dependencies must have a corresponding changelog entry.
 - Write entries from the operator's perspective: what changed and why it matters, not implementation details.
+- Use imperative mood ("Add X", not "Added X" or "Adds X").
+- Group related entries under a sub-heading (e.g., `#### FIDO2 Auth Backend`).
+- Reference the feature file or roadmap phase (e.g., `(Phase 5, features/import-export-backup-restore.md)`).
+- See the HTML comment block at the top of `CHANGELOG.md` for the full maintenance guide.
+
+### roadmap.md
+
+- Update `roadmap.md` whenever a feature status changes (Todo → In Progress → Done).
+- Move completed initiatives from "Active Initiatives" to "Completed Initiatives".
+- Keep the feature status table accurate -- it is the single source of truth for project progress.
+
+### Feature Files (features/*.md)
+
+- Update the "Current State" section in each feature file when implementation progresses.
+- Mark phase tables (Done/Pending) to reflect actual file-level completion.
+- Create a new feature file for any significant new capability before implementation begins.
+
+### Roadmap Files (roadmaps/*.md)
+
+- Update phase status (Complete/Pending) as work is done.
+- Keep the "What Is Not Yet Implemented" section accurate.
+- When all phases are complete, update the "Current State" header to reflect completion.
 
 ## Expected Output From Agents
 

@@ -15,7 +15,7 @@ pub struct MigrateResult {
 }
 
 /// Recursively list all keys from a backend by walking prefixes.
-fn list_all_keys<'a>(
+pub fn list_all_keys<'a>(
     backend: &'a dyn Backend,
     prefix: &'a str,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<String>, RvError>> + Send + 'a>> {

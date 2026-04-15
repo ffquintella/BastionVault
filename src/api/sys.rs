@@ -113,6 +113,10 @@ impl Sys<'_> {
         self.request_write(format!("{}/sys/cluster/leave", self.api_prefix()), None)
     }
 
+    pub fn cluster_failover(&self) -> Result<HttpResponse, RvError> {
+        self.request_write(format!("{}/sys/cluster/failover", self.api_prefix()), None)
+    }
+
     pub fn seal(&self) -> Result<HttpResponse, RvError> {
         self.request_put(format!("{}/sys/seal", self.api_prefix()), None)
     }
@@ -178,5 +182,17 @@ impl Sys<'_> {
 
     pub fn delete_policy(&self, name: &str) -> Result<HttpResponse, RvError> {
         self.request_delete(format!("{}/sys/policies/acl/{name}", self.api_prefix()), None)
+    }
+
+    pub fn export_secrets(&self, path: &str) -> Result<HttpResponse, RvError> {
+        self.request_read(format!("{}/sys/export/{path}", self.api_prefix()))
+    }
+
+    pub fn import_secrets(
+        &self,
+        mount: &str,
+        data: Option<serde_json::Map<String, Value>>,
+    ) -> Result<HttpResponse, RvError> {
+        self.request_write(format!("{}/sys/import/{mount}", self.api_prefix()), data)
     }
 }

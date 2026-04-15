@@ -2,17 +2,8 @@ name: Rust
 
 on:
   push:
-    branches: [ "main", "v0.2" ]
-    paths-ignore:
-      - "docs/**"
-      - ".github/workflows/website.yml"
-      - ".github/workflows/deploy-website.yml"
-  pull_request:
-    branches: [ "main" ]
-    paths-ignore:
-      - "docs/**"
-      - ".github/workflows/website.yml"
-      - ".github/workflows/deploy-website.yml"
+    tags:
+      - 'releases/**'
 
 env:
   CARGO_TERM_COLOR: always

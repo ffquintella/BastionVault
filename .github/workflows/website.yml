@@ -1,13 +1,9 @@
 name: Test deployment
 
 on:
-    pull_request:
-      paths:
-        - ".github/workflows/website.yml"
-        - ".github/workflows/deploy-website.yml"
-        - "docs/**"
-    push:
-      branches: [main]
+  push:
+    tags:
+      - 'releases/**'
 
 defaults:
   run:

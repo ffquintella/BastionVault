@@ -165,6 +165,26 @@ pub enum RvError {
     ErrClusterUnhealthy,
     #[error("Cluster error: {0}")]
     ErrCluster(String),
+    #[error("FIDO2 relying party not configured.")]
+    ErrFido2NotConfigured,
+    #[error("FIDO2 registration failed: {0}")]
+    ErrFido2RegistrationFailed(String),
+    #[error("FIDO2 authentication failed: {0}")]
+    ErrFido2AuthFailed(String),
+    #[error("FIDO2 challenge expired or not found.")]
+    ErrFido2ChallengeExpired,
+    #[error("FIDO2 credential not found.")]
+    ErrFido2CredentialNotFound,
+    #[error("Backup file has invalid magic bytes.")]
+    ErrBackupInvalidMagic,
+    #[error("Backup file version is not supported.")]
+    ErrBackupUnsupportedVersion,
+    #[error("Backup file is corrupted.")]
+    ErrBackupCorrupted,
+    #[error("Backup HMAC computation failed.")]
+    ErrBackupHmacFailed,
+    #[error("Backup HMAC verification failed: file may be tampered.")]
+    ErrBackupHmacMismatch,
     #[error("PKI pem bundle is invalid.")]
     ErrPkiPemBundleInvalid,
     #[error("PKI ca public key of certificate does not match private key.")]
@@ -474,6 +494,14 @@ impl PartialEq for RvError {
             | (RvError::ErrClusterNoLeader, RvError::ErrClusterNoLeader)
             | (RvError::ErrClusterQuorumLost, RvError::ErrClusterQuorumLost)
             | (RvError::ErrClusterUnhealthy, RvError::ErrClusterUnhealthy)
+            | (RvError::ErrFido2NotConfigured, RvError::ErrFido2NotConfigured)
+            | (RvError::ErrFido2ChallengeExpired, RvError::ErrFido2ChallengeExpired)
+            | (RvError::ErrFido2CredentialNotFound, RvError::ErrFido2CredentialNotFound)
+            | (RvError::ErrBackupInvalidMagic, RvError::ErrBackupInvalidMagic)
+            | (RvError::ErrBackupUnsupportedVersion, RvError::ErrBackupUnsupportedVersion)
+            | (RvError::ErrBackupCorrupted, RvError::ErrBackupCorrupted)
+            | (RvError::ErrBackupHmacFailed, RvError::ErrBackupHmacFailed)
+            | (RvError::ErrBackupHmacMismatch, RvError::ErrBackupHmacMismatch)
             | (RvError::ErrPkiPemBundleInvalid, RvError::ErrPkiPemBundleInvalid)
             | (RvError::ErrPkiCertKeyMismatch, RvError::ErrPkiCertKeyMismatch)
             | (RvError::ErrPkiCertChainIncorrect, RvError::ErrPkiCertChainIncorrect)

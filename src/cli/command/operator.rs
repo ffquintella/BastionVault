@@ -1,9 +1,9 @@
 use clap::{Parser, Subcommand};
 use sysexits::ExitCode;
 
-use super::{operator_init, operator_seal, operator_unseal};
+use super::{operator_init, operator_export, operator_import, operator_seal, operator_unseal};
 #[cfg(not(feature = "sync_handler"))]
-use super::operator_migrate;
+use super::{operator_backup, operator_migrate, operator_restore};
 use crate::{cli::command::CommandExecutor, EXIT_CODE_INSUFFICIENT_PARAMS};
 
 #[derive(Parser)]
@@ -44,6 +44,12 @@ pub enum Commands {
     Unseal(operator_unseal::Unseal),
     #[cfg(not(feature = "sync_handler"))]
     Migrate(operator_migrate::Migrate),
+    #[cfg(not(feature = "sync_handler"))]
+    Backup(operator_backup::Backup),
+    #[cfg(not(feature = "sync_handler"))]
+    Restore(operator_restore::Restore),
+    Export(operator_export::Export),
+    Import(operator_import::Import),
 }
 
 impl Commands {
@@ -54,6 +60,12 @@ impl Commands {
             Commands::Unseal(unseal) => unseal.execute(),
             #[cfg(not(feature = "sync_handler"))]
             Commands::Migrate(migrate) => migrate.execute(),
+            #[cfg(not(feature = "sync_handler"))]
+            Commands::Backup(backup) => backup.execute(),
+            #[cfg(not(feature = "sync_handler"))]
+            Commands::Restore(restore) => restore.execute(),
+            Commands::Export(export) => export.execute(),
+            Commands::Import(import) => import.execute(),
         }
     }
 }

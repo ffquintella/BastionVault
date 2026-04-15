@@ -48,6 +48,7 @@ use crate::{
 extern crate diesel;
 
 pub mod api;
+pub mod backup;
 pub mod cli;
 pub mod context;
 pub mod core;
@@ -124,6 +125,10 @@ impl BastionVault {
         // add credential module: approle
         let approle_module = AppRoleModule::new(core.clone());
         core.module_manager.add_module(Arc::new(approle_module))?;
+
+        // add credential module: fido2
+        let fido2_module = modules::credential::fido2::Fido2Module::new(core.clone());
+        core.module_manager.add_module(Arc::new(fido2_module))?;
 
         let handlers = core.handlers.load().clone();
         for handler in handlers.iter() {
