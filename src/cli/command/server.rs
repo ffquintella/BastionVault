@@ -215,7 +215,7 @@ impl Server {
 }
 
 fn build_rustls_server_config(listener: &config::Listener) -> Result<ServerConfig, RvError> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let cert_chain = load_rustls_cert_chain(Path::new(&listener.tls_cert_file))?;
     let private_key = load_rustls_private_key(Path::new(&listener.tls_key_file))?;

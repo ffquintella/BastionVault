@@ -19,6 +19,18 @@ storage "hiqlite" {
     "2:10.0.0.12:8210:10.0.0.12:8220",
     "3:10.0.0.13:8210:10.0.0.13:8220",
   ]
+
+  # TLS is enabled by default on both Raft and API channels with auto-generated
+  # self-signed certificates, providing post-quantum encryption (X25519MLKEM768).
+  # Uncomment to use custom certificates instead:
+  # tls_raft_cert = "/etc/bvault/tls/raft.crt"
+  # tls_raft_key  = "/etc/bvault/tls/raft.key"
+  # tls_api_cert  = "/etc/bvault/tls/api.crt"
+  # tls_api_key   = "/etc/bvault/tls/api.key"
+
+  # To disable TLS (not recommended for production):
+  # tls_raft_disable = true
+  # tls_api_disable  = true
 }
 
 listener "tcp" {
