@@ -23,6 +23,7 @@ exclude = [
 members = [
     ".",
     "crates/bv_crypto",
+    "gui/src-tauri",
 ]
 resolver = "2"
 
@@ -98,6 +99,9 @@ blake3 = "1.8"
 hmac = "0.13"
 sha1 = "0.11"
 sha2 = "0.11"
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+webauthn-rs-proto = "0.5"
+zstd = "0.13"
 
 [build-dependencies]
 toml = "1.1.2"

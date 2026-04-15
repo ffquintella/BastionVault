@@ -2,12 +2,8 @@ name: Deploy to AliCloud OSS
 
 on:
   push:
-    branches:
-      - main
-    paths:
-      - '.github/workflows/website.yml'
-      - ".github/workflows/deploy-website.yml"
-      - 'docs/**'
+    tags:
+      - 'releases/**'
 
 defaults:
   run:

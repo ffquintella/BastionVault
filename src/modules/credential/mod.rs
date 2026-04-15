@@ -4,5 +4,6 @@
 
 pub mod approle;
 pub mod cert;
+pub mod fido2;
 pub mod token;
 pub mod userpass;

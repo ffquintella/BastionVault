@@ -44,6 +44,17 @@ pub struct HiqliteBackend {
     _runtime: Option<tokio::runtime::Runtime>,
 }
 
+impl std::fmt::Debug for HiqliteBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HiqliteBackend")
+            .field("table", &self.table)
+            .field("api_addr", &self.api_addr)
+            .field("node_id", &self.node_id)
+            .field("tls_api_auto_certs", &self.tls_api_auto_certs)
+            .finish_non_exhaustive()
+    }
+}
+
 struct VaultRow {
     vault_key: String,
     vault_value: Vec<u8>,
@@ -418,6 +429,37 @@ impl HiqliteBackend {
     /// Gracefully shut down this node and leave the cluster.
     pub async fn leave_cluster(&self) -> Result<(), RvError> {
         self.client.shutdown().await.map_err(map_hiqlite_error)
+    }
+
+    /// Trigger a leader step-down to initiate a new election. Must be called on the leader.
+    pub fn trigger_failover(&self) -> Result<(), RvError> {
+        let url = format!("{}/cluster/step_down/db", self.api_addr);
+
+        let mut agent_builder = ureq::Agent::config_builder();
+        if self.tls_api_auto_certs {
+            agent_builder = agent_builder.tls_config(
+                ureq::tls::TlsConfig::builder()
+                    .disable_verification(true)
+                    .build(),
+            );
+        }
+        let agent = agent_builder.build().new_agent();
+        let req = http::Request::builder()
+            .method("POST")
+            .uri(&url)
+            .header("X-API-SECRET", &self.secret_api)
+            .body(Vec::new())
+            .map_err(|e| RvError::ErrCluster(e.to_string()))?;
+
+        let resp = agent.run(req).map_err(|e| RvError::ErrCluster(e.to_string()))?;
+        let status = resp.status().as_u16();
+
+        if (200..300).contains(&status) {
+            Ok(())
+        } else {
+            let text = resp.into_body().read_to_string().unwrap_or_default();
+            Err(RvError::ErrCluster(format!("failover failed (HTTP {status}): {text}")))
+        }
     }
 
     pub fn new(conf: &HashMap<String, Value>) -> Result<Self, RvError> {

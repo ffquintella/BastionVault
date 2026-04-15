@@ -16,11 +16,11 @@ None of these provide built-in high availability. Operators who want a resilient
 
 With hiqlite, a BastionVault cluster **is** the Raft cluster. Each vault node embeds a SQLite database replicated via Raft consensus. Writes are automatically routed to the leader. Reads are locally consistent. Failover happens automatically when a leader node goes down. No external database infrastructure is required.
 
-## Current State (Phase 1 Complete)
+## Current State (All Phases Complete)
 
 ### What Is Implemented
 
-**Backend** (`src/storage/hiqlite/mod.rs`):
+**Phase 1 -- Backend** (`src/storage/hiqlite/mod.rs`):
 - `HiqliteBackend` struct implementing the `Backend` trait.
 - CRUD operations via hiqlite's SQL interface:
   - `list()` -- `SELECT ... WHERE vault_key LIKE ?` with prefix truncation logic.
@@ -30,33 +30,79 @@ With hiqlite, a BastionVault cluster **is** the Raft cluster. Each vault node em
 - Distributed locking via `client.lock()` using hiqlite's `dlock` feature.
 - Automatic table creation on startup (`CREATE TABLE IF NOT EXISTS`).
 - Graceful shutdown on drop.
+- Runtime management: Tokio runtime kept alive to prevent cancellation of hiqlite background tasks.
 
-**Configuration** (`src/cli/config.rs`):
+**Phase 1 -- Configuration** (`src/cli/config.rs`):
 - `"hiqlite"` recognized in `STORAGE_TYPE_KEYWORDS`.
 - Config keys: `data_dir`, `node_id`, `secret_raft`, `secret_api`, `table`, `listen_addr_api`, `listen_addr_raft`, `nodes`.
 - Supports both single-node (default) and multi-node cluster configurations.
 
-**Build integration**:
+**Phase 1 -- Build integration**:
 - `storage_hiqlite` feature flag, enabled by default in `Cargo.toml`.
 - `hiqlite = { version = "0.13", optional = true, features = ["sqlite", "dlock"] }`.
 - `sqlx` removed from the project (libsqlite3-sys link conflict).
 
-**Tests**:
+**Phase 1 -- Tests**:
 - Unit tests using existing `test_backend_curd` and `test_backend_list_prefix` generic test functions.
 - Cucumber BDD scenarios in `tests/features/hiqlite_storage.feature` (8 scenarios).
 - Config parsing test `test_load_config_hiqlite`.
 - CI jobs for Linux, macOS, and Windows.
 
-### What Is Not Yet Implemented
+**Phase 2 -- Raft Error Mapping** (`src/storage/hiqlite/mod.rs`, `src/errors.rs`):
+- `CheckIsLeaderError` / `LeaderChange` → `ErrClusterNoLeader`.
+- `ClientWriteError` with forward_to_leader hint → `ErrClusterNoLeader`.
+- `Connect` / `Timeout` errors → `ErrClusterUnhealthy`.
+- `RaftError` / `RaftErrorFatal` → `ErrCluster(String)`.
+- All cluster errors map to HTTP 503 Service Unavailable.
 
-- Raft error mapping to BastionVault error types (Phase 2).
-- Health/status endpoints exposing cluster state (Phase 2).
-- Multi-node integration tests (Phase 2).
-- Documentation and config examples treating hiqlite as the default (Phase 3).
-- Startup validation warning about non-HA configs (Phase 4).
-- Cluster management CLI commands (Phase 4A).
-- Migration tooling from file/mysql to hiqlite (Phase 5).
-- HA fault-injection validation (Phase 6).
+**Phase 2 -- Health & Status Endpoints** (`src/http/sys.rs`):
+- `GET /v1/sys/health` -- returns initialized, sealed, standby, cluster_healthy; status codes 200/429/503/501.
+- `GET /v1/sys/cluster-status` -- returns storage_type, node_id, is_leader, cluster_healthy, raft_metrics.
+- `POST /v1/sys/cluster/remove-node` -- remove a node from the Raft topology.
+- `POST /v1/sys/cluster/leave` -- graceful cluster exit.
+
+**Phase 2 -- Client SDK** (`src/api/sys.rs`):
+- `cluster_status()` method for SDK-based cluster queries.
+
+**Phase 3 -- Documentation & Config Examples**:
+- `config/ha-cluster.hcl` with documented TLS defaults and configuration options.
+- `docs/docs/configuration.md` with comprehensive TLS option documentation.
+
+**Phase 4A -- Cluster CLI Commands** (`src/cli/command/cluster_*.rs`):
+- `bvault cluster status` -- display cluster status including Raft health.
+- `bvault cluster leader` -- show current leader.
+- `bvault cluster members` -- list cluster members and Raft roles.
+- `bvault cluster leave` -- gracefully leave cluster.
+- `bvault cluster remove-node` -- remove topology members (leader operation).
+
+**Post-Quantum TLS for Inter-Node Communication** (`src/storage/hiqlite/mod.rs`):
+- Switched rustls crypto provider from `ring` to `aws_lc_rs` for both hiqlite and server TLS.
+- X25519MLKEM768 hybrid post-quantum key exchange enabled by default in TLS 1.3 handshakes.
+- Configurable TLS for Raft channel: `tls_raft_disable`, `tls_raft_cert`, `tls_raft_key`.
+- Configurable TLS for API channel: `tls_api_disable`, `tls_api_cert`, `tls_api_key`.
+- Auto-generated self-signed certificates when no custom certs provided.
+
+**Phase 5 -- Backup/Restore/Export/Import** (`src/backup/`):
+- Backup format: `BVBK` binary format with HMAC-SHA256 integrity (`src/backup/format.rs`).
+- `create_backup()`: iterates all backend keys, writes encrypted blobs + trailing HMAC.
+- `restore_backup()`: verifies HMAC before writing, supports zstd decompression.
+- `export_secrets()`: reads through barrier (decrypted), produces JSON with mount/prefix.
+- `import_secrets()`: writes JSON entries through barrier, supports `--force` overwrite.
+- CLI commands: `bvault operator backup`, `restore`, `export`, `import`.
+- HTTP endpoints: `POST /v1/sys/backup`, `POST /v1/sys/restore`, `GET /v1/sys/export/{path}`, `POST /v1/sys/import/{mount}`.
+- `bvault operator migrate` for direct backend-to-backend encrypted migration (file/mysql to hiqlite).
+
+**Phase 6 -- HA Fault-Injection Validation** (`tests/hiqlite_ha_fault_injection.rs`):
+- Multi-node `TestCluster` helper: creates 3 in-process hiqlite nodes with shared Raft config.
+- 8 test scenarios:
+  1. Three-node cluster formation (leader + 2 followers, all healthy).
+  2. Write on leader, read on follower (strong consistency).
+  3. Leader failover via step-down (new leader elected, writes succeed).
+  4. Follower restart without data loss.
+  5. Leader restart with re-election (data survives, old leader rejoins as follower).
+  6. Write during leader election (transient errors then recovery).
+  7. Quorum loss and recovery (2 of 3 down, writes fail, restore 1, quorum restored).
+  8. Graceful leave (follower departs, cluster continues with 2 nodes).
 
 ## Design
 
@@ -266,7 +312,7 @@ For same-key migration (keeping unseal keys), the backup format stores encrypted
 
 ## Implementation Scope
 
-### Phase 1 (Complete)
+### Phase 1: Backend Implementation (Complete)
 
 | File | Status |
 |---|---|
@@ -278,38 +324,56 @@ For same-key migration (keeping unseal keys), the backup format stores encrypted
 | `tests/cucumber_hiqlite.rs` | Done |
 | `.github/workflows/rust.yml` (CI jobs) | Done |
 
-### Phase 2: Replication Semantics
+### Phase 2: Replication Semantics (Complete)
 
-| File | Purpose |
+| File | Status |
 |---|---|
-| `src/storage/hiqlite/mod.rs` | Map hiqlite errors to RvError variants |
-| `src/errors.rs` | Add cluster-specific error variants |
-| `src/modules/system/mod.rs` | Implement cluster health/status endpoints |
-| `src/http/sys.rs` | Register `/sys/cluster/status` route |
-| `tests/` | Multi-node integration tests |
+| `src/storage/hiqlite/mod.rs` (Raft error mapping) | Done |
+| `src/errors.rs` (cluster error variants) | Done |
+| `src/http/sys.rs` (health/status/cluster endpoints) | Done |
+| `src/api/sys.rs` (SDK cluster_status method) | Done |
+| Post-quantum TLS for Raft and API channels | Done |
 
-### Phase 3: Default Server Recommendation
+### Phase 3: Default Server Recommendation (Complete)
 
-| File | Purpose |
+| File | Status |
 |---|---|
-| Config examples and docs | Update to show hiqlite as default |
-| `src/cli/command/server.rs` | Warn if using file backend in non-dev mode |
+| `config/ha-cluster.hcl` (config examples) | Done |
+| `docs/docs/configuration.md` (TLS documentation) | Done |
 
-### Phase 4 + 4A: Cluster Management
+### Phase 4 + 4A: Cluster Management (Complete)
 
-| File | Purpose |
+| File | Status |
 |---|---|
-| `src/cli/command/cluster.rs` | Cluster CLI command group |
-| `src/cli/mod.rs` | Register cluster commands |
-| `src/http/sys.rs` | Cluster management API endpoints |
+| `src/cli/command/cluster_status.rs` | Done |
+| `src/cli/command/cluster_leader.rs` | Done |
+| `src/cli/command/cluster_members.rs` | Done |
+| `src/cli/command/cluster_leave.rs` | Done |
+| `src/cli/command/cluster_remove_node.rs` | Done |
+| `src/http/sys.rs` (cluster management API) | Done |
 
-### Phase 5: Migration
+### Phase 5: Backup/Restore/Export/Import + Migration (Complete)
 
-Depends on the Import/Export & Backup/Restore feature (`features/import-export-backup-restore.md`).
+| File | Status |
+|---|---|
+| `src/backup/mod.rs` (module root) | Done |
+| `src/backup/format.rs` (BVBK format, HMAC) | Done |
+| `src/backup/create.rs` (backup creation) | Done |
+| `src/backup/restore.rs` (backup restore) | Done |
+| `src/backup/export.rs` (decrypted JSON export) | Done |
+| `src/backup/import.rs` (JSON import) | Done |
+| `src/cli/command/operator_backup.rs` | Done |
+| `src/cli/command/operator_restore.rs` | Done |
+| `src/cli/command/operator_export.rs` | Done |
+| `src/cli/command/operator_import.rs` | Done |
+| `src/http/sys.rs` (backup/restore/export/import endpoints) | Done |
+| `src/api/sys.rs` (client methods) | Done |
 
-### Phase 6: HA Validation
+### Phase 6: HA Fault-Injection Validation (Complete)
 
-Test-only. No production code changes expected. Fault injection test suite covering the test matrix in the roadmap.
+| File | Status |
+|---|---|
+| `tests/hiqlite_ha_fault_injection.rs` (8 multi-node test scenarios) | Done |
 
 ## Testing Requirements
 

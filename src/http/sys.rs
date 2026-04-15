@@ -585,6 +585,141 @@ async fn sys_cluster_leave_request_handler(
     Ok(response_error(StatusCode::BAD_REQUEST, "cluster operations require hiqlite storage backend"))
 }
 
+async fn sys_cluster_failover_request_handler(
+    req: HttpRequest,
+    _core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let _auth = request_auth(&req);
+
+    #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
+    {
+        use crate::storage::hiqlite::HiqliteBackend;
+        let backend_any = _core.physical.as_ref() as &dyn std::any::Any;
+        if let Some(hiqlite_backend) = backend_any.downcast_ref::<HiqliteBackend>() {
+            hiqlite_backend.trigger_failover()?;
+            return Ok(response_ok(None, None));
+        }
+    }
+
+    Ok(response_error(StatusCode::BAD_REQUEST, "cluster operations require hiqlite storage backend"))
+}
+
+async fn sys_backup_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let _auth = request_auth(&req);
+
+    let hmac_key = core.barrier.derive_hmac_key()?;
+    let mut buf = Vec::new();
+
+    crate::backup::create::create_backup(
+        core.physical.as_ref(),
+        &hmac_key,
+        &mut buf,
+        false,
+    )
+    .await?;
+
+    Ok(HttpResponse::Ok()
+        .content_type("application/octet-stream")
+        .insert_header(("Content-Disposition", "attachment; filename=\"backup.bvbk\""))
+        .body(buf))
+}
+
+async fn sys_restore_request_handler(
+    req: HttpRequest,
+    body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let _auth = request_auth(&req);
+
+    let hmac_key = core.barrier.derive_hmac_key()?;
+    let mut reader = std::io::Cursor::new(body.as_ref());
+
+    let count = crate::backup::restore::restore_backup(
+        core.physical.as_ref(),
+        &hmac_key,
+        &mut reader,
+    )
+    .await?;
+
+    Ok(response_json_ok(None, serde_json::json!({ "entries_restored": count })))
+}
+
+async fn sys_export_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let _auth = request_auth(&req);
+
+    let path = req.match_info().get("path").unwrap_or("");
+    // Split path into mount and prefix at the first '/' after removing leading slash
+    let (mount, prefix) = if let Some(idx) = path.find('/') {
+        let (m, p) = path.split_at(idx + 1);
+        (m.to_string(), p.to_string())
+    } else {
+        (format!("{path}/"), String::new())
+    };
+
+    let export_data = crate::backup::export::export_secrets(
+        core.barrier.as_storage(),
+        &mount,
+        &prefix,
+    )
+    .await?;
+
+    Ok(response_json_ok(None, export_data))
+}
+
+async fn sys_import_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let _auth = request_auth(&req);
+
+    let mount = req.match_info().get("mount").unwrap_or("").to_string();
+    let mount = if mount.ends_with('/') { mount } else { format!("{mount}/") };
+
+    #[derive(serde::Deserialize)]
+    struct ImportPayload {
+        #[serde(default)]
+        version: u32,
+        #[serde(default)]
+        entries: Vec<crate::backup::export::ExportEntry>,
+        #[serde(default)]
+        force: bool,
+    }
+
+    let payload: ImportPayload = serde_json::from_slice(&body)?;
+    body.clear();
+
+    let export_data = crate::backup::export::ExportData {
+        version: payload.version.max(1),
+        created_at: String::new(),
+        mount: mount.clone(),
+        prefix: String::new(),
+        entries: payload.entries,
+    };
+
+    let result = crate::backup::import::import_secrets(
+        core.barrier.as_storage(),
+        &mount,
+        &export_data,
+        payload.force,
+    )
+    .await?;
+
+    Ok(response_json_ok(
+        None,
+        serde_json::json!({
+            "imported": result.imported,
+            "skipped": result.skipped,
+        }),
+    ))
+}
+
 fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
     scope
         .service(
@@ -598,6 +733,11 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
         .service(web::resource("/cluster-status").route(web::get().to(sys_cluster_status_request_handler)))
         .service(web::resource("/cluster/remove-node").route(web::post().to(sys_cluster_remove_node_request_handler)))
         .service(web::resource("/cluster/leave").route(web::post().to(sys_cluster_leave_request_handler)))
+        .service(web::resource("/cluster/failover").route(web::post().to(sys_cluster_failover_request_handler)))
+        .service(web::resource("/backup").route(web::post().to(sys_backup_request_handler)))
+        .service(web::resource("/restore").route(web::post().to(sys_restore_request_handler)))
+        .service(web::resource("/export/{path:.*}").route(web::get().to(sys_export_request_handler)))
+        .service(web::resource("/import/{mount:.*}").route(web::post().to(sys_import_request_handler)))
         .service(
             web::resource("/seal")
                 .route(web::post().to(sys_seal_request_handler))

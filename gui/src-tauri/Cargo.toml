@@ -1,0 +1,24 @@
+[package]
+name = "bastion-vault-gui"
+version = "0.1.0"
+edition = "2021"
+description = "BastionVault Desktop GUI"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+bastion_vault = { path = "../..", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+chrono = "0.4"
+dirs = "6"
+hex = "0.4"
+
+[features]
+default = ["storage_hiqlite"]
+storage_hiqlite = ["bastion_vault/storage_hiqlite"]
