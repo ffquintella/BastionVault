@@ -37,6 +37,9 @@ pub struct HiqliteBackend {
     secret_api: String,
     /// This node's ID
     node_id: u64,
+    /// Keeps the tokio runtime alive so hiqlite's background tasks (Raft, RPC servers) continue running.
+    /// Without this, dropping the runtime kills all spawned tasks and the node becomes unreachable.
+    _runtime: Option<tokio::runtime::Runtime>,
 }
 
 struct VaultRow {
@@ -213,23 +216,35 @@ impl HiqliteBackend {
             .unwrap_or("vault")
             .to_string();
 
+        // hiqlite expects listen_addr to be host-only (e.g. "0.0.0.0");
+        // it appends the port from the node's addr_raft/addr_api fields via build_listen_addr().
         let listen_addr_api = conf
             .get("listen_addr_api")
             .and_then(|v| v.as_str())
-            .unwrap_or("0.0.0.0:8220");
+            .unwrap_or("0.0.0.0");
 
         let listen_addr_raft = conf
             .get("listen_addr_raft")
             .and_then(|v| v.as_str())
-            .unwrap_or("0.0.0.0:8210");
+            .unwrap_or("0.0.0.0");
+
+        let port_raft: u16 = conf
+            .get("port_raft")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(8210) as u16;
+
+        let port_api: u16 = conf
+            .get("port_api")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(8220) as u16;
 
         let nodes = if let Some(nodes_val) = conf.get("nodes") {
             parse_nodes(nodes_val)?
         } else {
             vec![Node {
                 id: node_id,
-                addr_raft: listen_addr_raft.to_string(),
-                addr_api: listen_addr_api.to_string(),
+                addr_raft: format!("{listen_addr_raft}:{port_raft}"),
+                addr_api: format!("{listen_addr_api}:{port_api}"),
             }]
         };
 
@@ -267,7 +282,7 @@ impl HiqliteBackend {
             .await
             .map_err(map_hiqlite_error)?;
 
-        let api_addr = format!("http://{listen_addr_api}");
+        let api_addr = format!("http://{listen_addr_api}:{port_api}");
 
         Ok(HiqliteBackend {
             client,
@@ -275,6 +290,7 @@ impl HiqliteBackend {
             api_addr,
             secret_api: secret_api.to_string(),
             node_id,
+            _runtime: None,
         })
     }
 
@@ -339,28 +355,41 @@ impl HiqliteBackend {
     }
 
     pub fn new(conf: &HashMap<String, Value>) -> Result<Self, RvError> {
-        // hiqlite is async-only; use a nested-runtime pattern to bridge sync construction
-        match tokio::runtime::Handle::try_current() {
-            Ok(_handle) => std::thread::scope(|s| {
-                let conf = conf.clone();
+        // hiqlite is async-only; use a dedicated runtime to bridge sync construction.
+        // The runtime must be kept alive because hiqlite spawns long-running background
+        // tasks (Raft consensus, RPC servers) that are killed if the runtime is dropped.
+        let needs_own_runtime = tokio::runtime::Handle::try_current().is_ok();
+
+        let rt = tokio::runtime::Runtime::new()?;
+
+        let mut backend = if needs_own_runtime {
+            // An outer runtime exists (e.g. actix); spawn a thread to avoid nested block_on.
+            let conf = conf.clone();
+            std::thread::scope(|s| {
+                let rt_ref = &rt;
                 let handle = s.spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().unwrap();
-                    rt.block_on(async { Self::new_backend(&conf).await })
+                    rt_ref.block_on(async { Self::new_backend(&conf).await })
                 });
                 handle.join().unwrap()
-            }),
-            Err(_) => {
-                let rt = tokio::runtime::Runtime::new()?;
-                rt.block_on(async { Self::new_backend(conf).await })
-            }
-        }
+            })?
+        } else {
+            rt.block_on(async { Self::new_backend(conf).await })?
+        };
+
+        backend._runtime = Some(rt);
+        Ok(backend)
     }
 }
 
 impl Drop for HiqliteBackend {
     fn drop(&mut self) {
-        // Attempt graceful shutdown; ignore errors during drop
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        // Attempt graceful shutdown before dropping the runtime.
+        // We must shut down the client first while the runtime is still alive,
+        // otherwise the spawned tasks will be forcibly cancelled.
+        if let Some(ref rt) = self._runtime {
+            let client = self.client.clone();
+            let _ = rt.block_on(async move { client.shutdown().await });
+        } else if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let client = self.client.clone();
             handle.spawn(async move {
                 let _ = client.shutdown().await;
@@ -397,8 +426,10 @@ mod test {
         conf.insert("secret_raft".to_string(), Value::String("test_raft_secret_1234".to_string()));
         conf.insert("secret_api".to_string(), Value::String("test_api_secret_12345".to_string()));
         conf.insert("table".to_string(), Value::String("vault_test".to_string()));
-        conf.insert("listen_addr_api".to_string(), Value::String("127.0.0.1:18100".to_string()));
-        conf.insert("listen_addr_raft".to_string(), Value::String("127.0.0.1:18200".to_string()));
+        conf.insert("listen_addr_api".to_string(), Value::String("127.0.0.1".to_string()));
+        conf.insert("listen_addr_raft".to_string(), Value::String("127.0.0.1".to_string()));
+        conf.insert("port_api".to_string(), Value::Number(18100.into()));
+        conf.insert("port_raft".to_string(), Value::Number(18200.into()));
         conf
     }
 
