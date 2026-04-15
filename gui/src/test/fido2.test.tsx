@@ -65,8 +65,18 @@ describe("Fido2Page", () => {
     useAuthStore.setState({ token: "test-token", policies: ["root"], isAuthenticated: true });
   });
 
+  function mockFido2Invoke(config: unknown) {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_auth_methods") return Promise.resolve([{ path: "fido2/", mount_type: "fido2", description: "" }]);
+      if (cmd === "fido2_config_read") return Promise.resolve(config);
+      if (cmd === "fido2_config_write") return Promise.resolve();
+      if (cmd === "enable_auth_method") return Promise.resolve();
+      return Promise.reject(new Error(`unmocked: ${cmd}`));
+    });
+  }
+
   it("renders config and credentials sections", async () => {
-    mockInvoke.mockResolvedValueOnce({ rp_id: "localhost", rp_origin: "https://localhost", rp_name: "Test" });
+    mockFido2Invoke({ rp_id: "localhost", rp_origin: "https://localhost", rp_name: "Test" });
     const { Fido2Page } = await import("../routes/Fido2Page");
     renderWithProviders(<Fido2Page />);
 
@@ -76,23 +86,23 @@ describe("Fido2Page", () => {
     });
   });
 
-  it("shows not configured when no config exists", async () => {
-    mockInvoke.mockResolvedValueOnce(null);
+  it("shows config values when config exists", async () => {
+    mockFido2Invoke({ rp_id: "localhost", rp_origin: "https://localhost", rp_name: "Test" });
     const { Fido2Page } = await import("../routes/Fido2Page");
     renderWithProviders(<Fido2Page />);
 
     await waitFor(() => {
-      expect(screen.getByText("Not configured")).toBeInTheDocument();
+      expect(screen.getByText("localhost")).toBeInTheDocument();
     });
   });
 
-  it("shows configure button when no config", async () => {
-    mockInvoke.mockResolvedValueOnce(null);
+  it("shows edit button for config", async () => {
+    mockFido2Invoke({ rp_id: "localhost", rp_origin: "https://localhost", rp_name: "Test" });
     const { Fido2Page } = await import("../routes/Fido2Page");
     renderWithProviders(<Fido2Page />);
 
     await waitFor(() => {
-      expect(screen.getByText("Configure")).toBeInTheDocument();
+      expect(screen.getByText("Edit")).toBeInTheDocument();
     });
   });
 });

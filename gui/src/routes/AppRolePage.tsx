@@ -14,6 +14,7 @@ import {
 } from "../components/ui";
 import type { AppRoleInfo, SecretIdAccessorInfo } from "../lib/types";
 import * as api from "../lib/api";
+import { extractError } from "../lib/error";
 
 export function AppRolePage() {
   const { toast } = useToast();
@@ -56,7 +57,7 @@ export function AppRolePage() {
       setRoleInfo(info);
       setRoleId(rid.role_id);
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -71,7 +72,7 @@ export function AppRolePage() {
       loadRoles();
       selectRole(newName);
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -87,7 +88,7 @@ export function AppRolePage() {
       setDeleteTarget(null);
       loadRoles();
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -360,7 +361,7 @@ function SecretIdPanel({ roleName, onCopy, toast }: SecretIdPanelProps) {
       toast("success", "Secret ID generated");
       loadAccessors();
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -372,7 +373,7 @@ function SecretIdPanel({ roleName, onCopy, toast }: SecretIdPanelProps) {
       setDestroyTarget(null);
       loadAccessors();
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -381,7 +382,7 @@ function SecretIdPanel({ roleName, onCopy, toast }: SecretIdPanelProps) {
       const info = await api.lookupSecretIdAccessor(roleName, accessor);
       setDetailTarget(info);
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 

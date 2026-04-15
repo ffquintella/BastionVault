@@ -5,6 +5,7 @@ import { Button, Card, Badge, useToast } from "../components/ui";
 import { useVaultStore } from "../stores/vaultStore";
 import { useAuthStore } from "../stores/authStore";
 import * as api from "../lib/api";
+import { extractError } from "../lib/error";
 
 export function SettingsPage() {
   const { toast } = useToast();
@@ -21,7 +22,7 @@ export function SettingsPage() {
       await api.sealVault();
       toast("info", "Vault sealed");
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     } finally {
       setSealing(false);
     }

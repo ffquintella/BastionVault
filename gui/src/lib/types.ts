@@ -22,6 +22,11 @@ export interface RemoteStatus {
   sealed: boolean;
 }
 
+export interface Preferences {
+  mode: VaultMode;
+  remote_profile?: RemoteProfile;
+}
+
 export interface InitResponse {
   root_token: string;
 }

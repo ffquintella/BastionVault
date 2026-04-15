@@ -5,6 +5,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{CmdResult, CommandError};
+use crate::preferences::Preferences;
 use crate::state::{AppState, RemoteProfile, VaultMode};
 
 #[tauri::command]
@@ -194,4 +195,15 @@ pub async fn remote_login_userpass(
     *state.token.lock().await = Some(token.clone());
 
     Ok(crate::commands::auth::LoginResponse { token, policies })
+}
+
+#[tauri::command]
+pub async fn load_preferences() -> CmdResult<Preferences> {
+    crate::preferences::load()
+}
+
+#[tauri::command]
+pub async fn save_preferences(mode: VaultMode, remote_profile: Option<RemoteProfile>) -> CmdResult<()> {
+    let prefs = Preferences { mode, remote_profile };
+    crate::preferences::save(&prefs)
 }

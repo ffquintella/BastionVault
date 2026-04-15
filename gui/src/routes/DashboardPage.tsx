@@ -5,6 +5,7 @@ import { useVaultStore } from "../stores/vaultStore";
 import { useAuthStore } from "../stores/authStore";
 import type { MountInfo } from "../lib/types";
 import * as api from "../lib/api";
+import { extractError } from "../lib/error";
 
 export function DashboardPage() {
   const setStatus = useVaultStore((s) => s.setStatus);
@@ -29,7 +30,7 @@ export function DashboardPage() {
       setMounts(m);
       setAuthMethods(a);
     } catch (e: unknown) {
-      setError(String(e));
+      setError(extractError(e));
     }
   }
 
@@ -39,7 +40,7 @@ export function DashboardPage() {
       const st = await api.getVaultStatus();
       setStatus(st);
     } catch (e: unknown) {
-      setError(String(e));
+      setError(extractError(e));
     }
   }
 

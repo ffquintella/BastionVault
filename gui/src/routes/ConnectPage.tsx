@@ -1,13 +1,16 @@
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { AuthLayout } from "../components/AuthLayout";
 import { Button, Input, Modal, useToast } from "../components/ui";
 import { useVaultStore } from "../stores/vaultStore";
 import type { RemoteProfile } from "../lib/types";
 import * as api from "../lib/api";
+import { extractError } from "../lib/error";
 
 export function ConnectPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const forceChoose = searchParams.get("choose") === "1";
   const { toast } = useToast();
   const setMode = useVaultStore((s) => s.setMode);
   const setRemoteProfile = useVaultStore((s) => s.setRemoteProfile);
@@ -23,21 +26,62 @@ export function ConnectPage() {
   const [connecting, setConnecting] = useState(false);
 
   useEffect(() => {
-    checkVault();
+    checkSavedPreferences();
   }, []);
 
-  async function checkVault() {
+  async function checkSavedPreferences() {
+    // If user explicitly wants the chooser (e.g. from "Switch vault"), skip auto-navigate
+    if (forceChoose) {
+      setLoading(false);
+      // Pre-fill remote form from saved profile if available
+      try {
+        const prefs = await api.loadPreferences();
+        if (prefs.remote_profile) {
+          setRemoteAddr(prefs.remote_profile.address);
+          setRemoteName(prefs.remote_profile.name);
+          setTlsSkipVerify(prefs.remote_profile.tls_skip_verify);
+          setCaCertPath(prefs.remote_profile.ca_cert_path ?? "");
+        }
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
     try {
-      const initialized = await api.isVaultInitialized();
-      if (initialized) {
-        await api.openVault();
-        navigate("/login");
-      } else {
-        setLoading(false);
+      const prefs = await api.loadPreferences();
+
+      if (prefs.mode === "Embedded") {
+        const initialized = await api.isVaultInitialized();
+        if (initialized) {
+          await api.openVault();
+          setMode("Embedded");
+          navigate("/login", { replace: true });
+          return;
+        }
+        // Not initialized yet — show chooser
+      } else if (prefs.mode === "Remote" && prefs.remote_profile) {
+        // Try to reconnect with saved profile
+        try {
+          await api.connectRemote(prefs.remote_profile);
+          setMode("Remote");
+          setRemoteProfile(prefs.remote_profile);
+          navigate("/login", { replace: true });
+          return;
+        } catch {
+          // Remote server unavailable — fall through to show chooser
+          // Pre-fill the remote form
+          setRemoteAddr(prefs.remote_profile.address);
+          setRemoteName(prefs.remote_profile.name);
+          setTlsSkipVerify(prefs.remote_profile.tls_skip_verify);
+          setCaCertPath(prefs.remote_profile.ca_cert_path ?? "");
+        }
       }
     } catch {
-      setLoading(false);
+      // No saved prefs or error loading — show chooser
     }
+
+    setLoading(false);
   }
 
   async function handleEmbedded() {
@@ -50,10 +94,11 @@ export function ConnectPage() {
       } else {
         await api.openVault();
         setMode("Embedded");
+        await api.savePreferences("Embedded");
         navigate("/login");
       }
     } catch (e: unknown) {
-      setError(String(e));
+      setError(extractError(e));
       setLoading(false);
     }
   }
@@ -72,11 +117,12 @@ export function ConnectPage() {
       await api.connectRemote(profile);
       setMode("Remote");
       setRemoteProfile(profile);
+      await api.savePreferences("Remote", profile);
       setShowRemote(false);
       toast("success", `Connected to ${remoteAddr}`);
       navigate("/login");
     } catch (e: unknown) {
-      setError(String(e));
+      setError(extractError(e));
     } finally {
       setConnecting(false);
     }
@@ -84,10 +130,10 @@ export function ConnectPage() {
 
   if (loading) {
     return (
-      <AuthLayout title="Loading..." subtitle="Identity-based secrets management">
+      <AuthLayout title="BastionVault" subtitle="Identity-based secrets management">
         <div className="text-center text-[var(--color-text-muted)] py-8">
           <div className="inline-block w-6 h-6 border-2 border-[var(--color-primary)] border-t-transparent rounded-full animate-spin mb-3" />
-          <p>Checking vault state...</p>
+          <p>Connecting to vault...</p>
         </div>
       </AuthLayout>
     );

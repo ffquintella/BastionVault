@@ -2,14 +2,17 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { AuthLayout } from "../components/AuthLayout";
 import { useAuthStore } from "../stores/authStore";
+import { useVaultStore } from "../stores/vaultStore";
 import { useWebAuthn } from "../hooks/useWebAuthn";
 import * as api from "../lib/api";
+import { extractError } from "../lib/error";
 
 type Tab = "token" | "userpass" | "fido2";
 
 export function LoginPage() {
   const navigate = useNavigate();
   const setAuth = useAuthStore((s) => s.setAuth);
+  const mode = useVaultStore((s) => s.mode);
   const { authenticate } = useWebAuthn();
   const [tab, setTab] = useState<Tab>("token");
   const [error, setError] = useState<string | null>(null);
@@ -25,6 +28,11 @@ export function LoginPage() {
   // FIDO2 form
   const [fido2Username, setFido2Username] = useState("");
 
+  // Reset vault state
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [resetConfirmText, setResetConfirmText] = useState("");
+  const [resetting, setResetting] = useState(false);
+
   async function handleTokenLogin(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
@@ -34,7 +42,7 @@ export function LoginPage() {
       setAuth(result.token, result.policies);
       navigate("/dashboard");
     } catch (err: unknown) {
-      setError(String(err));
+      setError(extractError(err));
     } finally {
       setLoading(false);
     }
@@ -49,7 +57,7 @@ export function LoginPage() {
       setAuth(result.token, result.policies);
       navigate("/dashboard");
     } catch (err: unknown) {
-      setError(String(err));
+      setError(extractError(err));
     } finally {
       setLoading(false);
     }
@@ -64,9 +72,28 @@ export function LoginPage() {
       setAuth(result.token, result.policies);
       navigate("/dashboard");
     } catch (err: unknown) {
-      setError(String(err));
+      setError(extractError(err));
     } finally {
       setLoading(false);
+    }
+  }
+
+  function handleSwitchVault() {
+    navigate("/connect?choose=1");
+  }
+
+  async function handleReset() {
+    setResetting(true);
+    setError(null);
+    try {
+      await api.resetVault();
+      setShowResetConfirm(false);
+      setResetConfirmText("");
+      navigate("/init");
+    } catch (e: unknown) {
+      setError(extractError(e));
+    } finally {
+      setResetting(false);
     }
   }
 
@@ -194,6 +221,79 @@ export function LoginPage() {
             )}
           </button>
         </form>
+      )}
+
+      {/* Footer actions */}
+      <div className="mt-6 pt-4 border-t border-[var(--color-border)] flex items-center justify-between">
+        <button
+          onClick={handleSwitchVault}
+          className="text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
+        >
+          Switch vault
+        </button>
+
+        {mode === "Embedded" && (
+          <>
+            {!showResetConfirm ? (
+              <button
+                onClick={() => setShowResetConfirm(true)}
+                className="text-xs text-red-400/60 hover:text-red-400 transition-colors"
+              >
+                Reset vault
+              </button>
+            ) : null}
+          </>
+        )}
+      </div>
+
+      {/* Reset confirmation */}
+      {showResetConfirm && (
+        <div className="mt-3 p-4 bg-red-500/10 border border-red-500/30 rounded-lg space-y-3">
+          <div className="flex items-start gap-2">
+            <span className="text-red-400 text-lg leading-none mt-0.5">!</span>
+            <div>
+              <p className="text-red-400 font-medium text-sm">
+                This will permanently destroy all vault data
+              </p>
+              <p className="text-red-400/70 text-xs mt-1">
+                All secrets, keys, users, policies, and configuration will be
+                irreversibly deleted. This cannot be undone.
+              </p>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs text-red-400/70 mb-1">
+              Type <span className="font-mono font-bold">RESET</span> to confirm
+            </label>
+            <input
+              type="text"
+              value={resetConfirmText}
+              onChange={(e) => setResetConfirmText(e.target.value)}
+              placeholder="RESET"
+              className="w-full bg-[var(--color-bg)] border border-red-500/30 rounded-lg px-3 py-2 text-sm font-mono text-red-400 placeholder:text-red-400/30"
+            />
+          </div>
+
+          <div className="flex gap-2">
+            <button
+              onClick={() => {
+                setShowResetConfirm(false);
+                setResetConfirmText("");
+              }}
+              className="flex-1 py-2 bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] rounded-lg text-sm transition-colors hover:bg-[var(--color-border)]"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleReset}
+              disabled={resetConfirmText !== "RESET" || resetting}
+              className="flex-1 py-2 bg-red-600 hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
+            >
+              {resetting ? "Resetting..." : "Destroy & Reset"}
+            </button>
+          </div>
+        </div>
       )}
     </AuthLayout>
   );

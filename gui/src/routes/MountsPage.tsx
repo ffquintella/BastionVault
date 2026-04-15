@@ -13,6 +13,7 @@ import {
 } from "../components/ui";
 import type { MountInfo } from "../lib/types";
 import * as api from "../lib/api";
+import { extractError } from "../lib/error";
 
 const ENGINE_TYPES = [
   { value: "kv", label: "KV (Version 1)" },
@@ -75,7 +76,7 @@ export function MountsPage() {
       setEngineDesc("");
       loadAll();
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -87,7 +88,7 @@ export function MountsPage() {
       setDeleteMount(null);
       loadAll();
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -100,7 +101,7 @@ export function MountsPage() {
       setAuthDesc("");
       loadAll();
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -112,7 +113,7 @@ export function MountsPage() {
       setDeleteAuth(null);
       loadAll();
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 

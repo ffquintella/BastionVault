@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "backend-api",
+      "runtimeExecutable": "/bin/zsh",
+      "runtimeArgs": ["-l", "-c", "cargo run -- server --config config/dev.hcl"],
+      "port": 8200
+    },
+    {
+      "name": "gui-frontend",
+      "runtimeExecutable": "/bin/zsh",
+      "runtimeArgs": ["-i", "-c", "cd gui && npm run dev"],
+      "port": 1420
+    },
+    {
+      "name": "docs",
+      "runtimeExecutable": "/bin/zsh",
+      "runtimeArgs": ["-i", "-c", "cd docs && npx docusaurus start"],
+      "port": 3000
+    }
+  ]
+}

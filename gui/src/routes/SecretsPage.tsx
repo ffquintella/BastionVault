@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Layout } from "../components/Layout";
 import { Button, Card, Input, Breadcrumb, EmptyState, Modal, useToast } from "../components/ui";
 import * as api from "../lib/api";
+import { extractError } from "../lib/error";
 
 export function SecretsPage() {
   const { toast } = useToast();
@@ -46,7 +47,7 @@ export function SecretsPage() {
       setSelectedKey(key);
       setSecretData(result.data);
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -58,7 +59,7 @@ export function SecretsPage() {
       setSecretData({});
       loadKeys();
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 
@@ -76,7 +77,7 @@ export function SecretsPage() {
       setEditPairs([{ key: "", value: "" }]);
       loadKeys();
     } catch (e: unknown) {
-      toast("error", String(e));
+      toast("error", extractError(e));
     }
   }
 

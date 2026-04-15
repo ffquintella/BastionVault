@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   VaultMode,
   VaultStatus,
+  Preferences,
   InitResponse,
   LoginResponse,
   MountInfo,
@@ -38,6 +39,9 @@ export const connectRemote = (profile: RemoteProfile) =>
   invoke<void>("connect_remote", { profile });
 export const disconnectRemote = () => invoke<void>("disconnect_remote");
 export const getRemoteStatus = () => invoke<RemoteStatus>("get_remote_status");
+export const loadPreferences = () => invoke<Preferences>("load_preferences");
+export const savePreferences = (mode: VaultMode, remoteProfile?: RemoteProfile) =>
+  invoke<void>("save_preferences", { mode, remoteProfile: remoteProfile ?? null });
 export const remoteLoginToken = (token: string) =>
   invoke<void>("remote_login_token", { token });
 export const remoteLoginUserpass = (username: string, password: string) =>
@@ -47,6 +51,7 @@ export const remoteLoginUserpass = (username: string, password: string) =>
 export const initVault = () => invoke<InitResponse>("init_vault");
 export const openVault = () => invoke<void>("open_vault");
 export const sealVault = () => invoke<void>("seal_vault");
+export const resetVault = () => invoke<void>("reset_vault");
 export const getVaultStatus = () => invoke<VaultStatus>("get_vault_status");
 export const listMounts = () => invoke<MountInfo[]>("list_mounts");
 export const listAuthMethods = () => invoke<MountInfo[]>("list_auth_methods");
@@ -164,3 +169,9 @@ export const fido2ListCredentials = (username: string) =>
   invoke<Fido2CredentialInfo | null>("fido2_list_credentials", { username });
 export const fido2DeleteCredential = (username: string) =>
   invoke<void>("fido2_delete_credential", { username });
+
+// Native FIDO2 (CTAP2 over USB, bypasses browser WebAuthn API)
+export const fido2NativeRegister = (username: string) =>
+  invoke<void>("fido2_native_register", { username });
+export const fido2NativeLogin = (username: string) =>
+  invoke<Fido2LoginResponse>("fido2_native_login", { username });

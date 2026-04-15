@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import { extractError } from "../lib/error";
 
 interface ApiState<T> {
   data: T | null;
@@ -21,7 +22,7 @@ export function useVaultApi<T>(apiFn: (...args: unknown[]) => Promise<T>) {
         setState({ data, loading: false, error: null });
         return data;
       } catch (e: unknown) {
-        const error = String(e);
+        const error = extractError(e);
         setState({ data: null, loading: false, error });
         throw e;
       }

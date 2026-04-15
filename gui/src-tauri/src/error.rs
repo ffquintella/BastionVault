@@ -41,4 +41,10 @@ impl From<std::io::Error> for CommandError {
     }
 }
 
+impl From<authenticator::errors::AuthenticatorError> for CommandError {
+    fn from(e: authenticator::errors::AuthenticatorError) -> Self {
+        Self { message: format!("Authenticator error: {e:?}") }
+    }
+}
+
 pub type CmdResult<T> = Result<T, CommandError>;

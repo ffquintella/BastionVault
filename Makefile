@@ -2,7 +2,7 @@
 
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
 
-.PHONY: help build run-dev run-dev-gui gui-build gui-test gui-check docs bump-minor bump-major bump-patch bootstrap
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch bootstrap
 
 help: ## List available commands
 	@echo "BastionVault v$(VERSION)"
@@ -17,16 +17,19 @@ build: ## Build the project in release mode
 run-dev: ## Run the development server
 	cargo run -- server --config config/dev.hcl
 
-run-dev-gui: ## Run the desktop GUI in development mode (Tauri + Vite HMR)
+gui-deps: ## Install GUI frontend dependencies
+	cd gui && npm install
+
+run-dev-gui: gui-deps ## Run the desktop GUI in development mode (Tauri + Vite HMR)
 	cd gui && npx tauri dev -- --features storage_hiqlite
 
-gui-build: ## Build the desktop GUI for production
+gui-build: gui-deps ## Build the desktop GUI for production
 	cd gui && npx tauri build -- --features storage_hiqlite
 
-gui-test: ## Run GUI frontend tests (Vitest)
+gui-test: gui-deps ## Run GUI frontend tests (Vitest)
 	cd gui && npx vitest run
 
-gui-check: ## Type-check and lint the GUI frontend
+gui-check: gui-deps ## Type-check and lint the GUI frontend
 	cd gui && npx tsc --noEmit && npx vite build
 
 docs: ## Start the documentation site locally
