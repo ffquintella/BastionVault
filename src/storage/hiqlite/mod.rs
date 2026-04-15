@@ -1,6 +1,6 @@
 use std::{any::Any, borrow::Cow, collections::HashMap};
 
-use hiqlite::{Client, Node, NodeConfig, Param};
+use hiqlite::{Client, Node, NodeConfig, Param, tls::ServerTlsConfig};
 use serde_json::Value;
 
 use crate::{
@@ -31,12 +31,14 @@ fn map_hiqlite_error(e: hiqlite::Error) -> RvError {
 pub struct HiqliteBackend {
     client: Client,
     table: String,
-    /// Hiqlite API address for management HTTP calls (e.g., "http://127.0.0.1:8100")
+    /// Hiqlite API address for management HTTP calls (e.g., "https://127.0.0.1:8100")
     api_addr: String,
     /// Shared API secret for hiqlite management endpoints
     secret_api: String,
     /// This node's ID
     node_id: u64,
+    /// Whether TLS is enabled on the API channel (affects certificate verification for self-signed)
+    tls_api_auto_certs: bool,
     /// Keeps the tokio runtime alive so hiqlite's background tasks (Raft, RPC servers) continue running.
     /// Without this, dropping the runtime kills all spawned tasks and the node becomes unreachable.
     _runtime: Option<tokio::runtime::Runtime>,
@@ -248,6 +250,51 @@ impl HiqliteBackend {
             }]
         };
 
+        // Parse TLS configuration for Raft and API channels.
+        // By default, TLS is enabled with auto-generated self-signed certificates
+        // (ServerTlsConfig::TlsAutoCertificates). Peer authentication is handled by
+        // secret_raft/secret_api; TLS provides PQC-protected confidentiality.
+        let tls_raft_disable = conf
+            .get("tls_raft_disable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let tls_api_disable = conf
+            .get("tls_api_disable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let tls_raft = if tls_raft_disable {
+            None
+        } else if let (Some(cert), Some(key)) = (
+            conf.get("tls_raft_cert").and_then(|v| v.as_str()),
+            conf.get("tls_raft_key").and_then(|v| v.as_str()),
+        ) {
+            Some(ServerTlsConfig::Specific(hiqlite::tls::ServerTlsConfigCerts::new(
+                cert.to_string(),
+                key.to_string(),
+            )))
+        } else {
+            Some(ServerTlsConfig::TlsAutoCertificates)
+        };
+
+        let tls_api = if tls_api_disable {
+            None
+        } else if let (Some(cert), Some(key)) = (
+            conf.get("tls_api_cert").and_then(|v| v.as_str()),
+            conf.get("tls_api_key").and_then(|v| v.as_str()),
+        ) {
+            Some(ServerTlsConfig::Specific(hiqlite::tls::ServerTlsConfigCerts::new(
+                cert.to_string(),
+                key.to_string(),
+            )))
+        } else {
+            Some(ServerTlsConfig::TlsAutoCertificates)
+        };
+
+        let api_scheme = if tls_api.is_some() { "https" } else { "http" };
+        let tls_api_auto_certs = matches!(tls_api, Some(ServerTlsConfig::TlsAutoCertificates));
+
         // hiqlite requires encryption keys for backup/cookie encryption
         let mut enc_keys = cryptr::EncKeys {
             enc_key_active: String::new(),
@@ -266,8 +313,16 @@ impl HiqliteBackend {
             secret_raft: secret_raft.to_string(),
             secret_api: secret_api.to_string(),
             enc_keys,
+            tls_raft,
+            tls_api,
             ..Default::default()
         };
+
+        // Install aws_lc_rs as the default rustls crypto provider BEFORE hiqlite starts.
+        // This gives us X25519MLKEM768 hybrid post-quantum key exchange in TLS 1.3.
+        // hiqlite tries to install ring's provider in start_node(), but first-install-wins
+        // semantics mean it will silently no-op since aws_lc_rs is already installed.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
         let client = hiqlite::start_node(node_config)
             .await
@@ -282,7 +337,7 @@ impl HiqliteBackend {
             .await
             .map_err(map_hiqlite_error)?;
 
-        let api_addr = format!("http://{listen_addr_api}:{port_api}");
+        let api_addr = format!("{api_scheme}://{listen_addr_api}:{port_api}");
 
         Ok(HiqliteBackend {
             client,
@@ -290,6 +345,7 @@ impl HiqliteBackend {
             api_addr,
             secret_api: secret_api.to_string(),
             node_id,
+            tls_api_auto_certs,
             _runtime: None,
         })
     }
@@ -329,7 +385,17 @@ impl HiqliteBackend {
             "stay_as_learner": stay_as_learner,
         });
 
-        let agent = ureq::Agent::new_with_defaults();
+        let mut agent_builder = ureq::Agent::config_builder();
+        if self.tls_api_auto_certs {
+            // Auto-generated self-signed certs require skipping certificate verification.
+            // Peer authentication is handled by the X-API-SECRET challenge-response.
+            agent_builder = agent_builder.tls_config(
+                ureq::tls::TlsConfig::builder()
+                    .disable_verification(true)
+                    .build(),
+            );
+        }
+        let agent = agent_builder.build().new_agent();
         let req = http::Request::builder()
             .method("DELETE")
             .uri(&url)

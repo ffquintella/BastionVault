@@ -118,6 +118,45 @@ storage "file" {
 |--------|---------|-------------|
 | `path` | | Directory path for encrypted vault data |
 
+### Hiqlite (HA)
+
+Embedded Raft-based SQLite storage for high-availability clusters. This is the recommended backend for production HA deployments.
+
+~~~hcl
+storage "hiqlite" {
+  data_dir         = "/var/lib/bvault/data"
+  node_id          = 1
+  secret_raft      = "change_me_shared_raft"
+  secret_api       = "change_me_shared_api_"
+  nodes            = [
+    "1:10.0.0.11:8210:10.0.0.11:8220",
+    "2:10.0.0.12:8210:10.0.0.12:8220",
+    "3:10.0.0.13:8210:10.0.0.13:8220",
+  ]
+}
+~~~
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `data_dir` | | Directory for Raft logs, SQLite database, and snapshots |
+| `node_id` | | Unique numeric ID for this node |
+| `secret_raft` | | Shared secret for Raft consensus authentication (min 16 chars) |
+| `secret_api` | | Shared secret for management API authentication (min 16 chars) |
+| `nodes` | | Array of node definitions: `"id:raft_host:raft_port:api_host:api_port"` |
+| `table` | `vault` | SQLite table name |
+| `listen_addr_raft` | `0.0.0.0` | Raft listener bind address |
+| `listen_addr_api` | `0.0.0.0` | Management API listener bind address |
+| `port_raft` | `8210` | Raft consensus port |
+| `port_api` | `8220` | Management API port |
+| `tls_raft_disable` | `false` | Disable TLS on Raft channel (not recommended) |
+| `tls_api_disable` | `false` | Disable TLS on management API channel (not recommended) |
+| `tls_raft_cert` | | Path to custom TLS certificate for Raft (auto-generated if omitted) |
+| `tls_raft_key` | | Path to custom TLS private key for Raft (auto-generated if omitted) |
+| `tls_api_cert` | | Path to custom TLS certificate for API (auto-generated if omitted) |
+| `tls_api_key` | | Path to custom TLS private key for API (auto-generated if omitted) |
+
+By default, both Raft and API channels use TLS with auto-generated self-signed certificates, providing post-quantum encryption (X25519MLKEM768 hybrid key exchange) for all inter-node traffic. Peer authentication is handled by the shared secrets (`secret_raft`/`secret_api`), while TLS provides confidentiality. Set `tls_raft_disable`/`tls_api_disable` to `true` only for development or testing.
+
 ### MySQL
 
 MySQL-backed storage using Diesel.

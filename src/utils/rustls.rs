@@ -4,11 +4,8 @@ use rustls::{
     crypto::{self, WebPkiSupportedAlgorithms},
     pki_types::{CertificateDer, UnixTime},
     server::danger::{ClientCertVerified, ClientCertVerifier},
-    DistinguishedName, Error, SignatureScheme,
-};
-use rustls::{
-    DigitallySignedStruct,
     client::danger::HandshakeSignatureValid,
+    DistinguishedName, DigitallySignedStruct, Error, SignatureScheme,
 };
 
 /// Requests a client certificate at the TLS layer but defers trust decisions to application code.
@@ -23,7 +20,7 @@ pub struct OptionalClientAuthVerifier {
 impl OptionalClientAuthVerifier {
     pub fn new() -> Self {
         Self {
-            supported_algs: rustls::crypto::ring::default_provider().signature_verification_algorithms,
+            supported_algs: rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
         }
     }
 }
