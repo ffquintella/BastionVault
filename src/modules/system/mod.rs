@@ -889,9 +889,12 @@ mod mod_system_tests {
         assert_eq!(ret["auth"]["token/"]["type"], Value::String("token".into()));
         assert!(ret["auth"]["token/"].is_object());
         assert!(ret["secret"]["secret/"].is_object());
-        assert_eq!(ret["secret"]["secret/"]["type"], Value::String("kv".into()));
+        assert_eq!(ret["secret"]["secret/"]["type"], Value::String("kv-v2".into()));
         assert!(ret["secret"]["sys/"].is_object());
         assert_eq!(ret["secret"]["sys/"]["type"], Value::String("system".into()));
+        // Identity mount for user/application groups.
+        assert!(ret["secret"]["identity/"].is_object());
+        assert_eq!(ret["secret"]["identity/"]["type"], Value::String("identity".into()));
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
@@ -906,6 +909,6 @@ mod mod_system_tests {
         let ret = ret.unwrap().1;
         assert!(ret.is_object());
         let ret = ret.as_object().unwrap();
-        assert_eq!(ret["type"], Value::String("kv".into()));
+        assert_eq!(ret["type"], Value::String("kv-v2".into()));
     }
 }

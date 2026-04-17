@@ -5,6 +5,7 @@ use crate::{
     context::Context,
     errors::RvError,
     logical::{Auth, Backend, Field, FieldType, Lease, Operation, Path, PathOperation, Request, Response},
+    modules::identity::{GroupKind, IdentityModule},
     new_fields, new_fields_internal, new_path, new_path_internal, bv_error_string,
     utils::policy::equivalent_policies,
 };
@@ -39,6 +40,34 @@ impl UserPassBackend {
 
 #[maybe_async::maybe_async]
 impl UserPassBackendInner {
+    /// Return `direct` unioned with any policies attached through identity
+    /// groups of `kind` that list `member` as a member. On any lookup failure
+    /// (module absent, store unavailable, I/O error) falls back to `direct` so
+    /// login is never blocked by an optional subsystem.
+    pub(crate) async fn expand_identity_group_policies(
+        &self,
+        kind: GroupKind,
+        member: &str,
+        direct: &[String],
+    ) -> Vec<String> {
+        let Some(module) = self.core.module_manager.get_module::<IdentityModule>("identity") else {
+            return direct.to_vec();
+        };
+        let Some(store) = module.group_store() else {
+            return direct.to_vec();
+        };
+        match store.expand_policies(kind, member, direct).await {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!(
+                    "identity group policy expansion failed for {kind} member '{member}': {e}. \
+                     falling back to direct policies only."
+                );
+                direct.to_vec()
+            }
+        }
+    }
+
     pub async fn login(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let err_info = "invalid username or password";
         let username_value = req.get_data("username")?;
@@ -70,6 +99,12 @@ impl UserPassBackendInner {
             return Ok(Some(resp));
         }
 
+        // Union user's direct policies with any policies attached through
+        // identity user-groups the user is a member of.
+        let effective_policies = self
+            .expand_identity_group_policies(GroupKind::User, &username, &user.policies)
+            .await;
+
         let mut auth = Auth {
             lease: Lease {
                 ttl: user.ttl,
@@ -78,21 +113,29 @@ impl UserPassBackendInner {
                 ..Default::default()
             },
             display_name: username.to_string(),
-            policies: user.policies.clone(),
+            policies: effective_policies.clone(),
             ..Default::default()
         };
         auth.metadata.insert("username".to_string(), username.to_string());
 
-        // Ensure token_policies mirrors policies before populate_token_auth
-        // (which overwrites auth.policies with token_policies).
-        if user.token_policies.is_empty() && !user.policies.is_empty() {
-            user.token_policies = user.policies.clone();
+        // Ensure token_policies mirrors effective policies before
+        // populate_token_auth (which overwrites auth.policies with
+        // token_policies).
+        if user.token_policies.is_empty() && !effective_policies.is_empty() {
+            user.token_policies = effective_policies.clone();
+        } else if !effective_policies.is_empty() {
+            // Add group-derived policies to token_policies if not already present.
+            for p in &effective_policies {
+                if !user.token_policies.iter().any(|x| x == p) {
+                    user.token_policies.push(p.clone());
+                }
+            }
         }
         user.populate_token_auth(&mut auth);
 
         // Safety net: if populate_token_auth cleared policies, restore them
-        if auth.policies.is_empty() && !user.policies.is_empty() {
-            auth.policies = user.policies.clone();
+        if auth.policies.is_empty() && !effective_policies.is_empty() {
+            auth.policies = effective_policies;
         }
 
         let resp = Response { auth: Some(auth), ..Response::default() };
@@ -118,7 +161,12 @@ impl UserPassBackendInner {
 
         let user = user.unwrap();
 
-        if !equivalent_policies(&user.policies, &auth.policies) {
+        // Compare against the union of user.policies and group-derived
+        // policies, since the login path grants this union.
+        let effective = self
+            .expand_identity_group_policies(GroupKind::User, username, &user.policies)
+            .await;
+        if !equivalent_policies(&effective, &auth.policies) {
             return Err(bv_error_string!("policies have changed, not renewing"));
         }
 

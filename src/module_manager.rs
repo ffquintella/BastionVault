@@ -15,7 +15,10 @@ use arc_swap::ArcSwap;
 use crate::{
     core::Core,
     errors::RvError,
-    modules::{kv::KvModule, kv_v2::KvV2Module, resource::ResourceModule, system::SystemModule, Module},
+    modules::{
+        identity::IdentityModule, kv::KvModule, kv_v2::KvV2Module, resource::ResourceModule,
+        system::SystemModule, Module,
+    },
 };
 
 pub struct ModuleManager {
@@ -33,6 +36,7 @@ impl ModuleManager {
             Arc::new(KvModule::new(core.clone())),
             Arc::new(KvV2Module::new(core.clone())),
             Arc::new(ResourceModule::new(core.clone())),
+            Arc::new(IdentityModule::new(core.clone())),
             Arc::new(SystemModule::new(core)),
         ];
         self.modules.store(Arc::new(modules));

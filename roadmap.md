@@ -13,6 +13,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Secret Management (KV CRUD) | Done |
 | Secret Versioning & Soft-Delete | Todo |
 | Access Control (RBAC, path-based ACL policies) | Done |
+| Identity Groups (user groups, application groups, group→policy mapping) | Done |
 | Audit Logging (tamper-evident, HMAC chain) | Partial |
 | Metrics (Prometheus) | Done |
 | **Cryptography** | |
@@ -72,6 +73,8 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
   SAML 2.0 auth backend with SP-initiated SSO and attribute-to-policy role mappings.
 - [Resource Management](features/resources.md)
   Higher-level inventory abstraction for organizing secrets by infrastructure entity (servers, network devices, websites, databases, applications, custom types). Stored in the KV engine with metadata (hostname, IP, OS, location, owner, tags).
+- [Identity Groups](features/identity-groups.md)
+  User groups and application groups with group-to-policy mapping. Policies attached to a group are unioned with the caller's direct policies at login time. Backend + HTTP API shipped; GUI integration pending.
 
 ## Notes
 

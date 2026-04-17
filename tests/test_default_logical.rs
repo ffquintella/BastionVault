@@ -465,7 +465,9 @@ async fn test_sys_mount_feature(core: &Core, token: &str) {
     assert!(resp.is_some());
     let data = resp.unwrap().data;
     assert!(data.is_some());
-    assert_eq!(data.as_ref().unwrap().len(), 3);
+    // Default core mounts: secret/, resources/, identity/, sys/ plus the
+    // token mount for auth.
+    assert_eq!(data.as_ref().unwrap().len(), 5);
 
     // test api: "mounts/kv" with valid type
     let mount_data = json!({

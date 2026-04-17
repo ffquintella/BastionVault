@@ -47,6 +47,14 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Identity Groups (`features/identity-groups.md`)
+- **Identity module** (`src/modules/identity/`) -- new logical backend mounted at `identity/` that manages user groups and application groups. Groups hold a list of members (UserPass usernames or AppRole role names) and a list of policies.
+- **HTTP API**: `GET/PUT/DELETE /v1/identity/group/user/{name}`, `LIST /v1/identity/group/user`, and the symmetric `group/app/*` routes for application groups.
+- **GroupStore** (`src/modules/identity/group_store.rs`) -- encrypted storage under the system barrier view at `sys/identity/group/{user,app}/` with a policy-expansion helper used at login time.
+- **Policy union at login** -- UserPass (`path_login.rs`) and AppRole (`path_login.rs`) login handlers union the caller's directly-attached policies with policies from every group the caller is a member of. Renewal checks the unioned policy set for equivalence.
+- **Default mount + migration** (`src/mount.rs`) -- new deployments get the `identity/` mount automatically; existing deployments pick it up on next unseal via a new `mount_update` migration that injects any missing default core mounts without overwriting existing ones.
+- 3 integration tests covering user-group CRUD, user/app namespace isolation, and end-to-end policy expansion through a UserPass login.
+
 #### GitHub Actions
 - Restricted all CI workflows (`rust.yml`, `deploy-website.yml`, `website.yml`) to only trigger on tag pushes matching `releases/**`.
 

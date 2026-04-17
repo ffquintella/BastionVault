@@ -73,9 +73,11 @@ mod test {
         let ret = ret.unwrap();
         let list: Map<String, Value> = serde_json::from_str(&ret).unwrap();
         assert!(list["secret/"].is_object());
-        assert_eq!(list["secret/"]["type"], Value::String("kv".into()));
+        assert_eq!(list["secret/"]["type"], Value::String("kv-v2".into()));
         assert!(list["sys/"].is_object());
         assert_eq!(list["sys/"]["type"], Value::String("system".into()));
+        assert!(list["identity/"].is_object());
+        assert_eq!(list["identity/"]["type"], Value::String("identity".into()));
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
@@ -94,7 +96,7 @@ mod test {
         let ret = ret.unwrap();
         let list: Map<String, Value> = serde_json::from_str(&ret).unwrap();
         assert!(list["secret/"].is_object());
-        assert_eq!(list["secret/"]["type"], Value::String("kv".into()));
+        assert_eq!(list["secret/"]["type"], Value::String("kv-v2".into()));
 
         assert!(list["kv1/"].is_object());
         assert_eq!(list["kv1/"]["type"], Value::String("kv".into()));

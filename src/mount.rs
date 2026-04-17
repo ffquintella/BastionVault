@@ -59,6 +59,15 @@ lazy_static! {
             table: MOUNT_TABLE_TYPE.to_string(),
             tainted: false,
             uuid: generate_uuid(),
+            path: "identity/".to_string(),
+            logical_type: "identity".to_string(),
+            description: "user and application group management".to_string(),
+            ..Default::default()
+        },
+        MountEntry {
+            table: MOUNT_TABLE_TYPE.to_string(),
+            tainted: false,
+            uuid: generate_uuid(),
             path: "sys/".to_string(),
             logical_type: "system".to_string(),
             description: "system endpoints used for control, policy and debugging".to_string(),
@@ -367,6 +376,24 @@ impl MountTable {
                     entry.calc_hmac(hmac_key.unwrap())?;
                     need_persist = true;
                 }
+            }
+        }
+
+        // Upgrade path: ensure any default core mounts that were introduced
+        // after the original install are present. Only add missing ones; never
+        // overwrite an existing entry.
+        {
+            let mut entries = self.entries.write()?;
+            for default in DEFAULT_CORE_MOUNTS.iter() {
+                if entries.contains_key(&default.path) {
+                    continue;
+                }
+                let mut new_entry = default.clone();
+                if let Some(key) = hmac_key {
+                    new_entry.calc_hmac(key)?;
+                }
+                entries.insert(default.path.clone(), Arc::new(RwLock::new(new_entry)));
+                need_persist = true;
             }
         }
 

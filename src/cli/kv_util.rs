@@ -23,13 +23,15 @@ pub fn kv_preflight_version_request(client: &Client, path: &str) -> Result<(Stri
     };
 
     let path = data["path"].as_str().unwrap_or("");
-    let version: u32 = if let Some(options) = data.get("options") {
-        match options["version"].as_str().unwrap_or("") {
-            "1" => 1,
-            _ => 2,
-        }
-    } else {
-        1
+    // Treat the mount as KV v2 only when the options explicitly opt in
+    // with version="2". Missing options, missing version key, or any other
+    // value (including the common version="1") mean KV v1.
+    let version: u32 = match data.get("options") {
+        Some(options) => match options.get("version").and_then(|v| v.as_str()).unwrap_or("") {
+            "2" => 2,
+            _ => 1,
+        },
+        None => 1,
     };
 
     Ok((path.to_string(), version))

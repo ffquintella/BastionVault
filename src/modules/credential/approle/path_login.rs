@@ -9,6 +9,7 @@ use crate::{
     context::Context,
     errors::RvError,
     logical::{Auth, Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
+    modules::identity::{GroupKind, IdentityModule},
     new_fields, new_fields_internal, new_path, new_path_internal, bv_error_response, bv_error_string,
     storage::StorageEntry,
     utils::cidr,
@@ -53,6 +54,33 @@ endpoint."#
 
 #[maybe_async::maybe_async]
 impl AppRoleBackendInner {
+    /// Return `direct` unioned with policies from any identity app-group that
+    /// lists `member` as a member. On any error the direct policies are
+    /// returned as-is so login is never blocked by an optional subsystem.
+    pub(crate) async fn expand_identity_group_policies(
+        &self,
+        kind: GroupKind,
+        member: &str,
+        direct: &[String],
+    ) -> Vec<String> {
+        let Some(module) = self.core.module_manager.get_module::<IdentityModule>("identity") else {
+            return direct.to_vec();
+        };
+        let Some(store) = module.group_store() else {
+            return direct.to_vec();
+        };
+        match store.expand_policies(kind, member, direct).await {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!(
+                    "identity group policy expansion failed for {kind} member '{member}': {e}. \
+                     falling back to direct policies only."
+                );
+                direct.to_vec()
+            }
+        }
+    }
+
     pub async fn login(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let role_id = req.get_data_as_str("role_id")?;
 
@@ -223,7 +251,17 @@ impl AppRoleBackendInner {
         let mut auth = Auth { metadata, ..Default::default() };
         auth.internal_data.insert("role_name".to_string(), role_entry.name.clone());
 
-        role_entry.populate_token_auth(&mut auth);
+        // Union token_policies with policies attached through identity
+        // app-groups that list this role as a member.
+        let mut effective_role = role_entry.clone();
+        effective_role.token_policies = self
+            .expand_identity_group_policies(
+                GroupKind::App,
+                &role_entry.name,
+                &role_entry.token_policies,
+            )
+            .await;
+        effective_role.populate_token_auth(&mut auth);
 
         let resp = Response { auth: Some(auth), ..Response::default() };
 
