@@ -87,6 +87,11 @@ path "secret/*" {
   capabilities = ["create", "read", "update", "delete", "list"]
 }
 
+# Full access to resources
+path "resources/*" {
+  capabilities = ["create", "read", "update", "delete", "list"]
+}
+
 # Manage auth methods and users
 path "auth/*" {
   capabilities = ["create", "read", "update", "delete", "list"]
@@ -97,8 +102,13 @@ path "sys/policies/*" {
   capabilities = ["create", "read", "update", "delete", "list"]
 }
 
-# Manage mounts
+# Manage secret engine mounts
 path "sys/mounts/*" {
+  capabilities = ["create", "read", "update", "delete", "list"]
+}
+
+# Manage auth method mounts
+path "sys/auth/*" {
   capabilities = ["create", "read", "update", "delete", "list"]
 }
 
@@ -154,31 +164,26 @@ path "auth/token/lookup-self" {
     Ok(())
 }
 
-/// Enable default auth methods (userpass + fido2) on a freshly initialized vault.
+/// Enable default auth methods on a freshly initialized vault.
+/// FIDO2 is integrated into the userpass backend, so only userpass needs to be mounted.
 async fn enable_default_auth_methods(vault: &BastionVault, root_token: &str) -> Result<(), CommandError> {
     let core = vault.core.load();
 
-    let methods = [
-        ("userpass/", "userpass", "Username & password authentication"),
-        ("fido2/", "fido2", "FIDO2/WebAuthn security key authentication"),
-    ];
+    // Mount userpass (includes integrated FIDO2 support)
+    let mut body = Map::new();
+    body.insert("type".to_string(), Value::String("userpass".to_string()));
+    body.insert("description".to_string(), Value::String("Username & password authentication".to_string()));
 
-    for (path, auth_type, description) in methods {
-        let mut body = Map::new();
-        body.insert("type".to_string(), Value::String(auth_type.to_string()));
-        body.insert("description".to_string(), Value::String(description.to_string()));
+    let mut req = Request::default();
+    req.operation = Operation::Write;
+    req.path = "sys/auth/userpass/".to_string();
+    req.client_token = root_token.to_string();
+    req.body = Some(body);
 
-        let mut req = Request::default();
-        req.operation = Operation::Write;
-        req.path = format!("sys/auth/{path}");
-        req.client_token = root_token.to_string();
-        req.body = Some(body);
+    // Ignore errors if already mounted.
+    let _ = core.handle_request(&mut req).await;
 
-        // Ignore errors if already mounted.
-        let _ = core.handle_request(&mut req).await;
-    }
-
-    // Auto-configure FIDO2 with localhost defaults for embedded mode.
+    // Auto-configure FIDO2 relying party with localhost defaults for embedded mode.
     let mut body = Map::new();
     body.insert("rp_id".to_string(), Value::String("localhost".to_string()));
     body.insert("rp_origin".to_string(), Value::String("https://localhost".to_string()));
@@ -186,7 +191,7 @@ async fn enable_default_auth_methods(vault: &BastionVault, root_token: &str) -> 
 
     let mut req = Request::default();
     req.operation = Operation::Write;
-    req.path = "auth/fido2/config".to_string();
+    req.path = "auth/userpass/fido2/config".to_string();
     req.client_token = root_token.to_string();
     req.body = Some(body);
 

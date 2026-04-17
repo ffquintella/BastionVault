@@ -64,15 +64,15 @@ export const loginUserpass = (username: string, password: string) =>
 export const getCurrentToken = () => invoke<string | null>("get_current_token");
 export const logout = () => invoke<void>("logout");
 
-// Secrets
-export const listSecrets = (path: string) =>
-  invoke<SecretListResult>("list_secrets", { path });
-export const readSecret = (path: string) =>
-  invoke<SecretData>("read_secret", { path });
-export const writeSecret = (path: string, data: Record<string, string>) =>
-  invoke<void>("write_secret", { path, data });
-export const deleteSecret = (path: string) =>
-  invoke<void>("delete_secret", { path });
+// Secrets (mount/mountType passed for kv-v2 path handling)
+export const listSecrets = (path: string, mount?: string, mountType?: string) =>
+  invoke<SecretListResult>("list_secrets", { path, mount, mountType });
+export const readSecret = (path: string, mount?: string, mountType?: string) =>
+  invoke<SecretData>("read_secret", { path, mount, mountType });
+export const writeSecret = (path: string, data: Record<string, string>, mount?: string, mountType?: string) =>
+  invoke<void>("write_secret", { path, data, mount, mountType });
+export const deleteSecret = (path: string, mount?: string, mountType?: string) =>
+  invoke<void>("delete_secret", { path, mount, mountType });
 
 // Mounts
 export const mountEngine = (path: string, engineType: string, description: string) =>
@@ -103,23 +103,29 @@ export const writePolicy = (name: string, policy: string) =>
   invoke<void>("write_policy", { name, policy });
 export const deletePolicy = (name: string) => invoke<void>("delete_policy", { name });
 
-// Resources
-export const listResources = (mount: string) =>
-  invoke<ResourceListResult>("list_resources", { mount });
-export const readResource = (mount: string, name: string) =>
-  invoke<ResourceMetadata>("read_resource", { mount, name });
-export const writeResource = (mount: string, name: string, metadata: ResourceMetadata) =>
-  invoke<void>("write_resource", { mount, name, metadata });
-export const deleteResource = (mount: string, name: string) =>
-  invoke<void>("delete_resource", { mount, name });
-export const listResourceSecrets = (mount: string, name: string) =>
-  invoke<ResourceSecretListResult>("list_resource_secrets", { mount, name });
-export const readResourceSecret = (mount: string, name: string, key: string) =>
-  invoke<ResourceSecretData>("read_resource_secret", { mount, name, key });
-export const writeResourceSecret = (mount: string, name: string, key: string, data: Record<string, string>) =>
-  invoke<void>("write_resource_secret", { mount, name, key, data });
-export const deleteResourceSecret = (mount: string, name: string, key: string) =>
-  invoke<void>("delete_resource_secret", { mount, name, key });
+// Resource type configuration
+export const resourceTypesRead = () =>
+  invoke<Record<string, unknown> | null>("resource_types_read");
+export const resourceTypesWrite = (types: Record<string, unknown>) =>
+  invoke<void>("resource_types_write", { types });
+
+// Resources — uses dedicated resource engine (auto-mounted at resources/)
+export const listResources = () =>
+  invoke<ResourceListResult>("list_resources", {});
+export const readResource = (name: string) =>
+  invoke<ResourceMetadata>("read_resource", { name });
+export const writeResource = (name: string, metadata: ResourceMetadata) =>
+  invoke<void>("write_resource", { name, metadata });
+export const deleteResource = (name: string) =>
+  invoke<void>("delete_resource", { name });
+export const listResourceSecrets = (name: string) =>
+  invoke<ResourceSecretListResult>("list_resource_secrets", { name });
+export const readResourceSecret = (name: string, key: string) =>
+  invoke<ResourceSecretData>("read_resource_secret", { name, key });
+export const writeResourceSecret = (name: string, key: string, data: Record<string, string>) =>
+  invoke<void>("write_resource_secret", { name, key, data });
+export const deleteResourceSecret = (name: string, key: string) =>
+  invoke<void>("delete_resource_secret", { name, key });
 
 // AppRole
 export const listAppRoles = () => invoke<AppRoleListResult>("list_approles");
@@ -175,3 +181,5 @@ export const fido2NativeRegister = (username: string) =>
   invoke<void>("fido2_native_register", { username });
 export const fido2NativeLogin = (username: string) =>
   invoke<Fido2LoginResponse>("fido2_native_login", { username });
+export const fido2SubmitPin = (pin: string) =>
+  invoke<void>("fido2_submit_pin", { pin });

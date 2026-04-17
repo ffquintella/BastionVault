@@ -102,7 +102,7 @@ export function PoliciesPage() {
 
   return (
     <Layout>
-      <div className="max-w-5xl space-y-4">
+      <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">Policies</h1>
           <Button size="sm" onClick={() => setShowCreate(true)}>

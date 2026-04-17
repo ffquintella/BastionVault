@@ -15,7 +15,7 @@ use authenticator::ctap2::server::{
     ResidentKeyRequirement, Transport, UserVerificationRequirement,
 };
 use authenticator::statecallback::StateCallback;
-use authenticator::StatusUpdate;
+use authenticator::{Pin, StatusPinUv, StatusUpdate};
 use authenticator::authenticatorservice::{RegisterArgs, SignArgs};
 use base64urlsafedata::Base64UrlSafeData;
 use serde::Serialize;
@@ -79,7 +79,7 @@ async fn read_fido2_config(state: &State<'_, AppState>) -> Result<(String, Strin
 
     let mut req = Request::default();
     req.operation = Operation::Read;
-    req.path = "auth/fido2/config".to_string();
+    req.path = "auth/userpass/fido2/config".to_string();
     req.client_token = token;
 
     let resp = core.handle_request(&mut req).await.map_err(CommandError::from)?;
@@ -112,6 +112,99 @@ fn parse_uv_requirement(s: &str) -> UserVerificationRequirement {
     }
 }
 
+/// Collect a PIN from the frontend by emitting a request event, then waiting
+/// for the `fido2_submit_pin` Tauri command to relay the user's input.
+///
+/// Returns `Some(pin_string)` or `None` if the user cancelled / timed out.
+fn request_pin_from_frontend(
+    handle: &AppHandle,
+    pin_rx: &std::sync::mpsc::Receiver<String>,
+    event_payload: &str,
+) -> Option<String> {
+    let _ = handle.emit("fido2-pin-request", event_payload);
+    // Wait up to 2 minutes for the user to enter their PIN
+    match pin_rx.recv_timeout(Duration::from_secs(120)) {
+        Ok(pin) if pin.is_empty() => None, // user cancelled
+        Ok(pin) => Some(pin),
+        Err(_) => None,
+    }
+}
+
+/// Handle all `StatusUpdate` variants, including interactive PIN collection.
+/// `pin_rx` is the receiving end of a channel whose sender is held in `AppState.pin_sender`.
+fn handle_status_updates(
+    status_rx: std::sync::mpsc::Receiver<StatusUpdate>,
+    handle: AppHandle,
+    pin_rx: std::sync::mpsc::Receiver<String>,
+) {
+    while let Ok(status) = status_rx.recv() {
+        match status {
+            StatusUpdate::PresenceRequired => {
+                let _ = handle.emit("fido2-status", "tap-key");
+            }
+            StatusUpdate::SelectDeviceNotice => {
+                let _ = handle.emit("fido2-status", "select-device");
+            }
+            StatusUpdate::PinUvError(StatusPinUv::PinRequired(sender)) => {
+                let _ = handle.emit("fido2-status", "pin-required");
+                if let Some(pin) = request_pin_from_frontend(&handle, &pin_rx, "pin-required") {
+                    let _ = sender.send(Pin::new(&pin));
+                } else {
+                    // User cancelled — drop the sender which will abort the ceremony
+                    drop(sender);
+                }
+            }
+            StatusUpdate::PinUvError(StatusPinUv::InvalidPin(sender, attempts)) => {
+                let msg = attempts
+                    .map(|a| format!("invalid-pin:{a}"))
+                    .unwrap_or_else(|| "invalid-pin".to_string());
+                let _ = handle.emit("fido2-status", &msg);
+                if let Some(pin) = request_pin_from_frontend(&handle, &pin_rx, &msg) {
+                    let _ = sender.send(Pin::new(&pin));
+                } else {
+                    drop(sender);
+                }
+            }
+            StatusUpdate::PinUvError(StatusPinUv::PinAuthBlocked) => {
+                let _ = handle.emit("fido2-status", "pin-auth-blocked");
+            }
+            StatusUpdate::PinUvError(StatusPinUv::PinBlocked) => {
+                let _ = handle.emit("fido2-status", "pin-blocked");
+            }
+            StatusUpdate::PinUvError(StatusPinUv::InvalidUv(attempts)) => {
+                let msg = attempts
+                    .map(|a| format!("invalid-uv:{a}"))
+                    .unwrap_or_else(|| "invalid-uv".to_string());
+                let _ = handle.emit("fido2-status", &msg);
+            }
+            StatusUpdate::PinUvError(StatusPinUv::UvBlocked) => {
+                let _ = handle.emit("fido2-status", "uv-blocked");
+            }
+            StatusUpdate::PinUvError(StatusPinUv::PinNotSet) => {
+                let _ = handle.emit("fido2-status", "pin-not-set");
+            }
+            StatusUpdate::PinUvError(e) => {
+                let _ = handle.emit("fido2-status", format!("pin-error: {e:?}"));
+            }
+            _ => {}
+        }
+    }
+}
+
+// ── PIN submission command ───────────────────────────────────────────
+
+#[tauri::command]
+pub async fn fido2_submit_pin(
+    pin: String,
+    state: State<'_, AppState>,
+) -> CmdResult<()> {
+    let sender = state.pin_sender.lock().unwrap().take();
+    if let Some(tx) = sender {
+        tx.send(pin).map_err(|_| CommandError::from("PIN channel closed"))?;
+    }
+    Ok(())
+}
+
 // ── Registration ─────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -130,7 +223,7 @@ pub async fn fido2_native_register(
     let resp = make_request(
         &state,
         bastion_vault::logical::Operation::Write,
-        "auth/fido2/register/begin".to_string(),
+        "auth/userpass/fido2/register/begin".to_string(),
         Some(body),
     ).await?;
 
@@ -233,6 +326,13 @@ pub async fn fido2_native_register(
         .and_then(|v| v.as_u64())
         .unwrap_or(60000);
 
+    // Set up the PIN communication channel
+    let (pin_tx, pin_rx) = channel::<String>();
+    {
+        let mut guard = state.pin_sender.lock().unwrap();
+        *guard = Some(pin_tx);
+    }
+
     let handle = app_handle.clone();
     let result = tokio::task::spawn_blocking(move || {
         let mut service = AuthenticatorService::new()
@@ -242,23 +342,10 @@ pub async fn fido2_native_register(
         let (status_tx, status_rx) = channel::<StatusUpdate>();
         let (result_tx, result_rx) = channel();
 
-        // Status update thread
+        // Status update thread with full PIN handling
         let handle_clone = handle.clone();
         std::thread::spawn(move || {
-            while let Ok(status) = status_rx.recv() {
-                match status {
-                    StatusUpdate::PresenceRequired => {
-                        let _ = handle_clone.emit("fido2-status", "tap-key");
-                    }
-                    StatusUpdate::SelectDeviceNotice => {
-                        let _ = handle_clone.emit("fido2-status", "select-device");
-                    }
-                    StatusUpdate::PinUvError(pin_uv) => {
-                        let _ = handle_clone.emit("fido2-status", format!("pin-error: {pin_uv:?}"));
-                    }
-                    _ => {}
-                }
-            }
+            handle_status_updates(status_rx, handle_clone, pin_rx);
         });
 
         let callback = StateCallback::new(Box::new(move |rv| {
@@ -268,17 +355,20 @@ pub async fn fido2_native_register(
         let _ = handle.emit("fido2-status", "insert-key");
 
         service.register(timeout_ms, register_args, status_tx, callback)
-            .map_err(|e| CommandError::from(format!("Registration failed: {e:?}")))?;
+            .map_err(|e| CommandError::from(e))?;
 
         match result_rx.recv_timeout(Duration::from_millis(timeout_ms + 5000)) {
             Ok(Ok(register_result)) => Ok(register_result),
-            Ok(Err(e)) => Err(CommandError::from(format!("Registration failed: {e:?}"))),
+            Ok(Err(e)) => Err(CommandError::from(e)),
             Err(RecvTimeoutError::Timeout) => Err(CommandError::from("Registration timed out")),
             Err(e) => Err(CommandError::from(format!("Registration channel error: {e}"))),
         }
     })
     .await
     .map_err(|e| CommandError::from(format!("Task join error: {e}")))??;
+
+    // Clean up PIN channel
+    let _ = state.pin_sender.lock().unwrap().take();
 
     let _ = app_handle.emit("fido2-status", "processing");
 
@@ -312,7 +402,7 @@ pub async fn fido2_native_register(
     make_request(
         &state,
         bastion_vault::logical::Operation::Write,
-        "auth/fido2/register/complete".to_string(),
+        "auth/userpass/fido2/register/complete".to_string(),
         Some(body),
     ).await?;
 
@@ -338,7 +428,7 @@ pub async fn fido2_native_login(
     let resp = make_request(
         &state,
         bastion_vault::logical::Operation::Write,
-        "auth/fido2/login/begin".to_string(),
+        "auth/userpass/fido2/login/begin".to_string(),
         Some(body),
     ).await?;
 
@@ -400,6 +490,13 @@ pub async fn fido2_native_login(
         .and_then(|v| v.as_u64())
         .unwrap_or(60000);
 
+    // Set up PIN communication channel
+    let (pin_tx, pin_rx) = channel::<String>();
+    {
+        let mut guard = state.pin_sender.lock().unwrap();
+        *guard = Some(pin_tx);
+    }
+
     // 6. Run authenticator ceremony
     let handle = app_handle.clone();
     let sign_result = tokio::task::spawn_blocking(move || {
@@ -410,19 +507,10 @@ pub async fn fido2_native_login(
         let (status_tx, status_rx) = channel::<StatusUpdate>();
         let (result_tx, result_rx) = channel();
 
+        // Status update thread with full PIN handling
         let handle_clone = handle.clone();
         std::thread::spawn(move || {
-            while let Ok(status) = status_rx.recv() {
-                match status {
-                    StatusUpdate::PresenceRequired => {
-                        let _ = handle_clone.emit("fido2-status", "tap-key");
-                    }
-                    StatusUpdate::SelectDeviceNotice => {
-                        let _ = handle_clone.emit("fido2-status", "select-device");
-                    }
-                    _ => {}
-                }
-            }
+            handle_status_updates(status_rx, handle_clone, pin_rx);
         });
 
         let callback = StateCallback::new(Box::new(move |rv| {
@@ -432,17 +520,20 @@ pub async fn fido2_native_login(
         let _ = handle.emit("fido2-status", "insert-key");
 
         service.sign(timeout_ms, sign_args, status_tx, callback)
-            .map_err(|e| CommandError::from(format!("Authentication failed: {e:?}")))?;
+            .map_err(|e| CommandError::from(e))?;
 
         match result_rx.recv_timeout(Duration::from_millis(timeout_ms + 5000)) {
             Ok(Ok(result)) => Ok(result),
-            Ok(Err(e)) => Err(CommandError::from(format!("Authentication failed: {e:?}"))),
+            Ok(Err(e)) => Err(CommandError::from(e)),
             Err(RecvTimeoutError::Timeout) => Err(CommandError::from("Authentication timed out")),
             Err(e) => Err(CommandError::from(format!("Authentication channel error: {e}"))),
         }
     })
     .await
     .map_err(|e| CommandError::from(format!("Task join error: {e}")))??;
+
+    // Clean up PIN channel
+    let _ = state.pin_sender.lock().unwrap().take();
 
     let _ = app_handle.emit("fido2-status", "processing");
 
@@ -485,7 +576,7 @@ pub async fn fido2_native_login(
     let resp = make_request(
         &state,
         bastion_vault::logical::Operation::Write,
-        "auth/fido2/login/complete".to_string(),
+        "auth/userpass/fido2/login/complete".to_string(),
         Some(body),
     ).await?;
 

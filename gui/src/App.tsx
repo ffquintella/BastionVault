@@ -7,7 +7,6 @@ import { SecretsPage } from "./routes/SecretsPage";
 import { ResourcesPage } from "./routes/ResourcesPage";
 import { UsersPage } from "./routes/UsersPage";
 import { AppRolePage } from "./routes/AppRolePage";
-import { Fido2Page } from "./routes/Fido2Page";
 import { PoliciesPage } from "./routes/PoliciesPage";
 import { MountsPage } from "./routes/MountsPage";
 import { SettingsPage } from "./routes/SettingsPage";
@@ -52,10 +51,6 @@ export default function App() {
             <Route
               path="/approle"
               element={<ProtectedRoute><AppRolePage /></ProtectedRoute>}
-            />
-            <Route
-              path="/fido2"
-              element={<ProtectedRoute><Fido2Page /></ProtectedRoute>}
             />
             <Route
               path="/policies"

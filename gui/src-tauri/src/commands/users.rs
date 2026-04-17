@@ -79,12 +79,22 @@ pub async fn get_user(
                 .data
                 .as_ref()
                 .and_then(|d| d.get("policies"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+                .map(|v| match v {
+                    // Array of strings (from token_policies serialization)
+                    Value::Array(arr) => arr
+                        .iter()
+                        .filter_map(|item| item.as_str().map(|s| s.trim().to_string()))
+                        .filter(|s| !s.is_empty())
+                        .collect(),
+                    // Comma-separated string
+                    Value::String(s) => s
+                        .split(',')
+                        .map(|p| p.trim().to_string())
+                        .filter(|p| !p.is_empty())
+                        .collect(),
+                    _ => vec![],
+                })
+                .unwrap_or_default();
             Ok(UserInfo {
                 username,
                 policies,

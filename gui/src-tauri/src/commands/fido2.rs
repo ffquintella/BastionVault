@@ -29,6 +29,7 @@ pub(crate) async fn make_request(
 }
 
 // ── Config ─────────────────────────────────────────────────────────
+// Now stored within the userpass mount at auth/userpass/fido2/config
 
 #[derive(Serialize)]
 pub struct Fido2Config {
@@ -39,7 +40,7 @@ pub struct Fido2Config {
 
 #[tauri::command]
 pub async fn fido2_config_read(state: State<'_, AppState>) -> CmdResult<Option<Fido2Config>> {
-    let resp = make_request(&state, Operation::Read, "auth/fido2/config".into(), None).await?;
+    let resp = make_request(&state, Operation::Read, "auth/userpass/fido2/config".into(), None).await?;
 
     match resp {
         Some(r) => {
@@ -66,11 +67,12 @@ pub async fn fido2_config_write(
     body.insert("rp_origin".into(), Value::String(rp_origin));
     body.insert("rp_name".into(), Value::String(rp_name));
 
-    make_request(&state, Operation::Write, "auth/fido2/config".into(), Some(body)).await?;
+    make_request(&state, Operation::Write, "auth/userpass/fido2/config".into(), Some(body)).await?;
     Ok(())
 }
 
 // ── Registration ───────────────────────────────────────────────────
+// Now within userpass: auth/userpass/fido2/register/*
 
 #[derive(Serialize)]
 pub struct Fido2ChallengeResponse {
@@ -88,7 +90,7 @@ pub async fn fido2_register_begin(
     let resp = make_request(
         &state,
         Operation::Write,
-        "auth/fido2/register/begin".into(),
+        "auth/userpass/fido2/register/begin".into(),
         Some(body),
     ).await?;
 
@@ -114,13 +116,14 @@ pub async fn fido2_register_complete(
     make_request(
         &state,
         Operation::Write,
-        "auth/fido2/register/complete".into(),
+        "auth/userpass/fido2/register/complete".into(),
         Some(body),
     ).await?;
     Ok(())
 }
 
 // ── Login ──────────────────────────────────────────────────────────
+// Now within userpass: auth/userpass/fido2/login/*
 
 #[derive(Serialize)]
 pub struct Fido2LoginResponse {
@@ -139,7 +142,7 @@ pub async fn fido2_login_begin(
     let resp = make_request(
         &state,
         Operation::Write,
-        "auth/fido2/login/begin".into(),
+        "auth/userpass/fido2/login/begin".into(),
         Some(body),
     ).await?;
 
@@ -165,7 +168,7 @@ pub async fn fido2_login_complete(
     let resp = make_request(
         &state,
         Operation::Write,
-        "auth/fido2/login/complete".into(),
+        "auth/userpass/fido2/login/complete".into(),
         Some(body),
     ).await?;
 
@@ -185,15 +188,14 @@ pub async fn fido2_login_complete(
     }
 }
 
-// ── Credentials ────────────────────────────────────────────────────
+// ── Credentials (per-user FIDO2 info) ─────────────────────────────
+// Now within userpass: auth/userpass/users/{username}/fido2
 
 #[derive(Serialize)]
 pub struct Fido2CredentialInfo {
     pub username: String,
-    pub policies: Vec<String>,
     pub registered_keys: u64,
-    pub ttl: u64,
-    pub max_ttl: u64,
+    pub fido2_enabled: bool,
 }
 
 #[tauri::command]
@@ -204,28 +206,17 @@ pub async fn fido2_list_credentials(
     let resp = make_request(
         &state,
         Operation::Read,
-        format!("auth/fido2/credentials/{username}"),
+        format!("auth/userpass/users/{username}/fido2"),
         None,
     ).await?;
 
     match resp {
         Some(r) => {
             let data = r.data.as_ref();
-            let policies: Vec<String> = data
-                .and_then(|d| d.get("policies"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-
             Ok(Some(Fido2CredentialInfo {
                 username: data.and_then(|d| d.get("username")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                policies,
                 registered_keys: data.and_then(|d| d.get("registered_keys")).and_then(|v| v.as_u64()).unwrap_or(0),
-                ttl: data.and_then(|d| d.get("ttl")).and_then(|v| v.as_u64()).unwrap_or(0),
-                max_ttl: data.and_then(|d| d.get("max_ttl")).and_then(|v| v.as_u64()).unwrap_or(0),
+                fido2_enabled: data.and_then(|d| d.get("fido2_enabled")).and_then(|v| v.as_bool()).unwrap_or(false),
             }))
         }
         None => Ok(None),
@@ -240,7 +231,7 @@ pub async fn fido2_delete_credential(
     make_request(
         &state,
         Operation::Delete,
-        format!("auth/fido2/credentials/{username}"),
+        format!("auth/userpass/users/{username}/fido2"),
         None,
     ).await?;
     Ok(())

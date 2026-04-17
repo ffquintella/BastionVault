@@ -25,23 +25,37 @@ describe("LoginPage", () => {
     useAuthStore.setState({ token: null, policies: [], isAuthenticated: false });
   });
 
-  it("renders token and userpass tabs", async () => {
+  it("renders Login and Token tabs", async () => {
     const { LoginPage } = await import("../routes/LoginPage");
     renderWithProviders(<LoginPage />);
-    // "Token" appears as both a tab label and an input label
+    expect(screen.getByText("Login")).toBeInTheDocument();
+    // "Token" appears as both a tab label and an input label on the token tab
     expect(screen.getAllByText("Token").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText("UserPass")).toBeInTheDocument();
   });
 
-  it("renders token input field on token tab", async () => {
+  it("shows username field on the default Login tab", async () => {
     const { LoginPage } = await import("../routes/LoginPage");
     renderWithProviders(<LoginPage />);
+    // Login tab is default, shows username field
+    expect(screen.getByPlaceholderText("alice")).toBeInTheDocument();
+    expect(screen.getByText("Continue")).toBeInTheDocument();
+  });
+
+  it("renders token input field on Token tab", async () => {
+    const user = userEvent.setup();
+    const { LoginPage } = await import("../routes/LoginPage");
+    renderWithProviders(<LoginPage />);
+
+    await user.click(screen.getAllByText("Token")[0]);
     expect(screen.getByPlaceholderText("hvs.xxxxx...")).toBeInTheDocument();
   });
 
   it("disables sign in button when token is empty", async () => {
+    const user = userEvent.setup();
     const { LoginPage } = await import("../routes/LoginPage");
     renderWithProviders(<LoginPage />);
+
+    await user.click(screen.getAllByText("Token")[0]);
     const buttons = screen.getAllByRole("button", { name: /sign in/i });
     expect(buttons[0]).toBeDisabled();
   });
@@ -52,6 +66,7 @@ describe("LoginPage", () => {
     const { LoginPage } = await import("../routes/LoginPage");
     renderWithProviders(<LoginPage />);
 
+    await user.click(screen.getAllByText("Token")[0]);
     const input = screen.getByPlaceholderText("hvs.xxxxx...");
     await user.type(input, "hvs.test-token");
 
@@ -63,14 +78,11 @@ describe("LoginPage", () => {
     });
   });
 
-  it("switches to userpass tab and shows username/password fields", async () => {
-    const user = userEvent.setup();
+  it("disables Continue button when username is empty", async () => {
     const { LoginPage } = await import("../routes/LoginPage");
     renderWithProviders(<LoginPage />);
-
-    await user.click(screen.getByText("UserPass"));
-    expect(screen.getByText("Username")).toBeInTheDocument();
-    expect(screen.getByText("Password")).toBeInTheDocument();
+    const btn = screen.getByText("Continue").closest("button");
+    expect(btn).toBeDisabled();
   });
 });
 

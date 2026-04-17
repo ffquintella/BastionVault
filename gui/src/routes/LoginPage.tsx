@@ -1,37 +1,90 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
+import { listen } from "@tauri-apps/api/event";
 import { AuthLayout } from "../components/AuthLayout";
+import { Modal } from "../components/ui";
 import { useAuthStore } from "../stores/authStore";
 import { useVaultStore } from "../stores/vaultStore";
-import { useWebAuthn } from "../hooks/useWebAuthn";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 
-type Tab = "token" | "userpass" | "fido2";
+type Tab = "token" | "login";
+type LoginStep = "username" | "password";
 
 export function LoginPage() {
   const navigate = useNavigate();
   const setAuth = useAuthStore((s) => s.setAuth);
   const mode = useVaultStore((s) => s.mode);
-  const { authenticate } = useWebAuthn();
-  const [tab, setTab] = useState<Tab>("token");
+  const [tab, setTab] = useState<Tab>("login");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   // Token form
   const [token, setToken] = useState("");
 
-  // Userpass form
+  // Unified login form
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [loginStep, setLoginStep] = useState<LoginStep>("username");
+  const [fido2Status, setFido2Status] = useState<string | null>(null);
 
-  // FIDO2 form
-  const [fido2Username, setFido2Username] = useState("");
+  // PIN modal state
+  const [pinModalOpen, setPinModalOpen] = useState(false);
+  const [pinValue, setPinValue] = useState("");
+  const [pinError, setPinError] = useState<string | null>(null);
+  const pinInputRef = useRef<HTMLInputElement>(null);
 
   // Reset vault state
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetConfirmText, setResetConfirmText] = useState("");
   const [resetting, setResetting] = useState(false);
+
+  // Listen for FIDO2 status and PIN events
+  useEffect(() => {
+    const unlistenStatus = listen<string>("fido2-status", (event) => {
+      const status = event.payload;
+      if (status === "insert-key") setFido2Status("Insert your security key...");
+      else if (status === "tap-key") setFido2Status("Tap your security key now...");
+      else if (status === "pin-required") setFido2Status("PIN required...");
+      else if (status.startsWith("invalid-pin")) setFido2Status("Wrong PIN...");
+      else if (status === "pin-auth-blocked") setFido2Status("Too many failed attempts. Unplug and re-insert your key.");
+      else if (status === "pin-blocked") setFido2Status("PIN is blocked. Reset your security key.");
+      else if (status === "processing") { setFido2Status("Processing..."); setPinModalOpen(false); }
+      else if (status === "complete") { setFido2Status(null); setPinModalOpen(false); }
+      else setFido2Status(null);
+    });
+    const unlistenPin = listen<string>("fido2-pin-request", (event) => {
+      const payload = event.payload;
+      setPinValue("");
+      if (payload.startsWith("invalid-pin")) {
+        const attempts = payload.split(":")[1];
+        setPinError(attempts ? `Wrong PIN. ${attempts} attempts remaining.` : "Wrong PIN. Try again.");
+      } else {
+        setPinError(null);
+      }
+      setPinModalOpen(true);
+      setTimeout(() => pinInputRef.current?.focus(), 50);
+    });
+    return () => {
+      unlistenStatus.then(fn => fn());
+      unlistenPin.then(fn => fn());
+    };
+  }, []);
+
+  async function handlePinSubmit() {
+    if (!pinValue) return;
+    setPinModalOpen(false);
+    setPinError(null);
+    try { await api.fido2SubmitPin(pinValue); } catch { /* ceremony handles */ }
+    setPinValue("");
+  }
+
+  async function handlePinCancel() {
+    setPinModalOpen(false);
+    setPinError(null);
+    setPinValue("");
+    try { await api.fido2SubmitPin(""); } catch { /* ignore */ }
+  }
 
   async function handleTokenLogin(e: React.FormEvent) {
     e.preventDefault();
@@ -48,7 +101,34 @@ export function LoginPage() {
     }
   }
 
-  async function handleUserpassLogin(e: React.FormEvent) {
+  async function handleContinue(e: React.FormEvent) {
+    e.preventDefault();
+    if (!username) return;
+    setLoading(true);
+    setError(null);
+    try {
+      // Try to start FIDO2 login — if user has keys, this succeeds
+      await api.fido2NativeLogin(username).then((result) => {
+        setAuth(result.token, result.policies);
+        navigate("/dashboard");
+      });
+    } catch (fido2Err: unknown) {
+      const errMsg = extractError(fido2Err);
+      // If the error indicates no FIDO2 keys or FIDO2 not set up, fall back to password
+      const lower = errMsg.toLowerCase();
+      if (lower.includes("credential not found") || lower.includes("not configured") || lower.includes("no credentials") || lower.includes("no security key")) {
+        setLoginStep("password");
+        setLoading(false);
+        return;
+      }
+      // Real FIDO2 error (cancelled, PIN blocked, etc.)
+      setError(errMsg);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handlePasswordLogin(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     setError(null);
@@ -63,19 +143,10 @@ export function LoginPage() {
     }
   }
 
-  async function handleFido2Login(e: React.FormEvent) {
-    e.preventDefault();
-    setLoading(true);
+  function handleBack() {
+    setLoginStep("username");
+    setPassword("");
     setError(null);
-    try {
-      const result = await authenticate(fido2Username);
-      setAuth(result.token, result.policies);
-      navigate("/dashboard");
-    } catch (err: unknown) {
-      setError(extractError(err));
-    } finally {
-      setLoading(false);
-    }
   }
 
   function handleSwitchVault() {
@@ -98,9 +169,8 @@ export function LoginPage() {
   }
 
   const tabs: { id: Tab; label: string }[] = [
+    { id: "login", label: "Login" },
     { id: "token", label: "Token" },
-    { id: "userpass", label: "UserPass" },
-    { id: "fido2", label: "FIDO2" },
   ];
 
   return (
@@ -113,6 +183,8 @@ export function LoginPage() {
             onClick={() => {
               setTab(t.id);
               setError(null);
+              setLoginStep("username");
+              setPassword("");
             }}
             className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
               tab === t.id
@@ -155,8 +227,8 @@ export function LoginPage() {
         </form>
       )}
 
-      {tab === "userpass" && (
-        <form onSubmit={handleUserpassLogin} className="space-y-4">
+      {tab === "login" && loginStep === "username" && (
+        <form onSubmit={handleContinue} className="space-y-4">
           <div>
             <label className="block text-sm text-[var(--color-text-muted)] mb-1">
               Username
@@ -165,8 +237,44 @@ export function LoginPage() {
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
+              placeholder="alice"
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[var(--color-primary)]"
+              autoFocus
             />
+          </div>
+          <p className="text-xs text-[var(--color-text-muted)]">
+            If your account has a security key, you'll be prompted to use it. Otherwise, you'll enter your password.
+          </p>
+          <button
+            type="submit"
+            disabled={loading || !username}
+            className="w-full py-2.5 bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] disabled:opacity-50 text-white rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
+          >
+            {loading ? (
+              <>
+                <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                {fido2Status || "Checking for security key..."}
+              </>
+            ) : (
+              "Continue"
+            )}
+          </button>
+        </form>
+      )}
+
+      {tab === "login" && loginStep === "password" && (
+        <form onSubmit={handlePasswordLogin} className="space-y-4">
+          <div className="flex items-center gap-2 mb-2">
+            <button
+              type="button"
+              onClick={handleBack}
+              className="text-[var(--color-text-muted)] hover:text-[var(--color-text)] text-sm"
+            >
+              &larr;
+            </button>
+            <span className="text-sm text-[var(--color-text-muted)]">
+              Signing in as <span className="text-[var(--color-text)] font-medium">{username}</span>
+            </span>
           </div>
           <div>
             <label className="block text-sm text-[var(--color-text-muted)] mb-1">
@@ -177,48 +285,15 @@ export function LoginPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[var(--color-primary)]"
+              autoFocus
             />
           </div>
           <button
             type="submit"
-            disabled={loading || !username || !password}
+            disabled={loading || !password}
             className="w-full py-2.5 bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] disabled:opacity-50 text-white rounded-lg font-medium transition-colors"
           >
             {loading ? "Signing in..." : "Sign In"}
-          </button>
-        </form>
-      )}
-
-      {tab === "fido2" && (
-        <form onSubmit={handleFido2Login} className="space-y-4">
-          <div>
-            <label className="block text-sm text-[var(--color-text-muted)] mb-1">
-              Username
-            </label>
-            <input
-              type="text"
-              value={fido2Username}
-              onChange={(e) => setFido2Username(e.target.value)}
-              placeholder="alice"
-              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[var(--color-primary)]"
-            />
-          </div>
-          <p className="text-xs text-[var(--color-text-muted)]">
-            Insert your security key and click the button below. Your browser will prompt you to tap your key.
-          </p>
-          <button
-            type="submit"
-            disabled={loading || !fido2Username}
-            className="w-full py-2.5 bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] disabled:opacity-50 text-white rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
-          >
-            {loading ? (
-              <>
-                <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                Waiting for security key...
-              </>
-            ) : (
-              "Authenticate with Security Key"
-            )}
           </button>
         </form>
       )}
@@ -295,6 +370,52 @@ export function LoginPage() {
           </div>
         </div>
       )}
+
+      {/* PIN Entry Modal */}
+      <Modal
+        open={pinModalOpen}
+        onClose={handlePinCancel}
+        title="Security Key PIN"
+        size="sm"
+        actions={
+          <>
+            <button
+              onClick={handlePinCancel}
+              className="px-4 py-2 text-sm text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handlePinSubmit}
+              disabled={!pinValue}
+              className="px-4 py-2 text-sm bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] disabled:opacity-50 text-white rounded-lg font-medium transition-colors"
+            >
+              Submit
+            </button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          <p className="text-sm text-[var(--color-text-muted)]">
+            Your security key requires a PIN to continue.
+          </p>
+          {pinError && (
+            <p className="text-sm text-red-400 font-medium">
+              {pinError}
+            </p>
+          )}
+          <input
+            ref={pinInputRef}
+            type="password"
+            value={pinValue}
+            onChange={(e) => setPinValue(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && pinValue) handlePinSubmit(); }}
+            placeholder="Enter PIN"
+            className="w-full px-3 py-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none focus:ring-2 focus:ring-[var(--color-primary)]"
+            autoComplete="off"
+          />
+        </div>
+      </Modal>
     </AuthLayout>
   );
 }

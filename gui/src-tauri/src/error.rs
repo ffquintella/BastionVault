@@ -43,7 +43,24 @@ impl From<std::io::Error> for CommandError {
 
 impl From<authenticator::errors::AuthenticatorError> for CommandError {
     fn from(e: authenticator::errors::AuthenticatorError) -> Self {
-        Self { message: format!("Authenticator error: {e:?}") }
+        use authenticator::errors::AuthenticatorError;
+        let message = match &e {
+            AuthenticatorError::PinError(pin_err) => {
+                // Use the Display impl which gives user-friendly messages
+                format!("{pin_err}")
+            }
+            AuthenticatorError::CancelledByUser => {
+                "Operation was cancelled".to_string()
+            }
+            AuthenticatorError::CredentialExcluded => {
+                "This security key is already registered".to_string()
+            }
+            AuthenticatorError::NoConfiguredTransports => {
+                "No security key detected. Please insert your key and try again.".to_string()
+            }
+            _ => format!("Security key error: {e}"),
+        };
+        Self { message }
     }
 }
 

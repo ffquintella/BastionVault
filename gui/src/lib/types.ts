@@ -73,20 +73,32 @@ export interface PolicyContent {
 
 // Resources
 export interface ResourceMetadata {
-  _resource: boolean;
   name: string;
   type: string;
-  hostname: string;
-  ip_address: string;
-  port: number;
-  os: string;
-  location: string;
-  owner: string;
-  tags: string[];
+  tags: string;
   notes: string;
   created_at: string;
   updated_at: string;
+  // Flexible fields — any key/value pairs defined by the resource type
+  [key: string]: unknown;
 }
+
+// Resource type definition (stored in config/types)
+export interface ResourceFieldDef {
+  key: string;
+  label: string;
+  type: "text" | "number" | "url" | "ip" | "fqdn";
+  placeholder?: string;
+}
+
+export interface ResourceTypeDef {
+  id: string;
+  label: string;
+  color: "info" | "success" | "warning" | "error" | "neutral";
+  fields: ResourceFieldDef[];
+}
+
+export type ResourceTypeConfig = Record<string, ResourceTypeDef>;
 
 export interface ResourceListResult {
   resources: string[];
@@ -160,8 +172,6 @@ export interface Fido2LoginResponse {
 
 export interface Fido2CredentialInfo {
   username: string;
-  policies: string[];
   registered_keys: number;
-  ttl: number;
-  max_ttl: number;
+  fido2_enabled: boolean;
 }

@@ -49,6 +49,13 @@ cargo check -p bastion-vault-gui   # Check Tauri backend
 CARGO_TEST_HIQLITE=1 cargo test --test hiqlite_ha_fault_injection
 ```
 
+## GUI Development Rules
+
+- **All pages must be responsive** — never use `max-w-*` classes on the main page container. Pages must fill the available width within the Layout sidebar. Use responsive grid classes (`grid-cols-1 sm:grid-cols-2 lg:grid-cols-3`) for card layouts.
+- **Use `min-w-0` and `truncate`** on text that could overflow (URLs, hostnames, long names).
+- **Modals** use `size="sm" | "md" | "lg"` from the Modal component — these are the only places where max-width is appropriate.
+- **Forms** should use `grid grid-cols-2 gap-3` for field pairs, with `col-span-2` for full-width fields (tags, notes, textareas).
+
 ## Architecture Overview
 
 - **Storage**: File, MySQL, Hiqlite (default, embedded Raft SQLite with HA)

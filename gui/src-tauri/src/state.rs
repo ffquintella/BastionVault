@@ -31,6 +31,10 @@ pub struct AppState {
     pub remote_profile: Mutex<Option<RemoteProfile>>,
     /// Active auth token (used in both modes).
     pub token: Mutex<Option<String>>,
+    /// Channel for receiving PIN input from the frontend during FIDO2 ceremonies.
+    /// The status handler thread stores a sender here; the `fido2_submit_pin` command
+    /// sends the user-entered PIN (or empty string for cancel) through it.
+    pub pin_sender: std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>>,
 }
 
 impl AppState {
@@ -41,6 +45,7 @@ impl AppState {
             remote_client: Mutex::new(None),
             remote_profile: Mutex::new(None),
             token: Mutex::new(None),
+            pin_sender: std::sync::Mutex::new(None),
         }
     }
 }

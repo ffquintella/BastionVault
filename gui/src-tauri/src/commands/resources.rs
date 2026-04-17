@@ -8,7 +8,8 @@ use tauri::State;
 use crate::error::{CmdResult, CommandError};
 use crate::state::AppState;
 
-const RESOURCES_PREFIX: &str = "_resources/";
+/// The dedicated resource engine is mounted at this path.
+const RESOURCE_MOUNT: &str = "resources/";
 
 async fn make_request(
     state: &State<'_, AppState>,
@@ -34,38 +35,9 @@ async fn make_request(
 
 // ── Resource Metadata ──────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceMetadata {
-    #[serde(default = "default_true")]
-    pub _resource: bool,
-    pub name: String,
-    #[serde(rename = "type")]
-    pub resource_type: String,
-    #[serde(default)]
-    pub hostname: String,
-    #[serde(default)]
-    pub ip_address: String,
-    #[serde(default)]
-    pub port: u16,
-    #[serde(default)]
-    pub os: String,
-    #[serde(default)]
-    pub location: String,
-    #[serde(default)]
-    pub owner: String,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub notes: String,
-    #[serde(default)]
-    pub created_at: String,
-    #[serde(default)]
-    pub updated_at: String,
-}
-
-fn default_true() -> bool {
-    true
-}
+/// ResourceMetadata is now a flexible JSON object — the frontend defines the schema
+/// based on the resource type configuration. We just pass it through.
+type ResourceMetadata = Map<String, Value>;
 
 #[derive(Serialize)]
 pub struct ResourceListResult {
@@ -82,22 +54,45 @@ pub struct ResourceSecretData {
     pub data: HashMap<String, Value>,
 }
 
+// ── Type Configuration ─────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn resource_types_read(state: State<'_, AppState>) -> CmdResult<Option<Value>> {
+    let path = format!("{RESOURCE_MOUNT}config/types");
+    let resp = make_request(&state, Operation::Read, path, None).await?;
+    match resp {
+        Some(r) => Ok(r.data.map(Value::Object)),
+        None => Ok(None),
+    }
+}
+
+#[tauri::command]
+pub async fn resource_types_write(state: State<'_, AppState>, types: Value) -> CmdResult<()> {
+    let path = format!("{RESOURCE_MOUNT}config/types");
+    let body = types.as_object().cloned()
+        .ok_or_else(|| CommandError::from("types must be a JSON object"))?;
+    make_request(&state, Operation::Write, path, Some(body)).await?;
+    Ok(())
+}
+
 // ── Resource CRUD ──────────────────────────────────────────────────
+// Uses the dedicated resource engine at resources/
 
 #[tauri::command]
 pub async fn list_resources(
     state: State<'_, AppState>,
-    mount: String,
+    // mount and mount_type kept for API compat but ignored — we always use RESOURCE_MOUNT
+    #[allow(unused_variables)] mount: Option<String>,
+    #[allow(unused_variables)] mount_type: Option<String>,
 ) -> CmdResult<ResourceListResult> {
-    let path = format!("{mount}{RESOURCES_PREFIX}");
+    let path = format!("{RESOURCE_MOUNT}resources/");
     let resp = make_request(&state, Operation::List, path, None).await?;
 
     match resp {
         Some(r) => {
             if let Some(data) = &r.data {
                 if let Some(Value::Array(keys)) = data.get("keys") {
-                    let resources = keys
-                        .iter()
+                    let resources = keys.iter()
                         .filter_map(|v| v.as_str().map(String::from))
                         .collect();
                     return Ok(ResourceListResult { resources });
@@ -112,19 +107,17 @@ pub async fn list_resources(
 #[tauri::command]
 pub async fn read_resource(
     state: State<'_, AppState>,
-    mount: String,
+    #[allow(unused_variables)] mount: Option<String>,
     name: String,
+    #[allow(unused_variables)] mount_type: Option<String>,
 ) -> CmdResult<ResourceMetadata> {
-    let path = format!("{mount}{RESOURCES_PREFIX}{name}");
+    let path = format!("{RESOURCE_MOUNT}resources/{name}");
     let resp = make_request(&state, Operation::Read, path, None).await?;
 
     match resp {
         Some(r) => {
             if let Some(data) = r.data {
-                let value = Value::Object(data);
-                let meta: ResourceMetadata =
-                    serde_json::from_value(value).map_err(|e| CommandError::from(e.to_string()))?;
-                return Ok(meta);
+                return Ok(data);
             }
             Err("Resource not found".into())
         }
@@ -135,26 +128,20 @@ pub async fn read_resource(
 #[tauri::command]
 pub async fn write_resource(
     state: State<'_, AppState>,
-    mount: String,
+    #[allow(unused_variables)] mount: Option<String>,
     name: String,
     metadata: ResourceMetadata,
+    #[allow(unused_variables)] mount_type: Option<String>,
 ) -> CmdResult<()> {
-    let path = format!("{mount}{RESOURCES_PREFIX}{name}");
+    let path = format!("{RESOURCE_MOUNT}resources/{name}");
 
-    let mut meta = metadata;
-    meta._resource = true;
-    meta.name = name;
+    let mut body = metadata;
+    body.insert("name".to_string(), Value::String(name));
     let now = chrono::Utc::now().to_rfc3339();
-    if meta.created_at.is_empty() {
-        meta.created_at = now.clone();
+    if !body.contains_key("created_at") || body.get("created_at").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+        body.insert("created_at".to_string(), Value::String(now.clone()));
     }
-    meta.updated_at = now;
-
-    let value = serde_json::to_value(&meta).map_err(|e| CommandError::from(e.to_string()))?;
-    let body = value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| CommandError::from("Failed to serialize metadata"))?;
+    body.insert("updated_at".to_string(), Value::String(now));
 
     make_request(&state, Operation::Write, path, Some(body)).await?;
     Ok(())
@@ -163,34 +150,12 @@ pub async fn write_resource(
 #[tauri::command]
 pub async fn delete_resource(
     state: State<'_, AppState>,
-    mount: String,
+    #[allow(unused_variables)] mount: Option<String>,
     name: String,
+    #[allow(unused_variables)] mount_type: Option<String>,
 ) -> CmdResult<()> {
-    // Delete the resource metadata.
-    let meta_path = format!("{mount}{RESOURCES_PREFIX}{name}");
-    make_request(&state, Operation::Delete, meta_path, None).await?;
-
-    // Delete all secrets under the resource path.
-    let secrets_path = format!("{mount}{name}/");
-    let resp = make_request(&state, Operation::List, secrets_path.clone(), None).await;
-    if let Ok(Some(r)) = resp {
-        if let Some(data) = &r.data {
-            if let Some(Value::Array(keys)) = data.get("keys") {
-                for key in keys {
-                    if let Some(k) = key.as_str() {
-                        let _ = make_request(
-                            &state,
-                            Operation::Delete,
-                            format!("{mount}{name}/{k}"),
-                            None,
-                        )
-                        .await;
-                    }
-                }
-            }
-        }
-    }
-
+    let path = format!("{RESOURCE_MOUNT}resources/{name}");
+    make_request(&state, Operation::Delete, path, None).await?;
     Ok(())
 }
 
@@ -199,18 +164,18 @@ pub async fn delete_resource(
 #[tauri::command]
 pub async fn list_resource_secrets(
     state: State<'_, AppState>,
-    mount: String,
+    #[allow(unused_variables)] mount: Option<String>,
     name: String,
+    #[allow(unused_variables)] mount_type: Option<String>,
 ) -> CmdResult<ResourceSecretListResult> {
-    let path = format!("{mount}{name}/");
+    let path = format!("{RESOURCE_MOUNT}secrets/{name}/");
     let resp = make_request(&state, Operation::List, path, None).await?;
 
     match resp {
         Some(r) => {
             if let Some(data) = &r.data {
                 if let Some(Value::Array(keys)) = data.get("keys") {
-                    let keys = keys
-                        .iter()
+                    let keys = keys.iter()
                         .filter_map(|v| v.as_str().map(String::from))
                         .collect();
                     return Ok(ResourceSecretListResult { keys });
@@ -225,17 +190,17 @@ pub async fn list_resource_secrets(
 #[tauri::command]
 pub async fn read_resource_secret(
     state: State<'_, AppState>,
-    mount: String,
+    #[allow(unused_variables)] mount: Option<String>,
     name: String,
     key: String,
+    #[allow(unused_variables)] mount_type: Option<String>,
 ) -> CmdResult<ResourceSecretData> {
-    let path = format!("{mount}{name}/{key}");
+    let path = format!("{RESOURCE_MOUNT}secrets/{name}/{key}");
     let resp = make_request(&state, Operation::Read, path, None).await?;
 
     match resp {
         Some(r) => {
-            let data = r
-                .data
+            let data = r.data
                 .map(|m| m.into_iter().collect::<HashMap<String, Value>>())
                 .unwrap_or_default();
             Ok(ResourceSecretData { data })
@@ -247,12 +212,13 @@ pub async fn read_resource_secret(
 #[tauri::command]
 pub async fn write_resource_secret(
     state: State<'_, AppState>,
-    mount: String,
+    #[allow(unused_variables)] mount: Option<String>,
     name: String,
     key: String,
     data: HashMap<String, String>,
+    #[allow(unused_variables)] mount_type: Option<String>,
 ) -> CmdResult<()> {
-    let path = format!("{mount}{name}/{key}");
+    let path = format!("{RESOURCE_MOUNT}secrets/{name}/{key}");
     let mut body = Map::new();
     for (k, v) in data {
         body.insert(k, Value::String(v));
@@ -264,11 +230,12 @@ pub async fn write_resource_secret(
 #[tauri::command]
 pub async fn delete_resource_secret(
     state: State<'_, AppState>,
-    mount: String,
+    #[allow(unused_variables)] mount: Option<String>,
     name: String,
     key: String,
+    #[allow(unused_variables)] mount_type: Option<String>,
 ) -> CmdResult<()> {
-    let path = format!("{mount}{name}/{key}");
+    let path = format!("{RESOURCE_MOUNT}secrets/{name}/{key}");
     make_request(&state, Operation::Delete, path, None).await?;
     Ok(())
 }

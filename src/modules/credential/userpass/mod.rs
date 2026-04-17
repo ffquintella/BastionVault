@@ -11,6 +11,10 @@ use crate::{
 };
 
 pub mod cli;
+pub mod path_fido2_config;
+pub mod path_fido2_credentials;
+pub mod path_fido2_login;
+pub mod path_fido2_register;
 pub mod path_login;
 pub mod path_users;
 
@@ -47,7 +51,7 @@ impl UserPassBackend {
         let userpass_backend_ref = self.inner.clone();
 
         let mut backend = new_logical_backend!({
-            unauth_paths: ["login/*"],
+            unauth_paths: ["login/*", "fido2/login/*", "fido2/config"],
             auth_renew_handler: userpass_backend_ref.login_renew,
             help: USERPASS_BACKEND_HELP,
         });
@@ -56,6 +60,13 @@ impl UserPassBackend {
         backend.paths.push(Arc::new(self.user_list_path()));
         backend.paths.push(Arc::new(self.user_password_path()));
         backend.paths.push(Arc::new(self.login_path()));
+        // FIDO2 paths
+        backend.paths.push(Arc::new(self.fido2_config_path()));
+        backend.paths.push(Arc::new(self.fido2_register_begin_path()));
+        backend.paths.push(Arc::new(self.fido2_register_complete_path()));
+        backend.paths.push(Arc::new(self.fido2_login_begin_path()));
+        backend.paths.push(Arc::new(self.fido2_login_complete_path()));
+        backend.paths.push(Arc::new(self.fido2_credentials_path()));
 
         backend
     }
