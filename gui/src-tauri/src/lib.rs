@@ -59,6 +59,8 @@ pub fn run() {
             commands::policies::write_policy,
             commands::policies::delete_policy,
             // Resources
+            commands::resources::resource_types_read,
+            commands::resources::resource_types_write,
             commands::resources::list_resources,
             commands::resources::read_resource,
             commands::resources::write_resource,
@@ -80,6 +82,7 @@ pub fn run() {
             // FIDO2
             commands::fido2_native::fido2_native_register,
             commands::fido2_native::fido2_native_login,
+            commands::fido2_native::fido2_submit_pin,
             commands::fido2::fido2_config_read,
             commands::fido2::fido2_config_write,
             commands::fido2::fido2_register_begin,

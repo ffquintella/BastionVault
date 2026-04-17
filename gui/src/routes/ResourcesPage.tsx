@@ -13,83 +13,52 @@ import {
   EmptyState,
   useToast,
 } from "../components/ui";
-import type { ResourceMetadata, MountInfo } from "../lib/types";
+import type { ResourceMetadata, ResourceTypeConfig, ResourceTypeDef, ResourceFieldDef } from "../lib/types";
+import { DEFAULT_RESOURCE_TYPES, mergeTypeConfig, getTypeDef } from "../lib/resourceTypes";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 
-const BUILT_IN_TYPES = [
-  { value: "server", label: "Server" },
-  { value: "network_device", label: "Network Device" },
-  { value: "website", label: "Website" },
-  { value: "database", label: "Database" },
-  { value: "application", label: "Application" },
-  { value: "_custom", label: "Custom..." },
-];
-
-const TYPE_LABELS: Record<string, string> = {
-  server: "Server",
-  network_device: "Network Device",
-  website: "Website",
-  database: "Database",
-  application: "Application",
-};
-
-const TYPE_BADGE_VARIANT: Record<string, "info" | "success" | "warning" | "error" | "neutral"> = {
-  server: "info",
-  network_device: "warning",
-  website: "success",
-  database: "error",
-  application: "neutral",
-};
-
-function emptyResource(): ResourceMetadata {
-  return {
-    _resource: true,
-    name: "",
-    type: "server",
-    hostname: "",
-    ip_address: "",
-    port: 0,
-    os: "",
-    location: "",
-    owner: "",
-    tags: [],
-    notes: "",
-    created_at: "",
-    updated_at: "",
-  };
+function parseTags(tags: unknown): string[] {
+  if (Array.isArray(tags)) return tags.filter(Boolean);
+  if (typeof tags === "string" && tags) return tags.split(",").map((t) => t.trim()).filter(Boolean);
+  return [];
 }
 
 export function ResourcesPage() {
   const { toast } = useToast();
-  const [mount, setMount] = useState("");
-  const [resources, setResources] = useState<string[]>([]);
+  const [, setResources] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
   const [resourceInfo, setResourceInfo] = useState<ResourceMetadata | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [detailTab, setDetailTab] = useState<"info" | "secrets">("info");
   const [filterType, setFilterType] = useState("");
   const [search, setSearch] = useState("");
-
-  // Store loaded metadata for filtering
   const [allMeta, setAllMeta] = useState<ResourceMetadata[]>([]);
+  const [typeConfig, setTypeConfig] = useState<ResourceTypeConfig>(DEFAULT_RESOURCE_TYPES);
 
   useEffect(() => {
-    if (mount) loadResources();
-  }, [mount]);
+    loadTypeConfig();
+    loadResources();
+  }, []);
+
+  async function loadTypeConfig() {
+    try {
+      const saved = await api.resourceTypesRead();
+      setTypeConfig(mergeTypeConfig(saved as ResourceTypeConfig | null));
+    } catch {
+      setTypeConfig(DEFAULT_RESOURCE_TYPES);
+    }
+  }
 
   async function loadResources() {
     setLoading(true);
     try {
-      const result = await api.listResources(mount);
+      const result = await api.listResources();
       setResources(result.resources);
-
-      // Load all metadata for cards
       const metas = await Promise.all(
-        result.resources.map((name) =>
-          api.readResource(mount, name).catch(() => null),
-        ),
+        result.resources.map((name) => api.readResource(name).catch(() => null)),
       );
       setAllMeta(metas.filter((m): m is ResourceMetadata => m !== null));
     } catch {
@@ -102,9 +71,10 @@ export function ResourcesPage() {
 
   async function selectResource(name: string) {
     try {
-      const info = await api.readResource(mount, name);
+      const info = await api.readResource(name);
       setSelected(name);
       setResourceInfo(info);
+      setDetailTab("info");
     } catch (e: unknown) {
       toast("error", extractError(e));
     }
@@ -113,12 +83,9 @@ export function ResourcesPage() {
   async function handleDelete() {
     if (!deleteTarget) return;
     try {
-      await api.deleteResource(mount, deleteTarget);
+      await api.deleteResource(deleteTarget);
       toast("success", `Resource ${deleteTarget} deleted`);
-      if (selected === deleteTarget) {
-        setSelected(null);
-        setResourceInfo(null);
-      }
+      if (selected === deleteTarget) { setSelected(null); setResourceInfo(null); }
       setDeleteTarget(null);
       loadResources();
     } catch (e: unknown) {
@@ -126,319 +93,142 @@ export function ResourcesPage() {
     }
   }
 
-  // Filter resources
   const filteredMeta = allMeta.filter((m) => {
     if (filterType && m.type !== filterType) return false;
     if (search) {
       const q = search.toLowerCase();
-      return (
-        m.name.toLowerCase().includes(q) ||
-        m.hostname.toLowerCase().includes(q) ||
-        m.ip_address.includes(q) ||
-        m.tags.some((t) => t.toLowerCase().includes(q))
-      );
+      const name = String(m.name || "").toLowerCase();
+      const hostname = String(m.hostname || "").toLowerCase();
+      const ip = String(m.ip_address || "");
+      const tags = String(m.tags || "").toLowerCase();
+      return name.includes(q) || hostname.includes(q) || ip.includes(q) || tags.includes(q);
     }
     return true;
   });
 
-  if (!mount) {
-    return (
-      <Layout>
-        <div className="max-w-4xl space-y-4">
-          <h1 className="text-2xl font-bold">Resources</h1>
-          <MountSelector onSelect={setMount} />
-        </div>
-      </Layout>
-    );
-  }
+  const typeOptions = Object.values(typeConfig).map((t) => ({ value: t.id, label: t.label }));
+  const filterOptions = [{ value: "", label: "All types" }, ...typeOptions];
 
+  // ── Detail view ──────────────────────────────────────────────────
   if (selected && resourceInfo) {
+    const typeDef = getTypeDef(typeConfig, String(resourceInfo.type || ""));
     return (
       <Layout>
-        <div className="max-w-5xl space-y-4">
+        <div className="space-y-4">
           <div className="flex items-center gap-3">
-            <button
-              onClick={() => {
-                setSelected(null);
-                setResourceInfo(null);
-              }}
-              className="text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
-            >
-              &larr; Back
-            </button>
-            <h1 className="text-2xl font-bold">{resourceInfo.name}</h1>
-            <Badge
-              label={TYPE_LABELS[resourceInfo.type] || resourceInfo.type}
-              variant={TYPE_BADGE_VARIANT[resourceInfo.type] || "neutral"}
-            />
+            <button onClick={() => { setSelected(null); setResourceInfo(null); }}
+              className="text-[var(--color-text-muted)] hover:text-[var(--color-text)]">&larr; Back</button>
+            <h1 className="text-2xl font-bold">{String(resourceInfo.name)}</h1>
+            <Badge label={typeDef.label} variant={typeDef.color} />
           </div>
-          <ResourceDetail
-            mount={mount}
-            resource={resourceInfo}
-            onUpdate={() => selectResource(selected)}
-            onDelete={() => setDeleteTarget(selected)}
-            toast={toast}
-          />
-          <ConfirmModal
-            open={deleteTarget !== null}
-            onClose={() => setDeleteTarget(null)}
-            onConfirm={handleDelete}
-            title="Delete Resource"
-            message={`Delete "${deleteTarget}" and ALL its secrets? This cannot be undone.`}
-            confirmLabel="Delete"
-          />
+
+          <Card>
+            <Tabs tabs={[{ id: "info", label: "Info" }, { id: "secrets", label: "Secrets" }]}
+              active={detailTab} onChange={(t) => setDetailTab(t as "info" | "secrets")} />
+          </Card>
+
+          {detailTab === "info" && (
+            <ResourceInfoCard
+              resource={resourceInfo}
+              typeDef={typeDef}
+              onUpdate={() => selectResource(selected)}
+              onDelete={() => setDeleteTarget(selected)}
+              toast={toast}
+            />
+          )}
+
+          {detailTab === "secrets" && (
+            <ResourceSecretsPanel resourceName={String(resourceInfo.name)} toast={toast} />
+          )}
+
+          <ConfirmModal open={deleteTarget !== null} onClose={() => setDeleteTarget(null)}
+            onConfirm={handleDelete} title="Delete Resource"
+            message={`Delete "${deleteTarget}" and all its secrets? This cannot be undone.`}
+            confirmLabel="Delete" />
         </div>
       </Layout>
     );
   }
 
+  // ── List view ────────────────────────────────────────────────────
   return (
     <Layout>
-      <div className="max-w-5xl space-y-4">
+      <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">Resources</h1>
-          <div className="flex gap-2">
-            <button
-              onClick={() => setMount("")}
-              className="text-sm text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-            >
-              Change mount
-            </button>
-            <Button size="sm" onClick={() => setShowCreate(true)}>
-              Add Resource
-            </Button>
-          </div>
+          <Button size="sm" onClick={() => setShowCreate(true)}>Add Resource</Button>
         </div>
 
-        {/* Filters */}
         <div className="flex gap-3">
-          <Input
-            placeholder="Search by name, hostname, IP, or tag..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="flex-1"
-          />
-          <select
-            value={filterType}
-            onChange={(e) => setFilterType(e.target.value)}
-            className="bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm"
-          >
-            <option value="">All types</option>
-            {BUILT_IN_TYPES.filter((t) => t.value !== "_custom").map((t) => (
-              <option key={t.value} value={t.value}>
-                {t.label}
-              </option>
-            ))}
-          </select>
+          <Input placeholder="Search by name, hostname" value={search}
+            onChange={(e) => setSearch(e.target.value)} />
+          <Select value={filterType} onChange={(e) => setFilterType(e.target.value)}
+            options={filterOptions} />
         </div>
 
-        {/* Resource grid */}
         {loading ? (
-          <p className="text-sm text-[var(--color-text-muted)] py-8 text-center">Loading...</p>
+          <p className="text-sm text-[var(--color-text-muted)]">Loading...</p>
         ) : filteredMeta.length === 0 ? (
-          <EmptyState
-            title={resources.length === 0 ? "No resources" : "No matching resources"}
-            description={
-              resources.length === 0
-                ? "Add your first resource to start organizing secrets by infrastructure"
-                : "Try a different search or filter"
-            }
-            action={
-              resources.length === 0 ? (
-                <Button size="sm" onClick={() => setShowCreate(true)}>
-                  Add Resource
-                </Button>
-              ) : undefined
-            }
-          />
+          <EmptyState title="No resources"
+            description="Add your first resource to start organizing secrets by infrastructure"
+            action={<Button size="sm" onClick={() => setShowCreate(true)}>Add Resource</Button>} />
         ) : (
-          <div className="grid grid-cols-2 gap-3">
-            {filteredMeta.map((meta) => (
-              <ResourceCard
-                key={meta.name}
-                meta={meta}
-                onClick={() => selectResource(meta.name)}
-              />
-            ))}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {filteredMeta.map((meta) => {
+              const td = getTypeDef(typeConfig, String(meta.type));
+              return (
+                <button key={String(meta.name)} onClick={() => selectResource(String(meta.name))}
+                  className="p-4 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-xl text-left hover:border-[var(--color-primary)] transition-colors">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="font-medium truncate">{String(meta.name)}</span>
+                    <Badge label={td.label} variant={td.color} />
+                  </div>
+                  {meta.hostname ? <p className="text-xs text-[var(--color-text-muted)] truncate">{String(meta.hostname)}{meta.ip_address ? ` (${String(meta.ip_address)})` : ""}</p> : null}
+                  {parseTags(meta.tags).length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-2">
+                      {parseTags(meta.tags).slice(0, 4).map((t) => (
+                        <span key={t} className="px-1.5 py-0.5 bg-[var(--color-bg)] rounded text-[10px] text-[var(--color-text-muted)]">{t}</span>
+                      ))}
+                    </div>
+                  )}
+                </button>
+              );
+            })}
           </div>
         )}
 
-        <CreateResourceModal
-          open={showCreate}
-          onClose={() => setShowCreate(false)}
-          mount={mount}
-          onCreated={(name) => {
-            setShowCreate(false);
-            loadResources();
-            selectResource(name);
-          }}
-          toast={toast}
-        />
+        <CreateResourceModal open={showCreate} onClose={() => setShowCreate(false)}
+          typeConfig={typeConfig}
+          onCreated={() => { setShowCreate(false); loadResources(); }}
+          toast={toast} />
+
+        <ConfirmModal open={deleteTarget !== null} onClose={() => setDeleteTarget(null)}
+          onConfirm={handleDelete} title="Delete Resource"
+          message={`Delete "${deleteTarget}" and all its secrets?`} confirmLabel="Delete" />
       </div>
     </Layout>
   );
 }
 
-// ── Resource Card ──────────────────────────────────────────────────
+// ── Resource Info Card ─────────────────────────────────────────────
 
-function ResourceCard({
-  meta,
-  onClick,
-}: {
-  meta: ResourceMetadata;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className="p-4 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-xl text-left
-        hover:border-[var(--color-primary)] hover:bg-[var(--color-surface-hover)] transition-colors"
-    >
-      <div className="flex items-center justify-between mb-2">
-        <span className="font-medium text-[var(--color-text)]">{meta.name}</span>
-        <Badge
-          label={TYPE_LABELS[meta.type] || meta.type}
-          variant={TYPE_BADGE_VARIANT[meta.type] || "neutral"}
-        />
-      </div>
-      {(meta.hostname || meta.ip_address) && (
-        <p className="text-xs font-mono text-[var(--color-text-muted)] mb-2">
-          {meta.hostname || meta.ip_address}
-          {meta.port > 0 ? `:${meta.port}` : ""}
-        </p>
-      )}
-      {meta.tags.length > 0 && (
-        <div className="flex flex-wrap gap-1">
-          {meta.tags.slice(0, 4).map((tag) => (
-            <span
-              key={tag}
-              className="px-1.5 py-0.5 bg-[var(--color-bg)] rounded text-[10px] text-[var(--color-text-muted)]"
-            >
-              {tag}
-            </span>
-          ))}
-          {meta.tags.length > 4 && (
-            <span className="text-[10px] text-[var(--color-text-muted)]">
-              +{meta.tags.length - 4}
-            </span>
-          )}
-        </div>
-      )}
-    </button>
-  );
-}
-
-// ── Mount Selector ─────────────────────────────────────────────────
-
-function MountSelector({ onSelect }: { onSelect: (path: string) => void }) {
-  const [mounts, setMounts] = useState<MountInfo[]>([]);
-
-  useEffect(() => {
-    api.listMounts().then(setMounts).catch(() => {});
-  }, []);
-
-  const kvMounts = mounts.filter(
-    (m) => m.mount_type === "kv" || m.mount_type === "kv-v2",
-  );
-
-  if (kvMounts.length === 0) {
-    return (
-      <EmptyState
-        title="No KV engines mounted"
-        description="Mount a KV secret engine from the Mounts page to use Resources"
-      />
-    );
-  }
-
-  return (
-    <div className="grid grid-cols-3 gap-3">
-      {kvMounts.map((m) => (
-        <button
-          key={m.path}
-          onClick={() => onSelect(m.path)}
-          className="p-4 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-xl text-left
-            hover:border-[var(--color-primary)] hover:bg-[var(--color-surface-hover)] transition-colors"
-        >
-          <div className="font-mono text-[var(--color-primary)] font-medium">{m.path}</div>
-          <div className="text-xs text-[var(--color-text-muted)] mt-1">{m.mount_type}</div>
-        </button>
-      ))}
-    </div>
-  );
-}
-
-// ── Resource Detail ────────────────────────────────────────────────
-
-function ResourceDetail({
-  mount,
-  resource,
-  onUpdate,
-  onDelete,
-  toast,
-}: {
-  mount: string;
+function ResourceInfoCard({ resource, typeDef, onUpdate, onDelete, toast }: {
   resource: ResourceMetadata;
+  typeDef: ResourceTypeDef;
   onUpdate: () => void;
   onDelete: () => void;
-  toast: (type: "success" | "error" | "info", message: string) => void;
-}) {
-  const [tab, setTab] = useState("info");
-
-  return (
-    <>
-      <Card>
-        <Tabs
-          tabs={[
-            { id: "info", label: "Info" },
-            { id: "secrets", label: "Secrets" },
-          ]}
-          active={tab}
-          onChange={setTab}
-        />
-      </Card>
-
-      {tab === "info" && (
-        <ResourceInfoTab
-          mount={mount}
-          resource={resource}
-          onUpdate={onUpdate}
-          onDelete={onDelete}
-          toast={toast}
-        />
-      )}
-
-      {tab === "secrets" && (
-        <ResourceSecretsTab mount={mount} resourceName={resource.name} toast={toast} />
-      )}
-    </>
-  );
-}
-
-// ── Info Tab ───────────────────────────────────────────────────────
-
-function ResourceInfoTab({
-  mount,
-  resource,
-  onUpdate,
-  onDelete,
-  toast,
-}: {
-  mount: string;
-  resource: ResourceMetadata;
-  onUpdate: () => void;
-  onDelete: () => void;
-  toast: (type: "success" | "error" | "info", message: string) => void;
+  toast: (type: "success" | "error" | "info", msg: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState(resource);
+  const [form, setForm] = useState<Record<string, unknown>>({ ...resource });
 
-  function updateField(field: string, value: string | number | string[]) {
-    setForm((prev) => ({ ...prev, [field]: value }));
+  function updateField(key: string, value: unknown) {
+    setForm((prev) => ({ ...prev, [key]: value }));
   }
 
   async function handleSave() {
     try {
-      await api.writeResource(mount, resource.name, form);
+      await api.writeResource(String(resource.name), form as ResourceMetadata);
       toast("success", "Resource updated");
       setEditing(false);
       onUpdate();
@@ -449,102 +239,204 @@ function ResourceInfoTab({
 
   if (!editing) {
     return (
-      <Card
-        actions={
-          <div className="flex gap-2">
-            <Button size="sm" variant="secondary" onClick={() => setEditing(true)}>
-              Edit
-            </Button>
-            <Button size="sm" variant="danger" onClick={onDelete}>
-              Delete
-            </Button>
-          </div>
-        }
-      >
+      <Card actions={
+        <div className="flex gap-2">
+          <Button size="sm" variant="ghost" onClick={() => { setForm({ ...resource }); setEditing(true); }}>Edit</Button>
+          <Button size="sm" variant="danger" onClick={onDelete}>Delete</Button>
+        </div>
+      }>
         <div className="grid grid-cols-2 gap-4 text-sm">
-          <InfoRow label="Type" value={TYPE_LABELS[resource.type] || resource.type} />
-          <InfoRow label="Hostname" value={resource.hostname} />
-          <InfoRow label="IP Address" value={resource.ip_address} />
-          <InfoRow label="Port" value={resource.port > 0 ? String(resource.port) : "-"} />
-          <InfoRow label="OS" value={resource.os} />
-          <InfoRow label="Location" value={resource.location} />
-          <InfoRow label="Owner" value={resource.owner} />
+          {typeDef.fields.map((f) => (
+            <div key={f.key}>
+              <span className="text-[var(--color-text-muted)] text-xs">{f.label}</span>
+              <p className="font-mono text-sm">{String(resource[f.key] ?? "-")}</p>
+            </div>
+          ))}
           <div className="col-span-2">
-            <span className="text-[var(--color-text-muted)]">Tags</span>
+            <span className="text-[var(--color-text-muted)] text-xs">Tags</span>
             <div className="flex flex-wrap gap-1 mt-1">
-              {resource.tags.length > 0
-                ? resource.tags.map((t) => <Badge key={t} label={t} variant="neutral" />)
+              {parseTags(resource.tags).length > 0
+                ? parseTags(resource.tags).map((t) => <Badge key={t} label={t} variant="neutral" />)
                 : <span className="text-[var(--color-text-muted)]">-</span>}
             </div>
           </div>
           {resource.notes && (
             <div className="col-span-2">
-              <span className="text-[var(--color-text-muted)]">Notes</span>
-              <p className="mt-1 whitespace-pre-wrap">{resource.notes}</p>
+              <span className="text-[var(--color-text-muted)] text-xs">Notes</span>
+              <p className="whitespace-pre-wrap text-sm">{String(resource.notes)}</p>
             </div>
           )}
-          <InfoRow label="Created" value={resource.created_at ? new Date(resource.created_at).toLocaleString() : "-"} />
-          <InfoRow label="Updated" value={resource.updated_at ? new Date(resource.updated_at).toLocaleString() : "-"} />
+          <div>
+            <span className="text-[var(--color-text-muted)] text-xs">Created</span>
+            <p className="text-xs">{resource.created_at ? new Date(String(resource.created_at)).toLocaleString() : "-"}</p>
+          </div>
+          <div>
+            <span className="text-[var(--color-text-muted)] text-xs">Updated</span>
+            <p className="text-xs">{resource.updated_at ? new Date(String(resource.updated_at)).toLocaleString() : "-"}</p>
+          </div>
         </div>
       </Card>
     );
   }
 
   return (
-    <Card
-      actions={
-        <div className="flex gap-2">
-          <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
-            Cancel
-          </Button>
-          <Button size="sm" onClick={handleSave}>
-            Save
-          </Button>
-        </div>
-      }
-    >
-      <div className="grid grid-cols-2 gap-3">
-        <Input label="Hostname" value={form.hostname} onChange={(e) => updateField("hostname", e.target.value)} />
-        <Input label="IP Address" value={form.ip_address} onChange={(e) => updateField("ip_address", e.target.value)} />
-        <Input label="Port" type="number" value={String(form.port || "")} onChange={(e) => updateField("port", parseInt(e.target.value) || 0)} />
-        <Input label="OS" value={form.os} onChange={(e) => updateField("os", e.target.value)} />
-        <Input label="Location" value={form.location} onChange={(e) => updateField("location", e.target.value)} />
-        <Input label="Owner" value={form.owner} onChange={(e) => updateField("owner", e.target.value)} />
-        <div className="col-span-2">
-          <Input
-            label="Tags"
-            value={form.tags.join(", ")}
-            onChange={(e) => updateField("tags", e.target.value.split(",").map((t) => t.trim()).filter(Boolean))}
-            hint="Comma-separated"
-          />
-        </div>
-        <div className="col-span-2">
-          <Textarea label="Notes" value={form.notes} onChange={(e) => updateField("notes", e.target.value)} />
-        </div>
+    <Card actions={
+      <div className="flex gap-2">
+        <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>Cancel</Button>
+        <Button size="sm" onClick={handleSave}>Save</Button>
+      </div>
+    }>
+      <DynamicFieldsForm fields={typeDef.fields} values={form} onChange={updateField} showErrors />
+      <div className="mt-3 space-y-3">
+        <Input label="Tags" value={String(form.tags ?? "")} onChange={(e) => updateField("tags", e.target.value)}
+          placeholder="production, web" hint="Comma-separated" />
+        <Textarea label="Notes" value={String(form.notes ?? "")} onChange={(e) => updateField("notes", e.target.value)} />
       </div>
     </Card>
   );
 }
 
-function InfoRow({ label, value }: { label: string; value: string }) {
+// ── Validation ─────────────────────────────────────────────────────
+
+const IPV4_RE = /^(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)$/;
+const IPV6_RE = /^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$/;
+const FQDN_RE = /^(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.[A-Za-z0-9-]{1,63})*\.?$/;
+
+function validateField(type: string, value: string): string | null {
+  if (!value) return null; // empty is OK (not required)
+  switch (type) {
+    case "ip":
+      if (!IPV4_RE.test(value) && !IPV6_RE.test(value))
+        return "Invalid IP address (IPv4 or IPv6)";
+      return null;
+    case "fqdn":
+      if (!FQDN_RE.test(value) || value.length > 253)
+        return "Invalid hostname (FQDN)";
+      return null;
+    case "url":
+      try { new URL(value); return null; }
+      catch { return "Invalid URL"; }
+    default:
+      return null;
+  }
+}
+
+// ── Dynamic Fields Form ────────────────────────────────────────────
+
+function DynamicFieldsForm({ fields, values, onChange, showErrors }: {
+  fields: ResourceFieldDef[];
+  values: Record<string, unknown>;
+  onChange: (key: string, value: unknown) => void;
+  showErrors?: boolean;
+}) {
   return (
-    <div>
-      <span className="text-[var(--color-text-muted)] text-xs">{label}</span>
-      <p className="font-mono text-sm">{value || "-"}</p>
+    <div className="grid grid-cols-2 gap-3">
+      {fields.map((f) => {
+        const val = String(values[f.key] ?? "");
+        const error = showErrors ? validateField(f.type, val) : null;
+        return (
+          <div key={f.key}>
+            <Input
+              label={f.label}
+              type={f.type === "number" ? "number" : "text"}
+              value={val}
+              onChange={(e) => onChange(f.key, f.type === "number" ? (parseInt(e.target.value) || 0) : e.target.value)}
+              placeholder={f.placeholder}
+              hint={f.type === "ip" ? "IPv4 or IPv6" : f.type === "fqdn" ? "Fully qualified domain name" : undefined}
+            />
+            {error && <p className="text-xs text-[var(--color-danger)] mt-0.5">{error}</p>}
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-// ── Secrets Tab ────────────────────────────────────────────────────
+/** Check if all validated fields pass. */
+function hasValidationErrors(fields: ResourceFieldDef[], values: Record<string, unknown>): boolean {
+  return fields.some((f) => validateField(f.type, String(values[f.key] ?? "")) !== null);
+}
 
-function ResourceSecretsTab({
-  mount,
-  resourceName,
-  toast,
-}: {
-  mount: string;
+// ── Create Resource Modal ──────────────────────────────────────────
+
+function CreateResourceModal({ open, onClose, typeConfig, onCreated, toast }: {
+  open: boolean;
+  onClose: () => void;
+  typeConfig: ResourceTypeConfig;
+  onCreated: () => void;
+  toast: (type: "success" | "error" | "info", msg: string) => void;
+}) {
+  const [name, setName] = useState("");
+  const [typeId, setTypeId] = useState(Object.keys(typeConfig)[0] || "server");
+  const [customType, setCustomType] = useState("");
+  const [fields, setFields] = useState<Record<string, unknown>>({});
+  const [tags, setTags] = useState("");
+  const [notes, setNotes] = useState("");
+
+  const typeOptions = [
+    ...Object.values(typeConfig).map((t) => ({ value: t.id, label: t.label })),
+    { value: "_custom", label: "Custom..." },
+  ];
+  const typeDef = typeId === "_custom" ? null : getTypeDef(typeConfig, typeId);
+
+  function updateField(key: string, value: unknown) {
+    setFields((prev) => ({ ...prev, [key]: value }));
+  }
+
+  async function handleCreate() {
+    if (!name) return;
+    const resolvedType = typeId === "_custom" ? customType : typeId;
+    const meta: ResourceMetadata = {
+      name,
+      type: resolvedType,
+      tags,
+      notes,
+      created_at: "",
+      updated_at: "",
+      ...fields,
+    };
+    try {
+      await api.writeResource(name, meta);
+      toast("success", `Resource ${name} created`);
+      setName(""); setTypeId(Object.keys(typeConfig)[0] || "server");
+      setCustomType(""); setFields({}); setTags(""); setNotes("");
+      onCreated();
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title="Add Resource" size="lg"
+      actions={<>
+        <Button variant="ghost" onClick={onClose}>Cancel</Button>
+        <Button onClick={handleCreate} disabled={!name || (typeId === "_custom" && !customType) || (typeDef ? hasValidationErrors(typeDef.fields, fields) : false)}>Create</Button>
+      </>}>
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 gap-3">
+          <Input label="Name" value={name} onChange={(e) => setName(e.target.value)} placeholder="web-server-01" />
+          <div className="space-y-1">
+            <Select label="Type" value={typeId} onChange={(e) => { setTypeId(e.target.value); setFields({}); }} options={typeOptions} />
+            {typeId === "_custom" && (
+              <Input placeholder="Custom type name" value={customType} onChange={(e) => setCustomType(e.target.value)} />
+            )}
+          </div>
+        </div>
+        {typeDef && <DynamicFieldsForm fields={typeDef.fields} values={fields} onChange={updateField} showErrors />}
+        <Input label="Tags" value={tags} onChange={(e) => setTags(e.target.value)}
+          placeholder="production, web, linux" hint="Comma-separated" />
+        <Textarea label="Notes" value={notes} onChange={(e) => setNotes(e.target.value)}
+          placeholder="Additional information..." />
+      </div>
+    </Modal>
+  );
+}
+
+// ── Resource Secrets Panel ─────────────────────────────────────────
+
+function ResourceSecretsPanel({ resourceName, toast }: {
   resourceName: string;
-  toast: (type: "success" | "error" | "info", message: string) => void;
+  toast: (type: "success" | "error" | "info", msg: string) => void;
 }) {
   const [keys, setKeys] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
@@ -552,17 +444,17 @@ function ResourceSecretsTab({
   const [secretData, setSecretData] = useState<Record<string, unknown>>({});
   const [showCreate, setShowCreate] = useState(false);
   const [newKey, setNewKey] = useState("");
-  const [newPairs, setNewPairs] = useState([{ key: "", value: "" }]);
+  const [editPairs, setEditPairs] = useState<{ key: string; value: string }[]>([{ key: "", value: "" }]);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
   useEffect(() => {
-    loadKeys();
+    loadSecrets();
   }, [resourceName]);
 
-  async function loadKeys() {
+  async function loadSecrets() {
     setLoading(true);
     try {
-      const result = await api.listResourceSecrets(mount, resourceName);
+      const result = await api.listResourceSecrets(resourceName);
       setKeys(result.keys);
     } catch {
       setKeys([]);
@@ -571,9 +463,9 @@ function ResourceSecretsTab({
     }
   }
 
-  async function handleSelect(key: string) {
+  async function handleSelectKey(key: string) {
     try {
-      const result = await api.readResourceSecret(mount, resourceName, key);
+      const result = await api.readResourceSecret(resourceName, key);
       setSelectedKey(key);
       setSecretData(result.data);
     } catch (e: unknown) {
@@ -584,16 +476,16 @@ function ResourceSecretsTab({
   async function handleCreate() {
     if (!newKey) return;
     const data: Record<string, string> = {};
-    for (const p of newPairs) {
-      if (p.key) data[p.key] = p.value;
+    for (const pair of editPairs) {
+      if (pair.key) data[pair.key] = pair.value;
     }
     try {
-      await api.writeResourceSecret(mount, resourceName, newKey, data);
-      toast("success", `Secret ${newKey} created`);
+      await api.writeResourceSecret(resourceName, newKey, data);
+      toast("success", `Secret "${newKey}" created`);
       setShowCreate(false);
       setNewKey("");
-      setNewPairs([{ key: "", value: "" }]);
-      loadKeys();
+      setEditPairs([{ key: "", value: "" }]);
+      loadSecrets();
     } catch (e: unknown) {
       toast("error", extractError(e));
     }
@@ -602,14 +494,11 @@ function ResourceSecretsTab({
   async function handleDelete() {
     if (!deleteTarget) return;
     try {
-      await api.deleteResourceSecret(mount, resourceName, deleteTarget);
-      toast("success", `Secret ${deleteTarget} deleted`);
-      if (selectedKey === deleteTarget) {
-        setSelectedKey(null);
-        setSecretData({});
-      }
+      await api.deleteResourceSecret(resourceName, deleteTarget);
+      toast("success", `Secret "${deleteTarget}" deleted`);
+      if (selectedKey === deleteTarget) { setSelectedKey(null); setSecretData({}); }
       setDeleteTarget(null);
-      loadKeys();
+      loadSecrets();
     } catch (e: unknown) {
       toast("error", extractError(e));
     }
@@ -617,38 +506,22 @@ function ResourceSecretsTab({
 
   return (
     <>
-      <Card
-        title="Secrets"
-        actions={
-          <Button size="sm" onClick={() => setShowCreate(true)}>
-            Add Secret
-          </Button>
-        }
-      >
+      <Card title="Secrets" actions={
+        <Button size="sm" onClick={() => setShowCreate(true)}>Add Secret</Button>
+      }>
         {loading ? (
           <p className="text-sm text-[var(--color-text-muted)]">Loading...</p>
         ) : keys.length === 0 ? (
-          <EmptyState title="No secrets" description="Add credentials for this resource" />
+          <EmptyState title="No secrets" description="Add credentials, API keys, or other secrets for this resource." />
         ) : (
           <div className="space-y-1">
             {keys.map((key) => (
-              <div key={key} className="flex items-center group">
-                <button
-                  onClick={() => handleSelect(key)}
-                  className={`flex-1 text-left px-3 py-1.5 rounded text-sm transition-colors ${
-                    selectedKey === key
-                      ? "bg-[var(--color-primary)] text-white"
-                      : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                  }`}
-                >
+              <div key={key} className="flex items-center justify-between py-1.5 border-b border-[var(--color-border)] last:border-0">
+                <button onClick={() => handleSelectKey(key)}
+                  className={`text-sm font-mono text-left hover:text-[var(--color-primary)] transition-colors ${selectedKey === key ? "text-[var(--color-primary)]" : "text-[var(--color-text-muted)]"}`}>
                   {key}
                 </button>
-                <button
-                  onClick={() => setDeleteTarget(key)}
-                  className="opacity-0 group-hover:opacity-100 px-2 text-[var(--color-danger)] text-xs"
-                >
-                  &times;
-                </button>
+                <Button size="sm" variant="danger" onClick={() => setDeleteTarget(key)}>Delete</Button>
               </div>
             ))}
           </div>
@@ -656,166 +529,60 @@ function ResourceSecretsTab({
       </Card>
 
       {selectedKey && (
-        <Card title={selectedKey}>
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-[var(--color-text-muted)] text-left">
-                <th className="pb-2 font-medium">Key</th>
-                <th className="pb-2 font-medium">Value</th>
-              </tr>
-            </thead>
-            <tbody>
-              {Object.entries(secretData).map(([k, v]) => (
-                <tr key={k} className="border-t border-[var(--color-border)]">
-                  <td className="py-2 font-mono text-[var(--color-primary)]">{k}</td>
-                  <td className="py-2 font-mono">
-                    <MaskedValue value={String(v)} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <Card title={`Secret: ${selectedKey}`}>
+          <div className="space-y-2">
+            {Object.entries(secretData).map(([k, v]) => (
+              <div key={k} className="flex justify-between items-center py-1.5 border-b border-[var(--color-border)]">
+                <span className="text-sm text-[var(--color-text-muted)]">{k}</span>
+                <code className="text-sm font-mono bg-[var(--color-bg)] px-2 py-0.5 rounded">{String(v)}</code>
+              </div>
+            ))}
+            {Object.keys(secretData).length === 0 && (
+              <p className="text-sm text-[var(--color-text-muted)]">Empty secret.</p>
+            )}
+          </div>
         </Card>
       )}
 
-      <Modal
-        open={showCreate}
-        onClose={() => setShowCreate(false)}
-        title="Add Secret"
-        actions={
-          <>
-            <Button variant="ghost" onClick={() => setShowCreate(false)}>Cancel</Button>
-            <Button onClick={handleCreate} disabled={!newKey}>Create</Button>
-          </>
-        }
-      >
+      {/* Create secret modal */}
+      <Modal open={showCreate} onClose={() => setShowCreate(false)} title="Add Secret" size="md"
+        actions={<>
+          <Button variant="ghost" onClick={() => setShowCreate(false)}>Cancel</Button>
+          <Button onClick={handleCreate} disabled={!newKey}>Create</Button>
+        </>}>
         <div className="space-y-3">
-          <Input label="Secret Name" value={newKey} onChange={(e) => setNewKey(e.target.value)} placeholder="admin-password" />
-          <div className="space-y-2">
-            <label className="block text-sm font-medium text-[var(--color-text-muted)]">Key-Value Pairs</label>
-            {newPairs.map((pair, i) => (
-              <div key={i} className="flex gap-2">
-                <Input placeholder="key" value={pair.key} onChange={(e) => {
-                  const u = [...newPairs]; u[i] = { ...pair, key: e.target.value }; setNewPairs(u);
-                }} />
-                <Input placeholder="value" type="password" value={pair.value} onChange={(e) => {
-                  const u = [...newPairs]; u[i] = { ...pair, value: e.target.value }; setNewPairs(u);
-                }} />
-                {newPairs.length > 1 && (
-                  <Button variant="ghost" size="sm" onClick={() => setNewPairs(newPairs.filter((_, j) => j !== i))}>&times;</Button>
+          <Input label="Key Name" value={newKey} onChange={(e) => setNewKey(e.target.value)}
+            placeholder="ssh_key, api_token, password" />
+          <div>
+            <label className="block text-sm text-[var(--color-text-muted)] mb-1">Key-Value Pairs</label>
+            {editPairs.map((pair, i) => (
+              <div key={i} className="flex gap-2 mb-2">
+                <Input value={pair.key} onChange={(e) => {
+                  const updated = [...editPairs];
+                  updated[i] = { ...pair, key: e.target.value };
+                  setEditPairs(updated);
+                }} placeholder="key" />
+                <Input value={pair.value} type="password" onChange={(e) => {
+                  const updated = [...editPairs];
+                  updated[i] = { ...pair, value: e.target.value };
+                  setEditPairs(updated);
+                }} placeholder="value" />
+                {editPairs.length > 1 && (
+                  <button onClick={() => setEditPairs(editPairs.filter((_, j) => j !== i))}
+                    className="text-[var(--color-danger)] text-lg shrink-0">&times;</button>
                 )}
               </div>
             ))}
-            <Button variant="ghost" size="sm" onClick={() => setNewPairs([...newPairs, { key: "", value: "" }])}>+ Add pair</Button>
+            <button onClick={() => setEditPairs([...editPairs, { key: "", value: "" }])}
+              className="text-xs text-[var(--color-primary)] hover:underline">+ Add pair</button>
           </div>
         </div>
       </Modal>
 
-      <ConfirmModal
-        open={deleteTarget !== null}
-        onClose={() => setDeleteTarget(null)}
-        onConfirm={handleDelete}
-        title="Delete Secret"
-        message={`Delete secret "${deleteTarget}"?`}
-        confirmLabel="Delete"
-      />
+      <ConfirmModal open={deleteTarget !== null} onClose={() => setDeleteTarget(null)}
+        onConfirm={handleDelete} title="Delete Secret"
+        message={`Delete secret "${deleteTarget}"? This cannot be undone.`}
+        confirmLabel="Delete" />
     </>
-  );
-}
-
-function MaskedValue({ value }: { value: string }) {
-  const [visible, setVisible] = useState(false);
-  return (
-    <span className="inline-flex items-center gap-2">
-      <span className={visible ? "" : "blur-sm select-none"}>{value}</span>
-      <button onClick={() => setVisible(!visible)} className="text-xs text-[var(--color-primary)] hover:underline shrink-0">
-        {visible ? "Hide" : "Show"}
-      </button>
-    </span>
-  );
-}
-
-// ── Create Resource Modal ──────────────────────────────────────────
-
-function CreateResourceModal({
-  open,
-  onClose,
-  mount,
-  onCreated,
-  toast,
-}: {
-  open: boolean;
-  onClose: () => void;
-  mount: string;
-  onCreated: (name: string) => void;
-  toast: (type: "success" | "error" | "info", message: string) => void;
-}) {
-  const [form, setForm] = useState(emptyResource());
-  const [customType, setCustomType] = useState("");
-  const [typeSelect, setTypeSelect] = useState("server");
-
-  function updateField(field: string, value: string | number | string[]) {
-    setForm((prev) => ({ ...prev, [field]: value }));
-  }
-
-  async function handleCreate() {
-    if (!form.name) return;
-    const meta = {
-      ...form,
-      type: typeSelect === "_custom" ? customType : typeSelect,
-    };
-    try {
-      await api.writeResource(mount, form.name, meta);
-      toast("success", `Resource ${form.name} created`);
-      setForm(emptyResource());
-      setTypeSelect("server");
-      setCustomType("");
-      onCreated(form.name);
-    } catch (e: unknown) {
-      toast("error", extractError(e));
-    }
-  }
-
-  return (
-    <Modal
-      open={open}
-      onClose={onClose}
-      title="Add Resource"
-      size="lg"
-      actions={
-        <>
-          <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button onClick={handleCreate} disabled={!form.name || (typeSelect === "_custom" && !customType)}>Create</Button>
-        </>
-      }
-    >
-      <div className="grid grid-cols-2 gap-3">
-        <Input label="Name" value={form.name} onChange={(e) => updateField("name", e.target.value)} placeholder="web-server-01" />
-        <div className="space-y-1">
-          <Select label="Type" value={typeSelect} onChange={(e) => setTypeSelect(e.target.value)} options={BUILT_IN_TYPES} />
-          {typeSelect === "_custom" && (
-            <Input placeholder="Custom type name" value={customType} onChange={(e) => setCustomType(e.target.value)} />
-          )}
-        </div>
-        <Input label="Hostname" value={form.hostname} onChange={(e) => updateField("hostname", e.target.value)} placeholder="web01.example.com" />
-        <Input label="IP Address" value={form.ip_address} onChange={(e) => updateField("ip_address", e.target.value)} placeholder="10.0.1.50" />
-        <Input label="Port" type="number" value={String(form.port || "")} onChange={(e) => updateField("port", parseInt(e.target.value) || 0)} placeholder="22" />
-        <Input label="OS" value={form.os} onChange={(e) => updateField("os", e.target.value)} placeholder="Ubuntu 24.04" />
-        <Input label="Location" value={form.location} onChange={(e) => updateField("location", e.target.value)} placeholder="us-east-1" />
-        <Input label="Owner" value={form.owner} onChange={(e) => updateField("owner", e.target.value)} placeholder="infra-team" />
-        <div className="col-span-2">
-          <Input
-            label="Tags"
-            value={form.tags.join(", ")}
-            onChange={(e) => updateField("tags", e.target.value.split(",").map((t) => t.trim()).filter(Boolean))}
-            placeholder="production, web, linux"
-            hint="Comma-separated"
-          />
-        </div>
-        <div className="col-span-2">
-          <Textarea label="Notes" value={form.notes} onChange={(e) => updateField("notes", e.target.value)} placeholder="Additional information about this resource..." />
-        </div>
-      </div>
-    </Modal>
   );
 }

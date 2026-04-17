@@ -41,9 +41,27 @@ async fn make_request(
         .map_err(CommandError::from)
 }
 
+/// Adjust a KV path for v2 by inserting the appropriate prefix after the mount.
+fn adjust_kv_path(path: &str, mount: &str, mount_type: &str, prefix: &str) -> String {
+    if mount_type == "kv-v2" && !mount.is_empty() {
+        let rel = path.strip_prefix(mount).unwrap_or(path);
+        format!("{mount}{prefix}/{rel}")
+    } else {
+        path.to_string()
+    }
+}
+
 #[tauri::command]
-pub async fn list_secrets(state: State<'_, AppState>, path: String) -> CmdResult<SecretListResult> {
-    let resp = make_request(&state, Operation::List, path, None).await?;
+pub async fn list_secrets(
+    state: State<'_, AppState>,
+    path: String,
+    mount: Option<String>,
+    mount_type: Option<String>,
+) -> CmdResult<SecretListResult> {
+    let m = mount.as_deref().unwrap_or("");
+    let mt = mount_type.as_deref().unwrap_or("kv");
+    let actual_path = adjust_kv_path(&path, m, mt, "metadata");
+    let resp = make_request(&state, Operation::List, actual_path, None).await?;
 
     match resp {
         Some(r) => {
@@ -63,15 +81,31 @@ pub async fn list_secrets(state: State<'_, AppState>, path: String) -> CmdResult
 }
 
 #[tauri::command]
-pub async fn read_secret(state: State<'_, AppState>, path: String) -> CmdResult<SecretData> {
-    let resp = make_request(&state, Operation::Read, path, None).await?;
+pub async fn read_secret(
+    state: State<'_, AppState>,
+    path: String,
+    mount: Option<String>,
+    mount_type: Option<String>,
+) -> CmdResult<SecretData> {
+    let m = mount.as_deref().unwrap_or("");
+    let mt = mount_type.as_deref().unwrap_or("kv");
+    let actual_path = adjust_kv_path(&path, m, mt, "data");
+    let resp = make_request(&state, Operation::Read, actual_path, None).await?;
 
     match resp {
         Some(r) => {
-            let data = r
-                .data
-                .map(|m| m.into_iter().collect::<HashMap<String, Value>>())
-                .unwrap_or_default();
+            let raw = r.data.unwrap_or_default();
+            // v2 nests the actual secret under a "data" key
+            let data = if mt == "kv-v2" {
+                raw.get("data")
+                    .and_then(|v| v.as_object())
+                    .cloned()
+                    .unwrap_or(raw)
+                    .into_iter()
+                    .collect()
+            } else {
+                raw.into_iter().collect()
+            };
             Ok(SecretData { data })
         }
         None => Err("Secret not found".into()),
@@ -83,19 +117,42 @@ pub async fn write_secret(
     state: State<'_, AppState>,
     path: String,
     data: HashMap<String, String>,
+    mount: Option<String>,
+    mount_type: Option<String>,
 ) -> CmdResult<()> {
-    let mut body = Map::new();
+    let m = mount.as_deref().unwrap_or("");
+    let mt = mount_type.as_deref().unwrap_or("kv");
+    let actual_path = adjust_kv_path(&path, m, mt, "data");
+
+    let mut kv_body = Map::new();
     for (k, v) in data {
-        body.insert(k, Value::String(v));
+        kv_body.insert(k, Value::String(v));
     }
 
-    make_request(&state, Operation::Write, path, Some(body)).await?;
+    // v2 wraps the data in a "data" envelope
+    let body = if mt == "kv-v2" {
+        let mut wrapper = Map::new();
+        wrapper.insert("data".to_string(), Value::Object(kv_body));
+        wrapper
+    } else {
+        kv_body
+    };
+
+    make_request(&state, Operation::Write, actual_path, Some(body)).await?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn delete_secret(state: State<'_, AppState>, path: String) -> CmdResult<()> {
-    make_request(&state, Operation::Delete, path, None).await?;
+pub async fn delete_secret(
+    state: State<'_, AppState>,
+    path: String,
+    mount: Option<String>,
+    mount_type: Option<String>,
+) -> CmdResult<()> {
+    let m = mount.as_deref().unwrap_or("");
+    let mt = mount_type.as_deref().unwrap_or("kv");
+    let actual_path = adjust_kv_path(&path, m, mt, "metadata");
+    make_request(&state, Operation::Delete, actual_path, None).await?;
     Ok(())
 }
 

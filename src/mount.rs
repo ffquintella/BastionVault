@@ -50,6 +50,15 @@ lazy_static! {
             table: MOUNT_TABLE_TYPE.to_string(),
             tainted: false,
             uuid: generate_uuid(),
+            path: "resources/".to_string(),
+            logical_type: "resource".to_string(),
+            description: "infrastructure resource storage".to_string(),
+            ..Default::default()
+        },
+        MountEntry {
+            table: MOUNT_TABLE_TYPE.to_string(),
+            tainted: false,
+            uuid: generate_uuid(),
             path: "sys/".to_string(),
             logical_type: "system".to_string(),
             description: "system endpoints used for control, policy and debugging".to_string(),

@@ -16,6 +16,7 @@ use crate::{
         token_util::{token_fields, TokenParams},
     },
 };
+use webauthn_rs::prelude::Passkey;
 
 //const DEFAULT_MAX_TTL: Duration = Duration::from_secs(365*24*60*60 as u64);
 
@@ -33,6 +34,28 @@ pub struct UserEntry {
     pub token_params: TokenParams,
     #[serde(default)]
     pub bound_cidrs: Vec<SockAddrMarshaler>,
+    /// When true, password login is blocked and only FIDO2 authentication is allowed.
+    #[serde(default)]
+    pub fido2_enabled: bool,
+    /// Serialized FIDO2 passkey credentials (JSON-encoded Vec<Passkey>).
+    #[serde(default)]
+    pub credentials_json: String,
+}
+
+impl UserEntry {
+    /// Deserialize the stored FIDO2 passkey credentials.
+    pub fn get_passkeys(&self) -> Result<Vec<Passkey>, serde_json::Error> {
+        if self.credentials_json.is_empty() {
+            return Ok(Vec::new());
+        }
+        serde_json::from_str(&self.credentials_json)
+    }
+
+    /// Serialize and store FIDO2 passkey credentials.
+    pub fn set_passkeys(&mut self, passkeys: &[Passkey]) -> Result<(), serde_json::Error> {
+        self.credentials_json = serde_json::to_string(passkeys)?;
+        Ok(())
+    }
 }
 
 #[maybe_async::maybe_async]
@@ -180,6 +203,10 @@ impl UserPassBackendInner {
         let mut user_entry_data = serde_json::to_value(&user_entry)?;
         let data = user_entry_data.as_object_mut().unwrap();
         data.remove("password_hash");
+        data.remove("credentials_json"); // Never expose key material
+        // Add computed field: number of registered FIDO2 keys
+        let registered_keys = user_entry.get_passkeys().map(|v| v.len()).unwrap_or(0);
+        data.insert("registered_keys".to_string(), serde_json::Value::Number(registered_keys.into()));
 
         user_entry.populate_token_data(data);
 
@@ -285,7 +312,11 @@ impl UserPassBackendInner {
             return Err(RvError::ErrRequestNoDataField);
         }
 
-        req.storage_delete(format!("user/{}", username.to_lowercase()).as_str()).await?;
+        let lc = username.to_lowercase();
+        req.storage_delete(format!("user/{lc}").as_str()).await?;
+        // Clean up any pending FIDO2 challenge state
+        let _ = req.storage_delete(&format!("challenge/reg/{lc}")).await;
+        let _ = req.storage_delete(&format!("challenge/auth/{lc}")).await;
         Ok(None)
     }
 

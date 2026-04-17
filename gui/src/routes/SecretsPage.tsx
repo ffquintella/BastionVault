@@ -7,6 +7,8 @@ import { extractError } from "../lib/error";
 export function SecretsPage() {
   const { toast } = useToast();
   const [currentPath, setCurrentPath] = useState("");
+  const [mountBase, setMountBase] = useState(""); // e.g. "secret/"
+  const [mountType, setMountType] = useState(""); // "kv" or "kv-v2"
   const [keys, setKeys] = useState<string[]>([]);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [secretData, setSecretData] = useState<Record<string, unknown>>({});
@@ -20,14 +22,14 @@ export function SecretsPage() {
   const loadKeys = useCallback(async () => {
     setLoading(true);
     try {
-      const result = await api.listSecrets(currentPath);
+      const result = await api.listSecrets(currentPath, mountBase, mountType);
       setKeys(result.keys);
     } catch {
       setKeys([]);
     } finally {
       setLoading(false);
     }
-  }, [currentPath]);
+  }, [currentPath, mountBase, mountType]);
 
   useEffect(() => {
     if (currentPath) {
@@ -43,7 +45,7 @@ export function SecretsPage() {
       return;
     }
     try {
-      const result = await api.readSecret(currentPath + key);
+      const result = await api.readSecret(currentPath + key, mountBase, mountType);
       setSelectedKey(key);
       setSecretData(result.data);
     } catch (e: unknown) {
@@ -53,7 +55,7 @@ export function SecretsPage() {
 
   async function handleDelete(key: string) {
     try {
-      await api.deleteSecret(currentPath + key);
+      await api.deleteSecret(currentPath + key, mountBase, mountType);
       toast("success", `Deleted ${key}`);
       setSelectedKey(null);
       setSecretData({});
@@ -70,7 +72,7 @@ export function SecretsPage() {
       if (pair.key) data[pair.key] = pair.value;
     }
     try {
-      await api.writeSecret(currentPath + newKey, data);
+      await api.writeSecret(currentPath + newKey, data, mountBase, mountType);
       toast("success", `Created ${newKey}`);
       setShowCreate(false);
       setNewKey("");
@@ -86,7 +88,7 @@ export function SecretsPage() {
   const breadcrumbs = [
     {
       label: "Mounts",
-      onClick: () => setCurrentPath(""),
+      onClick: () => { setCurrentPath(""); setMountBase(""); setMountType(""); },
     },
     ...pathParts.map((part, i) => ({
       label: part,
@@ -99,7 +101,7 @@ export function SecretsPage() {
 
   return (
     <Layout>
-      <div className="max-w-5xl space-y-4">
+      <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">Secrets</h1>
           {currentPath && (
@@ -112,7 +114,7 @@ export function SecretsPage() {
         <Breadcrumb segments={breadcrumbs} />
 
         {!currentPath ? (
-          <MountSelector onSelect={(path) => setCurrentPath(path)} />
+          <MountSelector onSelect={(path, type_) => { setMountBase(path); setMountType(type_); setCurrentPath(path); }} />
         ) : (
           <div className="flex gap-4">
             {/* Key list */}
@@ -255,7 +257,7 @@ export function SecretsPage() {
   );
 }
 
-function MountSelector({ onSelect }: { onSelect: (path: string) => void }) {
+function MountSelector({ onSelect }: { onSelect: (path: string, mountType: string) => void }) {
   const [mounts, setMounts] = useState<{ path: string; mount_type: string }[]>([]);
 
   useEffect(() => {
@@ -280,7 +282,7 @@ function MountSelector({ onSelect }: { onSelect: (path: string) => void }) {
       {kvMounts.map((m) => (
         <button
           key={m.path}
-          onClick={() => onSelect(m.path)}
+          onClick={() => onSelect(m.path, m.mount_type)}
           className="p-4 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-xl text-left
             hover:border-[var(--color-primary)] hover:bg-[var(--color-surface-hover)] transition-colors"
         >

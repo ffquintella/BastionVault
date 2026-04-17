@@ -17,6 +17,9 @@ export function ConnectPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showRemote, setShowRemote] = useState(false);
+  const [showReset, setShowReset] = useState(false);
+  const [resetText, setResetText] = useState("");
+  const [resetting, setResetting] = useState(false);
 
   // Remote form
   const [remoteAddr, setRemoteAddr] = useState("https://127.0.0.1:8200");
@@ -87,6 +90,7 @@ export function ConnectPage() {
   async function handleEmbedded() {
     setLoading(true);
     setError(null);
+    setShowReset(false);
     try {
       const initialized = await api.isVaultInitialized();
       if (!initialized) {
@@ -98,8 +102,29 @@ export function ConnectPage() {
         navigate("/login");
       }
     } catch (e: unknown) {
-      setError(extractError(e));
+      const msg = extractError(e);
+      setError(msg);
+      // Show reset option when unseal key is invalid or vault can't be opened
+      if (msg.toLowerCase().includes("unseal") || msg.toLowerCase().includes("invalid") || msg.toLowerCase().includes("decrypt")) {
+        setShowReset(true);
+      }
       setLoading(false);
+    }
+  }
+
+  async function handleReset() {
+    setResetting(true);
+    try {
+      await api.resetVault();
+      toast("success", "Vault data cleared. You can now create a new vault.");
+      setShowReset(false);
+      setResetText("");
+      setError(null);
+      navigate("/init");
+    } catch (e: unknown) {
+      setError(extractError(e));
+    } finally {
+      setResetting(false);
     }
   }
 
@@ -144,6 +169,45 @@ export function ConnectPage() {
       {error && (
         <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
           {error}
+        </div>
+      )}
+
+      {/* Reset vault panel — shown when unseal key is invalid */}
+      {showReset && (
+        <div className="mb-4 p-4 bg-red-500/10 border border-red-500/30 rounded-lg space-y-3">
+          <p className="text-red-400 font-medium text-sm">
+            The vault data cannot be decrypted. This usually means the unseal key in your keychain no longer matches.
+          </p>
+          <p className="text-red-400/70 text-xs">
+            You can reset the vault to start fresh. This permanently destroys all stored data.
+          </p>
+          <div>
+            <label className="block text-xs text-red-400/70 mb-1">
+              Type <span className="font-mono font-bold">RESET</span> to confirm
+            </label>
+            <input
+              type="text"
+              value={resetText}
+              onChange={(e) => setResetText(e.target.value)}
+              placeholder="RESET"
+              className="w-full bg-[var(--color-bg)] border border-red-500/30 rounded-lg px-3 py-2 text-sm font-mono text-red-400 placeholder:text-red-400/30"
+            />
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => { setShowReset(false); setResetText(""); }}
+              className="flex-1 py-2 bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] rounded-lg text-sm transition-colors hover:bg-[var(--color-border)]"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleReset}
+              disabled={resetText !== "RESET" || resetting}
+              className="flex-1 py-2 bg-red-600 hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
+            >
+              {resetting ? "Resetting..." : "Destroy & Reset"}
+            </button>
+          </div>
         </div>
       )}
 

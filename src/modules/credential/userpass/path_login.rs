@@ -53,7 +53,15 @@ impl UserPassBackendInner {
             return Ok(Some(resp));
         }
 
-        let user = user.unwrap();
+        let mut user = user.unwrap();
+
+        // Block password login when FIDO2 is enabled for this user
+        if user.fido2_enabled {
+            let resp = Response::error_response(
+                "Password login is disabled for this account. Use your FIDO2 security key instead.",
+            );
+            return Ok(Some(resp));
+        }
 
         let check = self.verify_password_hash(password, &user.password_hash)?;
         if !check {
@@ -75,7 +83,17 @@ impl UserPassBackendInner {
         };
         auth.metadata.insert("username".to_string(), username.to_string());
 
+        // Ensure token_policies mirrors policies before populate_token_auth
+        // (which overwrites auth.policies with token_policies).
+        if user.token_policies.is_empty() && !user.policies.is_empty() {
+            user.token_policies = user.policies.clone();
+        }
         user.populate_token_auth(&mut auth);
+
+        // Safety net: if populate_token_auth cleared policies, restore them
+        if auth.policies.is_empty() && !user.policies.is_empty() {
+            auth.policies = user.policies.clone();
+        }
 
         let resp = Response { auth: Some(auth), ..Response::default() };
 

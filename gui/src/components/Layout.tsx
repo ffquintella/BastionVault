@@ -10,7 +10,6 @@ const navItems = [
   { path: "/secrets", label: "Secrets" },
   { path: "/users", label: "Users" },
   { path: "/approle", label: "AppRole" },
-  { path: "/fido2", label: "FIDO2 Keys" },
   { path: "/policies", label: "Policies" },
   { path: "/mounts", label: "Mounts" },
   { path: "/settings", label: "Settings" },
