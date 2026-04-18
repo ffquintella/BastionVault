@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use bastion_vault::logical::{Operation, Request};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tauri::State;
 
@@ -225,6 +225,154 @@ pub async fn write_resource_secret(
     }
     make_request(&state, Operation::Write, path, Some(body)).await?;
     Ok(())
+}
+
+// ── History / versions ─────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize)]
+pub struct ResourceHistoryEntry {
+    pub ts: String,
+    pub user: String,
+    pub op: String,
+    #[serde(default)]
+    pub changed_fields: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct ResourceHistoryResult {
+    pub entries: Vec<ResourceHistoryEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ResourceSecretVersionInfo {
+    pub version: u64,
+    pub created_time: String,
+    pub username: String,
+    pub operation: String,
+}
+
+#[derive(Serialize)]
+pub struct ResourceSecretVersionListResult {
+    pub current_version: u64,
+    pub versions: Vec<ResourceSecretVersionInfo>,
+}
+
+#[derive(Serialize)]
+pub struct ResourceSecretVersionData {
+    pub data: HashMap<String, Value>,
+    pub version: u64,
+    pub created_time: String,
+    pub username: String,
+    pub operation: String,
+}
+
+/// Return the change history for a resource (newest first). Each entry
+/// identifies who made the change, when, and which top-level fields were
+/// modified. Before/after values are NOT returned (resource history is
+/// field-level only, by design).
+#[tauri::command]
+pub async fn list_resource_history(
+    state: State<'_, AppState>,
+    name: String,
+) -> CmdResult<ResourceHistoryResult> {
+    let path = format!("{RESOURCE_MOUNT}resources/{name}/history");
+    let resp = make_request(&state, Operation::Read, path, None).await?;
+
+    let entries = resp
+        .and_then(|r| r.data)
+        .and_then(|d| d.get("entries").cloned())
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+
+    let out: Vec<ResourceHistoryEntry> = entries
+        .into_iter()
+        .filter_map(|v| serde_json::from_value::<ResourceHistoryEntry>(v).ok())
+        .collect();
+    Ok(ResourceHistoryResult { entries: out })
+}
+
+/// List every stored version of a resource secret (newest first). Each
+/// version has its own timestamp + username so the caller can render a
+/// timeline. Use `read_resource_secret_version` to fetch a specific
+/// payload.
+#[tauri::command]
+pub async fn list_resource_secret_versions(
+    state: State<'_, AppState>,
+    name: String,
+    key: String,
+) -> CmdResult<ResourceSecretVersionListResult> {
+    let path = format!("{RESOURCE_MOUNT}secrets/{name}/{key}/history");
+    let resp = make_request(&state, Operation::Read, path, None).await?;
+
+    let data = match resp.and_then(|r| r.data) {
+        Some(d) => d,
+        None => {
+            return Ok(ResourceSecretVersionListResult {
+                current_version: 0,
+                versions: vec![],
+            });
+        }
+    };
+
+    let current_version = data
+        .get("current_version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let versions = data
+        .get("versions")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let versions: Vec<ResourceSecretVersionInfo> = versions
+        .into_iter()
+        .filter_map(|v| serde_json::from_value::<ResourceSecretVersionInfo>(v).ok())
+        .collect();
+
+    Ok(ResourceSecretVersionListResult {
+        current_version,
+        versions,
+    })
+}
+
+/// Read one historical version of a resource secret.
+#[tauri::command]
+pub async fn read_resource_secret_version(
+    state: State<'_, AppState>,
+    name: String,
+    key: String,
+    version: u64,
+) -> CmdResult<ResourceSecretVersionData> {
+    let path = format!("{RESOURCE_MOUNT}secrets/{name}/{key}/version/{version}");
+    let resp = make_request(&state, Operation::Read, path, None).await?;
+
+    let data = resp.and_then(|r| r.data).ok_or("Version not found")?;
+    let data_map = data
+        .get("data")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    Ok(ResourceSecretVersionData {
+        data: data_map.into_iter().collect(),
+        version: data
+            .get("version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(version),
+        created_time: data
+            .get("created_time")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        username: data
+            .get("username")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        operation: data
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    })
 }
 
 #[tauri::command]

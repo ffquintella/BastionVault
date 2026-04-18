@@ -72,6 +72,34 @@ export interface SecretListResult {
   keys: string[];
 }
 
+// KV-v2 version history
+export interface SecretVersionInfo {
+  version: number;
+  created_time: string;
+  deletion_time: string;
+  destroyed: boolean;
+  username: string;
+  /** "create" | "update" | "restore" | "" for legacy entries without an op */
+  operation: string;
+}
+
+export interface SecretVersionListResult {
+  current_version: number;
+  oldest_version: number;
+  /** Newest version first. */
+  versions: SecretVersionInfo[];
+}
+
+export interface SecretVersionData {
+  data: Record<string, unknown>;
+  version: number;
+  created_time: string;
+  deletion_time: string;
+  destroyed: boolean;
+  username: string;
+  operation: string;
+}
+
 // Users
 export interface UserListResult {
   users: string[];
@@ -131,6 +159,43 @@ export interface ResourceSecretListResult {
 
 export interface ResourceSecretData {
   data: Record<string, unknown>;
+}
+
+// Resource change-history (metadata changes only -- field names, no values)
+export interface ResourceHistoryEntry {
+  ts: string;
+  user: string;
+  /** "create" | "update" | "delete" */
+  op: string;
+  changed_fields: string[];
+}
+
+export interface ResourceHistoryResult {
+  /** Newest entry first. */
+  entries: ResourceHistoryEntry[];
+}
+
+// Resource-secret version history
+export interface ResourceSecretVersionInfo {
+  version: number;
+  created_time: string;
+  username: string;
+  /** "create" | "update" | "restore" */
+  operation: string;
+}
+
+export interface ResourceSecretVersionListResult {
+  current_version: number;
+  /** Newest version first. */
+  versions: ResourceSecretVersionInfo[];
+}
+
+export interface ResourceSecretVersionData {
+  data: Record<string, unknown>;
+  version: number;
+  created_time: string;
+  username: string;
+  operation: string;
 }
 
 // AppRole

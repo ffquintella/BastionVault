@@ -16,6 +16,11 @@ import type {
   ResourceListResult,
   ResourceSecretListResult,
   ResourceSecretData,
+  SecretVersionListResult,
+  SecretVersionData,
+  ResourceHistoryResult,
+  ResourceSecretVersionListResult,
+  ResourceSecretVersionData,
   AppRoleListResult,
   AppRoleInfo,
   RoleIdInfo,
@@ -78,6 +83,16 @@ export const writeSecret = (path: string, data: Record<string, string>, mount?: 
 export const deleteSecret = (path: string, mount?: string, mountType?: string) =>
   invoke<void>("delete_secret", { path, mount, mountType });
 
+// KV secret version history (kv-v2 only -- kv-v1 returns empty).
+export const listSecretVersions = (path: string, mount?: string, mountType?: string) =>
+  invoke<SecretVersionListResult>("list_secret_versions", { path, mount, mountType });
+export const readSecretVersion = (
+  path: string,
+  version: number,
+  mount?: string,
+  mountType?: string,
+) => invoke<SecretVersionData>("read_secret_version", { path, version, mount, mountType });
+
 // Mounts
 export const mountEngine = (path: string, engineType: string, description: string) =>
   invoke<void>("mount_engine", { path, engineType, description });
@@ -130,6 +145,16 @@ export const writeResourceSecret = (name: string, key: string, data: Record<stri
   invoke<void>("write_resource_secret", { name, key, data });
 export const deleteResourceSecret = (name: string, key: string) =>
   invoke<void>("delete_resource_secret", { name, key });
+
+// Resource change history (metadata edits -- field names only, no values).
+export const listResourceHistory = (name: string) =>
+  invoke<ResourceHistoryResult>("list_resource_history", { name });
+
+// Resource-secret version history (full value retained per version).
+export const listResourceSecretVersions = (name: string, key: string) =>
+  invoke<ResourceSecretVersionListResult>("list_resource_secret_versions", { name, key });
+export const readResourceSecretVersion = (name: string, key: string, version: number) =>
+  invoke<ResourceSecretVersionData>("read_resource_secret_version", { name, key, version });
 
 // AppRole
 export const listAppRoles = () => invoke<AppRoleListResult>("list_approles");

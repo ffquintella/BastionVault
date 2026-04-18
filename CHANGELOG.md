@@ -131,6 +131,14 @@ EXAMPLE ENTRY:
 
 - Branch and pull_request triggers from all GitHub Actions workflows (now tag-only via `releases/**`).
 
+#### Change history (GUI + backend)
+- **KV-v2 per-version audit fields**: `VersionMetadata` and `VersionData` now include `username` (from `auth.metadata["username"]`, falling back to `auth.display_name`, finally `"unknown"`) and `operation` (`"create"` / `"update"` / `"restore"`). `data/` responses expose both in the metadata envelope. On-disk format is backward-compatible via `#[serde(default)]`.
+- **Resource metadata history**: new append-only audit log at `hist/<name>/<nanos>` in the resource engine. Each entry records `ts`, `user`, `op` (`create` / `update` / `delete`), and `changed_fields` -- the set of top-level field names that differ from the previous write, excluding timestamp/identity fields. Redundant saves that only touch `updated_at` do NOT generate entries. Exposed through a new path `resources/<name>/history` (`Operation::Read`).
+- **Resource secret versioning**: resource secrets are now versioned. Each write snapshots to `sver/<resource>/<key>/<version>` and updates `smeta/<resource>/<key>`; the current value is still kept at `secret/<resource>/<key>` for O(1) reads. New paths: `secrets/<resource>/<key>/history` (version list) and `secrets/<resource>/<key>/version/<n>` (read old value).
+- **Tauri commands**: `list_secret_versions`, `read_secret_version`, `list_resource_history`, `list_resource_secret_versions`, `read_resource_secret_version`.
+- **GUI**: new History button on the SecretsPage detail pane (KV-v2 only); new History tab on the Resources detail view; new History button on the resource-secret detail pane. Timeline UI shared across secrets (`SecretHistoryPanel`) and resources (`ResourceHistoryPanel`). Clicking a version loads its data masked with `MaskedValue`; a Restore button writes the old value as a new version.
+- Tests: 5 new Rust unit tests for the diff helper + history-seq ordering, 3 new integration tests in `tests/test_default_logical.rs` covering KV-v2 username tracking, resource metadata history (including the no-op-write suppression), and resource secret versioning. 20 new vitest tests for the two history panels, timestamp/op helpers, and a regression on the generator + policy check.
+
 ### Fixed
 
 #### Windows build

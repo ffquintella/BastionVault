@@ -9,6 +9,13 @@ export {
   dataFromPairs,
   type SecretPair,
 } from "./SecretPairsEditor";
+export {
+  SecretHistoryPanel,
+  type SecretHistoryVersion,
+  operationVariant,
+  formatTimestamp,
+} from "./SecretHistoryPanel";
+export { ResourceHistoryPanel } from "./ResourceHistoryPanel";
 export { Textarea } from "./Textarea";
 export { Select } from "./Select";
 export { Card } from "./Card";

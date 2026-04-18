@@ -9,9 +9,11 @@ import {
   EmptyState,
   Modal,
   SecretPairsEditor,
+  SecretHistoryPanel,
   pairsFromData,
   dataFromPairs,
   type SecretPair,
+  type SecretHistoryVersion,
   useToast,
 } from "../components/ui";
 import * as api from "../lib/api";
@@ -38,6 +40,11 @@ export function SecretsPage() {
   const [editingSecret, setEditingSecret] = useState(false);
   const [editPairs, setEditPairs] = useState<SecretPair[]>([]);
   const [savingEdit, setSavingEdit] = useState(false);
+
+  // History view (KV-v2 version timeline) of the currently-selected secret.
+  const [showHistory, setShowHistory] = useState(false);
+  const [versions, setVersions] = useState<SecretHistoryVersion[]>([]);
+  const [loadingVersions, setLoadingVersions] = useState(false);
 
   // null = still loading, [] = no KV engines, non-empty = available KV mounts
   const [kvMounts, setKvMounts] = useState<KvMount[] | null>(null);
@@ -100,6 +107,59 @@ export function SecretsPage() {
       setSelectedKey(key);
       setSecretData(result.data);
       setEditingSecret(false);
+      setShowHistory(false);
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
+  }
+
+  async function openHistory() {
+    if (!selectedKey) return;
+    setShowHistory(true);
+    setLoadingVersions(true);
+    try {
+      const result = await api.listSecretVersions(
+        currentPath + selectedKey,
+        mountBase,
+        mountType,
+      );
+      setVersions(result.versions);
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+      setVersions([]);
+    } finally {
+      setLoadingVersions(false);
+    }
+  }
+
+  async function loadSecretVersionData(version: number) {
+    if (!selectedKey) throw new Error("No secret selected");
+    const result = await api.readSecretVersion(
+      currentPath + selectedKey,
+      version,
+      mountBase,
+      mountType,
+    );
+    return result.data;
+  }
+
+  async function handleRestoreVersion(version: number, data: Record<string, unknown>) {
+    if (!selectedKey) return;
+    // Vault writes require string values; stringify non-string values rather
+    // than crashing on e.g. numbers that slipped into a legacy entry.
+    const stringData: Record<string, string> = {};
+    for (const [k, v] of Object.entries(data)) stringData[k] = String(v ?? "");
+    try {
+      await api.writeSecret(currentPath + selectedKey, stringData, mountBase, mountType);
+      toast("success", `Restored ${selectedKey} from version ${version}`);
+      // Reload the current value and the history after restore.
+      const refreshed = await api.readSecret(
+        currentPath + selectedKey,
+        mountBase,
+        mountType,
+      );
+      setSecretData(refreshed.data);
+      await openHistory();
     } catch (e: unknown) {
       toast("error", extractError(e));
     }
@@ -255,7 +315,17 @@ export function SecretsPage() {
             {/* Secret detail */}
             <Card className="flex-1" title={selectedKey || "Select a secret"}>
               {selectedKey ? (
-                editingSecret ? (
+                showHistory ? (
+                  <SecretHistoryPanel
+                    versions={versions}
+                    loading={loadingVersions}
+                    loadVersion={loadSecretVersionData}
+                    onRestore={
+                      mountType === "kv-v2" ? handleRestoreVersion : undefined
+                    }
+                    onClose={() => setShowHistory(false)}
+                  />
+                ) : editingSecret ? (
                   <div className="space-y-3">
                     <SecretPairsEditor pairs={editPairs} onChange={setEditPairs} />
                     <div className="flex gap-2 pt-2">
@@ -301,6 +371,11 @@ export function SecretsPage() {
                       <Button size="sm" onClick={startEdit}>
                         Edit
                       </Button>
+                      {mountType === "kv-v2" && (
+                        <Button size="sm" variant="secondary" onClick={openHistory}>
+                          History
+                        </Button>
+                      )}
                       <Button
                         variant="danger"
                         size="sm"

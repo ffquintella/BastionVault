@@ -7,6 +7,14 @@ pub struct VersionMetadata {
     pub created_time: String,
     pub deletion_time: String,
     pub destroyed: bool,
+    /// Username (or display name) of the token that created this version.
+    /// `#[serde(default)]` keeps older on-disk metadata deserializable.
+    #[serde(default)]
+    pub username: String,
+    /// "create" for the first version, "update" for subsequent versions,
+    /// "restore" when the version is a copy of an earlier version.
+    #[serde(default)]
+    pub operation: String,
 }
 
 impl VersionMetadata {

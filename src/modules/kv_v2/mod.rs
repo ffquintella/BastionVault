@@ -186,6 +186,24 @@ fn now_rfc3339() -> String {
     Utc::now().to_rfc3339()
 }
 
+/// Best-effort caller identity for audit purposes. Prefers the `username`
+/// metadata field (populated by userpass login), falls back to
+/// `auth.display_name`, and finally to `"unknown"` for root-token writes
+/// and any path where auth was not resolved.
+fn caller_username(req: &Request) -> String {
+    if let Some(auth) = req.auth.as_ref() {
+        if let Some(u) = auth.metadata.get("username") {
+            if !u.is_empty() {
+                return u.clone();
+            }
+        }
+        if !auth.display_name.is_empty() {
+            return auth.display_name.clone();
+        }
+    }
+    "unknown".to_string()
+}
+
 fn get_name_from_request(req: &Request) -> Result<String, RvError> {
     if let Some(data) = req.data.as_ref() {
         if let Some(name) = data.get("name") {
@@ -384,6 +402,8 @@ impl KvV2BackendInner {
                 "created_time": vd.created_time,
                 "deletion_time": vd.deletion_time,
                 "destroyed": vd.destroyed,
+                "username": vd.username,
+                "operation": vd.operation,
             }
         });
 
@@ -439,6 +459,8 @@ impl KvV2BackendInner {
         // Increment version
         let new_version = meta.current_version + 1;
         let now = now_rfc3339();
+        let user = caller_username(req);
+        let op = if new_version == 1 { "create" } else { "update" };
 
         let vd = VersionData {
             data: secret_data,
@@ -446,6 +468,8 @@ impl KvV2BackendInner {
             created_time: now.clone(),
             deletion_time: String::new(),
             destroyed: false,
+            username: user.clone(),
+            operation: op.to_string(),
         };
 
         // Store version data
@@ -463,6 +487,8 @@ impl KvV2BackendInner {
                 created_time: now,
                 deletion_time: String::new(),
                 destroyed: false,
+                username: user,
+                operation: op.to_string(),
             },
         );
 

@@ -156,6 +156,189 @@ pub async fn delete_secret(
     Ok(())
 }
 
+// ── Secret history / versions ──────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct SecretVersionInfo {
+    pub version: u64,
+    pub created_time: String,
+    pub deletion_time: String,
+    pub destroyed: bool,
+    pub username: String,
+    pub operation: String,
+}
+
+#[derive(Serialize)]
+pub struct SecretVersionListResult {
+    pub current_version: u64,
+    pub oldest_version: u64,
+    pub versions: Vec<SecretVersionInfo>,
+}
+
+#[derive(Serialize)]
+pub struct SecretVersionData {
+    pub data: HashMap<String, Value>,
+    pub version: u64,
+    pub created_time: String,
+    pub deletion_time: String,
+    pub destroyed: bool,
+    pub username: String,
+    pub operation: String,
+}
+
+/// List every stored version of a KV-v2 secret (newest first). Returns
+/// the per-version metadata -- `created_time`, the username of whoever
+/// wrote it, and the soft-delete/destroy state. KV-v1 does not support
+/// versioning; callers receive an empty list in that case.
+#[tauri::command]
+pub async fn list_secret_versions(
+    state: State<'_, AppState>,
+    path: String,
+    mount: Option<String>,
+    mount_type: Option<String>,
+) -> CmdResult<SecretVersionListResult> {
+    let m = mount.as_deref().unwrap_or("");
+    let mt = mount_type.as_deref().unwrap_or("kv");
+    if mt != "kv-v2" {
+        return Ok(SecretVersionListResult {
+            current_version: 0,
+            oldest_version: 0,
+            versions: vec![],
+        });
+    }
+    let actual_path = adjust_kv_path(&path, m, mt, "metadata");
+    let resp = make_request(&state, Operation::Read, actual_path, None).await?;
+
+    let data = match resp.and_then(|r| r.data) {
+        Some(d) => d,
+        None => {
+            return Ok(SecretVersionListResult {
+                current_version: 0,
+                oldest_version: 0,
+                versions: vec![],
+            });
+        }
+    };
+
+    let current_version = data
+        .get("current_version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let oldest_version = data
+        .get("oldest_version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let mut versions: Vec<SecretVersionInfo> = Vec::new();
+    if let Some(Value::Object(vmap)) = data.get("versions") {
+        for (k, v) in vmap {
+            let Ok(version) = k.parse::<u64>() else { continue };
+            let obj = match v.as_object() {
+                Some(o) => o,
+                None => continue,
+            };
+            versions.push(SecretVersionInfo {
+                version,
+                created_time: obj
+                    .get("created_time")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                deletion_time: obj
+                    .get("deletion_time")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                destroyed: obj
+                    .get("destroyed")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false),
+                username: obj
+                    .get("username")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                operation: obj
+                    .get("operation")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            });
+        }
+    }
+    // Newest version first.
+    versions.sort_by(|a, b| b.version.cmp(&a.version));
+
+    Ok(SecretVersionListResult {
+        current_version,
+        oldest_version,
+        versions,
+    })
+}
+
+/// Read a specific historical version of a KV-v2 secret. Not valid for
+/// KV-v1 (where only the current value exists).
+#[tauri::command]
+pub async fn read_secret_version(
+    state: State<'_, AppState>,
+    path: String,
+    version: u64,
+    mount: Option<String>,
+    mount_type: Option<String>,
+) -> CmdResult<SecretVersionData> {
+    let m = mount.as_deref().unwrap_or("");
+    let mt = mount_type.as_deref().unwrap_or("kv");
+    if mt != "kv-v2" {
+        return Err("Versioning is only available on kv-v2 mounts".into());
+    }
+    let actual_path = adjust_kv_path(&path, m, mt, "data");
+
+    let mut body = Map::new();
+    body.insert("version".to_string(), Value::from(version));
+    let resp = make_request(&state, Operation::Read, actual_path, Some(body)).await?;
+
+    let raw = resp.and_then(|r| r.data).ok_or("Version not found")?;
+    let data_map = raw
+        .get("data")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let meta = raw
+        .get("metadata")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    Ok(SecretVersionData {
+        data: data_map.into_iter().collect(),
+        version: meta.get("version").and_then(|v| v.as_u64()).unwrap_or(version),
+        created_time: meta
+            .get("created_time")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        deletion_time: meta
+            .get("deletion_time")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        destroyed: meta
+            .get("destroyed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        username: meta
+            .get("username")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        operation: meta
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
 #[tauri::command]
 pub async fn mount_engine(
     state: State<'_, AppState>,

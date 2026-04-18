@@ -8,4 +8,10 @@ pub struct VersionData {
     pub created_time: String,
     pub deletion_time: String,
     pub destroyed: bool,
+    /// Username (or display name) of the token that created this version.
+    #[serde(default)]
+    pub username: String,
+    /// "create" | "update" | "restore".
+    #[serde(default)]
+    pub operation: String,
 }

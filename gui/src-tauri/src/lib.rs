@@ -128,6 +128,8 @@ pub fn run() {
             commands::secrets::read_secret,
             commands::secrets::write_secret,
             commands::secrets::delete_secret,
+            commands::secrets::list_secret_versions,
+            commands::secrets::read_secret_version,
             commands::secrets::mount_engine,
             commands::secrets::unmount_engine,
             commands::secrets::enable_auth_method,
@@ -154,6 +156,9 @@ pub fn run() {
             commands::resources::read_resource_secret,
             commands::resources::write_resource_secret,
             commands::resources::delete_resource_secret,
+            commands::resources::list_resource_history,
+            commands::resources::list_resource_secret_versions,
+            commands::resources::read_resource_secret_version,
             // AppRole
             commands::approle::list_approles,
             commands::approle::read_approle,

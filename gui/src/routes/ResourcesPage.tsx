@@ -13,12 +13,21 @@ import {
   ConfirmModal,
   EmptyState,
   SecretPairsEditor,
+  SecretHistoryPanel,
+  ResourceHistoryPanel,
   pairsFromData,
   dataFromPairs,
   type SecretPair,
+  type SecretHistoryVersion,
   useToast,
 } from "../components/ui";
-import type { ResourceMetadata, ResourceTypeConfig, ResourceTypeDef, ResourceFieldDef } from "../lib/types";
+import type {
+  ResourceMetadata,
+  ResourceTypeConfig,
+  ResourceTypeDef,
+  ResourceFieldDef,
+  ResourceHistoryEntry,
+} from "../lib/types";
 import { DEFAULT_RESOURCE_TYPES, mergeTypeConfig, getTypeDef } from "../lib/resourceTypes";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
@@ -37,7 +46,7 @@ export function ResourcesPage() {
   const [resourceInfo, setResourceInfo] = useState<ResourceMetadata | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
-  const [detailTab, setDetailTab] = useState<"info" | "secrets">("info");
+  const [detailTab, setDetailTab] = useState<"info" | "secrets" | "history">("info");
   const [filterType, setFilterType] = useState("");
   const [search, setSearch] = useState("");
   const [allMeta, setAllMeta] = useState<ResourceMetadata[]>([]);
@@ -128,8 +137,15 @@ export function ResourcesPage() {
           </div>
 
           <Card>
-            <Tabs tabs={[{ id: "info", label: "Info" }, { id: "secrets", label: "Secrets" }]}
-              active={detailTab} onChange={(t) => setDetailTab(t as "info" | "secrets")} />
+            <Tabs
+              tabs={[
+                { id: "info", label: "Info" },
+                { id: "secrets", label: "Secrets" },
+                { id: "history", label: "History" },
+              ]}
+              active={detailTab}
+              onChange={(t) => setDetailTab(t as "info" | "secrets" | "history")}
+            />
           </Card>
 
           {detailTab === "info" && (
@@ -144,6 +160,10 @@ export function ResourcesPage() {
 
           {detailTab === "secrets" && (
             <ResourceSecretsPanel resourceName={String(resourceInfo.name)} toast={toast} />
+          )}
+
+          {detailTab === "history" && (
+            <ResourceMetadataHistoryCard resourceName={String(resourceInfo.name)} toast={toast} />
           )}
 
           <ConfirmModal open={deleteTarget !== null} onClose={() => setDeleteTarget(null)}
@@ -437,6 +457,52 @@ function CreateResourceModal({ open, onClose, typeConfig, onCreated, toast }: {
   );
 }
 
+// ── Resource Metadata History ──────────────────────────────────────
+
+function ResourceMetadataHistoryCard({
+  resourceName,
+  toast,
+}: {
+  resourceName: string;
+  toast: (type: "success" | "error" | "info", msg: string) => void;
+}) {
+  const [entries, setEntries] = useState<ResourceHistoryEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      try {
+        const result = await api.listResourceHistory(resourceName);
+        if (!cancelled) setEntries(result.entries);
+      } catch (e: unknown) {
+        if (!cancelled) {
+          toast("error", extractError(e));
+          setEntries([]);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [resourceName, toast]);
+
+  return (
+    <Card title="Change history">
+      <p className="text-xs text-[var(--color-text-muted)] mb-3">
+        Records who made each change and which metadata fields were modified.
+        Before/after values are not retained here -- use the Secrets tab for
+        per-secret version history with values.
+      </p>
+      <ResourceHistoryPanel entries={entries} loading={loading} />
+    </Card>
+  );
+}
+
 // ── Resource Secrets Panel ─────────────────────────────────────────
 
 function ResourceSecretsPanel({ resourceName, toast }: {
@@ -456,6 +522,11 @@ function ResourceSecretsPanel({ resourceName, toast }: {
   const [editingSecret, setEditingSecret] = useState(false);
   const [editPairs, setEditPairs] = useState<SecretPair[]>([]);
   const [savingEdit, setSavingEdit] = useState(false);
+
+  // Version history panel for the selected secret.
+  const [showHistory, setShowHistory] = useState(false);
+  const [versions, setVersions] = useState<SecretHistoryVersion[]>([]);
+  const [loadingVersions, setLoadingVersions] = useState(false);
 
   useEffect(() => {
     loadSecrets();
@@ -479,6 +550,46 @@ function ResourceSecretsPanel({ resourceName, toast }: {
       setSelectedKey(key);
       setSecretData(result.data);
       setEditingSecret(false);
+      setShowHistory(false);
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
+  }
+
+  async function openHistory() {
+    if (!selectedKey) return;
+    setShowHistory(true);
+    setLoadingVersions(true);
+    try {
+      const result = await api.listResourceSecretVersions(resourceName, selectedKey);
+      setVersions(result.versions);
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+      setVersions([]);
+    } finally {
+      setLoadingVersions(false);
+    }
+  }
+
+  async function loadSecretVersion(version: number) {
+    if (!selectedKey) throw new Error("No secret selected");
+    const result = await api.readResourceSecretVersion(resourceName, selectedKey, version);
+    return result.data;
+  }
+
+  async function handleRestoreSecretVersion(
+    version: number,
+    data: Record<string, unknown>,
+  ) {
+    if (!selectedKey) return;
+    const stringData: Record<string, string> = {};
+    for (const [k, v] of Object.entries(data)) stringData[k] = String(v ?? "");
+    try {
+      await api.writeResourceSecret(resourceName, selectedKey, stringData);
+      toast("success", `Restored "${selectedKey}" from version ${version}`);
+      const refreshed = await api.readResourceSecret(resourceName, selectedKey);
+      setSecretData(refreshed.data);
+      await openHistory();
     } catch (e: unknown) {
       toast("error", extractError(e));
     }
@@ -600,7 +711,15 @@ function ResourceSecretsPanel({ resourceName, toast }: {
           {/* Secret detail */}
           <Card className="flex-1" title={selectedKey ? `Secret: ${selectedKey}` : "Select a secret"}>
             {selectedKey ? (
-              editingSecret ? (
+              showHistory ? (
+                <SecretHistoryPanel
+                  versions={versions}
+                  loading={loadingVersions}
+                  loadVersion={loadSecretVersion}
+                  onRestore={handleRestoreSecretVersion}
+                  onClose={() => setShowHistory(false)}
+                />
+              ) : editingSecret ? (
                 <div className="space-y-3">
                   <SecretPairsEditor pairs={editPairs} onChange={setEditPairs} />
                   <div className="flex gap-2 pt-2">
@@ -648,6 +767,9 @@ function ResourceSecretsPanel({ resourceName, toast }: {
                   )}
                   <div className="flex gap-2 pt-2">
                     <Button size="sm" onClick={startEdit}>Edit</Button>
+                    <Button size="sm" variant="secondary" onClick={openHistory}>
+                      History
+                    </Button>
                     <Button
                       size="sm"
                       variant="danger"
