@@ -19,11 +19,22 @@ pub struct VaultStatus {
 
 #[tauri::command]
 pub async fn init_vault(state: State<'_, AppState>) -> CmdResult<InitResponse> {
-    let root_token = embedded::init_embedded().await?;
-
-    // Re-open to get the vault instance in state.
-    let vault = embedded::open_embedded().await?;
-    *state.vault.lock().await = Some(vault);
+    // Hold the vault mutex for the entire init so concurrent invocations
+    // -- e.g. React StrictMode in dev firing a click handler's effect
+    // twice -- serialize and the loser sees an already-initialized vault
+    // instead of trying to open a second hiqlite instance over the same
+    // on-disk lockfile.
+    let mut vault_guard = state.vault.lock().await;
+    if vault_guard.is_some() {
+        return Err("Vault already initialized in this session".into());
+    }
+    // init_embedded returns the already-unsealed vault. We stash it into
+    // app state directly -- reopening the backend right after init would
+    // collide with its still-held lockfile (hiqlite) or be wasteful (file).
+    let outcome = embedded::init_embedded().await?;
+    let root_token = outcome.root_token.clone();
+    *vault_guard = Some(outcome.vault);
+    drop(vault_guard);
     *state.token.lock().await = Some(root_token.clone());
 
     Ok(InitResponse { root_token })
@@ -31,8 +42,16 @@ pub async fn init_vault(state: State<'_, AppState>) -> CmdResult<InitResponse> {
 
 #[tauri::command]
 pub async fn open_vault(state: State<'_, AppState>) -> CmdResult<()> {
+    // Idempotent: if something (e.g. a double-fired StrictMode effect)
+    // already opened the vault, return success without touching storage.
+    // Holding the mutex across open_embedded serializes concurrent calls.
+    let mut vault_guard = state.vault.lock().await;
+    if vault_guard.is_some() {
+        return Ok(());
+    }
     let vault = embedded::open_embedded().await?;
-    *state.vault.lock().await = Some(vault);
+    *vault_guard = Some(vault);
+    drop(vault_guard);
 
     if let Some(token) = crate::secure_store::get_root_token()? {
         *state.token.lock().await = Some(token);

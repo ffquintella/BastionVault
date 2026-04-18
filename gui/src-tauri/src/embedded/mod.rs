@@ -3,53 +3,153 @@ use std::sync::Arc;
 
 use bastion_vault::core::SealConfig;
 use bastion_vault::logical::{Operation, Request};
-use bastion_vault::storage::new_backend;
+use bastion_vault::storage::{new_backend, Backend};
 use bastion_vault::BastionVault;
 use serde_json::{Map, Value};
 
 use crate::error::CommandError;
 use crate::secure_store;
 
-/// Returns the data directory for the embedded vault.
+// ── Storage selection ──────────────────────────────────────────────
+//
+// The embedded vault can run on either the plain file backend (simple,
+// zero-config, one file per key) or hiqlite (embedded Raft SQLite, single
+// node in dev). The backend is picked at process start from the
+// `BASTION_EMBEDDED_STORAGE` env var:
+//
+//   unset / "file"     -> file backend (default, backward compatible)
+//   "hiqlite"          -> hiqlite backend, single-node, TLS disabled
+//
+// Each backend gets its own data directory so switching via the env var
+// does not mix file-style keys with hiqlite's SQLite files.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageKind {
+    File,
+    Hiqlite,
+}
+
+pub fn storage_kind() -> StorageKind {
+    match std::env::var("BASTION_EMBEDDED_STORAGE")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .trim()
+    {
+        "hiqlite" => StorageKind::Hiqlite,
+        _ => StorageKind::File,
+    }
+}
+
+/// Base data directory for the embedded vault. Each storage backend uses
+/// a different subdirectory so the two layouts never mix on the same
+/// machine.
 pub fn data_dir() -> Result<std::path::PathBuf, CommandError> {
     let base = dirs::data_local_dir()
         .or_else(dirs::home_dir)
         .ok_or("Cannot determine home directory")?;
-    Ok(base.join(".bastion_vault_gui").join("data"))
+    let root = base.join(".bastion_vault_gui");
+    Ok(match storage_kind() {
+        StorageKind::File => root.join("data"),
+        StorageKind::Hiqlite => root.join("data-hiqlite"),
+    })
+}
+
+/// Build a storage backend according to `storage_kind()`, pointed at the
+/// matching data directory. Creates the directory if missing.
+fn build_backend() -> Result<Arc<dyn Backend>, CommandError> {
+    let dir = data_dir()?;
+    std::fs::create_dir_all(&dir)?;
+
+    let mut conf: HashMap<String, Value> = HashMap::new();
+    let dir_str = dir.to_string_lossy().into_owned();
+
+    match storage_kind() {
+        StorageKind::File => {
+            conf.insert("path".into(), Value::String(dir_str));
+            new_backend("file", &conf).map_err(CommandError::from)
+        }
+        StorageKind::Hiqlite => {
+            // Single-node dev config. NOT for production -- the secrets
+            // below are public knowledge because they are in source.
+            //
+            // listen_addr is set to 127.0.0.1 so hiqlite's self-dial (which
+            // uses the same address field as the listener) actually reaches
+            // the local node. The default of "0.0.0.0" works as a listener
+            // but is not a valid dial target on Windows and hangs here.
+            conf.insert("data_dir".into(), Value::String(dir_str));
+            conf.insert("node_id".into(), Value::from(1u64));
+            conf.insert(
+                "secret_raft".into(),
+                Value::String("dev_raft_secret_1".into()),
+            );
+            conf.insert(
+                "secret_api".into(),
+                Value::String("dev_api_secret_01".into()),
+            );
+            conf.insert(
+                "listen_addr_api".into(),
+                Value::String("127.0.0.1".into()),
+            );
+            conf.insert(
+                "listen_addr_raft".into(),
+                Value::String("127.0.0.1".into()),
+            );
+            conf.insert("tls_raft_disable".into(), Value::Bool(true));
+            conf.insert("tls_api_disable".into(), Value::Bool(true));
+            // Default ports: 8210 raft, 8220 api. If either is already in
+            // use, hiqlite will fail to bind and init_embedded will surface
+            // a clear error.
+            eprintln!(
+                "embedded: starting hiqlite backend at {} (raft 127.0.0.1:8210, api 127.0.0.1:8220)",
+                dir.display()
+            );
+            new_backend("hiqlite", &conf).map_err(CommandError::from)
+        }
+    }
 }
 
 /// Check if a vault has been previously initialized.
 ///
-/// Checks for the barrier init marker file first, then falls back to
-/// checking whether the data directory contains any files at all (the
-/// vault may have been initialized via a different storage backend that
-/// doesn't use `_barrier`).
+/// Checks for the file-backend barrier marker file first, then falls back
+/// to checking whether the data directory contains any files at all. The
+/// fallback is what catches hiqlite's SQLite files (hiqlite stores the
+/// barrier as rows, not as a literal `_barrier` file).
 pub fn is_initialized() -> Result<bool, CommandError> {
     let dir = data_dir()?;
     if !dir.exists() {
         return Ok(false);
     }
-    // Primary check: barrier marker file.
+    // Primary check: file-backend barrier marker.
     if dir.join("_barrier").exists() {
         return Ok(true);
     }
-    // Fallback: if the directory has any contents, consider it initialized.
+    // Fallback: any files/subdirs present means some backend has written
+    // to this tree before.
     let has_files = std::fs::read_dir(&dir)
         .map(|mut entries| entries.next().is_some())
         .unwrap_or(false);
     Ok(has_files)
 }
 
-/// Create a new embedded vault, initialize it, and store keys in the OS keychain.
-/// Returns the root token.
-pub async fn init_embedded() -> Result<String, CommandError> {
-    let dir = data_dir()?;
-    std::fs::create_dir_all(&dir)?;
+/// Result of a fresh embedded-vault initialization. The caller receives
+/// both the root token (to stash in app state / keychain already happened
+/// internally) and the already-unsealed `BastionVault` so it can be
+/// placed directly into Tauri state. Returning the live vault avoids a
+/// close-then-reopen cycle which the hiqlite backend cannot tolerate --
+/// its on-disk lockfile would still be held by the dropped instance and
+/// reopening would deadlock or panic.
+pub struct InitOutcome {
+    pub root_token: String,
+    pub vault: Arc<BastionVault>,
+}
 
-    let mut conf: HashMap<String, Value> = HashMap::new();
-    conf.insert("path".into(), Value::String(dir.to_string_lossy().into_owned()));
-
-    let backend = new_backend("file", &conf).map_err(|e| CommandError::from(e))?;
+/// Create a new embedded vault, initialize it, and store keys in the OS
+/// keychain. Returns the unsealed vault *and* the root token so the Tauri
+/// command can put the vault into app state without a separate open.
+pub async fn init_embedded() -> Result<InitOutcome, CommandError> {
+    eprintln!("embedded: init_embedded starting (storage = {:?})", storage_kind());
+    let backend = build_backend()?;
+    eprintln!("embedded: backend built, creating vault");
     let vault = BastionVault::new(backend, None).map_err(|e| CommandError::from(e))?;
 
     let seal_config = SealConfig {
@@ -73,7 +173,10 @@ pub async fn init_embedded() -> Result<String, CommandError> {
     create_default_policies(&vault, &root_token).await?;
     enable_default_auth_methods(&vault, &root_token).await?;
 
-    Ok(root_token)
+    Ok(InitOutcome {
+        root_token,
+        vault: Arc::new(vault),
+    })
 }
 
 /// Create default policies on a freshly initialized vault.
@@ -202,12 +305,7 @@ async fn enable_default_auth_methods(vault: &BastionVault, root_token: &str) -> 
 
 /// Open and unseal an existing embedded vault using keys from the OS keychain.
 pub async fn open_embedded() -> Result<Arc<BastionVault>, CommandError> {
-    let dir = data_dir()?;
-
-    let mut conf: HashMap<String, Value> = HashMap::new();
-    conf.insert("path".into(), Value::String(dir.to_string_lossy().into_owned()));
-
-    let backend = new_backend("file", &conf).map_err(|e| CommandError::from(e))?;
+    let backend = build_backend()?;
     let vault = BastionVault::new(backend, None).map_err(|e| CommandError::from(e))?;
 
     let unseal_key_hex = secure_store::get_unseal_key()?

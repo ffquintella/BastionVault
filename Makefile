@@ -20,8 +20,11 @@ run-dev: ## Run the development server
 gui-deps: ## Install GUI frontend dependencies
 	cd gui && npm install
 
-run-dev-gui: gui-deps ## Run the desktop GUI in development mode (Tauri + Vite HMR)
-	cd gui && npx tauri dev -- --features storage_hiqlite
+run-dev-gui: gui-deps ## Run the desktop GUI in dev mode (embedded = file storage)
+	cd gui && BASTION_EMBEDDED_STORAGE=file npx tauri dev -- --features storage_hiqlite
+
+run-dev-gui-hiqlite: gui-deps ## Run the desktop GUI in dev mode, embedded vault on hiqlite (ports 8210/8220)
+	cd gui && BASTION_EMBEDDED_STORAGE=hiqlite npx tauri dev -- --features storage_hiqlite
 
 gui-build: gui-deps ## Build the desktop GUI for production
 	cd gui && npx tauri build -- --features storage_hiqlite
