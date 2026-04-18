@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
 import { Layout } from "../components/Layout";
-import { Button, Card, Input, SecretInput, Breadcrumb, EmptyState, Modal, useToast } from "../components/ui";
+import { Button, Card, Input, SecretInput, MaskedValue, Breadcrumb, EmptyState, Modal, useToast } from "../components/ui";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
+
+type KvMount = { path: string; mount_type: string };
 
 export function SecretsPage() {
   const { toast } = useToast();
@@ -18,6 +20,36 @@ export function SecretsPage() {
   const [editPairs, setEditPairs] = useState<{ key: string; value: string }[]>([
     { key: "", value: "" },
   ]);
+
+  // null = still loading, [] = no KV engines, non-empty = available KV mounts
+  const [kvMounts, setKvMounts] = useState<KvMount[] | null>(null);
+
+  // Load the list of KV mounts once. Used both for auto-selecting a single
+  // mount (skipping the picker) and for rendering the picker when there is
+  // more than one.
+  useEffect(() => {
+    api
+      .listMounts()
+      .then((ms) =>
+        setKvMounts(
+          ms.filter((m) => m.mount_type === "kv" || m.mount_type === "kv-v2"),
+        ),
+      )
+      .catch(() => setKvMounts([]));
+  }, []);
+
+  // Auto-select when there is exactly one KV mount: jump straight into it
+  // instead of showing a single-card picker.
+  useEffect(() => {
+    if (kvMounts && kvMounts.length === 1 && !mountBase) {
+      const only = kvMounts[0];
+      setMountBase(only.path);
+      setMountType(only.mount_type);
+      setCurrentPath(only.path);
+    }
+  }, [kvMounts, mountBase]);
+
+  const hasMultipleMounts = (kvMounts?.length ?? 0) > 1;
 
   const loadKeys = useCallback(async () => {
     setLoading(true);
@@ -83,13 +115,23 @@ export function SecretsPage() {
     }
   }
 
-  // Build breadcrumb segments
+  // Build breadcrumb segments. The "Mounts" root is only clickable/shown
+  // when there are multiple KV mounts — with a single mount it is a dead
+  // link (clicking it would just auto-select that same mount again).
   const pathParts = currentPath.split("/").filter(Boolean);
   const breadcrumbs = [
-    {
-      label: "Mounts",
-      onClick: () => { setCurrentPath(""); setMountBase(""); setMountType(""); },
-    },
+    ...(hasMultipleMounts
+      ? [
+          {
+            label: "Mounts",
+            onClick: () => {
+              setCurrentPath("");
+              setMountBase("");
+              setMountType("");
+            },
+          },
+        ]
+      : []),
     ...pathParts.map((part, i) => ({
       label: part,
       onClick:
@@ -114,7 +156,23 @@ export function SecretsPage() {
         <Breadcrumb segments={breadcrumbs} />
 
         {!currentPath ? (
-          <MountSelector onSelect={(path, type_) => { setMountBase(path); setMountType(type_); setCurrentPath(path); }} />
+          kvMounts === null ? (
+            <p className="text-sm text-[var(--color-text-muted)]">Loading mounts...</p>
+          ) : kvMounts.length === 0 ? (
+            <EmptyState
+              title="No KV engines mounted"
+              description="Mount a KV secret engine from the Mounts page to start managing secrets"
+            />
+          ) : (
+            <MountSelector
+              mounts={kvMounts}
+              onSelect={(path, type_) => {
+                setMountBase(path);
+                setMountType(type_);
+                setCurrentPath(path);
+              }}
+            />
+          )
         ) : (
           <div className="flex gap-4">
             {/* Key list */}
@@ -258,29 +316,16 @@ export function SecretsPage() {
   );
 }
 
-function MountSelector({ onSelect }: { onSelect: (path: string, mountType: string) => void }) {
-  const [mounts, setMounts] = useState<{ path: string; mount_type: string }[]>([]);
-
-  useEffect(() => {
-    api.listMounts().then(setMounts).catch(() => {});
-  }, []);
-
-  const kvMounts = mounts.filter(
-    (m) => m.mount_type === "kv" || m.mount_type === "kv-v2",
-  );
-
-  if (kvMounts.length === 0) {
-    return (
-      <EmptyState
-        title="No KV engines mounted"
-        description="Mount a KV secret engine from the Mounts page to start managing secrets"
-      />
-    );
-  }
-
+function MountSelector({
+  mounts,
+  onSelect,
+}: {
+  mounts: KvMount[];
+  onSelect: (path: string, mountType: string) => void;
+}) {
   return (
     <div className="grid grid-cols-3 gap-3">
-      {kvMounts.map((m) => (
+      {mounts.map((m) => (
         <button
           key={m.path}
           onClick={() => onSelect(m.path, m.mount_type)}
@@ -295,17 +340,3 @@ function MountSelector({ onSelect }: { onSelect: (path: string, mountType: strin
   );
 }
 
-function MaskedValue({ value }: { value: string }) {
-  const [visible, setVisible] = useState(false);
-  return (
-    <span className="inline-flex items-center gap-2">
-      <span className={visible ? "" : "blur-sm select-none"}>{value}</span>
-      <button
-        onClick={() => setVisible(!visible)}
-        className="text-xs text-[var(--color-primary)] hover:underline shrink-0"
-      >
-        {visible ? "Hide" : "Show"}
-      </button>
-    </span>
-  );
-}

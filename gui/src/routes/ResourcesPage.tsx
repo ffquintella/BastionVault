@@ -4,6 +4,8 @@ import {
   Button,
   Card,
   Input,
+  SecretInput,
+  MaskedValue,
   Select,
   Textarea,
   Badge,
@@ -506,83 +508,170 @@ function ResourceSecretsPanel({ resourceName, toast }: {
 
   return (
     <>
-      <Card title="Secrets" actions={
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-medium text-[var(--color-text-muted)]">Secrets</h2>
         <Button size="sm" onClick={() => setShowCreate(true)}>Add Secret</Button>
-      }>
-        {loading ? (
-          <p className="text-sm text-[var(--color-text-muted)]">Loading...</p>
-        ) : keys.length === 0 ? (
-          <EmptyState title="No secrets" description="Add credentials, API keys, or other secrets for this resource." />
-        ) : (
-          <div className="space-y-1">
-            {keys.map((key) => (
-              <div key={key} className="flex items-center justify-between py-1.5 border-b border-[var(--color-border)] last:border-0">
-                <button onClick={() => handleSelectKey(key)}
-                  className={`text-sm font-mono text-left hover:text-[var(--color-primary)] transition-colors ${selectedKey === key ? "text-[var(--color-primary)]" : "text-[var(--color-text-muted)]"}`}>
-                  {key}
-                </button>
-                <Button size="sm" variant="danger" onClick={() => setDeleteTarget(key)}>Delete</Button>
-              </div>
-            ))}
-          </div>
-        )}
-      </Card>
+      </div>
 
-      {selectedKey && (
-        <Card title={`Secret: ${selectedKey}`}>
-          <div className="space-y-2">
-            {Object.entries(secretData).map(([k, v]) => (
-              <div key={k} className="flex justify-between items-center py-1.5 border-b border-[var(--color-border)]">
-                <span className="text-sm text-[var(--color-text-muted)]">{k}</span>
-                <code className="text-sm font-mono bg-[var(--color-bg)] px-2 py-0.5 rounded">{String(v)}</code>
-              </div>
-            ))}
-            {Object.keys(secretData).length === 0 && (
-              <p className="text-sm text-[var(--color-text-muted)]">Empty secret.</p>
-            )}
-          </div>
+      {loading ? (
+        <Card>
+          <p className="text-sm text-[var(--color-text-muted)]">Loading...</p>
         </Card>
+      ) : keys.length === 0 ? (
+        <Card>
+          <EmptyState
+            title="No secrets"
+            description="Add credentials, API keys, or other secrets for this resource."
+          />
+        </Card>
+      ) : (
+        <div className="flex gap-4">
+          {/* Key list */}
+          <Card className="w-72 shrink-0" title="Keys">
+            <div className="space-y-0.5 -mx-1">
+              {keys.map((key) => (
+                <div
+                  key={key}
+                  className={`group flex items-center justify-between gap-2 rounded px-3 py-1.5 transition-colors ${
+                    selectedKey === key
+                      ? "bg-[var(--color-primary)] text-white"
+                      : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => handleSelectKey(key)}
+                    className="flex-1 text-left text-sm font-mono truncate"
+                  >
+                    {key}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDeleteTarget(key)}
+                    aria-label={`Delete ${key}`}
+                    className={`text-xs shrink-0 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity ${
+                      selectedKey === key
+                        ? "text-white/80 hover:text-white"
+                        : "text-[var(--color-danger)] hover:underline"
+                    }`}
+                  >
+                    Delete
+                  </button>
+                </div>
+              ))}
+            </div>
+          </Card>
+
+          {/* Secret detail */}
+          <Card className="flex-1" title={selectedKey ? `Secret: ${selectedKey}` : "Select a secret"}>
+            {selectedKey ? (
+              Object.keys(secretData).length === 0 ? (
+                <p className="text-sm text-[var(--color-text-muted)]">Empty secret.</p>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-[var(--color-text-muted)] text-left">
+                      <th className="pb-2 font-medium">Key</th>
+                      <th className="pb-2 font-medium">Value</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(secretData).map(([k, v]) => (
+                      <tr key={k} className="border-t border-[var(--color-border)]">
+                        <td className="py-2 font-mono text-[var(--color-primary)]">{k}</td>
+                        <td className="py-2 font-mono">
+                          <MaskedValue value={String(v)} />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )
+            ) : (
+              <EmptyState
+                title="No secret selected"
+                description="Select a key from the list to view its contents"
+              />
+            )}
+          </Card>
+        </div>
       )}
 
       {/* Create secret modal */}
-      <Modal open={showCreate} onClose={() => setShowCreate(false)} title="Add Secret" size="md"
-        actions={<>
-          <Button variant="ghost" onClick={() => setShowCreate(false)}>Cancel</Button>
-          <Button onClick={handleCreate} disabled={!newKey}>Create</Button>
-        </>}>
-        <div className="space-y-3">
-          <Input label="Key Name" value={newKey} onChange={(e) => setNewKey(e.target.value)}
-            placeholder="ssh_key, api_token, password" />
-          <div>
-            <label className="block text-sm text-[var(--color-text-muted)] mb-1">Key-Value Pairs</label>
+      <Modal
+        open={showCreate}
+        onClose={() => setShowCreate(false)}
+        title="Add Secret"
+        size="md"
+        actions={
+          <>
+            <Button variant="ghost" onClick={() => setShowCreate(false)}>Cancel</Button>
+            <Button onClick={handleCreate} disabled={!newKey}>Create</Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <Input
+            label="Key Name"
+            value={newKey}
+            onChange={(e) => setNewKey(e.target.value)}
+            placeholder="ssh_key, api_token, password"
+          />
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-[var(--color-text-muted)]">
+              Key-Value Pairs
+            </label>
             {editPairs.map((pair, i) => (
-              <div key={i} className="flex gap-2 mb-2">
-                <Input value={pair.key} onChange={(e) => {
-                  const updated = [...editPairs];
-                  updated[i] = { ...pair, key: e.target.value };
-                  setEditPairs(updated);
-                }} placeholder="key" />
-                <Input value={pair.value} type="password" onChange={(e) => {
-                  const updated = [...editPairs];
-                  updated[i] = { ...pair, value: e.target.value };
-                  setEditPairs(updated);
-                }} placeholder="value" />
+              <div key={i} className="flex gap-2">
+                <Input
+                  placeholder="key"
+                  value={pair.key}
+                  onChange={(e) => {
+                    const updated = [...editPairs];
+                    updated[i] = { ...pair, key: e.target.value };
+                    setEditPairs(updated);
+                  }}
+                />
+                <SecretInput
+                  placeholder="value"
+                  value={pair.value}
+                  onChange={(e) => {
+                    const updated = [...editPairs];
+                    updated[i] = { ...pair, value: e.target.value };
+                    setEditPairs(updated);
+                  }}
+                  className="flex-1"
+                />
                 {editPairs.length > 1 && (
-                  <button onClick={() => setEditPairs(editPairs.filter((_, j) => j !== i))}
-                    className="text-[var(--color-danger)] text-lg shrink-0">&times;</button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setEditPairs(editPairs.filter((_, j) => j !== i))}
+                  >
+                    &times;
+                  </Button>
                 )}
               </div>
             ))}
-            <button onClick={() => setEditPairs([...editPairs, { key: "", value: "" }])}
-              className="text-xs text-[var(--color-primary)] hover:underline">+ Add pair</button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setEditPairs([...editPairs, { key: "", value: "" }])}
+            >
+              + Add pair
+            </Button>
           </div>
         </div>
       </Modal>
 
-      <ConfirmModal open={deleteTarget !== null} onClose={() => setDeleteTarget(null)}
-        onConfirm={handleDelete} title="Delete Secret"
+      <ConfirmModal
+        open={deleteTarget !== null}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={handleDelete}
+        title="Delete Secret"
         message={`Delete secret "${deleteTarget}"? This cannot be undone.`}
-        confirmLabel="Delete" />
+        confirmLabel="Delete"
+      />
     </>
   );
 }
