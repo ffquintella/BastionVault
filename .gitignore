@@ -22,3 +22,6 @@ Cargo.lock
 
 # VIM temp file
 *.swp
+
+# Claude Code local settings (machine-local)
+.claude/
