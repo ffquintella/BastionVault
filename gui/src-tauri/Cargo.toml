@@ -24,6 +24,19 @@ authenticator = { version = "0.5", default-features = false, features = ["crypto
 webauthn-rs-proto = "0.5"
 base64urlsafedata = "0.5"
 
+[target.'cfg(windows)'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+# Force winapi's "std" feature so winapi::ctypes::c_void unifies with
+# std::ffi::c_void. Works around authenticator 0.5.0 Windows build error
+# (mismatched types between libc::c_void and winapi::ctypes::c_void).
+# See: gui/src-tauri/Cargo.toml, error at authenticator-0.5.0/src/transport/windows/device.rs:144
+winapi = { version = "0.3", features = ["std"] }
+# Used from the Tauri setup hook to disable WebView2 form autofill, which
+# would otherwise persist typed secret values to Chromium's Web Data cache.
+# Version pinned to match the transitive dep pulled in by Tauri/wry.
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_Foundation"] }
+
 [features]
 default = ["storage_hiqlite"]
 storage_hiqlite = ["bastion_vault/storage_hiqlite"]

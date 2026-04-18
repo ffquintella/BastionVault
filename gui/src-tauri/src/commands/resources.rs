@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use bastion_vault::logical::{Operation, Request};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Map, Value};
 use tauri::State;
 

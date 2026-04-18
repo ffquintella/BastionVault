@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { Layout } from "../components/Layout";
-import { Button, Card, Input, Breadcrumb, EmptyState, Modal, useToast } from "../components/ui";
+import { Button, Card, Input, SecretInput, Breadcrumb, EmptyState, Modal, useToast } from "../components/ui";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 
@@ -222,7 +222,7 @@ export function SecretsPage() {
                       setEditPairs(updated);
                     }}
                   />
-                  <Input
+                  <SecretInput
                     placeholder="value"
                     value={pair.value}
                     onChange={(e) => {
@@ -230,6 +230,7 @@ export function SecretsPage() {
                       updated[i] = { ...pair, value: e.target.value };
                       setEditPairs(updated);
                     }}
+                    className="flex-1"
                   />
                   {editPairs.length > 1 && (
                     <Button

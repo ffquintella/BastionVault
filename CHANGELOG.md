@@ -131,6 +131,24 @@ EXAMPLE ENTRY:
 
 - Branch and pull_request triggers from all GitHub Actions workflows (now tag-only via `releases/**`).
 
+### Fixed
+
+#### Windows build
+- **`openssl-sys` link failure** on Windows MSVC -- added `openssl` dep with the `vendored` feature on `cfg(windows)` in root `Cargo.toml` and `gui/src-tauri/Cargo.toml` so the transitive `openssl-sys` (via `authenticator` and `webauthn-rs-core`) builds from source without a system install.
+- **`authenticator 0.5.0` type mismatch** (`expected winapi::ctypes::c_void, found libc::c_void`) on Windows -- worked around by adding `winapi = { version = "0.3", features = ["std"] }` as a direct dep in `gui/src-tauri/Cargo.toml`; Cargo's feature unification enables winapi's `std` feature, which re-exports `std::ffi::c_void` as `winapi::ctypes::c_void`.
+- **`tauri-winres` RC2176 "old DIB"** -- regenerated `gui/src-tauri/icons/icon.ico` via `npx @tauri-apps/cli icon` so the Windows Resource Compiler accepts the modern PNG-based Vista-style ICO format.
+- Unused `Deserialize` import in `gui/src-tauri/src/commands/resources.rs`.
+
+### Security
+
+#### WebView2 plaintext-secret leak (GUI)
+- **Disabled WebView2 form autofill** to stop Chromium/Edge from persisting typed secret values to its `Web Data` SQLite cache. Three layers of defense:
+  1. `gui/src-tauri/src/lib.rs` -- new `harden_webview_autofill()` called from the Tauri `setup` hook; uses `ICoreWebView2Settings6::SetIsGeneralAutofillEnabled(false)` and `SetIsPasswordAutosaveEnabled(false)`.
+  2. `run()` also sets `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--disable-features=AutofillServerCommunication,AutofillEnableAccountWalletStorage` before WebView2 init.
+  3. New `SecretInput` component (`gui/src/components/ui/SecretInput.tsx`) with `type="password"`, `autoComplete="new-password"`, `spellCheck={false}`, and password-manager ignore hints; used on `SecretsPage` for KV secret values. Base `Input` component now defaults to `autoComplete="off"` + `spellCheck={false}` so no ordinary text input persists to autofill.
+- Added `webview2-com = "0.38"` and `windows = { version = "0.61", features = ["Win32_Foundation"] }` as Windows-only deps in `gui/src-tauri/Cargo.toml` for the `CoreWebView2Settings` calls.
+- Users upgrading from earlier builds should delete `%LOCALAPPDATA%\com.bastionvault.gui\EBWebView\Default\Web Data*` to purge any previously-captured plaintext.
+
 ---
 
 ## [Previous entries below are from earlier development phases]

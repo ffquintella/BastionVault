@@ -7,11 +7,94 @@ mod state;
 
 use state::AppState;
 
+/// Disable WebView2 form-autofill features so typed secret values are not
+/// persisted to Chromium's Web Data SQLite cache. Defense-in-depth paired
+/// with the frontend `SecretInput` component and the Chromium-flag env var
+/// set in `run()`. Called from the Tauri `setup` hook once the WebView2
+/// controller is available.
+#[cfg(target_os = "windows")]
+fn harden_webview_autofill(window: &tauri::WebviewWindow) -> Result<(), Box<dyn std::error::Error>> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings6;
+    use windows::core::Interface;
+
+    window.with_webview(|webview| unsafe {
+        let controller = webview.controller();
+        let core = match controller.CoreWebView2() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("harden_webview_autofill: CoreWebView2 unavailable: {e}");
+                return;
+            }
+        };
+        let settings = match core.Settings() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("harden_webview_autofill: Settings unavailable: {e}");
+                return;
+            }
+        };
+        match settings.cast::<ICoreWebView2Settings6>() {
+            Ok(settings6) => {
+                if let Err(e) = settings6.SetIsGeneralAutofillEnabled(false) {
+                    eprintln!("harden_webview_autofill: SetIsGeneralAutofillEnabled failed: {e}");
+                }
+                if let Err(e) = settings6.SetIsPasswordAutosaveEnabled(false) {
+                    eprintln!("harden_webview_autofill: SetIsPasswordAutosaveEnabled failed: {e}");
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "harden_webview_autofill: ICoreWebView2Settings6 not supported on this \
+                     runtime (WebView2 SDK too old): {e}"
+                );
+            }
+        }
+    })?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Best-effort Chromium-flag disable for autofill-related features. Runs
+    // before Tauri initializes WebView2 so the runtime picks it up at launch.
+    // The authoritative hardening happens in `harden_webview_autofill` below.
+    #[cfg(target_os = "windows")]
+    {
+        const EXTRA_ARGS: &str =
+            "--disable-features=AutofillServerCommunication,AutofillEnableAccountWalletStorage";
+        // Preserve any pre-existing value the user set.
+        match std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS") {
+            Ok(existing) if !existing.is_empty() => {
+                std::env::set_var(
+                    "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+                    format!("{existing} {EXTRA_ARGS}"),
+                );
+            }
+            _ => {
+                std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", EXTRA_ARGS);
+            }
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(AppState::new())
+        .setup(|app| {
+            #[cfg(target_os = "windows")]
+            {
+                use tauri::Manager;
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Err(e) = harden_webview_autofill(&window) {
+                        eprintln!("WebView2 autofill hardening failed: {e}");
+                    }
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = app;
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // Connection
             commands::connection::get_mode,

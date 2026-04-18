@@ -119,6 +119,9 @@ sync_handler = ["maybe-async/is_sync"]
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5"
 
+[target.'cfg(windows)'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+
 [dependencies.foreign-types]
 version = "0.5.0"
 
