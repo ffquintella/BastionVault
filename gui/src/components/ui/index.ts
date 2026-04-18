@@ -2,6 +2,13 @@ export { Button } from "./Button";
 export { Input } from "./Input";
 export { SecretInput } from "./SecretInput";
 export { MaskedValue } from "./MaskedValue";
+export { PasswordGenerator } from "./PasswordGenerator";
+export {
+  SecretPairsEditor,
+  pairsFromData,
+  dataFromPairs,
+  type SecretPair,
+} from "./SecretPairsEditor";
 export { Textarea } from "./Textarea";
 export { Select } from "./Select";
 export { Card } from "./Card";

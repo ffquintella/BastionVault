@@ -6,6 +6,7 @@ import {
   Card,
   Badge,
   Input,
+  SecretInput,
   Table,
   Modal,
   ConfirmModal,
@@ -13,6 +14,8 @@ import {
   useToast,
 } from "../components/ui";
 import { useWebAuthn } from "../hooks/useWebAuthn";
+import { usePasswordPolicyStore } from "../stores/passwordPolicyStore";
+import { checkPasswordPolicy, describePolicy } from "../lib/password";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 
@@ -49,6 +52,22 @@ export function UsersPage() {
 
   // Per-user FIDO2 key counts for the list display
   const [userFido2Info, setUserFido2Info] = useState<Record<string, number>>({});
+
+  // Minimum-password-composition policy.
+  const passwordPolicy = usePasswordPolicyStore((s) => s.policy);
+  const loadPasswordPolicy = usePasswordPolicyStore((s) => s.load);
+  useEffect(() => {
+    loadPasswordPolicy();
+  }, [loadPasswordPolicy]);
+
+  const policyDescription = describePolicy(passwordPolicy);
+  // Live policy check for the create modal (password is always required).
+  const createPasswordCheck = checkPasswordPolicy(formPassword, passwordPolicy);
+  // Live policy check for the edit modal (blank = keep current, so blank is OK).
+  const editPasswordEntered = formPassword.length > 0;
+  const editPasswordCheck = editPasswordEntered
+    ? checkPasswordPolicy(formPassword, passwordPolicy)
+    : { ok: true, failures: [] };
 
   useEffect(() => {
     ensureMountAndLoad();
@@ -157,6 +176,14 @@ export function UsersPage() {
   }
 
   async function handleCreate() {
+    // Enforce the minimum-password-composition policy at create time. The
+    // backend does not know about this policy (it is a GUI-only UX rule),
+    // so we block client-side.
+    const check = checkPasswordPolicy(formPassword, passwordPolicy);
+    if (!check.ok) {
+      toast("error", `Password must include ${check.failures.join(", ")}.`);
+      return;
+    }
     try {
       const policies = formSelectedPolicies.join(",");
       await api.createUser(mountPath, formUsername, formPassword, policies);
@@ -171,6 +198,16 @@ export function UsersPage() {
 
   async function handleEdit() {
     if (!editUser) return;
+    // If the password field is non-empty the user is actively changing the
+    // password -- enforce the policy. A blank field means "keep current",
+    // which bypasses the policy (since we are not writing a new password).
+    if (formPassword.length > 0) {
+      const check = checkPasswordPolicy(formPassword, passwordPolicy);
+      if (!check.ok) {
+        toast("error", `Password must include ${check.failures.join(", ")}.`);
+        return;
+      }
+    }
     try {
       const policies = formSelectedPolicies.join(",");
       await api.updateUser(mountPath, editUser, formPassword, policies);
@@ -365,13 +402,30 @@ export function UsersPage() {
           actions={
             <>
               <Button variant="ghost" onClick={() => setShowCreate(false)}>Cancel</Button>
-              <Button onClick={handleCreate} disabled={!formUsername || !formPassword}>Create</Button>
+              <Button
+                onClick={handleCreate}
+                disabled={!formUsername || !formPassword || !createPasswordCheck.ok}
+              >
+                Create
+              </Button>
             </>
           }
         >
           <div className="space-y-3">
             <Input label="Username" value={formUsername} onChange={(e) => setFormUsername(e.target.value)} />
-            <Input label="Password" type="password" value={formPassword} onChange={(e) => setFormPassword(e.target.value)} />
+            <SecretInput
+              label="Password"
+              value={formPassword}
+              onChange={(e) => setFormPassword(e.target.value)}
+              showGenerator
+              onGenerate={(v) => setFormPassword(v)}
+              hint={policyDescription}
+              error={
+                formPassword && !createPasswordCheck.ok
+                  ? `Missing: ${createPasswordCheck.failures.join(", ")}`
+                  : undefined
+              }
+            />
             <PolicySelector />
           </div>
         </Modal>
@@ -385,7 +439,9 @@ export function UsersPage() {
           actions={
             <>
               <Button variant="ghost" onClick={() => setEditUser(null)}>Cancel</Button>
-              <Button onClick={handleEdit}>Save</Button>
+              <Button onClick={handleEdit} disabled={!editPasswordCheck.ok}>
+                Save
+              </Button>
             </>
           }
         >
@@ -398,12 +454,22 @@ export function UsersPage() {
                 </p>
               </div>
             ) : (
-              <Input
+              <SecretInput
                 label="New Password"
-                type="password"
                 value={formPassword}
                 onChange={(e) => setFormPassword(e.target.value)}
-                hint="Leave empty to keep current password"
+                showGenerator
+                onGenerate={(v) => setFormPassword(v)}
+                hint={
+                  editPasswordEntered
+                    ? policyDescription
+                    : `Leave empty to keep current password. ${policyDescription}.`
+                }
+                error={
+                  editPasswordEntered && !editPasswordCheck.ok
+                    ? `Missing: ${editPasswordCheck.failures.join(", ")}`
+                    : undefined
+                }
               />
             )}
             <PolicySelector />

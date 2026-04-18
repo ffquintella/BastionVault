@@ -25,7 +25,28 @@ export interface RemoteStatus {
 export interface Preferences {
   mode: VaultMode;
   remote_profile?: RemoteProfile;
+  password_policy?: PasswordPolicy;
 }
+
+/**
+ * Minimum-acceptable password composition enforced by the built-in
+ * generator. Stored in the GUI's local preferences.json.
+ */
+export interface PasswordPolicy {
+  min_length: number;
+  require_lowercase: boolean;
+  require_uppercase: boolean;
+  require_digits: boolean;
+  require_symbols: boolean;
+}
+
+export const DEFAULT_PASSWORD_POLICY: PasswordPolicy = {
+  min_length: 16,
+  require_lowercase: true,
+  require_uppercase: true,
+  require_digits: true,
+  require_symbols: false,
+};
 
 export interface InitResponse {
   root_token: string;

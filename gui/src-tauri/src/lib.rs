@@ -108,6 +108,8 @@ pub fn run() {
             commands::connection::remote_login_userpass,
             commands::connection::load_preferences,
             commands::connection::save_preferences,
+            commands::connection::get_password_policy,
+            commands::connection::set_password_policy,
             // System
             commands::system::init_vault,
             commands::system::open_vault,

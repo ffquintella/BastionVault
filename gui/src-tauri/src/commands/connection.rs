@@ -204,6 +204,25 @@ pub async fn load_preferences() -> CmdResult<Preferences> {
 
 #[tauri::command]
 pub async fn save_preferences(mode: VaultMode, remote_profile: Option<RemoteProfile>) -> CmdResult<()> {
-    let prefs = Preferences { mode, remote_profile };
+    // Load-then-merge so we do not drop fields this command does not know
+    // about (e.g. `password_policy`). Falls back to defaults if the file is
+    // missing or corrupt.
+    let mut prefs = crate::preferences::load().unwrap_or_default();
+    prefs.mode = mode;
+    prefs.remote_profile = remote_profile;
+    crate::preferences::save(&prefs)
+}
+
+#[tauri::command]
+pub async fn get_password_policy() -> CmdResult<crate::preferences::PasswordPolicy> {
+    Ok(crate::preferences::load().unwrap_or_default().password_policy)
+}
+
+#[tauri::command]
+pub async fn set_password_policy(
+    policy: crate::preferences::PasswordPolicy,
+) -> CmdResult<()> {
+    let mut prefs = crate::preferences::load().unwrap_or_default();
+    prefs.password_policy = policy;
     crate::preferences::save(&prefs)
 }

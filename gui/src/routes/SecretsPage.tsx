@@ -1,6 +1,19 @@
 import { useState, useEffect, useCallback } from "react";
 import { Layout } from "../components/Layout";
-import { Button, Card, Input, SecretInput, MaskedValue, Breadcrumb, EmptyState, Modal, useToast } from "../components/ui";
+import {
+  Button,
+  Card,
+  Input,
+  MaskedValue,
+  Breadcrumb,
+  EmptyState,
+  Modal,
+  SecretPairsEditor,
+  pairsFromData,
+  dataFromPairs,
+  type SecretPair,
+  useToast,
+} from "../components/ui";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 
@@ -17,9 +30,14 @@ export function SecretsPage() {
   const [loading, setLoading] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [newKey, setNewKey] = useState("");
-  const [editPairs, setEditPairs] = useState<{ key: string; value: string }[]>([
+  const [createPairs, setCreatePairs] = useState<SecretPair[]>([
     { key: "", value: "" },
   ]);
+
+  // In-place edit of the currently-selected secret.
+  const [editingSecret, setEditingSecret] = useState(false);
+  const [editPairs, setEditPairs] = useState<SecretPair[]>([]);
+  const [savingEdit, setSavingEdit] = useState(false);
 
   // null = still loading, [] = no KV engines, non-empty = available KV mounts
   const [kvMounts, setKvMounts] = useState<KvMount[] | null>(null);
@@ -68,6 +86,7 @@ export function SecretsPage() {
       loadKeys();
       setSelectedKey(null);
       setSecretData({});
+      setEditingSecret(false);
     }
   }, [currentPath, loadKeys]);
 
@@ -80,6 +99,7 @@ export function SecretsPage() {
       const result = await api.readSecret(currentPath + key, mountBase, mountType);
       setSelectedKey(key);
       setSecretData(result.data);
+      setEditingSecret(false);
     } catch (e: unknown) {
       toast("error", extractError(e));
     }
@@ -91,6 +111,7 @@ export function SecretsPage() {
       toast("success", `Deleted ${key}`);
       setSelectedKey(null);
       setSecretData({});
+      setEditingSecret(false);
       loadKeys();
     } catch (e: unknown) {
       toast("error", extractError(e));
@@ -99,19 +120,50 @@ export function SecretsPage() {
 
   async function handleCreate() {
     if (!newKey) return;
-    const data: Record<string, string> = {};
-    for (const pair of editPairs) {
-      if (pair.key) data[pair.key] = pair.value;
-    }
     try {
-      await api.writeSecret(currentPath + newKey, data, mountBase, mountType);
+      await api.writeSecret(
+        currentPath + newKey,
+        dataFromPairs(createPairs),
+        mountBase,
+        mountType,
+      );
       toast("success", `Created ${newKey}`);
       setShowCreate(false);
       setNewKey("");
-      setEditPairs([{ key: "", value: "" }]);
+      setCreatePairs([{ key: "", value: "" }]);
       loadKeys();
     } catch (e: unknown) {
       toast("error", extractError(e));
+    }
+  }
+
+  function startEdit() {
+    setEditPairs(pairsFromData(secretData));
+    setEditingSecret(true);
+  }
+
+  async function handleSaveEdit() {
+    if (!selectedKey) return;
+    const data = dataFromPairs(editPairs);
+    if (Object.keys(data).length === 0) {
+      toast("error", "At least one key-value pair is required.");
+      return;
+    }
+    setSavingEdit(true);
+    try {
+      await api.writeSecret(currentPath + selectedKey, data, mountBase, mountType);
+      toast("success", `Updated ${selectedKey}`);
+      const refreshed = await api.readSecret(
+        currentPath + selectedKey,
+        mountBase,
+        mountType,
+      );
+      setSecretData(refreshed.data);
+      setEditingSecret(false);
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    } finally {
+      setSavingEdit(false);
     }
   }
 
@@ -203,35 +255,62 @@ export function SecretsPage() {
             {/* Secret detail */}
             <Card className="flex-1" title={selectedKey || "Select a secret"}>
               {selectedKey ? (
-                <div className="space-y-3">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="text-[var(--color-text-muted)] text-left">
-                        <th className="pb-2 font-medium">Key</th>
-                        <th className="pb-2 font-medium">Value</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {Object.entries(secretData).map(([k, v]) => (
-                        <tr key={k} className="border-t border-[var(--color-border)]">
-                          <td className="py-2 font-mono text-[var(--color-primary)]">{k}</td>
-                          <td className="py-2 font-mono">
-                            <MaskedValue value={String(v)} />
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  <div className="flex gap-2 pt-2">
-                    <Button
-                      variant="danger"
-                      size="sm"
-                      onClick={() => handleDelete(selectedKey)}
-                    >
-                      Delete
-                    </Button>
+                editingSecret ? (
+                  <div className="space-y-3">
+                    <SecretPairsEditor pairs={editPairs} onChange={setEditPairs} />
+                    <div className="flex gap-2 pt-2">
+                      <Button
+                        size="sm"
+                        onClick={handleSaveEdit}
+                        loading={savingEdit}
+                        disabled={savingEdit}
+                      >
+                        Save
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setEditingSecret(false)}
+                        disabled={savingEdit}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="space-y-3">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-[var(--color-text-muted)] text-left">
+                          <th className="pb-2 font-medium">Key</th>
+                          <th className="pb-2 font-medium">Value</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {Object.entries(secretData).map(([k, v]) => (
+                          <tr key={k} className="border-t border-[var(--color-border)]">
+                            <td className="py-2 font-mono text-[var(--color-primary)]">{k}</td>
+                            <td className="py-2 font-mono">
+                              <MaskedValue value={String(v)} />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <div className="flex gap-2 pt-2">
+                      <Button size="sm" onClick={startEdit}>
+                        Edit
+                      </Button>
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        onClick={() => handleDelete(selectedKey)}
+                      >
+                        Delete
+                      </Button>
+                    </div>
+                  </div>
+                )
               ) : (
                 <EmptyState
                   title="No secret selected"
@@ -265,50 +344,7 @@ export function SecretsPage() {
               onChange={(e) => setNewKey(e.target.value)}
               placeholder="my-secret"
             />
-            <div className="space-y-2">
-              <label className="block text-sm font-medium text-[var(--color-text-muted)]">
-                Key-Value Pairs
-              </label>
-              {editPairs.map((pair, i) => (
-                <div key={i} className="flex gap-2">
-                  <Input
-                    placeholder="key"
-                    value={pair.key}
-                    onChange={(e) => {
-                      const updated = [...editPairs];
-                      updated[i] = { ...pair, key: e.target.value };
-                      setEditPairs(updated);
-                    }}
-                  />
-                  <SecretInput
-                    placeholder="value"
-                    value={pair.value}
-                    onChange={(e) => {
-                      const updated = [...editPairs];
-                      updated[i] = { ...pair, value: e.target.value };
-                      setEditPairs(updated);
-                    }}
-                    className="flex-1"
-                  />
-                  {editPairs.length > 1 && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setEditPairs(editPairs.filter((_, j) => j !== i))}
-                    >
-                      &times;
-                    </Button>
-                  )}
-                </div>
-              ))}
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setEditPairs([...editPairs, { key: "", value: "" }])}
-              >
-                + Add pair
-              </Button>
-            </div>
+            <SecretPairsEditor pairs={createPairs} onChange={setCreatePairs} />
           </div>
         </Modal>
       </div>
@@ -339,4 +375,3 @@ function MountSelector({
     </div>
   );
 }
-

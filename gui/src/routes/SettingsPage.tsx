@@ -4,7 +4,14 @@ import { Layout } from "../components/Layout";
 import { Button, Card, Badge, Input, Select, Modal, ConfirmModal, useToast } from "../components/ui";
 import { useVaultStore } from "../stores/vaultStore";
 import { useAuthStore } from "../stores/authStore";
-import type { Fido2Config, ResourceTypeConfig, ResourceTypeDef, ResourceFieldDef } from "../lib/types";
+import { usePasswordPolicyStore } from "../stores/passwordPolicyStore";
+import type {
+  Fido2Config,
+  ResourceTypeConfig,
+  ResourceTypeDef,
+  ResourceFieldDef,
+  PasswordPolicy,
+} from "../lib/types";
 import { DEFAULT_RESOURCE_TYPES, mergeTypeConfig } from "../lib/resourceTypes";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
@@ -41,10 +48,41 @@ export function SettingsPage() {
   const [deleteTypeId, setDeleteTypeId] = useState<string | null>(null);
   const [showAddType, setShowAddType] = useState(false);
 
+  // Password policy
+  const passwordPolicy = usePasswordPolicyStore((s) => s.policy);
+  const loadPasswordPolicy = usePasswordPolicyStore((s) => s.load);
+  const updatePasswordPolicy = usePasswordPolicyStore((s) => s.update);
+  const [editingPolicy, setEditingPolicy] = useState(false);
+  const [policyDraft, setPolicyDraft] = useState<PasswordPolicy>(passwordPolicy);
+  const [savingPolicy, setSavingPolicy] = useState(false);
+
   useEffect(() => {
     loadFido2Config();
     loadResourceTypes();
-  }, []);
+    loadPasswordPolicy();
+  }, [loadPasswordPolicy]);
+
+  // Keep the draft in sync with the store when not actively editing.
+  useEffect(() => {
+    if (!editingPolicy) setPolicyDraft(passwordPolicy);
+  }, [passwordPolicy, editingPolicy]);
+
+  async function handleSavePolicy() {
+    setSavingPolicy(true);
+    try {
+      const normalized: PasswordPolicy = {
+        ...policyDraft,
+        min_length: Math.max(1, Math.min(512, Math.floor(policyDraft.min_length))),
+      };
+      await updatePasswordPolicy(normalized);
+      toast("success", "Password policy saved");
+      setEditingPolicy(false);
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    } finally {
+      setSavingPolicy(false);
+    }
+  }
 
   async function loadFido2Config() {
     const defaults = deriveDefaults(mode, remoteProfile?.address);
@@ -243,6 +281,167 @@ export function SettingsPage() {
           )}
         </Card>
 
+        {/* Password Policy */}
+        <Card
+          title="Password Policy"
+          actions={
+            !editingPolicy ? (
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => {
+                  setPolicyDraft(passwordPolicy);
+                  setEditingPolicy(true);
+                }}
+              >
+                Edit
+              </Button>
+            ) : (
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setPolicyDraft(passwordPolicy);
+                    setEditingPolicy(false);
+                  }}
+                  disabled={savingPolicy}
+                >
+                  Cancel
+                </Button>
+                <Button size="sm" onClick={handleSavePolicy} loading={savingPolicy}>
+                  Save
+                </Button>
+              </div>
+            )
+          }
+        >
+          {editingPolicy ? (
+            <div className="space-y-4">
+              {/* Minimum length */}
+              <div className="space-y-1">
+                <div className="flex justify-between text-sm">
+                  <label
+                    htmlFor="policy-min-length"
+                    className="font-medium text-[var(--color-text)]"
+                  >
+                    Minimum length
+                  </label>
+                  <span className="font-mono text-[var(--color-text-muted)]">
+                    {policyDraft.min_length}
+                  </span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <input
+                    id="policy-min-length"
+                    type="range"
+                    min={4}
+                    max={128}
+                    value={policyDraft.min_length}
+                    onChange={(e) =>
+                      setPolicyDraft({
+                        ...policyDraft,
+                        min_length: Number(e.target.value),
+                      })
+                    }
+                    className="flex-1 accent-[var(--color-primary)]"
+                  />
+                  <input
+                    type="number"
+                    min={1}
+                    max={512}
+                    value={policyDraft.min_length}
+                    onChange={(e) => {
+                      const n = Number(e.target.value);
+                      if (Number.isFinite(n)) {
+                        setPolicyDraft({
+                          ...policyDraft,
+                          min_length: Math.max(1, Math.min(512, Math.floor(n))),
+                        });
+                      }
+                    }}
+                    className="w-20 text-sm bg-[var(--color-bg)] border border-[var(--color-border)] rounded px-2 py-1"
+                  />
+                </div>
+                <p className="text-xs text-[var(--color-text-muted)]">
+                  The generator will never produce a password shorter than this.
+                </p>
+              </div>
+
+              {/* Required character groups */}
+              <div className="space-y-2">
+                <label className="block text-sm font-medium text-[var(--color-text)]">
+                  Required character groups
+                </label>
+                <div className="grid grid-cols-2 gap-2 text-sm">
+                  <PolicyToggle
+                    label="Lowercase (a-z)"
+                    checked={policyDraft.require_lowercase}
+                    onChange={(v) =>
+                      setPolicyDraft({ ...policyDraft, require_lowercase: v })
+                    }
+                  />
+                  <PolicyToggle
+                    label="Uppercase (A-Z)"
+                    checked={policyDraft.require_uppercase}
+                    onChange={(v) =>
+                      setPolicyDraft({ ...policyDraft, require_uppercase: v })
+                    }
+                  />
+                  <PolicyToggle
+                    label="Digits (0-9)"
+                    checked={policyDraft.require_digits}
+                    onChange={(v) =>
+                      setPolicyDraft({ ...policyDraft, require_digits: v })
+                    }
+                  />
+                  <PolicyToggle
+                    label="Symbols (!@#...)"
+                    checked={policyDraft.require_symbols}
+                    onChange={(v) =>
+                      setPolicyDraft({ ...policyDraft, require_symbols: v })
+                    }
+                  />
+                </div>
+                <p className="text-xs text-[var(--color-text-muted)]">
+                  Groups toggled on here are always included by the generator --
+                  the user cannot turn them off from the generator popover.
+                </p>
+                {!policyDraft.require_lowercase &&
+                  !policyDraft.require_uppercase &&
+                  !policyDraft.require_digits &&
+                  !policyDraft.require_symbols && (
+                    <p className="text-xs text-[var(--color-warning)]">
+                      No character groups required. Users will be able to pick any
+                      combination in the generator.
+                    </p>
+                  )}
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-3 text-sm">
+              <div className="flex justify-between items-center">
+                <span className="text-[var(--color-text-muted)]">Minimum length</span>
+                <span className="font-mono">{passwordPolicy.min_length}</span>
+              </div>
+              <div>
+                <div className="text-[var(--color-text-muted)] mb-1">
+                  Required groups
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {requiredGroupBadges(passwordPolicy).length === 0 ? (
+                    <span className="text-[var(--color-text-muted)]">None</span>
+                  ) : (
+                    requiredGroupBadges(passwordPolicy).map((label) => (
+                      <Badge key={label} label={label} variant="info" />
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+        </Card>
+
         {/* Resource Types */}
         <Card title="Resource Types" actions={
           <div className="flex gap-2">
@@ -328,6 +527,39 @@ export function SettingsPage() {
       </div>
     </Layout>
   );
+}
+
+// ── Password Policy helpers ────────────────────────────────────────
+
+function PolicyToggle({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <label className="flex items-center gap-2 cursor-pointer select-none">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="accent-[var(--color-primary)]"
+      />
+      <span className="text-[var(--color-text-muted)]">{label}</span>
+    </label>
+  );
+}
+
+function requiredGroupBadges(p: PasswordPolicy): string[] {
+  const out: string[] = [];
+  if (p.require_lowercase) out.push("lowercase");
+  if (p.require_uppercase) out.push("uppercase");
+  if (p.require_digits) out.push("digits");
+  if (p.require_symbols) out.push("symbols");
+  return out;
 }
 
 // ── Type Editor Modal ──────────────────────────────────────────────

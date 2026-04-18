@@ -28,6 +28,7 @@ import type {
   Fido2CredentialInfo,
   RemoteProfile,
   RemoteStatus,
+  PasswordPolicy,
 } from "./types";
 
 // Connection
@@ -42,6 +43,9 @@ export const getRemoteStatus = () => invoke<RemoteStatus>("get_remote_status");
 export const loadPreferences = () => invoke<Preferences>("load_preferences");
 export const savePreferences = (mode: VaultMode, remoteProfile?: RemoteProfile) =>
   invoke<void>("save_preferences", { mode, remoteProfile: remoteProfile ?? null });
+export const getPasswordPolicy = () => invoke<PasswordPolicy>("get_password_policy");
+export const setPasswordPolicy = (policy: PasswordPolicy) =>
+  invoke<void>("set_password_policy", { policy });
 export const remoteLoginToken = (token: string) =>
   invoke<void>("remote_login_token", { token });
 export const remoteLoginUserpass = (username: string, password: string) =>
