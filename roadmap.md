@@ -14,6 +14,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Secret Versioning & Soft-Delete | Todo |
 | Access Control (RBAC, path-based ACL policies) | Done |
 | Identity Groups (user groups, application groups, group→policy mapping) | Done |
+| Per-User Scoping (ownership + policy templating + sharing) | Todo |
 | Audit Logging (tamper-evident, HMAC chain) | Partial |
 | Metrics (Prometheus) | Done |
 | **Cryptography** | |
@@ -75,6 +76,8 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
   Higher-level inventory abstraction for organizing secrets by infrastructure entity (servers, network devices, websites, databases, applications, custom types). Stored in the KV engine with metadata (hostname, IP, OS, location, owner, tags).
 - [Identity Groups](features/identity-groups.md)
   User groups and application groups with group-to-policy mapping. Policies attached to a group are unioned with the caller's direct policies at login time. Backend, HTTP API, and GUI integration shipped; extension to Certificate/OIDC/SAML auth backends pending.
+- [Per-User Scoping (Ownership & Sharing)](features/per-user-scoping.md)
+  Ownership-aware ACLs: entity IDs provisioned on first login, policy templating (`{{username}}`, `{{entity.id}}`), a new `scopes = ["owner" | "shared"]` qualifier on policy paths, and owner metadata on KV secrets and resources. Enables seeded `standard-user-readonly` and `password-administrator` roles, with an explicit secret-sharing layer as a later phase. Design only; not yet implemented.
 
 ## Notes
 
