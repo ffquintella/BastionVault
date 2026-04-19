@@ -19,7 +19,7 @@ pub mod policy;
 pub use policy::{Permissions, Policy, PolicyPathRules, PolicyType};
 
 pub mod policy_store;
-pub use policy_store::PolicyStore;
+pub use policy_store::{PolicyHistoryEntry, PolicyStore};
 
 pub mod acl;
 
@@ -102,13 +102,43 @@ impl PolicyModule {
         };
 
         let mut policy = Policy::from_str(&policy_raw)?;
-        policy.name = name;
+        policy.name = name.clone();
 
         if policy.policy_type == PolicyType::Egp || policy.policy_type == PolicyType::Rgp {
             policy.input_sentinel_policy_data(req)?;
         }
 
-        self.policy_store.load().set_policy(policy).await?;
+        // Snapshot the previous raw HCL before the write so we can record
+        // both sides of the change in the audit log. Only ACL policies
+        // are history-tracked here; sentinel (RGP/EGP) edits flow through
+        // this handler too but do not yet emit history entries.
+        let store = self.policy_store.load();
+        let previous_raw = if policy.policy_type == PolicyType::Acl {
+            store
+                .get_policy(&name, PolicyType::Acl)
+                .await?
+                .map(|p| p.raw.clone())
+        } else {
+            None
+        };
+        let op = if previous_raw.is_some() { "update" } else { "create" };
+        let new_raw = policy.raw.clone();
+
+        store.set_policy(policy).await?;
+
+        if matches!(op, "create" | "update")
+            && previous_raw.as_deref() != Some(new_raw.as_str())
+        {
+            let entry = PolicyHistoryEntry {
+                ts: now_iso(),
+                user: caller_username(req),
+                op: op.to_string(),
+                before_raw: previous_raw.unwrap_or_default(),
+                after_raw: new_raw,
+            };
+            // History failures must not fail the write.
+            let _ = store.append_history(&name, entry).await;
+        }
 
         Ok(None)
     }
@@ -119,9 +149,77 @@ impl PolicyModule {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let name = req.get_data_as_str("name")?;
-        self.policy_store.load().delete_policy(&name, PolicyType::Acl).await?;
+
+        // Capture the current raw HCL *before* deletion so the audit
+        // entry retains the full final state of the policy.
+        let store = self.policy_store.load();
+        let previous_raw = store
+            .get_policy(&name, PolicyType::Acl)
+            .await?
+            .map(|p| p.raw.clone())
+            .unwrap_or_default();
+
+        store.delete_policy(&name, PolicyType::Acl).await?;
+
+        let entry = PolicyHistoryEntry {
+            ts: now_iso(),
+            user: caller_username(req),
+            op: "delete".to_string(),
+            before_raw: previous_raw,
+            after_raw: String::new(),
+        };
+        let _ = store.append_history(&name, entry).await;
+
         Ok(None)
     }
+
+    pub async fn handle_policy_history(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let name = req.get_data_as_str("name")?;
+        let entries = self.policy_store.load().list_history(&name).await?;
+
+        let arr = Value::Array(
+            entries
+                .iter()
+                .map(|e| {
+                    let mut m = Map::new();
+                    m.insert("ts".into(), Value::String(e.ts.clone()));
+                    m.insert("user".into(), Value::String(e.user.clone()));
+                    m.insert("op".into(), Value::String(e.op.clone()));
+                    m.insert("before_raw".into(), Value::String(e.before_raw.clone()));
+                    m.insert("after_raw".into(), Value::String(e.after_raw.clone()));
+                    Value::Object(m)
+                })
+                .collect(),
+        );
+        let mut data = Map::new();
+        data.insert("entries".into(), arr);
+        Ok(Some(Response::data_response(Some(data))))
+    }
+}
+
+fn now_iso() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+/// Best-effort caller identity for audit entries. Prefers the
+/// `username` metadata field (populated by UserPass login), then
+/// `auth.display_name`, then falls back to `"unknown"`.
+fn caller_username(req: &Request) -> String {
+    if let Some(auth) = req.auth.as_ref() {
+        if let Some(u) = auth.metadata.get("username") {
+            if !u.is_empty() {
+                return u.clone();
+            }
+        }
+        if !auth.display_name.is_empty() {
+            return auth.display_name.clone();
+        }
+    }
+    "unknown".to_string()
 }
 
 #[maybe_async::maybe_async]

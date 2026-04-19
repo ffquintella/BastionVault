@@ -145,6 +145,7 @@ pub fn run() {
             commands::policies::read_policy,
             commands::policies::write_policy,
             commands::policies::delete_policy,
+            commands::policies::list_policy_history,
             // Resources
             commands::resources::resource_types_read,
             commands::resources::resource_types_write,
@@ -169,6 +170,12 @@ pub fn run() {
             commands::approle::list_secret_id_accessors,
             commands::approle::lookup_secret_id_accessor,
             commands::approle::destroy_secret_id_accessor,
+            // Identity groups
+            commands::groups::list_groups,
+            commands::groups::read_group,
+            commands::groups::write_group,
+            commands::groups::delete_group,
+            commands::groups::list_group_history,
             // FIDO2
             commands::fido2_native::fido2_native_register,
             commands::fido2_native::fido2_native_login,

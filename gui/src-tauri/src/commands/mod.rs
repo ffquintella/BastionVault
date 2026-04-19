@@ -2,6 +2,7 @@ pub mod approle;
 pub mod auth;
 pub mod fido2;
 pub mod fido2_native;
+pub mod groups;
 pub mod connection;
 pub mod policies;
 pub mod resources;

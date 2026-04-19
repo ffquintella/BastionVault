@@ -20,6 +20,8 @@ export function AppRolePage() {
   const { toast } = useToast();
   const [roles, setRoles] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [mountEnabled, setMountEnabled] = useState<boolean | null>(null);
+  const [enabling, setEnabling] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [roleInfo, setRoleInfo] = useState<AppRoleInfo | null>(null);
   const [roleId, setRoleId] = useState("");
@@ -38,12 +40,32 @@ export function AppRolePage() {
   async function loadRoles() {
     setLoading(true);
     try {
+      const methods = await api.listAuthMethods().catch(() => []);
+      const enabled = methods.some((m) => m.mount_type === "approle");
+      setMountEnabled(enabled);
+      if (!enabled) {
+        setRoles([]);
+        return;
+      }
       const result = await api.listAppRoles();
       setRoles(result.roles);
     } catch {
       setRoles([]);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleEnableMount() {
+    setEnabling(true);
+    try {
+      await api.enableAuthMethod("approle/", "approle", "AppRole auth method");
+      toast("success", "AppRole auth method enabled");
+      await loadRoles();
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    } finally {
+      setEnabling(false);
     }
   }
 
@@ -102,11 +124,28 @@ export function AppRolePage() {
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">AppRole</h1>
-          <Button size="sm" onClick={() => setShowCreate(true)}>
-            Create Role
-          </Button>
+          {mountEnabled && (
+            <Button size="sm" onClick={() => setShowCreate(true)}>
+              Create Role
+            </Button>
+          )}
         </div>
 
+        {mountEnabled === false && !loading && (
+          <Card>
+            <EmptyState
+              title="AppRole auth method not enabled"
+              description="The AppRole auth backend must be mounted before you can create roles."
+              action={
+                <Button onClick={handleEnableMount} disabled={enabling}>
+                  {enabling ? "Enabling..." : "Enable AppRole"}
+                </Button>
+              }
+            />
+          </Card>
+        )}
+
+        {mountEnabled && (
         <div className="flex gap-4">
           {/* Role list */}
           <Card className="w-56 shrink-0" title="Roles">
@@ -159,6 +198,7 @@ export function AppRolePage() {
             )}
           </div>
         </div>
+        )}
 
         {/* Create role modal */}
         <Modal

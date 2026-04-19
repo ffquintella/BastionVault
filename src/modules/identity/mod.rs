@@ -31,7 +31,7 @@ use crate::{
 };
 
 pub mod group_store;
-pub use group_store::{GroupEntry, GroupKind, GroupStore};
+pub use group_store::{GroupEntry, GroupHistoryEntry, GroupKind, GroupStore};
 
 static IDENTITY_BACKEND_HELP: &str = r#"
 The identity backend manages user groups and application groups. Each group
@@ -74,6 +74,10 @@ impl IdentityBackend {
         let h_app_read = self.inner.clone();
         let h_app_write = self.inner.clone();
         let h_app_delete = self.inner.clone();
+
+        // History handlers
+        let h_user_hist = self.inner.clone();
+        let h_app_hist = self.inner.clone();
 
         let h_noop1 = self.inner.clone();
         let h_noop2 = self.inner.clone();
@@ -126,6 +130,20 @@ impl IdentityBackend {
                     help: "List application group names."
                 },
                 {
+                    pattern: r"group/user/(?P<name>[^/]+)/history/?$",
+                    fields: {
+                        "name": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Group name."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_user_hist.handle_user_group_history}
+                    ],
+                    help: "Read the change history for a user group."
+                },
+                {
                     pattern: r"group/app/(?P<name>[^/]+)$",
                     fields: {
                         "name": {
@@ -155,6 +173,20 @@ impl IdentityBackend {
                         {op: Operation::Delete, handler: h_app_delete.handle_app_group_delete}
                     ],
                     help: "Read, create/update, or delete an application group."
+                },
+                {
+                    pattern: r"group/app/(?P<name>[^/]+)/history/?$",
+                    fields: {
+                        "name": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Group name."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_app_hist.handle_app_group_history}
+                    ],
+                    help: "Read the change history for an application group."
                 }
             ],
             secrets: [{
@@ -181,6 +213,86 @@ struct GroupWritePayload {
 
 fn now_iso() -> String {
     Utc::now().to_rfc3339()
+}
+
+/// Best-effort caller identity for audit entries. Prefers the `username`
+/// metadata field (populated by UserPass login), then `auth.display_name`,
+/// and falls back to `"unknown"` for root-token writes or paths where
+/// auth was not resolved. Mirrors the resource module.
+fn caller_username(req: &Request) -> String {
+    if let Some(auth) = req.auth.as_ref() {
+        if let Some(u) = auth.metadata.get("username") {
+            if !u.is_empty() {
+                return u.clone();
+            }
+        }
+        if !auth.display_name.is_empty() {
+            return auth.display_name.clone();
+        }
+    }
+    "unknown".to_string()
+}
+
+/// Compute the diff between two group states. Returns the list of
+/// changed field names plus two JSON maps holding the *values* of
+/// exactly those fields before and after the change. `members` and
+/// `policies` are compared as sets, so pure reordering is not a change.
+///
+/// Passing `None` for `old` represents creation; passing `None` for
+/// `new` represents deletion. In both cases the "missing" side of the
+/// diff is left empty.
+fn diff_with_values(
+    old: Option<&GroupEntry>,
+    new: Option<&GroupEntry>,
+) -> (Vec<String>, Map<String, Value>, Map<String, Value>) {
+    let empty = GroupEntry::default();
+    let o = old.unwrap_or(&empty);
+    let n = new.unwrap_or(&empty);
+
+    let mut changed: Vec<String> = Vec::new();
+    let mut before = Map::new();
+    let mut after = Map::new();
+
+    if o.description != n.description {
+        changed.push("description".to_string());
+        if old.is_some() {
+            before.insert("description".into(), Value::String(o.description.clone()));
+        }
+        if new.is_some() {
+            after.insert("description".into(), Value::String(n.description.clone()));
+        }
+    }
+    if !same_set(&o.members, &n.members) {
+        changed.push("members".to_string());
+        if old.is_some() {
+            before.insert("members".into(), string_array(&o.members));
+        }
+        if new.is_some() {
+            after.insert("members".into(), string_array(&n.members));
+        }
+    }
+    if !same_set(&o.policies, &n.policies) {
+        changed.push("policies".to_string());
+        if old.is_some() {
+            before.insert("policies".into(), string_array(&o.policies));
+        }
+        if new.is_some() {
+            after.insert("policies".into(), string_array(&n.policies));
+        }
+    }
+
+    (changed, before, after)
+}
+
+fn string_array(v: &[String]) -> Value {
+    Value::Array(v.iter().cloned().map(Value::String).collect())
+}
+
+fn same_set(a: &[String], b: &[String]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().all(|x| b.contains(x))
 }
 
 fn group_to_response(entry: &GroupEntry, kind: GroupKind) -> Response {
@@ -289,14 +401,14 @@ impl IdentityBackendInner {
         let mut entry = existing.clone().unwrap_or_default();
         entry.name = name.clone();
 
-        if let Some(d) = payload.description {
-            entry.description = d;
+        if let Some(d) = &payload.description {
+            entry.description = d.clone();
         }
-        if let Some(m) = payload.members {
-            entry.members = m;
+        if let Some(m) = &payload.members {
+            entry.members = m.clone();
         }
-        if let Some(p) = payload.policies {
-            entry.policies = p;
+        if let Some(p) = &payload.policies {
+            entry.policies = p.clone();
         }
 
         let now = now_iso();
@@ -305,7 +417,28 @@ impl IdentityBackendInner {
         }
         entry.updated_at = now;
 
+        // Compute changed fields *before* persisting, using the post-store
+        // normalization rules so the diff matches what actually gets saved.
+        let op = if existing.is_some() { "update" } else { "create" };
+        let (changed_fields, before, after) =
+            diff_with_values(existing.as_ref(), Some(&entry));
+        let record_history = op == "create" || !changed_fields.is_empty();
+
         store.set_group(kind, entry).await?;
+
+        if record_history {
+            let hist = GroupHistoryEntry {
+                ts: now_iso(),
+                user: caller_username(req),
+                op: op.to_string(),
+                changed_fields,
+                before,
+                after,
+            };
+            // History failures should not fail the write.
+            let _ = store.append_history(kind, &name, hist).await;
+        }
+
         Ok(None)
     }
 
@@ -316,8 +449,62 @@ impl IdentityBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
+
+        // Capture the full prior state so the delete entry retains the
+        // group's final contents for audit and possible restoration.
+        let previous = store.get_group(kind, &name).await?;
+        let (changed_fields, before, _after) = diff_with_values(previous.as_ref(), None);
+
+        let hist = GroupHistoryEntry {
+            ts: now_iso(),
+            user: caller_username(req),
+            op: "delete".to_string(),
+            changed_fields,
+            before,
+            after: Map::new(),
+        };
+        let _ = store.append_history(kind, &name, hist).await;
+
         store.delete_group(kind, &name).await?;
         Ok(None)
+    }
+
+    async fn handle_group_history(
+        &self,
+        kind: GroupKind,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_store()?;
+        let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
+        let entries = store.list_history(kind, &name).await?;
+
+        let arr = Value::Array(
+            entries
+                .iter()
+                .map(|e| {
+                    let mut m = Map::new();
+                    m.insert("ts".into(), Value::String(e.ts.clone()));
+                    m.insert("user".into(), Value::String(e.user.clone()));
+                    m.insert("op".into(), Value::String(e.op.clone()));
+                    m.insert(
+                        "changed_fields".into(),
+                        Value::Array(
+                            e.changed_fields
+                                .iter()
+                                .cloned()
+                                .map(Value::String)
+                                .collect(),
+                        ),
+                    );
+                    m.insert("before".into(), Value::Object(e.before.clone()));
+                    m.insert("after".into(), Value::Object(e.after.clone()));
+                    Value::Object(m)
+                })
+                .collect(),
+        );
+        let mut data = Map::new();
+        data.insert("entries".into(), arr);
+        Ok(Some(Response::data_response(Some(data))))
     }
 
     // ── User-group routes ───────────────────────────────────────────
@@ -354,6 +541,14 @@ impl IdentityBackendInner {
         self.handle_group_delete(GroupKind::User, req).await
     }
 
+    pub async fn handle_user_group_history(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        self.handle_group_history(GroupKind::User, req).await
+    }
+
     // ── App-group routes ────────────────────────────────────────────
 
     pub async fn handle_app_group_list(
@@ -386,6 +581,14 @@ impl IdentityBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         self.handle_group_delete(GroupKind::App, req).await
+    }
+
+    pub async fn handle_app_group_history(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        self.handle_group_history(GroupKind::App, req).await
     }
 
     pub async fn handle_noop(

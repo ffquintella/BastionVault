@@ -13,7 +13,9 @@
 
 use std::{fmt, sync::Arc};
 
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::{
     core::Core,
@@ -24,6 +26,8 @@ use crate::{
 
 const GROUP_USER_SUB_PATH: &str = "identity/group/user/";
 const GROUP_APP_SUB_PATH: &str = "identity/group/app/";
+const HISTORY_USER_SUB_PATH: &str = "identity/group-history/user/";
+const HISTORY_APP_SUB_PATH: &str = "identity/group-history/app/";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -70,9 +74,38 @@ pub struct GroupEntry {
     pub updated_at: String,
 }
 
+/// Audit log entry for a group change. Records the list of top-level
+/// fields that changed along with their before/after values so the GUI
+/// can reconstruct prior states and the operator can see exactly what
+/// changed. Only the values of the fields listed in `changed_fields`
+/// appear in the `before` and `after` maps.
+///
+/// Values:
+///   - `description`: JSON string
+///   - `members`:     JSON array of strings
+///   - `policies`:    JSON array of strings
+///
+/// For `create`, `before` is empty; for `delete`, `after` is empty; for
+/// `update`, both hold the values of exactly the changed fields.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GroupHistoryEntry {
+    pub ts: String,
+    pub user: String,
+    /// "create" | "update" | "delete"
+    pub op: String,
+    #[serde(default)]
+    pub changed_fields: Vec<String>,
+    #[serde(default)]
+    pub before: Map<String, Value>,
+    #[serde(default)]
+    pub after: Map<String, Value>,
+}
+
 pub struct GroupStore {
     user_view: Arc<BarrierView>,
     app_view: Arc<BarrierView>,
+    history_user_view: Arc<BarrierView>,
+    history_app_view: Arc<BarrierView>,
 }
 
 #[maybe_async::maybe_async]
@@ -84,14 +117,28 @@ impl GroupStore {
 
         let user_view = Arc::new(system_view.new_sub_view(GROUP_USER_SUB_PATH));
         let app_view = Arc::new(system_view.new_sub_view(GROUP_APP_SUB_PATH));
+        let history_user_view = Arc::new(system_view.new_sub_view(HISTORY_USER_SUB_PATH));
+        let history_app_view = Arc::new(system_view.new_sub_view(HISTORY_APP_SUB_PATH));
 
-        Ok(Arc::new(Self { user_view, app_view }))
+        Ok(Arc::new(Self {
+            user_view,
+            app_view,
+            history_user_view,
+            history_app_view,
+        }))
     }
 
     fn view(&self, kind: GroupKind) -> Arc<BarrierView> {
         match kind {
             GroupKind::User => self.user_view.clone(),
             GroupKind::App => self.app_view.clone(),
+        }
+    }
+
+    fn history_view(&self, kind: GroupKind) -> Arc<BarrierView> {
+        match kind {
+            GroupKind::User => self.history_user_view.clone(),
+            GroupKind::App => self.history_app_view.clone(),
         }
     }
 
@@ -144,6 +191,49 @@ impl GroupStore {
         view.delete(&name).await
     }
 
+    /// Append an audit entry for a group change. History keys are
+    /// `{name}/{20-digit-nanos}` so `list_history` returns them in
+    /// chronological order.
+    pub async fn append_history(
+        &self,
+        kind: GroupKind,
+        name: &str,
+        entry: GroupHistoryEntry,
+    ) -> Result<(), RvError> {
+        let name = Self::sanitize_name(name)?;
+        let view = self.history_view(kind);
+        let key = format!("{name}/{}", hist_seq());
+        let value = serde_json::to_vec(&entry)?;
+        view.put(&StorageEntry { key, value }).await
+    }
+
+    /// Return the full history for a single group, newest entry first.
+    /// History persists after the group is deleted so audit records remain
+    /// available until explicitly purged.
+    pub async fn list_history(
+        &self,
+        kind: GroupKind,
+        name: &str,
+    ) -> Result<Vec<GroupHistoryEntry>, RvError> {
+        let name = Self::sanitize_name(name)?;
+        let view = self.history_view(kind);
+        let prefix = format!("{name}/");
+        let mut keys = view.list(&prefix).await?;
+        keys.sort();
+        keys.reverse();
+
+        let mut entries = Vec::with_capacity(keys.len());
+        for k in keys {
+            let full = format!("{prefix}{k}");
+            if let Some(e) = view.get(&full).await? {
+                if let Ok(h) = serde_json::from_slice::<GroupHistoryEntry>(&e.value) {
+                    entries.push(h);
+                }
+            }
+        }
+        Ok(entries)
+    }
+
     /// Return the union of `direct_policies` with the policies of every group
     /// of the given `kind` that lists `member` in its `members` list. Names are
     /// compared case-insensitively (group names are lowercased on write).
@@ -174,6 +264,16 @@ impl GroupStore {
 
         Ok(merged)
     }
+}
+
+/// Monotonic-ish 20-digit zero-padded nanoseconds since UNIX epoch, used
+/// as the suffix of history log keys so listing returns entries in
+/// chronological order.
+fn hist_seq() -> String {
+    let n = Utc::now()
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| Utc::now().timestamp_millis() * 1_000_000);
+    format!("{:020}", n.max(0) as u128)
 }
 
 fn normalize(mut v: Vec<String>) -> Vec<String> {

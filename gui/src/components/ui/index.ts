@@ -16,6 +16,8 @@ export {
   formatTimestamp,
 } from "./SecretHistoryPanel";
 export { ResourceHistoryPanel } from "./ResourceHistoryPanel";
+export { GroupHistoryPanel } from "./GroupHistoryPanel";
+export { PolicyHistoryPanel } from "./PolicyHistoryPanel";
 export { Textarea } from "./Textarea";
 export { Select } from "./Select";
 export { Card } from "./Card";

@@ -4,12 +4,15 @@ import {
   Button,
   Card,
   Input,
+  Tabs,
   Textarea,
   Modal,
   ConfirmModal,
   EmptyState,
+  PolicyHistoryPanel,
   useToast,
 } from "../components/ui";
+import type { PolicyHistoryEntry } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 
@@ -30,6 +33,9 @@ export function PoliciesPage() {
   const [newContent, setNewContent] = useState(DEFAULT_POLICY);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
+  const [tab, setTab] = useState<"editor" | "history">("editor");
+  const [history, setHistory] = useState<PolicyHistoryEntry[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   useEffect(() => {
     loadPolicies();
@@ -53,6 +59,39 @@ export function PoliciesPage() {
       setSelected(name);
       setPolicyContent(result.policy);
       setDirty(false);
+      setTab("editor");
+      setHistory([]);
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
+  }
+
+  async function loadHistory(name: string) {
+    setHistoryLoading(true);
+    try {
+      const r = await api.listPolicyHistory(name);
+      setHistory(r.entries);
+    } catch {
+      setHistory([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (selected && tab === "history") {
+      loadHistory(selected);
+    }
+  }, [selected, tab]);
+
+  async function handleRestore(raw: string) {
+    if (!selected) return;
+    try {
+      await api.writePolicy(selected, raw);
+      toast("success", `Policy ${selected} restored`);
+      setPolicyContent(raw);
+      setDirty(false);
+      await loadHistory(selected);
     } catch (e: unknown) {
       toast("error", extractError(e));
     }
@@ -145,34 +184,62 @@ export function PoliciesPage() {
             )}
           </Card>
 
-          {/* Policy editor */}
-          <Card
-            className="flex-1"
-            title={selected ? `Policy: ${selected}` : "Select a policy"}
-            actions={
-              selected && dirty ? (
-                <Button size="sm" onClick={handleSave}>
-                  Save
-                </Button>
-              ) : null
-            }
-          >
+          {/* Policy detail */}
+          <div className="flex-1 min-w-0 space-y-4">
             {selected ? (
-              <Textarea
-                value={policyContent}
-                onChange={(e) => {
-                  setPolicyContent(e.target.value);
-                  setDirty(true);
-                }}
-                className="min-h-[400px]"
-              />
+              <>
+                <Card
+                  title={`Policy: ${selected}`}
+                  actions={
+                    tab === "editor" && dirty ? (
+                      <Button size="sm" onClick={handleSave}>
+                        Save
+                      </Button>
+                    ) : null
+                  }
+                >
+                  <Tabs
+                    tabs={[
+                      { id: "editor", label: "Editor" },
+                      { id: "history", label: "History" },
+                    ]}
+                    active={tab}
+                    onChange={(t) => setTab(t as "editor" | "history")}
+                  />
+                </Card>
+
+                {tab === "editor" && (
+                  <Card>
+                    <Textarea
+                      value={policyContent}
+                      onChange={(e) => {
+                        setPolicyContent(e.target.value);
+                        setDirty(true);
+                      }}
+                      className="min-h-[400px]"
+                    />
+                  </Card>
+                )}
+
+                {tab === "history" && (
+                  <Card title="Change History">
+                    <PolicyHistoryPanel
+                      entries={history}
+                      loading={historyLoading}
+                      onRestore={selected !== "root" ? handleRestore : undefined}
+                    />
+                  </Card>
+                )}
+              </>
             ) : (
-              <EmptyState
-                title="No policy selected"
-                description="Select a policy from the list to view and edit it"
-              />
+              <Card>
+                <EmptyState
+                  title="No policy selected"
+                  description="Select a policy from the list to view and edit it"
+                />
+              </Card>
             )}
-          </Card>
+          </div>
         </div>
 
         {/* Create policy modal */}

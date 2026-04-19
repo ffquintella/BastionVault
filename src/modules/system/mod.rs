@@ -84,6 +84,7 @@ impl SystemBackend {
         let sys_backend_policies_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_policies_write = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_policies_delete = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_policies_history = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_audit_table = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_audit_enable = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_audit_disable = self.self_ptr.upgrade().unwrap().clone();
@@ -245,6 +246,18 @@ impl SystemBackend {
                     operations: [
                         {op: Operation::Read, handler: sys_backend_policies_list1.handle_policy_list},
                         {op: Operation::List, handler: sys_backend_policies_list2.handle_policy_list}
+                    ]
+                },
+                {
+                    pattern: r"policies/acl/(?P<name>[^/]+)/history/?$",
+                    fields: {
+                        "name": {
+                            field_type: FieldType::Str,
+                            description: r#"The name of the policy."#
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: sys_backend_policies_history.handle_policy_history}
                     ]
                 },
                 {
@@ -568,6 +581,16 @@ impl SystemBackend {
         let policy_module = self.get_module::<PolicyModule>("policy")?;
 
         policy_module.handle_policy_delete(backend, req).await
+    }
+
+    pub async fn handle_policy_history(
+        &self,
+        backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let policy_module = self.get_module::<PolicyModule>("policy")?;
+
+        policy_module.handle_policy_history(backend, req).await
     }
 
     pub async fn handle_audit_table(

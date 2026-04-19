@@ -50,6 +50,11 @@ use crate::{
 const POLICY_ACL_SUB_PATH: &str = "policy/";
 const POLICY_RGP_SUB_PATH: &str = "policy-rgp/";
 const POLICY_EGP_SUB_PATH: &str = "policy-egp/";
+// POLICY_HISTORY_SUB_PATH stores append-only audit entries for ACL policy
+// changes. Keys are `{name}/{20-digit-nanos}` so `list` returns entries
+// in chronological order. History is retained when the policy is deleted
+// so the audit trail remains available after removal.
+const POLICY_HISTORY_SUB_PATH: &str = "policy-history/";
 
 // POLICY_CACHE_SIZE is the number of policies that are kept cached
 const POLICY_CACHE_SIZE: usize = 1024;
@@ -191,6 +196,22 @@ pub struct PolicyEntry {
     pub sentinal_policy: SentinelPolicy,
 }
 
+/// Audit log entry for a policy change. Records the raw HCL before and
+/// after the change so operators can reconstruct prior policy states and
+/// roll back by re-submitting `before.raw` if needed. For `create`,
+/// `before_raw` is empty; for `delete`, `after_raw` is empty.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PolicyHistoryEntry {
+    pub ts: String,
+    pub user: String,
+    /// "create" | "update" | "delete"
+    pub op: String,
+    #[serde(default)]
+    pub before_raw: String,
+    #[serde(default)]
+    pub after_raw: String,
+}
+
 /// The main policy store structure.
 #[derive(Default)]
 pub struct PolicyStore {
@@ -198,6 +219,7 @@ pub struct PolicyStore {
     pub acl_view: Option<Arc<BarrierView>>,
     pub rgp_view: Option<Arc<BarrierView>>,
     pub egp_view: Option<Arc<BarrierView>>,
+    pub history_view: Option<Arc<BarrierView>>,
     pub token_policies_lru: Option<Cache<String, Arc<Policy>>>,
     pub egp_lru: Option<Cache<String, Arc<Policy>>>,
     // Stores whether a token policy is ACL or RGP
@@ -226,6 +248,7 @@ impl PolicyStore {
         let acl_view = system_view.new_sub_view(POLICY_ACL_SUB_PATH);
         let rgp_view = system_view.new_sub_view(POLICY_RGP_SUB_PATH);
         let egp_view = system_view.new_sub_view(POLICY_EGP_SUB_PATH);
+        let history_view = system_view.new_sub_view(POLICY_HISTORY_SUB_PATH);
 
         let keys = acl_view.get_keys().await?;
 
@@ -234,6 +257,7 @@ impl PolicyStore {
             acl_view: Some(Arc::new(acl_view)),
             rgp_view: Some(Arc::new(rgp_view)),
             egp_view: Some(Arc::new(egp_view)),
+            history_view: Some(Arc::new(history_view)),
             self_ptr: Weak::default(),
             ..Default::default()
         };
@@ -626,6 +650,63 @@ impl PolicyStore {
     fn cache_key(&self, name: &str) -> String {
         name.to_string()
     }
+
+    /// Append an audit entry for a policy change. The entry is keyed by
+    /// `{name}/{20-digit-nanos}` so history for a single policy can be
+    /// listed in chronological order by sorting.
+    pub async fn append_history(
+        &self,
+        name: &str,
+        entry: PolicyHistoryEntry,
+    ) -> Result<(), RvError> {
+        let view = self
+            .history_view
+            .as_ref()
+            .ok_or_else(|| bv_error_string!("policy history view unavailable"))?;
+        let name = self.sanitize_name(name);
+        let key = format!("{name}/{}", hist_seq());
+        let value = serde_json::to_vec(&entry)?;
+        view.put(&StorageEntry { key, value }).await
+    }
+
+    /// Return the full history for a single policy, newest entry first.
+    /// History persists after the policy is deleted so audit records
+    /// remain available until explicitly purged.
+    pub async fn list_history(
+        &self,
+        name: &str,
+    ) -> Result<Vec<PolicyHistoryEntry>, RvError> {
+        let view = self
+            .history_view
+            .as_ref()
+            .ok_or_else(|| bv_error_string!("policy history view unavailable"))?;
+        let name = self.sanitize_name(name);
+        let prefix = format!("{name}/");
+        let mut keys = view.list(&prefix).await?;
+        keys.sort();
+        keys.reverse();
+
+        let mut entries = Vec::with_capacity(keys.len());
+        for k in keys {
+            let full = format!("{prefix}{k}");
+            if let Some(e) = view.get(&full).await? {
+                if let Ok(h) = serde_json::from_slice::<PolicyHistoryEntry>(&e.value) {
+                    entries.push(h);
+                }
+            }
+        }
+        Ok(entries)
+    }
+}
+
+/// Monotonic-ish 20-digit zero-padded nanoseconds since UNIX epoch, used
+/// as the suffix of history log keys so listing returns entries in
+/// chronological order. Mirrors the resource/identity modules.
+fn hist_seq() -> String {
+    let n = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() * 1_000_000);
+    format!("{:020}", n.max(0) as u128)
 }
 
 #[maybe_async::maybe_async]

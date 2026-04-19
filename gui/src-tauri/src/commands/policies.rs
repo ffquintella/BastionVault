@@ -39,6 +39,21 @@ pub struct PolicyContent {
     pub policy: String,
 }
 
+#[derive(Serialize)]
+pub struct PolicyHistoryEntry {
+    pub ts: String,
+    pub user: String,
+    /// "create" | "update" | "delete"
+    pub op: String,
+    pub before_raw: String,
+    pub after_raw: String,
+}
+
+#[derive(Serialize)]
+pub struct PolicyHistoryResult {
+    pub entries: Vec<PolicyHistoryEntry>,
+}
+
 #[tauri::command]
 pub async fn list_policies(state: State<'_, AppState>) -> CmdResult<PolicyListResult> {
     let resp = make_request(&state, Operation::List, "sys/policies/acl/".to_string(), None).await?;
@@ -105,6 +120,54 @@ pub async fn write_policy(
     )
     .await?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn list_policy_history(
+    state: State<'_, AppState>,
+    name: String,
+) -> CmdResult<PolicyHistoryResult> {
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("sys/policies/acl/{name}/history"),
+        None,
+    )
+    .await?;
+
+    match resp {
+        Some(r) => {
+            let data = r.data.as_ref();
+            let entries = data
+                .and_then(|d| d.get("entries"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| {
+                            let o = v.as_object()?;
+                            Some(PolicyHistoryEntry {
+                                ts: o.get("ts").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                                user: o.get("user").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                                op: o.get("op").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                                before_raw: o
+                                    .get("before_raw")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                after_raw: o
+                                    .get("after_raw")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(PolicyHistoryResult { entries })
+        }
+        None => Ok(PolicyHistoryResult { entries: vec![] }),
+    }
 }
 
 #[tauri::command]

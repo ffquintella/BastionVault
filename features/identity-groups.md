@@ -1,6 +1,6 @@
 # Identity Groups
 
-Status: Backend + HTTP API **Done**. GUI integration **Pending**.
+Status: Backend + HTTP API **Done**. GUI integration **Done**.
 
 ## Goal
 
@@ -74,14 +74,16 @@ Mounted at `identity/`. Routes:
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| LIST   | `/v1/identity/group/user`          | List user group names |
-| GET    | `/v1/identity/group/user/{name}`   | Read a user group |
-| PUT    | `/v1/identity/group/user/{name}`   | Create or update (partial updates preserve unspecified fields) |
-| DELETE | `/v1/identity/group/user/{name}`   | Delete a user group |
-| LIST   | `/v1/identity/group/app`           | List application group names |
-| GET    | `/v1/identity/group/app/{name}`    | Read an application group |
-| PUT    | `/v1/identity/group/app/{name}`    | Create or update |
-| DELETE | `/v1/identity/group/app/{name}`    | Delete an application group |
+| LIST   | `/v1/identity/group/user`                  | List user group names |
+| GET    | `/v1/identity/group/user/{name}`           | Read a user group |
+| PUT    | `/v1/identity/group/user/{name}`           | Create or update (partial updates preserve unspecified fields) |
+| DELETE | `/v1/identity/group/user/{name}`           | Delete a user group |
+| GET    | `/v1/identity/group/user/{name}/history`   | Read change history for a user group (newest first) |
+| LIST   | `/v1/identity/group/app`                   | List application group names |
+| GET    | `/v1/identity/group/app/{name}`            | Read an application group |
+| PUT    | `/v1/identity/group/app/{name}`            | Create or update |
+| DELETE | `/v1/identity/group/app/{name}`            | Delete an application group |
+| GET    | `/v1/identity/group/app/{name}/history`    | Read change history for an application group |
 
 Write-payload fields: `description` (string), `members` (comma-separated
 string or array of strings), `policies` (comma-separated string or array of
@@ -102,6 +104,42 @@ strings).
 - On any expansion error (module absent, store unavailable, I/O error), both
   login paths fall back to the caller's direct policies and log a warning.
   Login is never blocked by an identity-subsystem failure.
+
+### Change history
+
+Every create/update/delete is appended as a `GroupHistoryEntry` under
+`sys/identity/group-history/{user,app}/{name}/<20-digit-nanos>`:
+
+```
+GroupHistoryEntry {
+    ts:             RFC3339 timestamp,
+    user:           caller username (auth.metadata.username, falls back to
+                    auth.display_name, then "unknown"),
+    op:             "create" | "update" | "delete",
+    changed_fields: Vec<String>,         // subset of: description, members, policies
+    before:         Map<String, Value>,  // prior values for those fields
+    after:          Map<String, Value>,  // new values for those fields
+}
+```
+
+`changed_fields` is the list of top-level fields whose value differs from
+the previous stored entry. `before` and `after` carry the actual values
+of exactly those fields (`description` as a JSON string; `members` and
+`policies` as JSON arrays of strings) so audit consumers can reconstruct
+prior states and the GUI can render precise "added X, removed Y" diffs
+for membership and policy changes.
+
+`members` and `policies` are compared as sets, so reordering alone does
+not record a new entry. A write that does not change anything (no-op
+save) is suppressed to avoid log noise; the initial create is always
+recorded even with empty payload. For a `create` entry `before` is empty;
+for `delete` entries `after` is empty and `before` retains the full
+final state so the record is self-contained.
+
+History is retained when the group itself is deleted so the audit trail
+remains available. There is no automatic retention cap; operators who
+want one can purge entries by listing and deleting under the history
+prefix out-of-band.
 
 ### Implementation notes
 
@@ -124,7 +162,7 @@ strings).
 | 3 | Default mount + migration in `mount_update` | Done |
 | 4 | UserPass + AppRole login policy union | Done |
 | 5 | Integration tests (CRUD, namespace isolation, end-to-end login) | Done |
-| 6 | GUI: Groups page, members/policies editors, Tauri commands | Pending |
+| 6 | GUI: Groups page, members/policies editors, Tauri commands | Done |
 | 7 | Extension to other auth backends (Certificate, OIDC, SAML) | Pending |
 
 ## Testing
@@ -141,5 +179,22 @@ Three integration tests in `src/modules/identity/mod.rs`:
 
 ## Current State
 
-Phases 1–5 shipped in the initial change. GUI integration (Phase 6) and
-extension to the Certificate/OIDC/SAML auth backends (Phase 7) are pending.
+Phases 1–6 shipped. Extension to the Certificate/OIDC/SAML auth backends
+(Phase 7) is pending.
+
+### Phase 6 (GUI) details
+
+- Tauri commands in `gui/src-tauri/src/commands/groups.rs`: `list_groups`,
+  `read_group`, `write_group`, `delete_group`. All accept a `kind` argument
+  (`"user"` or `"app"`), delegate to the `identity/` logical mount, and
+  marshal members/policies as comma-separated strings on the wire.
+- Route `/groups` renders `GroupsPage` with a tab switcher between user
+  and application groups, a left-rail group list, and a detail card
+  showing members, policies, timestamps, and edit/delete actions.
+- The create/edit modal populates multi-select chips for members from the
+  current UserPass or AppRole mount and for policies from the policy
+  subsystem. A free-form comma-separated input allows adding members that
+  do not live in the currently-enumerated mount.
+- When `identity/` is not yet mounted (older deployments pre-unseal), the
+  page shows a neutral empty state pointing the operator at
+  reseal/unseal to pick up the default-mount migration.

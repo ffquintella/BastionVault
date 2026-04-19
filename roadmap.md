@@ -74,7 +74,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 - [Resource Management](features/resources.md)
   Higher-level inventory abstraction for organizing secrets by infrastructure entity (servers, network devices, websites, databases, applications, custom types). Stored in the KV engine with metadata (hostname, IP, OS, location, owner, tags).
 - [Identity Groups](features/identity-groups.md)
-  User groups and application groups with group-to-policy mapping. Policies attached to a group are unioned with the caller's direct policies at login time. Backend + HTTP API shipped; GUI integration pending.
+  User groups and application groups with group-to-policy mapping. Policies attached to a group are unioned with the caller's direct policies at login time. Backend, HTTP API, and GUI integration shipped; extension to Certificate/OIDC/SAML auth backends pending.
 
 ## Notes
 

@@ -120,6 +120,26 @@ export interface PolicyContent {
   policy: string;
 }
 
+/**
+ * Audit entry for a policy change. `before_raw` is the HCL text prior
+ * to the change (empty for `create`); `after_raw` is the new HCL text
+ * (empty for `delete`). History is retained after delete so the trail
+ * remains complete.
+ */
+export interface PolicyHistoryEntry {
+  ts: string;
+  user: string;
+  /** "create" | "update" | "delete" */
+  op: string;
+  before_raw: string;
+  after_raw: string;
+}
+
+export interface PolicyHistoryResult {
+  /** Newest entry first. */
+  entries: PolicyHistoryEntry[];
+}
+
 // Resources
 export interface ResourceMetadata {
   name: string;
@@ -238,6 +258,45 @@ export interface SecretIdAccessorInfo {
   expiration_time: string;
   metadata: Record<string, string>;
   cidr_list: string[];
+}
+
+// Identity groups
+export type GroupKind = "user" | "app";
+
+export interface GroupListResult {
+  groups: string[];
+}
+
+export interface GroupInfo {
+  name: string;
+  kind: string;
+  description: string;
+  members: string[];
+  policies: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * A single audit entry for a group change. `before` and `after` contain
+ * the values of exactly the fields listed in `changed_fields`:
+ *   - `description`: string
+ *   - `members`, `policies`: string[]
+ * `before` is empty for `create`; `after` is empty for `delete`.
+ */
+export interface GroupHistoryEntry {
+  ts: string;
+  user: string;
+  /** "create" | "update" | "delete" */
+  op: string;
+  changed_fields: string[];
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+}
+
+export interface GroupHistoryResult {
+  /** Newest entry first. */
+  entries: GroupHistoryEntry[];
 }
 
 // FIDO2

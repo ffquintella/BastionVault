@@ -12,6 +12,7 @@ import type {
   UserInfo,
   PolicyListResult,
   PolicyContent,
+  PolicyHistoryResult,
   ResourceMetadata,
   ResourceListResult,
   ResourceSecretListResult,
@@ -27,6 +28,10 @@ import type {
   SecretIdResponse,
   SecretIdAccessorList,
   SecretIdAccessorInfo,
+  GroupKind,
+  GroupListResult,
+  GroupInfo,
+  GroupHistoryResult,
   Fido2Config,
   Fido2ChallengeResponse,
   Fido2LoginResponse,
@@ -121,6 +126,8 @@ export const readPolicy = (name: string) => invoke<PolicyContent>("read_policy",
 export const writePolicy = (name: string, policy: string) =>
   invoke<void>("write_policy", { name, policy });
 export const deletePolicy = (name: string) => invoke<void>("delete_policy", { name });
+export const listPolicyHistory = (name: string) =>
+  invoke<PolicyHistoryResult>("list_policy_history", { name });
 
 // Resource type configuration
 export const resourceTypesRead = () =>
@@ -187,6 +194,23 @@ export const lookupSecretIdAccessor = (name: string, accessor: string) =>
   invoke<SecretIdAccessorInfo>("lookup_secret_id_accessor", { name, accessor });
 export const destroySecretIdAccessor = (name: string, accessor: string) =>
   invoke<void>("destroy_secret_id_accessor", { name, accessor });
+
+// Identity groups
+export const listGroups = (kind: GroupKind) =>
+  invoke<GroupListResult>("list_groups", { kind });
+export const readGroup = (kind: GroupKind, name: string) =>
+  invoke<GroupInfo>("read_group", { kind, name });
+export const writeGroup = (
+  kind: GroupKind,
+  name: string,
+  description: string,
+  members: string,
+  policies: string,
+) => invoke<void>("write_group", { kind, name, description, members, policies });
+export const deleteGroup = (kind: GroupKind, name: string) =>
+  invoke<void>("delete_group", { kind, name });
+export const listGroupHistory = (kind: GroupKind, name: string) =>
+  invoke<GroupHistoryResult>("list_group_history", { kind, name });
 
 // FIDO2
 export const fido2ConfigRead = () => invoke<Fido2Config | null>("fido2_config_read");
