@@ -11,10 +11,11 @@ roles must be expressible:
 1. **Read-only user** — can read (and list) secrets and resources they
    own, plus anything explicitly shared with them. Cannot create, update,
    or delete.
-2. **Password administrator** — can create, read, update, delete, and
-   (future) share secrets and resources *they created*, plus anything
-   explicitly shared with them. Cannot touch items owned by other users
-   unless they have been granted explicit access.
+2. **Secret author** — can create, read, update, delete, and (future)
+   share secrets and resources *they created*, plus anything explicitly
+   shared with them. Cannot touch items owned by other users unless they
+   have been granted explicit access. The name matches the ownership
+   model: you manage what you authored.
 
 Neither role may read or modify a secret or resource owned by another
 user without an explicit share. Neither role can manage policies, users,
@@ -210,7 +211,7 @@ path "resources/*" {
 ```
 
 ```hcl
-# password-administrator
+# secret-author
 path "secret/data/*" {
     capabilities = ["create", "read", "update", "delete", "list"]
     scopes       = ["owner", "shared"]
@@ -259,13 +260,14 @@ owner/share stores the same way.
 | 3 | `scopes` qualifier in ACL grammar + evaluator; `any` scope backward-compatible | Pending |
 | 4 | KV-secret owner store + write/delete hooks; list-filtering for `owner` scope | Pending |
 | 5 | Resource `owner_entity_id` field + write/delete hooks; list-filtering | Pending |
-| 6 | Seeded `standard-user-readonly` and `password-administrator` policies | Pending |
+| 6 | Seeded `standard-user-readonly` and `secret-author` policies | Pending |
 | 7 | GUI: show "owner" column on resources/secrets lists; "only show mine" toggle | Pending |
 | 8 | Sharing MVP: `SecretShare` store + v2 API + evaluator hook | Pending |
 | 9 | Sharing GUI: share dialog, "shared with me" section, revoke flow | Pending |
 | 10 | Admin ownership-transfer endpoints + GUI | Pending |
 
-Phases 1–6 deliver the two baseline roles the operator asked for.
+Phases 1–6 deliver the two baseline roles the operator asked for
+(`standard-user-readonly` and `secret-author`).
 Phases 8–9 deliver sharing. Phase 10 is a small ergonomic follow-up.
 
 ## Testing Plan

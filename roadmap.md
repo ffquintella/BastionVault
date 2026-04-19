@@ -77,7 +77,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 - [Identity Groups](features/identity-groups.md)
   User groups and application groups with group-to-policy mapping. Policies attached to a group are unioned with the caller's direct policies at login time. Backend, HTTP API, and GUI integration shipped; extension to Certificate/OIDC/SAML auth backends pending.
 - [Per-User Scoping (Ownership & Sharing)](features/per-user-scoping.md)
-  Ownership-aware ACLs: entity IDs provisioned on first login, policy templating (`{{username}}`, `{{entity.id}}`), a new `scopes = ["owner" | "shared"]` qualifier on policy paths, and owner metadata on KV secrets and resources. Enables seeded `standard-user-readonly` and `password-administrator` roles, with an explicit secret-sharing layer as a later phase. Design only; not yet implemented.
+  Ownership-aware ACLs: entity IDs provisioned on first login, policy templating (`{{username}}`, `{{entity.id}}`), a new `scopes = ["owner" | "shared"]` qualifier on policy paths, and owner metadata on KV secrets and resources. Enables seeded `standard-user-readonly` and `secret-author` roles, with an explicit secret-sharing layer as a later phase. Design only; not yet implemented.
 
 ## Notes
 
