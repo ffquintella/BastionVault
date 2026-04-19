@@ -41,6 +41,25 @@ This repository handles security-sensitive code. Treat correctness, reviewabilit
 - Avoid creating large god-modules that mix parsing, crypto, I/O, persistence, and orchestration logic.
 - If a change touches a large file repeatedly, consider a preparatory split before implementing new behavior.
 
+## HTTP API Routes
+
+- **All new HTTP routes must be introduced under the `v2/` prefix.** This
+  is the project's forward-going API version. Example: a new identity
+  endpoint is `v2/identity/group/user/{name}`, not `identity/group/...`
+  and not `v1/...`.
+- Do **not** add new routes or new operations (Read/Write/List/Delete) to
+  existing `v1/` paths. `v1` is frozen for Vault compatibility and
+  accepts only bug fixes and security patches.
+- When extending an existing subsystem, mirror the route under `v2/` and
+  implement the new behavior there. The `v1` handler may delegate to the
+  `v2` implementation, but never the other way around.
+- Tauri commands, internal logical-backend paths, and tests that target
+  new functionality must use the `v2/` form. Update `docs/docs/api.md`
+  and the relevant `features/*.md` file with the `v2` path.
+- Breaking changes to request or response shape are allowed on `v2`
+  routes only up until the first stable release that ships them; after
+  that, treat them the same as `v1`.
+
 ## Dependency Rules
 
 - Prefer maintained, widely reviewed libraries with clear ownership and active releases.
