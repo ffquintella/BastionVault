@@ -173,6 +173,75 @@ path "sys/wrapping/unwrap" {
 }
 "#;
 
+/// Baseline policy for unprivileged users. Seeded on first unseal and
+/// editable afterward (not in IMMUTABLE_POLICIES). Grants:
+///   - read + list on all KV secrets (so users can read secrets they
+///     created or that others granted them visibility to);
+///   - create + read + list + update on resources and per-resource
+///     secrets (so users can create new resources and populate them);
+///   - no delete, no policy/user/mount/identity management;
+///   - cubbyhole access + the usual token-self operations from the
+///     `default` policy.
+///
+/// Note: BastionVault does not currently substitute `{{username}}` or
+/// similar placeholders in policy paths, so this policy cannot express
+/// "only the secrets *you* created". It intentionally grants broad
+/// read/list scope across the shared `secret/` and `resources/` mounts;
+/// operators who need per-user isolation should either adopt a path
+/// convention per user and tighten this policy, or group users via the
+/// identity backend so policy assignment is narrower per group.
+static STANDARD_USER_POLICY_NAME: &str = "standard-user";
+static STANDARD_USER_POLICY: &str = r#"
+# --- Self service (mirrors the relevant parts of the default policy) ---
+
+path "auth/token/lookup-self" {
+    capabilities = ["read"]
+}
+path "auth/token/renew-self" {
+    capabilities = ["update"]
+}
+path "auth/token/revoke-self" {
+    capabilities = ["update"]
+}
+path "sys/capabilities-self" {
+    capabilities = ["update"]
+}
+path "sys/internal/ui/resultant-acl" {
+    capabilities = ["read"]
+}
+
+# --- KV secrets ---
+
+# KV-v1: read and list secrets under the default mount.
+path "secret/*" {
+    capabilities = ["read", "list"]
+}
+
+# KV-v2: data + metadata read/list paths.
+path "secret/data/*" {
+    capabilities = ["read", "list"]
+}
+path "secret/metadata/*" {
+    capabilities = ["read", "list"]
+}
+
+# --- Resources ---
+
+# Create new resources and read/list/update existing ones. Delete is
+# intentionally not granted -- destructive operations on the shared
+# resource inventory should require a privileged operator policy.
+path "resources/*" {
+    capabilities = ["create", "read", "update", "list"]
+}
+
+# --- Per-user workspace ---
+
+# Each token gets its own private cubbyhole for scratch storage.
+path "cubbyhole/*" {
+    capabilities = ["create", "read", "update", "delete", "list"]
+}
+"#;
+
 static _POLICY_STORE_HELP: &str = r#"
 TODO
 "#;
@@ -486,6 +555,7 @@ impl PolicyStore {
         self.load_acl_policy(DEFAULT_POLICY_NAME, DEFAULT_POLICY).await?;
         self.load_acl_policy(RESPONSE_WRAPPING_POLICY_NAME, RESPONSE_WRAPPING_POLICY).await?;
         self.load_acl_policy(CONTROL_GROUP_POLICY_NAME, CONTROL_GROUP_POLICY).await?;
+        self.load_acl_policy(STANDARD_USER_POLICY_NAME, STANDARD_USER_POLICY).await?;
         Ok(())
     }
 
