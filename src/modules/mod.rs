@@ -18,6 +18,7 @@ pub mod kv_v2;
 pub mod pki;
 pub mod policy;
 pub mod resource;
+pub mod resource_group;
 pub mod system;
 
 #[maybe_async::maybe_async]

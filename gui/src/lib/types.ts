@@ -299,6 +299,53 @@ export interface GroupHistoryResult {
   entries: GroupHistoryEntry[];
 }
 
+// Asset groups (resources + KV secrets). The backend mount is
+// `resource-group/` for historical reasons; the GUI label is
+// "Asset Groups" to distinguish from the principal-oriented
+// "Identity Groups".
+
+export interface AssetGroupListResult {
+  groups: string[];
+}
+
+export interface AssetGroupInfo {
+  name: string;
+  description: string;
+  /** Resource names in the group. */
+  members: string[];
+  /** KV-secret paths in the group, stored canonicalized (`secret/foo/bar`). */
+  secrets: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * A single audit entry for an asset-group change. `before` / `after`
+ * carry the values of exactly the fields listed in `changed_fields`:
+ *   - `description`: string
+ *   - `members`, `secrets`: string[]
+ * `before` is empty for `create`; `after` is empty for `delete`.
+ */
+export interface AssetGroupHistoryEntry {
+  ts: string;
+  user: string;
+  /** "create" | "update" | "delete" */
+  op: string;
+  changed_fields: string[];
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+}
+
+export interface AssetGroupHistoryResult {
+  /** Newest entry first. */
+  entries: AssetGroupHistoryEntry[];
+}
+
+export interface AssetGroupLookupResult {
+  /** Group names the object is a member of. */
+  groups: string[];
+}
+
 // FIDO2
 export interface Fido2Config {
   rp_id: string;

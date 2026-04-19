@@ -11,6 +11,7 @@ use crate::{
     context::Context,
     errors::RvError,
     logical::{Auth, Backend, Field, FieldType, Lease, Operation, Path, PathOperation, Request, Response},
+    modules::identity::GroupKind,
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
 };
@@ -163,11 +164,24 @@ impl UserPassBackendInner {
             .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
         self.set_user(req, &username, &user_entry).await?;
 
-        // Build Auth response — policies come from the same UserEntry.
-        // Ensure token_policies mirrors policies so populate_token_auth doesn't
-        // overwrite them with an empty list (can happen with pre-existing entries).
-        if user_entry.token_policies.is_empty() && !user_entry.policies.is_empty() {
-            user_entry.token_policies = user_entry.policies.clone();
+        // Union direct policies with any attached through identity user-groups
+        // so FIDO2 logins receive the same group-derived policies as password
+        // logins for the same username.
+        let effective_policies = self
+            .expand_identity_group_policies(GroupKind::User, &username, &user_entry.policies)
+            .await;
+
+        // Ensure token_policies mirrors effective policies before
+        // populate_token_auth (which overwrites auth.policies with
+        // token_policies).
+        if user_entry.token_policies.is_empty() && !effective_policies.is_empty() {
+            user_entry.token_policies = effective_policies.clone();
+        } else if !effective_policies.is_empty() {
+            for p in &effective_policies {
+                if !user_entry.token_policies.iter().any(|x| x == p) {
+                    user_entry.token_policies.push(p.clone());
+                }
+            }
         }
 
         let mut auth = Auth {
@@ -178,16 +192,15 @@ impl UserPassBackendInner {
                 ..Default::default()
             },
             display_name: format!("fido2-{username}"),
-            policies: user_entry.policies.clone(),
+            policies: effective_policies.clone(),
             ..Default::default()
         };
         auth.metadata.insert("username".to_string(), username.to_string());
         user_entry.populate_token_auth(&mut auth);
 
-        // Safety net: populate_token_auth overwrites auth.policies with
-        // token_policies. If that somehow ended up empty, restore from UserEntry.
-        if auth.policies.is_empty() && !user_entry.policies.is_empty() {
-            auth.policies = user_entry.policies.clone();
+        // Safety net: if populate_token_auth cleared policies, restore them.
+        if auth.policies.is_empty() && !effective_policies.is_empty() {
+            auth.policies = effective_policies;
         }
 
         Ok(Some(Response { auth: Some(auth), ..Response::default() }))

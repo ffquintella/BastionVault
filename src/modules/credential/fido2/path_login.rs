@@ -11,6 +11,7 @@ use crate::{
     context::Context,
     errors::RvError,
     logical::{Auth, Backend, Field, FieldType, Lease, Operation, Path, PathOperation, Request, Response},
+    modules::identity::{GroupKind, IdentityModule},
     new_fields, new_fields_internal, new_path, new_path_internal, bv_error_string,
     storage::StorageEntry,
     utils::policy::equivalent_policies,
@@ -67,6 +68,37 @@ impl Fido2Backend {
 
 #[maybe_async::maybe_async]
 impl Fido2BackendInner {
+    /// Return `direct` unioned with any policies attached through identity
+    /// user-groups that list `member` as a member. On any lookup failure
+    /// (module absent, store unavailable, I/O error) falls back to `direct`
+    /// so login is never blocked by an optional subsystem.
+    ///
+    /// FIDO2 and UserPass share the same username namespace, so we expand
+    /// against `GroupKind::User` — the same group membership applies to both
+    /// password and passkey logins for a given user.
+    pub(crate) async fn expand_identity_group_policies(
+        &self,
+        member: &str,
+        direct: &[String],
+    ) -> Vec<String> {
+        let Some(module) = self.core.module_manager.get_module::<IdentityModule>("identity") else {
+            return direct.to_vec();
+        };
+        let Some(store) = module.group_store() else {
+            return direct.to_vec();
+        };
+        match store.expand_policies(GroupKind::User, member, direct).await {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!(
+                    "identity group policy expansion failed for fido2 user '{member}': {e}. \
+                     falling back to direct policies only."
+                );
+                direct.to_vec()
+            }
+        }
+    }
+
     pub async fn login_begin(
         &self,
         _backend: &dyn Backend,
@@ -164,6 +196,13 @@ impl Fido2BackendInner {
             .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
         self.set_user_credentials(req, &username, &user_entry).await?;
 
+        // Union FIDO2 user's direct policies with any policies attached
+        // through identity user-groups. FIDO2 shares the UserPass username
+        // namespace, so the same group membership applies.
+        let effective_policies = self
+            .expand_identity_group_policies(&username, &user_entry.policies)
+            .await;
+
         // Build Auth response to issue a vault token.
         let mut auth = Auth {
             lease: Lease {
@@ -173,11 +212,29 @@ impl Fido2BackendInner {
                 ..Default::default()
             },
             display_name: format!("fido2-{username}"),
-            policies: user_entry.policies.clone(),
+            policies: effective_policies.clone(),
             ..Default::default()
         };
         auth.metadata.insert("username".to_string(), username.to_string());
+
+        // Ensure token_policies mirrors effective policies before
+        // populate_token_auth (which overwrites auth.policies with
+        // token_policies).
+        if user_entry.token_policies.is_empty() && !effective_policies.is_empty() {
+            user_entry.token_policies = effective_policies.clone();
+        } else if !effective_policies.is_empty() {
+            for p in &effective_policies {
+                if !user_entry.token_policies.iter().any(|x| x == p) {
+                    user_entry.token_policies.push(p.clone());
+                }
+            }
+        }
         user_entry.populate_token_auth(&mut auth);
+
+        // Safety net: if populate_token_auth cleared policies, restore them.
+        if auth.policies.is_empty() && !effective_policies.is_empty() {
+            auth.policies = effective_policies;
+        }
 
         Ok(Some(Response { auth: Some(auth), ..Response::default() }))
     }
@@ -201,7 +258,12 @@ impl Fido2BackendInner {
         }
         let user_entry = user_entry.unwrap();
 
-        if !equivalent_policies(&user_entry.policies, &auth.policies) {
+        // Compare against the union of direct and group-derived policies,
+        // since the login path grants this union.
+        let effective = self
+            .expand_identity_group_policies(&username, &user_entry.policies)
+            .await;
+        if !equivalent_policies(&effective, &auth.policies) {
             return Err(bv_error_string!("policies have changed, not renewing"));
         }
 

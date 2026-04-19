@@ -1,6 +1,23 @@
 # Asset Groups (Secrets & Resources Groups)
 
-Status: **Design only.** Not yet implemented.
+Status: **Minimum viable feature shipped**. Both the **resource half**
+and the **KV-secret half** of the object model, reverse indexes, HTTP
+API, history, and the ACL `groups = [...]` qualifier are implemented
+and tested — see [Resource Groups](resource-groups.md). The
+resource-delete lifecycle prune is wired; the KV-delete hook is
+pending. Ownership, admin transfer, sharing, and the unified GUI
+remain design-only.
+
+See `features/resource-groups.md` for the concrete implementation. The
+internal module name is still `resource_group` (mount
+`resource-group/`, storage under `sys/resource-group/…`) for
+backward-compatibility with the resource-only ship; the operator-facing
+label remains "Group".
+
+The work items below that refer to storage, reverse indexes, the HTTP
+API, KV-path canonicalization, or the ACL qualifier are **done** —
+both halves. The remaining scope is ownership, admin transfer,
+sharing, the KV-delete lifecycle hook, and the GUI.
 
 > *Terminology:* internally the feature is called an **asset group** to
 > disambiguate from **identity groups** (which group *principals* —
@@ -321,8 +338,39 @@ Phase 7 is the operator-facing win. Phases 8–9 are follow-ups.
 
 ## Current State
 
-Design approved in principle (this document). No code changes. Existing
-identity-groups and per-user-scoping designs are referenced from here;
-the `groups` ACL qualifier is additive with the `scopes` qualifier from
-per-user-scoping, so the two features can land in either order but
-together deliver the full "give this team read on this bundle" story.
+- **Resource half: shipped** as [Resource Groups](resource-groups.md).
+  Covers phases 1–3 (store + member-index + CRUD + history), the
+  resource-half of phase 4 (ACL `groups = [...]` qualifier + evaluator
+  integration), and phase 6 (resource-delete lifecycle prune). A
+  `path "resources/resources/*" { groups = [...] capabilities = [...] }`
+  policy rule is enforced per-request via the member-index.
+- **KV-secret half: shipped.** `ResourceGroupEntry` grew a
+  `secrets: Vec<String>` field stored in canonical form (the KV-v2
+  `data/` / `metadata/` segments are stripped so all three variants
+  of the same logical path collapse to one entry). A parallel
+  `sys/resource-group/secret-index/<base64url(path)>` reverse index
+  lets `groups_for_secret(path)` run in a single read. The HTTP API
+  grew a `GET /by-secret/<b64url_path>` reverse-lookup route; the
+  group-write payload accepts a `secrets` comma-string or array.
+  `PolicyStore::post_auth` resolves KV candidate paths (anything not
+  under the fixed `sys/`/`auth/`/…/`resources/` prefixes) into the
+  secret-index and unions the result with the resource-index into
+  `Request::asset_groups`, so the same `groups = [...]` qualifier
+  gates KV paths exactly the way it gates resource paths.
+- **KV-delete lifecycle hook: pending.** The KV-v1 and KV-v2 backends
+  receive the mount-stripped path in their delete handlers and don't
+  know the full logical path, which is what the asset-group store
+  uses as the reverse-index key. A clean fix needs a router-level
+  touch point that sees the pre-strip path; that's tracked as a
+  follow-up. Until then, stale secret-index entries remain until the
+  next `resource-group/reindex` call or the next group-write that
+  happens to touch the same secret.
+- **Ownership, admin transfer, sharing: design only.**
+  `owner_entity_id`, the two-tier edit model, the admin
+  ownership-transfer endpoint, `<hidden>` membership redaction for
+  unreadable members, and `SecretShare` integration are all still
+  unimplemented. Per-user-scoping (`scopes = [...]`) is the
+  dependency for most of those; the two features compose (`groups`
+  and `scopes` OR together on a single rule).
+- **GUI: design only.** No Asset Groups / Resource Groups page, no
+  chips on object pages, no sidebar filter.

@@ -23,6 +23,7 @@ serde_cbor = "0.11"
 authenticator = { version = "0.5", default-features = false, features = ["crypto_openssl"] }
 webauthn-rs-proto = "0.5"
 base64urlsafedata = "0.5"
+base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }

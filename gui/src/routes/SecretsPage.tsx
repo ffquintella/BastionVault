@@ -7,6 +7,7 @@ import {
   MaskedValue,
   Breadcrumb,
   EmptyState,
+  GroupsSection,
   Modal,
   SecretPairsEditor,
   SecretHistoryPanel,
@@ -18,6 +19,7 @@ import {
 } from "../components/ui";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
+import { useAssetGroupMap, canonicalizeSecretPath } from "../hooks/useAssetGroupMap";
 
 type KvMount = { path: string; mount_type: string };
 
@@ -48,6 +50,41 @@ export function SecretsPage() {
 
   // null = still loading, [] = no KV engines, non-empty = available KV mounts
   const [kvMounts, setKvMounts] = useState<KvMount[] | null>(null);
+
+  const assetGroups = useAssetGroupMap();
+  const [filterGroup, setFilterGroup] = useState<string | null>(null);
+
+  // Resolve the asset-groups a given leaf key belongs to. Checks both
+  // the full logical path (mountBase + currentPath + key) and the bare
+  // key name — a user who typed just "test1" into the group editor
+  // without the "secret/" prefix should still see the chip here.
+  function groupsForKey(key: string): string[] {
+    if (key.endsWith("/")) return [];
+    const fullPath = canonicalizeSecretPath(mountBase + currentPath + key);
+    const keyOnly = canonicalizeSecretPath(currentPath + key);
+    const out = new Set<string>();
+    for (const g of assetGroups.map.bySecret[fullPath] || []) out.add(g);
+    if (keyOnly !== fullPath) {
+      for (const g of assetGroups.map.bySecret[keyOnly] || []) out.add(g);
+    }
+    return Array.from(out).sort();
+  }
+
+  // Group cards above the key list: one per group that contains at
+  // least one of the currently-listed leaf keys.
+  const groupCounts = new Map<string, number>();
+  for (const k of keys) {
+    for (const g of groupsForKey(k)) {
+      groupCounts.set(g, (groupCounts.get(g) || 0) + 1);
+    }
+  }
+  const groupOptions = Array.from(groupCounts.entries())
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const visibleKeys = filterGroup
+    ? keys.filter((k) => groupsForKey(k).includes(filterGroup))
+    : keys;
 
   // Load the list of KV mounts once. Used both for auto-selecting a single
   // mount (skipping the picker) and for rendering the picker when there is
@@ -286,28 +323,60 @@ export function SecretsPage() {
             />
           )
         ) : (
-          <div className="flex gap-4">
+          <div className="flex flex-col gap-4">
+            <GroupsSection
+              groups={groupOptions}
+              selected={filterGroup}
+              onSelect={setFilterGroup}
+              itemKindPlural="secrets"
+            />
+
+            <div className="flex gap-4">
             {/* Key list */}
             <Card className="w-72 shrink-0" title="Keys">
               {loading ? (
                 <p className="text-sm text-[var(--color-text-muted)]">Loading...</p>
-              ) : keys.length === 0 ? (
-                <EmptyState title="No secrets" description="Create your first secret" />
+              ) : visibleKeys.length === 0 ? (
+                <EmptyState
+                  title={filterGroup ? "No secrets in this group" : "No secrets"}
+                  description={
+                    filterGroup
+                      ? "Clear the group filter to see all secrets"
+                      : "Create your first secret"
+                  }
+                />
               ) : (
                 <div className="space-y-0.5 -mx-1">
-                  {keys.map((key) => (
-                    <button
-                      key={key}
-                      onClick={() => handleSelectKey(key)}
-                      className={`w-full text-left px-3 py-1.5 rounded text-sm transition-colors ${
-                        selectedKey === key
-                          ? "bg-[var(--color-primary)] text-white"
-                          : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-                      }`}
-                    >
-                      {key.endsWith("/") ? `${key}` : key}
-                    </button>
-                  ))}
+                  {visibleKeys.map((key) => {
+                    const groups = groupsForKey(key);
+                    return (
+                      <div key={key}>
+                        <button
+                          onClick={() => handleSelectKey(key)}
+                          className={`w-full text-left px-3 py-1.5 rounded text-sm transition-colors ${
+                            selectedKey === key
+                              ? "bg-[var(--color-primary)] text-white"
+                              : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                          }`}
+                        >
+                          {key}
+                        </button>
+                        {groups.length > 0 && (
+                          <div className="flex flex-wrap gap-1 px-3 pb-1">
+                            {groups.map((g) => (
+                              <span
+                                key={g}
+                                className="px-1.5 py-0.5 bg-[var(--color-primary)] text-white rounded text-[10px]"
+                                title={`Member of asset group "${g}"`}
+                              >
+                                {g}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </Card>
@@ -393,6 +462,7 @@ export function SecretsPage() {
                 />
               )}
             </Card>
+            </div>
           </div>
         )}
 

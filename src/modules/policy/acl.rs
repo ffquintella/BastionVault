@@ -67,9 +67,29 @@ pub struct ACL {
     pub exact_rules: Trie<String, Permissions>,
     pub prefix_rules: Trie<String, Permissions>,
     pub segment_wildcard_paths: DashMap<String, Permissions>,
+    /// Group-gated rules, stored unmerged. A rule lands here when it has
+    /// a non-empty `groups = [...]` filter in the policy HCL. These are
+    /// evaluated per-request against `Request::asset_groups`: a rule
+    /// contributes its capabilities only if the request target is a
+    /// member of at least one listed asset group. Kept separate from the
+    /// ungated tries because merging would lose the per-rule gate.
+    pub grouped_rules: Vec<GroupGatedRule>,
     pub rgp_policies: Vec<Arc<Policy>>,
     #[default(false)]
     pub root: bool,
+}
+
+/// A single policy path rule with a non-empty `groups = [...]` filter.
+/// Preserves the originating path shape (exact / prefix / segment
+/// wildcards) because path matching must happen at authorize time
+/// against the same shape the operator wrote. `permissions.groups`
+/// carries the asset-group filter.
+#[derive(Debug, Clone, Default)]
+pub struct GroupGatedRule {
+    pub path: String,
+    pub is_prefix: bool,
+    pub has_segment_wildcards: bool,
+    pub permissions: Permissions,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -140,6 +160,25 @@ impl ACL {
             }
 
             for pr in policy.paths.iter() {
+                // Group-gated rules skip the merge path: merging with an
+                // ungated rule would either widen the ungated rule's
+                // caps (if we dropped the gate) or narrow them (if we
+                // kept it). Keeping each gated rule as its own entry
+                // preserves per-rule gate semantics — at authorize time
+                // each gated rule is evaluated independently and its
+                // caps are OR'd into the result.
+                if !pr.groups.is_empty() {
+                    let mut cloned_perms = pr.permissions.clone();
+                    cloned_perms.add_granting_policy_to_map(policy, pr.permissions.capabilities_bitmap)?;
+                    acl.grouped_rules.push(GroupGatedRule {
+                        path: pr.path.clone(),
+                        is_prefix: pr.is_prefix,
+                        has_segment_wildcards: pr.has_segment_wildcards,
+                        permissions: cloned_perms,
+                    });
+                    continue;
+                }
+
                 if let Some(mut existing_perms) = acl.get_permissions(pr)? {
                     let deny = Capability::Deny.to_bits();
                     if existing_perms.capabilities_bitmap & deny != 0 {
@@ -249,21 +288,63 @@ impl ACL {
 
         let path = ensure_no_leading_slash(&req.path);
 
-        if let Some(perm) = self.exact_rules.get(&path) {
-            return perm.check(req, check_only);
-        }
-
-        if req.operation == Operation::List {
+        let mut base = if let Some(perm) = self.exact_rules.get(&path) {
+            perm.check(req, check_only)?
+        } else if req.operation == Operation::List {
             if let Some(perm) = self.exact_rules.get(path.trim_end_matches('/')) {
-                return perm.check(req, check_only);
+                perm.check(req, check_only)?
+            } else if let Some(perm) = self.get_none_exact_paths_permissions(&path, false) {
+                perm.check(req, check_only)?
+            } else {
+                ACLResults::default()
+            }
+        } else if let Some(perm) = self.get_none_exact_paths_permissions(&path, false) {
+            perm.check(req, check_only)?
+        } else {
+            ACLResults::default()
+        };
+
+        // Layer in group-gated rules. Each gated rule is evaluated on
+        // its own; its capabilities only contribute when the request
+        // target is a member of one of the rule's listed asset groups.
+        // A gated grant never overrides an existing ungated deny
+        // (explicit deny wins), but it can grant caps that ungated
+        // rules denied by omission.
+        if !self.grouped_rules.is_empty()
+            && base.capabilities_bitmap & Capability::Deny.to_bits() == 0
+        {
+            for rule in self.grouped_rules.iter() {
+                if !grouped_rule_matches(rule, &path) {
+                    continue;
+                }
+                if !rule_gate_passes(rule, req) {
+                    continue;
+                }
+                let sub = rule.permissions.check(req, check_only)?;
+                if sub.capabilities_bitmap & Capability::Deny.to_bits() != 0 {
+                    // Honor explicit deny in a gated rule the same way as
+                    // an ungated rule: it wipes the grant entirely.
+                    base.allowed = false;
+                    base.capabilities_bitmap = Capability::Deny.to_bits();
+                    base.granting_policies.clear();
+                    return Ok(base);
+                }
+                base.capabilities_bitmap |= sub.capabilities_bitmap;
+                if sub.allowed {
+                    base.allowed = true;
+                }
+                if sub.root_privs {
+                    base.root_privs = true;
+                }
+                for g in sub.granting_policies {
+                    if !base.granting_policies.iter().any(|p| p.name == g.name) {
+                        base.granting_policies.push(g);
+                    }
+                }
             }
         }
 
-        if let Some(perm) = self.get_none_exact_paths_permissions(&path, false) {
-            return perm.check(req, check_only);
-        }
-
-        Ok(ACLResults::default())
+        Ok(base)
     }
 
     /// Retrieves permissions for a path that does not have an exact match.
@@ -432,6 +513,67 @@ impl ACL {
 
         acl_cap_given
     }
+}
+
+/// Does `path` match this group-gated rule's path shape?
+/// Mirrors the match logic used for the ungated tries: exact for literal
+/// rules, prefix for globbed rules, segment-aware for `+` wildcards.
+fn grouped_rule_matches(rule: &GroupGatedRule, path: &str) -> bool {
+    if rule.has_segment_wildcards {
+        segment_wildcard_matches(&rule.path, rule.is_prefix, path)
+    } else if rule.is_prefix {
+        path.starts_with(&rule.path)
+    } else {
+        rule.path == path
+    }
+}
+
+/// Minimal segment-wildcard matcher: `+` matches exactly one path
+/// segment; if `is_prefix` is true the rule path may end with a `*`
+/// glob and we match any suffix on the final segment.
+fn segment_wildcard_matches(rule_path: &str, is_prefix: bool, req_path: &str) -> bool {
+    let rule_parts: Vec<&str> = rule_path.split('/').collect();
+    let req_parts: Vec<&str> = req_path.split('/').collect();
+
+    if !is_prefix && rule_parts.len() != req_parts.len() {
+        return false;
+    }
+    if is_prefix && req_parts.len() < rule_parts.len() {
+        return false;
+    }
+
+    for (i, rp) in rule_parts.iter().enumerate() {
+        if *rp == "+" {
+            continue;
+        }
+        if is_prefix && i == rule_parts.len() - 1 {
+            if !req_parts[i].starts_with(rp) {
+                return false;
+            }
+        } else if *rp != req_parts[i] {
+            return false;
+        }
+    }
+    true
+}
+
+/// Is the request target in any of the rule's listed asset groups?
+/// `groups` is always non-empty here (gated rules live in `grouped_rules`
+/// only when they carry a filter). Comparison is case-insensitive.
+fn rule_gate_passes(rule: &GroupGatedRule, req: &Request) -> bool {
+    if rule.permissions.groups.is_empty() {
+        return true;
+    }
+    if req.asset_groups.is_empty() {
+        return false;
+    }
+    for g in rule.permissions.groups.iter() {
+        let gl = g.trim().to_lowercase();
+        if req.asset_groups.iter().any(|x| x.trim().to_lowercase() == gl) {
+            return true;
+        }
+    }
+    false
 }
 
 fn check_path_capability(rules: &Trie<String, Permissions>, path: &str) -> bool {

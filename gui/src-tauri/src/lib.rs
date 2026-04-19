@@ -176,6 +176,14 @@ pub fn run() {
             commands::groups::write_group,
             commands::groups::delete_group,
             commands::groups::list_group_history,
+            // Asset groups (resources + KV secrets)
+            commands::asset_groups::list_asset_groups,
+            commands::asset_groups::read_asset_group,
+            commands::asset_groups::write_asset_group,
+            commands::asset_groups::delete_asset_group,
+            commands::asset_groups::list_asset_group_history,
+            commands::asset_groups::asset_groups_for_resource,
+            commands::asset_groups::asset_groups_for_secret,
             // FIDO2
             commands::fido2_native::fido2_native_register,
             commands::fido2_native::fido2_native_login,

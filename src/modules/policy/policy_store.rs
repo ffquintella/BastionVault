@@ -39,6 +39,7 @@ use crate::{
     errors::RvError,
     handler::AuthHandler,
     logical::{auth::PolicyResults, Operation, Request},
+    modules::resource_group::ResourceGroupModule,
     router::Router,
     bv_error_response_status, bv_error_string,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
@@ -285,6 +286,11 @@ pub struct PolicyHistoryEntry {
 #[derive(Default)]
 pub struct PolicyStore {
     pub router: Arc<Router>,
+    /// Weak reference back to Core so `post_auth` can resolve optional
+    /// subsystems (resource-group) without a strong cycle. Upgrade at
+    /// use site; tolerate `None` so unit tests that construct a bare
+    /// store continue to work.
+    pub core: Weak<Core>,
     pub acl_view: Option<Arc<BarrierView>>,
     pub rgp_view: Option<Arc<BarrierView>>,
     pub egp_view: Option<Arc<BarrierView>>,
@@ -323,6 +329,7 @@ impl PolicyStore {
 
         let mut policy_store = PolicyStore {
             router: core.router.clone(),
+            core: core.self_ptr.clone(),
             acl_view: Some(Arc::new(acl_view)),
             rgp_view: Some(Arc::new(rgp_view)),
             egp_view: Some(Arc::new(egp_view)),
@@ -769,6 +776,91 @@ impl PolicyStore {
     }
 }
 
+/// Extract a resource name from `request_path` if it targets the
+/// resource engine. The resource module is mounted at `resources/` and
+/// its internal paths include `resources/<name>` (metadata) and
+/// `secrets/<resource>/<key>` (per-resource secrets). The full request
+/// path (pre-mount-strip) therefore looks like `resources/resources/<name>`
+/// or `resources/secrets/<resource>/<key>`. Returns `None` for any other
+/// path shape, which is the signal to treat `asset_groups` as empty.
+fn resource_name_from_path(req_path: &str) -> Option<String> {
+    let p = req_path.strip_prefix('/').unwrap_or(req_path);
+    let rest = p.strip_prefix("resources/")?;
+    let rest = rest.strip_prefix("resources/").or_else(|| rest.strip_prefix("secrets/"))?;
+    let name = rest.split('/').next()?;
+    if name.is_empty() { None } else { Some(name.to_lowercase()) }
+}
+
+/// Does `request_path` look like a KV (v1 or v2) request? The routing
+/// layer puts KV mounts under their operator-chosen path (default
+/// `secret/`). We can't enumerate mounts from here cheaply, so we use
+/// a permissive heuristic: anything that is *not* one of the fixed
+/// non-KV prefixes (`sys/`, `auth/`, `identity/`, `resource-group/`,
+/// `cubbyhole/`, `resources/`) is treated as a candidate KV path. If
+/// the secret-index has no entry for it, `groups_for_secret` returns
+/// an empty vec and the evaluator moves on. Worst case: a request for
+/// a non-KV path outside this allowlist hits one extra index lookup.
+fn looks_like_kv_path(req_path: &str) -> bool {
+    let p = req_path.strip_prefix('/').unwrap_or(req_path);
+    const NON_KV_PREFIXES: &[&str] = &[
+        "sys/",
+        "auth/",
+        "identity/",
+        "resource-group/",
+        "cubbyhole/",
+        "resources/",
+    ];
+    !p.is_empty() && !NON_KV_PREFIXES.iter().any(|pref| p.starts_with(pref))
+}
+
+/// Best-effort lookup of the asset-groups that contain the request
+/// target. Consults the resource-index when the path looks like a
+/// resource engine path, then (independently) the secret-index when
+/// the path looks like a KV path. The two lookups can both contribute
+/// — a group-gated policy rule can reference a group whose members
+/// include both resources and secrets, and either kind of target
+/// passing the gate is enough for the rule to apply.
+///
+/// Returns an empty vec on any failure (module absent, store not yet
+/// initialized, path we don't recognize, storage error). The ACL
+/// evaluator treats empty here as "target is in no groups", so a
+/// lookup failure can only narrow access, never widen it.
+async fn resolve_asset_groups(core: &Weak<Core>, req_path: &str) -> Vec<String> {
+    let Some(core) = core.upgrade() else {
+        return Vec::new();
+    };
+    let Some(module) = core.module_manager.get_module::<ResourceGroupModule>("resource-group") else {
+        return Vec::new();
+    };
+    let Some(store) = module.store() else {
+        return Vec::new();
+    };
+
+    let mut out: Vec<String> = Vec::new();
+
+    if let Some(name) = resource_name_from_path(req_path) {
+        if let Ok(groups) = store.groups_for_resource(&name).await {
+            for g in groups {
+                if !out.iter().any(|x| x == &g) {
+                    out.push(g);
+                }
+            }
+        }
+    }
+
+    if looks_like_kv_path(req_path) {
+        if let Ok(groups) = store.groups_for_secret(req_path).await {
+            for g in groups {
+                if !out.iter().any(|x| x == &g) {
+                    out.push(g);
+                }
+            }
+        }
+    }
+
+    out
+}
+
 /// Monotonic-ish 20-digit zero-padded nanoseconds since UNIX epoch, used
 /// as the suffix of history log keys so listing returns entries in
 /// chronological order. Mirrors the resource/identity modules.
@@ -800,6 +892,14 @@ impl AuthHandler for PolicyStore {
             if auth.policies.is_empty() {
                 return Ok(());
             }
+
+            // Resolve the request target's resource-group membership once so
+            // the (sync) ACL evaluator can enforce the `groups = [...]`
+            // policy qualifier against it. Cheap lookup — one read against
+            // the reverse member-index view. Absence of the subsystem, or a
+            // non-resource path, leaves `asset_groups` empty (= the path
+            // matches no groups, and any `groups`-gated rule is skipped).
+            req.asset_groups = resolve_asset_groups(&self.core, &req.path).await;
 
             let acl = self.new_acl(&auth.policies, None).await?;
             acl_result = acl.allow_operation(req, false)?;

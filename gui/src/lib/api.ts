@@ -32,6 +32,10 @@ import type {
   GroupListResult,
   GroupInfo,
   GroupHistoryResult,
+  AssetGroupListResult,
+  AssetGroupInfo,
+  AssetGroupHistoryResult,
+  AssetGroupLookupResult,
   Fido2Config,
   Fido2ChallengeResponse,
   Fido2LoginResponse,
@@ -211,6 +215,27 @@ export const deleteGroup = (kind: GroupKind, name: string) =>
   invoke<void>("delete_group", { kind, name });
 export const listGroupHistory = (kind: GroupKind, name: string) =>
   invoke<GroupHistoryResult>("list_group_history", { kind, name });
+
+// Asset groups (resources + KV secrets)
+export const listAssetGroups = () =>
+  invoke<AssetGroupListResult>("list_asset_groups");
+export const readAssetGroup = (name: string) =>
+  invoke<AssetGroupInfo>("read_asset_group", { name });
+export const writeAssetGroup = (
+  name: string,
+  description: string,
+  members: string,
+  secrets: string,
+) =>
+  invoke<void>("write_asset_group", { name, description, members, secrets });
+export const deleteAssetGroup = (name: string) =>
+  invoke<void>("delete_asset_group", { name });
+export const listAssetGroupHistory = (name: string) =>
+  invoke<AssetGroupHistoryResult>("list_asset_group_history", { name });
+export const assetGroupsForResource = (resource: string) =>
+  invoke<AssetGroupLookupResult>("asset_groups_for_resource", { resource });
+export const assetGroupsForSecret = (path: string) =>
+  invoke<AssetGroupLookupResult>("asset_groups_for_secret", { path });
 
 // FIDO2
 export const fido2ConfigRead = () => invoke<Fido2Config | null>("fido2_config_read");

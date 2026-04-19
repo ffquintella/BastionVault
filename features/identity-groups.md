@@ -1,6 +1,8 @@
 # Identity Groups
 
-Status: Backend + HTTP API **Done**. GUI integration **Done**.
+Status: Backend + HTTP API **Done**. GUI integration **Done**. FIDO2 login
+policy union **Done**. Cert/OIDC/SAML extension deferred until those
+backends are themselves implemented.
 
 ## Goal
 
@@ -101,7 +103,15 @@ strings).
   handler clones `role_entry`, replaces `token_policies` with the unioned
   set via `expand_identity_group_policies(GroupKind::App, role_name, ...)`,
   then calls `populate_token_auth`.
-- On any expansion error (module absent, store unavailable, I/O error), both
+- **FIDO2** (`src/modules/credential/userpass/path_fido2_login.rs` and the
+  legacy standalone backend at `src/modules/credential/fido2/path_login.rs`):
+  both FIDO2 login-complete handlers call the same
+  `expand_identity_group_policies(GroupKind::User, username, ...)` used by
+  password login, so a user in a user-group receives the same policies
+  whether they authenticate with a password or a passkey. Token renewal in
+  the unified userpass path reuses `login_renew`, which already expands
+  against the current group membership.
+- On any expansion error (module absent, store unavailable, I/O error), all
   login paths fall back to the caller's direct policies and log a warning.
   Login is never blocked by an identity-subsystem failure.
 
@@ -163,7 +173,8 @@ prefix out-of-band.
 | 4 | UserPass + AppRole login policy union | Done |
 | 5 | Integration tests (CRUD, namespace isolation, end-to-end login) | Done |
 | 6 | GUI: Groups page, members/policies editors, Tauri commands | Done |
-| 7 | Extension to other auth backends (Certificate, OIDC, SAML) | Pending |
+| 7 | FIDO2 login policy union (shares UserPass username namespace) | Done |
+| 8 | Extension to Certificate / OIDC / SAML when those backends land | Deferred |
 
 ## Testing
 
@@ -179,8 +190,24 @@ Three integration tests in `src/modules/identity/mod.rs`:
 
 ## Current State
 
-Phases 1–6 shipped. Extension to the Certificate/OIDC/SAML auth backends
-(Phase 7) is pending.
+Phases 1–7 shipped: CRUD, HTTP API, default mount, UserPass/AppRole login
+union, integration tests, GUI, and FIDO2 login union. Phase 8 (extension
+to Certificate/OIDC/SAML) is deferred — the Certificate backend is
+currently disabled in the OpenSSL-free build and the OIDC/SAML backends
+are design-only. When those backends are implemented they should call
+`expand_identity_group_policies(GroupKind::User, user_id, &policies)`
+using whatever stable identifier the IdP provides (subject/nameID, mapped
+to a user-group member string on the backend side).
+
+### FIDO2 integration note
+
+Testing FIDO2 login end-to-end requires a real WebAuthn authenticator, so
+no new integration test was added for the FIDO2 wiring specifically. The
+underlying `GroupStore::expand_policies(GroupKind::User, ...)` call is
+exercised by `test_identity_group_policy_expansion_at_login`, and the
+FIDO2 login handlers now invoke the same helper used by UserPass password
+login — so if the UserPass test passes, FIDO2 logins for the same
+username receive the same unioned policy set.
 
 ### Phase 6 (GUI) details
 

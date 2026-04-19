@@ -26,5 +26,6 @@ export { Table } from "./Table";
 export { Badge } from "./Badge";
 export { Tabs } from "./Tabs";
 export { EmptyState } from "./EmptyState";
+export { GroupsSection } from "./GroupsSection";
 export { Breadcrumb } from "./Breadcrumb";
 export { ToastProvider, useToast } from "./Toast";

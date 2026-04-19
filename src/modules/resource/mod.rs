@@ -28,7 +28,7 @@ use crate::{
         secret::Secret, Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation,
         Request, Response,
     },
-    modules::Module,
+    modules::{resource_group::ResourceGroupModule, Module},
     new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
     new_path_internal, new_secret, new_secret_internal,
     storage::StorageEntry,
@@ -515,6 +515,27 @@ impl ResourceBackendInner {
         // Delete the resource metadata.
         let meta_key = format!("{META_PREFIX}{name}");
         req.storage_delete(&meta_key).await?;
+
+        // Prune the resource from every resource-group it is a member of.
+        // Resource-groups are an optional subsystem — if the module isn't
+        // loaded or the store isn't initialized yet, skip the prune.
+        // Failures are logged but do not block resource deletion: a stale
+        // group member will be cleaned up on the next group write or by
+        // the `resource-group/reindex` endpoint.
+        if let Some(rg_module) = self
+            .core
+            .module_manager
+            .get_module::<ResourceGroupModule>("resource-group")
+        {
+            if let Some(rg_store) = rg_module.store() {
+                if let Err(e) = rg_store.prune_resource(&name).await {
+                    log::warn!(
+                        "resource-group prune failed for deleted resource '{name}': {e}. \
+                         Use the resource-group/reindex endpoint to clean up.",
+                    );
+                }
+            }
+        }
 
         // Delete all current-value secrets under this resource.
         let secret_prefix = format!("{SECRET_PREFIX}{name}/");

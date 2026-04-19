@@ -377,8 +377,10 @@ mod mod_policy_tests {
         let policies = policies.unwrap();
         assert!(policies.data.is_some());
         let policies = policies.data.unwrap();
-        assert_eq!(policies["keys"], json!(["default", policy1_name, "root"]));
-        assert_eq!(policies["policies"], json!(["default", policy1_name, "root"]));
+        // Seeded policies — `standard-user` ships in the default install
+        // (see `policy_store.rs`) alongside `default` and `root`.
+        assert_eq!(policies["keys"], json!(["default", policy1_name, "standard-user", "root"]));
+        assert_eq!(policies["policies"], json!(["default", policy1_name, "standard-user", "root"]));
 
         // Delete
         test_delete_policy(&core, &root_token, policy1_name).await;
@@ -393,8 +395,8 @@ mod mod_policy_tests {
         // List again
         let policies = test_list_api(&core, &root_token, "sys/policy", true).await;
         let policies = policies.unwrap().unwrap().data.unwrap();
-        assert_eq!(policies["keys"], json!(["default", "root"]));
-        assert_eq!(policies["policies"], json!(["default", "root"]));
+        assert_eq!(policies["keys"], json!(["default", "standard-user", "root"]));
+        assert_eq!(policies["policies"], json!(["default", "standard-user", "root"]));
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
@@ -404,10 +406,13 @@ mod mod_policy_tests {
         // set token
         test_http_server.token = test_http_server.root_token.clone();
 
-        // List policies
+        // List policies — `standard-user` is seeded alongside the built-ins.
         let ret = test_http_server.read("sys/policy", None);
         assert!(ret.is_ok());
-        assert_eq!(ret.unwrap().1, json!({"keys": ["default", "root"], "policies": ["default", "root"]}));
+        assert_eq!(
+            ret.unwrap().1,
+            json!({"keys": ["default", "standard-user", "root"], "policies": ["default", "standard-user", "root"]})
+        );
 
         // Read default policy
         let ret = test_http_server.read("sys/policy/default", None);
@@ -438,7 +443,10 @@ mod mod_policy_tests {
         assert!(ret.is_ok());
         assert_eq!(
             ret.unwrap().1,
-            json!({"keys": ["default", "policy1", "root"], "policies": ["default", "policy1", "root"]})
+            json!({
+                "keys": ["default", "policy1", "standard-user", "root"],
+                "policies": ["default", "policy1", "standard-user", "root"],
+            })
         );
 
         // Delete policy1
@@ -448,7 +456,10 @@ mod mod_policy_tests {
         // List policies again
         let ret = test_http_server.read("sys/policy", None);
         assert!(ret.is_ok());
-        assert_eq!(ret.unwrap().1, json!({"keys": ["default", "root"], "policies": ["default", "root"]}));
+        assert_eq!(
+            ret.unwrap().1,
+            json!({"keys": ["default", "standard-user", "root"], "policies": ["default", "standard-user", "root"]})
+        );
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

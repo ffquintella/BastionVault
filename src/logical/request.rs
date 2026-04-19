@@ -35,6 +35,14 @@ pub struct Request {
     pub ctx: Arc<Context>,
     #[default(1)]
     pub api_version: u8,
+    /// Asset-group membership of the request target, resolved once
+    /// during `post_auth` so the sync ACL evaluator can evaluate the
+    /// `groups = [...]` policy qualifier without an async hop. Empty
+    /// when the target is not in any asset group, when the
+    /// resource-group subsystem is not loaded, or when the target is
+    /// not a resource path.
+    #[default(Vec::new())]
+    pub asset_groups: Vec<String>,
 }
 
 #[maybe_async::maybe_async]

@@ -73,6 +73,11 @@ pub struct PolicyPathRules {
     pub has_segment_wildcards: bool,
     pub min_wrapping_ttl: Duration,
     pub max_wrapping_ttl: Duration,
+    /// Asset-group membership filter. When non-empty, the rule's
+    /// capabilities apply only if the request target is a member of at
+    /// least one listed asset-group. Empty means the rule is ungated and
+    /// behaves like a literal path rule (legacy semantics).
+    pub groups: Vec<String>,
 }
 
 /// Structure holding permissions and associated configurations.
@@ -85,6 +90,10 @@ pub struct Permissions {
     pub denied_parameters: HashMap<String, Vec<Value>>,
     pub required_parameters: Vec<String>,
     pub granting_policies_map: DashMap<u32, Vec<PolicyInfo>>,
+    /// Asset-group filter for this permission. Empty means ungated.
+    /// Set from the policy path rule's `groups = [...]` attribute.
+    /// Evaluated at authorize time against `Request::asset_groups`.
+    pub groups: Vec<String>,
 }
 
 // Configuration struct used to parse policy data from HCL.
@@ -111,6 +120,11 @@ struct PolicyPathConfig {
     pub denied_parameters: HashMap<String, Vec<Value>>,
     #[serde(default)]
     pub required_parameters: Vec<String>,
+    /// Asset-group membership filter. When non-empty, the rule's
+    /// capabilities only grant when the request target is a member of
+    /// at least one listed group. See `features/resource-groups.md`.
+    #[serde(default)]
+    pub groups: Vec<String>,
 }
 
 /// Enumeration of backwards capabilities, old-style policies.
@@ -370,6 +384,20 @@ impl Policy {
             permissions.allowed_parameters.clone_from(&pc.allowed_parameters);
             permissions.denied_parameters.clone_from(&pc.denied_parameters);
             permissions.required_parameters.clone_from(&pc.required_parameters);
+
+            // Normalize the asset-group filter on both the rule and the
+            // inner Permissions: trim, lowercase (group names are stored
+            // lowercased by the resource-group backend), drop empties,
+            // dedup, preserve first-seen order.
+            let mut groups: Vec<String> = Vec::new();
+            for g in pc.groups.iter() {
+                let t = g.trim().to_lowercase();
+                if !t.is_empty() && !groups.iter().any(|x| x == &t) {
+                    groups.push(t);
+                }
+            }
+            rules.groups = groups.clone();
+            permissions.groups = groups;
 
             self.paths.push(rules);
         }

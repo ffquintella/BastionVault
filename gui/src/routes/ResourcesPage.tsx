@@ -8,10 +8,12 @@ import {
   Select,
   Textarea,
   Badge,
+  Breadcrumb,
   Tabs,
   Modal,
   ConfirmModal,
   EmptyState,
+  GroupsSection,
   SecretPairsEditor,
   SecretHistoryPanel,
   ResourceHistoryPanel,
@@ -31,6 +33,7 @@ import type {
 import { DEFAULT_RESOURCE_TYPES, mergeTypeConfig, getTypeDef } from "../lib/resourceTypes";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
+import { useAssetGroupMap } from "../hooks/useAssetGroupMap";
 
 function parseTags(tags: unknown): string[] {
   if (Array.isArray(tags)) return tags.filter(Boolean);
@@ -48,9 +51,11 @@ export function ResourcesPage() {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<"info" | "secrets" | "history">("info");
   const [filterType, setFilterType] = useState("");
+  const [filterGroup, setFilterGroup] = useState("");
   const [search, setSearch] = useState("");
   const [allMeta, setAllMeta] = useState<ResourceMetadata[]>([]);
   const [typeConfig, setTypeConfig] = useState<ResourceTypeConfig>(DEFAULT_RESOURCE_TYPES);
+  const assetGroups = useAssetGroupMap();
 
   useEffect(() => {
     loadTypeConfig();
@@ -109,6 +114,10 @@ export function ResourcesPage() {
 
   const filteredMeta = allMeta.filter((m) => {
     if (filterType && m.type !== filterType) return false;
+    if (filterGroup) {
+      const groups = assetGroups.map.byResource[String(m.name)] || [];
+      if (!groups.includes(filterGroup)) return false;
+    }
     if (search) {
       const q = search.toLowerCase();
       const name = String(m.name || "").toLowerCase();
@@ -119,6 +128,17 @@ export function ResourcesPage() {
     }
     return true;
   });
+
+  // All group names referenced by the currently loaded resources —
+  // used to populate the filter dropdown so operators only see groups
+  // they can actually filter by.
+  const groupOptionsSet = new Set<string>();
+  for (const m of allMeta) {
+    for (const g of assetGroups.map.byResource[String(m.name)] || []) {
+      groupOptionsSet.add(g);
+    }
+  }
+  const groupOptions = Array.from(groupOptionsSet).sort();
 
   const typeOptions = Object.values(typeConfig).map((t) => ({ value: t.id, label: t.label }));
   const filterOptions = [{ value: "", label: "All types" }, ...typeOptions];
@@ -184,12 +204,39 @@ export function ResourcesPage() {
           <Button size="sm" onClick={() => setShowCreate(true)}>Add Resource</Button>
         </div>
 
+        {/* Breadcrumb-style path indicator. Shows the active filter as
+            a drill-down path ("All resources / <group>") so the user
+            always knows where in the group hierarchy they are. The
+            "All resources" segment clears the filter. */}
+        <Breadcrumb
+          segments={
+            filterGroup
+              ? [
+                  { label: "All resources", onClick: () => setFilterGroup("") },
+                  { label: filterGroup },
+                ]
+              : [{ label: "All resources" }]
+          }
+        />
+
         <div className="flex gap-3">
           <Input placeholder="Search by name, hostname" value={search}
             onChange={(e) => setSearch(e.target.value)} />
           <Select value={filterType} onChange={(e) => setFilterType(e.target.value)}
             options={filterOptions} />
         </div>
+
+        <GroupsSection
+          groups={groupOptions.map((name) => ({
+            name,
+            count: allMeta.filter((m) =>
+              (assetGroups.map.byResource[String(m.name)] || []).includes(name),
+            ).length,
+          }))}
+          selected={filterGroup || null}
+          onSelect={(name) => setFilterGroup(name ?? "")}
+          itemKindPlural="resources"
+        />
 
         {loading ? (
           <p className="text-sm text-[var(--color-text-muted)]">Loading...</p>
@@ -201,6 +248,7 @@ export function ResourcesPage() {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {filteredMeta.map((meta) => {
               const td = getTypeDef(typeConfig, String(meta.type));
+              const groups = assetGroups.map.byResource[String(meta.name)] || [];
               return (
                 <button key={String(meta.name)} onClick={() => selectResource(String(meta.name))}
                   className="p-4 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-xl text-left hover:border-[var(--color-primary)] transition-colors">
@@ -209,6 +257,23 @@ export function ResourcesPage() {
                     <Badge label={td.label} variant={td.color} />
                   </div>
                   {meta.hostname ? <p className="text-xs text-[var(--color-text-muted)] truncate">{String(meta.hostname)}{meta.ip_address ? ` (${String(meta.ip_address)})` : ""}</p> : null}
+                  {groups.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-2">
+                      {groups.map((g) => (
+                        <span
+                          key={g}
+                          onClick={(ev) => {
+                            ev.stopPropagation();
+                            setFilterGroup((cur) => (cur === g ? "" : g));
+                          }}
+                          className="px-1.5 py-0.5 bg-[var(--color-primary)] text-white rounded text-[10px] cursor-pointer hover:opacity-80"
+                          title={`Filter by group "${g}"`}
+                        >
+                          {g}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   {parseTags(meta.tags).length > 0 && (
                     <div className="flex flex-wrap gap-1 mt-2">
                       {parseTags(meta.tags).slice(0, 4).map((t) => (

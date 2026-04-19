@@ -102,13 +102,13 @@ mod test {
         assert!(ret.is_ok());
         assert_eq!(ret.unwrap(), "Success! Uploaded policy: my-policy\n");
 
-        // list policy with table format
+        // list policy with table format — `standard-user` is seeded.
         let ret = test_http_server.cli(&["policy", "list"], &["--format=table"]);
         assert!(ret.is_ok());
         #[cfg(windows)]
-        assert_eq!(ret.unwrap(), "default    \r\nmy-policy    \r\nroot    \r\n");
+        assert_eq!(ret.unwrap(), "default    \r\nmy-policy    \r\nstandard-user    \r\nroot    \r\n");
         #[cfg(not(windows))]
-        assert_eq!(ret.unwrap(), "default    \nmy-policy    \nroot    \n");
+        assert_eq!(ret.unwrap(), "default    \nmy-policy    \nstandard-user    \nroot    \n");
 
         // read my-policy with table format
         let ret = test_http_server.cli(&["policy", "read"], &["my-policy", "--format=table"]);
@@ -124,9 +124,15 @@ mod test {
         let ret = test_http_server.cli(&["policy", "list"], &["--format=table"]);
         assert!(ret.is_ok());
         #[cfg(windows)]
-        assert_eq!(ret.unwrap(), "default    \r\nmy-policy    \r\nmy-policy1    \r\nroot    \r\n");
+        assert_eq!(
+            ret.unwrap(),
+            "default    \r\nmy-policy    \r\nmy-policy1    \r\nstandard-user    \r\nroot    \r\n",
+        );
         #[cfg(not(windows))]
-        assert_eq!(ret.unwrap(), "default    \nmy-policy    \nmy-policy1    \nroot    \n");
+        assert_eq!(
+            ret.unwrap(),
+            "default    \nmy-policy    \nmy-policy1    \nstandard-user    \nroot    \n",
+        );
 
         // read my-policy1 with table format
         let ret = test_http_server.cli(&["policy", "read"], &["my-policy1", "--format=table"]);
