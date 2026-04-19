@@ -15,6 +15,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Access Control (RBAC, path-based ACL policies) | Done |
 | Identity Groups (user groups, application groups, group→policy mapping) | Done |
 | Per-User Scoping (ownership + policy templating + sharing) | Todo |
+| Asset Groups (secret + resource collections with group-based ACLs) | Todo |
 | Audit Logging (tamper-evident, HMAC chain) | Partial |
 | Metrics (Prometheus) | Done |
 | **Cryptography** | |
@@ -78,6 +79,8 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
   User groups and application groups with group-to-policy mapping. Policies attached to a group are unioned with the caller's direct policies at login time. Backend, HTTP API, and GUI integration shipped; extension to Certificate/OIDC/SAML auth backends pending.
 - [Per-User Scoping (Ownership & Sharing)](features/per-user-scoping.md)
   Ownership-aware ACLs: entity IDs provisioned on first login, policy templating (`{{username}}`, `{{entity.id}}`), a new `scopes = ["owner" | "shared"]` qualifier on policy paths, and owner metadata on KV secrets and resources. Enables seeded `standard-user-readonly` and `secret-author` roles, with an explicit secret-sharing layer as a later phase. Design only; not yet implemented.
+- [Asset Groups](features/asset-groups.md)
+  Named collections of KV secrets and resources used to organize objects and to grant access by membership. Policies reference an asset group via a new `groups = [...]` qualifier (additive with the per-user-scoping `scopes`); reverse indexes make authorization checks and list-filtering cheap. Integrates with identity groups (compose the "this team gets this bundle" story) and with the future sharing model. Design only; not yet implemented.
 
 ## Notes
 
