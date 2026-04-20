@@ -43,6 +43,27 @@ pub struct Request {
     /// not a resource path.
     #[default(Vec::new())]
     pub asset_groups: Vec<String>,
+    /// When a `LIST` operation was authorized by a policy rule with a
+    /// non-empty `groups = [...]` filter, the evaluator records those
+    /// groups here so a post-route pass can filter the response keys
+    /// down to just the members of (any of) those groups. Empty when
+    /// the list was granted ungated, or when the op is not a LIST.
+    #[default(Vec::new())]
+    pub list_filter_groups: Vec<String>,
+    /// Owner entity_id of the request target, resolved during
+    /// `post_auth` for authorization-aware reads of ownership. Empty
+    /// when the target is not an ownership-tracked object or has no
+    /// owner record yet (legacy / unowned). Consumed by ACL rules
+    /// with `scopes = ["owner"]`.
+    #[default(String::new())]
+    pub asset_owner: String,
+    /// When a `LIST` operation was authorized only by a
+    /// `scopes = [...]`-filtered rule, the evaluator records the
+    /// active scopes here so `post_route` can narrow the response
+    /// `keys` to entries the caller owns (or has shared with them,
+    /// once sharing lands).
+    #[default(Vec::new())]
+    pub list_filter_scopes: Vec<String>,
 }
 
 #[maybe_async::maybe_async]

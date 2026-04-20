@@ -2,9 +2,12 @@
 
 Status: Backend + HTTP API **Done**. Resource-delete lifecycle hook
 **Done**. ACL `groups = [...]` qualifier **Done** (both resource and
-KV-secret halves). KV-secret membership **Done**. GUI integration
-**Pending**. KV-delete lifecycle hook **Pending** (needs a
-router-level change).
+KV-secret halves). KV-secret membership **Done**. KV-delete lifecycle
+hook **Done**. List-filter on group-gated LIST operations **Done**.
+Policy-compile warning for unknown groups **Done**. GUI integration
+**Done** (Asset Groups page, chips, Termius-style section, filter).
+Ownership, admin transfer, and sharing still pending on
+per-user-scoping.
 
 > The internal module name (`resource_group`, mount `resource-group/`)
 > and the feature name now diverge: the backend actually stores both
@@ -259,13 +262,15 @@ Path-shape extraction in `resolve_asset_groups` (policy_store.rs):
 | 6 | ACL `groups = [...]` qualifier + evaluator integration (resource half) | Done |
 | 7 | KV-secret membership: `secrets` field, secret-index, canonicalization, `by-secret` route | Done |
 | 8 | ACL `groups = [...]` qualifier extended to KV paths via secret-index | Done |
-| 9 | KV-delete lifecycle hook: call `prune_secret` when a KV entry is destroyed | Pending (needs a router-level touch point to see the full logical path) |
-| 10 | GUI: Asset Groups page, group chips on objects, sidebar filter | Pending |
-| 11 | Ownership, admin transfer, sharing (depends on per-user-scoping) | Pending |
+| 9 | KV-delete lifecycle hook: call `prune_secret` when a KV entry is destroyed | Done (PolicyStore::post_route) |
+| 10 | List-filter: narrow LIST response keys to asset-group members when granted via `groups = [...]` | Done |
+| 11 | Policy-compile warning when `groups = [...]` references a non-existent asset group | Done |
+| 12 | GUI: Asset Groups page, group chips on objects, sidebar filter | Done |
+| 13 | Ownership, admin transfer, sharing (depends on per-user-scoping) | Pending |
 
 ## Testing
 
-Seven integration tests in `src/modules/resource_group/mod.rs`:
+Ten integration tests in `src/modules/resource_group/mod.rs`:
 
 1. `test_resource_group_crud` — create/read/list/update/delete with
    partial-update preservation and member canonicalization; verifies
@@ -295,21 +300,59 @@ Seven integration tests in `src/modules/resource_group/mod.rs`:
    `groups = ["kv-club"]` policy reads `kv/alpha` (in the group), is
    denied on `kv/beta` (outside it), and swaps correctly when
    membership changes.
+8. `test_list_filter_on_groups_gated_list_kv` — a user whose only
+   list grant on `kv/*` is gated by `groups = ["crew"]` sees only
+   the crew's members in the list response; non-members are filtered
+   out of `keys`.
+9. `test_kv_delete_prunes_from_groups` — deleting a KV secret
+   removes it from every asset group it belonged to via
+   `PolicyStore::post_route`.
+10. `test_policy_write_warns_on_unknown_groups` — writing a policy
+    whose `groups = [...]` clause names a nonexistent group
+    succeeds but returns a response warning listing the unknown
+    names; existing groups are not flagged.
 
 ## Current State
 
-Phases 1–8 are shipped. The feature now covers both halves of
-asset-groups' minimum viable scope — object storage for resources
-*and* KV secrets, reverse indexes, lifecycle prune on resource
-deletes, and the ACL `groups = [...]` qualifier with evaluator
-integration for both target kinds.
+Phases 1–12 are shipped. The feature is feature-complete for the
+single-tenant, non-ownership model:
 
-Remaining: phase 9 (KV-delete lifecycle hook — defers until a
-router-level touch point is available, since the KV backend only
-sees the mount-stripped path), phase 10 (GUI), and phase 11
-(ownership / admin transfer / sharing, all blocked on
-per-user-scoping landing).
+- Object storage for resources and KV secrets, with two parallel
+  reverse indexes and canonicalization that collapses KV-v1/v2 forms.
+- HTTP CRUD API, `by-resource` / `by-secret` reverse lookups,
+  `reindex` admin recovery endpoint, change-history with before/after
+  values.
+- Default mount + `mount_update` migration on unseal for upgrading
+  deployments.
+- Lifecycle hooks on both sides: resource-delete prunes in the
+  resource module, KV-delete prunes via `PolicyStore::post_route`
+  (registered as both `AuthHandler` and `Handler` in the core
+  pipeline).
+- ACL `groups = [...]` qualifier parsed into `PolicyPathRules.groups`,
+  stored unmerged in `ACL::grouped_rules`, evaluated per-rule.
+  `PolicyStore::post_auth` populates `Request::asset_groups` via a
+  single reverse-index lookup.
+- **List-filter** when a LIST op is authorized only via a gated rule:
+  the evaluator records the rule's `groups` on
+  `ACLResults::list_filter_groups`, `post_auth` propagates them to
+  `Request::list_filter_groups`, and `PolicyStore::post_route`
+  narrows the response `keys` to entries whose full logical path is a
+  member of any listed group. Ungated LIST grants defeat the filter
+  so broader access is never accidentally narrowed.
+- **Policy-compile warning** when a policy's `groups = [...]` clause
+  references a group name that does not currently exist. The write
+  still succeeds (a later group create retroactively activates the
+  clause), but the response carries a warning listing the unknown
+  names so operators can spot typos.
+- GUI: Asset Groups page (`/asset-groups`), Termius-style groups
+  section on the Resources and Secrets pages with click-to-filter and
+  a breadcrumb-style path indicator, chips on individual resources
+  and secrets, collapsible Admin section with persisted state.
 
-Resource groups now compose cleanly with identity groups: an identity
+Remaining: phase 13 (ownership / admin transfer / sharing), blocked
+on [per-user-scoping](per-user-scoping.md) landing the entity-ID
+plumbing and the `SecretShare` type the sharing layer will hang off.
+
+Resource groups compose cleanly with identity groups: an identity
 group can attach a policy with `groups = [...]`, giving "this team
 gets this bundle" in one group edit without a policy rewrite.

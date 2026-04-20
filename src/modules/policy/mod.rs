@@ -5,11 +5,11 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use better_default::Default;
 use serde_json::{Map, Value};
 
-use super::Module;
+use super::{resource_group::ResourceGroupModule, Module};
 use crate::{
     core::Core,
     errors::RvError,
-    handler::AuthHandler,
+    handler::{AuthHandler, Handler},
     logical::{Backend, Request, Response},
     bv_error_response_status,
 };
@@ -124,6 +124,34 @@ impl PolicyModule {
         let op = if previous_raw.is_some() { "update" } else { "create" };
         let new_raw = policy.raw.clone();
 
+        // Compile-time warning: any `groups = [...]` entries that
+        // reference a non-existent asset group contribute zero
+        // authorization at runtime. The policy is still accepted —
+        // later creating the named group retroactively activates the
+        // clause — but we surface the unknown names so operators can
+        // spot typos immediately. Silent on any resolution failure
+        // (module absent, store uninitialized).
+        let mut warnings: Vec<String> = Vec::new();
+        if policy.policy_type == PolicyType::Acl {
+            let referenced = collect_referenced_groups(&policy);
+            if !referenced.is_empty() {
+                if let Some(known) = self.known_asset_groups().await {
+                    let unknown: Vec<String> = referenced
+                        .into_iter()
+                        .filter(|g| !known.iter().any(|k| k == g))
+                        .collect();
+                    if !unknown.is_empty() {
+                        warnings.push(format!(
+                            "policy references unknown asset group(s): {}. \
+                             The policy is accepted; these clauses grant no \
+                             access until a group with a matching name is created.",
+                            unknown.join(", "),
+                        ));
+                    }
+                }
+            }
+        }
+
         store.set_policy(policy).await?;
 
         if matches!(op, "create" | "update")
@@ -140,7 +168,23 @@ impl PolicyModule {
             let _ = store.append_history(&name, entry).await;
         }
 
-        Ok(None)
+        if warnings.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(Response { warnings, ..Response::default() }))
+        }
+    }
+
+    /// Snapshot the current asset-group names. Returns `None` when the
+    /// subsystem isn't loaded — caller treats that as "can't validate,
+    /// don't warn".
+    async fn known_asset_groups(&self) -> Option<Vec<String>> {
+        let module = self
+            .core
+            .module_manager
+            .get_module::<ResourceGroupModule>("resource-group")?;
+        let store = module.store()?;
+        store.list_groups().await.ok()
     }
 
     pub async fn handle_policy_delete(
@@ -201,6 +245,22 @@ impl PolicyModule {
     }
 }
 
+/// Collect the deduped list of asset-group names referenced via
+/// `groups = [...]` across every path rule in the policy. Case is
+/// preserved (names are already lowercased at parse time by
+/// `policy.rs`).
+fn collect_referenced_groups(policy: &Policy) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for pr in policy.paths.iter() {
+        for g in pr.groups.iter() {
+            if !out.iter().any(|x| x == g) {
+                out.push(g.clone());
+            }
+        }
+    }
+    out
+}
+
 fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339()
 }
@@ -242,13 +302,19 @@ impl Module for PolicyModule {
 
         self.setup_policy().await?;
 
-        core.add_auth_handler(policy_store as Arc<dyn AuthHandler>)?;
+        core.add_auth_handler(policy_store.clone() as Arc<dyn AuthHandler>)?;
+        // Also register as a regular Handler so `Handler::post_route`
+        // runs after the backend returns. The post-route pass handles
+        // list-filter (keys narrowed to asset-group members) and the
+        // KV-delete lifecycle prune from resource-groups.
+        core.add_handler(policy_store as Arc<dyn Handler>)?;
 
         Ok(())
     }
 
     fn cleanup(&self, core: &Core) -> Result<(), RvError> {
         core.delete_auth_handler(self.policy_store.load().clone() as Arc<dyn AuthHandler>)?;
+        core.delete_handler(self.policy_store.load().clone() as Arc<dyn Handler>)?;
         let policy_store = Arc::new(PolicyStore::default());
         self.policy_store.swap(policy_store);
         Ok(())
@@ -377,10 +443,31 @@ mod mod_policy_tests {
         let policies = policies.unwrap();
         assert!(policies.data.is_some());
         let policies = policies.data.unwrap();
-        // Seeded policies — `standard-user` ships in the default install
-        // (see `policy_store.rs`) alongside `default` and `root`.
-        assert_eq!(policies["keys"], json!(["default", policy1_name, "standard-user", "root"]));
-        assert_eq!(policies["policies"], json!(["default", policy1_name, "standard-user", "root"]));
+        // Seeded policies — `standard-user`, `standard-user-readonly`,
+        // and `secret-author` all ship in the default install (see
+        // `policy_store.rs`) alongside `default` and `root`.
+        assert_eq!(
+            policies["keys"],
+            json!([
+                "default",
+                policy1_name,
+                "secret-author",
+                "standard-user",
+                "standard-user-readonly",
+                "root"
+            ])
+        );
+        assert_eq!(
+            policies["policies"],
+            json!([
+                "default",
+                policy1_name,
+                "secret-author",
+                "standard-user",
+                "standard-user-readonly",
+                "root"
+            ])
+        );
 
         // Delete
         test_delete_policy(&core, &root_token, policy1_name).await;
@@ -395,8 +482,14 @@ mod mod_policy_tests {
         // List again
         let policies = test_list_api(&core, &root_token, "sys/policy", true).await;
         let policies = policies.unwrap().unwrap().data.unwrap();
-        assert_eq!(policies["keys"], json!(["default", "standard-user", "root"]));
-        assert_eq!(policies["policies"], json!(["default", "standard-user", "root"]));
+        assert_eq!(
+            policies["keys"],
+            json!(["default", "secret-author", "standard-user", "standard-user-readonly", "root"])
+        );
+        assert_eq!(
+            policies["policies"],
+            json!(["default", "secret-author", "standard-user", "standard-user-readonly", "root"])
+        );
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
@@ -406,12 +499,16 @@ mod mod_policy_tests {
         // set token
         test_http_server.token = test_http_server.root_token.clone();
 
-        // List policies — `standard-user` is seeded alongside the built-ins.
+        // List policies — `standard-user`, `standard-user-readonly`,
+        // and `secret-author` are seeded alongside the built-ins.
         let ret = test_http_server.read("sys/policy", None);
         assert!(ret.is_ok());
         assert_eq!(
             ret.unwrap().1,
-            json!({"keys": ["default", "standard-user", "root"], "policies": ["default", "standard-user", "root"]})
+            json!({
+                "keys":     ["default", "secret-author", "standard-user", "standard-user-readonly", "root"],
+                "policies": ["default", "secret-author", "standard-user", "standard-user-readonly", "root"],
+            })
         );
 
         // Read default policy
@@ -444,8 +541,8 @@ mod mod_policy_tests {
         assert_eq!(
             ret.unwrap().1,
             json!({
-                "keys": ["default", "policy1", "standard-user", "root"],
-                "policies": ["default", "policy1", "standard-user", "root"],
+                "keys":     ["default", "policy1", "secret-author", "standard-user", "standard-user-readonly", "root"],
+                "policies": ["default", "policy1", "secret-author", "standard-user", "standard-user-readonly", "root"],
             })
         );
 
@@ -458,7 +555,10 @@ mod mod_policy_tests {
         assert!(ret.is_ok());
         assert_eq!(
             ret.unwrap().1,
-            json!({"keys": ["default", "standard-user", "root"], "policies": ["default", "standard-user", "root"]})
+            json!({
+                "keys":     ["default", "secret-author", "standard-user", "standard-user-readonly", "root"],
+                "policies": ["default", "secret-author", "standard-user", "standard-user-readonly", "root"],
+            })
         );
     }
 

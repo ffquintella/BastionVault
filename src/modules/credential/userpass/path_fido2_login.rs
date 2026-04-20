@@ -196,6 +196,14 @@ impl UserPassBackendInner {
             ..Default::default()
         };
         auth.metadata.insert("username".to_string(), username.to_string());
+        // FIDO2 shares the UserPass username namespace, so look up the
+        // same entity_id as password login. See `path_login.rs` for
+        // the helper.
+        if let Some(entity_id) =
+            super::path_login::resolve_entity_id(&self.core, "userpass/", &username).await
+        {
+            auth.metadata.insert("entity_id".to_string(), entity_id);
+        }
         user_entry.populate_token_auth(&mut auth);
 
         // Safety net: if populate_token_auth cleared policies, restore them.

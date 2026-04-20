@@ -1,12 +1,13 @@
 # Asset Groups (Secrets & Resources Groups)
 
-Status: **Minimum viable feature shipped**. Both the **resource half**
-and the **KV-secret half** of the object model, reverse indexes, HTTP
-API, history, and the ACL `groups = [...]` qualifier are implemented
-and tested — see [Resource Groups](resource-groups.md). The
-resource-delete lifecycle prune is wired; the KV-delete hook is
-pending. Ownership, admin transfer, sharing, and the unified GUI
-remain design-only.
+Status: **Feature-complete for the single-tenant, non-ownership
+model.** Both the **resource half** and the **KV-secret half** of the
+object model, reverse indexes, HTTP API, history, lifecycle prunes on
+both sides, list-filter on group-gated LIST ops, policy-compile
+warnings for unknown groups, and the GUI are all implemented and
+tested — see [Resource Groups](resource-groups.md). The ACL
+`groups = [...]` qualifier is end-to-end. Ownership, admin transfer,
+and sharing remain design-only, blocked on per-user-scoping.
 
 See `features/resource-groups.md` for the concrete implementation. The
 internal module name is still `resource_group` (mount
@@ -357,14 +358,22 @@ Phase 7 is the operator-facing win. Phases 8–9 are follow-ups.
   secret-index and unions the result with the resource-index into
   `Request::asset_groups`, so the same `groups = [...]` qualifier
   gates KV paths exactly the way it gates resource paths.
-- **KV-delete lifecycle hook: pending.** The KV-v1 and KV-v2 backends
-  receive the mount-stripped path in their delete handlers and don't
-  know the full logical path, which is what the asset-group store
-  uses as the reverse-index key. A clean fix needs a router-level
-  touch point that sees the pre-strip path; that's tracked as a
-  follow-up. Until then, stale secret-index entries remain until the
-  next `resource-group/reindex` call or the next group-write that
-  happens to touch the same secret.
+- **KV-delete lifecycle hook: shipped.** `PolicyStore` now implements
+  `Handler` in addition to `AuthHandler`. Its `post_route` runs after
+  the backend returns with the full pre-strip request path and, for
+  KV paths (anything outside the fixed non-KV prefix list), calls
+  `ResourceGroupStore::prune_secret`. Failures are logged; they do
+  not fail the delete.
+- **List-filter: shipped.** `ACL::allow_operation` records a
+  `list_filter_groups` set when a LIST op is only authorized via a
+  `groups = [...]`-gated rule; `post_auth` copies it onto the request;
+  `post_route` filters the response `keys` to entries whose full path
+  resolves to any of those groups. Ungated list grants defeat the
+  filter so a user's broader access is never accidentally narrowed.
+- **Policy-compile warning: shipped.** Writing a policy whose
+  `groups = [...]` clause references an unknown group returns a
+  response warning listing the unknown names. The write succeeds —
+  creating a matching group later retroactively activates the clause.
 - **Ownership, admin transfer, sharing: design only.**
   `owner_entity_id`, the two-tier edit model, the admin
   ownership-transfer endpoint, `<hidden>` membership redaction for

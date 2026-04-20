@@ -53,6 +53,18 @@ pub struct ACLResults {
     pub is_root: bool,
     pub capabilities_bitmap: u32,
     pub granting_policies: Vec<PolicyInfo>,
+    /// For `LIST` ops, the union of `groups` from every group-gated
+    /// rule that matched the request path. An empty vec means the list
+    /// was either granted ungated (return everything) or denied.
+    /// Non-empty means the caller was granted LIST, but the response
+    /// keys must be filtered to members of these asset groups.
+    pub list_filter_groups: Vec<String>,
+    /// Parallel to `list_filter_groups` but for the ownership-scope
+    /// filter. Non-empty means the LIST was only granted via a
+    /// `scopes = [...]` rule; `post_route` narrows the response keys
+    /// to entries matching any listed scope (currently only "owner"
+    /// is enforceable; "shared" is a future phase).
+    pub list_filter_scopes: Vec<String>,
 }
 
 /// Stores results specific to sentinel checks.
@@ -74,6 +86,13 @@ pub struct ACL {
     /// member of at least one listed asset group. Kept separate from the
     /// ungated tries because merging would lose the per-rule gate.
     pub grouped_rules: Vec<GroupGatedRule>,
+    /// Scope-filtered rules (ownership-aware ACL). A rule lands here
+    /// when it has a non-empty `scopes = [...]` filter. Each rule is
+    /// evaluated against the caller's entity_id and the target's
+    /// owner (resolved in `post_auth`). Kept separate for the same
+    /// reason as `grouped_rules`: merging would break the per-rule
+    /// filter.
+    pub scoped_rules: Vec<ScopedRule>,
     pub rgp_policies: Vec<Arc<Policy>>,
     #[default(false)]
     pub root: bool,
@@ -86,6 +105,18 @@ pub struct ACL {
 /// carries the asset-group filter.
 #[derive(Debug, Clone, Default)]
 pub struct GroupGatedRule {
+    pub path: String,
+    pub is_prefix: bool,
+    pub has_segment_wildcards: bool,
+    pub permissions: Permissions,
+}
+
+/// A policy path rule with a non-empty `scopes = [...]` filter. Same
+/// shape as `GroupGatedRule`; evaluated against the caller's
+/// entity_id and the target's owner at authorize time.
+/// `permissions.scopes` carries the filter.
+#[derive(Debug, Clone, Default)]
+pub struct ScopedRule {
     pub path: String,
     pub is_prefix: bool,
     pub has_segment_wildcards: bool,
@@ -171,6 +202,22 @@ impl ACL {
                     let mut cloned_perms = pr.permissions.clone();
                     cloned_perms.add_granting_policy_to_map(policy, pr.permissions.capabilities_bitmap)?;
                     acl.grouped_rules.push(GroupGatedRule {
+                        path: pr.path.clone(),
+                        is_prefix: pr.is_prefix,
+                        has_segment_wildcards: pr.has_segment_wildcards,
+                        permissions: cloned_perms,
+                    });
+                    continue;
+                }
+
+                // Scope-filtered rules use the same unmerged-storage
+                // strategy as group-gated rules. The per-rule scope
+                // filter (owner / shared) is checked at authorize
+                // time against the target's owner_entity_id.
+                if !pr.scopes.is_empty() {
+                    let mut cloned_perms = pr.permissions.clone();
+                    cloned_perms.add_granting_policy_to_map(policy, pr.permissions.capabilities_bitmap)?;
+                    acl.scoped_rules.push(ScopedRule {
                         path: pr.path.clone(),
                         is_prefix: pr.is_prefix,
                         has_segment_wildcards: pr.has_segment_wildcards,
@@ -310,6 +357,15 @@ impl ACL {
         // A gated grant never overrides an existing ungated deny
         // (explicit deny wins), but it can grant caps that ungated
         // rules denied by omission.
+        //
+        // LIST is a special case: a list op targets a *collection*,
+        // not a single object, so the caller's `Request::asset_groups`
+        // is not a meaningful gate input (the collection path is not
+        // itself a resource or KV secret). Instead, when a gated rule
+        // matches a LIST path we grant the list and record the rule's
+        // `groups` as a filter set. A post-route pass filters the
+        // response keys to members of those groups.
+        let is_list = req.operation == Operation::List;
         if !self.grouped_rules.is_empty()
             && base.capabilities_bitmap & Capability::Deny.to_bits() == 0
         {
@@ -317,7 +373,8 @@ impl ACL {
                 if !grouped_rule_matches(rule, &path) {
                     continue;
                 }
-                if !rule_gate_passes(rule, req) {
+                let gate_passes = is_list || rule_gate_passes(rule, req);
+                if !gate_passes {
                     continue;
                 }
                 let sub = rule.permissions.check(req, check_only)?;
@@ -327,6 +384,7 @@ impl ACL {
                     base.allowed = false;
                     base.capabilities_bitmap = Capability::Deny.to_bits();
                     base.granting_policies.clear();
+                    base.list_filter_groups.clear();
                     return Ok(base);
                 }
                 base.capabilities_bitmap |= sub.capabilities_bitmap;
@@ -341,6 +399,77 @@ impl ACL {
                         base.granting_policies.push(g);
                     }
                 }
+                if is_list
+                    && sub.capabilities_bitmap & Capability::List.to_bits() != 0
+                {
+                    for g in rule.permissions.groups.iter() {
+                        if !base.list_filter_groups.iter().any(|x| x == g) {
+                            base.list_filter_groups.push(g.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Layer in scope-filtered rules (per-user-scoping). Same
+        // structure as the gated-rules pass: each rule is evaluated
+        // individually, with ownership/shared checks replacing the
+        // asset-group intersection. LIST ops defer the filter to
+        // `post_route` via `list_filter_scopes`.
+        if !self.scoped_rules.is_empty()
+            && base.capabilities_bitmap & Capability::Deny.to_bits() == 0
+        {
+            for rule in self.scoped_rules.iter() {
+                if !scoped_rule_matches(rule, &path) {
+                    continue;
+                }
+                let scope_passes = is_list || scope_passes(rule, req);
+                if !scope_passes {
+                    continue;
+                }
+                let sub = rule.permissions.check(req, check_only)?;
+                if sub.capabilities_bitmap & Capability::Deny.to_bits() != 0 {
+                    base.allowed = false;
+                    base.capabilities_bitmap = Capability::Deny.to_bits();
+                    base.granting_policies.clear();
+                    base.list_filter_groups.clear();
+                    base.list_filter_scopes.clear();
+                    return Ok(base);
+                }
+                base.capabilities_bitmap |= sub.capabilities_bitmap;
+                if sub.allowed {
+                    base.allowed = true;
+                }
+                if sub.root_privs {
+                    base.root_privs = true;
+                }
+                for g in sub.granting_policies {
+                    if !base.granting_policies.iter().any(|p| p.name == g.name) {
+                        base.granting_policies.push(g);
+                    }
+                }
+                if is_list
+                    && sub.capabilities_bitmap & Capability::List.to_bits() != 0
+                {
+                    for s in rule.permissions.scopes.iter() {
+                        if !base.list_filter_scopes.iter().any(|x| x == s) {
+                            base.list_filter_scopes.push(s.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // If the list is also granted by an ungated rule (no filter
+        // needed), drop both filters so we don't accidentally restrict
+        // a request that had broader access too.
+        if is_list
+            && (!base.list_filter_groups.is_empty() || !base.list_filter_scopes.is_empty())
+        {
+            let ungated_list = matches_ungated_list(self, &path);
+            if ungated_list {
+                base.list_filter_groups.clear();
+                base.list_filter_scopes.clear();
             }
         }
 
@@ -555,6 +684,91 @@ fn segment_wildcard_matches(rule_path: &str, is_prefix: bool, req_path: &str) ->
         }
     }
     true
+}
+
+/// Does any ungated rule (exact/prefix/segment-wildcard) grant LIST on
+/// `path`? Used to decide whether a gated-rule filter should still
+/// apply — if the caller has broader ungated list access, filtering
+/// the response would be *more* restrictive than the operator
+/// intended, so we drop the filter.
+fn matches_ungated_list(acl: &ACL, path: &str) -> bool {
+    let list_bit = Capability::List.to_bits();
+    if let Some(p) = acl.exact_rules.get(path) {
+        if p.capabilities_bitmap & list_bit != 0 {
+            return true;
+        }
+    }
+    if let Some(p) = acl.exact_rules.get(path.trim_end_matches('/')) {
+        if p.capabilities_bitmap & list_bit != 0 {
+            return true;
+        }
+    }
+    if let Some(p) = acl.get_none_exact_paths_permissions(path, false) {
+        if p.capabilities_bitmap & list_bit != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Does `path` match this scoped rule's path shape? Same matching
+/// logic as `grouped_rule_matches`.
+fn scoped_rule_matches(rule: &ScopedRule, path: &str) -> bool {
+    if rule.has_segment_wildcards {
+        segment_wildcard_matches(&rule.path, rule.is_prefix, path)
+    } else if rule.is_prefix {
+        path.starts_with(&rule.path)
+    } else {
+        rule.path == path
+    }
+}
+
+/// Does the caller pass any of the rule's listed scopes?
+///   - "owner": target's `asset_owner` equals caller's entity_id, *or*
+///     the target has no owner record yet and the request is a `Write`
+///     (first-write captures ownership via the owner-store hook in
+///     `PolicyStore::post_route`). The exception is necessary so a
+///     user granted only `scopes = ["owner"]` can create their very
+///     first object — without it, ownership-gated policies would be
+///     unusable for all-new deployments.
+///   - "shared": placeholder; sharing is a future phase, always
+///     returns `false` until `SecretShare` lands.
+/// Unknown scope values are ignored (treated as not matching) so a
+/// typo doesn't silently widen access.
+fn scope_passes(rule: &ScopedRule, req: &Request) -> bool {
+    let caller_id = match req
+        .auth
+        .as_ref()
+        .and_then(|a| a.metadata.get("entity_id"))
+    {
+        Some(id) if !id.is_empty() => id.as_str(),
+        _ => return false,
+    };
+    for s in rule.permissions.scopes.iter() {
+        match s.as_str() {
+            "owner" => {
+                if !req.asset_owner.is_empty() && req.asset_owner == caller_id {
+                    return true;
+                }
+                // First-write carve-out: an unowned target accepts a
+                // Write from any caller with `scopes = ["owner"]`.
+                // Read / Delete / List / Update on an unowned target
+                // are *not* granted — caller must own (or a future
+                // share must exist).
+                if req.asset_owner.is_empty()
+                    && matches!(req.operation, Operation::Write)
+                {
+                    return true;
+                }
+            }
+            "shared" => {
+                // Future: consult the SecretShare store. For now,
+                // shared-only rules never grant access.
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Is the request target in any of the rule's listed asset groups?

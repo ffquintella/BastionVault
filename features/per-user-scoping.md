@@ -1,6 +1,9 @@
 # Per-User Scoping (Ownership & Sharing)
 
-Status: **Design only.** Not yet implemented.
+Status: **Phases 1, 3, 4, 5, 6 shipped** — the two baseline roles
+(`standard-user-readonly`, `secret-author`) are live. Policy templating
+(phase 2), GUI (phase 7), sharing (phases 8–9), and admin
+ownership-transfer (phase 10) remain pending.
 
 ## Goal
 
@@ -255,12 +258,12 @@ owner/share stores the same way.
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| 1 | `EntityStore`, auto-provision on first login, `auth.entity_id` plumbed into issued tokens | Pending |
+| 1 | `EntityStore`, auto-provision on first login, `auth.metadata["entity_id"]` plumbed into issued tokens | Done |
 | 2 | Policy templating (`{{username}}`, `{{entity.id}}`, `{{auth.mount}}`), `templated = true` honored | Pending |
-| 3 | `scopes` qualifier in ACL grammar + evaluator; `any` scope backward-compatible | Pending |
-| 4 | KV-secret owner store + write/delete hooks; list-filtering for `owner` scope | Pending |
-| 5 | Resource `owner_entity_id` field + write/delete hooks; list-filtering | Pending |
-| 6 | Seeded `standard-user-readonly` and `secret-author` policies | Pending |
+| 3 | `scopes` qualifier in ACL grammar + evaluator; `any` scope backward-compatible | Done |
+| 4 | KV-secret owner store + write/delete hooks; list-filtering for `owner` scope | Done |
+| 5 | Resource owner record + write/delete hooks; list-filtering | Done |
+| 6 | Seeded `standard-user-readonly` and `secret-author` policies | Done |
 | 7 | GUI: show "owner" column on resources/secrets lists; "only show mine" toggle | Pending |
 | 8 | Sharing MVP: `SecretShare` store + v2 API + evaluator hook | Pending |
 | 9 | Sharing GUI: share dialog, "shared with me" section, revoke flow | Pending |
@@ -307,7 +310,58 @@ Phases 8–9 deliver sharing. Phase 10 is a small ergonomic follow-up.
 
 ## Current State
 
-Design approved in principle (this document). No code changes. The
-currently-seeded `standard-user` policy (shipped in `e194fda`) remains
-the broadly-scoped baseline until phase 6 replaces it with the two
-ownership-aware policies described above.
+Phases 1, 3, 4, 5, and 6 are shipped. The two baseline roles
+(`standard-user-readonly`, `secret-author`) are seeded alongside the
+legacy broadly-scoped `standard-user` policy — `load_default_acl_policy`
+installs all three so operators can opt into ownership-aware ACLs
+without forcing a migration.
+
+### Implementation notes (deviations from the design doc)
+
+- **Unified OwnerStore rather than two parallel stores.** The design
+  called for `sys/kv-owner/<mount>/<path>` and a
+  `ResourceMetadata.owner_entity_id` field. In the ship both KV and
+  resource owners live in a single `OwnerStore`
+  (`src/modules/identity/owner_store.rs`) under
+  `sys/owner/kv/<b64url(canonical-path)>` and
+  `sys/owner/resource/<name>`. Keeps the resource payload layout
+  stable (no breaking change to `ResourceMetadata`) and gives KV the
+  same canonicalization as the resource-group store so a secret's
+  owner and group membership key on the same identity.
+- **First-write carve-out for the `owner` scope.** A strict "target's
+  owner must equal caller" check would make it impossible to create a
+  new object under an owner-only policy (no owner exists yet). The
+  evaluator therefore treats an unowned target + `Operation::Write` as
+  passing the owner scope; `PolicyStore::post_route` then records the
+  caller as the owner of the new object. Read / Delete / List /
+  Update on an unowned target are still denied, so a legacy secret
+  predating this feature is invisible to scoped policies until an
+  admin uses a future backfill endpoint to assign ownership.
+- **Entity-id lookup via `auth.metadata["entity_id"]`.** The design
+  suggested a new `auth.entity_id` field; the ship reuses the
+  existing `metadata` `HashMap<String,String>` so no `Auth` struct
+  change was needed. UserPass, AppRole, and FIDO2 login handlers
+  resolve an entity via `EntityStore::get_or_create_entity(mount,
+  name)` and insert the resulting UUID into metadata.
+- **Policy templating deferred.** The seeded policies use the ACL
+  scopes qualifier only (no `{{username}}` substitution). Scopes
+  alone are enough to express "you manage what you authored" and the
+  read-only variant without per-token policy recompilation.
+  Templating remains a future phase for operators who want
+  path-shape isolation rather than per-target ownership checks.
+- **Sharing still design-only.** `scopes = ["shared"]` is accepted by
+  the parser and present on the seeded policies, but at evaluation
+  time it always fails until the `SecretShare` store lands. No shares
+  can be created today.
+
+### Integration tests
+
+Three tests in `src/modules/identity/mod.rs`:
+
+1. `test_per_user_scoping_owner_denies_non_owner` — alice writes a
+   KV-v2 secret; bob (also `secret-author`) is denied on read.
+2. `test_secret_author_full_crud_on_owned_secret` — carol writes,
+   reads, updates, and deletes her own secret end-to-end.
+3. `test_list_filter_by_ownership` — bob listing
+   `secret/metadata/` sees only his own keys; alice's secrets are
+   filtered out of the response.

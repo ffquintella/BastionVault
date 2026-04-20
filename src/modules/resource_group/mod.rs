@@ -1057,4 +1057,191 @@ mod resource_group_tests {
         // Oldest last: the create.
         assert_eq!(entries[1]["op"], "create");
     }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_list_filter_on_groups_gated_list_kv() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_list_filter_on_groups_gated_list_kv").await;
+
+        // Policy grants read+list on kv/*, gated on membership in "crew".
+        // The list op can't literally "belong to a group" — the
+        // post-route filter narrows the returned keys to group members.
+        let gated_hcl = r#"
+            path "kv/*" {
+                capabilities = ["read", "list"]
+                groups = ["crew"]
+            }
+        "#;
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "sys/policy/p-list-gated",
+            true,
+            json!({ "policy": gated_hcl }).as_object().cloned(),
+        )
+        .await;
+
+        // KV-v1 mount with three secrets; two join the crew, one stays out.
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "sys/mounts/kv/",
+            true,
+            json!({ "type": "kv" }).as_object().cloned(),
+        )
+        .await;
+        for k in ["alpha", "beta", "gamma"] {
+            let _ = test_write_api(
+                &core,
+                &root_token,
+                &format!("kv/{k}"),
+                true,
+                json!({ "v": "x" }).as_object().cloned(),
+            )
+            .await;
+        }
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "resource-group/groups/crew",
+            true,
+            json!({ "secrets": "kv/alpha,kv/beta" }).as_object().cloned(),
+        )
+        .await;
+
+        // alice gets the gated policy.
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "sys/auth/pass",
+            true,
+            json!({ "type": "userpass" }).as_object().cloned(),
+        )
+        .await;
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "auth/pass/users/alice",
+            true,
+            json!({
+                "password": "hunter22XX!",
+                "token_policies": "p-list-gated",
+                "ttl": 0,
+            })
+            .as_object()
+            .cloned(),
+        )
+        .await;
+
+        let mut login_req = Request::new("auth/pass/login/alice");
+        login_req.operation = Operation::Write;
+        login_req.body = json!({ "password": "hunter22XX!" }).as_object().cloned();
+        let resp = core.handle_request(&mut login_req).await.unwrap().unwrap();
+        let token = resp.auth.unwrap().client_token;
+
+        // Listing kv/ as alice returns only group members — alpha, beta.
+        // gamma lives in no group, so it is filtered out.
+        let resp = test_list_api(&core, &token, "kv/", true)
+            .await
+            .unwrap()
+            .unwrap();
+        let data = resp.data.unwrap();
+        let keys = data["keys"].as_array().unwrap();
+        let names: Vec<&str> = keys.iter().filter_map(|v| v.as_str()).collect();
+        assert!(names.contains(&"alpha"), "expected alpha in {names:?}");
+        assert!(names.contains(&"beta"), "expected beta in {names:?}");
+        assert!(!names.contains(&"gamma"), "gamma should be filtered out of {names:?}");
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_kv_delete_prunes_from_groups() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_kv_delete_prunes_from_groups").await;
+
+        // KV-v1 mount, one secret, and a group containing it.
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "sys/mounts/kv/",
+            true,
+            json!({ "type": "kv" }).as_object().cloned(),
+        )
+        .await;
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "kv/s1",
+            true,
+            json!({ "v": "x" }).as_object().cloned(),
+        )
+        .await;
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "resource-group/groups/club",
+            true,
+            json!({ "secrets": "kv/s1,kv/s2" }).as_object().cloned(),
+        )
+        .await;
+
+        // Precondition: s1 and s2 are both listed as members.
+        let resp = test_read_api(&core, &root_token, "resource-group/groups/club", true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp.data.unwrap()["secrets"], json!(["kv/s1", "kv/s2"]));
+
+        // Delete kv/s1 — the post-route hook prunes it from the group.
+        let _ = test_delete_api(&core, &root_token, "kv/s1", true, None).await;
+
+        let resp = test_read_api(&core, &root_token, "resource-group/groups/club", true)
+            .await
+            .unwrap()
+            .unwrap();
+        // kv/s1 is gone; kv/s2 remains (never deleted).
+        assert_eq!(resp.data.unwrap()["secrets"], json!(["kv/s2"]));
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_policy_write_warns_on_unknown_groups() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_policy_write_warns_on_unknown_groups").await;
+
+        // Create one real group so the check can distinguish "unknown"
+        // from "no group subsystem present".
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "resource-group/groups/real",
+            true,
+            json!({}).as_object().cloned(),
+        )
+        .await;
+
+        let policy_hcl = r#"
+            path "resources/resources/*" {
+                capabilities = ["read"]
+                groups = ["real", "typo-here", "other-typo"]
+            }
+        "#;
+
+        // Write the policy. Unknown group names trigger a warning on
+        // the response; the write still succeeds.
+        let resp = test_write_api(
+            &core,
+            &root_token,
+            "sys/policy/p-typo",
+            true,
+            json!({ "policy": policy_hcl }).as_object().cloned(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(resp.warnings.len(), 1, "expected one warning, got {:?}", resp.warnings);
+        let w = &resp.warnings[0];
+        assert!(w.contains("typo-here"), "warning did not mention typo-here: {w}");
+        assert!(w.contains("other-typo"), "warning did not mention other-typo: {w}");
+        assert!(!w.contains("\"real\""), "warning should not flag the real group: {w}");
+    }
 }

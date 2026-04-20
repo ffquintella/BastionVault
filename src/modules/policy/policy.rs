@@ -78,6 +78,15 @@ pub struct PolicyPathRules {
     /// least one listed asset-group. Empty means the rule is ungated and
     /// behaves like a literal path rule (legacy semantics).
     pub groups: Vec<String>,
+    /// Ownership-scope filter. When non-empty, the rule's
+    /// capabilities apply only when the target's owner matches one of
+    /// the listed scopes. Supported values:
+    ///   - "owner"  — target's `owner_entity_id` == caller's entity_id
+    ///   - "shared" — (future) an explicit SecretShare exists
+    ///   - "any"    — equivalent to omitting `scopes` entirely
+    /// Multiple scopes are additive (OR). Empty means legacy
+    /// unscoped semantics (no ownership check).
+    pub scopes: Vec<String>,
 }
 
 /// Structure holding permissions and associated configurations.
@@ -94,6 +103,11 @@ pub struct Permissions {
     /// Set from the policy path rule's `groups = [...]` attribute.
     /// Evaluated at authorize time against `Request::asset_groups`.
     pub groups: Vec<String>,
+    /// Ownership-scope filter. Empty means unscoped. Set from the
+    /// policy path rule's `scopes = [...]` attribute. Evaluated at
+    /// authorize time against `Request::asset_owner` and (future)
+    /// share records.
+    pub scopes: Vec<String>,
 }
 
 // Configuration struct used to parse policy data from HCL.
@@ -125,6 +139,10 @@ struct PolicyPathConfig {
     /// at least one listed group. See `features/resource-groups.md`.
     #[serde(default)]
     pub groups: Vec<String>,
+    /// Ownership-scope filter. See `features/per-user-scoping.md`.
+    /// Supported values: "owner", "shared", "any".
+    #[serde(default)]
+    pub scopes: Vec<String>,
 }
 
 /// Enumeration of backwards capabilities, old-style policies.
@@ -398,6 +416,21 @@ impl Policy {
             }
             rules.groups = groups.clone();
             permissions.groups = groups;
+
+            // Normalize scopes: lowercase, trim, drop empties + "any"
+            // (which is the default), dedup.
+            let mut scopes: Vec<String> = Vec::new();
+            for s in pc.scopes.iter() {
+                let t = s.trim().to_lowercase();
+                if t.is_empty() || t == "any" {
+                    continue;
+                }
+                if !scopes.iter().any(|x| x == &t) {
+                    scopes.push(t);
+                }
+            }
+            rules.scopes = scopes.clone();
+            permissions.scopes = scopes;
 
             self.paths.push(rules);
         }

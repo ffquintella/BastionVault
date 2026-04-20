@@ -58,13 +58,20 @@ mod test {
         let mut test_http_server = TestHttpServer::new("test_cli_policy_list", true).await;
         test_http_server.token = test_http_server.root_token.clone();
 
-        // list policy — `standard-user` ships as a seeded default.
+        // list policy — the seeded ownership-aware baselines and the
+        // legacy `standard-user` all ship by default.
         let ret = test_http_server.cli(&["policy", "list"], &[]);
         assert!(ret.is_ok());
         #[cfg(windows)]
-        assert_eq!(ret.unwrap(), "default    \r\nstandard-user    \r\nroot    \r\n");
+        assert_eq!(
+            ret.unwrap(),
+            "default    \r\nsecret-author    \r\nstandard-user    \r\nstandard-user-readonly    \r\nroot    \r\n",
+        );
         #[cfg(not(windows))]
-        assert_eq!(ret.unwrap(), "default    \nstandard-user    \nroot    \n");
+        assert_eq!(
+            ret.unwrap(),
+            "default    \nsecret-author    \nstandard-user    \nstandard-user-readonly    \nroot    \n",
+        );
 
         // write a test policy
         let test_policy = r#"path "secret/" {}"#;
@@ -76,29 +83,44 @@ mod test {
         let ret = test_http_server.cli(&["policy", "list"], &[]);
         assert!(ret.is_ok());
         #[cfg(windows)]
-        assert_eq!(ret.unwrap(), "default    \r\nmy-policy    \r\nstandard-user    \r\nroot    \r\n");
+        assert_eq!(
+            ret.unwrap(),
+            "default    \r\nmy-policy    \r\nsecret-author    \r\nstandard-user    \r\nstandard-user-readonly    \r\nroot    \r\n",
+        );
         #[cfg(not(windows))]
-        assert_eq!(ret.unwrap(), "default    \nmy-policy    \nstandard-user    \nroot    \n");
+        assert_eq!(
+            ret.unwrap(),
+            "default    \nmy-policy    \nsecret-author    \nstandard-user    \nstandard-user-readonly    \nroot    \n",
+        );
 
         // list policy with table format
         let ret = test_http_server.cli(&["policy", "list"], &["--format=table"]);
         assert!(ret.is_ok());
         #[cfg(windows)]
-        assert_eq!(ret.unwrap(), "default    \r\nmy-policy    \r\nstandard-user    \r\nroot    \r\n");
+        assert_eq!(
+            ret.unwrap(),
+            "default    \r\nmy-policy    \r\nsecret-author    \r\nstandard-user    \r\nstandard-user-readonly    \r\nroot    \r\n",
+        );
         #[cfg(not(windows))]
-        assert_eq!(ret.unwrap(), "default    \nmy-policy    \nstandard-user    \nroot    \n");
+        assert_eq!(
+            ret.unwrap(),
+            "default    \nmy-policy    \nsecret-author    \nstandard-user    \nstandard-user-readonly    \nroot    \n",
+        );
 
         // list policy with json format
         let ret = test_http_server.cli(&["policy", "list"], &["--format=json"]);
         assert!(ret.is_ok());
         assert_eq!(
             ret.unwrap(),
-            "[\n  \"default\",\n  \"my-policy\",\n  \"standard-user\",\n  \"root\"\n]\n",
+            "[\n  \"default\",\n  \"my-policy\",\n  \"secret-author\",\n  \"standard-user\",\n  \"standard-user-readonly\",\n  \"root\"\n]\n",
         );
 
         // list policy with yaml format
         let ret = test_http_server.cli(&["policy", "list"], &["--format=yaml"]);
         assert!(ret.is_ok());
-        assert_eq!(ret.unwrap(), "- default\n- my-policy\n- standard-user\n- root\n");
+        assert_eq!(
+            ret.unwrap(),
+            "- default\n- my-policy\n- secret-author\n- standard-user\n- standard-user-readonly\n- root\n",
+        );
     }
 }

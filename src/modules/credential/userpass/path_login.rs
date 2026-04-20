@@ -3,12 +3,36 @@ use std::{collections::HashMap, sync::Arc};
 use super::{UserPassBackend, UserPassBackendInner};
 use crate::{
     context::Context,
+    core::Core,
     errors::RvError,
     logical::{Auth, Backend, Field, FieldType, Lease, Operation, Path, PathOperation, Request, Response},
     modules::identity::{GroupKind, IdentityModule},
     new_fields, new_fields_internal, new_path, new_path_internal, bv_error_string,
     utils::policy::equivalent_policies,
 };
+
+/// Best-effort resolve-or-create of the entity_id for a principal. The
+/// identity module may not be loaded (embedded / minimal builds) or
+/// the store may not yet be initialized; in those cases this returns
+/// `None` so the login still succeeds but the issued token carries no
+/// `entity_id` metadata (and therefore fails any `scopes = ["owner"]`
+/// check, as it should).
+pub(crate) async fn resolve_entity_id(core: &Arc<Core>, mount: &str, name: &str) -> Option<String> {
+    let module = core
+        .module_manager
+        .get_module::<IdentityModule>("identity")?;
+    let store = module.entity_store()?;
+    match store.get_or_create_entity(mount, name).await {
+        Ok(entity) => Some(entity.id),
+        Err(e) => {
+            log::warn!(
+                "entity store unavailable for {mount}/{name}: {e}. \
+                 Login continues without entity_id."
+            );
+            None
+        }
+    }
+}
 
 impl UserPassBackend {
     pub fn login_path(&self) -> Path {
@@ -117,6 +141,15 @@ impl UserPassBackendInner {
             ..Default::default()
         };
         auth.metadata.insert("username".to_string(), username.to_string());
+        // Provision / resolve the stable entity_id for this login so
+        // ownership-aware ACL rules (`scopes = ["owner"]`) and the KV /
+        // resource owner stores can key off the entity rather than the
+        // token. Silent on failure — the absence of entity_id just
+        // narrows access (owner-scoped rules won't match) rather than
+        // blocking login.
+        if let Some(entity_id) = resolve_entity_id(&self.core, "userpass/", &username).await {
+            auth.metadata.insert("entity_id".to_string(), entity_id);
+        }
 
         // Ensure token_policies mirrors effective policies before
         // populate_token_auth (which overwrites auth.policies with

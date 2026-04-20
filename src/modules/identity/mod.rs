@@ -30,8 +30,12 @@ use crate::{
     bv_error_response_status, bv_error_string,
 };
 
+pub mod entity_store;
 pub mod group_store;
+pub mod owner_store;
+pub use entity_store::{Entity, EntityStore};
 pub use group_store::{GroupEntry, GroupHistoryEntry, GroupKind, GroupStore};
+pub use owner_store::{OwnerRecord, OwnerStore};
 
 static IDENTITY_BACKEND_HELP: &str = r#"
 The identity backend manages user groups and application groups. Each group
@@ -45,6 +49,8 @@ pub struct IdentityModule {
     pub name: String,
     pub core: Arc<Core>,
     pub group_store: ArcSwap<Option<Arc<GroupStore>>>,
+    pub entity_store: ArcSwap<Option<Arc<EntityStore>>>,
+    pub owner_store: ArcSwap<Option<Arc<OwnerStore>>>,
 }
 
 pub struct IdentityBackendInner {
@@ -606,11 +612,21 @@ impl IdentityModule {
             name: "identity".to_string(),
             core,
             group_store: ArcSwap::new(Arc::new(None)),
+            entity_store: ArcSwap::new(Arc::new(None)),
+            owner_store: ArcSwap::new(Arc::new(None)),
         }
     }
 
     pub fn group_store(&self) -> Option<Arc<GroupStore>> {
         self.group_store.load().as_ref().clone()
+    }
+
+    pub fn entity_store(&self) -> Option<Arc<EntityStore>> {
+        self.entity_store.load().as_ref().clone()
+    }
+
+    pub fn owner_store(&self) -> Option<Arc<OwnerStore>> {
+        self.owner_store.load().as_ref().clone()
     }
 }
 
@@ -639,11 +655,17 @@ impl Module for IdentityModule {
     async fn init(&self, core: &Core) -> Result<(), RvError> {
         let gs = GroupStore::new(core).await?;
         self.group_store.store(Arc::new(Some(gs)));
+        let es = EntityStore::new(core).await?;
+        self.entity_store.store(Arc::new(Some(es)));
+        let os = OwnerStore::new(core).await?;
+        self.owner_store.store(Arc::new(Some(os)));
         Ok(())
     }
 
     fn cleanup(&self, core: &Core) -> Result<(), RvError> {
         self.group_store.store(Arc::new(None));
+        self.entity_store.store(Arc::new(None));
+        self.owner_store.store(Arc::new(None));
         core.delete_logical_backend("identity")
     }
 }
@@ -873,6 +895,213 @@ mod identity_tests {
             json!({ "v": "3" }).as_object().cloned(),
         )
         .await;
+    }
+
+    // ── Per-user scoping tests ─────────────────────────────────────
+
+    /// Alice writes a secret; Bob (secret-author policy) cannot read
+    /// it because the `scopes = ["owner", "shared"]` filter denies
+    /// access to non-owned entries without a share. Alice herself
+    /// reads her own secret fine.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_per_user_scoping_owner_denies_non_owner() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_per_user_scoping_owner_denies_non_owner").await;
+
+        // The default `secret/` mount is KV-v2; the seeded
+        // `secret-author` policy grants CRUD on `secret/data/*` with
+        // `scopes=["owner","shared"]`.
+        //
+        // Userpass with two users, both assigned `secret-author`.
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "sys/auth/pass",
+            true,
+            json!({ "type": "userpass" }).as_object().cloned(),
+        )
+        .await;
+        for name in ["alice", "bob"] {
+            let _ = test_write_api(
+                &core,
+                &root_token,
+                &format!("auth/pass/users/{name}"),
+                true,
+                json!({
+                    "password": "hunter22XX!",
+                    "token_policies": "secret-author",
+                    "ttl": 0,
+                })
+                .as_object()
+                .cloned(),
+            )
+            .await;
+        }
+
+        // Login as alice and write a KV-v2 secret under secret/data/.
+        let alice_token = login_pass(&core, "alice").await;
+        let _ = test_write_api(
+            &core,
+            &alice_token,
+            "secret/data/alice-secret",
+            true,
+            json!({ "data": { "v": "hello" } }).as_object().cloned(),
+        )
+        .await;
+
+        // Alice can read her own secret (owner match).
+        let _ = test_read_api(&core, &alice_token, "secret/data/alice-secret", true).await;
+
+        // Bob with secret-author cannot read alice's secret: the
+        // scopes=["owner","shared"] filter denies him because he is
+        // not the owner and no share exists.
+        let bob_token = login_pass(&core, "bob").await;
+        let err = test_read_api(&core, &bob_token, "secret/data/alice-secret", false).await;
+        assert!(err.is_err(), "bob should be denied on alice's secret");
+    }
+
+    /// `secret-author` grants full CRUD on KV secrets the caller owns.
+    /// A non-root user can write, read, update, and delete their own
+    /// secret end-to-end.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_secret_author_full_crud_on_owned_secret() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_secret_author_full_crud_on_owned_secret").await;
+
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "sys/auth/pass",
+            true,
+            json!({ "type": "userpass" }).as_object().cloned(),
+        )
+        .await;
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "auth/pass/users/carol",
+            true,
+            json!({
+                "password": "hunter22XX!",
+                "token_policies": "secret-author",
+                "ttl": 0,
+            })
+            .as_object()
+            .cloned(),
+        )
+        .await;
+
+        let carol_token = login_pass(&core, "carol").await;
+
+        // Write: carol becomes owner on the first write.
+        let _ = test_write_api(
+            &core,
+            &carol_token,
+            "secret/data/carol-db",
+            true,
+            json!({ "data": { "v": "pw1" } }).as_object().cloned(),
+        )
+        .await;
+        // Read own.
+        let _ = test_read_api(&core, &carol_token, "secret/data/carol-db", true).await;
+        // Update own (same path, new value).
+        let _ = test_write_api(
+            &core,
+            &carol_token,
+            "secret/data/carol-db",
+            true,
+            json!({ "data": { "v": "pw2" } }).as_object().cloned(),
+        )
+        .await;
+        // Delete own.
+        let _ = test_delete_api(&core, &carol_token, "secret/data/carol-db", true, None).await;
+    }
+
+    /// `secret-author` listing a KV mount sees only their own
+    /// entries. Alice writes two secrets, bob writes one; bob lists
+    /// and only sees bob's own key.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_list_filter_by_ownership() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_list_filter_by_ownership").await;
+
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "sys/auth/pass",
+            true,
+            json!({ "type": "userpass" }).as_object().cloned(),
+        )
+        .await;
+        for name in ["alice", "bob"] {
+            let _ = test_write_api(
+                &core,
+                &root_token,
+                &format!("auth/pass/users/{name}"),
+                true,
+                json!({
+                    "password": "hunter22XX!",
+                    "token_policies": "secret-author",
+                    "ttl": 0,
+                })
+                .as_object()
+                .cloned(),
+            )
+            .await;
+        }
+
+        // Alice writes two secrets on the default KV-v2 mount.
+        let alice_token = login_pass(&core, "alice").await;
+        for k in ["a1", "a2"] {
+            let _ = test_write_api(
+                &core,
+                &alice_token,
+                &format!("secret/data/{k}"),
+                true,
+                json!({ "data": { "v": "x" } }).as_object().cloned(),
+            )
+            .await;
+        }
+
+        // Bob writes one.
+        let bob_token = login_pass(&core, "bob").await;
+        let _ = test_write_api(
+            &core,
+            &bob_token,
+            "secret/data/b1",
+            true,
+            json!({ "data": { "v": "x" } }).as_object().cloned(),
+        )
+        .await;
+
+        // Bob listing the secret metadata index sees only "b1" —
+        // a1/a2 are alice-owned and get filtered out by the
+        // scopes=["owner","shared"] list gate.
+        let resp = test_list_api(&core, &bob_token, "secret/metadata/", true)
+            .await
+            .unwrap()
+            .unwrap();
+        let data = resp.data.unwrap();
+        let keys: Vec<&str> = data["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(keys.contains(&"b1"), "bob should see his own key in {keys:?}");
+        assert!(!keys.contains(&"a1"), "bob should not see a1 in {keys:?}");
+        assert!(!keys.contains(&"a2"), "bob should not see a2 in {keys:?}");
+    }
+
+    /// Helper: login via userpass with the shared password used
+    /// across per-user-scoping tests.
+    #[cfg(test)]
+    async fn login_pass(core: &Core, username: &str) -> String {
+        let mut login_req = Request::new(format!("auth/pass/login/{username}"));
+        login_req.operation = Operation::Write;
+        login_req.body = json!({ "password": "hunter22XX!" }).as_object().cloned();
+        let resp = core.handle_request(&mut login_req).await.unwrap().unwrap();
+        resp.auth.unwrap().client_token
     }
 }
 

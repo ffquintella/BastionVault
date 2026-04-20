@@ -7,6 +7,7 @@ use super::{
 };
 use crate::{
     context::Context,
+    core::Core,
     errors::RvError,
     logical::{Auth, Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     modules::identity::{GroupKind, IdentityModule},
@@ -14,6 +15,28 @@ use crate::{
     storage::StorageEntry,
     utils::cidr,
 };
+
+/// Resolve or create the entity_id for an AppRole principal under the
+/// `approle/` entity namespace. Returns `None` on any failure so login
+/// still succeeds (with no `entity_id` metadata, which means any
+/// `scopes = ["owner"]` policy will not match — correct fail-closed
+/// behavior).
+async fn resolve_approle_entity_id(core: &Arc<Core>, role_name: &str) -> Option<String> {
+    let module = core
+        .module_manager
+        .get_module::<IdentityModule>("identity")?;
+    let store = module.entity_store()?;
+    match store.get_or_create_entity("approle/", role_name).await {
+        Ok(entity) => Some(entity.id),
+        Err(e) => {
+            log::warn!(
+                "entity store unavailable for approle/{role_name}: {e}. \
+                 Login continues without entity_id."
+            );
+            None
+        }
+    }
+}
 
 impl AppRoleBackend {
     pub fn login_path(&self) -> Path {
@@ -247,6 +270,13 @@ impl AppRoleBackendInner {
         }
 
         metadata.insert("role_name".to_string(), role_entry.name.clone());
+
+        // AppRole sits in its own entity namespace (mount-qualified).
+        // An `approle:payments-api` entity is distinct from any user
+        // named "payments-api" on userpass/.
+        if let Some(entity_id) = resolve_approle_entity_id(&self.core, &role_entry.name).await {
+            metadata.insert("entity_id".to_string(), entity_id);
+        }
 
         let mut auth = Auth { metadata, ..Default::default() };
         auth.internal_data.insert("role_name".to_string(), role_entry.name.clone());

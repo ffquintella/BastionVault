@@ -37,13 +37,17 @@ use super::{
 use crate::{
     core::Core,
     errors::RvError,
-    handler::AuthHandler,
-    logical::{auth::PolicyResults, Operation, Request},
-    modules::resource_group::ResourceGroupModule,
+    handler::{AuthHandler, Handler},
+    logical::{auth::PolicyResults, Operation, Request, Response},
+    modules::{
+        identity::{IdentityModule, OwnerStore},
+        resource_group::{ResourceGroupModule, ResourceGroupStore},
+    },
     router::Router,
     bv_error_response_status, bv_error_string,
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
 };
+use serde_json::Value;
 
 // POLICY_ACL_SUB_PATH is the sub-path used for the policy store view. This is
 // nested under the system view. POLICY_RGP_SUB_PATH/POLICY_EGP_SUB_PATH are
@@ -238,6 +242,89 @@ path "resources/*" {
 # --- Per-user workspace ---
 
 # Each token gets its own private cubbyhole for scratch storage.
+path "cubbyhole/*" {
+    capabilities = ["create", "read", "update", "delete", "list"]
+}
+"#;
+
+/// Read-only ownership-scoped baseline. Grants a user read+list on any
+/// KV secret or resource they *own* (wrote) or that has been explicitly
+/// shared with them (once sharing lands). Does not grant create,
+/// update, delete, or any administrative capability.
+///
+/// Complements the existing broadly-scoped `standard-user` policy,
+/// which operators can still assign for deployments that have not
+/// opted into ownership-aware ACLs.
+static STANDARD_USER_READONLY_POLICY_NAME: &str = "standard-user-readonly";
+static STANDARD_USER_READONLY_POLICY: &str = r#"
+# --- Self service ---
+path "auth/token/lookup-self" { capabilities = ["read"] }
+path "auth/token/renew-self"  { capabilities = ["update"] }
+path "auth/token/revoke-self" { capabilities = ["update"] }
+path "sys/capabilities-self"  { capabilities = ["update"] }
+path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
+
+# --- KV secrets (owner-scoped read) ---
+path "secret/*" {
+    capabilities = ["read", "list"]
+    scopes       = ["owner", "shared"]
+}
+path "secret/data/*" {
+    capabilities = ["read", "list"]
+    scopes       = ["owner", "shared"]
+}
+path "secret/metadata/*" {
+    capabilities = ["read", "list"]
+    scopes       = ["owner", "shared"]
+}
+
+# --- Resources (owner-scoped read) ---
+path "resources/*" {
+    capabilities = ["read", "list"]
+    scopes       = ["owner", "shared"]
+}
+
+# --- Private workspace ---
+path "cubbyhole/*" {
+    capabilities = ["create", "read", "update", "delete", "list"]
+}
+"#;
+
+/// Full-CRUD ownership-scoped role. The user manages what they
+/// authored — create/read/update/delete/list on any KV secret or
+/// resource they own (or have shared with them, once sharing lands).
+/// No access to other users' objects without a share. No
+/// administrative capabilities.
+static SECRET_AUTHOR_POLICY_NAME: &str = "secret-author";
+static SECRET_AUTHOR_POLICY: &str = r#"
+# --- Self service ---
+path "auth/token/lookup-self" { capabilities = ["read"] }
+path "auth/token/renew-self"  { capabilities = ["update"] }
+path "auth/token/revoke-self" { capabilities = ["update"] }
+path "sys/capabilities-self"  { capabilities = ["update"] }
+path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
+
+# --- KV secrets (full CRUD on authored/shared items) ---
+path "secret/*" {
+    capabilities = ["create", "read", "update", "delete", "list"]
+    scopes       = ["owner", "shared"]
+}
+path "secret/data/*" {
+    capabilities = ["create", "read", "update", "delete", "list"]
+    scopes       = ["owner", "shared"]
+}
+path "secret/metadata/*" {
+    capabilities = ["read", "list", "delete"]
+    scopes       = ["owner", "shared"]
+}
+
+# --- Resources (full CRUD on authored/shared items) ---
+path "resources/*" {
+    capabilities = ["create", "read", "update", "delete", "list"]
+    scopes       = ["owner", "shared"]
+}
+
+# --- Private workspace ---
 path "cubbyhole/*" {
     capabilities = ["create", "read", "update", "delete", "list"]
 }
@@ -563,6 +650,10 @@ impl PolicyStore {
         self.load_acl_policy(RESPONSE_WRAPPING_POLICY_NAME, RESPONSE_WRAPPING_POLICY).await?;
         self.load_acl_policy(CONTROL_GROUP_POLICY_NAME, CONTROL_GROUP_POLICY).await?;
         self.load_acl_policy(STANDARD_USER_POLICY_NAME, STANDARD_USER_POLICY).await?;
+        // Ownership-aware baselines. See `features/per-user-scoping.md`.
+        self.load_acl_policy(STANDARD_USER_READONLY_POLICY_NAME, STANDARD_USER_READONLY_POLICY)
+            .await?;
+        self.load_acl_policy(SECRET_AUTHOR_POLICY_NAME, SECRET_AUTHOR_POLICY).await?;
         Ok(())
     }
 
@@ -813,6 +904,34 @@ fn looks_like_kv_path(req_path: &str) -> bool {
     !p.is_empty() && !NON_KV_PREFIXES.iter().any(|pref| p.starts_with(pref))
 }
 
+/// Best-effort resolve of the owner entity_id for the request target.
+/// Returns an empty string on any failure (module absent, no owner
+/// record, path shape we don't recognize). `scope_passes` treats an
+/// empty `asset_owner` as "no owner match", so a resolution miss can
+/// only narrow access for owner-scoped rules.
+async fn resolve_asset_owner(core: &Weak<Core>, req_path: &str) -> String {
+    let Some(core) = core.upgrade() else {
+        return String::new();
+    };
+    let Some(module) = core.module_manager.get_module::<IdentityModule>("identity") else {
+        return String::new();
+    };
+    let Some(store) = module.owner_store() else {
+        return String::new();
+    };
+    if let Some(name) = resource_name_from_path(req_path) {
+        if let Ok(Some(rec)) = store.get_resource_owner(&name).await {
+            return rec.entity_id;
+        }
+    }
+    if looks_like_kv_path(req_path) {
+        if let Ok(Some(rec)) = store.get_kv_owner(req_path).await {
+            return rec.entity_id;
+        }
+    }
+    String::new()
+}
+
 /// Best-effort lookup of the asset-groups that contain the request
 /// target. Consults the resource-index when the path looks like a
 /// resource engine path, then (independently) the secret-index when
@@ -900,10 +1019,21 @@ impl AuthHandler for PolicyStore {
             // non-resource path, leaves `asset_groups` empty (= the path
             // matches no groups, and any `groups`-gated rule is skipped).
             req.asset_groups = resolve_asset_groups(&self.core, &req.path).await;
+            // Resolve the request target's owner entity_id for the
+            // `scopes = ["owner"]` check. Same shape as asset_groups:
+            // empty on any failure, which is fail-closed for
+            // owner-scoped rules.
+            req.asset_owner = resolve_asset_owner(&self.core, &req.path).await;
 
             let acl = self.new_acl(&auth.policies, None).await?;
             acl_result = acl.allow_operation(req, false)?;
         }
+
+        // Stash the list-filter groups + scopes on the request so the
+        // post-route pass can filter the response keys. See the
+        // `Handler::post_route` impl below.
+        req.list_filter_groups = acl_result.list_filter_groups.clone();
+        req.list_filter_scopes = acl_result.list_filter_scopes.clone();
 
         if let Some(auth) = &mut req.auth {
             if is_root_path && !acl_result.root_privs && req.operation != Operation::Help {
@@ -926,6 +1056,292 @@ impl AuthHandler for PolicyStore {
 
         Ok(())
     }
+}
+
+#[maybe_async::maybe_async]
+impl Handler for PolicyStore {
+    fn name(&self) -> String {
+        "policy_store".to_string()
+    }
+
+    /// Post-route pass. Covers two asset-group integration concerns:
+    ///
+    /// 1. **List-filter.** If `req.list_filter_groups` is non-empty
+    ///    (set by `post_auth` when the list was authorized only by a
+    ///    `groups = [...]`-gated rule), restrict the response keys to
+    ///    those whose resolved full path is a member of any listed
+    ///    group. Respects both the resource-index (for `resources/`
+    ///    paths) and the secret-index (for KV paths).
+    ///
+    /// 2. **KV-delete prune.** On a successful `Delete` of a KV path,
+    ///    call `ResourceGroupStore::prune_secret` so the deleted
+    ///    secret disappears from every asset group it was a member
+    ///    of. Parallels the resource-delete hook in the resource
+    ///    module. Failures are logged but never fail the delete —
+    ///    `resource-group/reindex` is the recovery path.
+    async fn post_route(
+        &self,
+        req: &mut Request,
+        resp: &mut Option<Response>,
+    ) -> Result<(), RvError> {
+        let rg_store = self.resource_group_store();
+        let owner_store = self.owner_store();
+
+        // --- Asset-group list filter ---
+        if let Some(store) = rg_store.as_ref() {
+            if req.operation == Operation::List && !req.list_filter_groups.is_empty() {
+                if let Some(response) = resp.as_mut() {
+                    filter_list_response(response, &req.path, &req.list_filter_groups, store).await;
+                }
+            }
+        }
+
+        // --- Ownership list filter ---
+        // Narrows LIST response keys to entries the caller owns (and,
+        // once sharing lands, entries shared with them). Operates
+        // independently of the asset-group filter; a LIST granted by
+        // both a `scopes=["owner"]` rule and a `groups=[...]` rule
+        // applies both filters in sequence, which is the intended
+        // intersection — each filter narrows further.
+        if let Some(store) = owner_store.as_ref() {
+            if req.operation == Operation::List && !req.list_filter_scopes.is_empty() {
+                if let Some(response) = resp.as_mut() {
+                    let caller_id = req
+                        .auth
+                        .as_ref()
+                        .and_then(|a| a.metadata.get("entity_id"))
+                        .cloned()
+                        .unwrap_or_default();
+                    filter_list_by_ownership(
+                        response,
+                        &req.path,
+                        &req.list_filter_scopes,
+                        &caller_id,
+                        store,
+                    )
+                    .await;
+                }
+            }
+        }
+
+        // --- Owner bookkeeping ---
+        if let Some(store) = owner_store.as_ref() {
+            let caller_id = req
+                .auth
+                .as_ref()
+                .and_then(|a| a.metadata.get("entity_id"))
+                .cloned()
+                .unwrap_or_default();
+
+            match req.operation {
+                Operation::Write => {
+                    if looks_like_kv_path(&req.path) && !caller_id.is_empty() {
+                        let _ = store.record_kv_owner_if_absent(&req.path, &caller_id).await;
+                    }
+                    if let Some(name) = resource_name_from_path(&req.path) {
+                        // Only stamp ownership on the metadata create
+                        // path (`resources/resources/<name>`), not on
+                        // per-resource secret writes under
+                        // `resources/secrets/<name>/...`.
+                        let trimmed = req.path.trim_start_matches('/');
+                        if trimmed.starts_with("resources/resources/") && !caller_id.is_empty() {
+                            let _ = store
+                                .record_resource_owner_if_absent(&name, &caller_id)
+                                .await;
+                        }
+                    }
+                }
+                Operation::Delete => {
+                    if looks_like_kv_path(&req.path) {
+                        let _ = store.forget_kv_owner(&req.path).await;
+                    }
+                    if let Some(name) = resource_name_from_path(&req.path) {
+                        let trimmed = req.path.trim_start_matches('/');
+                        if trimmed.starts_with("resources/resources/") {
+                            let _ = store.forget_resource_owner(&name).await;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // --- KV-delete prune from asset-groups ---
+        if let Some(store) = rg_store.as_ref() {
+            if req.operation == Operation::Delete && looks_like_kv_path(&req.path) {
+                if let Err(e) = store.prune_secret(&req.path).await {
+                    log::warn!(
+                        "resource-group prune failed for deleted KV secret '{}': {e}. \
+                         Use the resource-group/reindex endpoint to clean up.",
+                        req.path,
+                    );
+                }
+            }
+        }
+
+        let _ = resp;
+        Err(RvError::ErrHandlerDefault)
+    }
+}
+
+impl PolicyStore {
+    /// Upgrade the weak Core reference and fetch the resource-group
+    /// store, if the subsystem is loaded. Returns `None` otherwise —
+    /// callers treat that as "no asset-group integration this turn".
+    fn resource_group_store(&self) -> Option<Arc<ResourceGroupStore>> {
+        let core = self.core.upgrade()?;
+        let module = core
+            .module_manager
+            .get_module::<ResourceGroupModule>("resource-group")?;
+        module.store()
+    }
+
+    /// Upgrade the weak Core reference and fetch the owner store from
+    /// the identity module. Returns `None` when the subsystem is not
+    /// loaded — callers treat that as "no per-user-scoping this turn".
+    fn owner_store(&self) -> Option<Arc<OwnerStore>> {
+        let core = self.core.upgrade()?;
+        let module = core
+            .module_manager
+            .get_module::<IdentityModule>("identity")?;
+        module.owner_store()
+    }
+}
+
+/// Filter a list response's `keys` array down to entries that are
+/// members of any asset-group in `filter_groups`. The full logical
+/// path of each key is reconstructed by joining `list_path` with the
+/// key; `ResourceGroupStore::groups_for_resource` /
+/// `groups_for_secret` do the membership lookup. Unknown paths and
+/// folder entries (trailing slash) are dropped.
+async fn filter_list_response(
+    response: &mut Response,
+    list_path: &str,
+    filter_groups: &[String],
+    store: &Arc<ResourceGroupStore>,
+) {
+    let Some(data) = response.data.as_mut() else { return };
+    let Some(keys_val) = data.get_mut("keys") else { return };
+    let Some(keys_arr) = keys_val.as_array() else { return };
+
+    let prefix = if list_path.ends_with('/') {
+        list_path.to_string()
+    } else {
+        format!("{list_path}/")
+    };
+
+    let mut kept: Vec<Value> = Vec::with_capacity(keys_arr.len());
+    for v in keys_arr.iter() {
+        let Some(k) = v.as_str() else { continue };
+        if k.ends_with('/') {
+            // Folders don't have a single logical path to look up.
+            // Drop them from filtered output to avoid exposing
+            // subtree structure the caller shouldn't see via this
+            // group grant.
+            continue;
+        }
+        let full = format!("{prefix}{k}");
+        let groups = resolve_groups_for_any(store, &full).await;
+        if groups.iter().any(|g| filter_groups.iter().any(|f| f == g)) {
+            kept.push(v.clone());
+        }
+    }
+
+    *keys_val = Value::Array(kept);
+}
+
+/// Narrow a LIST response's `keys` array to entries that match any
+/// active ownership scope — today only `"owner"` is enforceable
+/// (compares each key's resolved owner to the caller's entity_id).
+/// Folder keys (trailing `/`) are dropped since they have no single
+/// owner record. A `"shared"` scope has no effect until sharing
+/// lands.
+async fn filter_list_by_ownership(
+    response: &mut Response,
+    list_path: &str,
+    filter_scopes: &[String],
+    caller_entity_id: &str,
+    store: &Arc<OwnerStore>,
+) {
+    let Some(data) = response.data.as_mut() else { return };
+    let Some(keys_val) = data.get_mut("keys") else { return };
+    let Some(keys_arr) = keys_val.as_array() else { return };
+
+    let want_owner = filter_scopes.iter().any(|s| s == "owner");
+    // `shared` not yet implemented; nothing to filter in on that side.
+
+    let prefix = if list_path.ends_with('/') {
+        list_path.to_string()
+    } else {
+        format!("{list_path}/")
+    };
+
+    let mut kept: Vec<Value> = Vec::with_capacity(keys_arr.len());
+    for v in keys_arr.iter() {
+        let Some(k) = v.as_str() else { continue };
+        if k.ends_with('/') {
+            continue;
+        }
+        let full = format!("{prefix}{k}");
+
+        if !want_owner || caller_entity_id.is_empty() {
+            continue;
+        }
+
+        // Try both lookups: the same path may be a KV secret (owner
+        // stored canonicalized under the kv view) or a resource name
+        // (owner stored under the resource view). Either match is
+        // sufficient for the owner scope.
+        let mut owns = false;
+        if let Ok(Some(rec)) = store.get_kv_owner(&full).await {
+            if rec.entity_id == caller_entity_id {
+                owns = true;
+            }
+        }
+        if !owns {
+            if let Some(name) = resource_name_from_path(&full) {
+                if let Ok(Some(rec)) = store.get_resource_owner(&name).await {
+                    if rec.entity_id == caller_entity_id {
+                        owns = true;
+                    }
+                }
+            }
+        }
+
+        if owns {
+            kept.push(v.clone());
+        }
+    }
+
+    *keys_val = Value::Array(kept);
+}
+
+/// Look up asset-group membership for any target path — tries the
+/// resource-name extraction first (for `resources/resources/<name>`
+/// and `resources/secrets/<name>/...`), then falls back to the
+/// secret-index (treating the path as a KV path). Mirrors
+/// `resolve_asset_groups`.
+async fn resolve_groups_for_any(store: &Arc<ResourceGroupStore>, path: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Some(name) = resource_name_from_path(path) {
+        if let Ok(groups) = store.groups_for_resource(&name).await {
+            for g in groups {
+                if !out.iter().any(|x| x == &g) {
+                    out.push(g);
+                }
+            }
+        }
+    }
+    if looks_like_kv_path(path) {
+        if let Ok(groups) = store.groups_for_secret(path).await {
+            for g in groups {
+                if !out.iter().any(|x| x == &g) {
+                    out.push(g);
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
