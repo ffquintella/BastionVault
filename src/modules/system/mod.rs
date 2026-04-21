@@ -18,6 +18,7 @@ use crate::{
     },
     modules::{
         auth::{AuthModule, AUTH_TABLE_TYPE},
+        identity::IdentityModule,
         policy::{acl::ACL, PolicyModule},
         Module,
     },
@@ -85,6 +86,8 @@ impl SystemBackend {
         let sys_backend_policies_write = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_policies_delete = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_policies_history = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_kv_owner_transfer = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_resource_owner_transfer = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_audit_table = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_audit_enable = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_audit_disable = self.self_ptr.upgrade().unwrap().clone();
@@ -258,6 +261,44 @@ impl SystemBackend {
                     },
                     operations: [
                         {op: Operation::Read, handler: sys_backend_policies_history.handle_policy_history}
+                    ]
+                },
+                {
+                    // Admin-only: transfer ownership of a KV secret to a
+                    // different entity. Gated by the usual ACL on
+                    // `sys/kv-owner/transfer`. Body:
+                    //   { path, new_owner_entity_id }
+                    pattern: r"kv-owner/transfer$",
+                    fields: {
+                        "path": {
+                            field_type: FieldType::Str,
+                            description: "Full logical path of the KV secret (e.g., secret/foo/bar or secret/data/foo/bar)."
+                        },
+                        "new_owner_entity_id": {
+                            field_type: FieldType::Str,
+                            description: "The entity_id that will become the new owner."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: sys_backend_kv_owner_transfer.handle_kv_owner_transfer}
+                    ]
+                },
+                {
+                    // Admin-only: transfer ownership of a resource.
+                    // Body: { resource, new_owner_entity_id }
+                    pattern: r"resource-owner/transfer$",
+                    fields: {
+                        "resource": {
+                            field_type: FieldType::Str,
+                            description: "Resource name."
+                        },
+                        "new_owner_entity_id": {
+                            field_type: FieldType::Str,
+                            description: "The entity_id that will become the new owner."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: sys_backend_resource_owner_transfer.handle_resource_owner_transfer}
                     ]
                 },
                 {
@@ -593,6 +634,84 @@ impl SystemBackend {
         policy_module.handle_policy_history(backend, req).await
     }
 
+    /// Admin-only: overwrite the KV-secret owner record with a new
+    /// `entity_id`. Access is gated by the usual ACL on
+    /// `sys/kv-owner/transfer` — no additional handler-level
+    /// authorization.
+    pub async fn handle_kv_owner_transfer(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let path = req
+            .get_data("path")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let new_owner = req
+            .get_data("new_owner_entity_id")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+
+        if path.trim().is_empty() || new_owner.trim().is_empty() {
+            return Err(bv_error_response_status!(
+                400,
+                "path and new_owner_entity_id are required"
+            ));
+        }
+
+        let identity = self.get_module::<IdentityModule>("identity")?;
+        let store = identity.owner_store().ok_or_else(|| {
+            bv_error_response_status!(500, "owner store not initialized")
+        })?;
+
+        store.set_kv_owner(&path, &new_owner).await?;
+
+        let mut data = Map::new();
+        data.insert("path".into(), Value::String(path));
+        data.insert("new_owner_entity_id".into(), Value::String(new_owner));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// Admin-only: overwrite the resource owner record with a new
+    /// `entity_id`.
+    pub async fn handle_resource_owner_transfer(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let resource = req
+            .get_data("resource")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let new_owner = req
+            .get_data("new_owner_entity_id")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+
+        if resource.trim().is_empty() || new_owner.trim().is_empty() {
+            return Err(bv_error_response_status!(
+                400,
+                "resource and new_owner_entity_id are required"
+            ));
+        }
+
+        let identity = self.get_module::<IdentityModule>("identity")?;
+        let store = identity.owner_store().ok_or_else(|| {
+            bv_error_response_status!(500, "owner store not initialized")
+        })?;
+
+        store.set_resource_owner(&resource, &new_owner).await?;
+
+        let mut data = Map::new();
+        data.insert("resource".into(), Value::String(resource));
+        data.insert("new_owner_entity_id".into(), Value::String(new_owner));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
     pub async fn handle_audit_table(
         &self,
         _backend: &dyn Backend,
@@ -694,7 +813,7 @@ impl SystemBackend {
                 None
             } else {
                 is_authed = true;
-                Some(policy_module.policy_store.load().new_acl(&auth.policies, None).await?)
+                Some(policy_module.policy_store.load().new_acl_for_request(&auth.policies, None, &auth).await?)
             }
         } else {
             None
@@ -803,7 +922,7 @@ impl SystemBackend {
             if auth.policies.is_empty() {
                 return Err(RvError::ErrPermissionDenied);
             } else {
-                policy_module.policy_store.load().new_acl(&auth.policies, None).await?
+                policy_module.policy_store.load().new_acl_for_request(&auth.policies, None, &auth).await?
             }
         } else {
             return Err(RvError::ErrPermissionDenied);

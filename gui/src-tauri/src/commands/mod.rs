@@ -1,5 +1,6 @@
 pub mod approle;
 pub mod asset_groups;
+pub mod sharing;
 pub mod auth;
 pub mod fido2;
 pub mod fido2_native;

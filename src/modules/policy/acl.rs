@@ -731,8 +731,11 @@ fn scoped_rule_matches(rule: &ScopedRule, path: &str) -> bool {
 ///     user granted only `scopes = ["owner"]` can create their very
 ///     first object — without it, ownership-gated policies would be
 ///     unusable for all-new deployments.
-///   - "shared": placeholder; sharing is a future phase, always
-///     returns `false` until `SecretShare` lands.
+///   - "shared": grants the rule's capabilities iff an explicit
+///     `SecretShare` exists for `(target, caller)` with the capability
+///     that corresponds to the current operation. Resolved once
+///     during `post_auth` and stashed on `req.target_shared_caps`.
+///     Expired shares are excluded at resolution time.
 /// Unknown scope values are ignored (treated as not matching) so a
 /// typo doesn't silently widen access.
 fn scope_passes(rule: &ScopedRule, req: &Request) -> bool {
@@ -753,8 +756,8 @@ fn scope_passes(rule: &ScopedRule, req: &Request) -> bool {
                 // First-write carve-out: an unowned target accepts a
                 // Write from any caller with `scopes = ["owner"]`.
                 // Read / Delete / List / Update on an unowned target
-                // are *not* granted — caller must own (or a future
-                // share must exist).
+                // are *not* granted — caller must own (or a share
+                // must exist).
                 if req.asset_owner.is_empty()
                     && matches!(req.operation, Operation::Write)
                 {
@@ -762,13 +765,34 @@ fn scope_passes(rule: &ScopedRule, req: &Request) -> bool {
                 }
             }
             "shared" => {
-                // Future: consult the SecretShare store. For now,
-                // shared-only rules never grant access.
+                if req.target_shared_caps.is_empty() {
+                    continue;
+                }
+                if let Some(cap) = operation_share_capability(req.operation) {
+                    if req.target_shared_caps.iter().any(|c| c == cap) {
+                        return true;
+                    }
+                }
             }
             _ => {}
         }
     }
     false
+}
+
+/// Map a request `Operation` onto the capability-name vocabulary used
+/// by `SecretShare.capabilities`. Returns `None` for operations that
+/// are not shareable (Help, Renew, Rollback, Revoke) — the evaluator
+/// then refuses the `shared` scope for them, which is the right
+/// default: shares describe user-level access, not lifecycle hooks.
+fn operation_share_capability(op: Operation) -> Option<&'static str> {
+    match op {
+        Operation::Read => Some("read"),
+        Operation::List => Some("list"),
+        Operation::Write => Some("update"),
+        Operation::Delete => Some("delete"),
+        _ => None,
+    }
 }
 
 /// Is the request target in any of the rule's listed asset groups?

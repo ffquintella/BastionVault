@@ -40,7 +40,7 @@ use crate::{
     handler::{AuthHandler, Handler},
     logical::{auth::PolicyResults, Operation, Request, Response},
     modules::{
-        identity::{IdentityModule, OwnerStore},
+        identity::{IdentityModule, OwnerStore, ShareStore, ShareTargetKind},
         resource_group::{ResourceGroupModule, ResourceGroupStore},
     },
     router::Router,
@@ -664,6 +664,33 @@ impl PolicyStore {
         policy_names: &[String],
         additional_policies: Option<Vec<Arc<Policy>>>,
     ) -> Result<ACL, RvError> {
+        self.new_acl_inner(policy_names, additional_policies, None).await
+    }
+
+    /// ACL construction with templating context. Templated policies (those
+    /// detected at parse time to contain `{{...}}` placeholders in their
+    /// path strings) are deep-cloned and substituted using the caller's
+    /// identity (`{{username}}`, `{{entity.id}}`, `{{auth.mount}}`).
+    /// Substitution rules mirror `features/per-user-scoping.md` §1:
+    /// placeholders that cannot be resolved cause the owning path rule
+    /// to be dropped (fail-closed) with a logged warning. Non-templated
+    /// policies pass through untouched.
+    pub async fn new_acl_for_request(
+        &self,
+        policy_names: &[String],
+        additional_policies: Option<Vec<Arc<Policy>>>,
+        auth: &crate::logical::Auth,
+    ) -> Result<ACL, RvError> {
+        self.new_acl_inner(policy_names, additional_policies, Some(auth))
+            .await
+    }
+
+    async fn new_acl_inner(
+        &self,
+        policy_names: &[String],
+        additional_policies: Option<Vec<Arc<Policy>>>,
+        auth: Option<&crate::logical::Auth>,
+    ) -> Result<ACL, RvError> {
         let mut all_policies: Vec<Arc<Policy>> = vec![];
         for policy_name in policy_names.iter() {
             if let Some(policy) = self.get_policy(policy_name.as_str(), PolicyType::Token).await? {
@@ -675,7 +702,35 @@ impl PolicyStore {
             all_policies.extend(ap);
         }
 
-        ACL::new(&all_policies)
+        // Apply templating substitution to any policy flagged `templated`
+        // when we have a caller context. Produces a parallel Vec of
+        // Arc<Policy> that ACL::new consumes.
+        let materialized: Vec<Arc<Policy>> = all_policies
+            .into_iter()
+            .filter_map(|p| {
+                if p.templated {
+                    match auth {
+                        Some(a) => apply_templates(&p, a),
+                        // No caller context: drop templated policies
+                        // fail-closed rather than let literal `{{...}}`
+                        // strings reach path matching where they would
+                        // never hit a real request.
+                        None => {
+                            log::warn!(
+                                "dropping templated policy '{}' because no caller \
+                                 context is available for substitution",
+                                p.name,
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    Some(p)
+                }
+            })
+            .collect();
+
+        ACL::new(&materialized)
     }
 
     async fn set_policy_internal(&self, policy: Arc<Policy>) -> Result<(), RvError> {
@@ -932,6 +987,64 @@ async fn resolve_asset_owner(core: &Weak<Core>, req_path: &str) -> String {
     String::new()
 }
 
+/// Best-effort lookup of the capabilities the caller has on the
+/// request target via any non-expired `SecretShare`. Returns an
+/// empty vec on any failure (module absent, store not yet
+/// initialized, caller has no `entity_id`, path shape we don't
+/// recognize). A resolution miss can only narrow access for
+/// shared-scoped rules — fail-closed.
+async fn resolve_target_shared_caps(
+    core: &Weak<Core>,
+    req: &Request,
+) -> Vec<String> {
+    let Some(caller_id) = req
+        .auth
+        .as_ref()
+        .and_then(|a| a.metadata.get("entity_id"))
+        .cloned()
+    else {
+        return Vec::new();
+    };
+    if caller_id.is_empty() {
+        return Vec::new();
+    }
+    let Some(core) = core.upgrade() else {
+        return Vec::new();
+    };
+    let Some(module) = core.module_manager.get_module::<IdentityModule>("identity") else {
+        return Vec::new();
+    };
+    let Some(store) = module.share_store() else {
+        return Vec::new();
+    };
+
+    // Try both target kinds; a path can uniquely be one or the other
+    // (resource vs KV) but we accept either match. Shares live per
+    // (kind, canonical path), so the resource-name extraction takes
+    // precedence when the path belongs to the resource engine.
+    if let Some(name) = resource_name_from_path(&req.path) {
+        if let Ok(caps) = store
+            .shared_capabilities(ShareTargetKind::Resource, &name, &caller_id)
+            .await
+        {
+            if !caps.is_empty() {
+                return caps;
+            }
+        }
+    }
+    if looks_like_kv_path(&req.path) {
+        if let Ok(caps) = store
+            .shared_capabilities(ShareTargetKind::KvSecret, &req.path, &caller_id)
+            .await
+        {
+            if !caps.is_empty() {
+                return caps;
+            }
+        }
+    }
+    Vec::new()
+}
+
 /// Best-effort lookup of the asset-groups that contain the request
 /// target. Consults the resource-index when the path looks like a
 /// resource engine path, then (independently) the secret-index when
@@ -980,6 +1093,123 @@ async fn resolve_asset_groups(core: &Weak<Core>, req_path: &str) -> Vec<String> 
     out
 }
 
+/// Substitute `{{username}}`, `{{entity.id}}`, and `{{auth.mount}}`
+/// in every path of a templated policy using the caller's `Auth`.
+///
+/// Returns a cloned `Arc<Policy>` with substituted paths on success,
+/// or `None` when every path rule dropped (unresolved placeholders).
+/// Path rules whose substitution fails are dropped individually; the
+/// rest of the policy is retained. Warnings are logged.
+///
+/// Substitution vocabulary (v1):
+///   `{{username}}`   — `auth.metadata["username"]`, falling back to
+///                      `auth.display_name`.
+///   `{{entity.id}}`  — `auth.metadata["entity_id"]`.
+///   `{{auth.mount}}` — `auth.metadata["mount_path"]` (populated by
+///                      the auth backend when available).
+fn apply_templates(
+    policy: &Arc<Policy>,
+    auth: &crate::logical::Auth,
+) -> Option<Arc<Policy>> {
+    let username = auth
+        .metadata
+        .get("username")
+        .cloned()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| auth.display_name.clone());
+    let entity_id = auth
+        .metadata
+        .get("entity_id")
+        .cloned()
+        .unwrap_or_default();
+    let auth_mount = auth
+        .metadata
+        .get("mount_path")
+        .cloned()
+        .unwrap_or_default();
+
+    let mut cloned: Policy = Policy::clone(policy);
+    let mut kept: Vec<crate::modules::policy::PolicyPathRules> =
+        Vec::with_capacity(cloned.paths.len());
+    let mut dropped = 0usize;
+
+    for mut rule in cloned.paths.drain(..) {
+        match substitute_path(&rule.path, &username, &entity_id, &auth_mount) {
+            Some(new_path) => {
+                rule.path = new_path;
+                kept.push(rule);
+            }
+            None => {
+                log::warn!(
+                    "policy '{}': dropping path rule '{}' — unresolved template placeholder",
+                    cloned.name,
+                    rule.path,
+                );
+                dropped += 1;
+            }
+        }
+    }
+
+    if kept.is_empty() {
+        log::warn!(
+            "policy '{}': all {} path rule(s) dropped due to unresolved template placeholders; \
+             policy contributes no authorization this turn",
+            cloned.name,
+            dropped,
+        );
+        return None;
+    }
+
+    cloned.paths = kept;
+    Some(Arc::new(cloned))
+}
+
+/// Replace every supported `{{...}}` placeholder with its value.
+/// Returns `None` if any `{{...}}` placeholder cannot be resolved
+/// (e.g., `{{username}}` on a root-token request where auth metadata
+/// is empty). An unknown placeholder name (outside the v1 vocabulary)
+/// is also treated as unresolved, so typos are fail-closed.
+fn substitute_path(
+    path: &str,
+    username: &str,
+    entity_id: &str,
+    auth_mount: &str,
+) -> Option<String> {
+    let mut out = String::with_capacity(path.len());
+    let mut rest = path;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let end = after.find("}}")?;
+        let key = after[..end].trim();
+        let value = match key {
+            "username" => {
+                if username.is_empty() {
+                    return None;
+                }
+                username
+            }
+            "entity.id" => {
+                if entity_id.is_empty() {
+                    return None;
+                }
+                entity_id
+            }
+            "auth.mount" => {
+                if auth_mount.is_empty() {
+                    return None;
+                }
+                auth_mount
+            }
+            _ => return None,
+        };
+        out.push_str(value);
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
 /// Monotonic-ish 20-digit zero-padded nanoseconds since UNIX epoch, used
 /// as the suffix of history log keys so listing returns entries in
 /// chronological order. Mirrors the resource/identity modules.
@@ -1024,8 +1254,14 @@ impl AuthHandler for PolicyStore {
             // empty on any failure, which is fail-closed for
             // owner-scoped rules.
             req.asset_owner = resolve_asset_owner(&self.core, &req.path).await;
+            // Resolve any active `SecretShare` capabilities the caller
+            // has on this target so `scopes = ["shared"]` rules can be
+            // evaluated synchronously downstream. Empty when the
+            // caller has no entity_id, no share exists, or the share
+            // has expired.
+            req.target_shared_caps = resolve_target_shared_caps(&self.core, req).await;
 
-            let acl = self.new_acl(&auth.policies, None).await?;
+            let acl = self.new_acl_for_request(&auth.policies, None, auth).await?;
             acl_result = acl.allow_operation(req, false)?;
         }
 
@@ -1112,12 +1348,14 @@ impl Handler for PolicyStore {
                         .and_then(|a| a.metadata.get("entity_id"))
                         .cloned()
                         .unwrap_or_default();
+                    let share_store = self.share_store();
                     filter_list_by_ownership(
                         response,
                         &req.path,
                         &req.list_filter_scopes,
                         &caller_id,
                         store,
+                        share_store.as_ref(),
                     )
                     .await;
                 }
@@ -1159,6 +1397,38 @@ impl Handler for PolicyStore {
                         let trimmed = req.path.trim_start_matches('/');
                         if trimmed.starts_with("resources/resources/") {
                             let _ = store.forget_resource_owner(&name).await;
+                        }
+                    }
+                    // Cascade-delete every SecretShare referencing this
+                    // target so dangling share rows do not outlive the
+                    // secret/resource. Failures are logged but never
+                    // fail the delete — stale share records deny
+                    // access anyway once `get_share` returns None.
+                    if let Some(sshare) = self.share_store() {
+                        if looks_like_kv_path(&req.path) {
+                            if let Err(e) = sshare
+                                .cascade_delete_target(ShareTargetKind::KvSecret, &req.path)
+                                .await
+                            {
+                                log::warn!(
+                                    "share cascade-delete failed for KV path '{}': {e}",
+                                    req.path,
+                                );
+                            }
+                        }
+                        if let Some(name) = resource_name_from_path(&req.path) {
+                            let trimmed = req.path.trim_start_matches('/');
+                            if trimmed.starts_with("resources/resources/") {
+                                if let Err(e) = sshare
+                                    .cascade_delete_target(ShareTargetKind::Resource, &name)
+                                    .await
+                                {
+                                    log::warn!(
+                                        "share cascade-delete failed for resource '{}': {e}",
+                                        name,
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -1206,6 +1476,17 @@ impl PolicyStore {
             .get_module::<IdentityModule>("identity")?;
         module.owner_store()
     }
+
+    /// Upgrade the weak Core reference and fetch the share store from
+    /// the identity module. Returns `None` when the subsystem is not
+    /// loaded.
+    fn share_store(&self) -> Option<Arc<ShareStore>> {
+        let core = self.core.upgrade()?;
+        let module = core
+            .module_manager
+            .get_module::<IdentityModule>("identity")?;
+        module.share_store()
+    }
 }
 
 /// Filter a list response's `keys` array down to entries that are
@@ -1251,24 +1532,33 @@ async fn filter_list_response(
 }
 
 /// Narrow a LIST response's `keys` array to entries that match any
-/// active ownership scope — today only `"owner"` is enforceable
-/// (compares each key's resolved owner to the caller's entity_id).
+/// active ownership scope:
+///
+/// - `owner`: each key's resolved owner matches the caller's
+///   `entity_id`.
+/// - `shared`: an explicit `SecretShare` grants the caller any
+///   capability on the key. `SecretShare` presence alone is enough
+///   for list inclusion — the shared `list` capability is not
+///   separately required, matching how `list_shares_for_grantee`
+///   surfaces "what is shared with me?".
+///
 /// Folder keys (trailing `/`) are dropped since they have no single
-/// owner record. A `"shared"` scope has no effect until sharing
-/// lands.
+/// owner or share record. A key surviving *any* active scope is kept
+/// (scopes OR together).
 async fn filter_list_by_ownership(
     response: &mut Response,
     list_path: &str,
     filter_scopes: &[String],
     caller_entity_id: &str,
     store: &Arc<OwnerStore>,
+    share_store: Option<&Arc<ShareStore>>,
 ) {
     let Some(data) = response.data.as_mut() else { return };
     let Some(keys_val) = data.get_mut("keys") else { return };
     let Some(keys_arr) = keys_val.as_array() else { return };
 
     let want_owner = filter_scopes.iter().any(|s| s == "owner");
-    // `shared` not yet implemented; nothing to filter in on that side.
+    let want_shared = filter_scopes.iter().any(|s| s == "shared");
 
     let prefix = if list_path.ends_with('/') {
         list_path.to_string()
@@ -1284,31 +1574,57 @@ async fn filter_list_by_ownership(
         }
         let full = format!("{prefix}{k}");
 
-        if !want_owner || caller_entity_id.is_empty() {
+        if caller_entity_id.is_empty() {
             continue;
         }
 
-        // Try both lookups: the same path may be a KV secret (owner
-        // stored canonicalized under the kv view) or a resource name
-        // (owner stored under the resource view). Either match is
-        // sufficient for the owner scope.
-        let mut owns = false;
-        if let Ok(Some(rec)) = store.get_kv_owner(&full).await {
-            if rec.entity_id == caller_entity_id {
-                owns = true;
+        let mut included = false;
+
+        if want_owner {
+            // Try both owner lookups: a key may be a KV secret or a
+            // resource. Either match is sufficient.
+            if let Ok(Some(rec)) = store.get_kv_owner(&full).await {
+                if rec.entity_id == caller_entity_id {
+                    included = true;
+                }
             }
-        }
-        if !owns {
-            if let Some(name) = resource_name_from_path(&full) {
-                if let Ok(Some(rec)) = store.get_resource_owner(&name).await {
-                    if rec.entity_id == caller_entity_id {
-                        owns = true;
+            if !included {
+                if let Some(name) = resource_name_from_path(&full) {
+                    if let Ok(Some(rec)) = store.get_resource_owner(&name).await {
+                        if rec.entity_id == caller_entity_id {
+                            included = true;
+                        }
                     }
                 }
             }
         }
 
-        if owns {
+        if !included && want_shared {
+            if let Some(sstore) = share_store {
+                if let Ok(caps) = sstore
+                    .shared_capabilities(ShareTargetKind::KvSecret, &full, caller_entity_id)
+                    .await
+                {
+                    if !caps.is_empty() {
+                        included = true;
+                    }
+                }
+                if !included {
+                    if let Some(name) = resource_name_from_path(&full) {
+                        if let Ok(caps) = sstore
+                            .shared_capabilities(ShareTargetKind::Resource, &name, caller_entity_id)
+                            .await
+                        {
+                            if !caps.is_empty() {
+                                included = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if included {
             kept.push(v.clone());
         }
     }
@@ -1342,6 +1658,69 @@ async fn resolve_groups_for_any(store: &Arc<ResourceGroupStore>, path: &str) -> 
         }
     }
     out
+}
+
+#[cfg(test)]
+mod templating_tests {
+    use super::*;
+
+    #[test]
+    fn test_substitute_path_happy_cases() {
+        let got = substitute_path(
+            "secret/data/users/{{username}}/*",
+            "alice",
+            "ent-123",
+            "userpass/",
+        );
+        assert_eq!(got.as_deref(), Some("secret/data/users/alice/*"));
+
+        let got = substitute_path(
+            "kv/{{entity.id}}/inbox",
+            "alice",
+            "ent-123",
+            "",
+        );
+        assert_eq!(got.as_deref(), Some("kv/ent-123/inbox"));
+
+        let got = substitute_path(
+            "{{auth.mount}}login",
+            "alice",
+            "ent-123",
+            "userpass/",
+        );
+        assert_eq!(got.as_deref(), Some("userpass/login"));
+    }
+
+    #[test]
+    fn test_substitute_path_fail_closed_on_unknown_placeholder() {
+        // Unknown key — typo — must drop the rule, not widen access.
+        assert_eq!(
+            substitute_path("secret/{{uzername}}", "alice", "ent-123", "userpass/"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_substitute_path_fail_closed_on_missing_value() {
+        // `{{username}}` but username is empty — drop.
+        assert_eq!(
+            substitute_path("secret/{{username}}/*", "", "ent-123", "userpass/"),
+            None
+        );
+        // `{{entity.id}}` but entity_id empty — drop.
+        assert_eq!(
+            substitute_path("secret/{{entity.id}}", "alice", "", "userpass/"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_substitute_path_no_placeholders_is_identity() {
+        assert_eq!(
+            substitute_path("secret/foo/bar", "alice", "ent-123", "userpass/").as_deref(),
+            Some("secret/foo/bar")
+        );
+    }
 }
 
 #[cfg(test)]

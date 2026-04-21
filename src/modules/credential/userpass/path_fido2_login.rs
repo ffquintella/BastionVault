@@ -196,6 +196,7 @@ impl UserPassBackendInner {
             ..Default::default()
         };
         auth.metadata.insert("username".to_string(), username.to_string());
+        auth.metadata.insert("mount_path".to_string(), "userpass/".to_string());
         // FIDO2 shares the UserPass username namespace, so look up the
         // same entity_id as password login. See `path_login.rs` for
         // the helper.

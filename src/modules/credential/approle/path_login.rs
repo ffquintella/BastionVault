@@ -270,6 +270,7 @@ impl AppRoleBackendInner {
         }
 
         metadata.insert("role_name".to_string(), role_entry.name.clone());
+        metadata.insert("mount_path".to_string(), "approle/".to_string());
 
         // AppRole sits in its own entity namespace (mount-qualified).
         // An `approle:payments-api` entity is distinct from any user

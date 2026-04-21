@@ -346,6 +346,49 @@ export interface AssetGroupLookupResult {
   groups: string[];
 }
 
+// Per-user scoping: entity, owner, sharing.
+
+export interface EntitySelf {
+  entity_id: string;
+  username: string;
+  mount_path: string;
+  role_name: string;
+  primary_mount: string;
+  primary_name: string;
+  created_at: string;
+}
+
+export type ShareTargetKind = "kv-secret" | "resource";
+
+export interface OwnerInfo {
+  target_kind: string;
+  target: string;
+  /** Empty string when no owner record exists yet. */
+  entity_id: string;
+  owned: boolean;
+  created_at: string;
+}
+
+/** A share-pointer — what the `by-grantee` list returns; load the
+ *  full record via `getShare` or equivalent if values are needed. */
+export interface SharePointer {
+  target_kind: string;
+  target_path: string;
+}
+
+export interface ShareEntry {
+  target_kind: string;
+  target_path: string;
+  grantee_entity_id: string;
+  granted_by_entity_id: string;
+  /** Subset of "read" | "list" | "update" | "delete" | "create". */
+  capabilities: string[];
+  granted_at: string;
+  /** RFC3339 or empty. */
+  expires_at: string;
+  expired: boolean;
+}
+
 // FIDO2
 export interface Fido2Config {
   rp_id: string;

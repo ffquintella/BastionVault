@@ -141,6 +141,8 @@ impl UserPassBackendInner {
             ..Default::default()
         };
         auth.metadata.insert("username".to_string(), username.to_string());
+        // Used by policy-templating substitution ({{auth.mount}}).
+        auth.metadata.insert("mount_path".to_string(), "userpass/".to_string());
         // Provision / resolve the stable entity_id for this login so
         // ownership-aware ACL rules (`scopes = ["owner"]`) and the KV /
         // resource owner stores can key off the entity rather than the

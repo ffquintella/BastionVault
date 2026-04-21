@@ -60,10 +60,18 @@ pub struct Request {
     /// When a `LIST` operation was authorized only by a
     /// `scopes = [...]`-filtered rule, the evaluator records the
     /// active scopes here so `post_route` can narrow the response
-    /// `keys` to entries the caller owns (or has shared with them,
-    /// once sharing lands).
+    /// `keys` to entries the caller owns (or has shared with them).
     #[default(Vec::new())]
     pub list_filter_scopes: Vec<String>,
+    /// Capabilities the caller has on the request target via an
+    /// explicit `SecretShare`. Resolved once during `post_auth` so the
+    /// sync ACL evaluator can answer the `scopes = ["shared"]` check
+    /// without an async hop. Empty when no matching share exists, the
+    /// share has expired, the target is not an ownership-tracked
+    /// object, or the caller has no `entity_id`. Lower-case capability
+    /// names: `read`, `list`, `update`, `delete`, `create`.
+    #[default(Vec::new())]
+    pub target_shared_caps: Vec<String>,
 }
 
 #[maybe_async::maybe_async]

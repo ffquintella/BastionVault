@@ -33,9 +33,11 @@ use crate::{
 pub mod entity_store;
 pub mod group_store;
 pub mod owner_store;
+pub mod share_store;
 pub use entity_store::{Entity, EntityStore};
 pub use group_store::{GroupEntry, GroupHistoryEntry, GroupKind, GroupStore};
 pub use owner_store::{OwnerRecord, OwnerStore};
+pub use share_store::{SecretShare, ShareByGranteePointer, ShareStore, ShareTargetKind};
 
 static IDENTITY_BACKEND_HELP: &str = r#"
 The identity backend manages user groups and application groups. Each group
@@ -51,6 +53,7 @@ pub struct IdentityModule {
     pub group_store: ArcSwap<Option<Arc<GroupStore>>>,
     pub entity_store: ArcSwap<Option<Arc<EntityStore>>>,
     pub owner_store: ArcSwap<Option<Arc<OwnerStore>>>,
+    pub share_store: ArcSwap<Option<Arc<ShareStore>>>,
 }
 
 pub struct IdentityBackendInner {
@@ -84,6 +87,18 @@ impl IdentityBackend {
         // History handlers
         let h_user_hist = self.inner.clone();
         let h_app_hist = self.inner.clone();
+
+        // Sharing handlers
+        let h_share_by_grantee = self.inner.clone();
+        let h_share_target_list = self.inner.clone();
+        let h_share_get = self.inner.clone();
+        let h_share_put = self.inner.clone();
+        let h_share_delete = self.inner.clone();
+
+        // Entity + owner lookup handlers
+        let h_entity_self = self.inner.clone();
+        let h_owner_kv = self.inner.clone();
+        let h_owner_resource = self.inner.clone();
 
         let h_noop1 = self.inner.clone();
         let h_noop2 = self.inner.clone();
@@ -193,6 +208,130 @@ impl IdentityBackend {
                         {op: Operation::Read, handler: h_app_hist.handle_app_group_history}
                     ],
                     help: "Read the change history for an application group."
+                },
+                // ── Sharing ─────────────────────────────────────────
+                //
+                // `target` is base64url(canonical_path) so paths
+                // containing '/' fit a single URL segment. `kind` is
+                // "kv-secret" or "resource".
+                {
+                    pattern: r"sharing/by-grantee/(?P<grantee>[^/]+)/?$",
+                    fields: {
+                        "grantee": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Grantee entity_id."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::List, handler: h_share_by_grantee.handle_share_by_grantee_list}
+                    ],
+                    help: "List every share granted to this entity."
+                },
+                {
+                    pattern: r"sharing/by-target/(?P<kind>[^/]+)/(?P<target>[^/]+)/?$",
+                    fields: {
+                        "kind": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Target kind: kv-secret or resource."
+                        },
+                        "target": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "base64url(canonical-path) of the target."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::List, handler: h_share_target_list.handle_share_by_target_list}
+                    ],
+                    help: "List every share granted on this target."
+                },
+                // ── Entity lookup (caller introspection) ────────────
+                {
+                    pattern: r"entity/self$",
+                    operations: [
+                        {op: Operation::Read, handler: h_entity_self.handle_entity_self}
+                    ],
+                    help: "Read the caller's own entity record (id, primary mount, aliases)."
+                },
+                // ── Owner lookup (for GUI 'owner' badges) ───────────
+                //
+                // `path` is base64url(canonical path) for the KV case so
+                // slashes fit one URL segment, matching the sharing API.
+                {
+                    pattern: r"owner/kv/(?P<path>[^/]+)$",
+                    fields: {
+                        "path": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "base64url(canonical KV path)."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_owner_kv.handle_kv_owner_read}
+                    ],
+                    help: "Read the owner record for a KV secret."
+                },
+                {
+                    pattern: r"owner/resource/(?P<name>[^/]+)$",
+                    fields: {
+                        "name": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Resource name."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_owner_resource.handle_resource_owner_read}
+                    ],
+                    help: "Read the owner record for a resource."
+                },
+                {
+                    pattern: r"sharing/by-target/(?P<kind>[^/]+)/(?P<target>[^/]+)/(?P<grantee>[^/]+)$",
+                    fields: {
+                        "kind": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Target kind: kv-secret or resource."
+                        },
+                        "target": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "base64url(canonical-path) of the target. When writing, `target_path` in the body overrides this."
+                        },
+                        "grantee": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Grantee entity_id."
+                        },
+                        "target_kind": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Override the kind on write. Accepted values: kv-secret, resource."
+                        },
+                        "target_path": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Raw (non-encoded) target path on write. Overrides the URL segment."
+                        },
+                        "capabilities": {
+                            field_type: FieldType::CommaStringSlice,
+                            required: false,
+                            description: "Capabilities the grantee is allowed: subset of read, list, update, delete, create."
+                        },
+                        "expires_at": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Optional RFC3339 timestamp; share is inert once expired."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_share_get.handle_share_get},
+                        {op: Operation::Write, handler: h_share_put.handle_share_put},
+                        {op: Operation::Delete, handler: h_share_delete.handle_share_delete}
+                    ],
+                    help: "Read, create/update, or delete a single share."
                 }
             ],
             secrets: [{
@@ -339,6 +478,92 @@ fn parse_write_payload(req: &Request) -> Result<GroupWritePayload, RvError> {
     }
 
     Ok(payload)
+}
+
+/// Decode a base64url(no-pad) URL segment into the original path.
+/// Returns `None` on any decoding failure or when the decoded bytes
+/// are not valid UTF-8. Used for share API URL segments.
+fn decode_b64url_path(segment: &str) -> Option<String> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    let bytes = URL_SAFE_NO_PAD.decode(segment.trim()).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+/// Pull `(kind, target_path, grantee)` out of the URL fields on a
+/// share request. Fails with a 400-ish error when any segment is
+/// missing or invalid.
+fn extract_share_identifiers(
+    req: &Request,
+) -> Result<(ShareTargetKind, String, String), RvError> {
+    let kind_str = req.get_data("kind")?.as_str().unwrap_or("").to_string();
+    let target_b64 = req.get_data("target")?.as_str().unwrap_or("").to_string();
+    let grantee = req.get_data("grantee")?.as_str().unwrap_or("").to_string();
+
+    let kind = ShareTargetKind::parse(&kind_str)
+        .ok_or_else(|| bv_error_string!("invalid share kind"))?;
+    let target_path = decode_b64url_path(&target_b64)
+        .ok_or_else(|| bv_error_string!("invalid target segment (expected base64url)"))?;
+    if grantee.trim().is_empty() {
+        return Err(bv_error_string!("grantee is required"));
+    }
+    Ok((kind, target_path, grantee))
+}
+
+/// Render an optional `OwnerRecord` plus the inquired target into a
+/// JSON object. When `rec` is `None` the response still carries the
+/// target identifiers with empty owner fields so the GUI can tell
+/// "not yet owned" from "lookup failed".
+fn owner_response(
+    kind: &str,
+    target: &str,
+    rec: Option<OwnerRecord>,
+) -> Map<String, Value> {
+    let mut m = Map::new();
+    m.insert("target_kind".into(), Value::String(kind.to_string()));
+    m.insert("target".into(), Value::String(target.to_string()));
+    match rec {
+        Some(r) => {
+            m.insert("entity_id".into(), Value::String(r.entity_id));
+            m.insert("created_at".into(), Value::String(r.created_at));
+            m.insert("owned".into(), Value::Bool(true));
+        }
+        None => {
+            m.insert("entity_id".into(), Value::String(String::new()));
+            m.insert("created_at".into(), Value::String(String::new()));
+            m.insert("owned".into(), Value::Bool(false));
+        }
+    }
+    m
+}
+
+/// Render a `SecretShare` into a JSON object for HTTP responses.
+fn share_to_value(share: &SecretShare) -> Value {
+    let mut m = Map::new();
+    m.insert("target_kind".into(), Value::String(share.target_kind.clone()));
+    m.insert("target_path".into(), Value::String(share.target_path.clone()));
+    m.insert(
+        "grantee_entity_id".into(),
+        Value::String(share.grantee_entity_id.clone()),
+    );
+    m.insert(
+        "granted_by_entity_id".into(),
+        Value::String(share.granted_by_entity_id.clone()),
+    );
+    m.insert(
+        "capabilities".into(),
+        Value::Array(
+            share
+                .capabilities
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    m.insert("granted_at".into(), Value::String(share.granted_at.clone()));
+    m.insert("expires_at".into(), Value::String(share.expires_at.clone()));
+    m.insert("expired".into(), Value::Bool(share.is_expired()));
+    Value::Object(m)
 }
 
 fn value_to_string_vec(v: &Value) -> Vec<String> {
@@ -597,6 +822,294 @@ impl IdentityBackendInner {
         self.handle_group_history(GroupKind::App, req).await
     }
 
+    // ── Sharing ─────────────────────────────────────────────────────
+
+    fn resolve_share_store(&self) -> Result<Arc<ShareStore>, RvError> {
+        self.core
+            .module_manager
+            .get_module::<IdentityModule>("identity")
+            .and_then(|m| m.share_store())
+            .ok_or_else(|| bv_error_string!("share store unavailable"))
+    }
+
+    pub async fn handle_share_by_grantee_list(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_share_store()?;
+        let grantee = req.get_data("grantee")?.as_str().unwrap_or("").to_string();
+        let ptrs = store.list_shares_for_grantee(&grantee).await?;
+
+        let mut data = Map::new();
+        data.insert("grantee".into(), Value::String(grantee));
+        data.insert(
+            "entries".into(),
+            Value::Array(
+                ptrs.iter()
+                    .map(|p| {
+                        let mut m = Map::new();
+                        m.insert("target_kind".into(), Value::String(p.target_kind.clone()));
+                        m.insert("target_path".into(), Value::String(p.target_path.clone()));
+                        Value::Object(m)
+                    })
+                    .collect(),
+            ),
+        );
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_share_by_target_list(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_share_store()?;
+        let kind_str = req.get_data("kind")?.as_str().unwrap_or("").to_string();
+        let target_b64 = req.get_data("target")?.as_str().unwrap_or("").to_string();
+
+        let kind = ShareTargetKind::parse(&kind_str)
+            .ok_or_else(|| bv_error_string!("invalid share kind"))?;
+        let target_path = decode_b64url_path(&target_b64)
+            .ok_or_else(|| bv_error_string!("invalid target segment (expected base64url)"))?;
+
+        let shares = store.list_shares_for_target(kind, &target_path).await?;
+
+        let mut data = Map::new();
+        data.insert("target_kind".into(), Value::String(kind_str));
+        data.insert("target_path".into(), Value::String(target_path));
+        data.insert(
+            "entries".into(),
+            Value::Array(shares.iter().map(share_to_value).collect()),
+        );
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_share_get(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_share_store()?;
+        let (kind, target_path, grantee) = extract_share_identifiers(req)?;
+
+        match store.get_share(kind, &target_path, &grantee).await? {
+            Some(share) => Ok(Some(Response::data_response(Some(
+                share_to_value(&share).as_object().cloned().unwrap_or_default(),
+            )))),
+            None => Err(bv_error_response_status!(
+                404,
+                &format!(
+                    "no share found for kind={}, path={}, grantee={}",
+                    kind.as_str(),
+                    target_path,
+                    grantee
+                )
+            )),
+        }
+    }
+
+    pub async fn handle_share_put(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_share_store()?;
+        let (url_kind, url_target_path, grantee) = extract_share_identifiers(req)?;
+
+        // Body can override kind/path with the raw (non-encoded) form.
+        // Grantee is always taken from the URL.
+        let kind = if let Ok(v) = req.get_data("target_kind") {
+            if let Some(s) = v.as_str() {
+                let s = s.trim();
+                if s.is_empty() {
+                    url_kind
+                } else {
+                    ShareTargetKind::parse(s)
+                        .ok_or_else(|| bv_error_string!("invalid target_kind"))?
+                }
+            } else {
+                url_kind
+            }
+        } else {
+            url_kind
+        };
+
+        let target_path = req
+            .get_data("target_path")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(url_target_path);
+
+        let capabilities: Vec<String> = req
+            .get_data("capabilities")
+            .ok()
+            .map(|v| value_to_string_vec(&v))
+            .unwrap_or_default();
+
+        let expires_at = req
+            .get_data("expires_at")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+
+        let granted_by = req
+            .auth
+            .as_ref()
+            .and_then(|a| a.metadata.get("entity_id"))
+            .cloned()
+            .unwrap_or_default();
+
+        let share = SecretShare {
+            target_kind: kind.as_str().to_string(),
+            target_path,
+            grantee_entity_id: grantee,
+            granted_by_entity_id: granted_by,
+            capabilities,
+            granted_at: String::new(),
+            expires_at,
+        };
+
+        let stored = store.set_share(share).await?;
+        Ok(Some(Response::data_response(Some(
+            share_to_value(&stored).as_object().cloned().unwrap_or_default(),
+        ))))
+    }
+
+    pub async fn handle_share_delete(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_share_store()?;
+        let (kind, target_path, grantee) = extract_share_identifiers(req)?;
+        store.delete_share(kind, &target_path, &grantee).await?;
+        Ok(None)
+    }
+
+    // ── Entity + owner lookup ──────────────────────────────────────
+
+    /// Return the caller's own entity record. Populated from the auth
+    /// metadata the identity-aware login handlers stamp on the token.
+    /// Useful for the GUI to decide ownership in the client (owner ==
+    /// caller.entity_id) without issuing a second network round-trip.
+    pub async fn handle_entity_self(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let auth = req.auth.as_ref().ok_or_else(|| {
+            bv_error_response_status!(401, "no authenticated caller")
+        })?;
+
+        let entity_id = auth.metadata.get("entity_id").cloned().unwrap_or_default();
+        let username = auth.metadata.get("username").cloned().unwrap_or_default();
+        let mount_path = auth.metadata.get("mount_path").cloned().unwrap_or_default();
+        let role_name = auth.metadata.get("role_name").cloned().unwrap_or_default();
+
+        let mut data = Map::new();
+        data.insert("entity_id".into(), Value::String(entity_id.clone()));
+        data.insert("username".into(), Value::String(username));
+        data.insert("mount_path".into(), Value::String(mount_path));
+        data.insert("role_name".into(), Value::String(role_name));
+
+        // Hydrate the stored Entity record when the identity module is
+        // loaded so the caller sees their creation time and aliases.
+        if !entity_id.is_empty() {
+            if let Some(module) = self
+                .core
+                .module_manager
+                .get_module::<IdentityModule>("identity")
+            {
+                if let Some(store) = module.entity_store() {
+                    if let Ok(Some(entity)) = store.get_entity(&entity_id).await {
+                        data.insert(
+                            "primary_mount".into(),
+                            Value::String(entity.primary_mount),
+                        );
+                        data.insert(
+                            "primary_name".into(),
+                            Value::String(entity.primary_name),
+                        );
+                        data.insert(
+                            "created_at".into(),
+                            Value::String(entity.created_at),
+                        );
+                        data.insert(
+                            "aliases".into(),
+                            Value::Array(
+                                entity
+                                    .aliases
+                                    .into_iter()
+                                    .map(|a| {
+                                        let mut m = Map::new();
+                                        m.insert(
+                                            "mount".into(),
+                                            Value::String(a.mount),
+                                        );
+                                        m.insert("name".into(), Value::String(a.name));
+                                        Value::Object(m)
+                                    })
+                                    .collect(),
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_kv_owner_read(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let path_b64 = req.get_data("path")?.as_str().unwrap_or("").to_string();
+        let path = decode_b64url_path(&path_b64)
+            .ok_or_else(|| bv_error_string!("invalid path segment (expected base64url)"))?;
+
+        let module = self
+            .core
+            .module_manager
+            .get_module::<IdentityModule>("identity")
+            .ok_or_else(|| bv_error_string!("identity module unavailable"))?;
+        let store = module
+            .owner_store()
+            .ok_or_else(|| bv_error_string!("owner store unavailable"))?;
+
+        let rec = store.get_kv_owner(&path).await?;
+        Ok(Some(Response::data_response(Some(owner_response(
+            "kv-secret",
+            &path,
+            rec,
+        )))))
+    }
+
+    pub async fn handle_resource_owner_read(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
+
+        let module = self
+            .core
+            .module_manager
+            .get_module::<IdentityModule>("identity")
+            .ok_or_else(|| bv_error_string!("identity module unavailable"))?;
+        let store = module
+            .owner_store()
+            .ok_or_else(|| bv_error_string!("owner store unavailable"))?;
+
+        let rec = store.get_resource_owner(&name).await?;
+        Ok(Some(Response::data_response(Some(owner_response(
+            "resource", &name, rec,
+        )))))
+    }
+
     pub async fn handle_noop(
         &self,
         _backend: &dyn Backend,
@@ -614,6 +1127,7 @@ impl IdentityModule {
             group_store: ArcSwap::new(Arc::new(None)),
             entity_store: ArcSwap::new(Arc::new(None)),
             owner_store: ArcSwap::new(Arc::new(None)),
+            share_store: ArcSwap::new(Arc::new(None)),
         }
     }
 
@@ -627,6 +1141,10 @@ impl IdentityModule {
 
     pub fn owner_store(&self) -> Option<Arc<OwnerStore>> {
         self.owner_store.load().as_ref().clone()
+    }
+
+    pub fn share_store(&self) -> Option<Arc<ShareStore>> {
+        self.share_store.load().as_ref().clone()
     }
 }
 
@@ -659,6 +1177,8 @@ impl Module for IdentityModule {
         self.entity_store.store(Arc::new(Some(es)));
         let os = OwnerStore::new(core).await?;
         self.owner_store.store(Arc::new(Some(os)));
+        let ss = ShareStore::new(core).await?;
+        self.share_store.store(Arc::new(Some(ss)));
         Ok(())
     }
 
@@ -666,6 +1186,7 @@ impl Module for IdentityModule {
         self.group_store.store(Arc::new(None));
         self.entity_store.store(Arc::new(None));
         self.owner_store.store(Arc::new(None));
+        self.share_store.store(Arc::new(None));
         core.delete_logical_backend("identity")
     }
 }
@@ -679,6 +1200,131 @@ mod identity_tests {
         new_unseal_test_bastion_vault, test_delete_api, test_list_api, test_read_api,
         test_write_api,
     };
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_share_store_roundtrip_and_cascade() {
+        let (_bvault, core, _root_token) =
+            new_unseal_test_bastion_vault("test_share_store_roundtrip_and_cascade").await;
+
+        let store = ShareStore::new(&core).await.unwrap();
+
+        // Create a KV-secret share for grantee 'ent-bob' on 'secret/foo'.
+        let share = SecretShare {
+            target_kind: "kv-secret".into(),
+            target_path: "secret/foo".into(),
+            grantee_entity_id: "ent-bob".into(),
+            granted_by_entity_id: "ent-alice".into(),
+            capabilities: vec!["read".into(), "list".into()],
+            granted_at: String::new(),
+            expires_at: String::new(),
+        };
+        let stored = store.set_share(share).await.unwrap();
+        assert_eq!(stored.capabilities, vec!["read".to_string(), "list".to_string()]);
+
+        // Round-trip read.
+        let got = store
+            .get_share(ShareTargetKind::KvSecret, "secret/foo", "ent-bob")
+            .await
+            .unwrap();
+        assert!(got.is_some(), "share should be readable by (kind, path, grantee)");
+
+        // KV-v2 path form resolves to the same canonical key.
+        let got_v2 = store
+            .get_share(ShareTargetKind::KvSecret, "secret/data/foo", "ent-bob")
+            .await
+            .unwrap();
+        assert!(got_v2.is_some(), "v2 `secret/data/foo` should canonicalize to `secret/foo`");
+
+        // shared_capabilities returns the stored list.
+        let caps = store
+            .shared_capabilities(ShareTargetKind::KvSecret, "secret/foo", "ent-bob")
+            .await
+            .unwrap();
+        assert_eq!(caps, vec!["read".to_string(), "list".to_string()]);
+
+        // by-grantee lookup returns one pointer.
+        let ptrs = store.list_shares_for_grantee("ent-bob").await.unwrap();
+        assert_eq!(ptrs.len(), 1);
+        assert_eq!(ptrs[0].target_kind, "kv-secret");
+        assert_eq!(ptrs[0].target_path, "secret/foo");
+
+        // by-target lookup returns one share.
+        let shares = store
+            .list_shares_for_target(ShareTargetKind::KvSecret, "secret/foo")
+            .await
+            .unwrap();
+        assert_eq!(shares.len(), 1);
+
+        // Cascade delete drops the share, reverse pointer, and capabilities.
+        let removed = store
+            .cascade_delete_target(ShareTargetKind::KvSecret, "secret/foo")
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+
+        let got = store
+            .get_share(ShareTargetKind::KvSecret, "secret/foo", "ent-bob")
+            .await
+            .unwrap();
+        assert!(got.is_none());
+        let ptrs = store.list_shares_for_grantee("ent-bob").await.unwrap();
+        assert!(ptrs.is_empty());
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_share_store_rejects_invalid_inputs() {
+        let (_bvault, core, _root_token) =
+            new_unseal_test_bastion_vault("test_share_store_rejects_invalid_inputs").await;
+        let store = ShareStore::new(&core).await.unwrap();
+
+        // Empty grantee → error.
+        let err = store
+            .set_share(SecretShare {
+                target_kind: "kv-secret".into(),
+                target_path: "secret/foo".into(),
+                grantee_entity_id: "".into(),
+                capabilities: vec!["read".into()],
+                ..Default::default()
+            })
+            .await;
+        assert!(err.is_err());
+
+        // Empty capabilities → error.
+        let err = store
+            .set_share(SecretShare {
+                target_kind: "kv-secret".into(),
+                target_path: "secret/foo".into(),
+                grantee_entity_id: "ent-x".into(),
+                capabilities: vec![],
+                ..Default::default()
+            })
+            .await;
+        assert!(err.is_err());
+
+        // Unknown capability is filtered out; if nothing remains → error.
+        let err = store
+            .set_share(SecretShare {
+                target_kind: "kv-secret".into(),
+                target_path: "secret/foo".into(),
+                grantee_entity_id: "ent-x".into(),
+                capabilities: vec!["sudo".into(), "deny".into()],
+                ..Default::default()
+            })
+            .await;
+        assert!(err.is_err());
+
+        // Bad target_kind → error.
+        let err = store
+            .set_share(SecretShare {
+                target_kind: "not-a-kind".into(),
+                target_path: "secret/foo".into(),
+                grantee_entity_id: "ent-x".into(),
+                capabilities: vec!["read".into()],
+                ..Default::default()
+            })
+            .await;
+        assert!(err.is_err());
+    }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_identity_user_group_crud() {

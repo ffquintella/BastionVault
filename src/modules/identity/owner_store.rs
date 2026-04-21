@@ -129,6 +129,31 @@ impl OwnerStore {
     /// Drop the owner record for `path`. Called on KV delete so a
     /// later write by a different caller correctly captures new
     /// ownership.
+    /// Unconditionally set the owner of a KV secret, overwriting any
+    /// existing owner record. Used by the admin ownership-transfer
+    /// endpoint — callers who want "first write wins" semantics must
+    /// use `record_kv_owner_if_absent` instead.
+    pub async fn set_kv_owner(
+        &self,
+        path: &str,
+        entity_id: &str,
+    ) -> Result<(), RvError> {
+        let Some(canonical) = Self::canonicalize_kv_path(path) else {
+            return Err(crate::bv_error_string!("invalid KV path"));
+        };
+        let entity_id = entity_id.trim();
+        if entity_id.is_empty() {
+            return Err(crate::bv_error_string!("entity_id is required"));
+        }
+        let key = Self::kv_key(&canonical);
+        let rec = OwnerRecord {
+            entity_id: entity_id.to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        let value = serde_json::to_vec(&rec)?;
+        self.kv_view.put(&StorageEntry { key, value }).await
+    }
+
     pub async fn forget_kv_owner(&self, path: &str) -> Result<(), RvError> {
         let Some(canonical) = Self::canonicalize_kv_path(path) else {
             return Ok(());
@@ -166,6 +191,29 @@ impl OwnerStore {
         }
         if self.resource_view.get(&key).await?.is_some() {
             return Ok(());
+        }
+        let rec = OwnerRecord {
+            entity_id: entity_id.to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        let value = serde_json::to_vec(&rec)?;
+        self.resource_view.put(&StorageEntry { key, value }).await
+    }
+
+    /// Unconditional overwrite of a resource owner record. Mirror of
+    /// `set_kv_owner`.
+    pub async fn set_resource_owner(
+        &self,
+        resource: &str,
+        entity_id: &str,
+    ) -> Result<(), RvError> {
+        let key = resource.trim().to_lowercase();
+        if key.is_empty() || key.contains('/') {
+            return Err(crate::bv_error_string!("invalid resource name"));
+        }
+        let entity_id = entity_id.trim();
+        if entity_id.is_empty() {
+            return Err(crate::bv_error_string!("entity_id is required"));
         }
         let rec = OwnerRecord {
             entity_id: entity_id.to_string(),

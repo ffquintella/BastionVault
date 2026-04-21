@@ -14,6 +14,7 @@ type LoginStep = "username" | "password";
 export function LoginPage() {
   const navigate = useNavigate();
   const setAuth = useAuthStore((s) => s.setAuth);
+  const loadEntity = useAuthStore((s) => s.loadEntity);
   const mode = useVaultStore((s) => s.mode);
   const [tab, setTab] = useState<Tab>("login");
   const [error, setError] = useState<string | null>(null);
@@ -93,6 +94,10 @@ export function LoginPage() {
     try {
       const result = await api.loginToken(token);
       setAuth(result.token, result.policies);
+      // Best-effort: populate the caller's entity_id so ownership &
+      // sharing UI knows "who am I?". Failure is silent — features
+      // gracefully degrade to "owner unknown".
+      loadEntity().catch(() => {});
       navigate("/dashboard");
     } catch (err: unknown) {
       setError(extractError(err));
@@ -135,6 +140,10 @@ export function LoginPage() {
     try {
       const result = await api.loginUserpass(username, password);
       setAuth(result.token, result.policies);
+      // Best-effort: populate the caller's entity_id so ownership &
+      // sharing UI knows "who am I?". Failure is silent — features
+      // gracefully degrade to "owner unknown".
+      loadEntity().catch(() => {});
       navigate("/dashboard");
     } catch (err: unknown) {
       setError(extractError(err));

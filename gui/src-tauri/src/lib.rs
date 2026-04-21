@@ -184,6 +184,16 @@ pub fn run() {
             commands::asset_groups::list_asset_group_history,
             commands::asset_groups::asset_groups_for_resource,
             commands::asset_groups::asset_groups_for_secret,
+            // Per-user scoping: entity, owner, sharing, transfer
+            commands::sharing::get_entity_self,
+            commands::sharing::get_kv_owner,
+            commands::sharing::get_resource_owner,
+            commands::sharing::list_shares_for_grantee,
+            commands::sharing::list_shares_for_target,
+            commands::sharing::put_share,
+            commands::sharing::delete_share,
+            commands::sharing::transfer_kv_owner,
+            commands::sharing::transfer_resource_owner,
             // FIDO2
             commands::fido2_native::fido2_native_register,
             commands::fido2_native::fido2_native_login,

@@ -240,6 +240,16 @@ impl FromStr for Policy {
 
         policy.init(&policy_config)?;
 
+        // Auto-detect templated paths (e.g. `secret/data/users/{{username}}/*`)
+        // so callers don't need to set `templated = true` explicitly. The
+        // PolicyStore consults this flag in `new_acl_for_request` to decide
+        // whether to run substitution. False positives are harmless — the
+        // substitution pass is a no-op for policies with literal `{{` inside
+        // strings that don't happen to match any known placeholder.
+        if policy.paths.iter().any(|r| r.path.contains("{{")) {
+            policy.templated = true;
+        }
+
         Ok(policy)
     }
 }

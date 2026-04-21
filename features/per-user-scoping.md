@@ -1,9 +1,18 @@
 # Per-User Scoping (Ownership & Sharing)
 
-Status: **Phases 1, 3, 4, 5, 6 shipped** — the two baseline roles
-(`standard-user-readonly`, `secret-author`) are live. Policy templating
-(phase 2), GUI (phase 7), sharing (phases 8–9), and admin
-ownership-transfer (phase 10) remain pending.
+Status: **All ten phases shipped** — the two baseline roles
+(`standard-user-readonly`, `secret-author`) are live; policy templating
+(`{{username}}`, `{{entity.id}}`, `{{auth.mount}}`) is wired in at
+ACL compile time with fail-closed unresolved-placeholder semantics;
+the `shared` ACL scope is wired end-to-end against the `ShareStore`;
+admin ownership-transfer endpoints exist at
+`POST /v2/sys/{kv,resource}-owner/transfer`; the GUI surfaces a
+`/sharing` page (Shared with me + Manage target tabs) plus a
+per-resource Sharing tab that shows owner info, an active-share
+table with Revoke, a Grant-access modal, and an admin-only
+Transfer-ownership modal. Share re-sharing (a sharee creating further
+shares) is intentionally not supported; doing so requires the caller
+to own the target or hold an admin capability.
 
 ## Goal
 
@@ -264,10 +273,10 @@ owner/share stores the same way.
 | 4 | KV-secret owner store + write/delete hooks; list-filtering for `owner` scope | Done |
 | 5 | Resource owner record + write/delete hooks; list-filtering | Done |
 | 6 | Seeded `standard-user-readonly` and `secret-author` policies | Done |
-| 7 | GUI: show "owner" column on resources/secrets lists; "only show mine" toggle | Pending |
-| 8 | Sharing MVP: `SecretShare` store + v2 API + evaluator hook | Pending |
-| 9 | Sharing GUI: share dialog, "shared with me" section, revoke flow | Pending |
-| 10 | Admin ownership-transfer endpoints + GUI | Pending |
+| 7 | GUI: owner info on resource detail; Sharing tab; /sharing page with Shared-with-me + Manage-target tabs | Done |
+| 8 | Sharing MVP: `SecretShare` store + v2 API + evaluator hook | Done |
+| 9 | Sharing GUI: share dialog, "shared with me" section, revoke flow | Done |
+| 10 | Admin ownership-transfer endpoints + GUI | Done |
 
 Phases 1–6 deliver the two baseline roles the operator asked for
 (`standard-user-readonly` and `secret-author`).

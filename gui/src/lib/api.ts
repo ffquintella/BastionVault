@@ -36,6 +36,11 @@ import type {
   AssetGroupInfo,
   AssetGroupHistoryResult,
   AssetGroupLookupResult,
+  EntitySelf,
+  OwnerInfo,
+  ShareEntry,
+  SharePointer,
+  ShareTargetKind,
   Fido2Config,
   Fido2ChallengeResponse,
   Fido2LoginResponse,
@@ -236,6 +241,41 @@ export const assetGroupsForResource = (resource: string) =>
   invoke<AssetGroupLookupResult>("asset_groups_for_resource", { resource });
 export const assetGroupsForSecret = (path: string) =>
   invoke<AssetGroupLookupResult>("asset_groups_for_secret", { path });
+
+// Per-user scoping: entity introspection, owner lookup, sharing,
+// admin ownership transfer. See features/per-user-scoping.md.
+export const getEntitySelf = () => invoke<EntitySelf>("get_entity_self");
+export const getKvOwner = (path: string) =>
+  invoke<OwnerInfo>("get_kv_owner", { path });
+export const getResourceOwner = (name: string) =>
+  invoke<OwnerInfo>("get_resource_owner", { name });
+export const listSharesForGrantee = (grantee: string) =>
+  invoke<SharePointer[]>("list_shares_for_grantee", { grantee });
+export const listSharesForTarget = (kind: ShareTargetKind, targetPath: string) =>
+  invoke<ShareEntry[]>("list_shares_for_target", { kind, targetPath });
+export const putShare = (
+  kind: ShareTargetKind,
+  targetPath: string,
+  grantee: string,
+  capabilities: string[],
+  expiresAt: string,
+) =>
+  invoke<ShareEntry>("put_share", {
+    kind,
+    targetPath,
+    grantee,
+    capabilities,
+    expiresAt,
+  });
+export const deleteShare = (
+  kind: ShareTargetKind,
+  targetPath: string,
+  grantee: string,
+) => invoke<void>("delete_share", { kind, targetPath, grantee });
+export const transferKvOwner = (path: string, newOwnerEntityId: string) =>
+  invoke<void>("transfer_kv_owner", { path, newOwnerEntityId });
+export const transferResourceOwner = (resource: string, newOwnerEntityId: string) =>
+  invoke<void>("transfer_resource_owner", { resource, newOwnerEntityId });
 
 // FIDO2
 export const fido2ConfigRead = () => invoke<Fido2Config | null>("fido2_config_read");
