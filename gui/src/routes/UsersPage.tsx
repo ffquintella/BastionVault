@@ -15,6 +15,7 @@ import {
 } from "../components/ui";
 import { useWebAuthn } from "../hooks/useWebAuthn";
 import { usePasswordPolicyStore } from "../stores/passwordPolicyStore";
+import { useEntityDirectoryStore } from "../stores/entityDirectoryStore";
 import { checkPasswordPolicy, describePolicy } from "../lib/password";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
@@ -191,6 +192,11 @@ export function UsersPage() {
       setShowCreate(false);
       resetForm();
       loadUsers();
+      // The userpass create handler pre-provisions the entity alias
+      // so the new login appears in share pickers without a relogin.
+      // Refresh the cache so already-mounted EntityPickers / labels
+      // pick it up immediately.
+      useEntityDirectoryStore.getState().refresh().catch(() => {});
     } catch (e: unknown) {
       toast("error", extractError(e));
     }
@@ -227,6 +233,8 @@ export function UsersPage() {
       toast("success", `User ${deleteUser} deleted`);
       setDeleteUser(null);
       loadUsers();
+      // Drop the deleted user from the picker cache.
+      useEntityDirectoryStore.getState().refresh().catch(() => {});
     } catch (e: unknown) {
       toast("error", extractError(e));
     }

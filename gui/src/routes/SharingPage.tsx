@@ -6,6 +6,7 @@ import {
   Button,
   Card,
   EmptyState,
+  EntityLabel,
   EntityPicker,
   Input,
   Modal,
@@ -341,9 +342,7 @@ function ShareTable({
     {
       key: "grantee",
       header: "Grantee",
-      render: (s: ShareEntry) => (
-        <span className="font-mono text-xs truncate">{s.grantee_entity_id}</span>
-      ),
+      render: (s: ShareEntry) => <EntityLabel entityId={s.grantee_entity_id} />,
     },
     {
       key: "caps",

@@ -8,6 +8,7 @@ import {
   MaskedValue,
   Breadcrumb,
   EmptyState,
+  EntityLabel,
   EntityPicker,
   GroupsSection,
   Modal,
@@ -654,7 +655,7 @@ function SecretSharingPanel({
         </div>
         {owner?.owned ? (
           <div className="flex items-center gap-2">
-            <span className="font-mono text-xs">{owner.entity_id}</span>
+            <EntityLabel entityId={owner.entity_id} callerEntityId={entityId} />
             {isOwner && <Badge label="You" variant="success" />}
           </div>
         ) : (
@@ -681,9 +682,7 @@ function SecretSharingPanel({
                 key: "grantee",
                 header: "Grantee",
                 render: (s: ShareEntry) => (
-                  <span className="font-mono text-xs truncate">
-                    {s.grantee_entity_id}
-                  </span>
+                  <EntityLabel entityId={s.grantee_entity_id} />
                 ),
               },
               {

@@ -14,6 +14,7 @@ import {
   Modal,
   ConfirmModal,
   EmptyState,
+  EntityLabel,
   EntityPicker,
   GroupsSection,
   SecretPairsEditor,
@@ -1019,8 +1020,11 @@ function ResourceSharingCard({
         {owner?.owned ? (
           <div className="space-y-1 text-sm">
             <div className="flex items-center gap-2">
-              <span className="text-[var(--color-text-muted)] text-xs">entity_id</span>
-              <span className="font-mono text-xs">{owner.entity_id}</span>
+              <span className="text-[var(--color-text-muted)] text-xs">owner</span>
+              <EntityLabel
+                entityId={owner.entity_id}
+                callerEntityId={entityId}
+              />
               {owner.entity_id === entityId && entityId !== "" && (
                 <Badge label="You" variant="success" />
               )}
@@ -1066,7 +1070,7 @@ function ResourceSharingCard({
                 key: "grantee",
                 header: "Grantee",
                 render: (s: ShareEntry) => (
-                  <span className="font-mono text-xs truncate">{s.grantee_entity_id}</span>
+                  <EntityLabel entityId={s.grantee_entity_id} />
                 ),
               },
               {

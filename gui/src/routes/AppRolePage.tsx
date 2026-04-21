@@ -15,6 +15,7 @@ import {
 import type { AppRoleInfo, SecretIdAccessorInfo } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
+import { useEntityDirectoryStore } from "../stores/entityDirectoryStore";
 
 export function AppRolePage() {
   const { toast } = useToast();
@@ -93,6 +94,10 @@ export function AppRolePage() {
       setNewPolicies("");
       loadRoles();
       selectRole(newName);
+      // approle write_role pre-provisions an entity alias on first
+      // create — refresh the share-picker cache so the new role
+      // shows up immediately.
+      useEntityDirectoryStore.getState().refresh().catch(() => {});
     } catch (e: unknown) {
       toast("error", extractError(e));
     }
@@ -109,6 +114,8 @@ export function AppRolePage() {
       }
       setDeleteTarget(null);
       loadRoles();
+      // Drop the deleted role from the picker cache.
+      useEntityDirectoryStore.getState().refresh().catch(() => {});
     } catch (e: unknown) {
       toast("error", extractError(e));
     }

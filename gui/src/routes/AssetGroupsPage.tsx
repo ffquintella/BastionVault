@@ -11,6 +11,7 @@ import {
   Modal,
   ConfirmModal,
   EmptyState,
+  EntityLabel,
   EntityPicker,
   GroupHistoryPanel,
   useToast,
@@ -527,10 +528,16 @@ function AssetGroupDetail({ info, onEdit, onDelete, onReload }: AssetGroupDetail
               <div className="grid grid-cols-2 gap-4 text-sm">
                 <DetailRow label="Resources" value={String(info.members.length)} />
                 <DetailRow label="Secrets" value={String(info.secrets.length)} />
-                <DetailRow
-                  label="Owner"
-                  value={info.owner_entity_id || "(unowned — root token create)"}
-                />
+                <div className="flex justify-between items-center py-1.5 border-b border-[var(--color-border)]">
+                  <span className="text-[var(--color-text-muted)]">Owner</span>
+                  {info.owner_entity_id ? (
+                    <EntityLabel entityId={info.owner_entity_id} />
+                  ) : (
+                    <span className="text-xs text-[var(--color-text-muted)] italic">
+                      (unowned)
+                    </span>
+                  )}
+                </div>
                 <DetailRow label="Created" value={info.created_at || "-"} />
                 <DetailRow label="Updated" value={info.updated_at || "-"} />
               </div>
@@ -731,8 +738,11 @@ function AssetGroupSharingCard({
         {info.owner_entity_id ? (
           <div className="space-y-1 text-sm">
             <div className="flex items-center gap-2">
-              <span className="text-[var(--color-text-muted)] text-xs">entity_id</span>
-              <span className="font-mono text-xs">{info.owner_entity_id}</span>
+              <span className="text-[var(--color-text-muted)] text-xs">owner</span>
+              <EntityLabel
+                entityId={info.owner_entity_id}
+                callerEntityId={entityId}
+              />
               {isOwner && <Badge label="You" variant="success" />}
             </div>
           </div>
@@ -772,7 +782,7 @@ function AssetGroupSharingCard({
                 key: "grantee",
                 header: "Grantee",
                 render: (s: ShareEntry) => (
-                  <span className="font-mono text-xs truncate">{s.grantee_entity_id}</span>
+                  <EntityLabel entityId={s.grantee_entity_id} />
                 ),
               },
               {
