@@ -8,6 +8,7 @@ import {
   EmptyState,
   EntityLabel,
   EntityPicker,
+  TargetPicker,
   Input,
   Modal,
   Select,
@@ -175,21 +176,26 @@ export function SharingPage() {
               <Select
                 label="Kind"
                 value={manageKind}
-                onChange={(e) => setManageKind(e.target.value as ShareTargetKind)}
+                onChange={(e) => {
+                  setManageKind(e.target.value as ShareTargetKind);
+                  // Changing kind invalidates the previous free-text
+                  // path and the shares list that was loaded against it.
+                  setManagePath("");
+                  setShares([]);
+                }}
                 options={[
                   { value: "resource", label: "Resource" },
                   { value: "kv-secret", label: "KV secret" },
                 ]}
               />
-              <Input
-                label={manageKind === "resource" ? "Resource name" : "KV path"}
-                value={managePath}
-                onChange={(e) => setManagePath(e.target.value)}
-                placeholder={
-                  manageKind === "resource" ? "server-01" : "secret/foo/bar"
-                }
-                className="flex-1"
-              />
+              <div className="flex-1">
+                <TargetPicker
+                  label={manageKind === "resource" ? "Resource name" : "KV path"}
+                  kind={manageKind}
+                  value={managePath}
+                  onChange={setManagePath}
+                />
+              </div>
               <Button onClick={loadSharesForTarget} disabled={!managePath.trim()}>
                 Load
               </Button>
