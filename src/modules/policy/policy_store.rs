@@ -1205,19 +1205,20 @@ fn substitute_path(
         let end = after.find("}}")?;
         let key = after[..end].trim();
         let value = match key {
-            "username" => {
+            // BastionVault-native vocabulary.
+            "username" | "identity.entity.name" => {
                 if username.is_empty() {
                     return None;
                 }
                 username
             }
-            "entity.id" => {
+            "entity.id" | "identity.entity.id" => {
                 if entity_id.is_empty() {
                     return None;
                 }
                 entity_id
             }
-            "auth.mount" => {
+            "auth.mount" | "identity.entity.mount" => {
                 if auth_mount.is_empty() {
                     return None;
                 }

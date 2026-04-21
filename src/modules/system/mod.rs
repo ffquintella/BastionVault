@@ -1098,6 +1098,104 @@ mod mod_system_tests {
         assert_eq!(ret["secret"]["identity/"]["type"], Value::String("identity".into()));
     }
 
+    /// Defense-in-depth regression: a userpass caller with only the
+    /// `default` policy must NOT see any secret-engine or auth-method
+    /// mounts via `sys/internal/ui/mounts`. This is the endpoint the
+    /// Tauri dashboard now routes through after we closed the
+    /// bypass that previously read the router's mount table directly.
+    /// If a regression reintroduces that bypass — or the ACL filter
+    /// in `handle_internal_ui_mounts_read` starts leaking — this test
+    /// catches it.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_system_internal_ui_mounts_default_policy_sees_nothing() {
+        let mut test_http_server =
+            TestHttpServer::new("test_system_internal_ui_mounts_default_policy_sees_nothing", true)
+                .await;
+
+        // Mount userpass and provision a user with only `default`.
+        test_http_server.token = test_http_server.root_token.clone();
+        let _ = test_http_server
+            .write(
+                "sys/auth/pass",
+                serde_json::json!({ "type": "userpass" }).as_object().cloned(),
+                None,
+            )
+            .unwrap();
+        let _ = test_http_server
+            .write(
+                "auth/pass/users/felipe",
+                serde_json::json!({
+                    "password": "hunter22XX!",
+                    "token_policies": "default",
+                    "ttl": 0,
+                })
+                .as_object()
+                .cloned(),
+                None,
+            )
+            .unwrap();
+
+        // Log in as felipe.
+        let login = test_http_server
+            .write(
+                "auth/pass/login/felipe",
+                serde_json::json!({ "password": "hunter22XX!" })
+                    .as_object()
+                    .cloned(),
+                None,
+            )
+            .unwrap()
+            .1;
+        let felipe_token = login
+            .get("auth")
+            .and_then(|a| a.get("client_token"))
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+
+        // IMPORTANT: pass felipe's token explicitly. The helper falls
+        // back to `self.root_token` when the per-call token is `None`;
+        // using `test_http_server.token = ...` only helps the sidecar
+        // VAULT_TOKEN path, not the HTTP `request` method.
+        let ret = test_http_server.read("sys/internal/ui/mounts", Some(&felipe_token));
+        assert!(ret.is_ok(), "felipe should still be able to hit the endpoint");
+        let body = ret.unwrap().1;
+        let secret = body
+            .get("secret")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let auth = body
+            .get("auth")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+
+        // Mounts felipe MUST NOT see (no path in `default` grants
+        // anything under these mounts): secret/, resources/,
+        // resource-group/. If these appear, something leaked.
+        for hidden in ["secret/", "resources/", "resource-group/"] {
+            assert!(
+                !secret.contains_key(hidden),
+                "felipe must not see {hidden} on dashboard, got {:?}",
+                secret.keys().collect::<Vec<_>>(),
+            );
+        }
+        // Mounts felipe MAY see (default grants paths under these):
+        // sys/ via sys/capabilities-self etc., identity/ via the
+        // templated identity/entity/id/{{identity.entity.id}} rule
+        // (resolves to felipe's entity_id), auth/token/ via
+        // auth/token/lookup-self etc. No assertion that these must
+        // be present — only that the hidden mounts are absent.
+        for forbidden_auth in ["pass/"] {
+            assert!(
+                !auth.contains_key(forbidden_auth),
+                "felipe must not see {forbidden_auth} auth mount, got {:?}",
+                auth.keys().collect::<Vec<_>>(),
+            );
+        }
+    }
+
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_system_internal_ui_mounts_path() {
         let mut test_http_server = TestHttpServer::new("test_system_internal_ui_mounts_path", true).await;
