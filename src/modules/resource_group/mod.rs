@@ -40,6 +40,11 @@ use crate::{
 pub mod group_store;
 pub use group_store::{ResourceGroupEntry, ResourceGroupHistoryEntry, ResourceGroupStore};
 
+/// Sentinel returned in the `members` / `secrets` list when the caller
+/// has group-read access but not read access on an individual member.
+/// Keeps group cardinality truthful without leaking paths.
+pub const REDACTED_MEMBER: &str = "<hidden>";
+
 static RESOURCE_GROUP_BACKEND_HELP: &str = r#"
 The resource-group backend manages named collections of resources. Each
 group holds a list of resource names and carries a change-history log.
@@ -201,6 +206,73 @@ struct WritePayload {
     /// KV-secret paths. Same semantics as `members`.
     #[serde(default)]
     secrets: Option<Vec<String>>,
+}
+
+/// Replace each member in `entry.members` / `entry.secrets` with the
+/// `REDACTED_MEMBER` sentinel when `auth` does not have `Read` access
+/// on the corresponding target path. The owner and admin short-circuit
+/// (which bypasses this helper entirely) avoids the per-member cost
+/// for the common case where a caller sees their own groups in full.
+///
+/// Silent on any probe failure: if the policy module or subsystem is
+/// unavailable, the helper returns without modifying the entry, which
+/// preserves the pre-redaction behavior. Callers who want fail-closed
+/// behavior should guard at the handler level.
+async fn redact_inaccessible_members(
+    core: &Arc<Core>,
+    auth: &crate::logical::Auth,
+    entry: &mut ResourceGroupEntry,
+) {
+    use crate::modules::policy::PolicyModule;
+
+    let Some(policy_module) = core.module_manager.get_module::<PolicyModule>("policy") else {
+        return;
+    };
+    let store = policy_module.policy_store.load();
+
+    // Resource members — probe `resources/resources/<name>`.
+    for m in entry.members.iter_mut() {
+        if m == REDACTED_MEMBER {
+            continue;
+        }
+        let path = format!("resources/resources/{m}");
+        if !store.can_operate(auth, &path, Operation::Read).await {
+            *m = REDACTED_MEMBER.to_string();
+        }
+    }
+
+    // KV-secret members — stored in canonical logical form (no
+    // `data/` / `metadata/` segment). Policies on KV-v2 mounts are
+    // usually written against the v2 `<mount>/data/...` form, so we
+    // probe both shapes and consider the member visible if either
+    // check allows `Read`. Cheap on the common case (first probe
+    // matches).
+    for s in entry.secrets.iter_mut() {
+        if s == REDACTED_MEMBER {
+            continue;
+        }
+        let allowed = store.can_operate(auth, s, Operation::Read).await
+            || store
+                .can_operate(auth, &kv_v2_data_form(s), Operation::Read)
+                .await;
+        if !allowed {
+            *s = REDACTED_MEMBER.to_string();
+        }
+    }
+}
+
+/// Rewrite a canonical KV path (e.g., `secret/foo/bar`) into the
+/// KV-v2 API form (`secret/data/foo/bar`) for authorization probes.
+/// Returns the input unchanged when it already contains `/data/` or
+/// has no segments to insert into.
+fn kv_v2_data_form(canonical: &str) -> String {
+    let trimmed = canonical.trim_matches('/');
+    match trimmed.split_once('/') {
+        Some((head, rest)) if !rest.starts_with("data/") && !rest.starts_with("metadata/") => {
+            format!("{head}/data/{rest}")
+        }
+        _ => canonical.to_string(),
+    }
 }
 
 fn now_iso() -> String {
@@ -367,7 +439,41 @@ impl ResourceGroupBackendInner {
         let store = self.resolve_store()?;
         let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
         match store.get_group(&name).await? {
-            Some(entry) => Ok(Some(group_to_response(&entry))),
+            Some(mut entry) => {
+                // Member redaction: callers with read access on the
+                // group but not on a specific member see the member
+                // replaced by `<hidden>` rather than the path, so
+                // group cardinality remains truthful without leaking
+                // paths the caller can't read anyway.
+                //
+                // The owner sees everything unredacted (they wrote
+                // the members list in the first place); so do callers
+                // holding a broad admin policy. For everyone else we
+                // probe `Read` on each member's logical path via
+                // `PolicyStore::can_operate` and swap the path for
+                // the sentinel string on denial.
+                let caller_entity_id = req
+                    .auth
+                    .as_ref()
+                    .and_then(|a| a.metadata.get("entity_id"))
+                    .cloned()
+                    .unwrap_or_default();
+                let caller_is_owner = !entry.owner_entity_id.is_empty()
+                    && entry.owner_entity_id == caller_entity_id;
+                let caller_is_admin = req
+                    .auth
+                    .as_ref()
+                    .map(|a| a.policies.iter().any(|p| p == "root" || p == "admin"))
+                    .unwrap_or(false);
+
+                if !caller_is_owner && !caller_is_admin {
+                    if let Some(auth) = req.auth.clone() {
+                        redact_inaccessible_members(&self.core, &auth, &mut entry).await;
+                    }
+                }
+
+                Ok(Some(group_to_response(&entry)))
+            }
             None => Err(bv_error_response_status!(404, &format!("no resource group named: {}", name))),
         }
     }
@@ -612,6 +718,156 @@ mod resource_group_tests {
         new_unseal_test_bastion_vault, test_delete_api, test_list_api, test_read_api,
         test_write_api,
     };
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_asset_group_member_redaction_for_non_owner() {
+        // Members the caller cannot read are replaced with `<hidden>`
+        // on group read, but only for non-owner / non-admin callers.
+        // Owners and admins see everything unredacted.
+        use serde_json::json as j;
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_asset_group_member_redaction_for_non_owner").await;
+
+        // Create a custom policy: lets the caller read asset-group
+        // entries AND read KV secrets under `secret/data/ok/*`. That
+        // means they can read the group record but not secrets
+        // under `secret/data/forbidden/*`.
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "sys/policies/acl/redaction-tester",
+            true,
+            j!({
+                "policy": r#"
+                    path "resource-group/groups/*" {
+                        capabilities = ["read", "list"]
+                    }
+                    path "secret/data/ok/*" {
+                        capabilities = ["read"]
+                    }
+                "#
+            })
+            .as_object()
+            .cloned(),
+        )
+        .await
+        .unwrap();
+
+        // Provision a userpass user with the policy.
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "sys/auth/pass-r",
+            true,
+            j!({ "type": "userpass" }).as_object().cloned(),
+        )
+        .await;
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "auth/pass-r/users/carol",
+            true,
+            j!({
+                "password": "hunter22XX!",
+                "token_policies": "redaction-tester",
+                "ttl": 0,
+            })
+            .as_object()
+            .cloned(),
+        )
+        .await;
+
+        // Root creates an asset group whose `secrets` list has one
+        // path Carol can read (`secret/ok/a`) and one she can't
+        // (`secret/forbidden/a`). Plus a resource member Carol can't
+        // read (no `resources/*` grant in her policy).
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "resource-group/groups/mixed-visibility",
+            true,
+            j!({
+                "description": "mixed",
+                "members": "alpha",
+                "secrets": "secret/ok/a,secret/forbidden/a",
+            })
+            .as_object()
+            .cloned(),
+        )
+        .await
+        .unwrap();
+
+        // Login as Carol.
+        let mut login_req = Request::new("auth/pass-r/login/carol");
+        login_req.operation = Operation::Write;
+        login_req.body = j!({ "password": "hunter22XX!" }).as_object().cloned();
+        let resp = core.handle_request(&mut login_req).await.unwrap().unwrap();
+        let carol_token = resp.auth.unwrap().client_token;
+
+        // Sanity: write a KV-v2 entry at secret/data/ok/a and confirm
+        // Carol's policy actually grants her Read on it.
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "secret/data/ok/a",
+            true,
+            j!({ "data": { "v": "hi" } }).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+        let _ = test_read_api(&core, &carol_token, "secret/data/ok/a", true)
+            .await
+            .unwrap();
+
+        // Carol reads the group: secret/ok/a stays, secret/forbidden/a
+        // and the resource member (alpha) become `<hidden>`.
+        let resp = test_read_api(&core, &carol_token, "resource-group/groups/mixed-visibility", true)
+            .await
+            .unwrap()
+            .unwrap();
+        let body = resp.data.unwrap();
+        let members = body.get("members").and_then(|v| v.as_array()).unwrap().clone();
+        let secrets = body.get("secrets").and_then(|v| v.as_array()).unwrap().clone();
+
+        assert_eq!(
+            members,
+            vec![Value::String(REDACTED_MEMBER.to_string())],
+            "resource members Carol can't read should be redacted",
+        );
+        let secrets_strs: Vec<String> = secrets
+            .iter()
+            .map(|v| v.as_str().unwrap_or("").to_string())
+            .collect();
+        assert!(
+            secrets_strs.contains(&"secret/ok/a".to_string()),
+            "visible secret should be unredacted, got {secrets_strs:?}",
+        );
+        assert!(
+            secrets_strs.contains(&REDACTED_MEMBER.to_string()),
+            "forbidden secret should be redacted, got {secrets_strs:?}",
+        );
+        assert!(
+            !secrets_strs.contains(&"secret/forbidden/a".to_string()),
+            "forbidden secret path must not leak: {secrets_strs:?}",
+        );
+
+        // Root (admin) reads the same group and sees everything unredacted.
+        let resp = test_read_api(&core, &root_token, "resource-group/groups/mixed-visibility", true)
+            .await
+            .unwrap()
+            .unwrap();
+        let body = resp.data.unwrap();
+        let secrets_strs: Vec<String> = body
+            .get("secrets")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap_or("").to_string())
+            .collect();
+        assert!(secrets_strs.contains(&"secret/ok/a".to_string()));
+        assert!(secrets_strs.contains(&"secret/forbidden/a".to_string()));
+        assert!(!secrets_strs.contains(&REDACTED_MEMBER.to_string()));
+    }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_asset_group_admin_owner_transfer_roundtrip() {

@@ -540,8 +540,12 @@ function AssetGroupDetail({ info, onEdit, onDelete, onReload }: AssetGroupDetail
                     Resources
                   </label>
                   <div className="flex flex-wrap gap-1">
-                    {info.members.map((m) => (
-                      <Badge key={m} label={m} variant="info" />
+                    {info.members.map((m, i) => (
+                      <Badge
+                        key={`${i}-${m}`}
+                        label={m === "<hidden>" ? "hidden" : m}
+                        variant={m === "<hidden>" ? "neutral" : "info"}
+                      />
                     ))}
                   </div>
                 </div>
@@ -553,8 +557,12 @@ function AssetGroupDetail({ info, onEdit, onDelete, onReload }: AssetGroupDetail
                     Secrets
                   </label>
                   <div className="flex flex-wrap gap-1">
-                    {info.secrets.map((s) => (
-                      <Badge key={s} label={s} variant="info" />
+                    {info.secrets.map((s, i) => (
+                      <Badge
+                        key={`${i}-${s}`}
+                        label={s === "<hidden>" ? "hidden" : s}
+                        variant={s === "<hidden>" ? "neutral" : "info"}
+                      />
                     ))}
                   </div>
                 </div>
@@ -565,19 +573,31 @@ function AssetGroupDetail({ info, onEdit, onDelete, onReload }: AssetGroupDetail
           <Card title="Resources">
             <Table
               columns={resourceCols}
-              data={info.members}
+              data={info.members.filter((m) => m !== "<hidden>")}
               rowKey={(m) => m}
               emptyMessage="No resources in this group"
             />
+            {info.members.filter((m) => m === "<hidden>").length > 0 && (
+              <p className="text-xs text-[var(--color-text-muted)] mt-2 italic">
+                {info.members.filter((m) => m === "<hidden>").length} hidden
+                resource(s) you don't have read access to.
+              </p>
+            )}
           </Card>
 
           <Card title="Secrets">
             <Table
               columns={secretCols}
-              data={info.secrets}
+              data={info.secrets.filter((s) => s !== "<hidden>")}
               rowKey={(s) => s}
               emptyMessage="No secrets in this group"
             />
+            {info.secrets.filter((s) => s === "<hidden>").length > 0 && (
+              <p className="text-xs text-[var(--color-text-muted)] mt-2 italic">
+                {info.secrets.filter((s) => s === "<hidden>").length} hidden
+                secret(s) you don't have read access to.
+              </p>
+            )}
           </Card>
         </>
       )}

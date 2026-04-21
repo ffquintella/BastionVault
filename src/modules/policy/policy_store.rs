@@ -1499,6 +1499,53 @@ impl PolicyStore {
         module.owner_store()
     }
 
+    /// Probe whether `auth` is permitted to perform `op` on `path`.
+    ///
+    /// Runs the same per-target resolution and ACL evaluation as
+    /// `post_auth` — asset groups, owner record, and active shares
+    /// are all consulted — but in a dry-run mode that doesn't mutate
+    /// anything and doesn't care about side-effects. Intended for
+    /// handler code that needs to preview an authorization decision
+    /// against a *different* target than the one that triggered the
+    /// current request (e.g., the asset-group read handler deciding
+    /// whether to redact a member the caller can't see).
+    ///
+    /// Returns `Ok(false)` on any resolution error so a failure
+    /// silently narrows access rather than leaking it.
+    pub async fn can_operate(
+        &self,
+        auth: &crate::logical::Auth,
+        path: &str,
+        op: Operation,
+    ) -> bool {
+        if auth.policies.is_empty() {
+            return false;
+        }
+
+        let asset_groups = resolve_asset_groups(&self.core, path).await;
+        let asset_owner = resolve_asset_owner(&self.core, path).await;
+
+        let mut req = Request::default();
+        req.path = path.to_string();
+        req.operation = op;
+        req.auth = Some(auth.clone());
+        req.asset_groups = asset_groups;
+        req.asset_owner = asset_owner;
+        req.target_shared_caps = resolve_target_shared_caps(&self.core, &req).await;
+
+        let acl = match self
+            .new_acl_for_request(&auth.policies, None, auth)
+            .await
+        {
+            Ok(a) => a,
+            Err(_) => return false,
+        };
+        // `check_only=false` is required — with `true`, `Permissions::check`
+        // short-circuits without setting `allowed`, always returning
+        // `allowed=false`. The full gate is cheap for a read probe.
+        acl.allow_operation(&req, false).map(|r| r.allowed).unwrap_or(false)
+    }
+
     /// Upgrade the weak Core reference and fetch the share store from
     /// the identity module. Returns `None` when the subsystem is not
     /// loaded.
