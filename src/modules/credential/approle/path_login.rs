@@ -21,7 +21,7 @@ use crate::{
 /// still succeeds (with no `entity_id` metadata, which means any
 /// `scopes = ["owner"]` policy will not match — correct fail-closed
 /// behavior).
-async fn resolve_approle_entity_id(core: &Arc<Core>, role_name: &str) -> Option<String> {
+pub(crate) async fn resolve_approle_entity_id(core: &Arc<Core>, role_name: &str) -> Option<String> {
     let module = core
         .module_manager
         .get_module::<IdentityModule>("identity")?;

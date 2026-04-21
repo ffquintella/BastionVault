@@ -302,6 +302,16 @@ impl UserPassBackendInner {
 
         self.set_user(req, &username, &user_entry).await?;
 
+        // Pre-provision the entity_id alias so this user shows up in the
+        // GUI's user-picker (`/v2/identity/entity/aliases`) without
+        // having to log in first. Without this, a freshly-created user
+        // can't be selected as a grantee in share dialogs until after
+        // their first successful authentication — which is a footgun:
+        // admins want to grant access up-front. Silent on failure
+        // (module absent / store uninitialized); login will provision
+        // lazily the same way it always has.
+        let _ = super::path_login::resolve_entity_id(&self.core, "userpass/", &username).await;
+
         Ok(None)
     }
 
@@ -317,6 +327,23 @@ impl UserPassBackendInner {
         // Clean up any pending FIDO2 challenge state
         let _ = req.storage_delete(&format!("challenge/reg/{lc}")).await;
         let _ = req.storage_delete(&format!("challenge/auth/{lc}")).await;
+
+        // Drop the entity alias so the user disappears from the picker
+        // immediately. The entity record itself stays (shares and
+        // ownership records still point at its `entity_id`) so audit
+        // history isn't vaporised — only the `mount:name` lookup index
+        // is removed. Admins can recover by using the admin
+        // ownership-transfer endpoints. Silent on failure.
+        if let Some(module) = self
+            .core
+            .module_manager
+            .get_module::<crate::modules::identity::IdentityModule>("identity")
+        {
+            if let Some(store) = module.entity_store() {
+                let _ = store.forget_alias("userpass/", &lc).await;
+            }
+        }
+
         Ok(None)
     }
 

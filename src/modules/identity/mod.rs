@@ -1253,6 +1253,79 @@ mod identity_tests {
         test_write_api,
     };
 
+    /// Regression: a userpass user that has never logged in must
+    /// still appear in the alias list that drives the GUI user-picker.
+    /// Before the pre-provision hook in `write_user`, the alias was
+    /// only created on first login, so admins couldn't grant shares
+    /// to a freshly-created user until after they authenticated once.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_userpass_create_preprovisions_entity_alias() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_userpass_create_preprovisions_entity_alias").await;
+
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "sys/auth/pass",
+            true,
+            json!({ "type": "userpass" }).as_object().cloned(),
+        )
+        .await;
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "auth/pass/users/felipe",
+            true,
+            json!({
+                "password": "hunter22XX!",
+                "token_policies": "default",
+            })
+            .as_object()
+            .cloned(),
+        )
+        .await
+        .unwrap();
+
+        // The aliases list — which the GUI reads — must now contain
+        // felipe even though felipe has never logged in.
+        let resp = test_read_api(&core, &root_token, "identity/entity/aliases", true)
+            .await
+            .unwrap()
+            .unwrap();
+        let body = resp.data.unwrap();
+        let arr = body.get("aliases").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let has_felipe = arr.iter().any(|v| {
+            let o = v.as_object();
+            o.and_then(|o| o.get("name").and_then(|v| v.as_str())) == Some("felipe")
+                && o.and_then(|o| o.get("mount").and_then(|v| v.as_str())) == Some("userpass/")
+                && o.and_then(|o| o.get("entity_id").and_then(|v| v.as_str()))
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+        });
+        assert!(
+            has_felipe,
+            "freshly-created userpass user should appear in the alias list: {arr:?}",
+        );
+
+        // Delete the user → alias disappears from the list (entity
+        // record itself stays so audit trails are preserved, but the
+        // (mount,name) lookup is gone).
+        let _ = test_delete_api(&core, &root_token, "auth/pass/users/felipe", true, None).await;
+
+        let resp = test_read_api(&core, &root_token, "identity/entity/aliases", true)
+            .await
+            .unwrap()
+            .unwrap();
+        let body = resp.data.unwrap();
+        let arr = body.get("aliases").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let still_there = arr.iter().any(|v| {
+            v.as_object()
+                .and_then(|o| o.get("name").and_then(|v| v.as_str()))
+                == Some("felipe")
+        });
+        assert!(!still_there, "delete-user should forget the alias: {arr:?}");
+    }
+
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_share_store_roundtrip_and_cascade() {
         let (_bvault, core, _root_token) =

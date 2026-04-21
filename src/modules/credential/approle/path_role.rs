@@ -1170,6 +1170,14 @@ impl AppRoleBackendInner {
 
         self.set_role(req, &role_entry.name, &role_entry, &previous_role_id).await?;
 
+        // Pre-provision the entity_id alias so this role shows up in
+        // the GUI's user-picker (`/v2/identity/entity/aliases`) without
+        // the role having to log in first. Same rationale as the
+        // userpass user-create hook.
+        if create {
+            let _ = super::path_login::resolve_approle_entity_id(&self.core, &role_entry.name).await;
+        }
+
         Ok(None)
     }
 
@@ -1250,6 +1258,21 @@ impl AppRoleBackendInner {
             self.delete_role_id(req, &entry.role_id).await?;
 
             req.storage_delete(format!("role/{}", role_name.to_lowercase()).as_str()).await?;
+
+            // Drop the entity alias so the role disappears from the
+            // GUI user-picker immediately. Mirrors the delete-user
+            // hook in userpass. Entity record itself stays so audit
+            // history survives; only the (mount, name) lookup index
+            // is removed.
+            if let Some(module) = self
+                .core
+                .module_manager
+                .get_module::<crate::modules::identity::IdentityModule>("identity")
+            {
+                if let Some(store) = module.entity_store() {
+                    let _ = store.forget_alias("approle/", &entry.name).await;
+                }
+            }
         }
 
         Ok(None)

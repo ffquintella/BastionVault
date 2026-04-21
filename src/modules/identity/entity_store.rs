@@ -70,12 +70,19 @@ impl EntityStore {
         Ok(Arc::new(Self { entity_view, alias_view }))
     }
 
-    /// Key under the alias view for a (mount, name) pair. Mount keeps
-    /// its trailing slash so `userpass/` and `user/` can't collide; the
-    /// slash is escaped to keep the key flat within the BarrierView.
+    /// Storage key under the alias view for a `(mount, name)` pair.
+    /// Uses `/` as the separator so the underlying physical backend
+    /// can round-trip it on every OS. An earlier revision used `:`
+    /// which — because NTFS treats `:` as an alternate-data-stream
+    /// marker — silently broke the key layout on Windows file
+    /// backends: writes succeeded but `read_dir` only returned the
+    /// pre-`:` prefix, so `list_aliases` saw zero entries.
+    ///
+    /// The mount's trailing `/` is dropped so `userpass/` and
+    /// `userpass` map to the same storage subtree.
     fn alias_key(mount: &str, name: &str) -> String {
         let mount = mount.trim_end_matches('/');
-        format!("{mount}:{}", name.trim().to_lowercase())
+        format!("{mount}/{}", name.trim().to_lowercase())
     }
 
     /// Look up an entity by (mount, principal name). Returns `None`
@@ -139,6 +146,19 @@ impl EntityStore {
         Ok(entity)
     }
 
+    /// Remove the `(mount, name)` → `entity_id` lookup entry. The
+    /// entity record itself stays — share records and ownership
+    /// data still reference it, so wiping it would vaporise audit
+    /// trails. Callers use this when deleting the underlying
+    /// principal (userpass user, AppRole role) so the alias
+    /// disappears from the GUI user-picker immediately.
+    ///
+    /// Idempotent: missing keys are not errors.
+    pub async fn forget_alias(&self, mount: &str, name: &str) -> Result<(), RvError> {
+        let key = Self::alias_key(mount, name);
+        self.alias_view.delete(&key).await
+    }
+
     pub async fn list_entities(&self) -> Result<Vec<String>, RvError> {
         let mut keys = self.entity_view.get_keys().await?;
         keys.sort();
@@ -157,7 +177,10 @@ impl EntityStore {
         let keys = self.alias_view.get_keys().await?;
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
-            let Some((mount, name)) = key.split_once(':') else {
+            // Keys are stored as `<mount>/<name>`. `get_keys` returns
+            // the recursively-walked leaf paths, so `key` already
+            // contains the full `<mount>/<name>` form.
+            let Some((mount, name)) = key.split_once('/') else {
                 continue;
             };
             let uuid = match self.alias_view.get(&key).await? {
