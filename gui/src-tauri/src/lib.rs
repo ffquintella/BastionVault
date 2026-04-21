@@ -194,6 +194,7 @@ pub fn run() {
             commands::sharing::delete_share,
             commands::sharing::transfer_kv_owner,
             commands::sharing::transfer_resource_owner,
+            commands::sharing::transfer_asset_group_owner,
             // FIDO2
             commands::fido2_native::fido2_native_register,
             commands::fido2_native::fido2_native_login,

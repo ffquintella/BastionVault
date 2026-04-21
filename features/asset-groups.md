@@ -1,13 +1,18 @@
 # Asset Groups (Secrets & Resources Groups)
 
-Status: **Feature-complete for the single-tenant, non-ownership
-model.** Both the **resource half** and the **KV-secret half** of the
-object model, reverse indexes, HTTP API, history, lifecycle prunes on
-both sides, list-filter on group-gated LIST ops, policy-compile
-warnings for unknown groups, and the GUI are all implemented and
-tested — see [Resource Groups](resource-groups.md). The ACL
-`groups = [...]` qualifier is end-to-end. Ownership, admin transfer,
-and sharing remain design-only, blocked on per-user-scoping.
+Status: **Feature-complete.** Both the **resource half** and the
+**KV-secret half** of the object model, reverse indexes, HTTP API,
+history, lifecycle prunes on both sides, list-filter on group-gated
+LIST ops, and policy-compile warnings for unknown groups are shipped.
+The ACL `groups = [...]` qualifier is end-to-end. **Ownership**
+(`owner_entity_id` captured on first write, preserved across regular
+updates), **admin ownership transfer** (`POST /v2/sys/asset-group-owner/transfer`),
+and **sharing** (a new `ShareTargetKind::AssetGroup` plus indirect
+share resolution at authorize time) are now shipped as well. The GUI
+surfaces a per-group Sharing tab with owner card, shares table with
+Revoke, Grant-access modal, and an admin-only Transfer modal. Member
+redaction for read-but-no-read-member callers remains the only
+deferred item from the original design and is tracked separately.
 
 See `features/resource-groups.md` for the concrete implementation. The
 internal module name is still `resource_group` (mount
@@ -16,9 +21,11 @@ backward-compatibility with the resource-only ship; the operator-facing
 label remains "Group".
 
 The work items below that refer to storage, reverse indexes, the HTTP
-API, KV-path canonicalization, or the ACL qualifier are **done** —
-both halves. The remaining scope is ownership, admin transfer,
-sharing, the KV-delete lifecycle hook, and the GUI.
+API, KV-path canonicalization, the ACL qualifier, the KV-delete
+lifecycle hook, ownership capture, admin transfer, the sharing
+integration, and the GUI are **done**. The one remaining item is
+member redaction (callers who can read the group but not a specific
+member should see `<hidden>` for that member).
 
 > *Terminology:* internally the feature is called an **asset group** to
 > disambiguate from **identity groups** (which group *principals* —

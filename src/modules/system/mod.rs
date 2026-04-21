@@ -20,6 +20,7 @@ use crate::{
         auth::{AuthModule, AUTH_TABLE_TYPE},
         identity::IdentityModule,
         policy::{acl::ACL, PolicyModule},
+        resource_group::ResourceGroupModule,
         Module,
     },
     mount::{MountEntry, MOUNT_TABLE_TYPE},
@@ -88,6 +89,7 @@ impl SystemBackend {
         let sys_backend_policies_history = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_kv_owner_transfer = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_resource_owner_transfer = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_asset_group_owner_transfer = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_audit_table = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_audit_enable = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_audit_disable = self.self_ptr.upgrade().unwrap().clone();
@@ -299,6 +301,24 @@ impl SystemBackend {
                     },
                     operations: [
                         {op: Operation::Write, handler: sys_backend_resource_owner_transfer.handle_resource_owner_transfer}
+                    ]
+                },
+                {
+                    // Admin-only: transfer ownership of an asset group.
+                    // Body: { name, new_owner_entity_id }
+                    pattern: r"asset-group-owner/transfer$",
+                    fields: {
+                        "name": {
+                            field_type: FieldType::Str,
+                            description: "Asset group name."
+                        },
+                        "new_owner_entity_id": {
+                            field_type: FieldType::Str,
+                            description: "The entity_id that will become the new owner."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: sys_backend_asset_group_owner_transfer.handle_asset_group_owner_transfer}
                     ]
                 },
                 {
@@ -708,6 +728,45 @@ impl SystemBackend {
 
         let mut data = Map::new();
         data.insert("resource".into(), Value::String(resource));
+        data.insert("new_owner_entity_id".into(), Value::String(new_owner));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// Admin-only: transfer ownership of an asset group (the
+    /// resource-group store's internal representation). Access is
+    /// gated by the usual ACL on `sys/asset-group-owner/transfer`.
+    pub async fn handle_asset_group_owner_transfer(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let name = req
+            .get_data("name")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let new_owner = req
+            .get_data("new_owner_entity_id")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+
+        if name.trim().is_empty() || new_owner.trim().is_empty() {
+            return Err(bv_error_response_status!(
+                400,
+                "name and new_owner_entity_id are required"
+            ));
+        }
+
+        let module = self.get_module::<ResourceGroupModule>("resource-group")?;
+        let store = module.store().ok_or_else(|| {
+            bv_error_response_status!(500, "resource-group store not initialized")
+        })?;
+
+        store.set_owner(&name, &new_owner).await?;
+
+        let mut data = Map::new();
+        data.insert("name".into(), Value::String(name));
         data.insert("new_owner_entity_id".into(), Value::String(new_owner));
         Ok(Some(Response::data_response(Some(data))))
     }

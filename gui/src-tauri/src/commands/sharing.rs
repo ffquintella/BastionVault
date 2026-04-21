@@ -327,6 +327,28 @@ pub async fn transfer_kv_owner(
 }
 
 #[tauri::command]
+pub async fn transfer_asset_group_owner(
+    state: State<'_, AppState>,
+    name: String,
+    new_owner_entity_id: String,
+) -> CmdResult<()> {
+    let mut body = Map::new();
+    body.insert("name".into(), Value::String(name));
+    body.insert(
+        "new_owner_entity_id".into(),
+        Value::String(new_owner_entity_id),
+    );
+    make_request(
+        &state,
+        Operation::Write,
+        "sys/asset-group-owner/transfer".into(),
+        Some(body),
+    )
+    .await?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn transfer_resource_owner(
     state: State<'_, AppState>,
     resource: String,

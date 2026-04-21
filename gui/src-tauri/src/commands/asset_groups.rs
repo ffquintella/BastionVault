@@ -47,6 +47,7 @@ pub struct AssetGroupInfo {
     pub description: String,
     pub members: Vec<String>,
     pub secrets: Vec<String>,
+    pub owner_entity_id: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -143,6 +144,11 @@ pub async fn read_asset_group(
                     .to_string(),
                 members: data_string_list(data, "members"),
                 secrets: data_string_list(data, "secrets"),
+                owner_entity_id: data
+                    .and_then(|d| d.get("owner_entity_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 created_at: data
                     .and_then(|d| d.get("created_at"))
                     .and_then(|v| v.as_str())

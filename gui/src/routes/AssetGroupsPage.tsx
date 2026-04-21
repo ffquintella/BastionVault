@@ -18,9 +18,11 @@ import type {
   AssetGroupInfo,
   AssetGroupHistoryEntry,
   GroupHistoryEntry,
+  ShareEntry,
 } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
+import { useAuthStore } from "../stores/authStore";
 
 // Asset Groups page: named collections of resources + KV secrets. The
 // backend is the "resource-group" mount — see features/resource-groups.md.
@@ -264,6 +266,7 @@ export function AssetGroupsPage() {
                   info={selectedInfo}
                   onEdit={openEdit}
                   onDelete={() => setDeleteTarget(selected)}
+                  onReload={() => selectGroup(selected)}
                 />
               ) : (
                 <Card>
@@ -446,9 +449,11 @@ interface AssetGroupDetailProps {
   info: AssetGroupInfo;
   onEdit: () => void;
   onDelete: () => void;
+  /** Refetch the group after an owner transfer so the badge updates. */
+  onReload?: () => void;
 }
 
-function AssetGroupDetail({ info, onEdit, onDelete }: AssetGroupDetailProps) {
+function AssetGroupDetail({ info, onEdit, onDelete, onReload }: AssetGroupDetailProps) {
   const [tab, setTab] = useState("overview");
   const [history, setHistory] = useState<AssetGroupHistoryEntry[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -502,6 +507,7 @@ function AssetGroupDetail({ info, onEdit, onDelete }: AssetGroupDetailProps) {
         <Tabs
           tabs={[
             { id: "overview", label: "Overview" },
+            { id: "sharing", label: "Sharing" },
             { id: "history", label: "History" },
           ]}
           active={tab}
@@ -520,6 +526,10 @@ function AssetGroupDetail({ info, onEdit, onDelete }: AssetGroupDetailProps) {
               <div className="grid grid-cols-2 gap-4 text-sm">
                 <DetailRow label="Resources" value={String(info.members.length)} />
                 <DetailRow label="Secrets" value={String(info.secrets.length)} />
+                <DetailRow
+                  label="Owner"
+                  value={info.owner_entity_id || "(unowned — root token create)"}
+                />
                 <DetailRow label="Created" value={info.created_at || "-"} />
                 <DetailRow label="Updated" value={info.updated_at || "-"} />
               </div>
@@ -572,6 +582,13 @@ function AssetGroupDetail({ info, onEdit, onDelete }: AssetGroupDetailProps) {
         </>
       )}
 
+      {tab === "sharing" && (
+        <AssetGroupSharingCard
+          info={info}
+          onOwnerChange={() => onReload?.()}
+        />
+      )}
+
       {tab === "history" && (
         <Card title="Change History">
           <GroupHistoryPanel
@@ -580,6 +597,316 @@ function AssetGroupDetail({ info, onEdit, onDelete }: AssetGroupDetailProps) {
           />
         </Card>
       )}
+    </>
+  );
+}
+
+/**
+ * Owner + shares + admin-transfer affordances for an asset group.
+ * Mirrors `ResourceSharingCard` in ResourcesPage but targets the
+ * `asset-group` share kind: a single share here grants access to
+ * every current and future member of the group.
+ */
+function AssetGroupSharingCard({
+  info,
+  onOwnerChange,
+}: {
+  info: AssetGroupInfo;
+  onOwnerChange: () => void;
+}) {
+  const { toast } = useToast();
+  const [shares, setShares] = useState<ShareEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const policies = useAuthStore((s) => s.policies);
+  const entityId = useAuthStore((s) => s.entityId);
+  const isAdmin = policies.some((p) => p === "root" || p === "admin");
+  const isOwner =
+    info.owner_entity_id !== "" && info.owner_entity_id === entityId;
+  const canGrant = isOwner || isAdmin;
+
+  const [showGrant, setShowGrant] = useState(false);
+  const [grantee, setGrantee] = useState("");
+  const [caps, setCaps] = useState<string[]>(["read"]);
+  const [expires, setExpires] = useState("");
+
+  const [showTransfer, setShowTransfer] = useState(false);
+  const [newOwner, setNewOwner] = useState("");
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [info.name]);
+
+  async function load() {
+    setLoading(true);
+    try {
+      const s = await api
+        .listSharesForTarget("asset-group", info.name)
+        .catch(() => [] as ShareEntry[]);
+      setShares(s);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleGrant() {
+    try {
+      await api.putShare(
+        "asset-group",
+        info.name,
+        grantee.trim(),
+        caps,
+        expires.trim(),
+      );
+      toast("success", "Share granted");
+      setShowGrant(false);
+      setGrantee("");
+      setCaps(["read"]);
+      setExpires("");
+      load();
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
+  }
+
+  async function handleRevoke(s: ShareEntry) {
+    try {
+      await api.deleteShare("asset-group", s.target_path, s.grantee_entity_id);
+      toast("success", "Share revoked");
+      load();
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
+  }
+
+  async function handleTransfer() {
+    try {
+      await api.transferAssetGroupOwner(info.name, newOwner.trim());
+      toast("success", "Ownership transferred");
+      setShowTransfer(false);
+      setNewOwner("");
+      onOwnerChange();
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
+  }
+
+  function toggleCap(c: string) {
+    setCaps((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]));
+  }
+
+  return (
+    <>
+      <Card
+        title="Owner"
+        actions={
+          isAdmin ? (
+            <Button size="sm" variant="secondary" onClick={() => setShowTransfer(true)}>
+              Transfer
+            </Button>
+          ) : null
+        }
+      >
+        {info.owner_entity_id ? (
+          <div className="space-y-1 text-sm">
+            <div className="flex items-center gap-2">
+              <span className="text-[var(--color-text-muted)] text-xs">entity_id</span>
+              <span className="font-mono text-xs">{info.owner_entity_id}</span>
+              {isOwner && <Badge label="You" variant="success" />}
+            </div>
+          </div>
+        ) : (
+          <EmptyState
+            title="No owner"
+            description="This group was created by a root token or by a caller without an entity_id. Admins can use Transfer to adopt it."
+          />
+        )}
+      </Card>
+
+      <Card
+        title="Shares"
+        actions={
+          canGrant ? (
+            <Button size="sm" onClick={() => setShowGrant(true)}>
+              Grant access
+            </Button>
+          ) : null
+        }
+      >
+        {loading ? (
+          <p className="text-sm text-[var(--color-text-muted)]">Loading...</p>
+        ) : shares.length === 0 ? (
+          <EmptyState
+            title="No shares"
+            description={
+              canGrant
+                ? "Granting access here shares every current and future member of the group."
+                : "Only the owner or an admin can grant new shares on this group."
+            }
+          />
+        ) : (
+          <Table
+            columns={[
+              {
+                key: "grantee",
+                header: "Grantee",
+                render: (s: ShareEntry) => (
+                  <span className="font-mono text-xs truncate">{s.grantee_entity_id}</span>
+                ),
+              },
+              {
+                key: "caps",
+                header: "Capabilities",
+                render: (s: ShareEntry) => (
+                  <div className="flex flex-wrap gap-1">
+                    {s.capabilities.map((c) => (
+                      <Badge key={c} label={c} variant="info" />
+                    ))}
+                  </div>
+                ),
+              },
+              {
+                key: "granted",
+                header: "Granted",
+                render: (s: ShareEntry) => (
+                  <span className="text-xs text-[var(--color-text-muted)]">
+                    {s.granted_at ? new Date(s.granted_at).toLocaleString() : "-"}
+                  </span>
+                ),
+              },
+              {
+                key: "expires",
+                header: "Expires",
+                render: (s: ShareEntry) =>
+                  s.expires_at ? (
+                    <span
+                      className={`text-xs ${
+                        s.expired
+                          ? "text-[var(--color-danger)]"
+                          : "text-[var(--color-text-muted)]"
+                      }`}
+                    >
+                      {s.expires_at}
+                      {s.expired && " (expired)"}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-[var(--color-text-muted)]">never</span>
+                  ),
+              },
+              {
+                key: "revoke",
+                header: "",
+                className: "text-right w-24",
+                render: (s: ShareEntry) =>
+                  canGrant ? (
+                    <Button variant="danger" size="sm" onClick={() => handleRevoke(s)}>
+                      Revoke
+                    </Button>
+                  ) : null,
+              },
+            ]}
+            data={shares}
+            rowKey={(s: ShareEntry) => s.grantee_entity_id}
+          />
+        )}
+      </Card>
+
+      <Modal
+        open={showGrant}
+        onClose={() => setShowGrant(false)}
+        title={`Grant access to group "${info.name}"`}
+        actions={
+          <>
+            <Button variant="ghost" onClick={() => setShowGrant(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleGrant}
+              disabled={!grantee.trim() || caps.length === 0}
+            >
+              Grant
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          <Input
+            label="Grantee entity_id"
+            value={grantee}
+            onChange={(e) => setGrantee(e.target.value)}
+            placeholder="Recipient's entity UUID"
+          />
+          <div>
+            <label className="block text-xs font-medium text-[var(--color-text-muted)] mb-1">
+              Capabilities
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {(["read", "list", "update", "delete", "create"] as const).map((c) => {
+                const selected = caps.includes(c);
+                return (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => toggleCap(c)}
+                    className={`px-2.5 py-1 rounded-full text-xs border transition-colors ${
+                      selected
+                        ? "bg-[var(--color-primary)] border-[var(--color-primary)] text-white"
+                        : "bg-[var(--color-bg)] border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-text-muted)]"
+                    }`}
+                  >
+                    {c}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-xs text-[var(--color-text-muted)] mt-2">
+              These capabilities apply to every current and future member
+              of the group — both resources and KV secrets.
+            </p>
+          </div>
+          <Input
+            label="Expires at (optional)"
+            value={expires}
+            onChange={(e) => setExpires(e.target.value)}
+            placeholder="2026-12-31T23:59:59Z"
+            hint="RFC3339. Leave empty for no expiry."
+          />
+        </div>
+      </Modal>
+
+      <Modal
+        open={showTransfer}
+        onClose={() => setShowTransfer(false)}
+        title={`Transfer ownership of "${info.name}"`}
+        actions={
+          <>
+            <Button variant="ghost" onClick={() => setShowTransfer(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              onClick={handleTransfer}
+              disabled={!newOwner.trim()}
+            >
+              Transfer
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          <p className="text-sm text-[var(--color-text-muted)]">
+            Overwrite the owner record. Admin-only. The new entity becomes
+            the sole non-admin account that can edit members and grant
+            shares on this group.
+          </p>
+          <Input
+            label="New owner entity_id"
+            value={newOwner}
+            onChange={(e) => setNewOwner(e.target.value)}
+            placeholder="Target entity UUID"
+          />
+        </div>
+      </Modal>
     </>
   );
 }

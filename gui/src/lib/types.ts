@@ -315,6 +315,9 @@ export interface AssetGroupInfo {
   members: string[];
   /** KV-secret paths in the group, stored canonicalized (`secret/foo/bar`). */
   secrets: string[];
+  /** entity_id of the caller that created the group; empty when created by a
+   *  root token. Gates membership edits to (owner ∪ admins). */
+  owner_entity_id: string;
   created_at: string;
   updated_at: string;
 }
@@ -358,7 +361,7 @@ export interface EntitySelf {
   created_at: string;
 }
 
-export type ShareTargetKind = "kv-secret" | "resource";
+export type ShareTargetKind = "kv-secret" | "resource" | "asset-group";
 
 export interface OwnerInfo {
   target_kind: string;

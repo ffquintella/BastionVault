@@ -1018,31 +1018,53 @@ async fn resolve_target_shared_caps(
         return Vec::new();
     };
 
-    // Try both target kinds; a path can uniquely be one or the other
-    // (resource vs KV) but we accept either match. Shares live per
-    // (kind, canonical path), so the resource-name extraction takes
-    // precedence when the path belongs to the resource engine.
+    // Direct shares first (kind = resource or kv-secret), then
+    // indirect shares via asset-group membership — a share granted
+    // on a group name covers every current member of the group.
+    // Capabilities from all matching shares union together.
+    let mut caps: Vec<String> = Vec::new();
+    let mut merge = |more: Vec<String>| {
+        for c in more {
+            if !caps.iter().any(|x| x == &c) {
+                caps.push(c);
+            }
+        }
+    };
+
     if let Some(name) = resource_name_from_path(&req.path) {
-        if let Ok(caps) = store
+        if let Ok(v) = store
             .shared_capabilities(ShareTargetKind::Resource, &name, &caller_id)
             .await
         {
-            if !caps.is_empty() {
-                return caps;
-            }
+            merge(v);
         }
     }
     if looks_like_kv_path(&req.path) {
-        if let Ok(caps) = store
+        if let Ok(v) = store
             .shared_capabilities(ShareTargetKind::KvSecret, &req.path, &caller_id)
             .await
         {
-            if !caps.is_empty() {
-                return caps;
+            merge(v);
+        }
+    }
+
+    // Indirect: walk the caller's asset-group memberships for this
+    // target and union any asset-group shares addressed to them. We
+    // already have the list on `req.asset_groups` — `post_auth`
+    // populated it before this helper runs, so no extra lookup is
+    // needed against the reverse index. Silent on any failure.
+    if !req.asset_groups.is_empty() {
+        for group in &req.asset_groups {
+            if let Ok(v) = store
+                .shared_capabilities(ShareTargetKind::AssetGroup, group, &caller_id)
+                .await
+            {
+                merge(v);
             }
         }
     }
-    Vec::new()
+
+    caps
 }
 
 /// Best-effort lookup of the asset-groups that contain the request

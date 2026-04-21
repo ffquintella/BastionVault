@@ -276,6 +276,8 @@ export const transferKvOwner = (path: string, newOwnerEntityId: string) =>
   invoke<void>("transfer_kv_owner", { path, newOwnerEntityId });
 export const transferResourceOwner = (resource: string, newOwnerEntityId: string) =>
   invoke<void>("transfer_resource_owner", { resource, newOwnerEntityId });
+export const transferAssetGroupOwner = (name: string, newOwnerEntityId: string) =>
+  invoke<void>("transfer_asset_group_owner", { name, newOwnerEntityId });
 
 // FIDO2
 export const fido2ConfigRead = () => invoke<Fido2Config | null>("fido2_config_read");

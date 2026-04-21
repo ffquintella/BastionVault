@@ -44,6 +44,12 @@ const SHARE_BY_GRANTEE_SUB_PATH: &str = "sharing/by-grantee/";
 pub enum ShareTargetKind {
     KvSecret,
     Resource,
+    /// Share is against an asset group (a named collection of KV
+    /// secrets and resources). At authorize time the evaluator
+    /// expands an asset-group share to every current member of the
+    /// group, so sharing a bundle scales without per-object grants.
+    /// The `target_path` is the group name (lowercased, canonical).
+    AssetGroup,
 }
 
 impl ShareTargetKind {
@@ -51,6 +57,7 @@ impl ShareTargetKind {
         match self {
             ShareTargetKind::KvSecret => "kv-secret",
             ShareTargetKind::Resource => "resource",
+            ShareTargetKind::AssetGroup => "asset-group",
         }
     }
 
@@ -58,6 +65,7 @@ impl ShareTargetKind {
         match s {
             "kv-secret" | "kv" => Some(ShareTargetKind::KvSecret),
             "resource" => Some(ShareTargetKind::Resource),
+            "asset-group" | "group" => Some(ShareTargetKind::AssetGroup),
             _ => None,
         }
     }
@@ -127,6 +135,16 @@ impl ShareStore {
             ShareTargetKind::Resource => {
                 let k = raw.trim().to_lowercase();
                 if k.is_empty() || k.contains('/') {
+                    None
+                } else {
+                    Some(k)
+                }
+            }
+            ShareTargetKind::AssetGroup => {
+                // Mirror ResourceGroupStore::sanitize_name: lowercase,
+                // trim, reject empties and `/` or `..`.
+                let k = raw.trim().to_lowercase();
+                if k.is_empty() || k.contains('/') || k.contains("..") {
                     None
                 } else {
                     Some(k)

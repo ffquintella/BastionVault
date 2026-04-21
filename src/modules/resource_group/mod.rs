@@ -294,6 +294,10 @@ fn group_to_response(entry: &ResourceGroupEntry) -> Response {
         "secrets".into(),
         Value::Array(entry.secrets.iter().cloned().map(Value::String).collect()),
     );
+    data.insert(
+        "owner_entity_id".into(),
+        Value::String(entry.owner_entity_id.clone()),
+    );
     data.insert("created_at".into(), Value::String(entry.created_at.clone()));
     data.insert("updated_at".into(), Value::String(entry.updated_at.clone()));
     Response::data_response(Some(data))
@@ -398,6 +402,15 @@ impl ResourceGroupBackendInner {
         let now = now_iso();
         if existing.is_none() {
             entry.created_at = now.clone();
+            // Capture the caller's `entity_id` as the group owner on
+            // the first write. Empty for root-token callers — admins
+            // can use `sys/asset-group-owner/transfer` to adopt.
+            entry.owner_entity_id = req
+                .auth
+                .as_ref()
+                .and_then(|a| a.metadata.get("entity_id"))
+                .cloned()
+                .unwrap_or_default();
         }
         entry.updated_at = now;
 
@@ -599,6 +612,89 @@ mod resource_group_tests {
         new_unseal_test_bastion_vault, test_delete_api, test_list_api, test_read_api,
         test_write_api,
     };
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_asset_group_admin_owner_transfer_roundtrip() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_asset_group_admin_owner_transfer_roundtrip")
+                .await;
+
+        // Root creates the group — owner_entity_id stays empty because
+        // the root token has no entity_id metadata.
+        let data = json!({ "description": "root-created" })
+            .as_object()
+            .cloned();
+        let _ = test_write_api(&core, &root_token, "resource-group/groups/bundle-a", true, data)
+            .await
+            .unwrap();
+
+        let resp = test_read_api(&core, &root_token, "resource-group/groups/bundle-a", true)
+            .await
+            .unwrap()
+            .unwrap();
+        let body = resp.data.unwrap();
+        assert_eq!(
+            body.get("owner_entity_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("missing"),
+            "",
+            "root-created groups start unowned",
+        );
+
+        // Admin transfer — populate the owner.
+        let xfer = json!({
+            "name": "bundle-a",
+            "new_owner_entity_id": "ent-owner-1",
+        })
+        .as_object()
+        .cloned();
+        let _ = test_write_api(&core, &root_token, "sys/asset-group-owner/transfer", true, xfer)
+            .await
+            .unwrap();
+
+        let resp = test_read_api(&core, &root_token, "resource-group/groups/bundle-a", true)
+            .await
+            .unwrap()
+            .unwrap();
+        let body = resp.data.unwrap();
+        assert_eq!(
+            body.get("owner_entity_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+            "ent-owner-1",
+        );
+
+        // A subsequent `set_group` write must not change the owner.
+        let update = json!({ "description": "updated description" })
+            .as_object()
+            .cloned();
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "resource-group/groups/bundle-a",
+            true,
+            update,
+        )
+        .await
+        .unwrap();
+
+        let resp = test_read_api(&core, &root_token, "resource-group/groups/bundle-a", true)
+            .await
+            .unwrap()
+            .unwrap();
+        let body = resp.data.unwrap();
+        assert_eq!(
+            body.get("owner_entity_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+            "ent-owner-1",
+            "owner must survive regular writes",
+        );
+        assert_eq!(
+            body.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+            "updated description",
+        );
+    }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_resource_group_crud() {

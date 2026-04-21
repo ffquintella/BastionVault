@@ -55,6 +55,15 @@ pub struct ResourceGroupEntry {
     /// `data/` or `metadata/` segment). Deduped, sorted on every write.
     #[serde(default)]
     pub secrets: Vec<String>,
+    /// `entity_id` of the caller that created the group, captured on
+    /// the first write. Used to gate membership edits to the owner
+    /// plus admins, and to drive the GUI's owner badge. Immutable
+    /// except through the admin `sys/asset-group-owner/transfer`
+    /// endpoint. Empty on groups created by a root token or a caller
+    /// whose `entity_id` couldn't be resolved, in which case only
+    /// admin policies can edit the group.
+    #[serde(default)]
+    pub owner_entity_id: String,
     #[serde(default)]
     pub created_at: String,
     #[serde(default)]
@@ -207,13 +216,20 @@ impl ResourceGroupStore {
         }
         entry.secrets = canonical_secrets.iter().cloned().collect();
 
-        let (old_members, old_secrets) = match self.get_group(&name).await? {
+        let (old_members, old_secrets, old_owner) = match self.get_group(&name).await? {
             Some(g) => (
                 g.members.into_iter().collect::<BTreeSet<String>>(),
                 g.secrets.into_iter().collect::<BTreeSet<String>>(),
+                g.owner_entity_id,
             ),
-            None => (BTreeSet::new(), BTreeSet::new()),
+            None => (BTreeSet::new(), BTreeSet::new(), String::new()),
         };
+        // Owner is immutable via `set_group` — preserved on update,
+        // captured on first write (caller supplies the initial value).
+        // Use `set_owner` for the admin-only transfer flow.
+        if !old_owner.is_empty() {
+            entry.owner_entity_id = old_owner;
+        }
         let new_members: BTreeSet<String> = entry.members.iter().cloned().collect();
         let new_secrets: BTreeSet<String> = entry.secrets.iter().cloned().collect();
 
@@ -462,6 +478,26 @@ impl ResourceGroupStore {
             }
         }
         Ok(entries)
+    }
+
+    /// Admin-only: overwrite the owner of a group. Distinct from
+    /// `set_group` which preserves the existing owner to prevent
+    /// privilege escalation via a regular write. Callers must gate
+    /// this behind an admin ACL (the HTTP route at
+    /// `sys/asset-group-owner/transfer` does so).
+    pub async fn set_owner(&self, name: &str, new_owner: &str) -> Result<(), RvError> {
+        let name = Self::sanitize_name(name)?;
+        let new_owner = new_owner.trim();
+        if new_owner.is_empty() {
+            return Err(bv_error_string!("new_owner_entity_id is required"));
+        }
+        let Some(mut g) = self.get_group(&name).await? else {
+            return Err(bv_error_string!(format!("asset group '{name}' not found")));
+        };
+        g.owner_entity_id = new_owner.to_string();
+        g.updated_at = now_iso();
+        let value = serde_json::to_vec(&g)?;
+        self.group_view.put(&StorageEntry { key: name, value }).await
     }
 
     /// Rebuild both reverse indexes from the primary records. Intended
