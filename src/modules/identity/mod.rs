@@ -97,6 +97,8 @@ impl IdentityBackend {
 
         // Entity + owner lookup handlers
         let h_entity_self = self.inner.clone();
+        let h_entity_aliases = self.inner.clone();
+        let h_entity_aliases2 = self.inner.clone();
         let h_owner_kv = self.inner.clone();
         let h_owner_resource = self.inner.clone();
 
@@ -254,6 +256,21 @@ impl IdentityBackend {
                         {op: Operation::Read, handler: h_entity_self.handle_entity_self}
                     ],
                     help: "Read the caller's own entity record (id, primary mount, aliases)."
+                },
+                // ── Alias list (GUI user-picker source) ──────────────
+                //
+                // Lists every known alias as (mount, name, entity_id)
+                // so the GUI's user-picker can resolve a login to the
+                // grantee_entity_id. Authorization on this route is
+                // the usual ACL gate on `identity/entity/aliases`:
+                // by default, unprivileged callers are denied.
+                {
+                    pattern: r"entity/aliases/?$",
+                    operations: [
+                        {op: Operation::List, handler: h_entity_aliases.handle_entity_aliases_list},
+                        {op: Operation::Read, handler: h_entity_aliases2.handle_entity_aliases_list}
+                    ],
+                    help: "List every known (mount, name, entity_id) alias."
                 },
                 // ── Owner lookup (for GUI 'owner' badges) ───────────
                 //
@@ -1059,6 +1076,41 @@ impl IdentityBackendInner {
             }
         }
 
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// List every known alias tuple. Used by the GUI's user-picker
+    /// to resolve a login (mount + username / role name) to the
+    /// grantee's `entity_id` when granting shares.
+    pub async fn handle_entity_aliases_list(
+        &self,
+        _backend: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let module = self
+            .core
+            .module_manager
+            .get_module::<IdentityModule>("identity")
+            .ok_or_else(|| bv_error_string!("identity module unavailable"))?;
+        let store = module
+            .entity_store()
+            .ok_or_else(|| bv_error_string!("entity store unavailable"))?;
+
+        let aliases = store.list_aliases().await?;
+        let arr = Value::Array(
+            aliases
+                .iter()
+                .map(|a| {
+                    let mut m = Map::new();
+                    m.insert("mount".into(), Value::String(a.mount.clone()));
+                    m.insert("name".into(), Value::String(a.name.clone()));
+                    m.insert("entity_id".into(), Value::String(a.entity_id.clone()));
+                    Value::Object(m)
+                })
+                .collect(),
+        );
+        let mut data = Map::new();
+        data.insert("aliases".into(), arr);
         Ok(Some(Response::data_response(Some(data))))
     }
 

@@ -37,6 +37,7 @@ import type {
   AssetGroupHistoryResult,
   AssetGroupLookupResult,
   EntitySelf,
+  EntityAliasInfo,
   OwnerInfo,
   ShareEntry,
   SharePointer,
@@ -245,6 +246,8 @@ export const assetGroupsForSecret = (path: string) =>
 // Per-user scoping: entity introspection, owner lookup, sharing,
 // admin ownership transfer. See features/per-user-scoping.md.
 export const getEntitySelf = () => invoke<EntitySelf>("get_entity_self");
+export const listEntityAliases = () =>
+  invoke<EntityAliasInfo[]>("list_entity_aliases");
 export const getKvOwner = (path: string) =>
   invoke<OwnerInfo>("get_kv_owner", { path });
 export const getResourceOwner = (name: string) =>

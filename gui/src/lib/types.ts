@@ -361,6 +361,15 @@ export interface EntitySelf {
   created_at: string;
 }
 
+/** `(mount, principal-name, entity_id)` triple used to populate the
+ *  user-picker in share dialogs — operators pick a login instead of
+ *  pasting a raw `entity_id`. */
+export interface EntityAliasInfo {
+  mount: string;
+  name: string;
+  entity_id: string;
+}
+
 export type ShareTargetKind = "kv-secret" | "resource" | "asset-group";
 
 export interface OwnerInfo {

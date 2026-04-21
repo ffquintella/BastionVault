@@ -6,6 +6,7 @@ import {
   Button,
   Card,
   EmptyState,
+  EntityPicker,
   Input,
   Modal,
   Select,
@@ -232,12 +233,12 @@ export function SharingPage() {
           }
         >
           <div className="space-y-3">
-            <Input
-              label="Grantee entity_id"
+            <EntityPicker
+              label="Grantee"
               value={newGrantee}
-              onChange={(e) => setNewGrantee(e.target.value)}
-              placeholder="Recipient's entity UUID"
-              hint="Find an entity_id via the 'Shared with me' tab of the recipient, or from /v2/identity/entity/self on their token."
+              onChange={(id) => setNewGrantee(id)}
+              placeholder="Search by login or paste entity_id"
+              hint="Type part of a username, mount, or UUID."
             />
             <div>
               <label className="block text-xs font-medium text-[var(--color-text-muted)] mb-1">

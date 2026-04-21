@@ -14,6 +14,7 @@ import {
   Modal,
   ConfirmModal,
   EmptyState,
+  EntityPicker,
   GroupsSection,
   SecretPairsEditor,
   SecretHistoryPanel,
@@ -1137,12 +1138,12 @@ function ResourceSharingCard({
         }
       >
         <div className="space-y-3">
-          <Input
-            label="Grantee entity_id"
+          <EntityPicker
+            label="Grantee"
             value={grantee}
-            onChange={(e) => setGrantee(e.target.value)}
-            placeholder="Recipient's entity UUID"
-            hint="The recipient can find this on the /sharing page (Shared with me) after a login round-trip."
+            onChange={(id) => setGrantee(id)}
+            placeholder="Search by login or paste entity_id"
+            hint="Type part of a username, mount, or UUID."
           />
           <div>
             <label className="block text-xs font-medium text-[var(--color-text-muted)] mb-1">

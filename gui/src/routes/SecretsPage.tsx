@@ -1,24 +1,29 @@
 import { useState, useEffect, useCallback } from "react";
 import { Layout } from "../components/Layout";
 import {
+  Badge,
   Button,
   Card,
   Input,
   MaskedValue,
   Breadcrumb,
   EmptyState,
+  EntityPicker,
   GroupsSection,
   Modal,
   SecretPairsEditor,
   SecretHistoryPanel,
+  Table,
   pairsFromData,
   dataFromPairs,
   type SecretPair,
   type SecretHistoryVersion,
   useToast,
 } from "../components/ui";
+import type { OwnerInfo, ShareEntry } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
+import { useAuthStore } from "../stores/authStore";
 import { useAssetGroupMap, canonicalizeSecretPath } from "../hooks/useAssetGroupMap";
 
 type KvMount = { path: string; mount_type: string };
@@ -42,6 +47,13 @@ export function SecretsPage() {
   const [editingSecret, setEditingSecret] = useState(false);
   const [editPairs, setEditPairs] = useState<SecretPair[]>([]);
   const [savingEdit, setSavingEdit] = useState(false);
+
+  // Sharing: modal and target key for the currently-selected secret.
+  // `shareTarget` is the leaf key name (same as `selectedKey`) — we
+  // hold a separate piece of state so closing the modal doesn't reset
+  // the rest of the detail view, and so the shares-subsection can
+  // show a stable target even if the user navigates away.
+  const [shareTarget, setShareTarget] = useState<string | null>(null);
 
   // History view (KV-v2 version timeline) of the currently-selected secret.
   const [showHistory, setShowHistory] = useState(false);
@@ -446,6 +458,13 @@ export function SecretsPage() {
                         </Button>
                       )}
                       <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => setShareTarget(selectedKey)}
+                      >
+                        Share
+                      </Button>
+                      <Button
                         variant="danger"
                         size="sm"
                         onClick={() => handleDelete(selectedKey)}
@@ -492,8 +511,327 @@ export function SecretsPage() {
             <SecretPairsEditor pairs={createPairs} onChange={setCreatePairs} />
           </div>
         </Modal>
+
+        {/* Share secret modal */}
+        <Modal
+          open={shareTarget !== null}
+          onClose={() => setShareTarget(null)}
+          title={`Share ${shareTarget ?? ""}`}
+          size="lg"
+        >
+          {shareTarget && (
+            <SecretSharingPanel
+              fullPath={canonicalizeSecretPath(mountBase + currentPath + shareTarget)}
+              displayPath={mountBase + currentPath + shareTarget}
+              onClose={() => setShareTarget(null)}
+            />
+          )}
+        </Modal>
       </div>
     </Layout>
+  );
+}
+
+/**
+ * Owner card + shares table + grant/revoke + admin transfer, all
+ * scoped to a single KV-secret path. `fullPath` is the canonical
+ * logical path (`secret/foo/bar`, NOT the KV-v2 `secret/data/foo/bar`
+ * form) — `ShareStore::canonicalize_kv_path` accepts either, but we
+ * pass the canonical form so UI-side comparisons to the returned
+ * share records line up.
+ */
+function SecretSharingPanel({
+  fullPath,
+  displayPath,
+  onClose,
+}: {
+  fullPath: string;
+  displayPath: string;
+  onClose: () => void;
+}) {
+  const { toast } = useToast();
+  const [owner, setOwner] = useState<OwnerInfo | null>(null);
+  const [shares, setShares] = useState<ShareEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const policies = useAuthStore((s) => s.policies);
+  const entityId = useAuthStore((s) => s.entityId);
+  const isAdmin = policies.some((p) => p === "root" || p === "admin");
+  const isOwner =
+    owner?.owned === true && owner.entity_id === entityId && entityId !== "";
+  const canGrant = isOwner || isAdmin;
+
+  const [grantee, setGrantee] = useState("");
+  const [caps, setCaps] = useState<string[]>(["read"]);
+  const [expires, setExpires] = useState("");
+
+  const [showTransfer, setShowTransfer] = useState(false);
+  const [newOwner, setNewOwner] = useState("");
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fullPath]);
+
+  async function load() {
+    setLoading(true);
+    try {
+      const [o, s] = await Promise.all([
+        api.getKvOwner(fullPath).catch(() => null),
+        api.listSharesForTarget("kv-secret", fullPath).catch(() => [] as ShareEntry[]),
+      ]);
+      setOwner(o);
+      setShares(s);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleGrant() {
+    try {
+      await api.putShare("kv-secret", fullPath, grantee.trim(), caps, expires.trim());
+      toast("success", "Share granted");
+      setGrantee("");
+      setCaps(["read"]);
+      setExpires("");
+      load();
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
+  }
+
+  async function handleRevoke(s: ShareEntry) {
+    try {
+      await api.deleteShare("kv-secret", s.target_path, s.grantee_entity_id);
+      toast("success", "Share revoked");
+      load();
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
+  }
+
+  async function handleTransfer() {
+    try {
+      await api.transferKvOwner(fullPath, newOwner.trim());
+      toast("success", "Ownership transferred");
+      setShowTransfer(false);
+      setNewOwner("");
+      load();
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
+  }
+
+  function toggleCap(c: string) {
+    setCaps((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]));
+  }
+
+  if (loading) {
+    return (
+      <p className="text-sm text-[var(--color-text-muted)] py-4">Loading...</p>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <label className="block text-xs font-medium text-[var(--color-text-muted)] mb-1">
+          Secret path
+        </label>
+        <code className="font-mono text-xs break-all">{displayPath}</code>
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <label className="text-xs font-medium text-[var(--color-text-muted)]">
+            Owner
+          </label>
+          {isAdmin && (
+            <Button size="sm" variant="ghost" onClick={() => setShowTransfer(true)}>
+              Transfer
+            </Button>
+          )}
+        </div>
+        {owner?.owned ? (
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-xs">{owner.entity_id}</span>
+            {isOwner && <Badge label="You" variant="success" />}
+          </div>
+        ) : (
+          <p className="text-xs text-[var(--color-text-muted)] italic">
+            Unowned. The next authenticated write to this path captures ownership.
+          </p>
+        )}
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <label className="text-xs font-medium text-[var(--color-text-muted)]">
+            Shares
+          </label>
+        </div>
+        {shares.length === 0 ? (
+          <p className="text-xs text-[var(--color-text-muted)] italic">
+            Nobody else has access via an explicit share.
+          </p>
+        ) : (
+          <Table
+            columns={[
+              {
+                key: "grantee",
+                header: "Grantee",
+                render: (s: ShareEntry) => (
+                  <span className="font-mono text-xs truncate">
+                    {s.grantee_entity_id}
+                  </span>
+                ),
+              },
+              {
+                key: "caps",
+                header: "Capabilities",
+                render: (s: ShareEntry) => (
+                  <div className="flex flex-wrap gap-1">
+                    {s.capabilities.map((c) => (
+                      <Badge key={c} label={c} variant="info" />
+                    ))}
+                  </div>
+                ),
+              },
+              {
+                key: "expires",
+                header: "Expires",
+                render: (s: ShareEntry) =>
+                  s.expires_at ? (
+                    <span
+                      className={`text-xs ${
+                        s.expired
+                          ? "text-[var(--color-danger)]"
+                          : "text-[var(--color-text-muted)]"
+                      }`}
+                    >
+                      {s.expires_at}
+                      {s.expired && " (expired)"}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-[var(--color-text-muted)]">never</span>
+                  ),
+              },
+              {
+                key: "revoke",
+                header: "",
+                className: "text-right w-24",
+                render: (s: ShareEntry) =>
+                  canGrant ? (
+                    <Button variant="danger" size="sm" onClick={() => handleRevoke(s)}>
+                      Revoke
+                    </Button>
+                  ) : null,
+              },
+            ]}
+            data={shares}
+            rowKey={(s: ShareEntry) => s.grantee_entity_id}
+          />
+        )}
+      </div>
+
+      {canGrant && (
+        <div className="border-t border-[var(--color-border)] pt-3 space-y-3">
+          <h4 className="text-sm font-medium">Grant access</h4>
+          <EntityPicker
+            label="Grantee"
+            value={grantee}
+            onChange={(id) => setGrantee(id)}
+            placeholder="Search by login or paste entity_id"
+          />
+          <div>
+            <label className="block text-xs font-medium text-[var(--color-text-muted)] mb-1">
+              Capabilities
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {(["read", "list", "update", "delete", "create"] as const).map((c) => {
+                const selected = caps.includes(c);
+                return (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => toggleCap(c)}
+                    className={`px-2.5 py-1 rounded-full text-xs border transition-colors ${
+                      selected
+                        ? "bg-[var(--color-primary)] border-[var(--color-primary)] text-white"
+                        : "bg-[var(--color-bg)] border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-text-muted)]"
+                    }`}
+                  >
+                    {c}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <Input
+            label="Expires at (optional)"
+            value={expires}
+            onChange={(e) => setExpires(e.target.value)}
+            placeholder="2026-12-31T23:59:59Z"
+            hint="RFC3339 timestamp. Leave empty for no expiry."
+          />
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" size="sm" onClick={onClose}>
+              Close
+            </Button>
+            <Button
+              size="sm"
+              onClick={handleGrant}
+              disabled={!grantee.trim() || caps.length === 0}
+            >
+              Grant
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {!canGrant && (
+        <div className="flex justify-end">
+          <Button variant="ghost" size="sm" onClick={onClose}>
+            Close
+          </Button>
+        </div>
+      )}
+
+      <Modal
+        open={showTransfer}
+        onClose={() => setShowTransfer(false)}
+        title={`Transfer ownership of ${displayPath}`}
+        size="sm"
+        actions={
+          <>
+            <Button variant="ghost" onClick={() => setShowTransfer(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              onClick={handleTransfer}
+              disabled={!newOwner.trim()}
+            >
+              Transfer
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          <p className="text-sm text-[var(--color-text-muted)]">
+            Overwrite the owner record for this KV path. Admin-only. The new
+            entity will pass the <code>scopes = ["owner"]</code> check on every
+            subsequent request.
+          </p>
+          <EntityPicker
+            label="New owner"
+            value={newOwner}
+            onChange={(id) => setNewOwner(id)}
+            placeholder="Search by login or paste entity_id"
+          />
+        </div>
+      </Modal>
+    </div>
   );
 }
 

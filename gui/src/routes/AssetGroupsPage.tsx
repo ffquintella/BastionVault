@@ -11,6 +11,7 @@ import {
   Modal,
   ConfirmModal,
   EmptyState,
+  EntityPicker,
   GroupHistoryPanel,
   useToast,
 } from "../components/ui";
@@ -850,11 +851,11 @@ function AssetGroupSharingCard({
         }
       >
         <div className="space-y-3">
-          <Input
-            label="Grantee entity_id"
+          <EntityPicker
+            label="Grantee"
             value={grantee}
-            onChange={(e) => setGrantee(e.target.value)}
-            placeholder="Recipient's entity UUID"
+            onChange={(id) => setGrantee(id)}
+            placeholder="Search by login or paste entity_id"
           />
           <div>
             <label className="block text-xs font-medium text-[var(--color-text-muted)] mb-1">

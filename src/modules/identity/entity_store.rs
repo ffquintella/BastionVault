@@ -144,4 +144,52 @@ impl EntityStore {
         keys.sort();
         Ok(keys)
     }
+
+    /// Enumerate every known alias as a `(mount, name, entity_id)`
+    /// tuple. Used by the GUI's user-picker so operators can search
+    /// for a grantee by login instead of pasting a raw `entity_id`.
+    ///
+    /// Keys on disk are `<mount>:<name>` (see [`alias_key`]); we split
+    /// on the first `:` to recover the pair. The mount is re-suffixed
+    /// with `/` to match the `mount_path` convention the rest of the
+    /// system uses.
+    pub async fn list_aliases(&self) -> Result<Vec<AliasRecord>, RvError> {
+        let keys = self.alias_view.get_keys().await?;
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
+            let Some((mount, name)) = key.split_once(':') else {
+                continue;
+            };
+            let uuid = match self.alias_view.get(&key).await? {
+                Some(raw) => serde_json::from_slice::<String>(&raw.value).unwrap_or_default(),
+                None => continue,
+            };
+            if uuid.is_empty() {
+                continue;
+            }
+            out.push(AliasRecord {
+                mount: format!("{mount}/"),
+                name: name.to_string(),
+                entity_id: uuid,
+            });
+        }
+        out.sort_by(|a, b| {
+            a.mount
+                .cmp(&b.mount)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        Ok(out)
+    }
+}
+
+/// `(mount, principal-name, entity_id)` triple surfaced by
+/// [`EntityStore::list_aliases`]. Safe to serialize and return to
+/// authenticated GUI callers — it lists existing user logins with
+/// their stable entity identifier, same information you'd get from
+/// the UserPass user-list plus an `entity/self` lookup per user.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AliasRecord {
+    pub mount: String,
+    pub name: String,
+    pub entity_id: String,
 }

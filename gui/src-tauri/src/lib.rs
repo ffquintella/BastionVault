@@ -186,6 +186,7 @@ pub fn run() {
             commands::asset_groups::asset_groups_for_secret,
             // Per-user scoping: entity, owner, sharing, transfer
             commands::sharing::get_entity_self,
+            commands::sharing::list_entity_aliases,
             commands::sharing::get_kv_owner,
             commands::sharing::get_resource_owner,
             commands::sharing::list_shares_for_grantee,

@@ -53,6 +53,61 @@ pub struct EntitySelf {
     pub created_at: String,
 }
 
+/// Lightweight alias record for the GUI user-picker. Mirrors the
+/// `EntityStore::AliasRecord` shape on the backend but kept separate
+/// so the Tauri surface doesn't leak internal types.
+#[derive(Serialize)]
+pub struct EntityAliasInfo {
+    pub mount: String,
+    pub name: String,
+    pub entity_id: String,
+}
+
+/// Enumerate every known alias so the frontend can resolve a login
+/// to an `entity_id` without making operators paste raw UUIDs into
+/// the share dialog. Hits `identity/entity/aliases`, which is ACL-
+/// gated; callers without access get an empty list rather than a
+/// leak.
+#[tauri::command]
+pub async fn list_entity_aliases(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<EntityAliasInfo>> {
+    let resp = make_request(
+        &state,
+        Operation::List,
+        "identity/entity/aliases".into(),
+        None,
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    let arr = data.get("aliases").and_then(|v| v.as_array()).cloned();
+    let out = arr
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| {
+            let o = v.as_object()?;
+            Some(EntityAliasInfo {
+                mount: o
+                    .get("mount")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                name: o
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                entity_id: o
+                    .get("entity_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            })
+        })
+        .collect();
+    Ok(out)
+}
+
 #[tauri::command]
 pub async fn get_entity_self(state: State<'_, AppState>) -> CmdResult<EntitySelf> {
     let resp = make_request(&state, Operation::Read, "identity/entity/self".into(), None)

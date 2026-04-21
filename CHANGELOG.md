@@ -47,6 +47,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### KV Secrets Sharing + User-Picker (`features/per-user-scoping.md`)
+- **Secrets can now be shared from the GUI.** `gui/src/routes/SecretsPage.tsx` gains a **Share** button on the detail view that opens a modal with the owner record, the current shares table (Revoke per row), a Grant-access form (owner + admin), and an admin-only Transfer-ownership flow. Targets the new `ShareTargetKind::KvSecret` via the existing share API; the full canonical path (e.g. `secret/foo/bar`) is derived from `mountBase + currentPath + key` and normalized via `canonicalizeSecretPath`.
+- **User-picker instead of raw UUIDs.** New `EntityPicker` component (`gui/src/components/ui/EntityPicker.tsx`) — typeahead over `(mount, name, entity_id)` tuples from a new `GET /v2/identity/entity/aliases` endpoint. Operators can now search by login (`felipe`), mount (`userpass/`), or partial UUID; the picker resolves to the grantee's stable `entity_id` on select. Falls back to raw UUID entry when the alias listing is denied. Wired into the four grant flows: SharingPage Manage-target, ResourcesPage Sharing tab, AssetGroupsPage Sharing tab, and the new SecretsPage Share modal. Also used for the asset-group and KV Transfer-ownership dialogs.
+- **Backend**: `EntityStore::list_aliases()` (`src/modules/identity/entity_store.rs`) enumerates every `(mount, principal-name, entity_id)` tuple from the alias sub-view; the new `identity/entity/aliases` logical route (LIST + Read, ACL-gated the usual way) surfaces it via `/v2/identity/entity/aliases`. Fails-open on the GUI side so a caller without directory access can still paste a UUID.
+
 ### Security
 
 #### Closed a mount-listing and seal-vault policy bypass in the Tauri GUI
