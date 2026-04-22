@@ -960,6 +960,65 @@ impl SystemBackend {
             }
         }
 
+        // Share events — grants, revokes, cascade-revokes — drawn from
+        // the flat share history view. The `actor_entity_id` is used
+        // as the event's `user` so the Audit page's EntityLabel turns
+        // it back into a login.
+        if let Ok(identity_module) = self.get_module::<IdentityModule>("identity") {
+            if let Some(store) = identity_module.share_store() {
+                if let Ok(entries) = store.list_all_history().await {
+                    for e in entries {
+                        let target = format!("{}:{}", e.target_kind, e.target_path);
+                        // Include the grantee on the changed_fields row
+                        // so the search box matches recipient-centric
+                        // queries like "shared with felipe".
+                        let mut fields = Vec::new();
+                        fields.push(format!("grantee={}", e.grantee_entity_id));
+                        if !e.capabilities.is_empty() {
+                            fields.push(format!("caps={}", e.capabilities.join(",")));
+                        }
+                        if !e.expires_at.is_empty() {
+                            fields.push(format!("expires={}", e.expires_at));
+                        }
+                        events.push(AuditEventBuilder {
+                            ts: e.ts,
+                            user: e.actor_entity_id,
+                            op: e.op,
+                            category: "share".into(),
+                            target,
+                            changed_fields: fields,
+                            summary: String::new(),
+                        });
+                    }
+                }
+            }
+
+            // User / role lifecycle events. Mount distinguishes
+            // userpass (`userpass/`) from approle (`approle/`);
+            // we preserve it on the `target` so the GUI can still
+            // show "mount:name" at a glance.
+            if let Some(store) = identity_module.user_audit_store() {
+                if let Ok(entries) = store.list_all().await {
+                    for e in entries {
+                        let mut fields = Vec::new();
+                        fields.push(format!("mount={}", e.mount));
+                        if !e.details.is_empty() {
+                            fields.push(e.details.clone());
+                        }
+                        events.push(AuditEventBuilder {
+                            ts: e.ts,
+                            user: e.actor_entity_id,
+                            op: e.op,
+                            category: "user".into(),
+                            target: format!("{}{}", e.mount, e.target),
+                            changed_fields: fields,
+                            summary: String::new(),
+                        });
+                    }
+                }
+            }
+        }
+
         // Sort newest-first. Timestamps are RFC3339 strings;
         // lexicographic order matches chronological for that format.
         events.sort_by(|a, b| b.ts.cmp(&a.ts));
@@ -1318,6 +1377,144 @@ mod mod_system_tests {
     /// If a regression reintroduces that bypass — or the ACL filter
     /// in `handle_internal_ui_mounts_read` starts leaking — this test
     /// catches it.
+    /// Userpass create / password-change / delete all show up in
+    /// the audit trail under the `user` category. Regression for the
+    /// gap where user lifecycle operations were invisible on the
+    /// Admin → Audit page.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_audit_events_includes_user_lifecycle() {
+        let mut server =
+            TestHttpServer::new("test_audit_events_includes_user_lifecycle", true).await;
+        server.token = server.root_token.clone();
+
+        let _ = server
+            .write(
+                "sys/auth/pass",
+                serde_json::json!({ "type": "userpass" }).as_object().cloned(),
+                None,
+            )
+            .unwrap();
+
+        let _ = server
+            .write(
+                "auth/pass/users/alice",
+                serde_json::json!({ "password": "hunter22XX!", "token_policies": "default" })
+                    .as_object()
+                    .cloned(),
+                None,
+            )
+            .unwrap();
+
+        let _ = server
+            .write(
+                "auth/pass/users/alice/password",
+                serde_json::json!({ "password": "hunter22XX_new!" })
+                    .as_object()
+                    .cloned(),
+                None,
+            )
+            .unwrap();
+
+        let _ = server
+            .delete("auth/pass/users/alice", None, None)
+            .unwrap();
+
+        let ret = server.read("sys/audit/events", None).unwrap().1;
+        let events = ret
+            .get("events")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let matching: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                e.get("category").and_then(|v| v.as_str()) == Some("user")
+                    && e.get("target").and_then(|v| v.as_str())
+                        == Some("userpass/alice")
+            })
+            .collect();
+
+        let ops: Vec<String> = matching
+            .iter()
+            .map(|e| {
+                e.get("op")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect();
+
+        assert!(ops.contains(&"create".to_string()), "missing create in {ops:?}");
+        assert!(
+            ops.contains(&"password-change".to_string()),
+            "missing password-change in {ops:?}",
+        );
+        assert!(ops.contains(&"delete".to_string()), "missing delete in {ops:?}");
+    }
+
+    /// Share grants and revocations show up in the audit trail under
+    /// the `share` category. Regression for the original gap where
+    /// the aggregator only pulled policy/group history and sharing
+    /// activity was invisible on the Admin → Audit page.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_audit_events_includes_share_grants_and_revokes() {
+        let mut server = TestHttpServer::new(
+            "test_audit_events_includes_share_grants_and_revokes",
+            true,
+        )
+        .await;
+        server.token = server.root_token.clone();
+
+        // Grant a share — generates a `share`/`grant` row.
+        // The URL segment is base64url(canonical_path) per the sharing
+        // route definition; "secret/foo" encodes to "c2VjcmV0L2Zvbw".
+        let target_b64 = "c2VjcmV0L2Zvbw";
+        let grantee = "ent-grantee-uuid-111";
+        let _ = server
+            .write(
+                &format!("identity/sharing/by-target/kv-secret/{target_b64}/{grantee}"),
+                serde_json::json!({
+                    "target_kind": "kv-secret",
+                    "target_path": "secret/foo",
+                    "capabilities": "read,list",
+                })
+                .as_object()
+                .cloned(),
+                None,
+            )
+            .unwrap();
+
+        // Revoke it — generates a `share`/`revoke` row.
+        let _ = server
+            .delete(
+                &format!("identity/sharing/by-target/kv-secret/{target_b64}/{grantee}"),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let ret = server.read("sys/audit/events", None).unwrap().1;
+        let events = ret
+            .get("events")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let has_grant = events.iter().any(|e| {
+            e.get("category").and_then(|v| v.as_str()) == Some("share")
+                && e.get("op").and_then(|v| v.as_str()) == Some("grant")
+                && e.get("target").and_then(|v| v.as_str()) == Some("kv-secret:secret/foo")
+        });
+        let has_revoke = events.iter().any(|e| {
+            e.get("category").and_then(|v| v.as_str()) == Some("share")
+                && e.get("op").and_then(|v| v.as_str()) == Some("revoke")
+                && e.get("target").and_then(|v| v.as_str()) == Some("kv-secret:secret/foo")
+        });
+        assert!(has_grant, "expected share/grant event in {events:?}");
+        assert!(has_revoke, "expected share/revoke event in {events:?}");
+    }
+
     /// The audit aggregator returns a newest-first list of events
     /// drawn from policy, identity-group, and asset-group history.
     /// Smoke test: root creates a policy + group, reads

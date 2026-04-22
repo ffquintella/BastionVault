@@ -234,9 +234,9 @@ impl UserPassBackendInner {
         let username = username_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_lowercase();
 
         let mut user_entry = UserEntry::default();
-
-        if let Some(entry) = self.get_user(req, &username).await? {
-            user_entry = entry;
+        let is_create = self.get_user(req, &username).await?.is_none();
+        if !is_create {
+            user_entry = self.get_user(req, &username).await?.unwrap();
         }
 
         if let Ok(password_value) = req.get_data("password") {
@@ -312,6 +312,20 @@ impl UserPassBackendInner {
         // lazily the same way it always has.
         let _ = super::path_login::resolve_entity_id(&self.core, "userpass/", &username).await;
 
+        // Audit: record the lifecycle event so the Admin → Audit page
+        // shows who created/updated the user. Policies are the main
+        // thing an admin wants to see in the diff on update, so stash
+        // them in `details`. Silent on subsystem absence.
+        let details = format!("policies={}", user_entry.policies.join(","));
+        record_user_audit(
+            &self.core,
+            req,
+            if is_create { "create" } else { "update" },
+            &username,
+            &details,
+        )
+        .await;
+
         Ok(None)
     }
 
@@ -343,6 +357,9 @@ impl UserPassBackendInner {
                 let _ = store.forget_alias("userpass/", &lc).await;
             }
         }
+
+        // Audit.
+        record_user_audit(&self.core, req, "delete", &lc, "").await;
 
         Ok(None)
     }
@@ -377,6 +394,8 @@ impl UserPassBackendInner {
 
         self.set_user(req, username, &user_entry).await?;
 
+        record_user_audit(&self.core, req, "password-change", username, "").await;
+
         Ok(None)
     }
 
@@ -389,4 +408,46 @@ impl UserPassBackendInner {
         let result = bcrypt::verify(password, password_hash)?;
         Ok(result)
     }
+}
+
+/// Best-effort append to the UserAuditStore. Reuses the helper
+/// pattern so userpass handlers don't need to thread an identity-
+/// module reference around directly. Silent on any failure; this is
+/// a convenience log for the Admin → Audit GUI, not a block on the
+/// underlying operation.
+async fn record_user_audit(
+    core: &std::sync::Arc<crate::core::Core>,
+    req: &crate::logical::Request,
+    op: &str,
+    target: &str,
+    details: &str,
+) {
+    use crate::modules::identity::{IdentityModule, UserAuditEntry};
+
+    let Some(module) = core
+        .module_manager
+        .get_module::<IdentityModule>("identity")
+    else {
+        return;
+    };
+    let Some(store) = module.user_audit_store() else {
+        return;
+    };
+
+    let actor = req
+        .auth
+        .as_ref()
+        .and_then(|a| a.metadata.get("entity_id"))
+        .cloned()
+        .unwrap_or_default();
+
+    let entry = UserAuditEntry {
+        ts: String::new(),
+        actor_entity_id: actor,
+        op: op.to_string(),
+        mount: "userpass/".to_string(),
+        target: target.to_string(),
+        details: details.to_string(),
+    };
+    let _ = store.append(entry).await;
 }

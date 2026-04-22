@@ -1178,6 +1178,16 @@ impl AppRoleBackendInner {
             let _ = super::path_login::resolve_approle_entity_id(&self.core, &role_entry.name).await;
         }
 
+        // Audit: lifecycle event for the role.
+        record_approle_audit(
+            &self.core,
+            req,
+            if create { "create" } else { "update" },
+            &role_entry.name,
+            &format!("policies={}", role_entry.policies.join(",")),
+        )
+        .await;
+
         Ok(None)
     }
 
@@ -1273,6 +1283,8 @@ impl AppRoleBackendInner {
                     let _ = store.forget_alias("approle/", &entry.name).await;
                 }
             }
+
+            record_approle_audit(&self.core, req, "delete", &entry.name, "").await;
         }
 
         Ok(None)
@@ -2265,6 +2277,46 @@ impl AppRoleBackendInner {
     ) -> Result<Option<Response>, RvError> {
         self.update_role_secret_id_common(req, req.get_data("secret_id")?.as_str().unwrap_or("")).await
     }
+}
+
+/// Best-effort append to the UserAuditStore (covers approle role
+/// lifecycle too — same store, `mount="approle/"`). Silent on
+/// subsystem absence.
+async fn record_approle_audit(
+    core: &std::sync::Arc<crate::core::Core>,
+    req: &crate::logical::Request,
+    op: &str,
+    target: &str,
+    details: &str,
+) {
+    use crate::modules::identity::{IdentityModule, UserAuditEntry};
+
+    let Some(module) = core
+        .module_manager
+        .get_module::<IdentityModule>("identity")
+    else {
+        return;
+    };
+    let Some(store) = module.user_audit_store() else {
+        return;
+    };
+
+    let actor = req
+        .auth
+        .as_ref()
+        .and_then(|a| a.metadata.get("entity_id"))
+        .cloned()
+        .unwrap_or_default();
+
+    let entry = UserAuditEntry {
+        ts: String::new(),
+        actor_entity_id: actor,
+        op: op.to_string(),
+        mount: "approle/".to_string(),
+        target: target.to_string(),
+        details: details.to_string(),
+    };
+    let _ = store.append(entry).await;
 }
 
 #[cfg(test)]

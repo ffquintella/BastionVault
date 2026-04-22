@@ -36,6 +36,11 @@ use super::owner_store::OwnerStore;
 
 const SHARE_PRIMARY_SUB_PATH: &str = "sharing/primary/";
 const SHARE_BY_GRANTEE_SUB_PATH: &str = "sharing/by-grantee/";
+/// Append-only audit trail for share grants, revocations, and
+/// cascade-revokes triggered by target deletion. Keyed by
+/// `<20-digit-nanos>` so a natural sort yields chronological order;
+/// the aggregator in the system backend walks this flat view.
+const SHARE_HISTORY_SUB_PATH: &str = "sharing/history/";
 
 /// Target object for a share — a KV secret (by logical path) or a
 /// resource (by resource name).
@@ -107,9 +112,33 @@ impl SecretShare {
     }
 }
 
+/// One row in the share audit trail. Captures enough state to
+/// reconstruct a grant/revoke decision after the fact, including
+/// who performed it and which capabilities were involved.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ShareHistoryEntry {
+    pub ts: String,
+    /// `entity_id` of the caller that triggered the event. Empty
+    /// for `cascade-revoke` events driven by target deletion when
+    /// the underlying request has no resolved entity (root token).
+    pub actor_entity_id: String,
+    /// `"grant" | "revoke" | "cascade-revoke"`. `grant` covers both
+    /// create and update (both go through `set_share`); distinguish
+    /// the two by the presence of prior history for the same
+    /// `(target, grantee)` pair.
+    pub op: String,
+    pub target_kind: String,
+    pub target_path: String,
+    pub grantee_entity_id: String,
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub expires_at: String,
+}
+
 pub struct ShareStore {
     primary_view: Arc<BarrierView>,
     by_grantee_view: Arc<BarrierView>,
+    history_view: Arc<BarrierView>,
 }
 
 #[maybe_async::maybe_async]
@@ -121,8 +150,13 @@ impl ShareStore {
 
         let primary_view = Arc::new(system_view.new_sub_view(SHARE_PRIMARY_SUB_PATH));
         let by_grantee_view = Arc::new(system_view.new_sub_view(SHARE_BY_GRANTEE_SUB_PATH));
+        let history_view = Arc::new(system_view.new_sub_view(SHARE_HISTORY_SUB_PATH));
 
-        Ok(Arc::new(Self { primary_view, by_grantee_view }))
+        Ok(Arc::new(Self {
+            primary_view,
+            by_grantee_view,
+            history_view,
+        }))
     }
 
     /// Canonicalize a share target's path. Uses the same rules as
@@ -210,6 +244,21 @@ impl ShareStore {
             .put(&StorageEntry { key: p_key, value: p_value })
             .await?;
 
+        // Audit: append a history row for the grant. History failures
+        // must not fail the write — the admin audit page is a
+        // convenience, not a block on share operations.
+        let hist = ShareHistoryEntry {
+            ts: Utc::now().to_rfc3339(),
+            actor_entity_id: share.granted_by_entity_id.clone(),
+            op: "grant".to_string(),
+            target_kind: share.target_kind.clone(),
+            target_path: share.target_path.clone(),
+            grantee_entity_id: share.grantee_entity_id.clone(),
+            capabilities: share.capabilities.clone(),
+            expires_at: share.expires_at.clone(),
+        };
+        let _ = self.append_history(hist).await;
+
         Ok(share)
     }
 
@@ -243,6 +292,21 @@ impl ShareStore {
         target_path: &str,
         grantee: &str,
     ) -> Result<(), RvError> {
+        self.delete_share_audited(kind, target_path, grantee, "", "revoke").await
+    }
+
+    /// Same as `delete_share` but carries an actor `entity_id` (for
+    /// audit logging) and lets the caller tag the event op — used by
+    /// `cascade_delete_target` to distinguish explicit revokes from
+    /// automatic cascade-revokes triggered by target deletion.
+    pub async fn delete_share_audited(
+        &self,
+        kind: ShareTargetKind,
+        target_path: &str,
+        grantee: &str,
+        actor_entity_id: &str,
+        op: &str,
+    ) -> Result<(), RvError> {
         let Some(canonical) = Self::canonicalize(kind, target_path) else {
             return Ok(());
         };
@@ -251,10 +315,34 @@ impl ShareStore {
             return Ok(());
         }
         let target_hash = Self::target_hash(kind, &canonical);
+
+        // Snapshot the share before deletion so the audit row can
+        // record which capabilities were revoked. A missing record
+        // (already deleted) is not an error — we still drop the
+        // by-grantee pointer and omit the audit entry.
         let pk = Self::primary_key(&target_hash, grantee);
+        let prior: Option<SecretShare> = match self.primary_view.get(&pk).await? {
+            Some(raw) => serde_json::from_slice(&raw.value).ok(),
+            None => None,
+        };
+
         self.primary_view.delete(&pk).await?;
         let bg = Self::by_grantee_key(grantee, &target_hash);
         self.by_grantee_view.delete(&bg).await?;
+
+        if let Some(prior) = prior {
+            let hist = ShareHistoryEntry {
+                ts: Utc::now().to_rfc3339(),
+                actor_entity_id: actor_entity_id.to_string(),
+                op: op.to_string(),
+                target_kind: prior.target_kind,
+                target_path: prior.target_path,
+                grantee_entity_id: prior.grantee_entity_id,
+                capabilities: prior.capabilities,
+                expires_at: prior.expires_at,
+            };
+            let _ = self.append_history(hist).await;
+        }
         Ok(())
     }
 
@@ -336,13 +424,69 @@ impl ShareStore {
         kind: ShareTargetKind,
         target_path: &str,
     ) -> Result<usize, RvError> {
+        self.cascade_delete_target_audited(kind, target_path, "").await
+    }
+
+    /// Same as `cascade_delete_target` but carries the actor
+    /// `entity_id` of the caller whose delete triggered the cascade.
+    /// Each removed share is recorded as a `cascade-revoke` event in
+    /// the audit trail.
+    pub async fn cascade_delete_target_audited(
+        &self,
+        kind: ShareTargetKind,
+        target_path: &str,
+        actor_entity_id: &str,
+    ) -> Result<usize, RvError> {
         let shares = self.list_shares_for_target(kind, target_path).await?;
         let count = shares.len();
         for s in shares {
-            self.delete_share(kind, &s.target_path, &s.grantee_entity_id).await?;
+            self.delete_share_audited(
+                kind,
+                &s.target_path,
+                &s.grantee_entity_id,
+                actor_entity_id,
+                "cascade-revoke",
+            )
+            .await?;
         }
         Ok(count)
     }
+
+    /// Append an audit entry to the share-history sub-view. Keyed by
+    /// `<20-digit-nanos>` (from `hist_seq`) so `list_all_history`
+    /// returns rows in chronological order with a plain sort.
+    pub async fn append_history(&self, entry: ShareHistoryEntry) -> Result<(), RvError> {
+        let key = hist_seq();
+        let value = serde_json::to_vec(&entry)?;
+        self.history_view.put(&StorageEntry { key, value }).await
+    }
+
+    /// Full share audit trail, newest-first. Consumed by the admin
+    /// audit aggregator in the system backend.
+    pub async fn list_all_history(&self) -> Result<Vec<ShareHistoryEntry>, RvError> {
+        let mut keys = self.history_view.get_keys().await?;
+        keys.sort();
+        keys.reverse();
+        let mut out = Vec::with_capacity(keys.len());
+        for k in keys {
+            if let Some(raw) = self.history_view.get(&k).await? {
+                if let Ok(e) = serde_json::from_slice::<ShareHistoryEntry>(&raw.value) {
+                    out.push(e);
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Monotonic-ish 20-digit zero-padded nanoseconds since UNIX epoch,
+/// used as history keys so `get_keys` + sort yields chronological
+/// order. Mirrors the helper in other history stores.
+fn hist_seq() -> String {
+    let n = Utc::now()
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| Utc::now().timestamp_millis() * 1_000_000);
+    format!("{:020}", n.max(0) as u128)
 }
 
 /// Pointer record written under `sys/sharing/by-grantee/<grantee>/<target_hash>`.

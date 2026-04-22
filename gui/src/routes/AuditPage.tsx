@@ -20,6 +20,8 @@ const CATEGORY_LABELS: Record<string, string> = {
   "identity-group-user": "Identity group (user)",
   "identity-group-app": "Identity group (app)",
   "asset-group": "Asset group",
+  share: "Share",
+  user: "User / Role",
 };
 
 const CATEGORY_VARIANTS: Record<
@@ -30,12 +32,18 @@ const CATEGORY_VARIANTS: Record<
   "identity-group-user": "info",
   "identity-group-app": "info",
   "asset-group": "success",
+  share: "info",
+  user: "neutral",
 };
 
 const OP_VARIANTS: Record<string, "info" | "success" | "warning" | "error" | "neutral"> = {
   create: "success",
   update: "info",
   delete: "error",
+  grant: "success",
+  revoke: "error",
+  "cascade-revoke": "warning",
+  "password-change": "warning",
 };
 
 /**
@@ -233,6 +241,10 @@ export function AuditPage() {
                   { value: "create", label: "Create" },
                   { value: "update", label: "Update" },
                   { value: "delete", label: "Delete" },
+                  { value: "grant", label: "Grant share" },
+                  { value: "revoke", label: "Revoke share" },
+                  { value: "cascade-revoke", label: "Cascade revoke" },
+                  { value: "password-change", label: "Password change" },
                 ]}
               />
             </div>

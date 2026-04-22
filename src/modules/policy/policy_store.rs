@@ -1427,10 +1427,19 @@ impl Handler for PolicyStore {
                     // secret/resource. Failures are logged but never
                     // fail the delete — stale share records deny
                     // access anyway once `get_share` returns None.
+                    //
+                    // The audited variant stamps the caller's entity_id
+                    // on each emitted cascade-revoke event so the
+                    // Admin → Audit page attributes the action to the
+                    // user that triggered the target delete.
                     if let Some(sshare) = self.share_store() {
                         if looks_like_kv_path(&req.path) {
                             if let Err(e) = sshare
-                                .cascade_delete_target(ShareTargetKind::KvSecret, &req.path)
+                                .cascade_delete_target_audited(
+                                    ShareTargetKind::KvSecret,
+                                    &req.path,
+                                    &caller_id,
+                                )
                                 .await
                             {
                                 log::warn!(
@@ -1443,7 +1452,11 @@ impl Handler for PolicyStore {
                             let trimmed = req.path.trim_start_matches('/');
                             if trimmed.starts_with("resources/resources/") {
                                 if let Err(e) = sshare
-                                    .cascade_delete_target(ShareTargetKind::Resource, &name)
+                                    .cascade_delete_target_audited(
+                                        ShareTargetKind::Resource,
+                                        &name,
+                                        &caller_id,
+                                    )
                                     .await
                                 {
                                     log::warn!(

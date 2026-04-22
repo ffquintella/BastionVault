@@ -34,10 +34,12 @@ pub mod entity_store;
 pub mod group_store;
 pub mod owner_store;
 pub mod share_store;
+pub mod user_audit_store;
 pub use entity_store::{Entity, EntityStore};
 pub use group_store::{GroupEntry, GroupHistoryEntry, GroupKind, GroupStore};
 pub use owner_store::{OwnerRecord, OwnerStore};
 pub use share_store::{SecretShare, ShareByGranteePointer, ShareStore, ShareTargetKind};
+pub use user_audit_store::{UserAuditEntry, UserAuditStore};
 
 static IDENTITY_BACKEND_HELP: &str = r#"
 The identity backend manages user groups and application groups. Each group
@@ -54,6 +56,7 @@ pub struct IdentityModule {
     pub entity_store: ArcSwap<Option<Arc<EntityStore>>>,
     pub owner_store: ArcSwap<Option<Arc<OwnerStore>>>,
     pub share_store: ArcSwap<Option<Arc<ShareStore>>>,
+    pub user_audit_store: ArcSwap<Option<Arc<UserAuditStore>>>,
 }
 
 pub struct IdentityBackendInner {
@@ -1001,7 +1004,15 @@ impl IdentityBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_share_store()?;
         let (kind, target_path, grantee) = extract_share_identifiers(req)?;
-        store.delete_share(kind, &target_path, &grantee).await?;
+        let actor = req
+            .auth
+            .as_ref()
+            .and_then(|a| a.metadata.get("entity_id"))
+            .cloned()
+            .unwrap_or_default();
+        store
+            .delete_share_audited(kind, &target_path, &grantee, &actor, "revoke")
+            .await?;
         Ok(None)
     }
 
@@ -1180,6 +1191,7 @@ impl IdentityModule {
             entity_store: ArcSwap::new(Arc::new(None)),
             owner_store: ArcSwap::new(Arc::new(None)),
             share_store: ArcSwap::new(Arc::new(None)),
+            user_audit_store: ArcSwap::new(Arc::new(None)),
         }
     }
 
@@ -1197,6 +1209,10 @@ impl IdentityModule {
 
     pub fn share_store(&self) -> Option<Arc<ShareStore>> {
         self.share_store.load().as_ref().clone()
+    }
+
+    pub fn user_audit_store(&self) -> Option<Arc<UserAuditStore>> {
+        self.user_audit_store.load().as_ref().clone()
     }
 }
 
@@ -1231,6 +1247,8 @@ impl Module for IdentityModule {
         self.owner_store.store(Arc::new(Some(os)));
         let ss = ShareStore::new(core).await?;
         self.share_store.store(Arc::new(Some(ss)));
+        let uas = UserAuditStore::new(core).await?;
+        self.user_audit_store.store(Arc::new(Some(uas)));
         Ok(())
     }
 
@@ -1239,6 +1257,7 @@ impl Module for IdentityModule {
         self.entity_store.store(Arc::new(None));
         self.owner_store.store(Arc::new(None));
         self.share_store.store(Arc::new(None));
+        self.user_audit_store.store(Arc::new(None));
         core.delete_logical_backend("identity")
     }
 }
