@@ -27,6 +27,7 @@ const adminNav: NavItem[] = [
   { path: "/asset-groups", label: "Asset Groups" },
   { path: "/policies", label: "Policies" },
   { path: "/mounts", label: "Mounts" },
+  { path: "/audit", label: "Audit" },
   { path: "/settings", label: "Settings" },
 ];
 

@@ -38,6 +38,7 @@ import type {
   AssetGroupLookupResult,
   EntitySelf,
   EntityAliasInfo,
+  AuditEvent,
   OwnerInfo,
   ShareEntry,
   SharePointer,
@@ -79,6 +80,8 @@ export const resetVault = () => invoke<void>("reset_vault");
 export const getVaultStatus = () => invoke<VaultStatus>("get_vault_status");
 export const listMounts = () => invoke<MountInfo[]>("list_mounts");
 export const listAuthMethods = () => invoke<MountInfo[]>("list_auth_methods");
+export const listAuditEvents = (from: string, to: string, limit?: number) =>
+  invoke<AuditEvent[]>("list_audit_events", { from, to, limit });
 
 // Auth
 export const loginToken = (token: string) =>

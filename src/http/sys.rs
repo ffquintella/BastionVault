@@ -195,6 +195,44 @@ async fn sys_list_mounts_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// Unified admin audit trail. GET reads the aggregated log; optional
+/// `from` / `to` / `limit` are accepted as query-string-style fields
+/// via the request body so the same handler works over the internal
+/// logical pipeline too (the Tauri command path).
+async fn sys_audit_events_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/audit/events".to_string();
+    r.operation = Operation::Read;
+
+    // Parse query string (`?from=...&to=...&limit=...`) into the
+    // request body so the logical handler's field-declaration-based
+    // `req.get_data(...)` lookups resolve. We accept the values
+    // verbatim — RFC3339 timestamps and integers don't need URL
+    // decoding, and any clients that need arbitrary characters can
+    // just POST a JSON body instead.
+    if let Some(qs) = req.uri().query() {
+        let mut body = serde_json::Map::new();
+        for pair in qs.split('&') {
+            let Some((k, v)) = pair.split_once('=') else { continue };
+            if k == "limit" {
+                if let Ok(n) = v.parse::<u64>() {
+                    body.insert(k.into(), serde_json::Value::Number(n.into()));
+                }
+            } else {
+                body.insert(k.into(), serde_json::Value::String(v.to_string()));
+            }
+        }
+        if !body.is_empty() {
+            r.body = Some(body);
+        }
+    }
+
+    handle_request(core, &mut r).await
+}
+
 async fn sys_mount_request_handler(
     req: HttpRequest,
     path: web::Path<String>,
@@ -780,6 +818,9 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
                 .route(web::get().to(sys_read_policies_request_handler))
                 .route(web::post().to(sys_write_policies_request_handler))
                 .route(web::delete().to(sys_delete_policies_request_handler)),
+        )
+        .service(
+            web::resource("/audit/events").route(web::get().to(sys_audit_events_request_handler)),
         )
         .service(
             web::resource("/internal/ui/mounts").route(web::get().to(sys_get_internal_ui_mounts_request_handler)),

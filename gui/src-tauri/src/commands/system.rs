@@ -228,6 +228,97 @@ async fn read_ui_mounts(
 /// Convert the `{path -> {type, description, ...}}` payload used by
 /// `sys/internal/ui/mounts` into the flat `Vec<MountInfo>` the
 /// frontend expects.
+/// One row of the unified audit trail. Mirrors the shape of the
+/// server's `/v2/sys/audit/events` response so the frontend can
+/// render it directly. `changed_fields` is empty for policies (where
+/// only raw-HCL before/after is tracked) and populated for group
+/// changes.
+#[derive(Serialize)]
+pub struct AuditEvent {
+    pub ts: String,
+    pub user: String,
+    pub op: String,
+    pub category: String,
+    pub target: String,
+    pub changed_fields: Vec<String>,
+    pub summary: String,
+}
+
+#[tauri::command]
+pub async fn list_audit_events(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+    limit: Option<u32>,
+) -> CmdResult<Vec<AuditEvent>> {
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let token = state.token.lock().await.clone().unwrap_or_default();
+
+    let mut req = Request::default();
+    req.operation = Operation::Read;
+    req.path = "sys/audit/events".to_string();
+    req.client_token = token;
+
+    // The handler parses these from `req.data` after field resolution;
+    // for Read it populates from the body, so stuff them there.
+    let mut body = serde_json::Map::new();
+    if !from.is_empty() {
+        body.insert("from".into(), Value::String(from));
+    }
+    if !to.is_empty() {
+        body.insert("to".into(), Value::String(to));
+    }
+    if let Some(l) = limit {
+        body.insert("limit".into(), Value::Number(l.into()));
+    }
+    if !body.is_empty() {
+        req.body = Some(body);
+    }
+
+    let resp = core.handle_request(&mut req).await.map_err(CommandError::from)?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    let arr = data.get("events").and_then(|v| v.as_array()).cloned();
+    let out = arr
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| {
+            let o = v.as_object()?;
+            Some(AuditEvent {
+                ts: o.get("ts").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                user: o.get("user").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                op: o.get("op").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                category: o
+                    .get("category")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                target: o
+                    .get("target")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                changed_fields: o
+                    .get("changed_fields")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                summary: o
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            })
+        })
+        .collect();
+    Ok(out)
+}
+
 fn mount_map_to_info(map: &serde_json::Map<String, Value>) -> Vec<MountInfo> {
     let mut out: Vec<MountInfo> = map
         .iter()

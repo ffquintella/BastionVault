@@ -118,6 +118,7 @@ pub fn run() {
             commands::system::get_vault_status,
             commands::system::list_mounts,
             commands::system::list_auth_methods,
+            commands::system::list_audit_events,
             // Auth
             commands::auth::login_token,
             commands::auth::login_userpass,

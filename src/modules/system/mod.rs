@@ -29,6 +29,42 @@ use crate::{
     storage::StorageEntry,
 };
 
+/// Per-event row in the aggregated audit trail. One instance per
+/// history entry we pull from a subsystem's change log; we build a
+/// Vec of these across policies, identity groups, and asset groups,
+/// then serialize newest-first in `handle_audit_events`.
+struct AuditEventBuilder {
+    ts: String,
+    user: String,
+    op: String,
+    category: String,
+    target: String,
+    changed_fields: Vec<String>,
+    summary: String,
+}
+
+impl AuditEventBuilder {
+    fn into_value(self) -> Value {
+        let mut m = Map::new();
+        m.insert("ts".into(), Value::String(self.ts));
+        m.insert("user".into(), Value::String(self.user));
+        m.insert("op".into(), Value::String(self.op));
+        m.insert("category".into(), Value::String(self.category));
+        m.insert("target".into(), Value::String(self.target));
+        m.insert(
+            "changed_fields".into(),
+            Value::Array(
+                self.changed_fields
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
+        m.insert("summary".into(), Value::String(self.summary));
+        Value::Object(m)
+    }
+}
+
 static SYSTEM_BACKEND_HELP: &str = r#"
 The system backend is built-in to BastionVault and cannot be remounted or
 unmounted. It contains the paths that are used to configure BastionVault itself
@@ -91,6 +127,7 @@ impl SystemBackend {
         let sys_backend_resource_owner_transfer = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_asset_group_owner_transfer = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_audit_table = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_audit_events = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_audit_enable = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_audit_disable = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_raw_read = self.self_ptr.upgrade().unwrap().clone();
@@ -343,6 +380,35 @@ impl SystemBackend {
                     pattern: "audit$",
                     operations: [
                         {op: Operation::Read, handler: sys_backend_audit_table.handle_audit_table}
+                    ]
+                },
+                {
+                    // Unified audit trail — aggregates per-subsystem
+                    // history logs (policies, identity groups, asset
+                    // groups, resources) into a flat newest-first
+                    // timeline. Intended for the Admin → Audit GUI
+                    // page. Routed ahead of the generic
+                    // `audit/(?P<path>.+)` catch-all so it matches.
+                    pattern: "audit/events/?$",
+                    fields: {
+                        "from": {
+                            required: false,
+                            field_type: FieldType::Str,
+                            description: "Optional RFC3339 lower-bound timestamp."
+                        },
+                        "to": {
+                            required: false,
+                            field_type: FieldType::Str,
+                            description: "Optional RFC3339 upper-bound timestamp."
+                        },
+                        "limit": {
+                            required: false,
+                            field_type: FieldType::Int,
+                            description: "Maximum number of events to return (default 500)."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: sys_backend_audit_events.handle_audit_events}
                     ]
                 },
                 {
@@ -779,6 +845,152 @@ impl SystemBackend {
         Ok(None)
     }
 
+    /// Unified audit trail. Walks every per-subsystem change-history
+    /// log we already maintain — ACL policies, identity user/app
+    /// groups, and asset groups (resource-group store) — and presents
+    /// them as a flat newest-first list. Admin-only (gated by the ACL
+    /// on `sys/audit/events`). Optional `from` / `to` query params
+    /// bound the time window; `limit` caps response size (default
+    /// 500).
+    ///
+    /// Resource-metadata history lives in the resource mount's own
+    /// barrier view (`hist/<name>/…`), which isn't reachable from the
+    /// system backend without routing a sub-request — it's omitted
+    /// from this aggregator for now. Operators can still view per-
+    /// resource history via the Resources tab's History panel.
+    pub async fn handle_audit_events(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        use crate::modules::{
+            identity::{GroupKind, IdentityModule},
+            policy::PolicyModule,
+            resource_group::ResourceGroupModule,
+        };
+
+        let from = req
+            .get_data("from")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .filter(|s| !s.is_empty());
+        let to = req
+            .get_data("to")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .filter(|s| !s.is_empty());
+        let limit = req
+            .get_data("limit")
+            .ok()
+            .and_then(|v| v.as_u64())
+            .unwrap_or(500) as usize;
+
+        let mut events: Vec<AuditEventBuilder> = Vec::new();
+
+        // Policies
+        if let Ok(policy_module) = self.get_module::<PolicyModule>("policy") {
+            let store = policy_module.policy_store.load();
+            if let Ok(names) = store.list_policy(crate::modules::policy::PolicyType::Acl).await {
+                for name in names {
+                    if let Ok(entries) = store.list_history(&name).await {
+                        for e in entries {
+                            events.push(AuditEventBuilder {
+                                ts: e.ts,
+                                user: e.user,
+                                op: e.op,
+                                category: "policy".into(),
+                                target: name.clone(),
+                                changed_fields: Vec::new(),
+                                summary: String::new(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Identity groups — user + app
+        if let Ok(identity_module) = self.get_module::<IdentityModule>("identity") {
+            if let Some(gs) = identity_module.group_store() {
+                for (kind, label) in [
+                    (GroupKind::User, "identity-group-user"),
+                    (GroupKind::App, "identity-group-app"),
+                ] {
+                    if let Ok(names) = gs.list_groups(kind).await {
+                        for name in names {
+                            if let Ok(entries) = gs.list_history(kind, &name).await {
+                                for e in entries {
+                                    events.push(AuditEventBuilder {
+                                        ts: e.ts,
+                                        user: e.user,
+                                        op: e.op,
+                                        category: label.into(),
+                                        target: name.clone(),
+                                        changed_fields: e.changed_fields,
+                                        summary: String::new(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Asset groups (resource-group store).
+        if let Ok(module) = self.get_module::<ResourceGroupModule>("resource-group") {
+            if let Some(store) = module.store() {
+                if let Ok(names) = store.list_groups().await {
+                    for name in names {
+                        if let Ok(entries) = store.list_history(&name).await {
+                            for e in entries {
+                                events.push(AuditEventBuilder {
+                                    ts: e.ts,
+                                    user: e.user,
+                                    op: e.op,
+                                    category: "asset-group".into(),
+                                    target: name.clone(),
+                                    changed_fields: e.changed_fields,
+                                    summary: String::new(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort newest-first. Timestamps are RFC3339 strings;
+        // lexicographic order matches chronological for that format.
+        events.sort_by(|a, b| b.ts.cmp(&a.ts));
+
+        // Apply from/to bounds (string comparison, which is fine for
+        // RFC3339). Malformed filters are ignored rather than
+        // surfacing errors — the GUI always passes well-formed values.
+        let filtered: Vec<_> = events
+            .into_iter()
+            .filter(|e| {
+                if let Some(f) = &from {
+                    if e.ts < *f {
+                        return false;
+                    }
+                }
+                if let Some(t) = &to {
+                    if e.ts > *t {
+                        return false;
+                    }
+                }
+                true
+            })
+            .take(limit)
+            .collect();
+
+        let arr = Value::Array(filtered.into_iter().map(|e| e.into_value()).collect());
+        let mut data = Map::new();
+        data.insert("events".into(), arr);
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
     pub async fn handle_audit_enable(
         &self,
         _backend: &dyn Backend,
@@ -1106,6 +1318,55 @@ mod mod_system_tests {
     /// If a regression reintroduces that bypass — or the ACL filter
     /// in `handle_internal_ui_mounts_read` starts leaking — this test
     /// catches it.
+    /// The audit aggregator returns a newest-first list of events
+    /// drawn from policy, identity-group, and asset-group history.
+    /// Smoke test: root creates a policy + group, reads
+    /// `sys/audit/events`, gets at least those two events back.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_audit_events_aggregator_basic() {
+        let mut server = TestHttpServer::new("test_audit_events_aggregator_basic", true).await;
+        server.token = server.root_token.clone();
+
+        // Create a policy — shows up as a "policy" create event.
+        let _ = server
+            .write(
+                "sys/policies/acl/audit-test-pol",
+                serde_json::json!({ "policy": r#"path "secret/*" { capabilities = ["read"] }"# })
+                    .as_object()
+                    .cloned(),
+                None,
+            )
+            .unwrap();
+
+        // Create an identity user-group — shows up as "identity-group-user".
+        let _ = server
+            .write(
+                "identity/group/user/audit-test-grp",
+                serde_json::json!({ "members": "alice" }).as_object().cloned(),
+                None,
+            )
+            .unwrap();
+
+        let ret = server.read("sys/audit/events", None).unwrap().1;
+        let events = ret
+            .get("events")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(!events.is_empty(), "audit trail should not be empty");
+
+        let has_policy = events.iter().any(|e| {
+            e.get("category").and_then(|v| v.as_str()) == Some("policy")
+                && e.get("target").and_then(|v| v.as_str()) == Some("audit-test-pol")
+        });
+        let has_group = events.iter().any(|e| {
+            e.get("category").and_then(|v| v.as_str()) == Some("identity-group-user")
+                && e.get("target").and_then(|v| v.as_str()) == Some("audit-test-grp")
+        });
+        assert!(has_policy, "expected policy event in {events:?}");
+        assert!(has_group, "expected identity-group-user event in {events:?}");
+    }
+
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_system_internal_ui_mounts_default_policy_sees_nothing() {
         let mut test_http_server =

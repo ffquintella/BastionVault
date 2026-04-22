@@ -10,6 +10,7 @@ import { AppRolePage } from "./routes/AppRolePage";
 import { GroupsPage } from "./routes/GroupsPage";
 import { AssetGroupsPage } from "./routes/AssetGroupsPage";
 import { SharingPage } from "./routes/SharingPage";
+import { AuditPage } from "./routes/AuditPage";
 import { PoliciesPage } from "./routes/PoliciesPage";
 import { MountsPage } from "./routes/MountsPage";
 import { SettingsPage } from "./routes/SettingsPage";
@@ -66,6 +67,10 @@ export default function App() {
             <Route
               path="/sharing"
               element={<ProtectedRoute><SharingPage /></ProtectedRoute>}
+            />
+            <Route
+              path="/audit"
+              element={<ProtectedRoute><AuditPage /></ProtectedRoute>}
             />
             <Route
               path="/policies"

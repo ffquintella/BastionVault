@@ -370,6 +370,21 @@ export interface EntityAliasInfo {
   entity_id: string;
 }
 
+/** One row of the admin audit trail. `category` identifies the subsystem
+ *  the event came from (`policy`, `identity-group-user`,
+ *  `identity-group-app`, `asset-group`). `changed_fields` may be empty
+ *  (policies don't track field-level diffs; only raw-HCL before/after). */
+export interface AuditEvent {
+  ts: string;
+  user: string;
+  /** "create" | "update" | "delete" */
+  op: string;
+  category: string;
+  target: string;
+  changed_fields: string[];
+  summary: string;
+}
+
 export type ShareTargetKind = "kv-secret" | "resource" | "asset-group";
 
 export interface OwnerInfo {
