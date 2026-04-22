@@ -1527,6 +1527,25 @@ mod mod_system_tests {
             "missing password-change in {ops:?}",
         );
         assert!(ops.contains(&"delete".to_string()), "missing delete in {ops:?}");
+
+        // Regression: root-token operations used to store an empty
+        // actor (no `entity_id`), which rendered as "(unknown)" in
+        // the Admin → Audit page. `caller_audit_actor` now falls
+        // back to `auth.display_name` so root writes surface as
+        // `"root"`.
+        let users: Vec<String> = matching
+            .iter()
+            .map(|e| {
+                e.get("user")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect();
+        assert!(
+            users.iter().all(|u| u == "root"),
+            "root-token audit rows should surface as 'root', got {users:?}",
+        );
     }
 
     /// Share grants and revocations show up in the audit trail under

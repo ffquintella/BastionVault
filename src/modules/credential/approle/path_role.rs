@@ -2289,7 +2289,7 @@ async fn record_approle_audit(
     target: &str,
     details: &str,
 ) {
-    use crate::modules::identity::{IdentityModule, UserAuditEntry};
+    use crate::modules::identity::{caller_audit_actor, IdentityModule, UserAuditEntry};
 
     let Some(module) = core
         .module_manager
@@ -2301,12 +2301,7 @@ async fn record_approle_audit(
         return;
     };
 
-    let actor = req
-        .auth
-        .as_ref()
-        .and_then(|a| a.metadata.get("entity_id"))
-        .cloned()
-        .unwrap_or_default();
+    let actor = caller_audit_actor(req);
 
     let entry = UserAuditEntry {
         ts: String::new(),

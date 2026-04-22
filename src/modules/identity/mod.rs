@@ -41,6 +41,35 @@ pub use owner_store::{OwnerRecord, OwnerStore};
 pub use share_store::{SecretShare, ShareByGranteePointer, ShareStore, ShareTargetKind};
 pub use user_audit_store::{UserAuditEntry, UserAuditStore};
 
+/// Best-effort caller identity for audit rows.
+///
+/// Order of preference:
+///   1. `auth.metadata["entity_id"]` — the stable UUID
+///      (`EntityStore`) for userpass/approle/FIDO2 logins.
+///   2. `auth.display_name` — populated for root (`"root"`) and by
+///      login handlers as a human label.
+///   3. Empty string — no `auth` at all.
+///
+/// Without this fallback, root-token operations show up as
+/// "(unknown)" in the Admin → Audit page because root has no
+/// entity_id. The GUI treats a non-UUID value as a literal
+/// username and renders it verbatim, so returning `"root"` here is
+/// enough to surface the correct actor without schema changes.
+pub fn caller_audit_actor(req: &Request) -> String {
+    let Some(auth) = req.auth.as_ref() else {
+        return String::new();
+    };
+    if let Some(id) = auth.metadata.get("entity_id") {
+        if !id.is_empty() {
+            return id.clone();
+        }
+    }
+    if !auth.display_name.is_empty() {
+        return auth.display_name.clone();
+    }
+    String::new()
+}
+
 static IDENTITY_BACKEND_HELP: &str = r#"
 The identity backend manages user groups and application groups. Each group
 holds a list of members (usernames for user groups, AppRole role names for
@@ -974,12 +1003,7 @@ impl IdentityBackendInner {
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_default();
 
-        let granted_by = req
-            .auth
-            .as_ref()
-            .and_then(|a| a.metadata.get("entity_id"))
-            .cloned()
-            .unwrap_or_default();
+        let granted_by = caller_audit_actor(req);
 
         let share = SecretShare {
             target_kind: kind.as_str().to_string(),
@@ -1004,12 +1028,7 @@ impl IdentityBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_share_store()?;
         let (kind, target_path, grantee) = extract_share_identifiers(req)?;
-        let actor = req
-            .auth
-            .as_ref()
-            .and_then(|a| a.metadata.get("entity_id"))
-            .cloned()
-            .unwrap_or_default();
+        let actor = caller_audit_actor(req);
         store
             .delete_share_audited(kind, &target_path, &grantee, &actor, "revoke")
             .await?;

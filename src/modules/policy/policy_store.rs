@@ -1387,12 +1387,18 @@ impl Handler for PolicyStore {
 
         // --- Owner bookkeeping ---
         if let Some(store) = owner_store.as_ref() {
+            // `caller_id` is the entity_id ONLY — used for ownership
+            // capture, where recording "root" as the owner would be
+            // wrong. `audit_actor` falls back to `display_name` so
+            // share cascade-revoke audit rows show "root" rather than
+            // "(unknown)" for root-token deletes.
             let caller_id = req
                 .auth
                 .as_ref()
                 .and_then(|a| a.metadata.get("entity_id"))
                 .cloned()
                 .unwrap_or_default();
+            let audit_actor = crate::modules::identity::caller_audit_actor(req);
 
             match req.operation {
                 Operation::Write => {
@@ -1438,7 +1444,7 @@ impl Handler for PolicyStore {
                                 .cascade_delete_target_audited(
                                     ShareTargetKind::KvSecret,
                                     &req.path,
-                                    &caller_id,
+                                    &audit_actor,
                                 )
                                 .await
                             {
@@ -1455,7 +1461,7 @@ impl Handler for PolicyStore {
                                     .cascade_delete_target_audited(
                                         ShareTargetKind::Resource,
                                         &name,
-                                        &caller_id,
+                                        &audit_actor,
                                     )
                                     .await
                                 {
