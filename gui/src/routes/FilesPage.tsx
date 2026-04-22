@@ -38,6 +38,8 @@ export function FilesPage() {
   const [metas, setMetas] = useState<FileMeta[]>([]);
   const [selected, setSelected] = useState<FileMeta | null>(null);
   const [showUpload, setShowUpload] = useState(false);
+  const [initialDropFile, setInitialDropFile] = useState<File | null>(null);
+  const [pageDragOver, setPageDragOver] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<FileMeta | null>(null);
 
   async function refresh() {
@@ -101,13 +103,53 @@ export function FilesPage() {
 
   return (
     <Layout>
-      <div className="flex flex-col gap-4">
+      <div
+        className="flex flex-col gap-4 relative"
+        onDragOver={(e) => {
+          // Only react to drags that carry a file payload — avoids
+          // hijacking drag-reorders or text selection inside the page.
+          if (Array.from(e.dataTransfer.types || []).includes("Files")) {
+            e.preventDefault();
+            setPageDragOver(true);
+          }
+        }}
+        onDragLeave={(e) => {
+          // Fires for every child too; only dismiss when the pointer
+          // actually leaves the container.
+          if (e.currentTarget === e.target) setPageDragOver(false);
+        }}
+        onDrop={(e) => {
+          if (Array.from(e.dataTransfer.types || []).includes("Files")) {
+            e.preventDefault();
+            setPageDragOver(false);
+            const f = e.dataTransfer.files?.[0];
+            if (f) {
+              setInitialDropFile(f);
+              setShowUpload(true);
+            }
+          }
+        }}
+      >
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-semibold">Files</h1>
-          <Button size="sm" onClick={() => setShowUpload(true)}>
+          <Button
+            size="sm"
+            onClick={() => {
+              setInitialDropFile(null);
+              setShowUpload(true);
+            }}
+          >
             Upload File
           </Button>
         </div>
+
+        {pageDragOver && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-lg border-2 border-dashed border-[var(--color-primary)] bg-[var(--color-primary)]/10">
+            <div className="rounded bg-[var(--color-surface)] px-4 py-2 text-sm font-medium">
+              Drop to upload
+            </div>
+          </div>
+        )}
 
         <Card title="All Files">
           <Table<FileMeta>
@@ -173,11 +215,16 @@ export function FilesPage() {
 
       <UploadModal
         open={showUpload}
-        onClose={() => setShowUpload(false)}
+        onClose={() => {
+          setShowUpload(false);
+          setInitialDropFile(null);
+        }}
         onCreated={async () => {
           setShowUpload(false);
+          setInitialDropFile(null);
           await refresh();
         }}
+        initialFile={initialDropFile}
       />
 
       {selected && (
@@ -221,10 +268,12 @@ function UploadModal({
   open,
   onClose,
   onCreated,
+  initialFile,
 }: {
   open: boolean;
   onClose: () => void;
   onCreated: () => void;
+  initialFile?: File | null;
 }) {
   const { toast } = useToast();
   const [name, setName] = useState("");
@@ -233,6 +282,7 @@ function UploadModal({
   const [notes, setNotes] = useState("");
   const [bytes, setBytes] = useState<Uint8Array | null>(null);
   const [busy, setBusy] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
   async function handleFileChoose(f: File | undefined) {
@@ -241,6 +291,30 @@ function UploadModal({
     if (!mimeType && f.type) setMimeType(f.type);
     const buf = new Uint8Array(await f.arrayBuffer());
     setBytes(buf);
+  }
+
+  // Prefill from a drag-and-drop initiated outside the modal.
+  useEffect(() => {
+    if (open && initialFile) {
+      handleFileChoose(initialFile);
+    } else if (!open) {
+      // Reset on close so the next open starts fresh.
+      setName("");
+      setResource("");
+      setMimeType("");
+      setNotes("");
+      setBytes(null);
+      setDragOver(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, initialFile]);
+
+  function onDropZone(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+    const f = e.dataTransfer.files?.[0];
+    if (f) handleFileChoose(f);
   }
 
   async function submit() {
@@ -256,9 +330,9 @@ function UploadModal({
     try {
       await api.createFile({
         name,
-        content_base64: toBase64(bytes),
+        contentBase64: toBase64(bytes),
         resource: resource || undefined,
-        mime_type: mimeType || undefined,
+        mimeType: mimeType || undefined,
         notes: notes || undefined,
       });
       toast("success", "File uploaded");
@@ -290,17 +364,41 @@ function UploadModal({
       <div className="flex flex-col gap-3">
         <div>
           <label className="text-xs text-[var(--color-text-muted)]">File</label>
-          <div className="flex items-center gap-2 mt-1">
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={() => fileInput.current?.click()}
-            >
-              Choose file…
-            </Button>
-            <span className="text-sm">
-              {bytes ? `${fmtBytes(bytes.length)} selected` : "No file selected"}
-            </span>
+          <div
+            onDragOver={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setDragOver(true);
+            }}
+            onDragLeave={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setDragOver(false);
+            }}
+            onDrop={onDropZone}
+            className={`mt-1 flex flex-col items-center justify-center gap-2 rounded border-2 border-dashed px-4 py-6 text-sm transition-colors ${
+              dragOver
+                ? "border-[var(--color-primary)] bg-[var(--color-primary)]/10"
+                : "border-[var(--color-border)]"
+            }`}
+          >
+            <div className="text-[var(--color-text-muted)]">
+              Drag &amp; drop a file here, or
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => fileInput.current?.click()}
+              >
+                Choose file…
+              </Button>
+              <span>
+                {bytes
+                  ? `${fmtBytes(bytes.length)} selected`
+                  : "no file selected"}
+              </span>
+            </div>
             <input
               ref={fileInput}
               type="file"
@@ -669,7 +767,7 @@ function AddSyncTargetModal({
         id: fileId,
         name,
         kind: "local-fs",
-        target_path: targetPath,
+        targetPath: targetPath,
         mode: mode || undefined,
       });
       toast("success", "Sync target configured");

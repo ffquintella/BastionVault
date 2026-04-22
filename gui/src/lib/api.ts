@@ -316,17 +316,17 @@ export const readFileContent = (id: string) =>
   invoke<FileContentResult>("read_file_content", { id });
 export const createFile = (args: {
   name: string;
-  content_base64: string;
+  contentBase64: string;
   resource?: string;
-  mime_type?: string;
+  mimeType?: string;
   tags?: string[];
   notes?: string;
 }) => invoke<FileMeta>("create_file", args);
 export const updateFileContent = (args: {
   id: string;
-  content_base64: string;
+  contentBase64: string;
   name?: string;
-  mime_type?: string;
+  mimeType?: string;
   tags?: string[];
   notes?: string;
 }) => invoke<FileMeta>("update_file_content", args);
@@ -340,9 +340,9 @@ export const writeFileSyncTarget = (args: {
   id: string;
   name: string;
   kind: string;
-  target_path: string;
+  targetPath: string;
   mode?: string;
-  sync_on_write?: boolean;
+  syncOnWrite?: boolean;
 }) => invoke<void>("write_file_sync_target", args);
 export const deleteFileSyncTarget = (id: string, name: string) =>
   invoke<void>("delete_file_sync_target", { id, name });
