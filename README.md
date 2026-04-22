@@ -1,6 +1,6 @@
 # BastionVault
 
-![BastionVault logo](docs/static/img/bastionvault-logo.svg)
+![BastionVault logo](docs/static/img/bastionvault.png)
 
 [![Crates.io Version](https://img.shields.io/crates/v/bastion_vault)](https://crates.io/crates/bastion_vault)
 

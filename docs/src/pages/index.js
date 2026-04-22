@@ -16,13 +16,13 @@ function HomepageHeader() {
         <img
           className={styles.homepageLogo}
           width="120"
-          src={require('@site/static/img/bastionvault-logo.svg').default}
+          src={require('@site/static/img/bastionvault.png').default}
           alt="BastionVault Logo"
         />
         <img
           className={styles.homepageBanner}
           width="400"
-          src={require('@site/static/img/bastionvault-logo.svg').default}
+          src={require('@site/static/img/bastionvault.png').default}
           alt="BastionVault Logo"
         />
         <h2 className="hero__subtitle">{siteConfig.tagline}</h2>

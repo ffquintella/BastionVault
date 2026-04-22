@@ -28,7 +28,7 @@ module.exports = {
       onBrokenMarkdownLinks: 'throw',
     },
   },
-  favicon: 'img/bastionvault-mark.svg',
+  favicon: 'img/bastionvault.png',
   organizationName: 'ffquintella',
   projectName: 'BastionVault',
   trailingSlash: true,
@@ -50,7 +50,7 @@ module.exports = {
       title: 'BastionVault',
       logo: {
         alt: 'BastionVault Logo',
-        src: 'img/bastionvault-mark.svg',
+        src: 'img/bastionvault.png',
       },
       items: [
         {
