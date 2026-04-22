@@ -61,8 +61,6 @@ const POLICY_EGP_SUB_PATH: &str = "policy-egp/";
 // so the audit trail remains available after removal.
 const POLICY_HISTORY_SUB_PATH: &str = "policy-history/";
 
-// POLICY_CACHE_SIZE is the number of policies that are kept cached
-const POLICY_CACHE_SIZE: usize = 1024;
 
 // DEFAULT_POLICY_NAME is the name of the default policy
 const DEFAULT_POLICY_NAME: &str = "default";
@@ -425,14 +423,15 @@ impl PolicyStore {
             ..Default::default()
         };
 
+        let policy_cache_size = core.cache_config.policy_cache_size.max(1);
         policy_store.token_policies_lru = Some(
-            Cache::builder(POLICY_CACHE_SIZE * 10, POLICY_CACHE_SIZE as i64)
+            Cache::builder(policy_cache_size * 10, policy_cache_size as i64)
                 .set_ignore_internal_cost(true)
                 .finalize()
                 .unwrap(),
         );
         policy_store.egp_lru = Some(
-            Cache::builder(POLICY_CACHE_SIZE * 10, POLICY_CACHE_SIZE as i64)
+            Cache::builder(policy_cache_size * 10, policy_cache_size as i64)
                 .set_ignore_internal_cost(true)
                 .finalize()
                 .unwrap(),
@@ -514,8 +513,12 @@ impl PolicyStore {
 
         if let Some(lru) = cache {
             if let Some(p) = lru.get(&index) {
+                crate::metrics::cache_metrics::cache_metrics()
+                    .record_hit(crate::metrics::cache_metrics::CacheLayer::Policy);
                 return Ok(Some(p.value().clone()));
             }
+            crate::metrics::cache_metrics::cache_metrics()
+                .record_miss(crate::metrics::cache_metrics::CacheLayer::Policy);
         }
 
         if policy_type == PolicyType::Acl && name == "root" {
@@ -821,9 +824,23 @@ impl PolicyStore {
         Ok(())
     }
 
+    /// Flush every cached policy and zeroize the held Arcs. Called by
+    /// `Core::flush_caches` on seal and by the `sys/cache/flush` admin
+    /// endpoint. Safe to call when the cache is already empty.
+    pub fn flush_caches(&self) {
+        if let Some(lru) = &self.token_policies_lru {
+            lru.clear().ok();
+        }
+        if let Some(lru) = &self.egp_lru {
+            lru.clear().ok();
+        }
+    }
+
     fn remove_token_policy_cache(&self, index: &String) -> Result<(), RvError> {
         if let Some(lru) = &self.token_policies_lru {
             lru.remove(index);
+            crate::metrics::cache_metrics::cache_metrics()
+                .record_eviction(crate::metrics::cache_metrics::CacheLayer::Policy);
         }
 
         Ok(())
@@ -842,6 +859,8 @@ impl PolicyStore {
     fn remove_egp_cache(&self, index: &String) -> Result<(), RvError> {
         if let Some(lru) = &self.egp_lru {
             lru.remove(index);
+            crate::metrics::cache_metrics::cache_metrics()
+                .record_eviction(crate::metrics::cache_metrics::CacheLayer::Policy);
         }
 
         Ok(())
@@ -1387,18 +1406,25 @@ impl Handler for PolicyStore {
 
         // --- Owner bookkeeping ---
         if let Some(store) = owner_store.as_ref() {
-            // `caller_id` is the entity_id ONLY — used for ownership
-            // capture, where recording "root" as the owner would be
-            // wrong. `audit_actor` falls back to `display_name` so
-            // share cascade-revoke audit rows show "root" rather than
-            // "(unknown)" for root-token deletes.
-            let caller_id = req
-                .auth
-                .as_ref()
-                .and_then(|a| a.metadata.get("entity_id"))
-                .cloned()
-                .unwrap_or_default();
+            // `caller_id` is the caller's `entity_id` when present,
+            // otherwise `display_name` (so root-token writes stamp
+            // `"root"` rather than orphan the record). This matches the
+            // audit-actor fallback and keeps the Owner card on the GUI
+            // useful for admin-created resources — an earlier version of
+            // this hook skipped ownership capture whenever `entity_id`
+            // was empty, which left every root-created resource
+            // permanently "Unowned".
+            //
+            // ACL impact is zero: root bypasses policy, and for other
+            // callers the comparison in `scope_passes` is entity_id vs
+            // entity_id — a literal "root" owner cannot accidentally
+            // grant owner-scope access because no other caller has
+            // `entity_id = "root"` in their auth metadata.
+            //
+            // `audit_actor` (already defined below for share-cascade
+            // revoke audit rows) computes the same value, so reuse it.
             let audit_actor = crate::modules::identity::caller_audit_actor(req);
+            let caller_id = audit_actor.clone();
 
             match req.operation {
                 Operation::Write => {

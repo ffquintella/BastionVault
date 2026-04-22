@@ -29,9 +29,10 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Storage Backend: MySQL | Done |
 | Storage Backend: SQLx (removed, libsqlite3-sys conflict) | Removed |
 | Storage Backend: Hiqlite (embedded Raft SQLite, HA) | Done |
+| Storage Backend: Cloud (S3 / OneDrive / Google Drive / Dropbox) | Todo |
 | Import/Export & Backup/Restore | Done |
-| Resource Management (inventory + grouped secrets) | In Progress |
-| Caching | Partial |
+| Resource Management (inventory + grouped secrets) | Done |
+| Caching | Done |
 | Batch Operations | Todo |
 | **Networking & TLS** | |
 | TLS & mTLS (Rustls-based) | Done |
@@ -67,6 +68,10 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
   All 6 phases complete: backend implementation, Raft error mapping, cluster health/status endpoints, cluster CLI commands (including failover), post-quantum TLS (X25519MLKEM768), backup/restore/export/import tooling, and HA fault-injection validation (8 multi-node test scenarios).
 - [Tauri GUI with FIDO2/YubiKey Support](roadmaps/tauri-gui-fido2.md)
   All 9 phases complete: project scaffold, embedded vault mode (auto-init/unseal via OS keychain), core screens (connect, init, login, dashboard), secrets management (KV browser, users, policies, mounts), AppRole dashboard, FIDO2 server module + GUI, remote mode (connection profiles, TLS config, HTTP API client), and polish (error boundary, settings page, packaging). 55 Tauri commands, 49 frontend tests, 79 React modules, 10 pages.
+- [Caching](features/caching.md)
+  Four-slice feature: cache-config scaffold; token lookup cache (keyed by salted hash, zeroized on release, never caches raw tokens); Prometheus metrics (`bvault_cache_{hits,misses,evictions}_total{layer}`); ciphertext-only secret read cache below the barrier (`CachingBackend` decorator, zeroized on release, no negative caching); memory-protection guardrails (`mlockall` on Unix, `PR_SET_DUMPABLE=0` on Linux); `POST /sys/cache/flush` admin endpoint (sudo-gated); automatic flush on seal. No cache at any layer holds plaintext secret material or raw bearer tokens — enforced structurally (secret cache implements `Backend` not `Storage`) and by per-layer zeroize-on-drop wrappers.
+- [Resource Management](features/resources.md)
+  Dedicated resource storage engine (`src/modules/resource/`) with per-resource metadata + secret grouping, per-field change history, per-secret version snapshots, configurable resource types, ownership + sharing + asset-group integration, 14 Tauri commands, and the full Resources GUI page. Goes beyond the original spec (which described a KV-prefix convention) — resources now live in a dedicated barrier-encrypted engine independent of KV.
 
 ## Active Initiatives
 
@@ -74,8 +79,8 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
   OpenID Connect auth backend with Authorization Code Flow + PKCE and claim-to-policy role mappings.
 - [SAML 2.0 Authentication](features/saml-auth.md)
   SAML 2.0 auth backend with SP-initiated SSO and attribute-to-policy role mappings.
-- [Resource Management](features/resources.md)
-  Higher-level inventory abstraction for organizing secrets by infrastructure entity (servers, network devices, websites, databases, applications, custom types). Stored in the KV engine with metadata (hostname, IP, OS, location, owner, tags).
+- [Cloud Storage Backend](features/cloud-storage-backend.md)
+  Third deployment mode (alongside Local / Remote): vault ciphertext stored in a user-provided cloud account — AWS S3, OneDrive, Google Drive, or Dropbox. Barrier and keys unchanged; provider sees only ciphertext. Design-only, 8 phases.
 - [Identity Groups](features/identity-groups.md)
   User groups and application groups with group-to-policy mapping. Policies attached to a group are unioned with the caller's direct policies at login time. Backend, HTTP API, GUI, and FIDO2 login union all shipped. Extension to Certificate / OIDC / SAML auth backends is deferred until those backends themselves are implemented (Cert is currently disabled in the OpenSSL-free build; OIDC/SAML are design-only).
 - [Per-User Scoping (Ownership & Sharing)](features/per-user-scoping.md)

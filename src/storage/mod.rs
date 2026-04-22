@@ -120,6 +120,31 @@ pub fn new_barrier(barrier_type: BarrierType, backend: Arc<dyn Backend>) -> Arc<
     }
 }
 
+/// Wrap a physical `Backend` in the ciphertext-only read cache when the
+/// operator has enabled `cache.secret_cache_ttl_secs > 0`. Returns the
+/// original `Arc` unchanged when caching is disabled so no decorator is
+/// installed at all — callers pay zero overhead in the default config.
+///
+/// The decorator implements `Backend`, which is the physical layer below
+/// the barrier. By construction it can only see whatever bytes are
+/// handed to `Backend::put` and returned by `Backend::get` — i.e. AEAD
+/// ciphertext under normal barrier-backed operation. See
+/// `src/cache/secret_cache.rs` for the full security invariants.
+pub fn wrap_with_cache(
+    backend: Arc<dyn Backend>,
+    cache_config: &crate::cache::CacheConfig,
+) -> Result<Arc<dyn Backend>, RvError> {
+    if cache_config.secret_cache_ttl_secs == 0 {
+        return Ok(backend);
+    }
+    let decorator = crate::cache::CachingBackend::new(
+        backend,
+        cache_config.secret_cache_size,
+        cache_config.secret_cache_ttl_secs,
+    )?;
+    Ok(Arc::new(decorator))
+}
+
 #[cfg(test)]
 pub mod test {
     use std::{collections::HashMap, env, fs};

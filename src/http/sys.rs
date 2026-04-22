@@ -231,6 +231,19 @@ async fn sys_audit_enable_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// POST `/sys/cache/flush` — drop every in-memory cache layer
+/// (policy / token / secret) and zeroize held payloads. Sudo-gated by
+/// `root_paths` in the system backend definition.
+async fn sys_cache_flush_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/cache/flush".to_string();
+    r.operation = Operation::Write;
+    handle_request(core, &mut r).await
+}
+
 /// DELETE `/sys/audit/{path}` — disable an audit device.
 async fn sys_audit_disable_request_handler(
     req: HttpRequest,
@@ -879,6 +892,9 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
             web::resource("/audit/{path:.*}")
                 .route(web::post().to(sys_audit_enable_request_handler))
                 .route(web::delete().to(sys_audit_disable_request_handler)),
+        )
+        .service(
+            web::resource("/cache/flush").route(web::post().to(sys_cache_flush_request_handler)),
         )
         .service(
             web::resource("/internal/ui/mounts").route(web::get().to(sys_get_internal_ui_mounts_request_handler)),

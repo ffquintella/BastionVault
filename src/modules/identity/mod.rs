@@ -1902,6 +1902,67 @@ mod identity_tests {
         assert!(!keys.contains(&"a2"), "bob should not see a2 in {keys:?}");
     }
 
+    /// Regression for a bug where root-created resources showed as
+    /// `Unowned` forever in the GUI. The owner-capture hook used to
+    /// gate on `entity_id` only, which is empty for the root token, so
+    /// every admin-created resource orphaned its owner record. The fix
+    /// falls back to `display_name` (via `caller_audit_actor`), which
+    /// is `"root"` for root tokens. Owner records must now exist after
+    /// a root-token resource write.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_root_token_resource_write_captures_owner() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_root_token_resource_write_captures_owner").await;
+
+        // Root creates a resource. Path is the GUI-facing
+        // `resources/resources/<name>` form the post_route hook
+        // pattern-matches on.
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "resources/resources/primary-gateway",
+            true,
+            json!({ "type": "server", "hostname": "gw-01.example" })
+                .as_object()
+                .cloned(),
+        )
+        .await;
+
+        // Owner record must now be present and point at `"root"` (the
+        // root token's display_name, surfaced via `caller_audit_actor`).
+        let module = core
+            .module_manager
+            .get_module::<IdentityModule>("identity")
+            .expect("identity module");
+        let store = module.owner_store().expect("owner store");
+        let rec = store
+            .get_resource_owner("primary-gateway")
+            .await
+            .unwrap()
+            .expect("owner record must exist after root-token write");
+        assert_eq!(
+            rec.entity_id, "root",
+            "root-created resources must stamp `root` as owner, not leave empty"
+        );
+
+        // Symmetrically: root KV writes capture the kv-owner record so
+        // the Secrets page's Sharing tab has an owner to display.
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "secret/data/gateway-password",
+            true,
+            json!({ "data": { "v": "hunter22XX!" } }).as_object().cloned(),
+        )
+        .await;
+        let kv_rec = store
+            .get_kv_owner("secret/data/gateway-password")
+            .await
+            .unwrap()
+            .expect("root-token KV write must capture owner record");
+        assert_eq!(kv_rec.entity_id, "root");
+    }
+
     /// Helper: login via userpass with the shared password used
     /// across per-user-scoping tests.
     #[cfg(test)]

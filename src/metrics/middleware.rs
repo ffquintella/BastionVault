@@ -62,7 +62,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::{
-        metrics::{http_metrics::*, system_metrics::*},
+        metrics::{cache_metrics::*, http_metrics::*, system_metrics::*},
         test_utils::TestHttpServer,
     };
 
@@ -81,6 +81,16 @@ mod tests {
     static HTTP_METRICS_MAP: &[(&str, &str)] = &[
         (HTTP_REQUEST_COUNT, HTTP_REQUEST_COUNT_HELP),
         (HTTP_REQUEST_DURATION_SECONDS, HTTP_REQUEST_DURATION_SECONDS_HELP),
+    ];
+
+    // Cache-subsystem metrics. Only appear in the scrape after at least
+    // one record-call per family; order-independent of test execution
+    // because the `CacheMetrics` singleton is shared across the process.
+    static CACHE_METRICS_MAP: &[(&str, &str)] = &[
+        (CACHE_HITS_TOTAL, CACHE_HITS_TOTAL_HELP),
+        (CACHE_MISSES_TOTAL, CACHE_MISSES_TOTAL_HELP),
+        (CACHE_EVICTIONS_TOTAL, CACHE_EVICTIONS_TOTAL_HELP),
+        (CACHE_SIZE, CACHE_SIZE_HELP),
     ];
 
     fn parse_metrics_name_help(raw: &str) -> HashMap<String, String> {
@@ -103,6 +113,7 @@ mod tests {
     async fn test_metrics_name_and_help_info() {
         let sys_metrics_map: HashMap<&str, &str> = SYS_METRICS_MAP.iter().cloned().collect();
         let http_metrics_map: HashMap<&str, &str> = HTTP_METRICS_MAP.iter().cloned().collect();
+        let cache_metrics_map: HashMap<&str, &str> = CACHE_METRICS_MAP.iter().cloned().collect();
 
         let server = TestHttpServer::new_with_prometheus("test_metrics_name_and_help_info", false).await;
         let root_token = &server.root_token;
@@ -117,11 +128,12 @@ mod tests {
             http_metrics_map.len(),
             metrics_map.len()
         );
+        // Cache metrics only surface once recorded; upper bound allows them all.
         assert!(
-            metrics_map.len() <= sys_metrics_map.len() + http_metrics_map.len(),
+            metrics_map.len() <= sys_metrics_map.len() + http_metrics_map.len() + cache_metrics_map.len(),
             "Got more metrics ({}) than expected ({})",
             metrics_map.len(),
-            sys_metrics_map.len() + http_metrics_map.len()
+            sys_metrics_map.len() + http_metrics_map.len() + cache_metrics_map.len()
         );
 
         for (metric_name, metric_help) in &metrics_map {
@@ -131,6 +143,8 @@ mod tests {
                 assert_eq!(sys_metrics_map.get(name), Some(&help));
             } else if http_metrics_map.contains_key(name) {
                 assert_eq!(http_metrics_map.get(name), Some(&help));
+            } else if cache_metrics_map.contains_key(name) {
+                assert_eq!(cache_metrics_map.get(name), Some(&help));
             }
         }
     }

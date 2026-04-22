@@ -50,6 +50,7 @@ extern crate diesel;
 pub mod api;
 pub mod audit;
 pub mod backup;
+pub mod cache;
 pub mod cli;
 pub mod context;
 pub mod core;
@@ -97,10 +98,22 @@ pub struct BastionVault {
 impl BastionVault {
     pub fn new(backend: Arc<dyn Backend>, config: Option<&Config>) -> Result<Self, RvError> {
         let barrier_type = config.map(|conf| conf.barrier_type).unwrap_or(BarrierType::Chacha20Poly1305);
+        let cache_config = config.map(|c| c.cache.clone()).unwrap_or_default();
+        // Apply process-level memory protections (`mlockall`,
+        // `PR_SET_DUMPABLE`) before any cache allocation happens. Returns
+        // `Err` when the operator has requested a guarantee we cannot
+        // provide (e.g. `memlock = true` on Windows, or `mlockall` with
+        // `RLIMIT_MEMLOCK` too low).
+        crate::cache::guardrails::apply(&cache_config)?;
+        // Wrap the physical backend in the ciphertext-only read cache
+        // when enabled. No-op when `secret_cache_ttl_secs == 0` (default),
+        // so existing deployments see zero overhead.
+        let backend = crate::storage::wrap_with_cache(backend, &cache_config)?;
         let mut core = Core::new_with_barrier(backend, barrier_type);
         if let Some(conf) = config {
             core.mount_entry_hmac_level = conf.mount_entry_hmac_level;
             core.mounts_monitor_interval = conf.mounts_monitor_interval;
+            core.cache_config = conf.cache.clone();
         }
 
         let core = core.wrap();

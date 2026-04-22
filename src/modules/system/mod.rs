@@ -135,6 +135,7 @@ impl SystemBackend {
         let sys_backend_raw_delete = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_internal_ui_mounts_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_internal_ui_mount_read = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_cache_flush = self.self_ptr.upgrade().unwrap().clone();
 
         let backend = new_logical_backend!({
             paths: [
@@ -470,9 +471,20 @@ impl SystemBackend {
                     operations: [
                         {op: Operation::Read, handler: sys_backend_internal_ui_mount_read.handle_internal_ui_mount_read}
                     ]
+                },
+                {
+                    // Flush every in-memory cache (policy / token /
+                    // secret) and zeroize held payloads. Sudo-gated.
+                    // Intended for operator use after a revocation
+                    // storm or suspected compromise; the vault will
+                    // repopulate lazily.
+                    pattern: "cache/flush$",
+                    operations: [
+                        {op: Operation::Write, handler: sys_backend_cache_flush.handle_cache_flush}
+                    ]
                 }
             ],
-            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "seal", "raw/*", "revoke-prefix/*"],
+            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "seal", "raw/*", "revoke-prefix/*", "cache/flush"],
             unauth_paths: ["internal/ui/mounts", "internal/ui/mounts/*", "init", "seal-status", "unseal"],
             help: SYSTEM_BACKEND_HELP,
         });
@@ -1126,6 +1138,19 @@ impl SystemBackend {
         Ok(None)
     }
 
+    /// Flush every in-memory cache layer (policy / token / secret).
+    /// Sudo-gated via `root_paths` — callers need a token whose policies
+    /// grant capability on `sys/cache/flush`. Returns 204 on success
+    /// matching the pattern used by `sys/audit` disable and `sys/seal`.
+    pub async fn handle_cache_flush(
+        &self,
+        _backend: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        self.core.flush_caches();
+        Ok(None)
+    }
+
     pub async fn handle_audit_disable(
         &self,
         _backend: &dyn Backend,
@@ -1443,6 +1468,16 @@ mod mod_system_tests {
         // Identity mount for user/application groups.
         assert!(ret["secret"]["identity/"].is_object());
         assert_eq!(ret["secret"]["identity/"]["type"], Value::String("identity".into()));
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_cache_flush_endpoint_as_root_succeeds() {
+        let mut server = TestHttpServer::new("test_cache_flush_endpoint", true).await;
+        server.token = server.root_token.clone();
+
+        // POST sys/cache/flush as root succeeds. Same response shape as
+        // sys/audit disable (204 No Content via Ok(None)).
+        let _ = server.write("sys/cache/flush", None, None).unwrap();
     }
 
     /// Defense-in-depth regression: a userpass caller with only the

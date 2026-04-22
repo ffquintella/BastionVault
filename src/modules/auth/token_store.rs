@@ -27,6 +27,7 @@ use super::{
     AUTH_ROUTER_PREFIX,
 };
 use crate::{
+    cache::TokenCache,
     context::Context,
     core::Core,
     errors::RvError,
@@ -120,6 +121,12 @@ pub struct TokenStore {
     pub salt: String,
     pub expiration: Arc<ExpirationManager>,
     pub auth_handlers: ArcSwap<Vec<Arc<dyn AuthHandler>>>,
+    /// Optional TTL-scoped cache of salted token entries. `None` when the
+    /// operator has set `cache.token_cache_ttl_secs = 0` (the cache is
+    /// off). Values are zeroized on drop and the raw bearer-token string
+    /// is never stored — the key is the same non-reversible `salt_id`
+    /// already used as the storage key.
+    pub token_cache: Option<Arc<TokenCache>>,
 }
 
 #[maybe_async::maybe_async]
@@ -146,6 +153,12 @@ impl TokenStore {
         let view = system_view.new_sub_view(TOKEN_SUB_PATH);
         let salt = view.get(TOKEN_SALT_LOCATION).await?;
 
+        let token_cache = TokenCache::new(
+            core.cache_config.token_cache_size,
+            core.cache_config.token_cache_ttl_secs,
+        )?
+        .map(Arc::new);
+
         let mut token_store = TokenStore {
             self_ptr: Weak::new(),
             router: core.router.clone(),
@@ -153,6 +166,7 @@ impl TokenStore {
             salt: String::new(),
             auth_handlers: ArcSwap::new(core.auth_handlers.load().clone()),
             expiration,
+            token_cache,
         };
 
         if salt.is_some() {
@@ -291,6 +305,16 @@ impl TokenStore {
         backend
     }
 
+    /// Drop every cached token entry and zeroize the held payloads.
+    /// Called by `Core::flush_caches` on seal and by the
+    /// `sys/cache/flush` admin endpoint. No-op when the token cache is
+    /// disabled.
+    pub fn flush_cache(&self) {
+        if let Some(cache) = self.token_cache.as_ref() {
+            cache.clear();
+        }
+    }
+
     /// Returns a salted hash of a token ID.
     pub fn salt_id(&self, id: &str) -> String {
         let salted_id = format!("{}{}", self.salt, id);
@@ -338,7 +362,17 @@ impl TokenStore {
         }
 
         view.put(&StorageEntry { key: format!("{TOKEN_LOOKUP_PREFIX}{salted_id}"), value: value.as_bytes().to_vec() })
-            .await
+            .await?;
+
+        // Invalidate any stale cache entry; the next lookup repopulates
+        // from storage. Cheaper than speculatively caching on create, and
+        // avoids caching entries that the caller may still mutate before
+        // first use.
+        if let Some(cache) = self.token_cache.as_ref() {
+            cache.invalidate(&salted_id);
+        }
+
+        Ok(())
     }
 
     /// Uses the token and decrements its use count.
@@ -361,9 +395,17 @@ impl TokenStore {
         let value = serde_json::to_string(&entry)?;
 
         let path = format!("{TOKEN_LOOKUP_PREFIX}{salted_id}");
-        let entry = StorageEntry { key: path, value: value.as_bytes().to_vec() };
+        let storage_entry = StorageEntry { key: path, value: value.as_bytes().to_vec() };
 
-        view.put(&entry).await
+        view.put(&storage_entry).await?;
+
+        // `num_uses` changed on disk; drop the cached copy so the next
+        // lookup sees the decremented count.
+        if let Some(cache) = self.token_cache.as_ref() {
+            cache.invalidate(&salted_id);
+        }
+
+        Ok(())
     }
 
     /// Checks the validity of a token and returns the associated authentication data.
@@ -410,6 +452,12 @@ impl TokenStore {
             return Err(RvError::ErrModuleNotInit);
         };
 
+        if let Some(cache) = self.token_cache.as_ref() {
+            if let Some(entry) = cache.lookup(salted_id) {
+                return Ok(Some(entry));
+            }
+        }
+
         let path = format!("{TOKEN_LOOKUP_PREFIX}{salted_id}");
         let raw = view.get(&path).await?;
         if raw.is_none() {
@@ -417,6 +465,10 @@ impl TokenStore {
         }
 
         let entry: TokenEntry = serde_json::from_slice(raw.unwrap().value.as_slice())?;
+
+        if let Some(cache) = self.token_cache.as_ref() {
+            cache.insert(salted_id, &entry);
+        }
 
         Ok(Some(entry))
     }
@@ -434,11 +486,23 @@ impl TokenStore {
             return Err(RvError::ErrModuleNotInit);
         };
 
+        // Evict up front so the `lookup_salted` below doesn't repopulate
+        // the cache with an entry we are about to delete, and so a racing
+        // lookup on another task can't observe the about-to-be-gone
+        // entry as live after this returns.
+        if let Some(cache) = self.token_cache.as_ref() {
+            cache.invalidate(salted_id);
+        }
+
         let entry = self.lookup_salted(salted_id).await?;
 
         let path = format!("{TOKEN_LOOKUP_PREFIX}{salted_id}");
 
         view.delete(&path).await?;
+
+        if let Some(cache) = self.token_cache.as_ref() {
+            cache.invalidate(salted_id);
+        }
 
         if entry.is_some() {
             let entry = entry.unwrap();
@@ -1046,6 +1110,73 @@ mod mod_token_store_tests {
         let child_result = token_store.lookup(&child_entry.id).await.unwrap();
         assert!(parent_result.is_none());
         assert!(child_result.is_none());
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_token_cache_is_enabled_by_default() {
+        // With default CacheConfig, token cache is enabled (TTL = 30s).
+        let token_store = mock_token_store!();
+        assert!(
+            token_store.token_cache.is_some(),
+            "default CacheConfig must enable the token cache"
+        );
+
+        let mut entry = TokenEntry {
+            policies: vec!["default".to_string()],
+            path: "auth/token/create".to_string(),
+            display_name: "cache-probe".to_string(),
+            ..TokenEntry::default()
+        };
+        token_store.create(&mut entry).await.unwrap();
+
+        // First lookup misses, fills cache; second lookup hits cache.
+        let first = token_store.lookup(&entry.id).await.unwrap().unwrap();
+        assert_eq!(first.display_name, entry.display_name);
+
+        let salted = token_store.salt_id(&entry.id);
+        // Stretto populates its admission window asynchronously; wait a
+        // beat so the insert becomes visible before we probe.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let cached = token_store
+            .token_cache
+            .as_ref()
+            .unwrap()
+            .lookup(&salted)
+            .expect("second lookup must have populated the cache");
+        assert_eq!(cached.id, entry.id);
+        assert_eq!(cached.policies, entry.policies);
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_token_cache_invalidated_on_revoke() {
+        let token_store = mock_token_store!();
+
+        let mut entry = TokenEntry {
+            policies: vec!["default".to_string()],
+            path: "auth/token/create".to_string(),
+            display_name: "revoke-probe".to_string(),
+            ..TokenEntry::default()
+        };
+        token_store.create(&mut entry).await.unwrap();
+
+        // Populate cache.
+        token_store.lookup(&entry.id).await.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let salted = token_store.salt_id(&entry.id);
+        assert!(token_store.token_cache.as_ref().unwrap().lookup(&salted).is_some());
+
+        token_store.revoke(&entry.id).await.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        assert!(
+            token_store.token_cache.as_ref().unwrap().lookup(&salted).is_none(),
+            "revoke must evict cache entry"
+        );
+        assert!(
+            token_store.lookup(&entry.id).await.unwrap().is_none(),
+            "revoked token must not be resurrectable via cache"
+        );
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

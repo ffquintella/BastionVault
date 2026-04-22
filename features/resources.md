@@ -13,6 +13,19 @@ The Resources layer provides:
 - **Grouping**: each resource has a dedicated namespace for its secrets, making it clear what credentials belong to what.
 - **Dynamic types**: built-in types for common categories plus user-defined custom types.
 
+## Current State
+
+**Done.** Implementation landed beyond the original spec: resources live in a **dedicated barrier-encrypted storage engine** (`src/modules/resource/mod.rs`, 905 lines, auto-mounted at `resource/`) rather than as a prefix inside the KV engine. This gives clean isolation from KV and a per-engine audit trail.
+
+Shipped pieces:
+
+- **Server module** (`src/modules/resource/mod.rs`) — metadata CRUD, per-secret CRUD, append-only history log (`hist/<name>/<nanos>` — who/when/which fields, no values), per-secret version snapshots (`smeta/` + `sver/`), built-in + custom resource types stored under the system config space. Includes module-level tests.
+- **Tauri command surface** (`gui/src-tauri/src/commands/resources.rs`) — 14 commands: `list_resources`, `read_resource`, `write_resource`, `delete_resource`, `list_resource_secrets`, `read_resource_secret`, `write_resource_secret`, `delete_resource_secret`, `list_resource_history`, `list_resource_secret_versions`, `read_resource_secret_version`, `resource_types_read`, `resource_types_write`, plus ownership/transfer wiring.
+- **GUI** (`gui/src/routes/ResourcesPage.tsx`, 1,219 lines) — list page with type filter + search, detail view with Info / Secrets / History / Sharing tabs, create/edit modal with dynamic type-driven fields, masked secret values with reveal-on-demand, version browser, ownership + admin-transfer modal.
+- **Integration** — ownership via `OwnerStore`, sharing via `ShareStore` (`ShareTargetKind::Resource`), membership in Asset Groups, all respected by the ACL evaluator and list-filter.
+
+Note: the spec's `kv/_resources/...` layout in the *Data Model* section below is **historical** — it describes the original plan. The shipped layout is documented in the module header (`meta/` `hist/` `secret/` `smeta/` `sver/` inside the `resource/` mount).
+
 ## Data Model
 
 Resources are stored in the existing KV engine at a reserved prefix (`_resources/`). No new secret engine or schema changes are required.

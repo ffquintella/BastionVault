@@ -11,7 +11,7 @@ use serde::{
 };
 use serde_json::Value;
 
-use crate::{errors::RvError, storage::BarrierType};
+use crate::{cache::CacheConfig, errors::RvError, storage::BarrierType};
 
 /// Supported TLS protocol versions for the listener.
 ///
@@ -55,6 +55,8 @@ pub struct Config {
     pub mounts_monitor_interval: u64,
     #[serde(default = "default_barrier_type")]
     pub barrier_type: BarrierType,
+    #[serde(default)]
+    pub cache: CacheConfig,
 }
 
 #[derive(Debug, Copy, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -267,6 +269,8 @@ impl Config {
         if other.barrier_type != BarrierType::Chacha20Poly1305 {
             self.barrier_type = other.barrier_type;
         }
+
+        self.cache.merge(other.cache);
     }
 }
 

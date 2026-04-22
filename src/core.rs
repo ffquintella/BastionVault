@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
+    cache::CacheConfig,
     cli::config::MountEntryHMACLevel,
     errors::RvError,
     handler::{AuthHandler, HandlePhase, Handler},
@@ -87,6 +88,10 @@ pub struct Core {
     pub mount_entry_hmac_level: MountEntryHMACLevel,
     pub mounts_monitor: ArcSwapOption<MountsMonitor>,
     pub mounts_monitor_interval: u64,
+    /// Cache subsystem configuration. Slice 1 wires this through but only
+    /// `policy_cache_size` is consumed today (by `PolicyStore::new`). Token
+    /// and secret caches will read from this in later slices.
+    pub cache_config: CacheConfig,
     pub state: ArcSwap<CoreState>,
     /// Audit broker — Some once the vault is unsealed and the
     /// audit subsystem is ready. Handle is installed by
@@ -124,6 +129,7 @@ impl Default for Core {
             mount_entry_hmac_level: MountEntryHMACLevel::None,
             mounts_monitor: ArcSwapOption::empty(),
             mounts_monitor_interval: 0,
+            cache_config: CacheConfig::default(),
             state: ArcSwap::from_pointee(CoreState::default()),
             audit_broker: ArcSwapOption::empty(),
         }
@@ -573,7 +579,42 @@ impl Core {
         Ok(())
     }
 
+    /// Flush every cache layer (policy, token, secret) and zeroize the
+    /// held payloads. Called from `pre_seal` and from the
+    /// `sys/cache/flush` admin endpoint. Never returns an error — any
+    /// individual flush failure is logged and the rest of the layers
+    /// still get flushed, because half-flushed is worse than
+    /// best-effort-flushed on a seal hot path.
+    pub fn flush_caches(&self) {
+        // Policy cache
+        if let Some(policy_module) =
+            self.module_manager.get_module::<crate::modules::policy::PolicyModule>("policy")
+        {
+            policy_module.policy_store.load().flush_caches();
+        }
+
+        // Token cache
+        if let Some(auth_module) =
+            self.module_manager.get_module::<crate::modules::auth::AuthModule>("auth")
+        {
+            if let Some(token_store) = auth_module.token_store.load_full() {
+                token_store.flush_cache();
+            }
+        }
+
+        // Secret read cache (ciphertext-only `CachingBackend` decorator).
+        // `Backend: Any` gives us a runtime downcast without wiring a
+        // dedicated trait method.
+        let any_backend: &dyn std::any::Any = &*self.physical;
+        if let Some(caching) = any_backend.downcast_ref::<crate::cache::CachingBackend>() {
+            caching.clear();
+        }
+    }
+
     fn pre_seal(&self) -> Result<(), RvError> {
+        // Flush every cache layer before releasing the unseal key: cached
+        // material must not survive into the sealed state even briefly.
+        self.flush_caches();
         // Drop the audit broker so a subsequent unseal gets a fresh
         // one tied to the new hmac_key.
         self.audit_broker.store(None);
@@ -743,6 +784,64 @@ mod test {
     #[test]
     fn test_core_init() {
         let _ = new_unseal_test_bastion_vault("test_core_init");
+    }
+
+    /// `Core::flush_caches` must clear the token cache so a previously
+    /// cached entry can no longer be served without a storage re-read.
+    /// Regression for the seal path: pre_seal invokes this helper, and
+    /// a missed flush would leave live token payloads in memory after
+    /// the unseal key has been released.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_core_flush_caches_empties_token_cache() {
+        use crate::modules::auth::{
+            token_store::TokenEntry, AuthModule,
+        };
+
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_core_flush_caches_empties_token_cache").await;
+
+        let auth_module = core
+            .module_manager
+            .get_module::<AuthModule>("auth")
+            .expect("auth module must exist in a default unseal");
+        let token_store =
+            auth_module.token_store.load_full().expect("token store must be installed");
+
+        // The root token is already in storage; force a cache-populating
+        // lookup, then verify the cache has it.
+        let _ = token_store.lookup(&root_token).await.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let salted = token_store.salt_id(&root_token);
+        assert!(
+            token_store.token_cache.as_ref().unwrap().lookup(&salted).is_some(),
+            "precondition: cache must be populated before flush"
+        );
+
+        // Also populate with a freshly created token so the test isn't
+        // contingent on lookup behaviour alone.
+        let mut entry = TokenEntry {
+            policies: vec!["default".into()],
+            path: "auth/token/create".into(),
+            display_name: "flush-probe".into(),
+            ..TokenEntry::default()
+        };
+        token_store.create(&mut entry).await.unwrap();
+        token_store.lookup(&entry.id).await.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let salted_probe = token_store.salt_id(&entry.id);
+        assert!(token_store.token_cache.as_ref().unwrap().lookup(&salted_probe).is_some());
+
+        core.flush_caches();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        assert!(
+            token_store.token_cache.as_ref().unwrap().lookup(&salted).is_none(),
+            "flush_caches must drop the root-token entry"
+        );
+        assert!(
+            token_store.token_cache.as_ref().unwrap().lookup(&salted_probe).is_none(),
+            "flush_caches must drop every token cache entry"
+        );
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

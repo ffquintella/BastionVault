@@ -69,6 +69,7 @@
 //!     metrics_manager.http_metrics.increment_request_count(&label);
 //! }
 //! ```
+pub mod cache_metrics;
 pub mod http_metrics;
 pub mod manager;
 pub mod middleware;
