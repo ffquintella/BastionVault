@@ -32,7 +32,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Storage Backend: Cloud targets for `FileBackend` (S3 / OneDrive / Google Drive / Dropbox) | Todo |
 | Import/Export & Backup/Restore | Done |
 | Resource Management (inventory + grouped secrets) | Done |
-| File Resources (binary blobs + SMB/SCP/SFTP sync) | Todo |
+| File Resources (binary blobs + SMB/SCP/SFTP sync) | In Progress (Phases 1–4 + 8 shipped: engine + CRUD + history + 32 MiB cap + SHA-256 integrity + ownership / sharing / admin transfer / backfill + asset-group membership + local-FS sync target + minimum-viable GUI + content versioning with snapshot-on-write / retention / restore; Phases 5–7 — SMB / SFTP / SCP sync + periodic re-sync — still Todo) |
 | Caching | Done |
 | Batch Operations | Done (Phase 1: HTTP endpoint; CLI + client SDK deferred) |
 | **Networking & TLS** | |
@@ -89,7 +89,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 - [Cloud Storage Targets for `FileBackend`](features/cloud-storage-backend.md)
   Extend the existing Encrypted File storage backend (`src/storage/physical/file.rs`) with a pluggable `FileTarget` trait: today's local-filesystem I/O becomes one of several targets alongside **AWS S3**, **OneDrive**, **Google Drive**, and **Dropbox**. Barrier, schema, and `Backend` trait are unchanged — only the I/O primitive underneath `FileBackend` is new. Each cloud target receives the same barrier-encrypted bytes the local target gets today, so provider-side rollback protection and multi-writer arbitration remain out of scope. OAuth+PKCE for consumer drives, AWS credential chain for S3; credentials referenced via a small URI grammar (`env:` / `keychain:` / `file:`), never inlined. Design-only, 8 phases; Phase 1 is a no-behavior-change refactor of `FileBackend`.
 - [File Resources](features/file-resources.md)
-  New resource kind that stores binary files (SSH keys, cert bundles, keytabs, config files) under the barrier alongside secrets — chunked, AEAD-authenticated, inherits ownership/sharing/audit from per-user-scoping. Later phases add push-only sync targets for local filesystem, SMB, SCP, and SFTP, with sync-target credentials stored as vault objects so they aren't in a separate silo. Design-only, 8 phases.
+  New resource kind that stores binary files (SSH keys, cert bundles, keytabs, config files) under the barrier alongside secrets. **Phases 1–4 + 8 shipped**: dedicated `files/` mount with meta + blob + history + sync-target + version storage, v2 CRUD, 32 MiB hard cap, SHA-256 integrity re-verified on every read (including historical versions); ownership / sharing / admin transfer / backfill wired through `OwnerStore` + `ShareStore`; **asset-group membership** for files via a third reverse index in `ResourceGroupStore`; **local-FS sync target** with atomic tmp-then-rename write + optional Unix mode, per-target sync-state, on-demand `push` endpoint; **content versioning** with snapshot-on-write, `DEFAULT_VERSION_RETENTION = 5` prune policy, `GET files/{id}/versions[/…]` list / read / content / restore (displaced content is itself snapshotted, so restore is reversible); **minimum-viable GUI** with a top-level Files page and a per-file detail modal (Info + Sync + Versions tabs). 22 file-module tests passing; full Rust suite 393/393; TS type-check clean; 66/66 GUI unit tests pass. Remaining: SMB (Phase 5), SFTP / SCP (Phase 6), periodic re-sync (Phase 7).
 
 ## Notes
 

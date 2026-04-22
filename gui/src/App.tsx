@@ -5,6 +5,7 @@ import { LoginPage } from "./routes/LoginPage";
 import { DashboardPage } from "./routes/DashboardPage";
 import { SecretsPage } from "./routes/SecretsPage";
 import { ResourcesPage } from "./routes/ResourcesPage";
+import { FilesPage } from "./routes/FilesPage";
 import { UsersPage } from "./routes/UsersPage";
 import { AppRolePage } from "./routes/AppRolePage";
 import { GroupsPage } from "./routes/GroupsPage";
@@ -47,6 +48,10 @@ export default function App() {
             <Route
               path="/secrets/*"
               element={<ProtectedRoute><SecretsPage /></ProtectedRoute>}
+            />
+            <Route
+              path="/files"
+              element={<ProtectedRoute><FilesPage /></ProtectedRoute>}
             />
             <Route
               path="/users"

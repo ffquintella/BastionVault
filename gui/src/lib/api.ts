@@ -22,6 +22,12 @@ import type {
   ResourceHistoryResult,
   ResourceSecretVersionListResult,
   ResourceSecretVersionData,
+  FileMeta,
+  FileListResult,
+  FileContentResult,
+  FileSyncListResult,
+  FileHistoryResult,
+  FileVersionListResult,
   AppRoleListResult,
   AppRoleInfo,
   RoleIdInfo,
@@ -301,6 +307,54 @@ export const fido2ListCredentials = (username: string) =>
   invoke<Fido2CredentialInfo | null>("fido2_list_credentials", { username });
 export const fido2DeleteCredential = (username: string) =>
   invoke<void>("fido2_delete_credential", { username });
+
+// File Resources
+export const listFiles = () => invoke<FileListResult>("list_files");
+export const readFileMeta = (id: string) =>
+  invoke<FileMeta>("read_file_meta", { id });
+export const readFileContent = (id: string) =>
+  invoke<FileContentResult>("read_file_content", { id });
+export const createFile = (args: {
+  name: string;
+  content_base64: string;
+  resource?: string;
+  mime_type?: string;
+  tags?: string[];
+  notes?: string;
+}) => invoke<FileMeta>("create_file", args);
+export const updateFileContent = (args: {
+  id: string;
+  content_base64: string;
+  name?: string;
+  mime_type?: string;
+  tags?: string[];
+  notes?: string;
+}) => invoke<FileMeta>("update_file_content", args);
+export const deleteFile = (id: string) => invoke<void>("delete_file", { id });
+export const listFileHistory = (id: string) =>
+  invoke<FileHistoryResult>("list_file_history", { id });
+
+export const listFileSyncTargets = (id: string) =>
+  invoke<FileSyncListResult>("list_file_sync_targets", { id });
+export const writeFileSyncTarget = (args: {
+  id: string;
+  name: string;
+  kind: string;
+  target_path: string;
+  mode?: string;
+  sync_on_write?: boolean;
+}) => invoke<void>("write_file_sync_target", args);
+export const deleteFileSyncTarget = (id: string, name: string) =>
+  invoke<void>("delete_file_sync_target", { id, name });
+export const pushFileSyncTarget = (id: string, name: string) =>
+  invoke<Record<string, unknown>>("push_file_sync_target", { id, name });
+
+export const listFileVersions = (id: string) =>
+  invoke<FileVersionListResult>("list_file_versions", { id });
+export const readFileVersionContent = (id: string, version: number) =>
+  invoke<FileContentResult>("read_file_version_content", { id, version });
+export const restoreFileVersion = (id: string, version: number) =>
+  invoke<Record<string, unknown>>("restore_file_version", { id, version });
 
 // Native FIDO2 (CTAP2 over USB, bypasses browser WebAuthn API)
 export const fido2NativeRegister = (username: string) =>

@@ -416,6 +416,82 @@ export interface ShareEntry {
   expired: boolean;
 }
 
+// File Resources
+export interface FileMeta {
+  id: string;
+  name: string;
+  resource: string;
+  mime_type: string;
+  size_bytes: number;
+  sha256: string;
+  tags: string[];
+  notes: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FileListResult {
+  ids: string[];
+}
+
+export interface FileContentResult {
+  id: string;
+  mime_type: string;
+  size_bytes: number;
+  content_base64: string;
+}
+
+export interface FileSyncState {
+  last_success_at: string;
+  last_success_sha256: string;
+  last_failure_at: string;
+  last_error: string;
+}
+
+export interface FileSyncTarget {
+  name: string;
+  kind: string;
+  target_path: string;
+  mode: string;
+  sync_on_write: boolean;
+  created_at: string;
+  updated_at: string;
+  state: FileSyncState;
+}
+
+export interface FileSyncListResult {
+  id: string;
+  targets: FileSyncTarget[];
+}
+
+export interface FileHistoryEntry {
+  ts: string;
+  user: string;
+  op: string;
+  changed_fields: string[];
+}
+
+export interface FileVersionInfo {
+  version: number;
+  size_bytes: number;
+  sha256: string;
+  name: string;
+  mime_type: string;
+  created_at: string;
+  user: string;
+}
+
+export interface FileVersionListResult {
+  id: string;
+  current_version: number;
+  versions: FileVersionInfo[];
+}
+
+export interface FileHistoryResult {
+  id: string;
+  entries: FileHistoryEntry[];
+}
+
 // FIDO2
 export interface Fido2Config {
   rp_id: string;

@@ -133,6 +133,7 @@ impl IdentityBackend {
         let h_entity_aliases2 = self.inner.clone();
         let h_owner_kv = self.inner.clone();
         let h_owner_resource = self.inner.clone();
+        let h_owner_file = self.inner.clone();
 
         let h_noop1 = self.inner.clone();
         let h_noop2 = self.inner.clone();
@@ -335,6 +336,20 @@ impl IdentityBackend {
                         {op: Operation::Read, handler: h_owner_resource.handle_resource_owner_read}
                     ],
                     help: "Read the owner record for a resource."
+                },
+                {
+                    pattern: r"owner/file/(?P<id>[^/]+)$",
+                    fields: {
+                        "id": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "File id (UUID)."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_owner_file.handle_file_owner_read}
+                    ],
+                    help: "Read the owner record for a file resource."
                 },
                 {
                     pattern: r"sharing/by-target/(?P<kind>[^/]+)/(?P<target>[^/]+)/(?P<grantee>[^/]+)$",
@@ -1189,6 +1204,28 @@ impl IdentityBackendInner {
         let rec = store.get_resource_owner(&name).await?;
         Ok(Some(Response::data_response(Some(owner_response(
             "resource", &name, rec,
+        )))))
+    }
+
+    pub async fn handle_file_owner_read(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let id = req.get_data("id")?.as_str().unwrap_or("").to_string();
+
+        let module = self
+            .core
+            .module_manager
+            .get_module::<IdentityModule>("identity")
+            .ok_or_else(|| bv_error_string!("identity module unavailable"))?;
+        let store = module
+            .owner_store()
+            .ok_or_else(|| bv_error_string!("owner store unavailable"))?;
+
+        let rec = store.get_file_owner(&id).await?;
+        Ok(Some(Response::data_response(Some(owner_response(
+            "file", &id, rec,
         )))))
     }
 

@@ -40,6 +40,7 @@ use crate::{
 const GROUP_SUB_PATH: &str = "resource-group/group/";
 const MEMBER_INDEX_SUB_PATH: &str = "resource-group/member-index/";
 const SECRET_INDEX_SUB_PATH: &str = "resource-group/secret-index/";
+const FILE_INDEX_SUB_PATH: &str = "resource-group/file-index/";
 const HISTORY_SUB_PATH: &str = "resource-group/history/";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -55,6 +56,13 @@ pub struct ResourceGroupEntry {
     /// `data/` or `metadata/` segment). Deduped, sorted on every write.
     #[serde(default)]
     pub secrets: Vec<String>,
+    /// File-resource ids (UUIDs) in the group. Lowercased, trimmed,
+    /// deduped, sorted on every write. Parallel to `members` (resources)
+    /// and `secrets` (KV). Empty on legacy groups created before file
+    /// resources existed; `reindex` will populate file-index entries
+    /// from any backfilled files.
+    #[serde(default)]
+    pub files: Vec<String>,
     /// `entity_id` of the caller that created the group, captured on
     /// the first write. Used to gate membership edits to the owner
     /// plus admins, and to drive the GUI's owner badge. Immutable
@@ -98,6 +106,7 @@ pub struct ResourceGroupStore {
     group_view: Arc<BarrierView>,
     index_view: Arc<BarrierView>,
     secret_index_view: Arc<BarrierView>,
+    file_index_view: Arc<BarrierView>,
     history_view: Arc<BarrierView>,
 }
 
@@ -111,12 +120,14 @@ impl ResourceGroupStore {
         let group_view = Arc::new(system_view.new_sub_view(GROUP_SUB_PATH));
         let index_view = Arc::new(system_view.new_sub_view(MEMBER_INDEX_SUB_PATH));
         let secret_index_view = Arc::new(system_view.new_sub_view(SECRET_INDEX_SUB_PATH));
+        let file_index_view = Arc::new(system_view.new_sub_view(FILE_INDEX_SUB_PATH));
         let history_view = Arc::new(system_view.new_sub_view(HISTORY_SUB_PATH));
 
         Ok(Arc::new(Self {
             group_view,
             index_view,
             secret_index_view,
+            file_index_view,
             history_view,
         }))
     }
@@ -185,6 +196,18 @@ impl ResourceGroupStore {
         URL_SAFE_NO_PAD.encode(canonical_path.as_bytes())
     }
 
+    /// Canonicalize a file-resource id. File ids are server-assigned
+    /// UUIDs, never operator-supplied — we lowercase and reject any
+    /// non-empty input containing `/` so the canonical form matches
+    /// what the files module stores.
+    fn sanitize_file_id(raw: &str) -> Option<String> {
+        let t = raw.trim().to_lowercase();
+        if t.is_empty() || t.contains('/') {
+            return None;
+        }
+        Some(t)
+    }
+
     /// Read-modify-write the primary record *and* keep both reverse
     /// indexes (resources + secrets) in sync with the diff between old
     /// and new membership. Reverse-index failures surface as errors —
@@ -216,13 +239,24 @@ impl ResourceGroupStore {
         }
         entry.secrets = canonical_secrets.iter().cloned().collect();
 
-        let (old_members, old_secrets, old_owner) = match self.get_group(&name).await? {
+        // Canonicalize file ids: lowercase, trim, drop empties / `/`,
+        // dedup, sort.
+        let mut canonical_files: BTreeSet<String> = BTreeSet::new();
+        for f in entry.files.drain(..) {
+            if let Some(c) = Self::sanitize_file_id(&f) {
+                canonical_files.insert(c);
+            }
+        }
+        entry.files = canonical_files.iter().cloned().collect();
+
+        let (old_members, old_secrets, old_files, old_owner) = match self.get_group(&name).await? {
             Some(g) => (
                 g.members.into_iter().collect::<BTreeSet<String>>(),
                 g.secrets.into_iter().collect::<BTreeSet<String>>(),
+                g.files.into_iter().collect::<BTreeSet<String>>(),
                 g.owner_entity_id,
             ),
-            None => (BTreeSet::new(), BTreeSet::new(), String::new()),
+            None => (BTreeSet::new(), BTreeSet::new(), BTreeSet::new(), String::new()),
         };
         // Owner is immutable via `set_group` — preserved on update,
         // captured on first write (caller supplies the initial value).
@@ -232,6 +266,7 @@ impl ResourceGroupStore {
         }
         let new_members: BTreeSet<String> = entry.members.iter().cloned().collect();
         let new_secrets: BTreeSet<String> = entry.secrets.iter().cloned().collect();
+        let new_files: BTreeSet<String> = entry.files.iter().cloned().collect();
 
         let value = serde_json::to_vec(&entry)?;
         self.group_view.put(&StorageEntry { key: name.clone(), value }).await?;
@@ -247,6 +282,12 @@ impl ResourceGroupStore {
         }
         for s in old_secrets.difference(&new_secrets) {
             self.remove_from_secret_index(s, &name).await?;
+        }
+        for f in new_files.difference(&old_files) {
+            self.add_to_file_index(f, &name).await?;
+        }
+        for f in old_files.difference(&new_files) {
+            self.remove_from_file_index(f, &name).await?;
         }
 
         Ok(entry)
@@ -272,9 +313,9 @@ impl ResourceGroupStore {
 
     pub async fn delete_group(&self, name: &str) -> Result<(), RvError> {
         let name = Self::sanitize_name(name)?;
-        let (old_members, old_secrets) = match self.get_group(&name).await? {
-            Some(g) => (g.members, g.secrets),
-            None => (Vec::new(), Vec::new()),
+        let (old_members, old_secrets, old_files) = match self.get_group(&name).await? {
+            Some(g) => (g.members, g.secrets, g.files),
+            None => (Vec::new(), Vec::new(), Vec::new()),
         };
 
         self.group_view.delete(&name).await?;
@@ -284,6 +325,9 @@ impl ResourceGroupStore {
         }
         for s in old_secrets {
             self.remove_from_secret_index(&s, &name).await?;
+        }
+        for f in old_files {
+            self.remove_from_file_index(&f, &name).await?;
         }
         Ok(())
     }
@@ -408,6 +452,74 @@ impl ResourceGroupStore {
         }
     }
 
+    /// List every group that currently contains `id` as a file
+    /// member. Returns an empty vec when the id is not in any group.
+    pub async fn groups_for_file(&self, id: &str) -> Result<Vec<String>, RvError> {
+        let Some(canonical) = Self::sanitize_file_id(id) else {
+            return Ok(Vec::new());
+        };
+        match self.file_index_view.get(&canonical).await? {
+            Some(e) => Ok(serde_json::from_slice(&e.value).unwrap_or_default()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Prune `id` from every group it is currently a file member of.
+    /// Called from `PolicyStore::post_route` on `files/files/<id>`
+    /// DELETE so groups stay tidy when a file is destroyed. Mirror of
+    /// `prune_secret` / `prune_resource`.
+    pub async fn prune_file(&self, id: &str) -> Result<Vec<String>, RvError> {
+        let Some(canonical) = Self::sanitize_file_id(id) else {
+            return Ok(Vec::new());
+        };
+        let groups = self.groups_for_file(&canonical).await?;
+
+        for g_name in &groups {
+            if let Some(mut g) = self.get_group(g_name).await? {
+                g.files.retain(|f| f != &canonical);
+                g.updated_at = now_iso();
+                let value = serde_json::to_vec(&g)?;
+                self.group_view.put(&StorageEntry { key: g.name.clone(), value }).await?;
+            }
+        }
+
+        self.file_index_view.delete(&canonical).await?;
+        Ok(groups)
+    }
+
+    async fn add_to_file_index(&self, file_id: &str, group_name: &str) -> Result<(), RvError> {
+        let Some(canonical) = Self::sanitize_file_id(file_id) else {
+            return Ok(());
+        };
+        let mut names: Vec<String> = match self.file_index_view.get(&canonical).await? {
+            Some(e) => serde_json::from_slice(&e.value).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        if !names.iter().any(|n| n == group_name) {
+            names.push(group_name.to_string());
+            names.sort();
+        }
+        let value = serde_json::to_vec(&names)?;
+        self.file_index_view.put(&StorageEntry { key: canonical, value }).await
+    }
+
+    async fn remove_from_file_index(&self, file_id: &str, group_name: &str) -> Result<(), RvError> {
+        let Some(canonical) = Self::sanitize_file_id(file_id) else {
+            return Ok(());
+        };
+        let mut names: Vec<String> = match self.file_index_view.get(&canonical).await? {
+            Some(e) => serde_json::from_slice(&e.value).unwrap_or_default(),
+            None => return Ok(()),
+        };
+        names.retain(|n| n != group_name);
+        if names.is_empty() {
+            self.file_index_view.delete(&canonical).await
+        } else {
+            let value = serde_json::to_vec(&names)?;
+            self.file_index_view.put(&StorageEntry { key: canonical, value }).await
+        }
+    }
+
     async fn add_to_index(&self, resource: &str, group_name: &str) -> Result<(), RvError> {
         let Some(key) = Self::sanitize_member(resource) else {
             return Ok(());
@@ -511,6 +623,9 @@ impl ResourceGroupStore {
         for k in self.secret_index_view.get_keys().await? {
             self.secret_index_view.delete(&k).await?;
         }
+        for k in self.file_index_view.get_keys().await? {
+            self.file_index_view.delete(&k).await?;
+        }
 
         let groups = self.list_groups().await?;
         let mut touched = 0usize;
@@ -522,6 +637,10 @@ impl ResourceGroupStore {
                 }
                 for s in g.secrets {
                     self.add_to_secret_index(&s, gname).await?;
+                    touched += 1;
+                }
+                for f in g.files {
+                    self.add_to_file_index(&f, gname).await?;
                     touched += 1;
                 }
             }

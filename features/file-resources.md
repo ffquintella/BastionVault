@@ -29,7 +29,78 @@ Non-goals:
 
 ## Current State
 
-Not started. This feature file exists to scope the work before implementation begins.
+**Phases 1 + 2 + 3 + 4 + 8 shipped** (GUI is minimum-viable — Files page + per-file Info / Sync / Versions tabs; advanced UX polish can follow). Phases 5–7 (SMB, SFTP, SCP, periodic re-sync) still Todo. Asset-group membership for files is also wired.
+
+Shipped in Phase 1 (`src/modules/files/mod.rs`):
+
+- **Dedicated storage engine** mounted at `files/`, independent of the KV and resource engines. Storage layout inside the mount's barrier view: `meta/<id>` (FileEntry JSON), `blob/<id>` (raw content bytes), `hist/<id>/<nanos>` (change log).
+- **Metadata + content CRUD** via a v2-accessible logical backend:
+  - `POST files/files` — create a file, server assigns a UUID, returns `{id, size_bytes, sha256}`.
+  - `LIST files/files` — list all file ids.
+  - `GET files/files/{id}` — read metadata.
+  - `GET files/files/{id}/content` — read content bytes (base64-wrapped in the JSON response).
+  - `POST files/files/{id}` — replace content (and optionally metadata fields; omitted fields are preserved).
+  - `DELETE files/files/{id}` — drop metadata + blob.
+  - `GET files/files/{id}/history` — per-file change log (newest-first).
+- **32 MiB hard cap** (`MAX_FILE_BYTES`) on content size, enforced server-side before any bytes are persisted.
+- **SHA-256 over plaintext** stored in `FileEntry.sha256`. The content-read handler recomputes it and errors out on mismatch, so storage corruption or out-of-band writes produce a loud error instead of returning potentially-wrong bytes.
+- **Change history** (who / when / op / changed_fields — never content bytes). Content replacement surfaces as `"content"` in `changed_fields` so the timeline reflects content movement even when no metadata changed.
+- **Module wiring**: registered in `src/module_manager.rs`, default-mounted at `files/` in `src/mount.rs`, integrated with the standard barrier-encrypted storage path.
+- **Tests** (12 in `src/modules/files/mod.rs`): size-cap rejection, SHA-256 determinism, content roundtrip, update-replaces-content with history entry carrying `"content"` in `changed_fields`, delete-then-read-returns-none, metadata-field diff logic, caller-username fallback chain.
+
+Shipped in Phase 2 (this slice):
+
+- **Owner tracking** in `OwnerStore`. New `owner/file/<id>` sub-view alongside the existing KV and resource owner stores. APIs: `get_file_owner`, `record_file_owner_if_absent`, `set_file_owner`, `forget_file_owner`. File IDs are UUIDs so no canonicalization is needed; the record key is the id itself.
+- **Owner capture**: the files module's `handle_create` stamps `caller_audit_actor(req)` as the owner on every new file (root-token writes therefore stamp `"root"`, matching KV and resource behavior). `PolicyStore::post_route` also stamps on replace-by-id writes (`POST files/files/<id>`) so the old-and-new-author case is covered.
+- **Owner forget + share-cascade** on delete: `PolicyStore::post_route` now forgets the file's owner record on `DELETE files/files/<id>` and cascade-revokes every `SecretShare` targeting that file. Failures log a warning but never fail the delete — consistent with the resource / KV paths.
+- **`ShareTargetKind::File`** — new share-target variant (`"file"` wire string). `ShareStore::canonicalize` accepts any non-empty, slash-free id string. `shared_capabilities` on a file path is honored by the ACL evaluator (`scopes = ["shared"]` works for files).
+- **Owner-aware ACL evaluation**: `resolve_asset_owner` and `resolve_target_shared_caps` in the policy evaluator now recognize `files/files/<id>` paths and return the corresponding owner / shared-capabilities from the store. `scopes = ["owner"]` rules on file paths now see the real owner; `scopes = ["shared"]` picks up explicit file shares.
+- **`GET identity/owner/file/<id>`** — read the owner record for a file resource, same envelope as the existing `/owner/kv/<...>` and `/owner/resource/<...>` routes (the Sharing-tab GUI uses these for the Owner card).
+- **`POST sys/file-owner/transfer`** — admin ownership-transfer endpoint (gated by the usual ACL on `sys/file-owner/transfer`, mirroring kv-owner / resource-owner / asset-group-owner transfer). Body: `{ id, new_owner_entity_id }`.
+- **`sys/owner/backfill`** — extended with a `file_ids` field parallel to the existing `resources` and `kv_paths`. Response now includes a `files` summary (`stamped` / `already_owned` / `invalid`). One endpoint, three object kinds.
+- **`looks_like_kv_path`** updated to exclude `files/`, so a file path never accidentally trips the KV owner-capture path.
+- 5 new integration tests (17 total in the files module).
+
+Shipped in this turn (asset-group files + Phases 3 + 4):
+
+- **Asset-group file membership** — `ResourceGroupStore` gains a third reverse index (`resource-group/file-index/<id>`) parallel to the existing resource and secret indexes. `ResourceGroupEntry` carries a `files: Vec<String>` field; the write handler accepts a `files` comma-slice and canonicalizes ids the same way member names are canonicalized. `groups_for_file` + `prune_file` mirror the KV/resource versions and run on file DELETE from `PolicyStore::post_route`. `reindex` walks file entries. `resolve_asset_groups` now recognizes file paths so `groups = [...]` ACL rules on a file resolve to the caller's group membership.
+- **Local-FS sync target** (`src/modules/files/mod.rs`):
+  - New per-file sync-target storage (`sync/<id>/<name>`) and sync-state storage (`sync-state/<id>/<name>`). Both barrier-encrypted like everything else in the engine.
+  - Routes: `GET files/{id}/sync` lists targets + per-target state; `POST|DELETE files/{id}/sync/{name}` create-or-replace / remove a target; `POST files/{id}/sync/{name}/push` performs an on-demand push.
+  - Only `kind = "local-fs"` is accepted on save (other kinds reject with a clear error pointing at the later phase). Local-FS push creates parent directories, writes atomically via `<path>.bvsync.<pid>.tmp` + rename, and optionally applies a Unix mode after the write on Unix hosts. Windows hosts skip the mode step with a docstring note.
+  - Failed pushes record `last_error` + `last_failure_at` on the sync-state **before** surfacing the error, so the GUI can display the reason on the next read.
+  - Delete of a file drops all associated sync-target configs + sync-state records. Errors during the sweep are logged, not raised — the file delete already succeeded.
+- **Tauri commands + TypeScript bindings** (`gui/src-tauri/src/commands/files.rs`, `gui/src/lib/api.ts`): `list_files`, `read_file_meta`, `read_file_content`, `create_file`, `update_file_content`, `delete_file`, `list_file_history`, `list_file_sync_targets`, `write_file_sync_target`, `delete_file_sync_target`, `push_file_sync_target`.
+- **GUI Files page** (`gui/src/routes/FilesPage.tsx`): top-level nav entry; table of all files with Details / Download / Delete actions; upload modal with filename/resource/mime/notes; per-file detail modal with Info + Sync tabs; Sync tab supports add local-fs target, push, remove, and shows last-success / last-error timestamps per target. Confirm modal on delete with the "already-synced remote copies are not touched" disclaimer from the spec.
+
+Shipped in this turn (Phase 8 — content versioning):
+
+- **Per-file version index + historical blob storage** (`vmeta/<id>` + `vblob/<id>/<version>`). `FileVersionMeta` tracks `current_version` (monotonically incrementing) plus a retained `Vec<FileVersionInfo>` of prior snapshots (oldest first).
+- **Snapshot-on-write.** `write_entry_and_blob` detects a content change (sha256 mismatch) and, *before* overwriting, reads the live blob + current metadata and records them as a new historical version. Metadata-only writes (same sha256) don't burn a version slot.
+- **Retention with automatic prune.** `DEFAULT_VERSION_RETENTION = 5` — after appending a new snapshot, versions beyond the cap are dropped from the front of the list and the corresponding `vblob/<id>/<version>` key deleted. Set retention to `0` to disable snapshotting (existing records stay until the file is deleted).
+- **Routes** (all under the existing `files/` mount):
+  - `GET files/{id}/versions` — list retained versions + `current_version`.
+  - `GET files/{id}/versions/{version}` — metadata for one historical version.
+  - `GET files/{id}/versions/{version}/content` — base64 content of a historical version, with a SHA-256 re-verification on read that errors out loudly on mismatch.
+  - `POST files/{id}/versions/{version}/restore` — swap a historical version into the live slot. The displaced content is itself snapshotted, so restore is reversible.
+- **Delete cascade.** File DELETE now sweeps `vmeta/<id>` and every `vblob/<id>/*` alongside the existing sync-config + sync-state sweep. Failures are logged, not raised (the file delete already succeeded; a dangling version blob can never widen access because the owner + shares are gone).
+- **Tauri commands** (`list_file_versions`, `read_file_version_content`, `restore_file_version`) + TypeScript bindings.
+- **GUI**: new **Versions** tab on the file detail modal. Shows version number, size, short SHA-256, author, and when the version was displaced. Per-row Download and Restore actions. Restore goes through a confirm dialog with the "reversible" disclaimer.
+- **Tests (3 new):** `test_file_versioning_snapshots_on_update` (two updates produce two versions with correct sha256s; v1 historical content round-trips; restore rolls the live content back to v1), `test_file_versioning_retention_prunes_oldest` (8 content writes with retention=5 ⇒ exactly 5 versions retained, oldest=v3), `test_file_delete_sweeps_versions` (vmeta + vblob cleared on file DELETE).
+
+**Intentionally deferred** to later slices (in spec order):
+
+- **Phase 5** — SMB sync target.
+- **Phase 6** — SFTP / SCP sync targets.
+- **Phase 7** — Periodic re-sync scheduler (today's `sync_on_write` flag is accepted and stored but not yet honored).
+- Chunking for files above the inline 32 MiB cap.
+- Operator-configurable retention (today hardcoded at 5).
+- GUI polish: drag-and-drop upload zone, plain-text preview for small text files, tag chip editor.
+- **Phase 4** — GUI.
+- **Phases 5–6** — SMB, SCP, SFTP sync targets.
+- **Phase 7** — Periodic re-sync scheduler.
+- **Phase 8** — Multi-version content retention (today's writes overwrite; the history log still records the event).
+- **Chunking** — the inline `blob/<id>` layout fits the 32 MiB cap comfortably. Chunking (`chunks/<id>/<seq>`) lands when the cap is raised or when streaming becomes necessary.
 
 ## Relationship to Resource Management
 

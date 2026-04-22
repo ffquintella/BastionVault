@@ -55,6 +55,9 @@ pub enum ShareTargetKind {
     /// group, so sharing a bundle scales without per-object grants.
     /// The `target_path` is the group name (lowercased, canonical).
     AssetGroup,
+    /// Share is against a file resource (see `src/modules/files/`).
+    /// The `target_path` is the server-assigned UUID.
+    File,
 }
 
 impl ShareTargetKind {
@@ -63,6 +66,7 @@ impl ShareTargetKind {
             ShareTargetKind::KvSecret => "kv-secret",
             ShareTargetKind::Resource => "resource",
             ShareTargetKind::AssetGroup => "asset-group",
+            ShareTargetKind::File => "file",
         }
     }
 
@@ -71,6 +75,7 @@ impl ShareTargetKind {
             "kv-secret" | "kv" => Some(ShareTargetKind::KvSecret),
             "resource" => Some(ShareTargetKind::Resource),
             "asset-group" | "group" => Some(ShareTargetKind::AssetGroup),
+            "file" => Some(ShareTargetKind::File),
             _ => None,
         }
     }
@@ -179,6 +184,18 @@ impl ShareStore {
                 // trim, reject empties and `/` or `..`.
                 let k = raw.trim().to_lowercase();
                 if k.is_empty() || k.contains('/') || k.contains("..") {
+                    None
+                } else {
+                    Some(k)
+                }
+            }
+            ShareTargetKind::File => {
+                // File ids are server-assigned UUIDs; treat any
+                // non-empty, slash-free string as canonical so operator
+                // tooling that posts lower/upper-cased or dashless
+                // forms still matches stored records consistently.
+                let k = raw.trim().to_lowercase();
+                if k.is_empty() || k.contains('/') {
                     None
                 } else {
                     Some(k)

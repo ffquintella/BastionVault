@@ -15,6 +15,7 @@ const userNav: NavItem[] = [
   { path: "/dashboard", label: "Dashboard" },
   { path: "/resources", label: "Resources" },
   { path: "/secrets", label: "Secrets" },
+  { path: "/files", label: "Files" },
   { path: "/sharing", label: "Sharing" },
 ];
 

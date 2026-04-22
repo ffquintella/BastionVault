@@ -4,6 +4,7 @@ pub mod sharing;
 pub mod auth;
 pub mod fido2;
 pub mod fido2_native;
+pub mod files;
 pub mod groups;
 pub mod connection;
 pub mod policies;

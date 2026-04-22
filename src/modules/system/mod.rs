@@ -126,6 +126,7 @@ impl SystemBackend {
         let sys_backend_kv_owner_transfer = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_resource_owner_transfer = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_asset_group_owner_transfer = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_file_owner_transfer = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_audit_table = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_audit_events = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_audit_enable = self.self_ptr.upgrade().unwrap().clone();
@@ -361,6 +362,24 @@ impl SystemBackend {
                     ]
                 },
                 {
+                    // Admin-only: transfer ownership of a file resource.
+                    // Body: { id, new_owner_entity_id }
+                    pattern: r"file-owner/transfer$",
+                    fields: {
+                        "id": {
+                            field_type: FieldType::Str,
+                            description: "File id (UUID)."
+                        },
+                        "new_owner_entity_id": {
+                            field_type: FieldType::Str,
+                            description: "The entity_id that will become the new owner."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: sys_backend_file_owner_transfer.handle_file_owner_transfer}
+                    ]
+                },
+                {
                     pattern: "policies/acl/(?P<name>.+)",
                     fields: {
                         "name": {
@@ -509,6 +528,10 @@ impl SystemBackend {
                         "kv_paths": {
                             field_type: FieldType::Array,
                             description: "KV logical paths to backfill (e.g., 'secret/data/foo')."
+                        },
+                        "file_ids": {
+                            field_type: FieldType::Array,
+                            description: "File-resource ids (UUIDs) to backfill."
                         },
                         "dry_run": {
                             field_type: FieldType::Bool,
@@ -805,6 +828,44 @@ impl SystemBackend {
 
         let mut data = Map::new();
         data.insert("path".into(), Value::String(path));
+        data.insert("new_owner_entity_id".into(), Value::String(new_owner));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// Admin-only: overwrite the file-resource owner record with a
+    /// new `entity_id`. Gated by the ACL on `sys/file-owner/transfer`.
+    pub async fn handle_file_owner_transfer(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let id = req
+            .get_data("id")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let new_owner = req
+            .get_data("new_owner_entity_id")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+
+        if id.trim().is_empty() || new_owner.trim().is_empty() {
+            return Err(bv_error_response_status!(
+                400,
+                "id and new_owner_entity_id are required"
+            ));
+        }
+
+        let identity = self.get_module::<IdentityModule>("identity")?;
+        let store = identity.owner_store().ok_or_else(|| {
+            bv_error_response_status!(500, "owner store not initialized")
+        })?;
+
+        store.set_file_owner(&id, &new_owner).await?;
+
+        let mut data = Map::new();
+        data.insert("id".into(), Value::String(id));
         data.insert("new_owner_entity_id".into(), Value::String(new_owner));
         Ok(Some(Response::data_response(Some(data))))
     }
@@ -1227,16 +1288,25 @@ impl SystemBackend {
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .filter(|s| !s.trim().is_empty())
             .collect();
+        let file_ids: Vec<String> = req
+            .get_data("file_ids")
+            .ok()
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .filter(|s| !s.trim().is_empty())
+            .collect();
         let dry_run = req
             .get_data("dry_run")
             .ok()
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        if resources.is_empty() && kv_paths.is_empty() {
+        if resources.is_empty() && kv_paths.is_empty() && file_ids.is_empty() {
             return Err(bv_error_response_status!(
                 400,
-                "at least one of resources or kv_paths must be non-empty"
+                "at least one of resources, kv_paths, or file_ids must be non-empty"
             ));
         }
 
@@ -1312,11 +1382,39 @@ impl SystemBackend {
             Value::Array(kv_invalid.into_iter().map(Value::String).collect()),
         );
 
+        let mut file_stamped = 0usize;
+        let mut file_already = 0usize;
+        let mut file_invalid: Vec<String> = Vec::new();
+        for id in &file_ids {
+            if id.contains('/') {
+                file_invalid.push(id.clone());
+                continue;
+            }
+            match store.get_file_owner(id).await? {
+                Some(_) => file_already += 1,
+                None => {
+                    if !dry_run {
+                        store.record_file_owner_if_absent(id, &entity_id).await?;
+                    }
+                    file_stamped += 1;
+                }
+            }
+        }
+
+        let mut files_summary = Map::new();
+        files_summary.insert("stamped".into(), Value::from(file_stamped));
+        files_summary.insert("already_owned".into(), Value::from(file_already));
+        files_summary.insert(
+            "invalid".into(),
+            Value::Array(file_invalid.into_iter().map(Value::String).collect()),
+        );
+
         let mut data = Map::new();
         data.insert("entity_id".into(), Value::String(entity_id));
         data.insert("dry_run".into(), Value::Bool(dry_run));
         data.insert("resources".into(), Value::Object(resources_summary));
         data.insert("kv".into(), Value::Object(kv_summary));
+        data.insert("files".into(), Value::Object(files_summary));
         Ok(Some(Response::data_response(Some(data))))
     }
 

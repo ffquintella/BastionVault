@@ -59,6 +59,15 @@ lazy_static! {
             table: MOUNT_TABLE_TYPE.to_string(),
             tainted: false,
             uuid: generate_uuid(),
+            path: "files/".to_string(),
+            logical_type: "files".to_string(),
+            description: "binary file resources (keys, certs, configs)".to_string(),
+            ..Default::default()
+        },
+        MountEntry {
+            table: MOUNT_TABLE_TYPE.to_string(),
+            tainted: false,
+            uuid: generate_uuid(),
             path: "identity/".to_string(),
             logical_type: "identity".to_string(),
             description: "user and application group management".to_string(),

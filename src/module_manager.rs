@@ -16,8 +16,9 @@ use crate::{
     core::Core,
     errors::RvError,
     modules::{
-        identity::IdentityModule, kv::KvModule, kv_v2::KvV2Module, resource::ResourceModule,
-        resource_group::ResourceGroupModule, system::SystemModule, Module,
+        files::FilesModule, identity::IdentityModule, kv::KvModule, kv_v2::KvV2Module,
+        resource::ResourceModule, resource_group::ResourceGroupModule, system::SystemModule,
+        Module,
     },
 };
 
@@ -36,6 +37,7 @@ impl ModuleManager {
             Arc::new(KvModule::new(core.clone())),
             Arc::new(KvV2Module::new(core.clone())),
             Arc::new(ResourceModule::new(core.clone())),
+            Arc::new(FilesModule::new(core.clone())),
             Arc::new(IdentityModule::new(core.clone())),
             Arc::new(ResourceGroupModule::new(core.clone())),
             Arc::new(SystemModule::new(core)),

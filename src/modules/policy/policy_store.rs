@@ -956,6 +956,42 @@ fn resource_name_from_path(req_path: &str) -> Option<String> {
     if name.is_empty() { None } else { Some(name.to_lowercase()) }
 }
 
+/// Extract a file id from `request_path` if it targets the files
+/// engine. The files module is mounted at `files/` and its metadata
+/// path is `files/<id>` (plus optional sub-segments like `/content` or
+/// `/history`). The full request path is therefore
+/// `files/files/<id>[/...]`. Returns the id on match (ownership hooks
+/// only fire on the metadata endpoint; `/content` and `/history`
+/// should not restamp ownership).
+fn file_id_from_path(req_path: &str) -> Option<String> {
+    let p = req_path.strip_prefix('/').unwrap_or(req_path);
+    let rest = p.strip_prefix("files/")?;
+    let rest = rest.strip_prefix("files/")?;
+    let mut parts = rest.splitn(2, '/');
+    let id = parts.next()?;
+    if id.is_empty() {
+        return None;
+    }
+    Some(id.to_lowercase())
+}
+
+/// As `file_id_from_path`, but only returns the id when the remainder
+/// of the path is empty — i.e. the request targets the file metadata
+/// directly and not a sub-endpoint like `/content` or `/history`.
+fn file_id_from_metadata_path(req_path: &str) -> Option<String> {
+    let p = req_path.strip_prefix('/').unwrap_or(req_path);
+    let rest = p.strip_prefix("files/")?;
+    let rest = rest.strip_prefix("files/")?;
+    // No further `/` segment means this is the metadata leaf path.
+    if rest.contains('/') {
+        return None;
+    }
+    if rest.is_empty() {
+        return None;
+    }
+    Some(rest.to_lowercase())
+}
+
 /// Does `request_path` look like a KV (v1 or v2) request? The routing
 /// layer puts KV mounts under their operator-chosen path (default
 /// `secret/`). We can't enumerate mounts from here cheaply, so we use
@@ -974,6 +1010,7 @@ fn looks_like_kv_path(req_path: &str) -> bool {
         "resource-group/",
         "cubbyhole/",
         "resources/",
+        "files/",
     ];
     !p.is_empty() && !NON_KV_PREFIXES.iter().any(|pref| p.starts_with(pref))
 }
@@ -995,6 +1032,11 @@ async fn resolve_asset_owner(core: &Weak<Core>, req_path: &str) -> String {
     };
     if let Some(name) = resource_name_from_path(req_path) {
         if let Ok(Some(rec)) = store.get_resource_owner(&name).await {
+            return rec.entity_id;
+        }
+    }
+    if let Some(id) = file_id_from_path(req_path) {
+        if let Ok(Some(rec)) = store.get_file_owner(&id).await {
             return rec.entity_id;
         }
     }
@@ -1066,6 +1108,14 @@ async fn resolve_target_shared_caps(
             merge(v);
         }
     }
+    if let Some(id) = file_id_from_path(&req.path) {
+        if let Ok(v) = store
+            .shared_capabilities(ShareTargetKind::File, &id, &caller_id)
+            .await
+        {
+            merge(v);
+        }
+    }
 
     // Indirect: walk the caller's asset-group memberships for this
     // target and union any asset-group shares addressed to them. We
@@ -1123,6 +1173,16 @@ async fn resolve_asset_groups(core: &Weak<Core>, req_path: &str) -> Vec<String> 
 
     if looks_like_kv_path(req_path) {
         if let Ok(groups) = store.groups_for_secret(req_path).await {
+            for g in groups {
+                if !out.iter().any(|x| x == &g) {
+                    out.push(g);
+                }
+            }
+        }
+    }
+
+    if let Some(id) = file_id_from_path(req_path) {
+        if let Ok(groups) = store.groups_for_file(&id).await {
             for g in groups {
                 if !out.iter().any(|x| x == &g) {
                     out.push(g);
@@ -1443,6 +1503,19 @@ impl Handler for PolicyStore {
                                 .await;
                         }
                     }
+                    // File resources: stamp owner on the metadata
+                    // path (`files/files/<id>`, i.e. a replace-by-id
+                    // write). For the create path (`files/files`
+                    // without id), the file engine stamps the owner
+                    // inline — post_route cannot because the new id is
+                    // only visible to the module that assigned it.
+                    if let Some(id) = file_id_from_metadata_path(&req.path) {
+                        if !caller_id.is_empty() {
+                            let _ = store
+                                .record_file_owner_if_absent(&id, &caller_id)
+                                .await;
+                        }
+                    }
                 }
                 Operation::Delete => {
                     if looks_like_kv_path(&req.path) {
@@ -1453,6 +1526,9 @@ impl Handler for PolicyStore {
                         if trimmed.starts_with("resources/resources/") {
                             let _ = store.forget_resource_owner(&name).await;
                         }
+                    }
+                    if let Some(id) = file_id_from_metadata_path(&req.path) {
+                        let _ = store.forget_file_owner(&id).await;
                     }
                     // Cascade-delete every SecretShare referencing this
                     // target so dangling share rows do not outlive the
@@ -1498,6 +1574,21 @@ impl Handler for PolicyStore {
                                 }
                             }
                         }
+                        if let Some(id) = file_id_from_metadata_path(&req.path) {
+                            if let Err(e) = sshare
+                                .cascade_delete_target_audited(
+                                    ShareTargetKind::File,
+                                    &id,
+                                    &audit_actor,
+                                )
+                                .await
+                            {
+                                log::warn!(
+                                    "share cascade-delete failed for file '{}': {e}",
+                                    id,
+                                );
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -1513,6 +1604,21 @@ impl Handler for PolicyStore {
                          Use the resource-group/reindex endpoint to clean up.",
                         req.path,
                     );
+                }
+            }
+        }
+
+        // --- File-delete prune from asset-groups ---
+        if let Some(store) = rg_store.as_ref() {
+            if req.operation == Operation::Delete {
+                if let Some(id) = file_id_from_metadata_path(&req.path) {
+                    if let Err(e) = store.prune_file(&id).await {
+                        log::warn!(
+                            "resource-group prune failed for deleted file '{}': {e}. \
+                             Use the resource-group/reindex endpoint to clean up.",
+                            id,
+                        );
+                    }
                 }
             }
         }

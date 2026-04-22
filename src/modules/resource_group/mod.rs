@@ -131,6 +131,11 @@ impl ResourceGroupBackend {
                             field_type: FieldType::CommaStringSlice,
                             required: false,
                             description: "KV-secret paths that belong to this group. Accepts either the logical form (secret/foo/bar) or the KV-v2 API form (secret/data/foo/bar); stored canonicalized."
+                        },
+                        "files": {
+                            field_type: FieldType::CommaStringSlice,
+                            required: false,
+                            description: "File-resource ids (UUIDs from `files/files`) that belong to this group."
                         }
                     },
                     operations: [
@@ -206,6 +211,9 @@ struct WritePayload {
     /// KV-secret paths. Same semantics as `members`.
     #[serde(default)]
     secrets: Option<Vec<String>>,
+    /// File-resource ids (UUIDs). Same semantics as `members`.
+    #[serde(default)]
+    files: Option<Vec<String>>,
 }
 
 /// Replace each member in `entry.members` / `entry.secrets` with the
@@ -339,6 +347,15 @@ fn diff_with_values(
             after.insert("secrets".into(), string_array(&n.secrets));
         }
     }
+    if !same_set(&o.files, &n.files) {
+        changed.push("files".to_string());
+        if old.is_some() {
+            before.insert("files".into(), string_array(&o.files));
+        }
+        if new.is_some() {
+            after.insert("files".into(), string_array(&n.files));
+        }
+    }
 
     (changed, before, after)
 }
@@ -367,6 +384,10 @@ fn group_to_response(entry: &ResourceGroupEntry) -> Response {
         Value::Array(entry.secrets.iter().cloned().map(Value::String).collect()),
     );
     data.insert(
+        "files".into(),
+        Value::Array(entry.files.iter().cloned().map(Value::String).collect()),
+    );
+    data.insert(
         "owner_entity_id".into(),
         Value::String(entry.owner_entity_id.clone()),
     );
@@ -390,6 +411,10 @@ fn parse_write_payload(req: &Request) -> Result<WritePayload, RvError> {
 
     if let Ok(v) = req.get_data("secrets") {
         payload.secrets = Some(value_to_string_vec(&v));
+    }
+
+    if let Ok(v) = req.get_data("files") {
+        payload.files = Some(value_to_string_vec(&v));
     }
 
     Ok(payload)
@@ -503,6 +528,9 @@ impl ResourceGroupBackendInner {
         }
         if let Some(s) = &payload.secrets {
             entry.secrets = s.clone();
+        }
+        if let Some(f) = &payload.files {
+            entry.files = f.clone();
         }
 
         let now = now_iso();

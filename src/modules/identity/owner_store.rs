@@ -31,6 +31,7 @@ use crate::{
 
 const KV_OWNER_SUB_PATH: &str = "owner/kv/";
 const RESOURCE_OWNER_SUB_PATH: &str = "owner/resource/";
+const FILE_OWNER_SUB_PATH: &str = "owner/file/";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OwnerRecord {
@@ -41,6 +42,7 @@ pub struct OwnerRecord {
 pub struct OwnerStore {
     kv_view: Arc<BarrierView>,
     resource_view: Arc<BarrierView>,
+    file_view: Arc<BarrierView>,
 }
 
 #[maybe_async::maybe_async]
@@ -52,8 +54,9 @@ impl OwnerStore {
 
         let kv_view = Arc::new(system_view.new_sub_view(KV_OWNER_SUB_PATH));
         let resource_view = Arc::new(system_view.new_sub_view(RESOURCE_OWNER_SUB_PATH));
+        let file_view = Arc::new(system_view.new_sub_view(FILE_OWNER_SUB_PATH));
 
-        Ok(Arc::new(Self { kv_view, resource_view }))
+        Ok(Arc::new(Self { kv_view, resource_view, file_view }))
     }
 
     /// Canonicalize a KV secret path for owner lookup/storage. Matches
@@ -229,5 +232,73 @@ impl OwnerStore {
             return Ok(());
         }
         self.resource_view.delete(&key).await
+    }
+
+    // ── File ownership (parallel to kv/resource) ──────────────────
+    //
+    // File IDs are server-assigned UUIDs (see `src/modules/files/`);
+    // they are never operator-supplied and always fit the `[^/]+`
+    // shape already enforced by the route pattern. The owner key is
+    // therefore the id itself, no canonicalization needed.
+
+    fn valid_file_id(id: &str) -> bool {
+        let t = id.trim();
+        !t.is_empty() && !t.contains('/')
+    }
+
+    pub async fn get_file_owner(&self, id: &str) -> Result<Option<OwnerRecord>, RvError> {
+        if !Self::valid_file_id(id) {
+            return Ok(None);
+        }
+        let key = id.trim().to_string();
+        let Some(raw) = self.file_view.get(&key).await? else {
+            return Ok(None);
+        };
+        let rec: OwnerRecord = serde_json::from_slice(&raw.value).unwrap_or_default();
+        if rec.entity_id.is_empty() { Ok(None) } else { Ok(Some(rec)) }
+    }
+
+    pub async fn record_file_owner_if_absent(
+        &self,
+        id: &str,
+        entity_id: &str,
+    ) -> Result<(), RvError> {
+        if entity_id.is_empty() || !Self::valid_file_id(id) {
+            return Ok(());
+        }
+        let key = id.trim().to_string();
+        if self.file_view.get(&key).await?.is_some() {
+            return Ok(());
+        }
+        let rec = OwnerRecord {
+            entity_id: entity_id.to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        let value = serde_json::to_vec(&rec)?;
+        self.file_view.put(&StorageEntry { key, value }).await
+    }
+
+    pub async fn set_file_owner(&self, id: &str, entity_id: &str) -> Result<(), RvError> {
+        if !Self::valid_file_id(id) {
+            return Err(crate::bv_error_string!("invalid file id"));
+        }
+        let entity_id = entity_id.trim();
+        if entity_id.is_empty() {
+            return Err(crate::bv_error_string!("entity_id is required"));
+        }
+        let key = id.trim().to_string();
+        let rec = OwnerRecord {
+            entity_id: entity_id.to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        let value = serde_json::to_vec(&rec)?;
+        self.file_view.put(&StorageEntry { key, value }).await
+    }
+
+    pub async fn forget_file_owner(&self, id: &str) -> Result<(), RvError> {
+        if !Self::valid_file_id(id) {
+            return Ok(());
+        }
+        self.file_view.delete(id.trim()).await
     }
 }
