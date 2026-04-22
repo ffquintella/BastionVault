@@ -17,7 +17,55 @@ Compliance frameworks (SOC 2, PCI-DSS, HIPAA, FedRAMP) require auditable access 
 
 ## Current State
 
-The codebase has **stubs and infrastructure** but no working audit implementation:
+**Phase 1 shipped** — AuditEntry + AuditBroker + FileAuditDevice +
+tamper-evident hash chain + core pipeline hook + sys/audit HTTP
+API + persistence at `sys/audit-devices/<path>` + tests.
+
+What's live:
+- `src/audit/{mod,entry,broker,file_device,hash_chain}.rs`.
+- `AuditEntry` JSON schema with `time`/`type`/`auth`/`request`/
+  `response`/`error`/`prev_hash` fields.
+- HMAC redaction of client tokens and body string-leaves via the
+  barrier-derived HMAC key. `log_raw` option disables it (dev only).
+- SHA-256 hash chain across entries, genesis is all-zero; verifier
+  at `audit::hash_chain::verify` detects insertion / deletion /
+  modification.
+- `AuditBroker` stored on `Core`, installed at post-unseal, cleared
+  at pre-seal. Fan-out is fail-closed — a device error fails the
+  whole log phase so unaudited operations cannot slip through.
+- FileAuditDevice: JSONL append-only, per-write `flush`, async
+  mutex over the `File` handle. Supports `file_path` + `log_raw`
+  options.
+- Pipeline hook at `Core::handle_log_phase`: emits one `response`-
+  type entry per request. Phase-1 simplification: separate pre-
+  dispatch `request` entries are deferred; the single combined
+  entry still captures full state (request + response + error +
+  prev_hash) so the chain remains tamper-evident.
+- `GET /v1/sys/audit` / `POST /v1/sys/audit/<path>` /
+  `DELETE /v1/sys/audit/<path>` wired through to the broker.
+  Device configs persist at `sys/audit-devices/<path>` and are
+  re-hydrated on every unseal.
+- 12 audit tests: entry redaction, hash-chain genesis + verify +
+  tamper detection, file-device end-to-end, enable/disable via the
+  HTTP API, broker-reset-on-seal.
+
+Pending / later phases:
+- Syslog, socket, HTTP webhook devices.
+- Pre-dispatch request entries (two entries per op) and per-device
+  hash-chain isolation.
+- External chain-head witness for stronger-than-evident tamper
+  guarantees.
+- CLI commands (`bvault audit enable/disable/list`).
+- The GUI Admin → Audit page currently surfaces the *aggregated*
+  audit trail (policy / identity-group / asset-group / share /
+  user histories). The broker-driven append-only log lives on disk
+  via the file device; a browser view for it can be a later
+  addition.
+
+### Original design notes
+
+The codebase also had **stubs and infrastructure** that predated
+this phase:
 
 **What exists:**
 - Handler trait defines a `log()` phase that runs after every request (`src/handler.rs:40`).

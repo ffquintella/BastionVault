@@ -842,7 +842,24 @@ impl SystemBackend {
         _backend: &dyn Backend,
         _req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        Ok(None)
+        let Some(broker) = self.core.audit_broker.load().as_ref().cloned() else {
+            let mut data = Map::new();
+            data.insert("devices".into(), Value::Array(Vec::new()));
+            return Ok(Some(Response::data_response(Some(data))));
+        };
+
+        let entries = broker.list();
+        let mut arr: Vec<Value> = Vec::with_capacity(entries.len());
+        for d in entries {
+            let mut m = Map::new();
+            m.insert("path".into(), Value::String(d.path));
+            m.insert("type".into(), Value::String(d.device_type));
+            m.insert("description".into(), Value::String(d.description));
+            arr.push(Value::Object(m));
+        }
+        let mut data = Map::new();
+        data.insert("devices".into(), Value::Array(arr));
+        Ok(Some(Response::data_response(Some(data))))
     }
 
     /// Unified audit trail. Walks every per-subsystem change-history
@@ -1053,16 +1070,75 @@ impl SystemBackend {
     pub async fn handle_audit_enable(
         &self,
         _backend: &dyn Backend,
-        _req: &mut Request,
+        req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
+        let Some(broker) = self.core.audit_broker.load().as_ref().cloned() else {
+            return Err(bv_error_response_status!(503, "audit broker not initialized"));
+        };
+
+        let path = req.get_data("path")?.as_str().unwrap_or("").to_string();
+        let device_type = req
+            .get_data("type")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let description = req
+            .get_data("description")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+
+        // `options` is declared as FieldType::Map on the route — it
+        // resolves to a `serde_json::Map` of string values. Other
+        // shapes fall through to empty.
+        let options: std::collections::HashMap<String, String> = req
+            .get_data("options")
+            .ok()
+            .and_then(|v| match v {
+                Value::Object(m) => Some(
+                    m.iter()
+                        .map(|(k, v)| {
+                            (
+                                k.clone(),
+                                match v {
+                                    Value::String(s) => s.clone(),
+                                    other => other.to_string(),
+                                },
+                            )
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        if path.trim().is_empty() || device_type.trim().is_empty() {
+            return Err(bv_error_response_status!(400, "path and type are required"));
+        }
+
+        let cfg = crate::audit::AuditDeviceConfig {
+            path,
+            device_type,
+            description,
+            options,
+        };
+        broker.enable_device(cfg).await?;
         Ok(None)
     }
 
     pub async fn handle_audit_disable(
         &self,
         _backend: &dyn Backend,
-        _req: &mut Request,
+        req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
+        let Some(broker) = self.core.audit_broker.load().as_ref().cloned() else {
+            return Ok(None);
+        };
+        let path = req.get_data("path")?.as_str().unwrap_or("").to_string();
+        if path.trim().is_empty() {
+            return Err(bv_error_response_status!(400, "path is required"));
+        }
+        broker.disable_device(&path).await?;
         Ok(None)
     }
 

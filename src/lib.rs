@@ -48,6 +48,7 @@ use crate::{
 extern crate diesel;
 
 pub mod api;
+pub mod audit;
 pub mod backup;
 pub mod cli;
 pub mod context;

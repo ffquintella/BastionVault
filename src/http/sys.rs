@@ -195,6 +195,58 @@ async fn sys_list_mounts_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// GET `/sys/audit` — list enabled audit devices.
+async fn sys_audit_list_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/audit".to_string();
+    r.operation = Operation::Read;
+    handle_request(core, &mut r).await
+}
+
+/// POST `/sys/audit/{path}` — enable a new audit device.
+async fn sys_audit_enable_request_handler(
+    req: HttpRequest,
+    path: web::Path<String>,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let device_path = path.into_inner();
+    if device_path.is_empty() {
+        return Ok(response_error(StatusCode::NOT_FOUND, ""));
+    }
+    let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
+        serde_json::Map::new()
+    } else {
+        serde_json::from_slice(&body)?
+    };
+    body.clear();
+
+    let mut r = request_auth(&req);
+    r.path = format!("sys/audit/{device_path}");
+    r.operation = Operation::Write;
+    r.body = Some(payload);
+    handle_request(core, &mut r).await
+}
+
+/// DELETE `/sys/audit/{path}` — disable an audit device.
+async fn sys_audit_disable_request_handler(
+    req: HttpRequest,
+    path: web::Path<String>,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let device_path = path.into_inner();
+    if device_path.is_empty() {
+        return Ok(response_error(StatusCode::NOT_FOUND, ""));
+    }
+    let mut r = request_auth(&req);
+    r.path = format!("sys/audit/{device_path}");
+    r.operation = Operation::Delete;
+    handle_request(core, &mut r).await
+}
+
 /// Unified admin audit trail. GET reads the aggregated log; optional
 /// `from` / `to` / `limit` are accepted as query-string-style fields
 /// via the request body so the same handler works over the internal
@@ -821,6 +873,12 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
         )
         .service(
             web::resource("/audit/events").route(web::get().to(sys_audit_events_request_handler)),
+        )
+        .service(web::resource("/audit").route(web::get().to(sys_audit_list_request_handler)))
+        .service(
+            web::resource("/audit/{path:.*}")
+                .route(web::post().to(sys_audit_enable_request_handler))
+                .route(web::delete().to(sys_audit_disable_request_handler)),
         )
         .service(
             web::resource("/internal/ui/mounts").route(web::get().to(sys_get_internal_ui_mounts_request_handler)),

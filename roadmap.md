@@ -17,7 +17,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Per-User Scoping (ownership + policy templating + sharing) | Done (all 10 phases: ownership, `scopes`, seeded baselines, policy templating, `ShareStore`, v2 sharing API, `shared` scope, share-cascade, admin transfer, and the GUI — `/sharing` page plus per-resource Sharing tab) |
 | Resource Groups (named collections of resources + KV with reverse index, ACL gate, list-filter, lifecycle prune) | Done (full model with ownership + sharing; see Asset Groups row) |
 | Asset Groups (secret + resource collections with group-based ACLs) | Done (full model: ownership, admin transfer, sharing via ShareTargetKind::AssetGroup, and member-redaction on read all shipped) |
-| Audit Logging (tamper-evident, HMAC chain) | Partial |
+| Audit Logging (tamper-evident, HMAC chain) | Done (Phase 1: file device, hash chain, sys/audit API, pipeline hook, config persistence; syslog/HTTP devices deferred) |
 | Metrics (Prometheus) | Done |
 | **Cryptography** | |
 | Post-Quantum Crypto Migration | Done |

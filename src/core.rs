@@ -88,6 +88,10 @@ pub struct Core {
     pub mounts_monitor: ArcSwapOption<MountsMonitor>,
     pub mounts_monitor_interval: u64,
     pub state: ArcSwap<CoreState>,
+    /// Audit broker — Some once the vault is unsealed and the
+    /// audit subsystem is ready. Handle is installed by
+    /// `post_unseal_init_audit` and cleared on seal.
+    pub audit_broker: ArcSwapOption<crate::audit::AuditBroker>,
 }
 
 impl Default for CoreState {
@@ -121,6 +125,7 @@ impl Default for Core {
             mounts_monitor: ArcSwapOption::empty(),
             mounts_monitor_interval: 0,
             state: ArcSwap::from_pointee(CoreState::default()),
+            audit_broker: ArcSwapOption::empty(),
         }
     }
 }
@@ -552,10 +557,26 @@ impl Core {
             mounts_monitor.start();
         }
 
+        // Install the audit broker. Uses the barrier-derived HMAC
+        // key for entry redaction. Re-hydrates any persisted device
+        // configs. Silent on failure — the broker is optional
+        // infrastructure; ops continue, just without audit, unless
+        // operators require it via the fail-closed policy.
+        let hmac_key = self.state.load().hmac_key.clone();
+        if !hmac_key.is_empty() {
+            match crate::audit::AuditBroker::new(self, hmac_key).await {
+                Ok(broker) => self.audit_broker.store(Some(broker)),
+                Err(e) => log::warn!("audit broker init failed: {e}. Audit disabled."),
+            }
+        }
+
         Ok(())
     }
 
     fn pre_seal(&self) -> Result<(), RvError> {
+        // Drop the audit broker so a subsequent unseal gets a fresh
+        // one tied to the new hmac_key.
+        self.audit_broker.store(None);
         if let Some(mounts_monitor) = self.mounts_monitor.load().as_ref() {
             mounts_monitor.remove_mounts_router(self.mounts_router.clone());
             mounts_monitor.stop();
@@ -689,6 +710,25 @@ impl Core {
             match handler.log(req, resp).await {
                 Err(e) if e != RvError::ErrHandlerDefault => return Err(e),
                 _ => continue,
+            }
+        }
+
+        // Audit broker fan-out. Emits one `response`-type entry per
+        // request covering the final state. Phase-1 simplification:
+        // the spec calls for separate pre-dispatch request entries;
+        // those require a second hook higher in the pipeline and are
+        // deferred. Fail-closed per design — if any device errors,
+        // the request fails here.
+        if let Some(broker) = self.audit_broker.load().as_ref().cloned() {
+            if broker.has_devices() {
+                let mut entry = crate::audit::AuditEntry::from_response(
+                    req,
+                    resp,
+                    None,
+                    broker.hmac_key(),
+                    false,
+                );
+                broker.log(&mut entry).await?;
             }
         }
 
