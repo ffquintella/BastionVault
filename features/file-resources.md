@@ -78,6 +78,8 @@ Where `<id>` is a UUIDv7 so files sort by creation time in listings.
 ### Size Limits
 
 - Default hard cap: **32 MiB** per file. Configurable via `files.max_bytes` in server config.
+
+  Operators who want to store files in a cloud account should use the [Cloud Storage Targets for `FileBackend`](cloud-storage-backend.md) feature — it makes the entire Encrypted File backend (including File Resource content) write its barrier-encrypted bytes to S3 / OneDrive / Google Drive / Dropbox, lifting the practical size constraints imposed by local-disk / MySQL row size / Hiqlite BLOB limits.
 - Files > 1 MiB are split into 1 MiB chunks (`files/chunks/<id>/0001`, `0002`, …). Each chunk passes through the barrier independently; AEAD authenticates each chunk.
 - A manifest-level SHA-256 over the *plaintext* is stored in metadata so the caller can verify whole-file integrity after reassembly.
 - Chunking is transparent to callers — the API accepts and returns the whole file; chunking lives inside the engine.

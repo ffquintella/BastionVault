@@ -244,6 +244,28 @@ async fn sys_cache_flush_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// POST `/sys/owner/backfill` — admin migration tool that stamps
+/// `entity_id` as the owner of every currently-unowned target in the
+/// request. Sudo-gated by `root_paths` in the system backend definition.
+async fn sys_owner_backfill_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
+        serde_json::Map::new()
+    } else {
+        serde_json::from_slice(&body)?
+    };
+    body.clear();
+
+    let mut r = request_auth(&req);
+    r.path = "sys/owner/backfill".to_string();
+    r.operation = Operation::Write;
+    r.body = Some(payload);
+    handle_request(core, &mut r).await
+}
+
 /// DELETE `/sys/audit/{path}` — disable an audit device.
 async fn sys_audit_disable_request_handler(
     req: HttpRequest,
@@ -897,6 +919,10 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
             web::resource("/cache/flush").route(web::post().to(sys_cache_flush_request_handler)),
         )
         .service(
+            web::resource("/owner/backfill")
+                .route(web::post().to(sys_owner_backfill_request_handler)),
+        )
+        .service(
             web::resource("/internal/ui/mounts").route(web::get().to(sys_get_internal_ui_mounts_request_handler)),
         )
         .service(
@@ -907,5 +933,23 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
 
 pub fn init_sys_service(cfg: &mut web::ServiceConfig) {
     cfg.service(configure_sys_routes(web::scope("/v1/sys")));
-    cfg.service(configure_sys_routes(web::scope("/v2/sys")));
+    // Batch is a v2-only route per the project's forward-going HTTP API
+    // rule. Register it under the v2 scope only. The body-size limit is
+    // enforced by the per-route `PayloadConfig`; when `Config` is not
+    // available (tests without a loaded config) the default 32 MiB
+    // from actix + our handler-level size check applies.
+    cfg.service(
+        configure_sys_routes(web::scope("/v2/sys"))
+            .service(
+                web::resource("/batch")
+                    .app_data(web::JsonConfig::default().limit(default_batch_body_limit()))
+                    .route(web::post().to(crate::http::batch::sys_batch_v2_request_handler)),
+            ),
+    );
+}
+
+/// Body-size limit for the batch route when no `Config` extension is
+/// present. Matches the documented default in `features/batch-operations.md`.
+fn default_batch_body_limit() -> usize {
+    32 * 1024 * 1024
 }

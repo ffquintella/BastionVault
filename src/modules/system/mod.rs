@@ -136,6 +136,7 @@ impl SystemBackend {
         let sys_backend_internal_ui_mounts_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_internal_ui_mount_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_cache_flush = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_owner_backfill = self.self_ptr.upgrade().unwrap().clone();
 
         let backend = new_logical_backend!({
             paths: [
@@ -482,9 +483,45 @@ impl SystemBackend {
                     operations: [
                         {op: Operation::Write, handler: sys_backend_cache_flush.handle_cache_flush}
                     ]
+                },
+                {
+                    // Admin-only: stamp ownership on currently-unowned
+                    // KV paths and/or resource names. Intended as the
+                    // one-shot migration tool for deployments that were
+                    // running before per-user-scoping landed (owner
+                    // records did not exist, so `owner`/`shared` ACL
+                    // scopes deny those objects until they are claimed).
+                    // Body:
+                    //   { entity_id, resources?, kv_paths?, dry_run? }
+                    // Only unowned targets are touched — existing
+                    // owners are never overwritten (use the
+                    // `*-owner/transfer` endpoints for that).
+                    pattern: "owner/backfill$",
+                    fields: {
+                        "entity_id": {
+                            field_type: FieldType::Str,
+                            description: "Entity id to stamp as owner on every currently-unowned target in the request. Use 'root' for admin-managed objects."
+                        },
+                        "resources": {
+                            field_type: FieldType::Array,
+                            description: "Resource names to backfill."
+                        },
+                        "kv_paths": {
+                            field_type: FieldType::Array,
+                            description: "KV logical paths to backfill (e.g., 'secret/data/foo')."
+                        },
+                        "dry_run": {
+                            field_type: FieldType::Bool,
+                            default: false,
+                            description: "When true, returns what would be stamped without writing any owner records."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: sys_backend_owner_backfill.handle_owner_backfill}
+                    ]
                 }
             ],
-            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "seal", "raw/*", "revoke-prefix/*", "cache/flush"],
+            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "seal", "raw/*", "revoke-prefix/*", "cache/flush", "owner/backfill"],
             unauth_paths: ["internal/ui/mounts", "internal/ui/mounts/*", "init", "seal-status", "unseal"],
             help: SYSTEM_BACKEND_HELP,
         });
@@ -1136,6 +1173,151 @@ impl SystemBackend {
         };
         broker.enable_device(cfg).await?;
         Ok(None)
+    }
+
+    /// Admin-only: stamp `entity_id` as the owner of every
+    /// currently-unowned target in `resources` + `kv_paths`. Intended
+    /// as the one-shot migration tool for deployments that were
+    /// running before per-user-scoping landed — existing unowned
+    /// objects are invisible to `owner`/`shared`-scoped policies until
+    /// they are claimed. Never overwrites an existing owner (use the
+    /// `*-owner/transfer` endpoints for that).
+    ///
+    /// Request fields:
+    ///   `entity_id` (required, non-empty) — owner to stamp.
+    ///   `resources` (optional array) — resource names.
+    ///   `kv_paths` (optional array)  — KV paths (any of the v1/v2 forms
+    ///                                   that `OwnerStore::canonicalize_kv_path`
+    ///                                   accepts).
+    ///   `dry_run` (optional bool)    — report-only when true.
+    ///
+    /// Response: per-kind counts (`stamped` / `already_owned` / `invalid`).
+    pub async fn handle_owner_backfill(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let entity_id = req
+            .get_data("entity_id")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        if entity_id.trim().is_empty() {
+            return Err(bv_error_response_status!(
+                400,
+                "entity_id is required and must be non-empty"
+            ));
+        }
+
+        let resources: Vec<String> = req
+            .get_data("resources")
+            .ok()
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .filter(|s| !s.trim().is_empty())
+            .collect();
+        let kv_paths: Vec<String> = req
+            .get_data("kv_paths")
+            .ok()
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .filter(|s| !s.trim().is_empty())
+            .collect();
+        let dry_run = req
+            .get_data("dry_run")
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if resources.is_empty() && kv_paths.is_empty() {
+            return Err(bv_error_response_status!(
+                400,
+                "at least one of resources or kv_paths must be non-empty"
+            ));
+        }
+
+        let identity = self.get_module::<IdentityModule>("identity")?;
+        let store = identity.owner_store().ok_or_else(|| {
+            bv_error_response_status!(500, "owner store not initialized")
+        })?;
+
+        let mut res_stamped = 0usize;
+        let mut res_already = 0usize;
+        let mut res_invalid: Vec<String> = Vec::new();
+        for name in &resources {
+            // `record_resource_owner_if_absent` already rejects names
+            // containing `/` or empty strings — we mirror that as
+            // "invalid" in the response instead of letting the whole
+            // batch error out.
+            if name.contains('/') {
+                res_invalid.push(name.clone());
+                continue;
+            }
+            match store.get_resource_owner(name).await? {
+                Some(_) => res_already += 1,
+                None => {
+                    if !dry_run {
+                        store
+                            .record_resource_owner_if_absent(name, &entity_id)
+                            .await?;
+                    }
+                    res_stamped += 1;
+                }
+            }
+        }
+
+        let mut kv_stamped = 0usize;
+        let mut kv_already = 0usize;
+        let mut kv_invalid: Vec<String> = Vec::new();
+        for path in &kv_paths {
+            // `canonicalize_kv_path` returns None for malformed input
+            // (empty segments, `..`, etc.). We surface those separately
+            // so the operator sees exactly which paths were skipped.
+            if crate::modules::identity::owner_store::OwnerStore::canonicalize_kv_path(path)
+                .is_none()
+            {
+                kv_invalid.push(path.clone());
+                continue;
+            }
+            match store.get_kv_owner(path).await? {
+                Some(_) => kv_already += 1,
+                None => {
+                    if !dry_run {
+                        store
+                            .record_kv_owner_if_absent(path, &entity_id)
+                            .await?;
+                    }
+                    kv_stamped += 1;
+                }
+            }
+        }
+
+        let mut resources_summary = Map::new();
+        resources_summary.insert("stamped".into(), Value::from(res_stamped));
+        resources_summary.insert("already_owned".into(), Value::from(res_already));
+        resources_summary.insert(
+            "invalid".into(),
+            Value::Array(res_invalid.into_iter().map(Value::String).collect()),
+        );
+
+        let mut kv_summary = Map::new();
+        kv_summary.insert("stamped".into(), Value::from(kv_stamped));
+        kv_summary.insert("already_owned".into(), Value::from(kv_already));
+        kv_summary.insert(
+            "invalid".into(),
+            Value::Array(kv_invalid.into_iter().map(Value::String).collect()),
+        );
+
+        let mut data = Map::new();
+        data.insert("entity_id".into(), Value::String(entity_id));
+        data.insert("dry_run".into(), Value::Bool(dry_run));
+        data.insert("resources".into(), Value::Object(resources_summary));
+        data.insert("kv".into(), Value::Object(kv_summary));
+        Ok(Some(Response::data_response(Some(data))))
     }
 
     /// Flush every in-memory cache layer (policy / token / secret).

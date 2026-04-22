@@ -266,7 +266,7 @@ Path-shape extraction in `resolve_asset_groups` (policy_store.rs):
 | 10 | List-filter: narrow LIST response keys to asset-group members when granted via `groups = [...]` | Done |
 | 11 | Policy-compile warning when `groups = [...]` references a non-existent asset group | Done |
 | 12 | GUI: Asset Groups page, group chips on objects, sidebar filter | Done |
-| 13 | Ownership, admin transfer, sharing (depends on per-user-scoping) | Pending |
+| 13 | Ownership, admin transfer, sharing (depends on per-user-scoping) | Done (`OwnerStore` integration; `POST /v2/sys/asset-group-owner/transfer`; `ShareTargetKind::AssetGroup` with indirect member-expansion at authorize time; member redaction for non-owner / non-admin readers) |
 
 ## Testing
 

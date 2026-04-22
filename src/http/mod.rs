@@ -18,6 +18,7 @@ use serde_json::{json, Map, Value};
 
 use crate::{core::Core, errors::RvError, logical::Request};
 
+pub mod batch;
 pub mod logical;
 pub mod metrics;
 pub mod sys;

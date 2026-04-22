@@ -1963,6 +1963,175 @@ mod identity_tests {
         assert_eq!(kv_rec.entity_id, "root");
     }
 
+    /// `sys/owner/backfill` — admin migration endpoint that stamps a
+    /// given entity_id as owner of every currently-unowned target in
+    /// `resources` + `kv_paths`. Exercises the sudo-gated handler end
+    /// to end via `core.handle_request`, including the data-shape of
+    /// the response and the never-overwrite invariant.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_owner_backfill_stamps_unowned_and_skips_owned() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_owner_backfill").await;
+
+        let module = core
+            .module_manager
+            .get_module::<IdentityModule>("identity")
+            .expect("identity module");
+        let store = module.owner_store().expect("owner store");
+
+        // Seed three objects in three different states:
+        //  - `orphan-resource`: exists in the owner store as unowned
+        //    (we write an empty-entity_id record directly to simulate
+        //    a pre-fix / legacy object)
+        //  - `claimed-resource`: already owned by "alice-ent", must be
+        //    left untouched by the backfill.
+        //  - `legacy-kv`:  unowned KV path.
+        //
+        // `record_resource_owner_if_absent` won't write on empty
+        // entity_id, so we simulate the legacy unowned state by simply
+        // not creating a record at all — `get_resource_owner` returns
+        // None, which the handler treats as the "stamp this" case.
+        store
+            .set_resource_owner("claimed-resource", "alice-ent")
+            .await
+            .unwrap();
+
+        // Call the backfill endpoint as root (has all capabilities).
+        let body = json!({
+            "entity_id": "root",
+            "resources": ["orphan-resource", "claimed-resource", "missing-slash/bad"],
+            "kv_paths": ["secret/data/legacy-kv", "secret/..//escape"],
+            "dry_run": false,
+        })
+        .as_object()
+        .cloned();
+        let resp = test_write_api(&core, &root_token, "sys/owner/backfill", true, body)
+            .await
+            .expect("backfill must succeed")
+            .expect("response has data");
+        let data = resp.data.expect("data envelope");
+
+        let res_stamped = data
+            .get("resources")
+            .and_then(|v| v.get("stamped"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let res_already = data
+            .get("resources")
+            .and_then(|v| v.get("already_owned"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let res_invalid: Vec<String> = data
+            .get("resources")
+            .and_then(|v| v.get("invalid"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        assert_eq!(res_stamped, 1, "orphan-resource must be stamped once");
+        assert_eq!(res_already, 1, "claimed-resource must be skipped as already-owned");
+        assert_eq!(
+            res_invalid,
+            vec!["missing-slash/bad".to_string()],
+            "names with '/' are invalid resource names"
+        );
+
+        let kv_stamped = data
+            .get("kv")
+            .and_then(|v| v.get("stamped"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let kv_invalid: Vec<String> = data
+            .get("kv")
+            .and_then(|v| v.get("invalid"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        assert_eq!(kv_stamped, 1, "legacy-kv must be stamped");
+        assert_eq!(
+            kv_invalid,
+            vec!["secret/..//escape".to_string()],
+            "malformed KV paths must be reported as invalid, not silently skipped"
+        );
+
+        // Verify the writes actually landed and the already-owned
+        // record was not overwritten.
+        let orphan_rec = store.get_resource_owner("orphan-resource").await.unwrap();
+        assert_eq!(orphan_rec.map(|r| r.entity_id), Some("root".to_string()));
+        let claimed_rec = store.get_resource_owner("claimed-resource").await.unwrap();
+        assert_eq!(
+            claimed_rec.map(|r| r.entity_id),
+            Some("alice-ent".to_string()),
+            "already-owned resource must not be overwritten"
+        );
+        let kv_rec = store
+            .get_kv_owner("secret/data/legacy-kv")
+            .await
+            .unwrap();
+        assert_eq!(kv_rec.map(|r| r.entity_id), Some("root".to_string()));
+    }
+
+    /// `dry_run = true` must report what would be stamped without
+    /// writing any owner records.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_owner_backfill_dry_run_writes_nothing() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_owner_backfill_dry_run").await;
+        let module = core
+            .module_manager
+            .get_module::<IdentityModule>("identity")
+            .expect("identity module");
+        let store = module.owner_store().expect("owner store");
+
+        let body = json!({
+            "entity_id": "root",
+            "resources": ["will-stay-unowned"],
+            "dry_run": true,
+        })
+        .as_object()
+        .cloned();
+        let resp = test_write_api(&core, &root_token, "sys/owner/backfill", true, body)
+            .await
+            .unwrap()
+            .unwrap();
+        let data = resp.data.unwrap();
+        let stamped = data
+            .get("resources")
+            .and_then(|v| v.get("stamped"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert_eq!(stamped, 1, "dry run still reports what would be stamped");
+
+        // But nothing was actually written.
+        assert!(
+            store
+                .get_resource_owner("will-stay-unowned")
+                .await
+                .unwrap()
+                .is_none(),
+            "dry_run must not write owner records"
+        );
+    }
+
+    /// Missing / empty `entity_id` must be rejected with 400.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_owner_backfill_rejects_empty_entity_id() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_owner_backfill_empty_entity").await;
+        let body = json!({
+            "entity_id": "",
+            "resources": ["x"],
+        })
+        .as_object()
+        .cloned();
+        let _ = test_write_api(&core, &root_token, "sys/owner/backfill", false, body).await;
+    }
+
     /// Helper: login via userpass with the shared password used
     /// across per-user-scoping tests.
     #[cfg(test)]

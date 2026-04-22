@@ -17,19 +17,29 @@ Each HTTP request incurs TLS handshake overhead (if not using keep-alive), authe
 
 ## Current State
 
-- The HTTP API handles exactly one operation per request (`src/http/logical.rs`).
-- The `Request` struct represents a single operation with one path, one operation type, and one body.
-- The storage `Backend` trait has no batch/transaction methods -- each `get()`/`put()`/`delete()` is independent.
-- The `Client` API (`src/api/logical.rs`) exposes only single-operation methods: `read()`, `write()`, `list()`, `delete()`.
-- No batch or bulk endpoints exist anywhere in the HTTP layer.
-- Hiqlite supports transactions (`client.txn()`) but they are not exposed through BastionVault.
+**Phase 1 shipped** — `POST /v2/sys/batch` accepts N operations, executes them sequentially under the caller's token, returns per-op results. Every op routes through the normal `Core::handle_request` pipeline, so ACLs, audit, and per-path semantics match what an individual HTTP call would produce. Path lives at **v2-only** per the project's forward-going-API rule.
+
+Shipped pieces:
+
+- **`src/http/batch.rs`** — `BatchRequest` / `BatchOperation` / `BatchResult` / `BatchResponse` types, `sys_batch_v2_request_handler` actix handler. Deserialization denies unknown op kinds. The handler rejects empty batches and batches exceeding `batch_max_operations` (default `128`) with 400 *before* any op runs.
+- **Route wiring** (`src/http/sys.rs`) — registered under `/v2/sys/batch` only, with a per-route `PayloadConfig::limit(32 MiB)` so an oversized body is dropped at the framework layer rather than allocated into memory.
+- **Config** (`src/cli/config.rs`) — `batch_max_operations` and `batch_max_body_size` (both `usize`, `0` = use built-in default).
+- **Per-op error mapping** — `ErrPermissionDenied` → 403, `ErrRouterMountNotFound` → 404, `ErrBarrierSealed` → 503, `ErrRequestClientTokenMissing` → 401, anything else → 500. Error text is echoed into the per-op `errors` array; other ops in the same batch are unaffected.
+- **Tests (8)** — parse/deserialize, unknown-op rejection, empty batch rejection, oversized batch rejection, write-then-read-in-same-batch visibility, individual-failure-does-not-abort-batch, default-max-operations-is-128, op-kind-maps-to-logical-Operation.
+
+Still deferred (explicitly out of scope for Phase 1):
+
+- CLI command (`bvault batch`) — the HTTP surface is operator-scriptable via `curl` today; the CLI is a later slice.
+- Client SDK `batch()` method on `src/api/logical.rs`.
+- Per-op `batch_id` correlation field in audit entries. Each op is audited independently today; correlation requires plumbing a new identifier through `Request`, which is a standalone change.
+- Cucumber BDD scenarios — the project does not use cucumber in the existing test suite; Rust integration tests cover the equivalent cases.
 
 ## Design
 
 ### Batch API Endpoint
 
 ```
-POST /v1/sys/batch
+POST /v2/sys/batch
 ```
 
 Request body:

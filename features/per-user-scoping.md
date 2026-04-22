@@ -268,7 +268,7 @@ owner/share stores the same way.
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 1 | `EntityStore`, auto-provision on first login, `auth.metadata["entity_id"]` plumbed into issued tokens | Done |
-| 2 | Policy templating (`{{username}}`, `{{entity.id}}`, `{{auth.mount}}`), `templated = true` honored | Pending |
+| 2 | Policy templating (`{{username}}`, `{{entity.id}}`, `{{auth.mount}}`), `templated = true` honored | Done |
 | 3 | `scopes` qualifier in ACL grammar + evaluator; `any` scope backward-compatible | Done |
 | 4 | KV-secret owner store + write/delete hooks; list-filtering for `owner` scope | Done |
 | 5 | Resource owner record + write/delete hooks; list-filtering | Done |
@@ -319,11 +319,13 @@ Phases 8–9 deliver sharing. Phase 10 is a small ergonomic follow-up.
 
 ## Current State
 
-Phases 1, 3, 4, 5, and 6 are shipped. The two baseline roles
+All ten phases are shipped. The two baseline roles
 (`standard-user-readonly`, `secret-author`) are seeded alongside the
 legacy broadly-scoped `standard-user` policy — `load_default_acl_policy`
 installs all three so operators can opt into ownership-aware ACLs
-without forcing a migration.
+without forcing a migration. Policy templating (Phase 2), the owner
+backfill admin endpoint (migration story from the *Testing Plan*), and
+the GUI for sharing + owner transfer are all live.
 
 ### Implementation notes (deviations from the design doc)
 
@@ -352,16 +354,37 @@ without forcing a migration.
   change was needed. UserPass, AppRole, and FIDO2 login handlers
   resolve an entity via `EntityStore::get_or_create_entity(mount,
   name)` and insert the resulting UUID into metadata.
-- **Policy templating deferred.** The seeded policies use the ACL
-  scopes qualifier only (no `{{username}}` substitution). Scopes
-  alone are enough to express "you manage what you authored" and the
-  read-only variant without per-token policy recompilation.
-  Templating remains a future phase for operators who want
-  path-shape isolation rather than per-target ownership checks.
-- **Sharing still design-only.** `scopes = ["shared"]` is accepted by
-  the parser and present on the seeded policies, but at evaluation
-  time it always fails until the `SecretShare` store lands. No shares
-  can be created today.
+- **Policy templating is live.** `apply_templates` in
+  `src/modules/policy/policy_store.rs` substitutes `{{username}}`,
+  `{{entity.id}}`, and `{{auth.mount}}` (plus their
+  `identity.entity.*` aliases) in every path of a `templated`
+  policy at request time, using the caller's `Auth`. Unresolved
+  placeholders (missing metadata, unknown placeholder name) drop the
+  affected path rule fail-closed; a policy whose every rule drops
+  returns `None` so the caller gets no authorization from it. The
+  parser also auto-detects `{{…}}` syntax in paths and flips
+  `templated = true` so operators do not need to set the flag
+  explicitly. Nine unit tests in `policy_store::templating_tests`
+  cover happy path, fail-closed on typos / missing values, rule-level
+  drop vs. whole-policy drop, display_name fallback for
+  `{{username}}`, and preservation of capabilities / scopes through
+  the substitution.
+- **Owner backfill endpoint**
+  (`POST /v2/sys/owner/backfill`, sudo-gated via `root_paths`):
+  one-shot admin tool for deployments that ran before per-user-scoping
+  landed. Accepts `{ entity_id, resources?, kv_paths?, dry_run? }`
+  and stamps the given `entity_id` as owner on every currently
+  *unowned* target in the request. Already-owned objects are
+  skipped (use the `*-owner/transfer` endpoints to overwrite). The
+  response reports per-kind counts (`stamped` / `already_owned` /
+  `invalid`) so operators can see exactly what changed. Invalid
+  paths — resource names containing `/`, KV paths that fail
+  `canonicalize_kv_path` — are surfaced in the `invalid` array
+  instead of silently dropping. `dry_run = true` reports the same
+  counts without writing any owner records.
+- **Sharing is live.** `scopes = ["shared"]` is wired end-to-end
+  against the `ShareStore`; see `src/modules/identity/share_store.rs`
+  and the `v2/identity/sharing/*` handlers.
 
 ### Integration tests
 

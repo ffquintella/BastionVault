@@ -57,6 +57,18 @@ pub struct Config {
     pub barrier_type: BarrierType,
     #[serde(default)]
     pub cache: CacheConfig,
+    /// Hard cap on operations per batch request. `0` means use the
+    /// built-in default (`http::batch::DEFAULT_BATCH_MAX_OPERATIONS`).
+    /// Operators can raise or lower this to match their expected
+    /// workload — a single batch occupies one request thread for the
+    /// duration of all its operations.
+    #[serde(default)]
+    pub batch_max_operations: usize,
+    /// Hard cap on batch request body size in bytes. Applied as the
+    /// actix `PayloadConfig` limit on the batch route. `0` means use the
+    /// built-in default of 32 MiB.
+    #[serde(default)]
+    pub batch_max_body_size: usize,
 }
 
 #[derive(Debug, Copy, Clone, Default, Serialize, Deserialize, PartialEq)]

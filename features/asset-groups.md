@@ -287,18 +287,20 @@ Share semantics on asset groups:
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| 1 | `AssetGroupStore` + CRUD + reverse indexes under the system barrier | Pending |
-| 2 | `v2/` CRUD + membership + reverse-lookup API | Pending |
-| 3 | Change history (before/after member diffs) — mirror of identity-group history | Pending |
-| 4 | ACL grammar extension (`groups` qualifier) + evaluator integration; no-op when unused | Pending |
-| 5 | List-filter path for `list` operations using the reverse index | Pending |
-| 6 | Lifecycle hooks: prune group membership on target delete/destroy | Pending |
-| 7 | GUI: Asset Groups page, chips on objects, sidebar filter | Pending |
-| 8 | Admin ownership-transfer + reindex endpoints and GUI | Pending |
-| 9 | Sharing integration (gated on per-user-scoping phase 8) | Pending |
+| 1 | `AssetGroupStore` + CRUD + reverse indexes under the system barrier | Done (`src/modules/resource_group/group_store.rs`; two reverse indexes — resource-name and canonicalized KV-path) |
+| 2 | `v2/` CRUD + membership + reverse-lookup API | Done (HTTP + Tauri: `list` / `read` / `write` / `delete` + `by-resource` / `by-secret` + `reindex` + `history`) |
+| 3 | Change history (before/after member diffs) | Done (mirror of identity-group history; newest-first) |
+| 4 | ACL grammar extension (`groups` qualifier) + evaluator integration | Done (resource half + KV half via secret-index; compile-time warning on unknown group references) |
+| 5 | List-filter path for `list` operations using the reverse index | Done (narrows LIST response keys when list was authorized via a `groups = [...]` rule) |
+| 6 | Lifecycle hooks: prune group membership on target delete/destroy | Done (resource-delete in the resource module; KV-delete via `PolicyStore::post_route`) |
+| 7 | GUI: Asset Groups page, chips on objects, sidebar filter | Done (Termius-style group cards on Resources and Secrets pages with click-to-filter + breadcrumb; collapsible admin menu) |
+| 8 | Admin ownership-transfer + reindex endpoints and GUI | Done (`POST /v2/sys/asset-group-owner/transfer`; `reindex` is the recovery path for torn writes) |
+| 9 | Sharing integration (gated on per-user-scoping phase 8) | Done (`ShareTargetKind::AssetGroup`; indirect resolution expands shares to the member set at authorize time; member redaction for non-owner / non-admin readers) |
 
-Phases 1–4 are the minimum viable feature. Phases 5–6 make it robust.
-Phase 7 is the operator-facing win. Phases 8–9 are follow-ups.
+All nine phases shipped. The implementation lives under
+`src/modules/resource_group/` (the module name kept the original
+"resource-group" label for backward compatibility; the operator-facing
+label is "Group").
 
 ## Testing Plan
 

@@ -1,26 +1,31 @@
-# Feature: Cloud Storage Backend
+# Feature: Cloud Storage Targets for the Encrypted File Backend
 
 ## Summary
 
-Add a third deployment mode for BastionVault alongside **Local (Embedded)** and **Remote (Connect to Server)**: **Cloud**, where the vault's ciphertext-at-rest lives in a user-provided cloud object store. Initial providers: **AWS S3**, **Google Drive**, **Microsoft OneDrive**, **Dropbox**.
+Let BastionVault's existing **Encrypted File** storage backend (`src/storage/physical/file.rs`, selected by `storage "file" { ... }` in server config) write its per-key files to a user-owned cloud account — **AWS S3**, **Google Drive**, **Microsoft OneDrive**, or **Dropbox** — instead of (or in addition to) the local filesystem. The on-disk format, the barrier-encrypted `BackendEntry` shape, and the `Backend` trait surface are all unchanged. The cloud is a pluggable **target** underneath the existing file backend, not a new backend.
 
-The vault barrier and key management remain unchanged. Only the physical `Backend` trait gets new implementations. Plaintext never leaves the client; the cloud provider sees only opaque, authenticated ciphertext produced by the existing ChaCha20-Poly1305 barrier.
+Earlier drafts of this feature went through two mis-framings that were rejected in review:
+
+1. "Third deployment mode alongside Local / Remote" — overcomplicated (whole-vault rollback manifests, single-writer leases).
+2. "Per-file content backend inside `src/modules/files/`" — still the wrong layer; File Resources shouldn't carry the cloud story for every other kind of vault data.
+
+The correct framing is: **the Encrypted File backend writes files somewhere. That somewhere can be `/var/lib/bastionvault/` (today) or an S3 bucket / OneDrive app-folder / Drive app-data folder / Dropbox App Folder (this feature).**
 
 ## Status
 
-**Todo — design only.** Nothing implemented yet. This document captures the intended design so it can be reviewed before code lands.
+**Todo — design only.** Nothing implemented yet. Does not depend on File Resources.
 
 ## Motivation
 
-- **Portability without a server**: users who want their secrets available across devices today must either run a network-reachable BastionVault server (Remote mode) or synchronise the local data directory manually. A cloud backend removes that friction while keeping the server-less UX of Embedded mode.
-- **Backup-by-construction**: the provider's durability and versioning become the disaster-recovery story for solo users.
-- **Bring-your-own-storage**: keeps BastionVault free of any hosted service of its own. Each user authenticates to their own S3 bucket or personal cloud drive.
+- **Bring-your-own-storage.** Operators who already run the vault on a VM they don't want to stake durability on (or who distribute a desktop build via the Tauri GUI) can point the same backend at an S3 bucket or personal cloud drive and get provider-side replication / versioning / retention without vault-side work.
+- **Desktop-friendly cross-device vault.** A Tauri-packaged BastionVault desktop app with cloud storage gives one user a vault that works on every machine they sign in from, without running a server.
+- **Reuses everything already shipped.** The barrier encrypts and authenticates every file. The `FileBackend`'s key → path mapping already handles arbitrary prefixes. There is nothing cryptographic, nothing schema-level, and nothing routing-level to redesign — only the I/O primitive changes.
 
 Non-goals:
 
-- This is **not** a multi-writer HA mode. For shared/team deployments, Remote mode with a Hiqlite cluster remains the answer. See *Concurrency* below.
-- This is **not** a way to share secrets between users. Sharing continues to flow through the normal identity/ACL layer on a running vault.
-- The cloud provider is **never** trusted with plaintext or keys. A compromised provider account must not be able to read secrets — only to deny service or roll back state (see *Threat Model*).
+- **Not** a multi-writer story. A cloud target is owned by exactly one BastionVault instance at a time. The single-writer lease scheme from earlier drafts is not needed *for a single-writer deployment*, and multi-writer is out of scope.
+- **Not** a transparent cache layer in front of the cloud. Reads go to the cloud; the existing below-barrier `CachingBackend` decorator can be layered on top if the operator enables it, and its ciphertext-only invariant holds unchanged.
+- **Not** a way to share the bucket across BastionVault instances. If two processes point at the same target, writes race. A warning in the docs is the full mitigation.
 
 ## Current State
 
@@ -28,165 +33,215 @@ Not started. This feature file exists to scope the work before implementation.
 
 ## Design
 
-### Deployment Mode (GUI)
+### Where the cloud plugs in
 
-`InitPage` and `SettingsPage` today present two modes: `Embedded` and `Remote`. Add a third: `Cloud`.
+Today `FileBackend` owns one field:
 
-```
-( ) Local (Embedded)      -- data in app-data dir, this machine only
-( ) Connect to Server     -- remote HTTPS API
-( ) Cloud Storage         -- data in your cloud account (S3 / OneDrive / Drive / Dropbox)
-```
-
-Cloud mode runs the **same embedded vault** as Local mode; the only difference is the `Backend` implementation wired under the barrier. Init/unseal/root-key handling is identical to Embedded mode and still uses the OS keychain for the unseal key.
-
-### Storage Model
-
-The vault's `Backend` trait exposes `list / get / put / delete` over hierarchical keys. Cloud object stores are flat key-value stores with a `/` convention — a near-perfect fit.
-
-- **Key → object name**: the vault key is used verbatim as the object key, with `core/` `sys/` `logical/` etc. prefixes preserved. A single configurable root prefix (e.g. `bastionvault/`) isolates vault data from anything else in the same bucket/folder.
-- **Value**: raw ciphertext bytes as produced by the barrier. No JSON wrapping on the wire for object-store backends — the barrier already serialises `BackendEntry`. *(Open question: keep the current JSON `BackendEntry` envelope for parity with `FileBackend`, or strip it. See* Decisions To Make *below.)*
-- **Listing**: use the provider's prefix+delimiter listing API. `list("foo/")` maps to `prefix=bastionvault/foo/`, `delimiter=/`. Return immediate children with a trailing `/` for directories, bare names for objects, mirroring `FileBackend`.
-
-No directory objects are created. Absence of a common prefix means absence of children, as in S3.
-
-### New Crate Layout
-
-Per `agent.md` guidance on narrow crates, introduce:
-
-```
-crates/
-  bv_cloud_storage/
-    src/
-      lib.rs            # re-exports + common types (CloudError, CloudCreds)
-      s3.rs             # S3Backend (aws-sdk-s3)
-      onedrive.rs       # OneDriveBackend (Microsoft Graph)
-      gdrive.rs         # GoogleDriveBackend
-      dropbox.rs        # DropboxBackend
-      oauth.rs          # shared OAuth2 PKCE flow for the three consumer drives
-      cache.rs          # optional LRU of recent gets (ciphertext-only)
+```rust
+pub struct FileBackend {
+    path: PathBuf,
+}
 ```
 
-Each provider exposes a single `Backend` impl. All providers share:
+…and every CRUD method calls into `std::fs` with paths derived from that root. The refactor replaces the implicit local-filesystem I/O with an explicit trait:
 
-- An `async` HTTP client (`reqwest` with rustls — already a workspace dep).
-- A retry/backoff policy with jitter for 429/5xx.
-- A conditional-write primitive (ETag/If-Match for S3, `@microsoft.graph.conflictBehavior` for OneDrive, `rev` for Dropbox, `ifMetadataMatches` for Google Drive) used to implement a single-writer lease (see *Concurrency*).
-
-Feature-gated in the top-level crate so users who don't need cloud pay no compile-time or binary-size cost:
-
-```toml
-[features]
-storage_s3       = ["bv_cloud_storage/s3"]
-storage_onedrive = ["bv_cloud_storage/onedrive"]
-storage_gdrive   = ["bv_cloud_storage/gdrive"]
-storage_dropbox  = ["bv_cloud_storage/dropbox"]
-storage_cloud    = ["storage_s3", "storage_onedrive", "storage_gdrive", "storage_dropbox"]
+```rust
+/// Storage target underneath `FileBackend`. All calls receive the
+/// already-computed per-key path (an arbitrary byte string in practice)
+/// and the already-serialized `BackendEntry` JSON. The barrier has
+/// nothing to do with this layer — values passed in are the exact bytes
+/// the caller wants persisted.
+#[async_trait]
+pub trait FileTarget: Send + Sync + std::fmt::Debug {
+    async fn read(&self, key: &str) -> Result<Option<Vec<u8>>, RvError>;
+    async fn write(&self, key: &str, value: &[u8]) -> Result<(), RvError>;
+    async fn delete(&self, key: &str) -> Result<(), RvError>;
+    async fn list(&self, prefix: &str) -> Result<Vec<String>, RvError>;
+}
 ```
 
-Wire each provider into `storage::new_backend` behind its feature, matching the pattern already used for `storage_mysql` / `storage_hiqlite`.
+`FileBackend` becomes:
 
-### Credentials & OAuth
+```rust
+pub struct FileBackend {
+    target: Arc<dyn FileTarget>,
+}
+```
 
-- **AWS S3**: accept either (a) an IAM access key / secret / session token, or (b) an AWS profile name resolved via the standard SDK credential chain. No BastionVault-managed OAuth. Region + bucket + optional prefix + optional KMS key ARN are config.
-- **OneDrive / Google Drive / Dropbox**: OAuth 2.0 with PKCE. The GUI opens the system browser, the user grants access, and the callback returns via a loopback redirect (`http://127.0.0.1:<ephemeral>/callback`). Refresh tokens and access tokens are stored in the **OS keychain**, never on disk in plaintext. Scopes are the narrowest the provider offers (app-folder scope for OneDrive / Drive / Dropbox where available, so the vault cannot see or touch the rest of the user's files).
-- **BastionVault does not ship its own OAuth client secrets for consumer providers.** Each build or distribution configures its own client IDs (for consumer-drive providers that require one) at compile time, or the user pastes their own. This avoids a shared-secret problem if the binary is redistributed.
+The existing body of `FileBackend::get/put/delete/list` moves verbatim into a `LocalFsTarget` that implements the trait. No public API change. Existing `storage "file" { path = "..." }` config still works and continues to hit `LocalFsTarget` under the hood.
 
-### Threat Model
+### New target kinds
 
-The cloud provider is **semi-trusted**:
+The new config shape:
 
-- Confidentiality: guaranteed by the barrier. All bytes written to the cloud are ciphertext under a key the provider never sees. A full provider compromise leaks metadata (key names, sizes, write timestamps) but not secret values.
-- Integrity: each object is authenticated by the AEAD tag inside the barrier payload. A provider cannot tamper with a value without detection on read.
-- Freshness / rollback: an object-store provider *can* roll an object back to an earlier ciphertext version, or drop writes. Barrier-level freshness is **not** currently enforced. Mitigations:
-  - Maintain a signed manifest object (`_manifest`) listing every live key and its latest ciphertext hash, rewritten on every commit. A rollback of an individual object is detected because its hash won't match the manifest.
-  - The manifest itself is signed with ML-DSA-65 (reusing the PQ signing material the vault already manages), so the provider cannot forge one.
-  - Rollback of the manifest itself to a *consistent* earlier state (all objects + manifest from some past snapshot) remains possible and is called out explicitly in the docs. This is the intrinsic limit of untrusted storage without a trusted counter.
-- Metadata: key names are sensitive (they encode mount paths and sometimes principal names). For providers that support it, wrap each key name through a deterministic keyed hash (HMAC over a stable key derived from the unseal secret) so the cloud sees opaque identifiers. Listing maps the hashed names back using a per-mode local index that lives inside the vault itself. This is optional (config flag `obfuscate_keys=true`) because it breaks out-of-band inspection of the bucket.
+```hcl
+storage "file" {
+  target = "local"
+  path   = "/var/lib/bastionvault"
+}
 
-### Concurrency
+storage "file" {
+  target          = "s3"
+  bucket          = "infra-vault"
+  region          = "us-east-1"
+  prefix          = "bastionvault/"
+  credentials_ref = "env:AWS_DEFAULT_PROFILE"
+}
 
-Cloud mode is **single-writer**. Attempting to run two vault processes against the same bucket is a supported-but-guarded scenario, not an HA configuration.
+storage "file" {
+  target          = "onedrive"
+  credentials_ref = "keychain:bastionvault/onedrive-refresh"
+}
+```
 
-- On unseal, the vault acquires a **lease object** (`_lease.json`) by conditional create (`If-None-Match: *` on S3; analogous on each provider). The lease contains a random lease ID, the holder's hostname, and an expiry timestamp.
-- The holder refreshes the lease every 30 s with a conditional update (`If-Match: <etag>`).
-- Writes attach `If-Match: <lease-etag>` semantics via the manifest: every commit rewrites `_manifest` with `If-Match`. A stale writer's commit fails and the process seals itself.
-- On clean shutdown the lease is released. On crash the expiry (default 2 min) lets another process take over.
+Target-specific keys are parsed by the target's own `from_config` constructor; `FileBackend::new` picks the right target based on `target = "..."` and delegates.
 
-For users who genuinely need multi-writer access across machines, the answer remains: run a BastionVault server (Remote mode), possibly backed by Hiqlite HA. This is documented prominently.
+`target = "local"` is the default when the field is absent, so every existing config continues to work without edits.
+
+### Providers and auth
+
+| Target | Kind | Auth | Notes |
+|---|---|---|---|
+| Local | Filesystem | Filesystem permissions | Existing behavior, unchanged. |
+| S3 | `aws-sdk-s3` | IAM access key / secret (+ session token) via `credentials_ref`, **or** AWS profile read from the ambient environment. | MinIO-compatible. |
+| OneDrive | Microsoft Graph | OAuth 2.0 + PKCE, `Files.ReadWrite.AppFolder` scope. | App-folder sandbox — vault cannot see the rest of the user's OneDrive. |
+| Google Drive | Drive v3 | OAuth 2.0 + PKCE, `drive.appdata` scope. | App-data folder sandbox. |
+| Dropbox | Dropbox v2 | OAuth 2.0 + PKCE, App Folder scope. | App-folder sandbox. |
+
+**BastionVault does not ship shared OAuth client secrets for consumer providers.** Each distribution or operator configures their own `client_id` at build or runtime, per provider guidance for redistributable-but-not-hosted applications.
+
+### `credentials_ref` and OAuth persistence
+
+Cloud targets accept a `credentials_ref` string in a small URI grammar:
+
+- `env:<VARNAME>` — read credentials from an environment variable.
+- `keychain:<label>` — read from the OS keychain (Tauri desktop mode).
+- `file:<path>` — read from a local file owned by the process.
+- `inline:<base64>` — literal embedded credential (rejected in production-strict mode; useful for tests only).
+
+For OAuth-based targets, the *refresh token* is what sits at `credentials_ref`. The vault admin runs a one-shot OAuth flow (see below) that writes the refresh token to the configured ref. The target's runtime code uses the refresh token to get fresh access tokens on demand.
+
+The OAuth flow runs through the CLI and GUI:
+
+- **CLI**: `bvault operator cloud-target connect --target=<name>` opens the consent URL in the system browser, listens on a loopback port for the callback, exchanges the code, and writes the refresh token to `credentials_ref`.
+- **GUI**: Settings → Storage → "Connect" button kicks off the same flow in the system browser and shows the bound account on completion.
+
+Reauth when the refresh token dies is the same flow; the target marks itself `needs-reauth` and subsequent operations fail with a clear error that points at the remediation.
+
+### Operational semantics
+
+- **Single writer per target.** Running two BastionVault processes against the same bucket + prefix is supported but not defended: writes race, and the last writer wins. The docs warn explicitly. For HA across multiple hosts, use the Hiqlite backend, which is what it's for.
+- **Freshness.** The cloud is an object store; eventual consistency on list/read varies by provider (S3 is now strong-read-after-write; consumer drives have sync delays up to minutes). The vault reads through `Backend::get` on every request unless caching is enabled; there is no cross-node invalidation. This is the same property as running `FileBackend` off a shared NFS mount and is already understood.
+- **No tombstone / snapshot / rollback protection at the cloud layer.** The barrier's existing integrity surface applies unchanged. A provider that rolls back an individual object is detected on decrypt (AEAD tag mismatch would be one path; an unexpected plaintext shape after decrypt is another); whole-target rollback to a consistent earlier snapshot is the intrinsic limit of untrusted storage without a trusted counter, and we document it.
+- **Listing.** `Backend::list(prefix)` maps to the provider's prefix+delimiter list API. Consumer drives that don't support a `delimiter` concept (Dropbox v2 does; others vary) simulate it client-side.
+
+### Key-name handling
+
+Local `FileBackend` URL-encodes tricky characters in keys before using them as filenames. Cloud object stores accept most bytes in keys, so the `LocalFsTarget` keeps its URL-encoding and the cloud targets pass keys through. Operators who want cloud object keys to be opaque (the rough shape of vault activity is visible to anyone with bucket read access, even if the ciphertext isn't) can enable **key obfuscation**:
+
+```hcl
+storage "file" {
+  target          = "s3"
+  obfuscate_keys  = true
+  ...
+}
+```
+
+When on, the object key is `HMAC-SHA256(target_salt, raw_key)` hex-encoded. `target_salt` lives in a dedicated `<prefix>/_salt` object (itself encrypted by the barrier like any other vault key) and can be rotated via a dedicated rekey job that rewrites every object key in the bucket. Off by default.
+
+### Failure modes
+
+- **Provider unreachable on read**: `Backend::get` returns `RvError::ErrOther` wrapping the transport error. The request fails clean.
+- **Provider unreachable on write**: same. Vault-side, the write is durable iff the target reports success.
+- **429 / throttling**: exponential backoff with jitter inside each target. Capped retry count. Failure surfaced clearly so the operator can diagnose.
+- **OAuth refresh failure**: target enters `needs-reauth`; subsequent operations fail with a specific error pointing at the reconnect flow.
+- **Credential expiry mid-operation**: transparent refresh on the first 401; one retry; then fail.
 
 ### Performance
 
-Object-store latency is dominated by round-trips. The vault currently does many small reads during unseal and policy evaluation. Without care, cloud mode will feel orders of magnitude slower than Embedded.
+- **Round-trip cost dominates.** For latency-sensitive deployments, layer the existing `CachingBackend` decorator on top (`cache.secret_cache_ttl_secs > 0` in server config). Its ciphertext-only invariant holds — the cache sees the same bytes the cloud sees.
+- **Parallel prefetch** on startup for vault paths known to be hot (policies, mounts). Target-level optimization, not required for correctness.
+- **Multipart upload** for S3 / Drive when a single `put` exceeds 5 MiB (unlikely for vault keys — most are under a few KiB — but allocating under 5 MiB is cheap and over 5 MiB needs multipart on S3). Later optimization.
 
-- **Read cache**: in-memory LRU of recent `get` results, keyed by `(key, etag)`. Invalidated on any local `put/delete`. Cache holds ciphertext only, so a memory dump contains no more than the cloud already stores.
-- **Manifest piggyback**: since the manifest enumerates live keys and their hashes, a cold start pulls the manifest once and uses it to short-circuit `get` for absent keys without a round-trip.
-- **Batched writes**: where the provider supports multi-object commit (S3 does not; Drive/OneDrive/Dropbox have batch endpoints), coalesce burst writes within a 50 ms window. Optional; default off.
+## New crate layout
 
-These optimisations are additive and can land after a correct but slow first cut.
+Narrow crates per `agent.md` guidance:
 
-### Configuration
-
-Server config (`hcl`) gains:
-
-```hcl
-storage "s3" {
-  bucket = "my-vault"
-  region = "us-east-1"
-  prefix = "bastionvault/"
-  # credentials: env / profile / inline
-}
-
-storage "onedrive" {
-  folder = "BastionVault"
-  # tokens loaded from keychain
-}
+```
+crates/
+  bv_file_targets/
+    src/
+      lib.rs            # FileTarget trait + target-kind enum + from_config entry
+      local.rs          # moved from src/storage/physical/file.rs
+      s3.rs             # aws-sdk-s3 impl
+      onedrive.rs       # Microsoft Graph impl
+      gdrive.rs         # Drive v3 impl
+      dropbox.rs        # Dropbox v2 impl
+      oauth.rs          # shared PKCE + loopback-redirect flow
+      creds.rs          # credentials_ref resolver (env / keychain / file / inline)
 ```
 
-GUI cloud-mode setup writes equivalent config into the embedded vault's data dir.
+Feature-gated at the top level so operators who don't need cloud targets pay no compile or binary-size cost:
 
-### Migration
+```toml
+[features]
+cloud_s3       = ["bv_file_targets/s3"]
+cloud_onedrive = ["bv_file_targets/onedrive"]
+cloud_gdrive   = ["bv_file_targets/gdrive"]
+cloud_dropbox  = ["bv_file_targets/dropbox"]
+cloud_targets  = ["cloud_s3", "cloud_onedrive", "cloud_gdrive", "cloud_dropbox"]
+```
 
-Users on Embedded or Remote mode can move to Cloud mode (and back) via the existing **operator migrate** tool (`src/storage/migrate.rs`, `src/cli/command/operator_migrate.rs`), which already performs backend-to-backend copy at the physical layer. Add cloud backends to its supported source/destination set. No new migration tool needed.
+The top-level `bastion_vault` crate gains a thin wrapper that constructs the configured target in `FileBackend::new`.
 
-The GUI gains a "Migrate to cloud…" action in Settings that wraps the CLI path.
+## Migration from the current `FileBackend`
 
-## Decisions To Make Before Implementation
+Zero for operators who don't change their config: `target = "local"` is the default and the existing code path is preserved bit-for-bit.
 
-1. **Wire format**: keep `BackendEntry` JSON envelope (matches `FileBackend`, simplifies migrate tool) or strip to raw ciphertext (smaller, cleaner)? Leaning toward keeping JSON for v1 to minimise surprises in the migrate path.
-2. **Key-name obfuscation default**: off (easier to debug, matches S3-console expectations) or on (better metadata posture). Leaning toward **off by default, on by config** to match the project's "explicit over clever" stance.
-3. **Consumer-drive OAuth client IDs**: require the user to provide their own, or ship per-distribution defaults? Shipping defaults is friendlier; requiring user-provided is safer. Leaning toward user-provided with a documented walkthrough.
-4. **Rollback detection scope**: manifest-based only (proposed), or also a monotonic epoch counter? A counter adds complexity but catches whole-bucket rollback. Defer unless a reviewer pushes back.
+Moving an existing vault to a cloud target uses the existing `operator migrate` CLI (`src/cli/command/operator_migrate.rs`) which already performs backend-to-backend copy at the physical layer. Register a second `storage "file"` stanza with the cloud target, run `bvault operator migrate --source=<local> --dest=<cloud>`, then swap the active config. No special migration code needed.
+
+## GUI
+
+- **Settings → Storage** — current mode (local path / cloud provider + bucket) and a "Change" action. The change flow kicks off the backend-migrate command under the hood and shows progress.
+- **Cloud OAuth connect UI** — provider picker → consent browser → "Connected as `user@example.com`" confirmation on return. Identical shape to the `bvault operator cloud-target connect` CLI flow.
 
 ## Phases
 
 | # | Phase | Scope |
 |---|-------|-------|
-| 1 | S3 backend | `S3Backend` + `If-Match` conditional writes + manifest + lease. Feature-flag `storage_s3`. CLI config. Migrate-tool integration. |
-| 2 | Lease/manifest hardening | Rollback-detection tests. Crash-recovery tests. Lease-takeover tests. Fault injection (provider 5xx, 429). |
-| 3 | GUI cloud mode (S3) | Third radio on `InitPage`/`SettingsPage`. Credential entry. Setup wizard writes config. E2E test with a local MinIO. |
-| 4 | OneDrive backend | Graph API client, OAuth-PKCE flow, app-folder scope, ETag-based conditional writes. Keychain token storage. |
-| 5 | Google Drive backend | Drive v3 client, OAuth-PKCE, app-data folder scope, `ifMetadataMatches`-based conditional writes. |
-| 6 | Dropbox backend | Dropbox API v2, OAuth-PKCE, App Folder scope, `rev`-based conditional writes. |
-| 7 | GUI consumer-drive wiring | Browser OAuth launch, callback handling, provider picker in the setup wizard. |
-| 8 | Performance pass | Read cache, manifest-driven negative cache, optional write batching. Benchmarks vs. FileBackend. |
+| 1 | `FileTarget` abstraction + `LocalFsTarget` | Refactor `FileBackend` to hold `Arc<dyn FileTarget>`, move existing body into `LocalFsTarget`, prove zero regression on every existing test. No new behavior. |
+| 2 | S3 target | `S3Target` against `aws-sdk-s3`. `credentials_ref` resolver. MinIO-based integration tests. |
+| 3 | OAuth infrastructure | PKCE + loopback-redirect flow in `bv_file_targets::oauth`. Used by Phases 4-6. CLI `bvault operator cloud-target connect`. |
+| 4 | OneDrive target | Microsoft Graph + `Files.ReadWrite.AppFolder`. |
+| 5 | Google Drive target | Drive v3 + `drive.appdata`. |
+| 6 | Dropbox target | Dropbox v2 + App Folder. |
+| 7 | GUI | Settings → Storage page; Connect flow in the system browser. Tauri desktop mode reuses the OS keychain for the refresh token. |
+| 8 | Key obfuscation + rekey | `obfuscate_keys = true` toggle. Rekey job that rewrites every object under a new salt. |
 
-Phase 1 is the critical path and the biggest security surface. Phases 4–6 are largely parallelisable after Phase 2 lands.
+Phase 1 is the critical path — it is a pure refactor with no functional change, and it must land green before any cloud code is merged. Phases 4-6 parallelize after Phase 3 lands the OAuth infra.
 
 ## Testing Requirements
 
-- **Unit**: backend CRUD against a mocked HTTP layer per provider. Malformed manifest, missing manifest, stale ETag, expired lease.
-- **Integration**:
-  - S3: against MinIO in CI.
-  - OneDrive / Drive / Dropbox: against a recorded-tape HTTP fixture (no live calls in CI). A nightly live-tape refresh job with dedicated test accounts.
-- **Fault injection**: provider returns 429/503/timeouts; verify exponential backoff, eventual success, no silent data loss.
-- **Compatibility**: a vault initialised with `FileBackend`, migrated to `S3Backend` via `operator migrate`, then unsealed, must read back every prior secret byte-for-byte.
-- **Rollback detection**: given an artificially rolled-back object, a read must surface a distinct, loud error (not silent stale data).
-- **Security regression**: no plaintext ever appears in HTTP request bodies observed by the test harness. Enforced by a capture-and-scan test.
+- **Phase 1 regression**: every existing `FileBackend` test passes unchanged against the new `FileBackend { target: Arc<LocalFsTarget> }` shape. No behavior difference.
+- **S3 integration**: MinIO in CI. Full CRUD round-trip, list-with-prefix, byte-for-byte integrity, chunked-reads-and-writes.
+- **Consumer-drive integration**: record-and-replay HTTP fixtures in CI; nightly live-tape against dedicated test accounts to refresh fixtures.
+- **Security regression**: `cloud_target_never_sees_plaintext` — drive a `BackendEntry::put` through a wrapped `FileBackend` whose target records the exact bytes it was asked to write. Assert those bytes do not contain a known plaintext marker that was encrypted by the barrier above.
+- **Failure injection**: 429 / 503 / timeout on each verb per provider; assert retry-with-backoff and clear surfaced errors.
+- **Backend-migrate compatibility**: round-trip a vault through `operator migrate` local → S3 → local; assert every key's value is byte-identical at the barrier layer.
+- **OAuth flow**: loopback-redirect port open-release; PKCE code verifier correctness; refresh-token persistence via every `credentials_ref` kind.
 
-## Operational Safety Notes
+## Security Considerations
 
-- Cloud mode is marked **Experimental** in the GUI and docs until Phase 2 ships with its test suite green.
-- The GUI warns at setup that losing access to the cloud account or the local unseal key means losing the vault; a printable recovery sheet is offered (same flow as Embedded mode).
-- The sealed-vault-can-be-read invariant holds: an attacker with the cloud bucket but without the unseal key sees only ciphertext.
-- Audit events emit the backend type (`s3`, `onedrive`, `gdrive`, `dropbox`) on every unseal so operators can see in the audit log that a vault is running against cloud storage.
+- **Provider never sees plaintext.** Values handed to `FileTarget::write` are barrier-encrypted `BackendEntry` JSON — the same bytes currently written to local disk. Decryption happens in the barrier above `FileBackend`; the target is below the barrier.
+- **Keys-as-metadata.** Object keys reveal the rough shape of vault activity (which paths exist, how often they change) to anyone with bucket read access. The barrier does not cover key names. Operators who need to hide this turn on `obfuscate_keys`; they accept that out-of-band bucket inspection becomes harder in exchange.
+- **Credentials.** Cloud target credentials are referenced, not inlined. OAuth refresh tokens live in the OS keychain (desktop) or a file owned by the vault process (server). Rotating a refresh token does not require a vault restart.
+- **Scope boundaries.** OAuth scopes are the narrowest available: app-folder / app-data for consumer drives; IAM policy guidance in docs restricts S3 to the specific bucket + prefix.
+- **No client-secret redistribution.** Each operator or distribution provides their own `client_id` and secret where applicable.
+- **Feature-gated.** A build without `cloud_targets` cannot accidentally contact a cloud provider.
+- **Single-writer assumption documented.** Two BastionVault processes against the same target + prefix produce racing writes. The docs say so loudly; the code does not attempt to arbitrate.
+
+## Open Questions (resolved before Phase 1)
+
+1. Whether to parse the full config into a `TargetKind` enum at `FileBackend::new` time, or keep it fully dynamic via `Arc<dyn FileTarget>`. Leaning `Arc<dyn>` for pluggability; the static-dispatch alternative saves one virtual call per operation which is negligible at cloud latencies.
+2. Whether `credentials_ref = "keychain:..."` is available on Linux via `secret-service`, or gated to macOS / Windows where the platform keychain is more reliable. Leaning "available everywhere, operator chooses `file:` on Linux if `secret-service` isn't running."
+3. Whether the `FileTarget` trait should also expose a bulk-delete primitive that S3 / Dropbox can implement efficiently, or whether per-object deletes in a loop are acceptable in v1. Leaning per-object for simplicity; bulk-delete as a later optimization.

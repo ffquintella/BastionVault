@@ -93,7 +93,43 @@ EXAMPLE ENTRY:
 - No new caches allocated in this slice; token / secret / metrics / mlock / zeroize-on-flush work lands in Slices 2–4 per the caching feature spec.
 - 5 unit tests covering defaults, empty block, partial block, `deny_unknown_fields`, and `merge`.
 
+### Changed
+
+#### Tracking-doc sync: Identity Groups + Resource/Asset Groups marked Done (`features/identity-groups.md`, `features/resource-groups.md`, `features/asset-groups.md`)
+- Identity Groups phase table is already accurate (Phase 8 Cert/OIDC/SAML extension correctly marked *Deferred* — the union pattern is ready, it just has no callers until those backends land). Roadmap entry moved from Active Initiatives → Completed Initiatives with a summary noting the 7 shipped phases + the why behind Phase 8's deferral.
+- `features/resource-groups.md` Phase 13 (Ownership / admin transfer / sharing) flipped Pending → Done — the implementation has actually been live (`ShareTargetKind::AssetGroup`, `POST /v2/sys/asset-group-owner/transfer`, member redaction) but the phase table hadn't caught up.
+- `features/asset-groups.md` Phases 1–9 flipped Pending → Done — the table was stale from the initial design-only period; the header of that file was already marking the feature "Feature-complete". Each phase now references the concrete code path / endpoint / GUI element it shipped as.
+- Roadmap's Active Initiatives list is now accurate: OIDC, SAML (both design-only auth backends), Cloud Storage Targets, and File Resources remain; the three group features and per-user-scoping are all in Completed Initiatives.
+- No code change — doc sync only.
+
+#### Cloud providers re-framed as `FileBackend` I/O targets (`features/cloud-storage-backend.md`)
+- The cloud-provider feature has gone through two earlier framings that review rejected: a standalone "third deployment mode" storage backend (too much complexity), and a per-file content backend scoped inside File Resources (wrong layer — File Resources shouldn't carry the cloud story for other vault data).
+- Final scope: the cloud providers sit **underneath the existing `FileBackend`** as alternative I/O targets, not as a new backend impl. `FileBackend` gains a `FileTarget` trait field; today's `std::fs`-based body moves verbatim into a `LocalFsTarget`. S3 / OneDrive / Google Drive / Dropbox each get a sibling target impl. The `Backend` trait, the barrier, the wire format, and every caller above `FileBackend::get/put/delete/list` are unchanged.
+- Phase 1 of the work is a pure refactor with zero behavior change, proven by every existing `FileBackend` test passing unmodified against `FileBackend { target: Arc<LocalFsTarget> }`. Phases 2-8 add S3, OAuth infrastructure + the three consumer drives, the GUI Settings → Storage page, and optional object-key obfuscation.
+- Renamed `features/cloud-file-backends.md` → `features/cloud-storage-backend.md` (back to the original filename, now matching the final scope). Roadmap row restored under Storage. File Resources' earlier "content backend" subsection (added in the superseded framing) replaced with a note pointing at this feature as the way to host file content in the cloud.
+- Credentials use a small URI grammar (`env:` / `keychain:` / `file:` / `inline:`) — never inlined verbatim in config. OAuth refresh tokens live in the OS keychain on desktop builds, in a process-owned file on servers. Per-operator `client_id` for consumer drives; no shared secrets redistributed. Feature-gated (`cloud_targets` + per-provider sub-features) so builds without the feature can't accidentally contact a cloud provider.
+- No code change — design revision only.
+
 ### Added
+
+#### Per-user scoping: owner backfill + templating tests (`features/per-user-scoping.md`)
+- **`POST /v2/sys/owner/backfill`** — new sudo-gated admin endpoint (under `root_paths`) that stamps a caller-supplied `entity_id` as owner of every currently-unowned target in the request. Body: `{ entity_id, resources?, kv_paths?, dry_run? }`. Already-owned objects are skipped (use the `*-owner/transfer` endpoints to overwrite). Response carries per-kind counts (`stamped` / `already_owned` / `invalid`) plus the invalid entries themselves so operators see exactly what was rejected. `dry_run = true` reports the same counts without writing. This is the migration tool named in `features/per-user-scoping.md`'s testing plan — deployments that ran before per-user-scoping landed can now retroactively claim their pre-existing objects so `owner` / `shared`-scoped ACLs start seeing them.
+- **HTTP wiring** (`src/http/sys.rs`) — `sys_owner_backfill_request_handler` + `POST /v{1,2}/sys/owner/backfill` route so the endpoint is cURL-able. Delegates to the logical backend via `handle_request`.
+- **Handler** (`src/modules/system/mod.rs` `handle_owner_backfill`) — reuses the existing `OwnerStore::{record_resource_owner_if_absent, record_kv_owner_if_absent, get_resource_owner, get_kv_owner}` APIs so the never-overwrite invariant is preserved. Resource names containing `/` and KV paths that fail `canonicalize_kv_path` are surfaced as `invalid` instead of silently dropped.
+- **Tests (3 new integration tests):** `test_owner_backfill_stamps_unowned_and_skips_owned` covers the happy path plus an already-claimed resource (untouched) and a malformed resource name and KV path (both reported as `invalid`); `test_owner_backfill_dry_run_writes_nothing` proves dry-run is side-effect-free; `test_owner_backfill_rejects_empty_entity_id` covers the 400 path.
+
+#### Per-user scoping: Phase 2 templating unit tests (`features/per-user-scoping.md`)
+- `apply_templates` (the wrapper around `substitute_path` in `src/modules/policy/policy_store.rs`) previously had zero unit tests — only the inner `substitute_path` helper was covered. Added 5 new tests covering: every path in a multi-rule policy substituted with caller values; `{{username}}` fallback to `display_name` when `auth.metadata["username"]` is missing; mixed-resolution rules (some drop, some survive) leave the policy partially live; all-drop returns `None` so the policy grants nothing; capabilities / scopes / groups survive the substitution intact. Policy templating is now proven fail-closed end to end.
+- Feature file's Phase 2 row flipped Pending → Done; the stale "Policy templating deferred" and "Sharing still design-only" bullets in Implementation Notes replaced with current-state summaries (templating is live, sharing has been live since Phase 8). No behavior change — the code already worked; this is doc + test-coverage catching up to reality.
+
+#### Batch operations Phase 1 (`features/batch-operations.md`)
+- **`POST /v2/sys/batch`** — new endpoint that accepts N vault operations in a single request body and executes them sequentially under the caller's token. Every op routes through the normal `Core::handle_request` pipeline, so ACLs, audit, and per-path semantics match individual HTTP calls. Registered v2-only per the project's forward-going-API rule.
+- **`src/http/batch.rs`** — `BatchRequest` / `BatchOperation` / `BatchResult` / `BatchResponse` types, `sys_batch_v2_request_handler`. Deserialization denies unknown op kinds. The handler rejects empty batches and batches exceeding `batch_max_operations` (default 128) with 400 before any op runs.
+- **Route wiring** (`src/http/sys.rs`) — per-route `PayloadConfig::limit(32 MiB)` drops oversized bodies at the framework layer rather than allocating them.
+- **Config** (`src/cli/config.rs`) — new `batch_max_operations` and `batch_max_body_size` keys (`0` = built-in default).
+- **Per-op error mapping** — `ErrPermissionDenied → 403`, `ErrRouterMountNotFound → 404`, `ErrBarrierSealed → 503`, `ErrRequestClientTokenMissing → 401`, else 500. Error text lands in the per-op `errors` array; other ops in the same batch are unaffected by one op's failure.
+- **Tests (8)** — parse/deserialize, unknown-op rejection, empty batch rejection, oversized batch rejection, write-then-read-in-same-batch visibility, individual-failure-does-not-abort-batch, default-max-operations-is-128, op-kind-maps-to-logical-Operation. 363 lib tests pass overall.
+- **Deferred to later slices**: CLI command (`bvault batch`), client SDK method, per-op `batch_id` correlation in audit entries.
 
 #### File Resources feature spec (`features/file-resources.md`, design-only)
 - New `features/file-resources.md` and matching roadmap entry (Todo). Scopes a "File Resources" kind: binary blobs stored under the barrier alongside secrets, chunked (1 MiB default, 32 MiB cap), AEAD-authenticated per chunk, with a plaintext-SHA-256 manifest for whole-file integrity. Reuses the existing resource / ownership / sharing / audit plumbing so files inherit per-user-scoping from day one — no parallel identity layer.

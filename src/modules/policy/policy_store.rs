@@ -1836,6 +1836,135 @@ mod templating_tests {
             Some("secret/foo/bar")
         );
     }
+
+    // ── apply_templates wrapper ──────────────────────────────────────
+
+    use crate::{
+        logical::Auth,
+        modules::policy::{Policy, PolicyPathRules, PolicyType},
+    };
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn policy_with_paths(paths: Vec<&str>) -> Arc<Policy> {
+        let mut p = Policy::default();
+        p.name = "test-templated".to_string();
+        p.policy_type = PolicyType::Acl;
+        p.templated = true;
+        p.paths = paths
+            .into_iter()
+            .map(|path| {
+                let mut rule = PolicyPathRules::default();
+                rule.path = path.to_string();
+                rule
+            })
+            .collect();
+        Arc::new(p)
+    }
+
+    fn auth_with(
+        username: Option<&str>,
+        entity_id: Option<&str>,
+        mount_path: Option<&str>,
+        display_name: &str,
+    ) -> Auth {
+        let mut meta = HashMap::new();
+        if let Some(u) = username {
+            meta.insert("username".into(), u.into());
+        }
+        if let Some(e) = entity_id {
+            meta.insert("entity_id".into(), e.into());
+        }
+        if let Some(m) = mount_path {
+            meta.insert("mount_path".into(), m.into());
+        }
+        Auth {
+            display_name: display_name.into(),
+            metadata: meta,
+            ..Auth::default()
+        }
+    }
+
+    #[test]
+    fn test_apply_templates_substitutes_in_all_paths() {
+        let policy = policy_with_paths(vec![
+            "secret/data/users/{{username}}/*",
+            "kv/{{entity.id}}/inbox",
+        ]);
+        let auth = auth_with(Some("alice"), Some("ent-abc"), Some("userpass/"), "alice");
+        let got = apply_templates(&policy, &auth).expect("policy must survive");
+        let paths: Vec<&str> = got.paths.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["secret/data/users/alice/*", "kv/ent-abc/inbox"],
+            "every templated path must be substituted with caller values"
+        );
+    }
+
+    #[test]
+    fn test_apply_templates_username_falls_back_to_display_name() {
+        // No `username` metadata key, but display_name is set — apply_templates
+        // must fall back so a FIDO2 or cert login with only display_name
+        // still authorizes a `{{username}}` rule.
+        let policy = policy_with_paths(vec!["secret/data/users/{{username}}/*"]);
+        let auth = auth_with(None, Some("ent-abc"), Some("userpass/"), "bob");
+        let got = apply_templates(&policy, &auth).expect("policy must survive");
+        assert_eq!(got.paths[0].path, "secret/data/users/bob/*");
+    }
+
+    #[test]
+    fn test_apply_templates_drops_individual_unresolved_rules() {
+        // Two rules: one resolvable, one needs `{{auth.mount}}` which is
+        // absent from metadata. The resolvable rule survives; the other
+        // is dropped fail-closed, policy still contributes.
+        let policy = policy_with_paths(vec![
+            "secret/data/users/{{username}}/*",
+            "{{auth.mount}}login",
+        ]);
+        let auth = auth_with(Some("alice"), Some("ent-abc"), None, "alice");
+        let got = apply_templates(&policy, &auth).expect("at least one rule survives");
+        let paths: Vec<&str> = got.paths.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(paths, vec!["secret/data/users/alice/*"]);
+    }
+
+    #[test]
+    fn test_apply_templates_returns_none_when_all_rules_drop() {
+        // Every rule references something the auth doesn't have. Fail
+        // closed: policy contributes no authorization.
+        let policy = policy_with_paths(vec![
+            "{{auth.mount}}login",
+            "secret/{{entity.id}}",
+        ]);
+        let auth = auth_with(Some("alice"), None, None, "alice");
+        assert!(
+            apply_templates(&policy, &auth).is_none(),
+            "all-rules-dropped must return None so the policy grants nothing"
+        );
+    }
+
+    #[test]
+    fn test_apply_templates_preserves_rule_capabilities() {
+        // Rules carry more than just `path` — capabilities / scopes /
+        // groups must survive the substitution.
+        let mut policy = Policy::default();
+        policy.name = "keep-fields".into();
+        policy.templated = true;
+        let mut rule = PolicyPathRules::default();
+        rule.path = "secret/data/users/{{username}}/*".into();
+        rule.capabilities = vec![
+            crate::modules::policy::policy::Capability::Read,
+            crate::modules::policy::policy::Capability::Update,
+        ];
+        rule.scopes = vec!["owner".into(), "shared".into()];
+        policy.paths = vec![rule];
+
+        let auth = auth_with(Some("carol"), Some("ent-c"), Some("userpass/"), "carol");
+        let got = apply_templates(&Arc::new(policy), &auth).expect("survives");
+        let r = &got.paths[0];
+        assert_eq!(r.path, "secret/data/users/carol/*");
+        assert_eq!(r.capabilities.len(), 2);
+        assert_eq!(r.scopes, vec!["owner", "shared"]);
+    }
 }
 
 #[cfg(test)]
