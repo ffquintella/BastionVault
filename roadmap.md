@@ -32,6 +32,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Storage Backend: Cloud (S3 / OneDrive / Google Drive / Dropbox) | Todo |
 | Import/Export & Backup/Restore | Done |
 | Resource Management (inventory + grouped secrets) | Done |
+| File Resources (binary blobs + SMB/SCP/SFTP sync) | Todo |
 | Caching | Done |
 | Batch Operations | Todo |
 | **Networking & TLS** | |
@@ -81,6 +82,8 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
   SAML 2.0 auth backend with SP-initiated SSO and attribute-to-policy role mappings.
 - [Cloud Storage Backend](features/cloud-storage-backend.md)
   Third deployment mode (alongside Local / Remote): vault ciphertext stored in a user-provided cloud account — AWS S3, OneDrive, Google Drive, or Dropbox. Barrier and keys unchanged; provider sees only ciphertext. Design-only, 8 phases.
+- [File Resources](features/file-resources.md)
+  New resource kind that stores binary files (SSH keys, cert bundles, keytabs, config files) under the barrier alongside secrets — chunked, AEAD-authenticated, inherits ownership/sharing/audit from per-user-scoping. Later phases add push-only sync targets for local filesystem, SMB, SCP, and SFTP, with sync-target credentials stored as vault objects so they aren't in a separate silo. Design-only, 8 phases.
 - [Identity Groups](features/identity-groups.md)
   User groups and application groups with group-to-policy mapping. Policies attached to a group are unioned with the caller's direct policies at login time. Backend, HTTP API, GUI, and FIDO2 login union all shipped. Extension to Certificate / OIDC / SAML auth backends is deferred until those backends themselves are implemented (Cert is currently disabled in the OpenSSL-free build; OIDC/SAML are design-only).
 - [Per-User Scoping (Ownership & Sharing)](features/per-user-scoping.md)

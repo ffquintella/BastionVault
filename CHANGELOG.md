@@ -93,6 +93,14 @@ EXAMPLE ENTRY:
 - No new caches allocated in this slice; token / secret / metrics / mlock / zeroize-on-flush work lands in Slices 2–4 per the caching feature spec.
 - 5 unit tests covering defaults, empty block, partial block, `deny_unknown_fields`, and `merge`.
 
+### Added
+
+#### File Resources feature spec (`features/file-resources.md`, design-only)
+- New `features/file-resources.md` and matching roadmap entry (Todo). Scopes a "File Resources" kind: binary blobs stored under the barrier alongside secrets, chunked (1 MiB default, 32 MiB cap), AEAD-authenticated per chunk, with a plaintext-SHA-256 manifest for whole-file integrity. Reuses the existing resource / ownership / sharing / audit plumbing so files inherit per-user-scoping from day one — no parallel identity layer.
+- Sync targets (local FS, SMB, SCP, SFTP) are scoped as later phases. Push-only in v1 (vault is authoritative). Sync-target credentials are themselves stored as vault objects (a KV secret or another file resource), referenced by id, so SSH keys and SMB passwords don't leak into a separate silo. Sync failures audit but don't fail the vault write.
+- 8-phase breakdown: engine scaffold → identity integration → local-FS sync → GUI → SMB → SFTP+SCP → periodic re-sync → versioning/retention. Critical path is Phase 1; transport phases are parallelizable after Phase 3 proves the sync abstraction.
+- No code change — tracking-doc only.
+
 ### Fixed
 
 #### Owner capture now stamps root-token writes (`features/per-user-scoping.md`)
