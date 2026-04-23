@@ -45,6 +45,13 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+
+#### Token-login now validates before signing in (`gui/src-tauri/src/commands/auth.rs`, `gui/src-tauri/src/commands/connection.rs`)
+- `login_token` (embedded) and `remote_login_token` (remote) previously accepted any string as the auth token and stored it verbatim. A wrong token got the user to the dashboard with a functioning sidebar, where every data fetch then failed with "Permission denied" — confusing and wrong-shaped (the real failure was the login, not the fetch).
+- Both handlers now issue `Read auth/token/lookup-self` with the supplied token and only store it on success. Permission-denied / invalid-token / forbidden errors at lookup-self are translated to a single "Invalid token" message so the login page shows one clear reason; other errors (network down, server unreachable) pass through with their original text.
+- `login_token` also reads the token's real `policies` array out of the lookup-self response instead of hard-coding `["root"]`. Admin-gated routes (Users / AppRole / Audit / etc.) now render correctly on first paint for non-root users, not after a second fetch.
+
 ### Added
 
 #### Local-vault custom data directory + Tauri command (`gui/src-tauri/src/embedded/mod.rs`, `gui/src-tauri/src/commands/vaults.rs`, `gui/src/routes/ConnectPage.tsx`)

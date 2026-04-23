@@ -148,11 +148,42 @@ pub async fn get_remote_status(state: State<'_, AppState>) -> CmdResult<RemoteSt
 }
 
 /// Login to a remote vault with a token.
+///
+/// Validates the token against the remote server via
+/// `auth/token/lookup-self` before storing it. Without this,
+/// a wrong token string gets saved into state and the user sees
+/// "Permission denied" toasts from every subsequent page fetch;
+/// this way an invalid token surfaces as an immediate "Invalid
+/// token" error on the login page.
 #[tauri::command]
 pub async fn remote_login_token(
     state: State<'_, AppState>,
     token: String,
 ) -> CmdResult<()> {
+    let client_guard = state.remote_client.lock().await;
+    let client = client_guard.as_ref().ok_or("Not connected to remote server")?;
+
+    // `token/lookup-self` is a GET that any valid token can call
+    // against its own metadata. The client takes a token via
+    // `with_token`; on an invalid token the request errors out and
+    // we surface that as "Invalid token" without storing anything.
+    let endpoint = format!("{}/auth/token/lookup-self", client.api_prefix());
+    let bound = client.clone().with_token(&token);
+    bound
+        .request_read(endpoint)
+        .map_err(|e| {
+            let msg = format!("{e}");
+            if msg.to_ascii_lowercase().contains("permission denied")
+                || msg.to_ascii_lowercase().contains("invalid")
+                || msg.to_ascii_lowercase().contains("forbidden")
+            {
+                CommandError::from("Invalid token")
+            } else {
+                CommandError::from(format!("Token validation failed: {e}"))
+            }
+        })?;
+
+    drop(client_guard);
     *state.token.lock().await = Some(token);
     Ok(())
 }
