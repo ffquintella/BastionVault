@@ -6,7 +6,7 @@ A new resource kind that stores **files** — arbitrary binary blobs with filena
 
 ## Status
 
-**Todo — design only.** Nothing implemented yet. This document captures the intended design so it can be reviewed before code lands.
+**Done (core feature).** Phases 1–4 + 8 shipped and in production use. Phases 5–7 (SMB / SFTP / SCP sync + periodic re-sync) are deferred as separate follow-up initiatives because each needs its own crate decision and container-based integration-test infrastructure — they're additive sync *transports*, not gaps in the core file-resource model. See the "Deferred sub-initiatives" section at the bottom of this file for the specific dependencies and scope each would need.
 
 ## Motivation
 
@@ -29,7 +29,9 @@ Non-goals:
 
 ## Current State
 
-**Phases 1 + 2 + 3 + 4 + 8 shipped** (GUI is minimum-viable — Files page + per-file Info / Sync / Versions tabs; advanced UX polish can follow). Phases 5–7 (SMB, SFTP, SCP, periodic re-sync) still Todo. Asset-group membership for files is also wired.
+**Phases 1 + 2 + 3 + 4 + 8 shipped** (GUI carries Files page + per-file Info / Sync / Versions tabs + Edit modal + drag-and-drop upload with Windows/WebView2 drop-handler fix; resource-detail pages grew a Files tab listing files associated with each resource; Admin → Audit aggregates file lifecycle events). Asset-group membership for files is wired through a third reverse index in `ResourceGroupStore`. Ownership / sharing / admin transfer / backfill flow through the shared `OwnerStore` + `ShareStore` used by KV and Resources.
+
+**Phases 5–7 (SMB / SFTP / SCP sync + periodic re-sync) deferred as separate follow-up initiatives.** They're additive sync transports rather than gaps in the core model — every file-resource feature works today against the local-FS sync target shipped in Phase 3. See "Deferred sub-initiatives" below for scope.
 
 Shipped in Phase 1 (`src/modules/files/mod.rs`):
 
@@ -289,3 +291,46 @@ Phase 1 is the critical path. Phases 5–6 are parallelizable after Phase 3 prov
 - The GUI warns on first sync-target add that the target host is trusted with the plaintext content.
 - Deleting a file cascades to its shares and sync configs but *not* to previously-synced copies on remote hosts — operators must clean those up explicitly. This is called out in both the DELETE confirmation and the audit row.
 - Audit events emit `files.create`, `files.update.content`, `files.update.meta`, `files.delete`, `files.sync.success`, `files.sync.failure` so operators can track file-handling separately from secret-handling.
+
+## Deferred sub-initiatives
+
+Three sync-related phases did not land in the core File Resources
+initiative. Each is self-contained and would warrant its own
+focused session with its own dep decision and test infrastructure.
+None of them is required for the core feature — operators who
+need file replication today use the Phase-3 local-FS target (often
+pointed at a mount managed out-of-band by `rclone`, `rsync`,
+`syncthing`, etc.) until an in-tree transport ships.
+
+### SMB sync target (was Phase 5)
+
+**Scope.** A `FileSyncTarget { kind = "smb", target_path = "//host/share/path", credentials_ref, ... }` that pushes the current file content to an SMB share.
+
+**Blocking questions for a future session:**
+- Crate choice. `pavao` (pure Rust, SMB2/3) and `smb3` are the main options; both are alpha/beta and should be evaluated head-to-head against a Samba server before being baked into `Cargo.toml`.
+- Auth. NTLM is table stakes; Kerberos/AD is where the complexity lives. First cut can be NTLMv2 only.
+- Windows-native vs. portable. Windows has first-class SMB client APIs via `windows-rs`; Linux + macOS need a pure-Rust crate. Either maintain two impls or pick one pure-Rust path and live with the quality trade-off on Windows.
+
+**Test infrastructure.** Samba container in CI (`docker run -p 445 ghcr.io/servercontainers/samba`), fixture for successful push, auth failure, and disk-full.
+
+### SFTP + SCP sync targets (was Phase 6)
+
+**Scope.** Two transports sharing an SSH session: `kind = "sftp"` and `kind = "scp"`. Auth via SSH private key (where the key itself can be a file resource stored in the vault) or password.
+
+**Blocking questions:**
+- Crate choice. `russh` + `russh-sftp` (pure Rust, maintained) is the lead option; `libssh2-sys` is the C-library alternative. Prefer `russh` unless interop testing reveals protocol-edge-case gaps.
+- Key management. The "SSH key lives in the vault" case creates a bootstrap ordering concern: the file resource containing the key has to be readable before sync can push — so the sync engine needs to resolve the key out of its own vault at push time, not at target-config time.
+
+**Test infrastructure.** OpenSSH container in CI; fixture for pubkey-auth push, password-auth push, host-key-mismatch rejection, bad-credential rejection.
+
+### Periodic re-sync (was Phase 7)
+
+**Scope.** Most sync targets today push on first write and on manual `POST files/{id}/sync/{name}/push`. A periodic re-sync would also push stale copies in the background — useful for a fleet where multiple hosts hold synced copies and the vault wants to guarantee they converge.
+
+**Design question.** Two viable shapes:
+- **Internal scheduler.** Background tokio task started at post-unseal, stopped at pre-seal. Touches the vault lifecycle. Sharper single-host story.
+- **External-tick endpoint.** `POST sys/files/sync/tick` that the operator wires into cron / systemd / k8s CronJob. Simpler, no lifecycle concerns, defers HA coordination to the scheduler the operator already runs.
+
+**Cluster coordination.** With Hiqlite storage the re-sync task must run on exactly one node at a time; `hiqlite::dlock` is the existing primitive for that.
+
+**Blocked on** the SMB or SFTP sync targets landing first — with only local-FS there's nothing to re-sync that the filesystem itself doesn't already handle.
