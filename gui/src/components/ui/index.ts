@@ -22,6 +22,7 @@ export { Textarea } from "./Textarea";
 export { Select } from "./Select";
 export { Card } from "./Card";
 export { Modal, ConfirmModal } from "./Modal";
+export { CollapsibleSection } from "./CollapsibleSection";
 export { Table } from "./Table";
 export { Badge } from "./Badge";
 export { Tabs } from "./Tabs";

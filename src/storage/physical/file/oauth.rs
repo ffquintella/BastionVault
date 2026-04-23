@@ -224,20 +224,58 @@ pub struct ConsentSession {
     listener: TcpListener,
 }
 
-/// Start a consent session: bind a random loopback port, compose
-/// the authorization URL, return a handle the caller uses to
-/// (a) open the URL in a browser and (b) wait for the callback.
+/// Default fixed loopback port for the OAuth consent callback.
+///
+/// Why fixed: OAuth providers require the redirect URI to exactly
+/// match a pre-registered value. Google and Microsoft special-case
+/// loopback URIs per RFC 8252 § 7.3 (any port works once you
+/// register `http://127.0.0.1` / `http://localhost`), but Dropbox
+/// doesn't — the registered URI must include the exact port. An
+/// ephemeral OS-assigned port (`port 0`) means the user would have
+/// to re-register their app every launch, which is unusable.
+///
+/// A single fixed port means the user registers the redirect URI
+/// once at the provider's dev console and every subsequent consent
+/// flow uses the same URL. Port collisions surface as a clear
+/// error at `begin_consent` time rather than silently degrading.
+///
+/// 8472 was picked because it's well outside the reserved + common
+/// app ranges and doesn't clash with BastionVault's own reserved
+/// ports (8200 Vault server, 8210 Raft, 8220 Raft API).
+pub const DEFAULT_LOOPBACK_PORT: u16 = 8472;
+
+/// Start a consent session: bind a loopback port, compose the
+/// authorization URL, return a handle the caller uses to (a) open
+/// the URL in a browser and (b) wait for the callback.
 ///
 /// `bind_host` is typically `"127.0.0.1"`. Callers that need IPv6
-/// for some reason can pass `"[::1]"`; both OAuth providers and
-/// `open` / `xdg-open` handle either cleanly.
+/// can pass `"[::1]"`; both OAuth providers and `open` /
+/// `xdg-open` handle either cleanly.
+///
+/// `preferred_port` is the port to try first. Pass `Some(n)` for
+/// a stable redirect URI the user can register at the provider
+/// once; pass `None` for an OS-assigned ephemeral port (useful in
+/// tests). On collision with a fixed port we surface a clear error
+/// rather than silently falling back, so the user knows the
+/// registered redirect URI won't match.
 pub fn begin_consent(
     provider: &OAuthProvider,
     creds: &OAuthCredentials,
     bind_host: &str,
+    preferred_port: Option<u16>,
 ) -> Result<ConsentSession, RvError> {
-    let listener = TcpListener::bind((bind_host, 0))
-        .map_err(|e| RvError::ErrString(format!("oauth: bind loopback: {e}")))?;
+    let listener = match preferred_port {
+        Some(p) => TcpListener::bind((bind_host, p)).map_err(|e| {
+            RvError::ErrString(format!(
+                "oauth: bind {bind_host}:{p}: {e}. This port needs to stay free \
+                 for the consent callback — close whichever process is holding \
+                 it (you can check with `netstat -ano | findstr {p}` on Windows \
+                 or `lsof -i :{p}` on Unix) and try again."
+            ))
+        })?,
+        None => TcpListener::bind((bind_host, 0))
+            .map_err(|e| RvError::ErrString(format!("oauth: bind loopback: {e}")))?,
+    };
     let port = listener
         .local_addr()
         .map_err(|e| RvError::ErrString(format!("oauth: local_addr: {e}")))?
@@ -650,7 +688,10 @@ mod tests {
             client_id: "c".into(),
             client_secret: None,
         };
-        let session = begin_consent(&provider, &creds, "127.0.0.1").unwrap();
+        // Tests pass `None` so each test gets an ephemeral port
+        // — the fixed `DEFAULT_LOOPBACK_PORT` would race if two
+        // tests ran in parallel against the same machine.
+        let session = begin_consent(&provider, &creds, "127.0.0.1", None).unwrap();
         let port = session.listener_addr().unwrap().port();
         let state_expected = session.state.clone();
         let state_for_worker = session.state.clone();
@@ -694,7 +735,10 @@ mod tests {
             client_id: "c".into(),
             client_secret: None,
         };
-        let session = begin_consent(&provider, &creds, "127.0.0.1").unwrap();
+        // Tests pass `None` so each test gets an ephemeral port
+        // — the fixed `DEFAULT_LOOPBACK_PORT` would race if two
+        // tests ran in parallel against the same machine.
+        let session = begin_consent(&provider, &creds, "127.0.0.1", None).unwrap();
         let port = session.listener_addr().unwrap().port();
 
         let handle = std::thread::spawn(move || {

@@ -134,33 +134,61 @@ describe("ConnectPage", () => {
     mockInvoke.mockReset();
   });
 
-  it("shows local vault option", async () => {
+  it("renders the add-new chooser when no profiles are saved", async () => {
     mockInvoke.mockImplementation((cmd: string) => {
-      if (cmd === "load_preferences") return Promise.resolve({ mode: "Embedded", remote_profile: null });
-      if (cmd === "is_vault_initialized") return Promise.resolve(false);
+      if (cmd === "list_vault_profiles")
+        return Promise.resolve({ vaults: [], lastUsedId: null });
       return Promise.reject(new Error(`unmocked: ${cmd}`));
     });
     const { ConnectPage } = await import("../routes/ConnectPage");
     renderWithProviders(<ConnectPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("Local Vault")).toBeInTheDocument();
+      expect(screen.getByText(/Add new vault/i)).toBeInTheDocument();
     });
+    // All three kinds of add-new action are offered.
+    expect(screen.getByText("Local")).toBeInTheDocument();
+    expect(screen.getByText("Server")).toBeInTheDocument();
+    expect(screen.getByText("Cloud")).toBeInTheDocument();
   });
 
-  it("shows remote option as enabled", async () => {
+  it("lists saved vault profiles", async () => {
     mockInvoke.mockImplementation((cmd: string) => {
-      if (cmd === "load_preferences") return Promise.resolve({ mode: "Embedded", remote_profile: null });
-      if (cmd === "is_vault_initialized") return Promise.resolve(false);
+      if (cmd === "list_vault_profiles")
+        return Promise.resolve({
+          vaults: [
+            {
+              id: "v1",
+              name: "Home lab",
+              spec: { kind: "local", storage_kind: "file" },
+            },
+            {
+              id: "v2",
+              name: "Prod",
+              spec: {
+                kind: "remote",
+                profile: {
+                  name: "Prod",
+                  address: "https://vault.example.com:8200",
+                  tls_skip_verify: false,
+                },
+              },
+            },
+          ],
+          lastUsedId: "v2",
+        });
+      // Block auto-resume so we render the chooser rather than
+      // navigating off the page.
+      if (cmd === "connect_remote")
+        return Promise.reject(new Error("no network in test"));
       return Promise.reject(new Error(`unmocked: ${cmd}`));
     });
     const { ConnectPage } = await import("../routes/ConnectPage");
     renderWithProviders(<ConnectPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("Connect to Server")).toBeInTheDocument();
+      expect(screen.getByText("Home lab")).toBeInTheDocument();
     });
-    const remoteBtn = screen.getByText("Connect to Server").closest("button");
-    expect(remoteBtn).not.toBeDisabled();
+    expect(screen.getByText("Prod")).toBeInTheDocument();
   });
 });

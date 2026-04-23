@@ -393,3 +393,102 @@ export const cloudTargetCompleteConnect = (args: {
 
 export const cloudTargetCancelConnect = (sessionId: string) =>
   invoke<void>("cloud_target_cancel_connect", { sessionId });
+
+// Cloud Vault — embedded vault mode backed by a cloud target.
+
+export interface CloudVaultStoredConfig {
+  target: string;
+  [key: string]: unknown;
+}
+
+export const setCloudVaultConfig = (args: {
+  target: "s3" | "onedrive" | "gdrive" | "dropbox";
+  config: Record<string, unknown>;
+}) => invoke<void>("set_cloud_vault_config", { input: args });
+
+export const clearCloudVaultConfig = () =>
+  invoke<void>("clear_cloud_vault_config");
+
+export const getCloudVaultConfig = () =>
+  invoke<CloudVaultStoredConfig | null>("get_cloud_vault_config");
+
+// ── Saved vault profiles ──────────────────────────────────────────
+//
+// The preferences file holds a list of saved vault profiles (Local
+// / Remote / Cloud). The Get Started screen enumerates them and
+// lets the user pick one, add a new one, or remove an existing one.
+
+export type VaultSpec =
+  | { kind: "local"; data_dir?: string | null; storage_kind: string }
+  | { kind: "remote"; profile: RemoteProfile }
+  | { kind: "cloud"; config: { target: string } & Record<string, unknown> };
+
+export interface VaultProfile {
+  id: string;
+  name: string;
+  spec: VaultSpec;
+}
+
+export interface VaultProfileList {
+  vaults: VaultProfile[];
+  lastUsedId: string | null;
+}
+
+export const listVaultProfiles = () =>
+  invoke<VaultProfileList>("list_vault_profiles");
+
+export const addVaultProfile = (args: {
+  name: string;
+  spec: VaultSpec;
+  setDefault?: boolean;
+}) => invoke<string>("add_vault_profile", args);
+
+export const updateVaultProfile = (args: {
+  id: string;
+  name: string;
+  spec: VaultSpec;
+}) => invoke<void>("update_vault_profile", args);
+
+export const removeVaultProfile = (id: string) =>
+  invoke<void>("remove_vault_profile", { id });
+
+export const setLastUsedVault = (id: string) =>
+  invoke<void>("set_last_used_vault", { id });
+
+export const clearLastUsedVault = () =>
+  invoke<void>("clear_last_used_vault");
+
+export const getVaultProfile = (id: string) =>
+  invoke<VaultProfile>("get_vault_profile", { id });
+
+// Add-vault helpers — suggestion + S3 credential save.
+
+export const suggestCredentialsRefPath = (
+  target: "s3" | "onedrive" | "gdrive" | "dropbox",
+) => invoke<string>("suggest_credentials_ref_path", { target });
+
+export const saveS3Credentials = (args: {
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken?: string;
+}) => invoke<string>("save_s3_credentials", { input: args });
+
+export const getOAuthRedirectUri = () =>
+  invoke<string>("get_oauth_redirect_uri");
+
+/**
+ * Shortcut for users who generated a token directly at the
+ * provider's dev console (Dropbox has a "Generate" button for
+ * this) — skips the redirect-URI round-trip entirely. Writes the
+ * pasted token as the credentials_ref file the target will read.
+ */
+export const savePastedToken = (args: { target: "s3" | "onedrive" | "gdrive" | "dropbox"; token: string }) =>
+  invoke<string>("save_pasted_token", args);
+
+/**
+ * Canonical default data directory for a local vault of the given
+ * storage engine. Used by the Add Local Vault modal to pre-populate
+ * the path field and for the "Reset to default" button.
+ */
+export const getDefaultLocalDataDir = (kind: "file" | "hiqlite") =>
+  invoke<string>("get_default_local_data_dir", { kind });

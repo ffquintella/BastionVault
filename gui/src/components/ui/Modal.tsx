@@ -40,10 +40,14 @@ export function Modal({ open, onClose, title, children, actions, size = "md" }: 
       }}
     >
       <div
-        className={`w-full ${sizeStyles[size]} bg-[var(--color-surface)] border border-[var(--color-border)] rounded-xl shadow-2xl`}
+        // `max-h-[calc(100vh-2rem)]` + `flex-col` + scrollable body
+        // keeps tall modals (e.g. the Add Cloud Vault form with every
+        // section expanded) within the viewport on small screens.
+        // Header + footer stay pinned; the body scrolls internally.
+        className={`w-full ${sizeStyles[size]} max-h-[calc(100vh-2rem)] flex flex-col bg-[var(--color-surface)] border border-[var(--color-border)] rounded-xl shadow-2xl`}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--color-border)]">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--color-border)] shrink-0">
           <h2 className="text-lg font-semibold">{title}</h2>
           <button
             onClick={onClose}
@@ -53,12 +57,14 @@ export function Modal({ open, onClose, title, children, actions, size = "md" }: 
           </button>
         </div>
 
-        {/* Body */}
-        <div className="px-5 py-4">{children}</div>
+        {/* Body — `flex-1 min-h-0` lets it shrink inside the
+            flex column so `overflow-y-auto` actually triggers
+            (without `min-h-0` a flex child sizes to content). */}
+        <div className="px-5 py-4 flex-1 min-h-0 overflow-y-auto">{children}</div>
 
         {/* Footer */}
         {actions && (
-          <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-[var(--color-border)]">
+          <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-[var(--color-border)] shrink-0">
             {actions}
           </div>
         )}

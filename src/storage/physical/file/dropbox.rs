@@ -69,7 +69,10 @@ pub struct DropboxTarget {
 
 #[derive(Debug)]
 struct Inner {
-    client_id: String,
+    /// Optional: only required for the refresh-token flow. When the
+    /// credential file is a long-lived `{"access_token":"..."}` JSON
+    /// envelope, we skip refresh entirely and this can stay `None`.
+    client_id: Option<String>,
     client_secret: Option<String>,
     credentials_ref: String,
     /// Prefix within the App Folder, normalized to start with `/`
@@ -102,11 +105,16 @@ impl DropboxTarget {
     ///   `prefix`            — path inside the App Folder.
     ///   `http_timeout_secs` — per-request timeout; default 30.
     pub fn from_config(conf: &HashMap<String, Value>) -> Result<Self, RvError> {
+        // `client_id` is only required for the refresh-token OAuth
+        // flow. Long-lived access tokens generated directly at the
+        // Dropbox App Console (`{"access_token":"..."}` JSON in the
+        // credentials file) work without one, so we accept a missing
+        // value here and defer enforcement to `ensure_access_token`
+        // when it actually tries to refresh.
         let client_id = conf
             .get("client_id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| RvError::ErrString("dropbox target: `client_id` is required".into()))?
-            .to_string();
+            .map(|s| s.to_string());
         let client_secret = conf
             .get("client_secret")
             .and_then(|v| v.as_str())
@@ -163,14 +171,64 @@ impl Inner {
                 }
             }
         }
-        let refresh_secret = creds::resolve(&self.credentials_ref)?;
-        let refresh_str = refresh_secret.as_str()?.trim().to_string();
+        let secret = creds::resolve(&self.credentials_ref)?;
+        let raw = secret.as_str()?.trim().to_string();
+
+        // Two credential formats are supported, inspected in order:
+        //
+        //   1. JSON envelope `{"access_token":"..."}` — a long-lived
+        //      access token the user generated directly at the
+        //      Dropbox App Console ("Generate" button). These tokens
+        //      don't expire and have no matching refresh token; we
+        //      use them as the Bearer directly and skip the OAuth
+        //      /oauth2/token round-trip entirely (which is what
+        //      would return "refresh token is malformed" for these).
+        //
+        //   2. Plain string — a standard OAuth 2.0 refresh token,
+        //      written by either `cloud_target_complete_connect` or
+        //      the CLI `bvault operator cloud-target connect` flow.
+        //      We exchange it at the token endpoint for a short-
+        //      lived access token, caching with the returned expiry.
+        if let Ok(parsed) = serde_json::from_str::<LongLivedToken>(&raw) {
+            let token = parsed.access_token.trim().to_string();
+            if token.is_empty() {
+                return Err(RvError::ErrString(
+                    "dropbox: credentials_ref JSON is missing or has empty `access_token`".into(),
+                ));
+            }
+            // Long-lived tokens don't expire; cache for a long time so
+            // we don't re-read the file on every call. If Dropbox ever
+            // revokes such a token, operations will fail at call time
+            // with 401 and the user re-pastes.
+            let mut cache = self.cached_access_token.lock().map_err(|e| {
+                RvError::ErrString(format!("dropbox: token cache poisoned: {e}"))
+            })?;
+            *cache = Some(CachedAccessToken {
+                token: token.clone(),
+                expires_at: Instant::now() + Duration::from_secs(365 * 24 * 3600),
+            });
+            return Ok(token);
+        }
+
+        // Fall through to the refresh-token flow. Client id is
+        // required here (the Dropbox token endpoint rejects refresh
+        // requests without it); if the user set up a long-lived
+        // token but then accidentally saved it as a plain string,
+        // we surface a specific hint.
+        let Some(client_id) = self.client_id.clone() else {
+            return Err(RvError::ErrString(
+                "dropbox: stored credential is a plain string but no `client_id` was \
+                 configured — set one, or paste the token wrapped as \
+                 `{\"access_token\":\"...\"}` JSON for long-lived tokens"
+                    .into(),
+            ));
+        };
         let provider = oauth::well_known_provider("dropbox")?;
         let creds_obj = oauth::OAuthCredentials {
-            client_id: self.client_id.clone(),
+            client_id,
             client_secret: self.client_secret.clone(),
         };
-        let resp = oauth::refresh_access_token(&provider, &creds_obj, &refresh_str)?;
+        let resp = oauth::refresh_access_token(&provider, &creds_obj, &raw)?;
         let new_token = resp.access_token.clone();
         let expires_in = resp.expires_in.unwrap_or(3600);
         {
@@ -183,7 +241,7 @@ impl Inner {
             });
         }
         if let Some(rotated) = resp.refresh_token.as_deref() {
-            if !rotated.is_empty() && rotated != refresh_str {
+            if !rotated.is_empty() && rotated != raw {
                 creds::persist(&self.credentials_ref, rotated.as_bytes())?;
             }
         }
@@ -228,8 +286,13 @@ impl Inner {
             )));
         }
         if !(200..300).contains(&status) {
+            // Capture Dropbox's error body so users see what Dropbox
+            // actually rejected (missing scope / malformed path /
+            // revoked token etc.), not just the HTTP status. The
+            // download endpoint returns JSON or plain text here.
+            let body = resp.into_body().read_to_string().unwrap_or_default();
             return Err(RvError::ErrString(format!(
-                "dropbox: GET {key}: http status {status}"
+                "dropbox: GET {key}: http status {status}: {body}"
             )));
         }
         Ok(Some(
@@ -301,8 +364,9 @@ impl Inner {
             )));
         }
         if !(200..300).contains(&status) {
+            let body = resp.into_body().read_to_string().unwrap_or_default();
             return Err(RvError::ErrString(format!(
-                "dropbox: DELETE {key}: http status {status}"
+                "dropbox: DELETE {key}: http status {status}: {body}"
             )));
         }
         let _ = resp.into_body().read_to_string();
@@ -349,8 +413,9 @@ impl Inner {
                 )));
             }
             if !(200..300).contains(&status) {
+                let body = resp.into_body().read_to_string().unwrap_or_default();
                 return Err(RvError::ErrString(format!(
-                    "dropbox: LIST: http status {status}"
+                    "dropbox: LIST: http status {status}: {body}"
                 )));
             }
             let text = resp
@@ -402,6 +467,21 @@ fn normalize_prefix(p: &str) -> String {
 /// false positives and robust against schema drift.
 fn is_not_found(body: &str) -> bool {
     body.contains("not_found")
+}
+
+/// Envelope used to distinguish a long-lived access token from a
+/// plain-string refresh token on disk. The writer (`save_pasted_token`
+/// in the GUI) wraps Dropbox-Generated access tokens in this shape;
+/// `ensure_access_token` parses it and uses the token directly.
+///
+/// Deliberately minimal — only `access_token` is read. Additional
+/// fields that might appear later (e.g. `token_type`, `scope`,
+/// `expires_at` for non-Dropbox providers) can be added without
+/// breaking the existing on-disk format because serde ignores
+/// unknown fields.
+#[derive(Debug, Deserialize)]
+struct LongLivedToken {
+    access_token: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -506,14 +586,26 @@ mod tests {
     }
 
     #[test]
-    fn from_config_requires_client_id() {
-        let (reference, path) = ref_with_token("rt");
-        let err = DropboxTarget::from_config(&cfg(json!({
+    fn from_config_accepts_missing_client_id_for_long_lived_token() {
+        // `client_id` is optional now — long-lived tokens from the
+        // Dropbox App Console ("Generate" button) don't need OAuth
+        // refresh, so a config with just a credentials_ref is valid.
+        let (reference, path) = ref_with_token(r#"{"access_token":"sl.longlived"}"#);
+        let t = DropboxTarget::from_config(&cfg(json!({
             "credentials_ref": reference,
         })))
-        .unwrap_err();
-        assert!(format!("{err}").contains("`client_id`"));
+        .expect("config with no client_id is accepted");
+        assert!(t.inner.client_id.is_none());
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn long_lived_token_envelope_parses() {
+        // The JSON envelope `{"access_token":"..."}` is what
+        // `save_pasted_token` writes for long-lived tokens.
+        let parsed: LongLivedToken =
+            serde_json::from_str(r#"{"access_token":"sl.ABC123"}"#).unwrap();
+        assert_eq!(parsed.access_token, "sl.ABC123");
     }
 
     #[test]
@@ -540,7 +632,7 @@ mod tests {
             "credentials_ref": reference,
         })))
         .unwrap();
-        assert_eq!(t.inner.client_id, "cid");
+        assert_eq!(t.inner.client_id.as_deref(), Some("cid"));
         assert_eq!(t.inner.prefix, "");
         std::fs::remove_file(&path).ok();
     }

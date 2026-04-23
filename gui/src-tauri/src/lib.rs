@@ -100,6 +100,23 @@ pub fn run() {
             commands::cloud_target::cloud_target_start_connect,
             commands::cloud_target::cloud_target_complete_connect,
             commands::cloud_target::cloud_target_cancel_connect,
+            // Cloud Vault (embedded vault backed by a cloud target)
+            commands::cloud_target::set_cloud_vault_config,
+            commands::cloud_target::clear_cloud_vault_config,
+            commands::cloud_target::get_cloud_vault_config,
+            commands::cloud_target::suggest_credentials_ref_path,
+            commands::cloud_target::save_s3_credentials,
+            commands::cloud_target::get_oauth_redirect_uri,
+            commands::cloud_target::save_pasted_token,
+            // Saved vault profiles (multi-vault chooser)
+            commands::vaults::list_vault_profiles,
+            commands::vaults::add_vault_profile,
+            commands::vaults::update_vault_profile,
+            commands::vaults::remove_vault_profile,
+            commands::vaults::set_last_used_vault,
+            commands::vaults::clear_last_used_vault,
+            commands::vaults::get_vault_profile,
+            commands::vaults::get_default_local_data_dir,
             // Connection
             commands::connection::get_mode,
             commands::connection::set_mode,

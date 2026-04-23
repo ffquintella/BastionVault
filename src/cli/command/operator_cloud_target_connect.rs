@@ -127,7 +127,15 @@ impl CloudTargetConnect {
             client_secret: self.client_secret.clone(),
         };
 
-        let session = oauth::begin_consent(&provider, &creds_obj, &self.bind_host)?;
+        // Fixed loopback port so the redirect URI is stable and
+        // matches whatever the user registered at the provider's
+        // dev console. See `oauth::DEFAULT_LOOPBACK_PORT`.
+        let session = oauth::begin_consent(
+            &provider,
+            &creds_obj,
+            &self.bind_host,
+            Some(oauth::DEFAULT_LOOPBACK_PORT),
+        )?;
         let listener_addr = session
             .listener_addr()
             .map_err(|e| RvError::ErrString(format!("cloud-target connect: local_addr: {e}")))?;

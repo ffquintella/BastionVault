@@ -1,6 +1,7 @@
 pub mod approle;
 pub mod asset_groups;
 pub mod cloud_target;
+pub mod vaults;
 pub mod sharing;
 pub mod auth;
 pub mod fido2;

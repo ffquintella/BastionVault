@@ -202,14 +202,72 @@ pub async fn load_preferences() -> CmdResult<Preferences> {
     crate::preferences::load()
 }
 
+/// Legacy-shape save for callers that still think in mode + single
+/// remote_profile terms. Folds into the multi-vault list:
+///   * Embedded / no profile → ensures a default Local entry exists
+///     and flips `last_used_id` to it.
+///   * Remote with profile → upserts a Remote vault by matching
+///     address; flips `last_used_id` to it.
+///
+/// New-shape callers (the redesigned ConnectPage) use the explicit
+/// `add_vault_profile` + `set_last_used_vault` commands instead.
 #[tauri::command]
 pub async fn save_preferences(mode: VaultMode, remote_profile: Option<RemoteProfile>) -> CmdResult<()> {
-    // Load-then-merge so we do not drop fields this command does not know
-    // about (e.g. `password_policy`). Falls back to defaults if the file is
-    // missing or corrupt.
+    use crate::preferences::{short_id, VaultProfile, VaultSpec};
+
     let mut prefs = crate::preferences::load().unwrap_or_default();
-    prefs.mode = mode;
-    prefs.remote_profile = remote_profile;
+    match mode {
+        VaultMode::Embedded => {
+            // Find any existing Local profile; otherwise create one.
+            let existing_id = prefs
+                .vaults
+                .iter()
+                .find(|v| matches!(v.spec, VaultSpec::Local { .. }))
+                .map(|v| v.id.clone());
+            let id = existing_id.unwrap_or_else(|| {
+                let id = short_id();
+                prefs.vaults.push(VaultProfile {
+                    id: id.clone(),
+                    name: "Local Vault".to_string(),
+                    spec: VaultSpec::Local {
+                        data_dir: None,
+                        storage_kind: "file".to_string(),
+                    },
+                });
+                id
+            });
+            prefs.last_used_id = Some(id);
+        }
+        VaultMode::Remote => {
+            let Some(profile) = remote_profile else {
+                return Err("save_preferences(Remote) requires a profile".into());
+            };
+            // Upsert by matching address — the legacy caller provides
+            // no stable id.
+            let existing = prefs
+                .vaults
+                .iter()
+                .position(|v| matches!(&v.spec, VaultSpec::Remote { profile: p } if p.address == profile.address));
+            let id = if let Some(idx) = existing {
+                prefs.vaults[idx].spec = VaultSpec::Remote { profile: profile.clone() };
+                prefs.vaults[idx].name = profile.name.clone();
+                prefs.vaults[idx].id.clone()
+            } else {
+                let id = short_id();
+                prefs.vaults.push(VaultProfile {
+                    id: id.clone(),
+                    name: if profile.name.is_empty() {
+                        "Remote Vault".to_string()
+                    } else {
+                        profile.name.clone()
+                    },
+                    spec: VaultSpec::Remote { profile },
+                });
+                id
+            };
+            prefs.last_used_id = Some(id);
+        }
+    }
     crate::preferences::save(&prefs)
 }
 

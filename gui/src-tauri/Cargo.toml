@@ -39,5 +39,11 @@ webview2-com = "0.38"
 windows = { version = "0.61", features = ["Win32_Foundation"] }
 
 [features]
-default = ["storage_hiqlite"]
+# Cloud storage targets are on by default in the desktop GUI build so
+# the "Cloud Vault" option on the Get Started screen can reach any
+# of the four providers without a custom build flag. Server-only
+# operators who want a leaner binary can override by disabling the
+# cloud_* features at their own workspace level.
+default = ["storage_hiqlite", "cloud_targets"]
 storage_hiqlite = ["bastion_vault/storage_hiqlite"]
+cloud_targets = ["bastion_vault/cloud_targets"]

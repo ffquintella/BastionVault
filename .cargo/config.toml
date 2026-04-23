@@ -1,0 +1,43 @@
+# Cargo configuration for the BastionVault workspace.
+#
+# ── Windows MSVC linker: raise PDB page size ──────────────────────
+#
+# The Tauri desktop GUI binary links against the full main crate
+# (post-quantum crypto stack, full storage layer, all four cloud
+# `FileTarget`s under `cloud_targets`, Tauri + wry + webview2 glue,
+# and the authenticator/FIDO2 crate that pulls in vendored OpenSSL).
+# A default-configuration dev build on Windows MSVC exceeds the
+# linker's monolithic PDB size limit and fails with
+# `LNK1318: Unexpected PDB error; LIMIT (12)`.
+#
+# `/PDBPAGESIZE:8192` doubles the default page size, raising the
+# per-PDB ceiling well past anything we'll realistically need — the
+# PDB can now hold ~2 GB of debug info.
+#
+# Linker-only. Release builds inherit the same flag. Safe for all
+# targets; harmless on non-MSVC toolchains (the stanzas only apply
+# to the listed triples).
+#
+# See: https://learn.microsoft.com/en-us/cpp/build/reference/pdbpagesize
+#
+# ── `openssl-sys` + Strawberry Perl on Windows ────────────────────
+#
+# Operators who build from a shell that puts Git's msys perl on
+# PATH ahead of Strawberry Perl will see openssl-sys fail its
+# vendored build (`perl ./Configure VC-WIN64A` rejects msys paths).
+# Workaround is to set `OPENSSL_SRC_PERL` in your environment to the
+# Strawberry perl path, e.g.:
+#
+#   set OPENSSL_SRC_PERL=C:\Strawberry\perl\bin\perl.exe
+#
+# Cargo does not support per-crate env vars in this file, so the
+# var has to live in your shell profile or CI config.
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-Clink-arg=/PDBPAGESIZE:8192"]
+
+[target.i686-pc-windows-msvc]
+rustflags = ["-Clink-arg=/PDBPAGESIZE:8192"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-Clink-arg=/PDBPAGESIZE:8192"]

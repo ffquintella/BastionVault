@@ -2,6 +2,26 @@
 
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
 
+# ── Windows: force `openssl-sys`'s vendored build to use Strawberry
+# Perl instead of the MSYS perl that ships with Git for Windows.
+#
+# Problem: when `make` is invoked from Git-Bash (MSYS), `cargo`'s
+# `Command::new("perl")` in the openssl-sys build script resolves
+# to `C:\Program Files\Git\usr\bin\perl.exe` — a minimal MSYS perl
+# that lacks `Locale::Maketext::Simple`. `perl ./Configure VC-WIN64A`
+# then dies with "Can't locate Locale/Maketext/Simple.pm in @INC".
+#
+# Fix: `openssl-src` honours `OPENSSL_SRC_PERL`. Point it at
+# Strawberry Perl (the standard Windows native install) so
+# Configure runs with the full CPAN module set.
+#
+# Override on the command line if your Strawberry Perl lives
+# elsewhere: `make OPENSSL_SRC_PERL=D:/perl/bin/perl.exe run-dev-gui`.
+ifeq ($(OS),Windows_NT)
+OPENSSL_SRC_PERL ?= C:/Strawberry/perl/bin/perl.exe
+export OPENSSL_SRC_PERL
+endif
+
 .PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch bootstrap win-bootstrap
 
 help: ## List available commands

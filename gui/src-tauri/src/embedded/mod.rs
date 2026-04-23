@@ -3,11 +3,13 @@ use std::sync::Arc;
 
 use bastion_vault::core::SealConfig;
 use bastion_vault::logical::{Operation, Request};
+use bastion_vault::storage::physical::file::FileBackend;
 use bastion_vault::storage::{new_backend, Backend};
 use bastion_vault::BastionVault;
 use serde_json::{Map, Value};
 
 use crate::error::CommandError;
+use crate::preferences::{self, CloudStorageConfig};
 use crate::secure_store;
 
 // ── Storage selection ──────────────────────────────────────────────
@@ -40,30 +42,97 @@ pub fn storage_kind() -> StorageKind {
     }
 }
 
-/// Base data directory for the embedded vault. Each storage backend uses
-/// a different subdirectory so the two layouts never mix on the same
+/// Base data directory for the embedded vault, picked from the env-
+/// var `BASTION_EMBEDDED_STORAGE`. Each storage backend uses a
+/// different subdirectory so the two layouts never mix on the same
 /// machine.
 pub fn data_dir() -> Result<std::path::PathBuf, CommandError> {
+    data_dir_for(storage_kind())
+}
+
+/// Kind-parameterized variant used when the current vault profile
+/// overrides `storage_kind` independently of the env var (the
+/// Add Local Vault form's "Storage engine" select). Same layout as
+/// `data_dir`, different discriminant.
+pub fn data_dir_for(kind: StorageKind) -> Result<std::path::PathBuf, CommandError> {
     let base = dirs::data_local_dir()
         .or_else(dirs::home_dir)
         .ok_or("Cannot determine home directory")?;
     let root = base.join(".bastion_vault_gui");
-    Ok(match storage_kind() {
+    Ok(match kind {
         StorageKind::File => root.join("data"),
         StorageKind::Hiqlite => root.join("data-hiqlite"),
     })
 }
 
-/// Build a storage backend according to `storage_kind()`, pointed at the
-/// matching data directory. Creates the directory if missing.
-fn build_backend() -> Result<Arc<dyn Backend>, CommandError> {
-    let dir = data_dir()?;
+/// Build a storage backend. If preferences hold a `cloud_storage`
+/// config, the backend is a `FileBackend` wrapped around the named
+/// cloud target (S3 / OneDrive / Google Drive / Dropbox); otherwise
+/// the env-var-selected local / Hiqlite path is used, preserving
+/// backward compatibility.
+///
+/// Async because the cloud-target path may need to bootstrap an
+/// obfuscation salt against the underlying provider before the
+/// backend is usable.
+pub async fn build_backend() -> Result<Arc<dyn Backend>, CommandError> {
+    // If the currently-default saved vault profile is a Cloud entry,
+    // build an `ObfuscatingTarget`-capable cloud backend. Local
+    // entries fall through to the env-var-selected filesystem path
+    // below; Remote entries don't reach this code path at all (the
+    // Tauri `connect_remote` command handles them out-of-band).
+    //
+    // Falls back gracefully when no default is set (fresh install,
+    // or the user hit "Switch vault" to clear it) — we just build
+    // the local default, same as the pre-multi-vault behavior.
+    // Effective storage kind + data dir, starting from the env-var
+    // fallback and then overlaying anything the currently-default
+    // saved profile asks for. Cloud profiles short-circuit entirely
+    // below; Local profiles pick up `storage_kind` + the optional
+    // custom `data_dir` here.
+    let mut effective_kind = storage_kind();
+    let mut effective_dir: Option<std::path::PathBuf> = None;
+
+    if let Ok(prefs) = preferences::load() {
+        if let Some(profile) = prefs.default_profile() {
+            match &profile.spec {
+                preferences::VaultSpec::Cloud { config } => {
+                    return build_cloud_backend(config.clone()).await;
+                }
+                preferences::VaultSpec::Local { data_dir, storage_kind: sk } => {
+                    // Per-profile overrides. `storage_kind` strings
+                    // we don't recognise fall back to `File` so we
+                    // never hard-fail on a typo in the preferences
+                    // file; other misconfigurations are louder.
+                    effective_kind = match sk.as_str() {
+                        "hiqlite" => StorageKind::Hiqlite,
+                        _ => StorageKind::File,
+                    };
+                    if let Some(custom) = data_dir.as_ref().filter(|s| !s.is_empty()) {
+                        effective_dir = Some(std::path::PathBuf::from(custom));
+                    }
+                }
+                preferences::VaultSpec::Remote { .. } => {
+                    // Remote profiles are handled by the Tauri
+                    // `connect_remote` command, not here. If we see
+                    // one set as the default we fall through to the
+                    // local default — same as pre-multi-vault.
+                }
+            }
+        }
+    }
+
+    // Use the profile's custom dir if set, otherwise the canonical
+    // per-kind default under the user's data-local dir.
+    let dir = match effective_dir {
+        Some(p) => p,
+        None => data_dir_for(effective_kind)?,
+    };
     std::fs::create_dir_all(&dir)?;
 
     let mut conf: HashMap<String, Value> = HashMap::new();
     let dir_str = dir.to_string_lossy().into_owned();
 
-    match storage_kind() {
+    match effective_kind {
         StorageKind::File => {
             conf.insert("path".into(), Value::String(dir_str));
             new_backend("file", &conf).map_err(CommandError::from)
@@ -108,6 +177,28 @@ fn build_backend() -> Result<Arc<dyn Backend>, CommandError> {
     }
 }
 
+/// Construct a cloud-backed `FileBackend` from a stored
+/// `CloudStorageConfig`. Uses `FileBackend::new_maybe_obfuscated` so
+/// the async salt bootstrap for `obfuscate_keys = true` runs before
+/// the backend is handed to the vault.
+async fn build_cloud_backend(cloud: CloudStorageConfig) -> Result<Arc<dyn Backend>, CommandError> {
+    let mut conf: HashMap<String, Value> = cloud
+        .config
+        .into_iter()
+        .collect();
+    conf.insert("target".into(), Value::String(cloud.target.clone()));
+
+    eprintln!(
+        "embedded: starting cloud backend with target `{}`",
+        cloud.target
+    );
+
+    let backend = FileBackend::new_maybe_obfuscated(&conf)
+        .await
+        .map_err(CommandError::from)?;
+    Ok(Arc::new(backend))
+}
+
 /// Check if a vault has been previously initialized.
 ///
 /// Checks for the file-backend barrier marker file first, then falls back
@@ -115,6 +206,21 @@ fn build_backend() -> Result<Arc<dyn Backend>, CommandError> {
 /// fallback is what catches hiqlite's SQLite files (hiqlite stores the
 /// barrier as rows, not as a literal `_barrier` file).
 pub fn is_initialized() -> Result<bool, CommandError> {
+    // Cloud Vault: can't cheaply check without a network round-trip,
+    // so we treat it as always-initialized once the config is saved.
+    // The caller's subsequent `open_embedded` will surface a clear
+    // error if the underlying bucket / folder doesn't actually have
+    // a vault on it yet (unseal will fail on a missing barrier).
+    // First-time-ever boot uses `init_vault` explicitly from the UI,
+    // so this lives in the "open when possible" code path only.
+    if let Ok(prefs) = preferences::load() {
+        if let Some(profile) = prefs.default_profile() {
+            if matches!(profile.spec, preferences::VaultSpec::Cloud { .. }) {
+                return Ok(true);
+            }
+        }
+    }
+
     let dir = data_dir()?;
     if !dir.exists() {
         return Ok(false);
@@ -148,7 +254,7 @@ pub struct InitOutcome {
 /// command can put the vault into app state without a separate open.
 pub async fn init_embedded() -> Result<InitOutcome, CommandError> {
     eprintln!("embedded: init_embedded starting (storage = {:?})", storage_kind());
-    let backend = build_backend()?;
+    let backend = build_backend().await?;
     eprintln!("embedded: backend built, creating vault");
     let vault = BastionVault::new(backend, None).map_err(|e| CommandError::from(e))?;
 
@@ -305,7 +411,7 @@ async fn enable_default_auth_methods(vault: &BastionVault, root_token: &str) -> 
 
 /// Open and unseal an existing embedded vault using keys from the OS keychain.
 pub async fn open_embedded() -> Result<Arc<BastionVault>, CommandError> {
-    let backend = build_backend()?;
+    let backend = build_backend().await?;
     let vault = BastionVault::new(backend, None).map_err(|e| CommandError::from(e))?;
 
     let unseal_key_hex = secure_store::get_unseal_key()?
