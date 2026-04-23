@@ -34,6 +34,7 @@ import type {
   ResourceHistoryEntry,
   ShareEntry,
   OwnerInfo,
+  FileMeta,
 } from "../lib/types";
 import { DEFAULT_RESOURCE_TYPES, mergeTypeConfig, getTypeDef } from "../lib/resourceTypes";
 import * as api from "../lib/api";
@@ -55,7 +56,9 @@ export function ResourcesPage() {
   const [resourceInfo, setResourceInfo] = useState<ResourceMetadata | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
-  const [detailTab, setDetailTab] = useState<"info" | "secrets" | "sharing" | "history">("info");
+  const [detailTab, setDetailTab] = useState<
+    "info" | "secrets" | "files" | "sharing" | "history"
+  >("info");
   const [filterType, setFilterType] = useState("");
   const [filterGroup, setFilterGroup] = useState("");
   const [search, setSearch] = useState("");
@@ -167,12 +170,15 @@ export function ResourcesPage() {
               tabs={[
                 { id: "info", label: "Info" },
                 { id: "secrets", label: "Secrets" },
+                { id: "files", label: "Files" },
                 { id: "sharing", label: "Sharing" },
                 { id: "history", label: "History" },
               ]}
               active={detailTab}
               onChange={(t) =>
-                setDetailTab(t as "info" | "secrets" | "sharing" | "history")
+                setDetailTab(
+                  t as "info" | "secrets" | "files" | "sharing" | "history",
+                )
               }
             />
           </Card>
@@ -189,6 +195,10 @@ export function ResourcesPage() {
 
           {detailTab === "secrets" && (
             <ResourceSecretsPanel resourceName={String(resourceInfo.name)} toast={toast} />
+          )}
+
+          {detailTab === "files" && (
+            <ResourceFilesPanel resourceName={String(resourceInfo.name)} toast={toast} />
           )}
 
           {detailTab === "sharing" && (
@@ -901,6 +911,144 @@ function ResourceSecretsPanel({ resourceName, toast }: {
         confirmLabel="Delete"
       />
     </>
+  );
+}
+
+// ── Resource Files Panel ───────────────────────────────────────────
+//
+// Lists files whose `resource` field names this resource. Filtering
+// is done client-side over `listFiles` + `readFileMeta` — the same
+// enumeration FilesPage already uses — because the file module does
+// not yet expose a `by-resource` reverse index. For deployments with
+// many files this is O(n), which we accept today; a server-side
+// index is a reasonable future optimization if it becomes a hot path.
+
+function ResourceFilesPanel({
+  resourceName,
+  toast,
+}: {
+  resourceName: string;
+  toast: (kind: "success" | "error" | "info", msg: string) => void;
+}) {
+  const [files, setFiles] = useState<FileMeta[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  function fmtBytes(n: number): string {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
+    return `${(n / (1024 * 1024)).toFixed(2)} MiB`;
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoading(true);
+      try {
+        const list = await api.listFiles();
+        const matched: FileMeta[] = [];
+        for (const id of list.ids) {
+          try {
+            const m = await api.readFileMeta(id);
+            if (m.resource === resourceName) matched.push(m);
+          } catch {
+            /* skip individual read failures */
+          }
+        }
+        matched.sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
+        if (!cancelled) setFiles(matched);
+      } catch (e) {
+        if (!cancelled) toast("error", extractError(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [resourceName, toast]);
+
+  async function download(m: FileMeta) {
+    try {
+      const c = await api.readFileContent(m.id);
+      const binary = atob(c.content_base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const blob = new Blob([bytes.buffer], {
+        type: c.mime_type || "application/octet-stream",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = m.name || m.id;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      toast("error", extractError(e));
+    }
+  }
+
+  return (
+    <Card>
+      <div className="mb-3 text-sm text-[var(--color-text-muted)]">
+        Files whose <span className="font-mono">resource</span> field is{" "}
+        <span className="font-mono">{resourceName}</span>. Manage them on the
+        Files page.
+      </div>
+      {loading ? (
+        <div className="text-sm text-[var(--color-text-muted)]">Loading…</div>
+      ) : files.length === 0 ? (
+        <EmptyState
+          title="No files"
+          description="Upload a file on the Files page and set its Resource field to this resource's name."
+        />
+      ) : (
+        <Table<FileMeta>
+          columns={[
+            {
+              key: "name",
+              header: "Name",
+              render: (m) =>
+                m.name ? m.name : <span className="opacity-60">{m.id}</span>,
+            },
+            {
+              key: "mime_type",
+              header: "Type",
+              render: (m) => m.mime_type || "—",
+            },
+            {
+              key: "size_bytes",
+              header: "Size",
+              render: (m) => fmtBytes(m.size_bytes),
+            },
+            {
+              key: "updated_at",
+              header: "Updated",
+              render: (m) =>
+                m.updated_at ? new Date(m.updated_at).toLocaleString() : "—",
+            },
+            {
+              key: "actions",
+              header: "",
+              render: (m) => (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => download(m)}
+                >
+                  Download
+                </Button>
+              ),
+            },
+          ]}
+          data={files}
+          rowKey={(m) => m.id}
+          emptyMessage=""
+        />
+      )}
+    </Card>
   );
 }
 

@@ -192,6 +192,32 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+### Added
+
+#### File events in the admin Audit page (`src/modules/files/files_audit_store.rs`, `src/modules/files/mod.rs`, `src/modules/system/mod.rs`, `gui/src/routes/AuditPage.tsx`)
+- **`FileAuditStore`** — new append-only log at `sys/files-audit/<nanos>` mirroring `UserAuditStore`. Records the ts, actor entity id (with the existing root-fallback via `caller_audit_actor`), op (`create` / `update` / `delete` / `restore`), file id, name snapshot, and a compact details string (`fields=resource,notes` on metadata update, `content` added when the SHA-256 moved, `version=v3` on restore). Constructed lazily from the system view — no post-unseal wiring needed.
+- **File-module handlers wired** — `handle_create`, `handle_write`, `handle_delete`, and `handle_version_restore` now call `record_file_audit`. On delete, the name is snapshotted from the metadata before wiping storage so the audit row still has a usable label. No-op writes (same metadata, same SHA) are suppressed to keep the Audit page signal-heavy. Failures on the audit-append path are logged and swallowed so they can never block the primary operation — the per-file history log inside the mount still captures the event for the per-file timeline UI.
+- **System audit aggregator** — new branch under `handle_audit_events` that walks `FileAuditStore::list_all()` and emits events in the `file` category. Target is the human name with id carried as a `changed_fields` entry (`id=…`) so both name- and id-based searches match.
+- **`AuditPage`** — added `file` to the category label / variant maps and `restore` to the op-variant map so the new events render cleanly.
+- Tests: 22/22 file-module tests pass; Rust lib + Tauri GUI both type-check clean.
+
+#### Resource detail — Files tab (`gui/src/routes/ResourcesPage.tsx`)
+- **`ResourceFilesPanel`** — new "Files" tab on the Resource detail page, sitting between Secrets and Sharing. Lists every file whose `resource` field names the current resource, with download action. Filtering is client-side over `listFiles` + `readFileMeta` (the file module does not yet expose a `by-resource` reverse index — an O(n) walk that we accept today; server-side index is a future optimization if it becomes a hot path). Empty state directs the operator to the Files page to set the Resource field. This closes the loop with the upload-modal / edit-modal resource typeahead added in this release: associating a file with a resource now surfaces on the resource itself.
+
+#### Edit file details (`gui/src/routes/FilesPage.tsx`, `gui/src-tauri/src/commands/files.rs`, `gui/src/lib/api.ts`)
+- **`EditMetaModal`** — new modal that edits a file's name, resource association (via the `TargetPicker` typeahead), MIME type, tags (comma-separated), and notes. Reachable two ways: an "Edit" button on each row of the Files table, and an "Edit details" button in the Info tab of the file detail modal. No file-module change was needed — `handle_write` already treats an unchanged SHA-256 as a metadata-only write: it skips the version snapshot, and records just the changed metadata fields in history. The modal reads the current content via `readFileContent`, re-POSTs those same bytes with the new metadata, and relies on that path. The content read also re-verifies SHA-256, so a corrupt blob would surface at save time rather than silently overwriting.
+- **`update_file_content` Tauri command + TS binding** — added a missing `resource: Option<String>` parameter. The file module's `handle_write` already accepted `resource` in the body and merged it via `merge_str`, but the Tauri command layer wasn't forwarding the field, so edits to the resource association were silently dropped (the Info tab kept showing `resource: —` after Save).
+
+### Fixed
+
+#### Upload File modal — resource field now typeaheads existing resources (`gui/src/routes/FilesPage.tsx`)
+- The "Resource (optional)" input in the `UploadFileModal` was a free-form text box, so associating a new file with an existing resource required the operator to remember the exact resource name and type it from memory. Misspellings produced orphaned `resource` labels with no association.
+- Replaced the plain `Input` with `TargetPicker kind="resource"` — the same typeahead already used on the Sharing page. It loads the resource list via `listResources` on first focus, filters client-side as the user types, and fails open to a plain text input if listing is denied. Free-form entry still works for resources that don't exist yet.
+
+#### GUI file upload drag-and-drop on Windows (`gui/src-tauri/tauri.conf.json`)
+- **Tauri v2 intercepts native drag-drop on Windows by default.** On WebView2 the WebView never sees the drop, so the HTML5 `onDragOver` / `onDrop` handlers in `FilesPage.tsx` (page-level overlay and per-modal drop zone) silently did nothing: dragging a file onto the Files page had no effect, and users had to fall back to the file picker button.
+- Fix: set `"dragDropEnabled": false` on the `main` window in `tauri.conf.json`. Tauri's native handler is disabled, HTML5 drag-drop events propagate to React as they do in the browser dev build, and the existing `onDrop` handlers (which filter on `e.dataTransfer.types` containing `"Files"` to avoid hijacking intra-page drags) start firing. No frontend changes were needed — the handlers were correct all along; only the Tauri window config was swallowing the events on Windows.
+
 #### Owner capture now stamps root-token writes (`features/per-user-scoping.md`)
 - **`PolicyStore::post_route` owner bookkeeping** (`src/modules/policy/policy_store.rs`) previously gated ownership stamping on a non-empty `entity_id` in auth metadata. Root tokens carry no `entity_id` (only `display_name = "root"`), so every resource or KV secret created through a root token orphaned its owner record and appeared as **Unowned** in the GUI forever. Admin-heavy workflows — where operators routinely create vault objects via root — left the Owner card empty on the Resources Sharing tab even after granting shares (which only an owner or admin can do), making the feature look broken.
 - Fix: reuse the existing `caller_audit_actor(req)` helper (which prefers `entity_id` and falls back to `display_name`) to compute the owner id on capture. Root-token writes now stamp `entity_id = "root"` on the owner record; non-root authenticated writes continue to stamp their real entity id.

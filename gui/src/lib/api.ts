@@ -326,6 +326,7 @@ export const updateFileContent = (args: {
   id: string;
   contentBase64: string;
   name?: string;
+  resource?: string;
   mimeType?: string;
   tags?: string[];
   notes?: string;

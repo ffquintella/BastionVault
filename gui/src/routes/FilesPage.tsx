@@ -13,6 +13,7 @@ import {
 import type { FileMeta, FileSyncTarget, FileVersionInfo } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
+import { TargetPicker } from "../components/ui/TargetPicker";
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -37,6 +38,7 @@ export function FilesPage() {
   const { toast } = useToast();
   const [metas, setMetas] = useState<FileMeta[]>([]);
   const [selected, setSelected] = useState<FileMeta | null>(null);
+  const [editing, setEditing] = useState<FileMeta | null>(null);
   const [showUpload, setShowUpload] = useState(false);
   const [initialDropFile, setInitialDropFile] = useState<File | null>(null);
   const [pageDragOver, setPageDragOver] = useState(false);
@@ -191,6 +193,13 @@ export function FilesPage() {
                     <Button
                       size="sm"
                       variant="secondary"
+                      onClick={() => setEditing(m)}
+                    >
+                      Edit
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
                       onClick={() => doDownload(m)}
                     >
                       Download
@@ -231,6 +240,7 @@ export function FilesPage() {
         <FileDetailModal
           meta={selected}
           onClose={() => setSelected(null)}
+          onEdit={() => setEditing(selected)}
           onChanged={async () => {
             await refresh();
             if (selected) {
@@ -238,6 +248,25 @@ export function FilesPage() {
                 setSelected(await api.readFileMeta(selected.id));
               } catch {
                 setSelected(null);
+              }
+            }
+          }}
+        />
+      )}
+
+      {editing && (
+        <EditMetaModal
+          meta={editing}
+          onClose={() => setEditing(null)}
+          onSaved={async () => {
+            const id = editing.id;
+            setEditing(null);
+            await refresh();
+            if (selected?.id === id) {
+              try {
+                setSelected(await api.readFileMeta(id));
+              } catch {
+                /* detail modal stays open with stale meta */
               }
             }
           }}
@@ -409,10 +438,11 @@ function UploadModal({
         </div>
         <Input label="Name" value={name} onChange={(e) => setName(e.target.value)} />
         <div className="grid grid-cols-2 gap-3">
-          <Input
+          <TargetPicker
+            kind="resource"
             label="Resource (optional)"
             value={resource}
-            onChange={(e) => setResource(e.target.value)}
+            onChange={setResource}
           />
           <Input
             label="MIME type (optional)"
@@ -435,10 +465,12 @@ function UploadModal({
 function FileDetailModal({
   meta,
   onClose,
+  onEdit,
   onChanged,
 }: {
   meta: FileMeta;
   onClose: () => void;
+  onEdit: () => void;
   onChanged: () => void;
 }) {
   const [active, setActive] = useState("info");
@@ -454,7 +486,7 @@ function FileDetailModal({
         onChange={setActive}
       />
       <div className="mt-4">
-        {active === "info" && <InfoTab meta={meta} />}
+        {active === "info" && <InfoTab meta={meta} onEdit={onEdit} />}
         {active === "sync" && <SyncTab meta={meta} onChanged={onChanged} />}
         {active === "versions" && (
           <VersionsTab meta={meta} onChanged={onChanged} />
@@ -600,7 +632,7 @@ function VersionsTab({
   );
 }
 
-function InfoTab({ meta }: { meta: FileMeta }) {
+function InfoTab({ meta, onEdit }: { meta: FileMeta; onEdit: () => void }) {
   const Row = ({ k, v }: { k: string; v: string }) => (
     <div className="flex gap-4 text-sm py-1">
       <span className="w-32 text-[var(--color-text-muted)]">{k}</span>
@@ -609,6 +641,11 @@ function InfoTab({ meta }: { meta: FileMeta }) {
   );
   return (
     <div className="flex flex-col gap-1">
+      <div className="flex justify-end">
+        <Button size="sm" variant="secondary" onClick={onEdit}>
+          Edit details
+        </Button>
+      </div>
       <Row k="id" v={meta.id} />
       <Row k="resource" v={meta.resource} />
       <Row k="mime_type" v={meta.mime_type} />
@@ -808,6 +845,118 @@ function AddSyncTargetModal({
           onChange={(e) => setTargetPath(e.target.value)}
         />
         <Input label="Mode (octal)" value={mode} onChange={(e) => setMode(e.target.value)} />
+      </div>
+    </Modal>
+  );
+}
+
+// ── Edit metadata modal ───────────────────────────────────────────
+//
+// The backend has no metadata-only endpoint (`handle_write` always
+// takes `content_base64`), so "edit details" is implemented by
+// reading the current blob and re-POSTing it with the new metadata.
+// `write_entry_and_blob` already skips the version snapshot when the
+// SHA-256 matches the previous blob and records only the changed
+// metadata fields in history — so this round-trip is clean: no
+// extra versions, truthful history entry.
+
+function EditMetaModal({
+  meta,
+  onClose,
+  onSaved,
+}: {
+  meta: FileMeta;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { toast } = useToast();
+  const [name, setName] = useState(meta.name);
+  const [resource, setResource] = useState(meta.resource);
+  const [mimeType, setMimeType] = useState(meta.mime_type);
+  const [notes, setNotes] = useState(meta.notes);
+  const [tagsText, setTagsText] = useState(meta.tags.join(", "));
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    if (!name.trim()) {
+      toast("error", "Name is required");
+      return;
+    }
+    setBusy(true);
+    try {
+      // Fetch current content so we can re-POST unchanged bytes with
+      // new metadata. The backend re-verifies the SHA-256 on read, so
+      // if storage were corrupt this would surface now rather than
+      // silently persisting metadata over a bad blob.
+      const c = await api.readFileContent(meta.id);
+      const tags = tagsText
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean);
+      await api.updateFileContent({
+        id: meta.id,
+        contentBase64: c.content_base64,
+        name,
+        resource,
+        mimeType: mimeType || undefined,
+        tags,
+        notes: notes || undefined,
+      });
+      toast("success", "Details updated");
+      onSaved();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      open={true}
+      onClose={onClose}
+      title={`Edit ${meta.name || meta.id}`}
+      size="md"
+      actions={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button onClick={submit} disabled={busy}>
+            {busy ? "Saving…" : "Save"}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-3">
+        <Input
+          label="Name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+        />
+        <div className="grid grid-cols-2 gap-3">
+          <TargetPicker
+            kind="resource"
+            label="Resource (optional)"
+            value={resource}
+            onChange={setResource}
+          />
+          <Input
+            label="MIME type (optional)"
+            value={mimeType}
+            onChange={(e) => setMimeType(e.target.value)}
+          />
+        </div>
+        <Input
+          label="Tags (comma-separated)"
+          value={tagsText}
+          onChange={(e) => setTagsText(e.target.value)}
+        />
+        <Input
+          label="Notes (optional)"
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+        />
       </div>
     </Modal>
   );

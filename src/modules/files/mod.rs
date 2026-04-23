@@ -56,6 +56,9 @@ use crate::{
     utils::generate_uuid,
 };
 
+pub mod files_audit_store;
+use files_audit_store::{FileAuditEntry, FileAuditStore};
+
 static FILES_BACKEND_HELP: &str = r#"
 The files backend provides dedicated storage for binary files
 (certificates, keys, configs, small archives) behind the vault barrier.
@@ -544,6 +547,42 @@ fn hist_seq() -> String {
     format!("{:020}", n.max(0) as u128)
 }
 
+/// Record one entry in the admin-facing file audit log.
+///
+/// Failure to write the audit entry is logged and swallowed — we do
+/// not want a write-through error on the audit side to block the
+/// primary operation from succeeding, since the per-file history log
+/// inside the mount still captures the event for the operator-facing
+/// timeline. Matches the fail-soft pattern used for `UserAuditStore`
+/// writes in `path_users.rs` / `path_role.rs`.
+async fn record_file_audit(
+    core: &Core,
+    actor: &str,
+    op: &str,
+    file_id: &str,
+    name: &str,
+    details: &str,
+) {
+    let store = match FileAuditStore::from_core(core) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("file audit: could not open store: {e}");
+            return;
+        }
+    };
+    let entry = FileAuditEntry {
+        ts: String::new(),
+        actor_entity_id: actor.to_string(),
+        op: op.to_string(),
+        file_id: file_id.to_string(),
+        name: name.to_string(),
+        details: details.to_string(),
+    };
+    if let Err(e) = store.append(entry).await {
+        log::warn!("file audit: append failed: {e}");
+    }
+}
+
 fn caller_username(req: &Request) -> String {
     if let Some(auth) = req.auth.as_ref() {
         if let Some(u) = auth.metadata.get("username") {
@@ -759,6 +798,13 @@ impl FilesBackendInner {
             }
         }
 
+        // Admin audit log — parallel to the per-file history write
+        // in `write_entry_and_blob`. Uses the same caller_audit_actor
+        // fallback so root-token writes show up as `"root"`.
+        if let Some(core) = self.core.self_ptr.upgrade() {
+            record_file_audit(&core, &audit_actor, "create", &id, &entry.name, "").await;
+        }
+
         let mut data = Map::new();
         data.insert("id".into(), Value::String(id));
         data.insert("size_bytes".into(), Value::from(entry.size_bytes));
@@ -895,6 +941,32 @@ impl FilesBackendInner {
         )
         .await?;
 
+        // Admin audit log. Summarize the change set the same way the
+        // per-file history does: metadata field names + "content" when
+        // the hash moved. Record nothing on a no-op write (same
+        // fields, same SHA) so the audit page stays signal-heavy.
+        if let Some(core) = self.core.self_ptr.upgrade() {
+            let actor = crate::modules::identity::caller_audit_actor(req);
+            let mut changed = diff_field_names(previous.as_ref(), &entry);
+            let content_changed = previous
+                .as_ref()
+                .map(|p| p.sha256 != entry.sha256)
+                .unwrap_or(false);
+            if content_changed {
+                changed.push("content".to_string());
+                changed.sort();
+                changed.dedup();
+            }
+            if op_label == "create" || !changed.is_empty() {
+                let details = if changed.is_empty() {
+                    String::new()
+                } else {
+                    format!("fields={}", changed.join(","))
+                };
+                record_file_audit(&core, &actor, op_label, &id, &entry.name, &details).await;
+            }
+        }
+
         let mut data = Map::new();
         data.insert("id".into(), Value::String(id));
         data.insert("size_bytes".into(), Value::from(entry.size_bytes));
@@ -908,6 +980,16 @@ impl FilesBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let id = get_str(req, "id");
+
+        // Snapshot the name before wiping metadata so the admin
+        // audit entry still has a usable label after the delete.
+        let name_snapshot = self
+            .load_entry(req, &id)
+            .await
+            .ok()
+            .flatten()
+            .map(|e| e.name)
+            .unwrap_or_default();
 
         // Record the delete in the history log *before* wiping the
         // metadata — consistent with the resource module. The entry
@@ -962,6 +1044,13 @@ impl FilesBackendInner {
                 let _ = req.storage_delete(&format!("{vblob_prefix}{n}")).await;
             }
         }
+
+        // Admin audit.
+        if let Some(core) = self.core.self_ptr.upgrade() {
+            let actor = crate::modules::identity::caller_audit_actor(req);
+            record_file_audit(&core, &actor, "delete", &id, &name_snapshot, "").await;
+        }
+
         Ok(None)
     }
 
@@ -1317,6 +1406,14 @@ impl FilesBackendInner {
         // content is itself snapshotted (restore is reversible).
         self.write_entry_and_blob(req, &id, &restored, &blob.value, Some(&previous), "restore")
             .await?;
+
+        // Admin audit — include the version number so the operator
+        // can see which snapshot was promoted.
+        if let Some(core) = self.core.self_ptr.upgrade() {
+            let actor = crate::modules::identity::caller_audit_actor(req);
+            let details = format!("version=v{version}");
+            record_file_audit(&core, &actor, "restore", &id, &restored.name, &details).await;
+        }
 
         let mut data = Map::new();
         data.insert("id".into(), Value::String(id));

@@ -1146,6 +1146,44 @@ impl SystemBackend {
             }
         }
 
+        // File-resource lifecycle events. Constructed lazily from the
+        // system view (see `FileAuditStore::from_core`) — if the core
+        // is sealed or the view hasn't been installed yet, we skip
+        // silently, same as the other branches.
+        {
+            if let Ok(store) = crate::modules::files::files_audit_store::FileAuditStore::from_core(
+                &self.core,
+            ) {
+                if let Ok(entries) = store.list_all().await {
+                    for e in entries {
+                        let mut fields = Vec::new();
+                        if !e.details.is_empty() {
+                            fields.push(e.details.clone());
+                        }
+                        // Display the human name when present, and
+                        // fall back to the id so the row is never
+                        // empty. The id is always appended as a
+                        // separate field so search still matches it.
+                        let target = if e.name.is_empty() {
+                            e.file_id.clone()
+                        } else {
+                            e.name.clone()
+                        };
+                        fields.push(format!("id={}", e.file_id));
+                        events.push(AuditEventBuilder {
+                            ts: e.ts,
+                            user: e.actor_entity_id,
+                            op: e.op,
+                            category: "file".into(),
+                            target,
+                            changed_fields: fields,
+                            summary: String::new(),
+                        });
+                    }
+                }
+            }
+        }
+
         // Sort newest-first. Timestamps are RFC3339 strings;
         // lexicographic order matches chronological for that format.
         events.sort_by(|a, b| b.ts.cmp(&a.ts));

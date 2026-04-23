@@ -22,6 +22,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   "asset-group": "Asset group",
   share: "Share",
   user: "User / Role",
+  file: "File",
 };
 
 const CATEGORY_VARIANTS: Record<
@@ -34,6 +35,7 @@ const CATEGORY_VARIANTS: Record<
   "asset-group": "success",
   share: "info",
   user: "neutral",
+  file: "info",
 };
 
 const OP_VARIANTS: Record<string, "info" | "success" | "warning" | "error" | "neutral"> = {
@@ -44,6 +46,7 @@ const OP_VARIANTS: Record<string, "info" | "success" | "warning" | "error" | "ne
   revoke: "error",
   "cascade-revoke": "warning",
   "password-change": "warning",
+  restore: "warning",
 };
 
 /**

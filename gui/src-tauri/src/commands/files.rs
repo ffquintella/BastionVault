@@ -225,6 +225,7 @@ pub async fn update_file_content(
     id: String,
     content_base64: String,
     name: Option<String>,
+    resource: Option<String>,
     mime_type: Option<String>,
     tags: Option<Vec<String>>,
     notes: Option<String>,
@@ -233,6 +234,9 @@ pub async fn update_file_content(
     body.insert("content_base64".into(), Value::String(content_base64));
     if let Some(n) = name {
         body.insert("name".into(), Value::String(n));
+    }
+    if let Some(r) = resource {
+        body.insert("resource".into(), Value::String(r));
     }
     if let Some(m) = mime_type {
         body.insert("mime_type".into(), Value::String(m));

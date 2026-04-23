@@ -29,7 +29,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Storage Backend: MySQL | Done |
 | Storage Backend: SQLx (removed, libsqlite3-sys conflict) | Removed |
 | Storage Backend: Hiqlite (embedded Raft SQLite, HA) | Done |
-| Storage Backend: Cloud targets for `FileBackend` (S3 / OneDrive / Google Drive / Dropbox) | Todo |
+| Storage Backend: Cloud targets for `Encrypted File` (S3 / OneDrive / Google Drive / Dropbox) | Todo |
 | Import/Export & Backup/Restore | Done |
 | Resource Management (inventory + grouped secrets) | Done |
 | File Resources (binary blobs + SMB/SCP/SFTP sync) | In Progress (Phases 1–4 + 8 shipped: engine + CRUD + history + 32 MiB cap + SHA-256 integrity + ownership / sharing / admin transfer / backfill + asset-group membership + local-FS sync target + minimum-viable GUI + content versioning with snapshot-on-write / retention / restore; Phases 5–7 — SMB / SFTP / SCP sync + periodic re-sync — still Todo) |
