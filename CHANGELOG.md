@@ -45,6 +45,13 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Changed
+
+#### Cloud Storage Targets initiative closed (`roadmap.md`, `features/cloud-storage-backend.md`)
+- Moved the Cloud Storage Targets initiative from *Active* to *Completed Initiatives* in `roadmap.md` with a one-paragraph summary covering all eight phases + the Get-Started-page integration (multi-vault chooser + Cloud Vault option) that grew out of the work. Two sub-slices stay explicitly deferred: the rekey-CLI orchestrator for obfuscation salt rotation (library pieces are present, end-to-end CLI is not), and propagating obfuscation-salt async bootstrap through server-mode `storage::new_backend` (desktop mode already honors it via `FileBackend::new_maybe_obfuscated` + `embedded::build_backend`). Neither blocks day-to-day use.
+- `features/cloud-storage-backend.md` status flipped to **Done** and a "Feature complete — shipped scope recap" section added at the bottom: a single-page audit of every artifact that shipped (trait, 4 provider targets, credentials resolver, OAuth infra, CLI, GUI surfaces, obfuscation decorator, OS keychain), test matrix coverage, explicit non-goals, and the two deferred sub-slices with rationale.
+- Feature-status table row in `roadmap.md` shortened from the multi-line "Phases shipped" log to a concise "Done (all 8 phases shipped; see Completed Initiatives)" pointer.
+
 ### Fixed
 
 #### Token-login now validates before signing in (`gui/src-tauri/src/commands/auth.rs`, `gui/src-tauri/src/commands/connection.rs`)

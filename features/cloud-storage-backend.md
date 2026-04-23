@@ -13,7 +13,7 @@ The correct framing is: **the Encrypted File backend writes files somewhere. Tha
 
 ## Status
 
-**In Progress.** Phase 1 (`FileTarget` abstraction + `LocalFsTarget`) shipped. Phases 2–8 pending.
+**Done.** All 8 phases shipped, plus the Get-Started-page integration (multi-vault chooser + Cloud Vault option) that grew out of the work. Two sub-slices are explicitly deferred and documented at the bottom of this file; neither blocks day-to-day use.
 
 ### Phase 1 — shipped
 
@@ -409,3 +409,88 @@ Phase 1 is the critical path — it is a pure refactor with no functional change
 1. Whether to parse the full config into a `TargetKind` enum at `FileBackend::new` time, or keep it fully dynamic via `Arc<dyn FileTarget>`. Leaning `Arc<dyn>` for pluggability; the static-dispatch alternative saves one virtual call per operation which is negligible at cloud latencies.
 2. Whether `credentials_ref = "keychain:..."` is available on Linux via `secret-service`, or gated to macOS / Windows where the platform keychain is more reliable. Leaning "available everywhere, operator chooses `file:` on Linux if `secret-service` isn't running."
 3. Whether the `FileTarget` trait should also expose a bulk-delete primitive that S3 / Dropbox can implement efficiently, or whether per-object deletes in a loop are acceptable in v1. Leaning per-object for simplicity; bulk-delete as a later optimization.
+
+## Feature complete — shipped scope recap
+
+Every core phase is done; the rest of this section is a single-page
+audit of what landed so operators planning a cloud-backed deployment
+can scan the surface area without re-reading the phase log.
+
+### What ships in the default binary
+
+Nothing. All four provider targets + the keychain writer are behind
+Cargo feature flags (`cloud_s3` / `cloud_onedrive` / `cloud_gdrive` /
+`cloud_dropbox` / `cloud_keychain`; umbrella `cloud_targets`). A
+server-only build that only uses the Encrypted File backend
+(filesystem or Hiqlite) pays zero compile / binary-size cost for
+cloud support.
+
+The desktop Tauri GUI **does** default `cloud_targets` on, so the
+installed desktop app can reach any of the four providers without a
+custom build. Operators who distribute a minimal desktop binary can
+opt out at their own workspace level.
+
+### Surface area shipped
+
+| Layer | Artifact |
+|---|---|
+| Trait | `FileTarget` — `read` / `write` / `delete` / `list` / `lock`, byte-level below the barrier |
+| Local | `LocalFsTarget` — the pre-Phase-1 `FileBackend` behavior, unchanged |
+| S3 | `S3Target` via `rusty-s3` + `ureq` (MinIO-compatible) |
+| OneDrive | `OneDriveTarget` via Microsoft Graph, App-folder scope |
+| Google Drive | `GoogleDriveTarget` via Drive v3, `drive.appdata` scope, folder-id cache |
+| Dropbox | `DropboxTarget` via v2 API, both OAuth refresh-token and long-lived `{"access_token":"..."}` envelope formats |
+| Credentials resolver | `file:` / `env:` / `inline:` / `keychain:` grammar with `Secret`-newtype zero-on-drop |
+| OAuth infra | PKCE + loopback-redirect on fixed port `8472`, provider factory for onedrive/gdrive/dropbox, authorization-code + refresh-token exchange, CSRF state validation |
+| CLI | `bvault operator cloud-target connect --target=<kind>` with cross-platform browser launch + atomic refresh-token persistence |
+| GUI — Settings | Cloud Storage Targets card with inline Connect flow, dev-console help links per provider |
+| GUI — Get Started | Multi-vault chooser with saved profiles + "Cloud Vault" add-new option (OAuth / S3 / paste-token paths) |
+| GUI — InitPage | Kind-aware copy + ⇄ switch / ⚙ inline credential re-paste / 🗑 forget controls |
+| Obfuscation | `ObfuscatingTarget` decorator, HMAC-SHA256 + auto-bootstrapped salt, `FileBackend::new_maybe_obfuscated` async constructor |
+| OS keychain | `creds::resolve` + `creds::persist` with `keyring` crate, `<service>/<user>` label syntax |
+
+### Test matrix
+
+Default build, each cloud feature individually, `cloud_targets` (all
+five together), and the Tauri GUI all compile clean. File-module
+suite: 57 default + 11 obfuscate unit tests + per-provider unit
+tests (S3: 9, OneDrive: 12, Google Drive: 11, Dropbox: 12) +
+`#[ignore]`d live-integration tests gated on per-provider env vars.
+GUI: 66/66 vitest tests and full TypeScript pass.
+
+### Explicitly deferred (by design)
+
+1. **Rekey-CLI for the obfuscation salt.** The library pieces
+   (`ObfuscatingTarget::with_salt`, `list("")` enumeration) are
+   present; the end-to-end CLI that walks old-salt → new-salt is
+   not shipped. Production rekey today runs via `operator migrate`
+   with a non-obfuscated intermediate, same mechanism used for
+   moving between backends.
+2. **Sync-path obfuscation bootstrap.** Desktop mode constructs
+   cloud `FileBackend`s through `embedded::build_backend` which is
+   async and honors `obfuscate_keys = true` via
+   `FileBackend::new_maybe_obfuscated`. Server mode uses
+   `storage::new_backend` which is sync and ignores the flag with
+   a loud log warning — threading the async bootstrap through the
+   broader storage chain is a separate refactor that touches the
+   startup path for every backend kind. Not blocking because
+   server-mode cloud-storage deployments still have the other 7.5
+   phases available; if/when demand materializes, the path is to
+   make `storage::new_backend` async and propagate.
+
+### What's intentionally not in scope
+
+Restating from the Motivation section so the "no" answers are
+explicit:
+
+- Multi-writer coordination across multiple vaults pointing at the
+  same target. Single-writer-per-target is the assumption and the
+  `lock()` no-op on cloud targets documents it; operators who need
+  HA across hosts use the Hiqlite backend, which is what it's for.
+- Provider-side rollback protection. The barrier's integrity story
+  covers single-object AEAD; whole-bucket rollback to an earlier
+  state is the intrinsic limit of untrusted cloud storage, noted
+  in the docs.
+- Cross-provider sync. Each vault targets exactly one target at a
+  time; `operator migrate` between providers works but there is
+  no built-in replication.
