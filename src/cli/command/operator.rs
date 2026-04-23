@@ -1,7 +1,10 @@
 use clap::{Parser, Subcommand};
 use sysexits::ExitCode;
 
-use super::{operator_init, operator_export, operator_import, operator_seal, operator_unseal};
+use super::{
+    operator_cloud_target_connect, operator_export, operator_import, operator_init, operator_seal,
+    operator_unseal,
+};
 #[cfg(not(feature = "sync_handler"))]
 use super::{operator_backup, operator_migrate, operator_restore};
 use crate::{cli::command::CommandExecutor, EXIT_CODE_INSUFFICIENT_PARAMS};
@@ -50,6 +53,32 @@ pub enum Commands {
     Restore(operator_restore::Restore),
     Export(operator_export::Export),
     Import(operator_import::Import),
+    /// OAuth consent flow for cloud storage targets (OneDrive,
+    /// Google Drive, Dropbox). See `features/cloud-storage-backend.md`.
+    #[command(name = "cloud-target")]
+    CloudTarget(CloudTarget),
+}
+
+/// Grouping wrapper so we can hang `connect` (and future verbs like
+/// `disconnect` / `refresh-now`) under `cloud-target`.
+#[derive(Parser)]
+pub struct CloudTarget {
+    #[command(subcommand)]
+    command: CloudTargetCommands,
+}
+
+#[derive(Subcommand)]
+pub enum CloudTargetCommands {
+    Connect(operator_cloud_target_connect::CloudTargetConnect),
+}
+
+impl CloudTarget {
+    #[inline]
+    pub fn execute(&mut self) -> ExitCode {
+        match &mut self.command {
+            CloudTargetCommands::Connect(c) => c.execute(),
+        }
+    }
 }
 
 impl Commands {
@@ -66,6 +95,7 @@ impl Commands {
             Commands::Restore(restore) => restore.execute(),
             Commands::Export(export) => export.execute(),
             Commands::Import(import) => import.execute(),
+            Commands::CloudTarget(c) => c.execute(),
         }
     }
 }

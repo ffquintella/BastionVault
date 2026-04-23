@@ -364,3 +364,32 @@ export const fido2NativeLogin = (username: string) =>
   invoke<Fido2LoginResponse>("fido2_native_login", { username });
 export const fido2SubmitPin = (pin: string) =>
   invoke<void>("fido2_submit_pin", { pin });
+
+// ── Cloud Storage Targets ─────────────────────────────────────────
+//
+// OAuth consent flow for OneDrive / Google Drive / Dropbox. The
+// two-step split (start/complete) is so the frontend can drive the
+// browser open itself via the Tauri shell plugin between commands —
+// keeps the consent URL in the browser chrome a user can see and
+// copy, rather than inside a Tauri webview popup.
+
+export interface CloudTargetStartResult {
+  sessionId: string;
+  consentUrl: string;
+}
+
+export const cloudTargetStartConnect = (args: {
+  target: "onedrive" | "gdrive" | "dropbox";
+  clientId: string;
+  clientSecret?: string;
+  credentialsRef: string;
+}) =>
+  invoke<CloudTargetStartResult>("cloud_target_start_connect", args);
+
+export const cloudTargetCompleteConnect = (args: {
+  sessionId: string;
+  timeoutSecs?: number;
+}) => invoke<void>("cloud_target_complete_connect", args);
+
+export const cloudTargetCancelConnect = (sessionId: string) =>
+  invoke<void>("cloud_target_cancel_connect", { sessionId });

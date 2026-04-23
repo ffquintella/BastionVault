@@ -13,6 +13,7 @@ import type {
   PasswordPolicy,
 } from "../lib/types";
 import { DEFAULT_RESOURCE_TYPES, mergeTypeConfig } from "../lib/resourceTypes";
+import { CloudStorageCard } from "../components/CloudStorageCard";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 
@@ -481,6 +482,10 @@ export function SettingsPage() {
           onConfirm={handleDeleteType} title="Delete Resource Type"
           message={`Delete the "${deleteTypeId}" resource type? Existing resources of this type will keep their data but won't have field definitions.`}
           confirmLabel="Delete" />
+
+        {/* Cloud Storage Targets — OAuth connect flow. Phase 7 of
+            features/cloud-storage-backend.md. */}
+        <CloudStorageCard />
 
         {/* Actions */}
         <Card title="Actions">

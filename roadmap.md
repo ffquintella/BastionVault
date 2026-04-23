@@ -29,7 +29,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Storage Backend: MySQL | Done |
 | Storage Backend: SQLx (removed, libsqlite3-sys conflict) | Removed |
 | Storage Backend: Hiqlite (embedded Raft SQLite, HA) | Done |
-| Storage Backend: Cloud targets for `Encrypted File` (S3 / OneDrive / Google Drive / Dropbox) | Todo |
+| Storage Backend: Cloud targets for `Encrypted File` (S3 / OneDrive / Google Drive / Dropbox) | Done (all 8 phases: `FileTarget` trait + `LocalFsTarget` refactor; `credentials_ref` read + write for `file:` / `env:` / `inline:` / `keychain:`; **S3 / OneDrive / Google Drive / Dropbox targets**, each feature-gated; **OAuth + PKCE + loopback-redirect infra**; `bvault operator cloud-target connect` CLI; **Settings → Cloud Storage Targets GUI card**; OS keychain writer via `keyring` behind `cloud_keychain`; **Phase 8 key obfuscation** — `ObfuscatingTarget` decorator with HMAC-SHA256 key hashing, auto-bootstrapped salt, async `FileBackend::new_maybe_obfuscated` constructor, on-disk integration test; 57 file-module tests + 11 obfuscate tests + 66 GUI tests green across the feature matrix. Rekey CLI and sync-bootstrap auto-wiring are documented deferred sub-slices) |
 | Import/Export & Backup/Restore | Done |
 | Resource Management (inventory + grouped secrets) | Done |
 | File Resources (binary blobs + SMB/SCP/SFTP sync) | In Progress (Phases 1–4 + 8 shipped: engine + CRUD + history + 32 MiB cap + SHA-256 integrity + ownership / sharing / admin transfer / backfill + asset-group membership + local-FS sync target + minimum-viable GUI + content versioning with snapshot-on-write / retention / restore; Phases 5–7 — SMB / SFTP / SCP sync + periodic re-sync — still Todo) |

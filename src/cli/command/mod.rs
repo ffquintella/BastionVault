@@ -31,6 +31,7 @@ pub mod format;
 pub mod list;
 pub mod login;
 pub mod operator;
+pub mod operator_cloud_target_connect;
 pub mod operator_init;
 #[cfg(not(feature = "sync_handler"))]
 pub mod operator_backup;

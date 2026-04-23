@@ -68,6 +68,18 @@ r2d2 = { version = "0.8.10", optional = true }
 r2d2-diesel = { version = "1.0.0", optional = true }
 hiqlite = { version = "0.13", optional = true, features = ["sqlite", "dlock"] }
 cryptr = { version = "0.10", optional = true, default-features = false }
+# Cloud Storage Targets — Phase 2b: S3 via rusty-s3 (URL signing +
+# XML parsing only, ~15 transitive deps). HTTP is handled by the
+# existing `ureq` dep, so enabling `cloud_s3` does not pull in
+# reqwest / hyper / aws-sdk-*. See `features/cloud-storage-backend.md`.
+rusty-s3 = { version = "0.9", optional = true }
+quick-xml = { version = "0.36", optional = true }
+# OS keychain writer for `credentials_ref = "keychain:..."`. Uses the
+# platform-native secret store on macOS (Keychain) / Windows
+# (Credential Vault) / Linux (Secret Service). Feature-gated so
+# server-only operators who never use `keychain:` refs don't carry
+# the extra transitive deps (notably `dbus` on Linux).
+keyring = { version = "3", optional = true }
 bcrypt = "0.19"
 url = "2.5"
 ureq = { version = "3.3", features = ["json"] }
@@ -115,6 +127,23 @@ default = ["storage_hiqlite"]
 storage_mysql = ["diesel", "r2d2", "r2d2-diesel"]
 storage_hiqlite = ["hiqlite", "cryptr"]
 sync_handler = ["maybe-async/is_sync"]
+# Cloud Storage Targets for the Encrypted File backend.
+# See `features/cloud-storage-backend.md`. Default build stays lean —
+# operators who don't need cloud targets pay no compile / binary cost.
+cloud_s3 = ["rusty-s3", "quick-xml"]
+# OneDrive target pulls no new external deps — reuses `ureq` for HTTP,
+# `serde_json` for Graph API JSON, and the shared OAuth infra from
+# `file/oauth.rs`. The feature flag still exists so operators who
+# don't need OneDrive can opt out of compiling the module + its tests.
+cloud_onedrive = []
+# Google Drive target. Like OneDrive, pulls no new external deps —
+# reuses `ureq` + `serde_json` + the shared OAuth infra.
+cloud_gdrive = []
+# Dropbox target. Zero new external deps — reuses `ureq` +
+# `serde_json` + the shared OAuth infra.
+cloud_dropbox = []
+cloud_keychain = ["keyring"]
+cloud_targets = ["cloud_s3", "cloud_onedrive", "cloud_gdrive", "cloud_dropbox", "cloud_keychain"]
 
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5"

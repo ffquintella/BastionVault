@@ -96,6 +96,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // Cloud storage targets (OAuth consent orchestration)
+            commands::cloud_target::cloud_target_start_connect,
+            commands::cloud_target::cloud_target_complete_connect,
+            commands::cloud_target::cloud_target_cancel_connect,
             // Connection
             commands::connection::get_mode,
             commands::connection::set_mode,
