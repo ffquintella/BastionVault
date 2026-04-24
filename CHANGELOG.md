@@ -45,7 +45,23 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### OIDC authentication backend (`src/modules/credential/oidc/`, `Cargo.toml`, `src/lib.rs`)
+- **New `oidc` credential module** registered via `OidcModule` + `OidcBackend`, following the Module/Backend pattern used by `userpass` and `approle`. Mount with `sys/auth/<path>` kind `oidc` — operators can run multiple mounts for multi-provider setups (`auth/okta/`, `auth/azuread/`, etc.).
+- **Provider config** (`auth/<mount>/config`) holds `oidc_discovery_url`, `oidc_client_id`, optional `oidc_client_secret` (redacted on read — surfaces only `oidc_client_secret_set: bool`), `default_role`, `allowed_redirect_uris`, and `oidc_scopes` (defaults to `["openid","profile","email"]` when empty).
+- **Role config** (`auth/<mount>/role/<name>`, list at `auth/<mount>/role/`) holds `bound_audiences`, `bound_claims` (JSON object, claim → allowed values — supports string / number / bool / array value shapes), `claim_mappings` (OIDC claim → Vault token metadata key), `user_claim` (default `sub`), `groups_claim`, `oidc_scopes`, `allowed_redirect_uris`, `policies`, `token_ttl_secs`, `token_max_ttl_secs`.
+- **`auth_url` endpoint** (unauth; `auth/<mount>/auth_url`) validates `redirect_uri` against the role + provider whitelists, generates PKCE verifier/challenge + CSRF state + nonce, persists an `OidcAuthState` at `state/<csrf>` with a 5-minute TTL, and returns the IdP authorization URL composed via `openidconnect::CoreProviderMetadata::discover_async`.
+- **`callback` endpoint** (unauth; `auth/<mount>/callback`) load-and-deletes the state entry (single-use, defends against replay), rejects stale states, re-discovers the provider metadata so IdP-side key rotations propagate without a vault restart, exchanges the authorization code + PKCE verifier for tokens, verifies the ID token (signature via JWKS, issuer, audience, nonce, expiry — all delegated to the `openidconnect` crate), validates `bound_audiences` + `bound_claims`, projects configured claims onto `auth.metadata`, and returns `Auth { policies, display_name, metadata, lease }` for the token store to mint the vault token.
+- **Token renewal** re-loads the role and rejects if the policy list drifted since the token was minted — operators who narrow a role's policies don't have to wait for existing tokens to expire.
+- **`openidconnect = "4"` added to `Cargo.toml`** with `rustls-tls` + `reqwest` features (default-features off). Reqwest is already transitively in the tree via `hiqlite`, so the marginal dep cost is the crate itself + the JWT transitive closure.
+- **Tests.** 17 unit tests (config redaction round-trip, comma-string / array parsing, bound-claim matching for string/number/boolean/array values, state-TTL boundary, claim-to-string flattening, JSON-envelope parsing). Plus a core-level integration test (`oidc_config_and_role_crud`) that mounts the backend through the real vault core, writes + reads config with redaction assertion, writes + reads + lists + deletes a role through the logical layer. Plus an `#[ignore]`d live-IdP test gated on `BVAULT_TEST_OIDC_DISCOVERY` + `BVAULT_TEST_OIDC_CLIENT_ID` env vars.
+- **GUI login integration is a separate follow-up.** The server surface is complete; the desktop GUI's login page + post-callback token handling lands in the next slice.
+
 ### Changed
+
+#### OIDC Authentication initiative closed (`roadmap.md`, `features/oidc-auth.md`)
+- Moved OIDC Authentication from *Active* to *Completed Initiatives* in `roadmap.md` and updated the feature-status table row from "Todo" to "Done (server module)". `features/oidc-auth.md` header flipped with a status summary pointing at the deferred GUI slice.
 
 #### File Resources initiative closed (`roadmap.md`, `features/file-resources.md`)
 - Moved File Resources from *Active Initiatives* to *Completed Initiatives* in `roadmap.md`. Core feature is shipped and in production use: dedicated `files/` mount with barrier-encrypted metadata + blob storage, per-file history, 32 MiB cap + SHA-256 integrity, ownership / sharing / admin transfer / backfill through the shared `OwnerStore` + `ShareStore` (new `ShareTargetKind::File` variant), asset-group membership via a third reverse index, local-filesystem sync target with atomic tmp-then-rename + per-target sync-state, content versioning with snapshot-on-write + 5-version retention + reversible restore, full Admin → Audit integration, and the Files GUI (page + resource-tab + drag-and-drop upload + edit modal + versions tab + sync-targets management).

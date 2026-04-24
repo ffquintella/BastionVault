@@ -109,6 +109,11 @@ lockfile = "0.4.0"
 arc-swap = "1"
 blake3 = "1.8"
 hmac = "0.13"
+# OIDC auth backend. Pulls in its own reqwest-based http client for
+# discovery + JWKS + token exchange; reqwest is already transitively
+# in the tree (hiqlite), so the marginal dep cost is the openidconnect
+# crate itself + a small jwt transitive closure.
+openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
 sha1 = "0.11"
 sha2 = "0.11"
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }

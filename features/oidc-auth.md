@@ -4,6 +4,10 @@
 
 Add an OIDC authentication backend that allows users to authenticate with BastionVault using any OpenID Connect-compliant identity provider (Okta, Azure AD, Keycloak, Google, Auth0, etc.). The backend supports Authorization Code Flow with PKCE, configurable claim-to-policy role mappings, and automatic token issuance.
 
+## Status
+
+**Done (core feature).** All four phases shipped: `src/modules/credential/oidc/` module registered as `oidc` auth kind, provider config + role CRUD, `auth_url` with PKCE + state storage, `callback` with ID-token verification + claim validation + metadata mapping, token renewal. 17 unit tests + 1 end-to-end core-integration test green; live-IdP test `#[ignore]`d behind `BVAULT_TEST_OIDC_DISCOVERY` + `BVAULT_TEST_OIDC_CLIENT_ID` env vars. GUI wire-up (a login option + post-callback token reception) is a separate follow-up deliverable.
+
 ## Motivation
 
 BastionVault currently supports token, userpass, approle, and certificate authentication. Enterprise environments require SSO integration with centralized identity providers. OIDC is the modern standard for federated authentication, supported by virtually all major IdPs. Without OIDC support, organizations must manage vault-specific credentials separately from their existing identity infrastructure, increasing operational overhead and security risk.
