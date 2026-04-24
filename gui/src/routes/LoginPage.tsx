@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
+import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { AuthLayout } from "../components/AuthLayout";
 import { Modal } from "../components/ui";
 import { useAuthStore } from "../stores/authStore";
@@ -8,7 +9,7 @@ import { useVaultStore } from "../stores/vaultStore";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 
-type Tab = "token" | "login";
+type Tab = "token" | "login" | "oidc";
 type LoginStep = "username" | "password";
 
 export function LoginPage() {
@@ -39,6 +40,15 @@ export function LoginPage() {
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetConfirmText, setResetConfirmText] = useState("");
   const [resetting, setResetting] = useState(false);
+
+  // OIDC login form state. `oidcMount` defaults to the canonical
+  // mount path `oidc` — operators with multiple mounts (e.g.
+  // `okta`, `azuread`) just pick a different value. Role is
+  // optional; when blank, the vault falls back to
+  // `OidcConfig.default_role`.
+  const [oidcMount, setOidcMount] = useState("oidc");
+  const [oidcRole, setOidcRole] = useState("");
+  const [oidcPhase, setOidcPhase] = useState<"idle" | "consent">("idle");
 
   // Listen for FIDO2 status and PIN events
   useEffect(() => {
@@ -85,6 +95,59 @@ export function LoginPage() {
     setPinError(null);
     setPinValue("");
     try { await api.fido2SubmitPin(""); } catch { /* ignore */ }
+  }
+
+  /**
+   * Run the OIDC consent flow in three steps:
+   *   1. `oidcLoginStart` binds a loopback listener and asks the
+   *      vault's `auth/<mount>/auth_url` endpoint for the IdP URL.
+   *   2. Open that URL in the user's real system browser via the
+   *      Tauri shell plugin — gets them the familiar IdP consent
+   *      page with their existing signed-in session rather than
+   *      a blank Tauri popup.
+   *   3. `oidcLoginComplete` blocks on the loopback accept loop,
+   *      POSTs the returned `code` + `state` to the vault's
+   *      `callback`, and returns the minted vault token.
+   *
+   * Cancellation / transient errors release the loopback listener
+   * via `oidcLoginCancel` so the OS port isn't held open for the
+   * 5-minute default timeout. The phase state drives the in-flight
+   * status text ("Waiting for browser callback…").
+   */
+  async function handleOidcLogin(e: React.FormEvent) {
+    e.preventDefault();
+    if (!oidcMount.trim()) {
+      setError("Mount is required (e.g. `oidc` or the mount path of your OIDC backend)");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    let sessionId: string | null = null;
+    try {
+      const start = await api.oidcLoginStart({
+        mount: oidcMount.trim(),
+        role: oidcRole.trim() || undefined,
+      });
+      sessionId = start.sessionId;
+      setOidcPhase("consent");
+      await shellOpen(start.authUrl);
+      const result = await api.oidcLoginComplete({ sessionId });
+      setAuth(result.token, result.policies);
+      loadEntity().catch(() => {});
+      navigate("/dashboard");
+    } catch (err: unknown) {
+      setError(extractError(err));
+      if (sessionId) {
+        try {
+          await api.oidcLoginCancel(sessionId);
+        } catch {
+          /* best-effort cleanup */
+        }
+      }
+    } finally {
+      setOidcPhase("idle");
+      setLoading(false);
+    }
   }
 
   async function handleTokenLogin(e: React.FormEvent) {
@@ -180,6 +243,11 @@ export function LoginPage() {
   const tabs: { id: Tab; label: string }[] = [
     { id: "login", label: "Login" },
     { id: "token", label: "Token" },
+    // Third tab — only meaningful when the vault has an `oidc`
+    // mount. Always showing it keeps the surface discoverable;
+    // operators without an OIDC mount get a helpful error on
+    // Sign In rather than a hidden option.
+    { id: "oidc", label: "SSO" },
   ];
 
   return (
@@ -232,6 +300,56 @@ export function LoginPage() {
             className="w-full py-2.5 bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] disabled:opacity-50 text-white rounded-lg font-medium transition-colors"
           >
             {loading ? "Signing in..." : "Sign In"}
+          </button>
+        </form>
+      )}
+
+      {tab === "oidc" && (
+        <form onSubmit={handleOidcLogin} className="space-y-4">
+          <p className="text-xs text-[var(--color-text-muted)]">
+            Sign in through your organization's identity provider. A new
+            browser window will open for consent; come back here once
+            you've approved.
+          </p>
+          <div>
+            <label className="block text-sm text-[var(--color-text-muted)] mb-1">
+              Mount
+            </label>
+            <input
+              type="text"
+              value={oidcMount}
+              onChange={(e) => setOidcMount(e.target.value)}
+              placeholder="oidc"
+              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[var(--color-primary)]"
+            />
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+              Path the OIDC backend is mounted at. Default <code>oidc</code>;
+              change if your vault uses a different mount
+              (e.g. <code>okta</code>, <code>azuread</code>).
+            </p>
+          </div>
+          <div>
+            <label className="block text-sm text-[var(--color-text-muted)] mb-1">
+              Role <span className="text-[var(--color-text-muted)]">(optional)</span>
+            </label>
+            <input
+              type="text"
+              value={oidcRole}
+              onChange={(e) => setOidcRole(e.target.value)}
+              placeholder="Leave blank for the mount's default role"
+              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[var(--color-primary)]"
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={loading || !oidcMount.trim()}
+            className="w-full py-2.5 bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] disabled:opacity-50 text-white rounded-lg font-medium transition-colors"
+          >
+            {loading
+              ? oidcPhase === "consent"
+                ? "Waiting for browser callback…"
+                : "Opening identity provider…"
+              : "Sign in with SSO"}
           </button>
         </form>
       )}

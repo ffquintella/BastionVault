@@ -108,6 +108,10 @@ pub fn run() {
             commands::cloud_target::save_s3_credentials,
             commands::cloud_target::get_oauth_redirect_uri,
             commands::cloud_target::save_pasted_token,
+            // OIDC login flow (embedded or remote vault)
+            commands::oidc::oidc_login_start,
+            commands::oidc::oidc_login_complete,
+            commands::oidc::oidc_login_cancel,
             // Saved vault profiles (multi-vault chooser)
             commands::vaults::list_vault_profiles,
             commands::vaults::add_vault_profile,

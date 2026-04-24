@@ -47,6 +47,19 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### OIDC GUI login ("SSO" tab) (`gui/src-tauri/src/commands/oidc.rs`, `gui/src-tauri/src/state.rs`, `gui/src/routes/LoginPage.tsx`, `gui/src/lib/api.ts`)
+- **Three Tauri commands** (`oidc_login_start`, `oidc_login_complete`, `oidc_login_cancel`) that bridge the system browser to the vault's `oidc` auth backend. Start binds a loopback port and asks the vault for the IdP authorization URL; complete blocks on the loopback (via `spawn_blocking`), accepts the IdP redirect, POSTs `code` + `state` back to the vault's `callback` endpoint, extracts the minted `client_token` + `policies` from the response, and stashes the token into `AppState`. Cancel releases the listener.
+- **Embedded + remote mode.** `dispatch_vault_write` picks the right path off `AppState::mode` — embedded calls flow through `vault.core.handle_request`; remote mode routes through `remote_client.request_write`. Same commands work for both.
+- **LoginPage gains an "SSO" tab** with Mount (default `oidc`) + optional Role. Submit runs the three-step flow, phase-aware button text ("Opening identity provider…" → "Waiting for browser callback…"), error path releases the listener before reporting.
+- **New `OidcLoginSession`** in `AppState` (separate from `CloudSession` to keep flow scopes distinct). Session id is an opaque short handle; sessions drop on completion, cancel, or timeout — no port leaks.
+- **Minimal query-string parser** for the loopback callback (no `url` crate dep in the Tauri binary). Handles `code` / `state` / `error` / `error_description` with `+`-to-space and `%HH` percent decoding.
+- TS bindings + `LoginResponse`-shaped return so the existing auth store consumes the result without ceremony.
+- 66/66 vitest tests still green; `cargo check -p bastion-vault-gui` clean.
+
+#### Opengrep security-audit cleanup (`src/utils/mod.rs`)
+- Ran `opengrep-core` v1.20.0 against `E:\Dev\opengrep-rules\rust\lang\security\` on all 241 Rust source files. Result: **no actionable findings** — 30 total matches across 3 rules, all accept / documented / false-positive.
+- **Kept `utils::sha1()` with explicit legacy-compat docs.** Discovered a single real caller (`TokenStore::salt_id` — HashiCorp-Vault-compatible salted-cache-key construction: `SHA1(server_salt || token_id)`). Safe in this specific use because collision resistance rests on the secrecy of the server-side salt, not on SHA-1's broken collision strength. Documented the caller and the migration path to SHA-256 for a future breaking-change revision. No functional change.
+
 #### OIDC authentication backend (`src/modules/credential/oidc/`, `Cargo.toml`, `src/lib.rs`)
 - **New `oidc` credential module** registered via `OidcModule` + `OidcBackend`, following the Module/Backend pattern used by `userpass` and `approle`. Mount with `sys/auth/<path>` kind `oidc` — operators can run multiple mounts for multi-provider setups (`auth/okta/`, `auth/azuread/`, etc.).
 - **Provider config** (`auth/<mount>/config`) holds `oidc_discovery_url`, `oidc_client_id`, optional `oidc_client_secret` (redacted on read — surfaces only `oidc_client_secret_set: bool`), `default_role`, `allowed_redirect_uris`, and `oidc_scopes` (defaults to `["openid","profile","email"]` when empty).

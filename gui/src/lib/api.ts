@@ -492,3 +492,26 @@ export const savePastedToken = (args: { target: "s3" | "onedrive" | "gdrive" | "
  */
 export const getDefaultLocalDataDir = (kind: "file" | "hiqlite") =>
   invoke<string>("get_default_local_data_dir", { kind });
+
+// ── OIDC login (browser consent flow) ─────────────────────────────
+//
+// Bridges the system browser to the vault's `oidc` auth backend.
+// Three-command shape matches the Cloud Storage Targets flow so the
+// frontend can shell-open the auth URL in the real browser between
+// the start and complete calls.
+
+export interface OidcLoginStartResult {
+  sessionId: string;
+  authUrl: string;
+}
+
+export const oidcLoginStart = (args: { mount: string; role?: string }) =>
+  invoke<OidcLoginStartResult>("oidc_login_start", args);
+
+export const oidcLoginComplete = (args: {
+  sessionId: string;
+  timeoutSecs?: number;
+}) => invoke<LoginResponse>("oidc_login_complete", args);
+
+export const oidcLoginCancel = (sessionId: string) =>
+  invoke<void>("oidc_login_cancel", { sessionId });

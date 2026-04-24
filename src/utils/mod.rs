@@ -331,6 +331,26 @@ pub fn is_str_subset<T: PartialEq>(sub: &Vec<T>, superset: &Vec<T>) -> bool {
     sub.iter().all(|item| superset.contains(item))
 }
 
+/// SHA-1 of `data`, hex-encoded. **Legacy-compat only.**
+///
+/// Single caller in tree: `TokenStore::salt_id` uses this to derive
+/// cache lookup keys of the form `SHA1(server_salt || token_id)`.
+/// The construction is HashiCorp-Vault-compatible (the canonical
+/// Vault uses the same shape for token-ID salting) so on-disk /
+/// cached state is portable between deployments. It is **not** a
+/// general-purpose hashing helper; new code that needs a hash
+/// should use `sha256`, `blake3`, or HMAC-SHA256 instead.
+///
+/// Security note: collision resistance in this use relies on the
+/// secrecy of `server_salt`, not on SHA-1's collision strength —
+/// an attacker without the salt cannot craft two token IDs that
+/// hash to the same cache key, regardless of SHA-1's well-known
+/// chosen-prefix weaknesses. Flagged once by the Opengrep
+/// `insecure-hashes` rule and reviewed; kept here for Vault
+/// compatibility with a documented migration path to SHA-256
+/// whenever a breaking-change revision of the token-store layout
+/// ships. See also `DigestAlgorithm::Sha1` in `utils/salt.rs`,
+/// another opt-in legacy-compat hashing path.
 pub fn sha1(data: &[u8]) -> String {
     let mut hasher = Sha1::new();
     hasher.update(data);
