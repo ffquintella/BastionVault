@@ -264,9 +264,24 @@ pub fn is_initialized() -> Result<bool, CommandError> {
                     // ambient-default probe for defensive reasons.
                 }
             }
+        } else {
+            // Preferences loaded successfully but NO profile is set
+            // as default — typically the state right after the
+            // operator removed every profile from the chooser. Do
+            // NOT probe the ambient default path: residue from an
+            // earlier profile's data dir would falsely report
+            // "initialised" for a vault that no longer logically
+            // exists, landing the operator on the "Vault Already
+            // Initialized" card with no context about which vault
+            // is being talked about. Return `false` so the GUI
+            // sends them back to the chooser / fresh-install flow.
+            return Ok(false);
         }
     }
 
+    // Preferences unreadable (fresh install, corrupted JSON, etc.)
+    // Fall through to the ambient default — safe because no
+    // profile-driven state exists yet either way.
     let dir = data_dir()?;
     check_local_dir(&dir)
 }
