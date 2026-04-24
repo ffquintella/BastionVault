@@ -10,6 +10,17 @@ interface PasswordGeneratorProps {
   onClose: () => void;
   /** Initial length; defaults to 24 (subject to policy clamp). */
   defaultLength?: number;
+  /**
+   * When true, strip the popover's own card chrome (background,
+   * border, shadow, fixed width) and its internal
+   * Escape / outside-click-close handlers + Cancel button. The
+   * parent is expected to be a `Modal` (or similar) providing its
+   * own backdrop, close button, and overflow container. This avoids
+   * the "card inside a card" visual and the double-close confusion
+   * we had when the generator rendered as a popover over the
+   * enclosing form field.
+   */
+  embedded?: boolean;
 }
 
 /**
@@ -22,7 +33,12 @@ interface PasswordGeneratorProps {
  * forced ON (their toggles are disabled). Users may raise the length or
  * enable additional non-required groups.
  */
-export function PasswordGenerator({ onGenerate, onClose, defaultLength = 24 }: PasswordGeneratorProps) {
+export function PasswordGenerator({
+  onGenerate,
+  onClose,
+  defaultLength = 24,
+  embedded = false,
+}: PasswordGeneratorProps) {
   const policy = usePasswordPolicyStore((s) => s.policy);
   const loadPolicy = usePasswordPolicyStore((s) => s.load);
   const policyLoaded = usePasswordPolicyStore((s) => s.loaded);
@@ -78,8 +94,12 @@ export function PasswordGenerator({ onGenerate, onClose, defaultLength = 24 }: P
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [length, lowercase, uppercase, digits, symbols, excludeAmbiguous, policy]);
 
-  // Close on Escape + outside click.
+  // Close on Escape + outside click — only when the generator is
+  // rendering as an inline popover. In embedded mode the parent
+  // Modal owns those concerns (and its own backdrop click would
+  // otherwise race with ours, producing double-close confusion).
   useEffect(() => {
+    if (embedded) return;
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") onClose();
     }
@@ -93,7 +113,7 @@ export function PasswordGenerator({ onGenerate, onClose, defaultLength = 24 }: P
       document.removeEventListener("mousedown", onClick);
       clearTimeout(t);
     };
-  }, [onClose]);
+  }, [onClose, embedded]);
 
   function reroll() {
     if (anyGroup) setPreview(generatePassword(opts));
@@ -113,12 +133,18 @@ export function PasswordGenerator({ onGenerate, onClose, defaultLength = 24 }: P
     policy.require_digits ||
     policy.require_symbols;
 
+  // In embedded mode the parent Modal owns the card chrome. In
+  // standalone (popover) mode we paint our own w-80 card.
+  const shellClass = embedded
+    ? "space-y-3"
+    : "z-20 w-80 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-lg space-y-3";
+
   return (
     <div
       ref={rootRef}
       role="dialog"
       aria-label="Password generator"
-      className="z-20 w-80 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-lg space-y-3"
+      className={shellClass}
     >
       {/* Preview row */}
       <div className="flex items-center gap-2">
@@ -215,11 +241,15 @@ export function PasswordGenerator({ onGenerate, onClose, defaultLength = 24 }: P
         </p>
       )}
 
-      {/* Actions */}
+      {/* Actions. In embedded mode, the parent Modal's own footer
+          provides the Cancel action; we only emit "Use" so the user
+          has a single commit button right next to the preview. */}
       <div className="flex justify-end gap-2 pt-1">
-        <Button variant="ghost" size="sm" onClick={onClose}>
-          Cancel
-        </Button>
+        {!embedded && (
+          <Button variant="ghost" size="sm" onClick={onClose}>
+            Cancel
+          </Button>
+        )}
         <Button size="sm" onClick={commit} disabled={!preview}>
           Use
         </Button>

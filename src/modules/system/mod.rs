@@ -1566,10 +1566,10 @@ impl SystemBackend {
     const SSO_SETTINGS_KEY: &'static str = "core/sso/settings";
 
     /// Auth-backend kinds that participate in the SSO login flow.
-    /// Growing this list (e.g. for `saml` once Phase 3 lands) is the
-    /// one place a new federated auth kind needs to be registered
-    /// for the GUI to pick it up.
-    const SSO_KINDS: &'static [&'static str] = &["oidc"];
+    /// The unauth `sys/sso/providers` endpoint filters the mount
+    /// table by these kinds so only federation-capable backends
+    /// surface to the login screen.
+    const SSO_KINDS: &'static [&'static str] = &["oidc", "saml"];
 
     pub async fn handle_sso_settings_read(
         &self,

@@ -1,5 +1,6 @@
 import { useState, type InputHTMLAttributes } from "react";
 import { PasswordGenerator } from "./PasswordGenerator";
+import { Modal } from "./Modal";
 
 interface SecretInputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "type"> {
   label?: string;
@@ -102,19 +103,31 @@ export function SecretInput({
           </button>
         )}
 
-        {/* Popover. Absolute so it overlays adjacent UI; rendered inline
-            (not portaled) so it scrolls with the form. */}
-        {showGenerator && genOpen && onGenerate && (
-          <div className="absolute right-0 top-full mt-1 z-20">
-            <PasswordGenerator
-              onGenerate={(v) => onGenerate(v)}
-              onClose={() => setGenOpen(false)}
-            />
-          </div>
-        )}
       </div>
       {error && <p className="text-xs text-[var(--color-danger)]">{error}</p>}
       {hint && !error && <p className="text-xs text-[var(--color-text-muted)]">{hint}</p>}
+
+      {/* Generator lives in its own Modal window rather than an
+          inline popover — the popover was visually colliding with
+          the enclosing form (see the "Create Secret" modal with
+          Length / character-group toggles bleeding out of the card).
+          Modal's own backdrop handles outside-click / Esc; we pass
+          `embedded` to strip the generator's own card chrome so
+          there is no card-inside-a-card. */}
+      {showGenerator && onGenerate && (
+        <Modal
+          open={genOpen}
+          onClose={() => setGenOpen(false)}
+          title="Generate Password"
+          size="sm"
+        >
+          <PasswordGenerator
+            onGenerate={(v) => onGenerate(v)}
+            onClose={() => setGenOpen(false)}
+            embedded
+          />
+        </Modal>
+      )}
     </div>
   );
 }

@@ -549,7 +549,19 @@ export const setSsoSettings = (enabled: boolean) =>
 // `auth/<mount>/role/<name>` surface. `client_secret_set` is the
 // redacted-secret presence hint; the actual secret is never returned.
 
-export interface SsoAdminRole {
+// ── OIDC shapes ─────────────────────────────────────────────────────
+
+export interface OidcAdminConfig {
+  kind: "oidc";
+  discovery_url: string;
+  client_id: string;
+  client_secret_set: boolean;
+  scopes: string[];
+  allowed_redirect_uris: string[];
+}
+
+export interface OidcAdminRole {
+  kind: "oidc";
   name: string;
   user_claim: string;
   groups_claim: string;
@@ -559,30 +571,106 @@ export interface SsoAdminRole {
   token_ttl_secs: number;
 }
 
-export interface SsoAdminProvider {
-  mount: string;
-  display_name: string;
-  kind: string;
-  discovery_url: string;
-  client_id: string;
-  client_secret_set: boolean;
-  allowed_redirect_uris: string[];
-  scopes: string[];
-  default_role: string;
-  role: SsoAdminRole | null;
-}
-
-export interface SsoAdminInput {
-  mount: string;
-  display_name: string;
+export interface OidcAdminInputConfig {
+  kind: "oidc";
   discovery_url: string;
   client_id: string;
   client_secret: string;
-  allowed_redirect_uris: string[];
   scopes: string[];
-  default_role: string;
-  role: SsoAdminRole;
+  allowed_redirect_uris: string[];
 }
+
+// ── SAML shapes ─────────────────────────────────────────────────────
+
+export interface SamlAdminConfig {
+  kind: "saml";
+  entity_id: string;
+  acs_url: string;
+  idp_sso_url: string;
+  idp_slo_url: string;
+  idp_metadata_url: string;
+  idp_metadata_xml_set: boolean;
+  idp_cert_set: boolean;
+  allowed_redirect_uris: string[];
+}
+
+export interface SamlAdminRole {
+  kind: "saml";
+  name: string;
+  bound_subjects: string[];
+  bound_subjects_type: string;
+  bound_attributes_json: string;
+  attribute_mappings_json: string;
+  groups_attribute: string;
+  policies: string[];
+  token_ttl_secs: number;
+}
+
+export interface SamlAdminInputConfig {
+  kind: "saml";
+  entity_id: string;
+  acs_url: string;
+  idp_sso_url: string;
+  idp_slo_url: string;
+  idp_metadata_url: string;
+  idp_metadata_xml: string;
+  idp_cert: string;
+  allowed_redirect_uris: string[];
+}
+
+// ── Unions + provider ──────────────────────────────────────────────
+//
+// SsoAdminProvider is a discriminated union on `kind` so TS narrows
+// both `config` and `role` correctly in consumer code (e.g.
+// `p.kind === "oidc" ? p.config.discovery_url : …`). The wire
+// format from Rust uses the same tagged-union shape via serde's
+// `#[serde(tag = "kind")]` on `SsoProviderConfig` / `SsoAdminRole`,
+// so the top-level `kind` and the nested `config.kind` always
+// agree.
+
+export type SsoProviderConfig = OidcAdminConfig | SamlAdminConfig;
+export type SsoAdminRole = OidcAdminRole | SamlAdminRole;
+export type SsoAdminInputConfig = OidcAdminInputConfig | SamlAdminInputConfig;
+
+interface SsoAdminProviderBase {
+  mount: string;
+  display_name: string;
+  default_role: string;
+}
+
+export interface SsoAdminProviderOidc extends SsoAdminProviderBase {
+  kind: "oidc";
+  config: OidcAdminConfig;
+  role: OidcAdminRole | null;
+}
+
+export interface SsoAdminProviderSaml extends SsoAdminProviderBase {
+  kind: "saml";
+  config: SamlAdminConfig;
+  role: SamlAdminRole | null;
+}
+
+export type SsoAdminProvider = SsoAdminProviderOidc | SsoAdminProviderSaml;
+
+interface SsoAdminInputBase {
+  mount: string;
+  display_name: string;
+  default_role: string;
+}
+
+export interface SsoAdminInputOidc extends SsoAdminInputBase {
+  kind: "oidc";
+  config: OidcAdminInputConfig;
+  role: OidcAdminRole;
+}
+
+export interface SsoAdminInputSaml extends SsoAdminInputBase {
+  kind: "saml";
+  config: SamlAdminInputConfig;
+  role: SamlAdminRole;
+}
+
+export type SsoAdminInput = SsoAdminInputOidc | SsoAdminInputSaml;
 
 export interface SsoCallbackHints {
   mode: string;
@@ -604,5 +692,5 @@ export const ssoAdminUpdate = (input: SsoAdminInput) =>
 export const ssoAdminDelete = (mount: string) =>
   invoke<void>("sso_admin_delete", { mount });
 
-export const ssoAdminCallbackHints = (mount: string) =>
-  invoke<SsoCallbackHints>("sso_admin_callback_hints", { mount });
+export const ssoAdminCallbackHints = (mount: string, kind: "oidc" | "saml") =>
+  invoke<SsoCallbackHints>("sso_admin_callback_hints", { mount, kind });

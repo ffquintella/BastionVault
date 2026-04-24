@@ -417,8 +417,11 @@ export function SettingsPage() {
                           label={p.kind.toUpperCase()}
                           variant="info"
                         />
-                        {!p.client_secret_set && (
+                        {p.kind === "oidc" && !p.config.client_secret_set && (
                           <Badge label="PKCE" variant="neutral" />
+                        )}
+                        {p.kind === "saml" && !p.config.idp_cert_set && (
+                          <Badge label="No cert" variant="warning" />
                         )}
                         {p.role === null && (
                           <Badge label="Missing role" variant="warning" />
@@ -426,11 +429,19 @@ export function SettingsPage() {
                       </div>
                       <div className="text-xs text-[var(--color-text-muted)] mt-0.5 flex gap-3 flex-wrap">
                         <span className="font-mono">mount: {p.mount}</span>
-                        {p.discovery_url && (
+                        {p.kind === "oidc" && p.config.discovery_url && (
                           <span className="font-mono truncate max-w-md">
-                            {p.discovery_url}
+                            {p.config.discovery_url}
                           </span>
                         )}
+                        {p.kind === "saml" &&
+                          (p.config.idp_metadata_url ||
+                            p.config.idp_sso_url) && (
+                            <span className="font-mono truncate max-w-md">
+                              {p.config.idp_metadata_url ||
+                                p.config.idp_sso_url}
+                            </span>
+                          )}
                       </div>
                     </div>
                     <div className="flex gap-1 shrink-0 ml-3">
@@ -906,29 +917,71 @@ function SsoProviderModal({
   onClose: () => void;
 }) {
   const isEdit = provider !== null;
+
+  // `kind` is fixed-after-create: the mount-path maps to one auth
+  // backend implementation, and we can't "convert" an OIDC mount to
+  // SAML without tearing it down. On create the admin picks; on
+  // edit the switcher is disabled.
+  const [kind, setKind] = useState<"oidc" | "saml">(provider?.kind ?? "oidc");
+
   const [mount, setMount] = useState(provider?.mount ?? "oidc");
   const [displayName, setDisplayName] = useState(provider?.display_name ?? "");
-  const [discoveryUrl, setDiscoveryUrl] = useState(provider?.discovery_url ?? "");
-  const [clientId, setClientId] = useState(provider?.client_id ?? "");
-  const [clientSecret, setClientSecret] = useState("");
   const [allowedRedirectUris, setAllowedRedirectUris] = useState(
-    (provider?.allowed_redirect_uris ?? []).join("\n"),
-  );
-  const [scopes, setScopes] = useState(
-    (provider?.scopes ?? COMMON_OIDC_SCOPES.slice(0, 3)).join(", "),
+    ((provider?.config.allowed_redirect_uris ?? []) as string[]).join("\n"),
   );
   const [defaultRole, setDefaultRole] = useState(provider?.default_role ?? "user");
 
-  const [userClaim, setUserClaim] = useState(
-    provider?.role?.user_claim ?? "preferred_username",
+  // OIDC-specific state (populated from provider.config when kind is OIDC).
+  const oidcCfg =
+    provider?.kind === "oidc" ? provider.config : undefined;
+  const oidcRole = provider?.role?.kind === "oidc" ? provider.role : undefined;
+  const [discoveryUrl, setDiscoveryUrl] = useState(oidcCfg?.discovery_url ?? "");
+  const [clientId, setClientId] = useState(oidcCfg?.client_id ?? "");
+  const [clientSecret, setClientSecret] = useState("");
+  const [scopes, setScopes] = useState(
+    (oidcCfg?.scopes ?? COMMON_OIDC_SCOPES.slice(0, 3)).join(", "),
   );
-  const [groupsClaim, setGroupsClaim] = useState(provider?.role?.groups_claim ?? "");
+  const [userClaim, setUserClaim] = useState(
+    oidcRole?.user_claim ?? "preferred_username",
+  );
+  const [groupsClaim, setGroupsClaim] = useState(oidcRole?.groups_claim ?? "");
   const [boundAudiences, setBoundAudiences] = useState(
-    (provider?.role?.bound_audiences ?? []).join(", "),
+    (oidcRole?.bound_audiences ?? []).join(", "),
   );
   const [boundClaimsJson, setBoundClaimsJson] = useState(
-    provider?.role?.bound_claims_json ?? "",
+    oidcRole?.bound_claims_json ?? "",
   );
+
+  // SAML-specific state.
+  const samlCfg =
+    provider?.kind === "saml" ? provider.config : undefined;
+  const samlRole = provider?.role?.kind === "saml" ? provider.role : undefined;
+  const [samlEntityId, setSamlEntityId] = useState(samlCfg?.entity_id ?? "");
+  const [samlAcsUrl, setSamlAcsUrl] = useState(samlCfg?.acs_url ?? "");
+  const [samlIdpSsoUrl, setSamlIdpSsoUrl] = useState(samlCfg?.idp_sso_url ?? "");
+  const [samlIdpSloUrl, setSamlIdpSloUrl] = useState(samlCfg?.idp_slo_url ?? "");
+  const [samlMetadataUrl, setSamlMetadataUrl] = useState(
+    samlCfg?.idp_metadata_url ?? "",
+  );
+  const [samlMetadataXml, setSamlMetadataXml] = useState("");
+  const [samlIdpCert, setSamlIdpCert] = useState("");
+  const [samlBoundSubjects, setSamlBoundSubjects] = useState(
+    (samlRole?.bound_subjects ?? []).join(", "),
+  );
+  const [samlBoundSubjectsType, setSamlBoundSubjectsType] = useState(
+    samlRole?.bound_subjects_type ?? "",
+  );
+  const [samlBoundAttributesJson, setSamlBoundAttributesJson] = useState(
+    samlRole?.bound_attributes_json ?? "",
+  );
+  const [samlAttributeMappingsJson, setSamlAttributeMappingsJson] = useState(
+    samlRole?.attribute_mappings_json ?? "",
+  );
+  const [samlGroupsAttribute, setSamlGroupsAttribute] = useState(
+    samlRole?.groups_attribute ?? "",
+  );
+
+  // Shared role fields.
   const [policies, setPolicies] = useState(
     (provider?.role?.policies ?? ["default"]).join(", "),
   );
@@ -939,12 +992,20 @@ function SsoProviderModal({
   const [hints, setHints] = useState<SsoCallbackHints | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // If the admin flips kind on the Add form, reset the mount-path
+  // suggestion so the default is sensible for the new kind.
+  useEffect(() => {
+    if (!isEdit) {
+      setMount(kind === "oidc" ? "oidc" : "saml");
+    }
+  }, [kind, isEdit]);
+
   useEffect(() => {
     api
-      .ssoAdminCallbackHints(mount.trim() || "oidc")
+      .ssoAdminCallbackHints(mount.trim() || kind, kind)
       .then(setHints)
       .catch(() => setHints(null));
-  }, [mount]);
+  }, [mount, kind]);
 
   function splitList(raw: string): string[] {
     return raw
@@ -962,27 +1023,69 @@ function SsoProviderModal({
   }
 
   async function handleSubmit() {
-    const input: SsoAdminInput = {
+    const common = {
       mount: mount.trim(),
       display_name: displayName.trim(),
-      discovery_url: discoveryUrl.trim(),
-      client_id: clientId.trim(),
-      client_secret: clientSecret,
-      allowed_redirect_uris: splitList(allowedRedirectUris),
-      scopes: splitList(scopes),
       default_role: defaultRole.trim(),
-      role: {
-        name: defaultRole.trim(),
-        user_claim: userClaim.trim(),
-        groups_claim: groupsClaim.trim(),
-        bound_audiences: splitList(boundAudiences),
-        bound_claims_json: boundClaimsJson.trim(),
-        policies: splitList(policies),
-        token_ttl_secs: Number.isFinite(Number(tokenTtlSecs))
-          ? Math.max(0, Math.floor(Number(tokenTtlSecs)))
-          : 0,
-      },
     };
+    const ttl = Number.isFinite(Number(tokenTtlSecs))
+      ? Math.max(0, Math.floor(Number(tokenTtlSecs)))
+      : 0;
+
+    // Build the discriminated-union payload as one atomic object
+    // per kind so TS can correlate `kind`, `config.kind`, and
+    // `role.kind` at the type level. Splitting them out into
+    // separate variables and re-merging trips the union-narrowing.
+    const input: SsoAdminInput =
+      kind === "oidc"
+        ? {
+            ...common,
+            kind: "oidc",
+            config: {
+              kind: "oidc",
+              discovery_url: discoveryUrl.trim(),
+              client_id: clientId.trim(),
+              client_secret: clientSecret,
+              scopes: splitList(scopes),
+              allowed_redirect_uris: splitList(allowedRedirectUris),
+            },
+            role: {
+              kind: "oidc",
+              name: defaultRole.trim(),
+              user_claim: userClaim.trim(),
+              groups_claim: groupsClaim.trim(),
+              bound_audiences: splitList(boundAudiences),
+              bound_claims_json: boundClaimsJson.trim(),
+              policies: splitList(policies),
+              token_ttl_secs: ttl,
+            },
+          }
+        : {
+            ...common,
+            kind: "saml",
+            config: {
+              kind: "saml",
+              entity_id: samlEntityId.trim(),
+              acs_url: samlAcsUrl.trim(),
+              idp_sso_url: samlIdpSsoUrl.trim(),
+              idp_slo_url: samlIdpSloUrl.trim(),
+              idp_metadata_url: samlMetadataUrl.trim(),
+              idp_metadata_xml: samlMetadataXml,
+              idp_cert: samlIdpCert,
+              allowed_redirect_uris: splitList(allowedRedirectUris),
+            },
+            role: {
+              kind: "saml",
+              name: defaultRole.trim(),
+              bound_subjects: splitList(samlBoundSubjects),
+              bound_subjects_type: samlBoundSubjectsType.trim(),
+              bound_attributes_json: samlBoundAttributesJson.trim(),
+              attribute_mappings_json: samlAttributeMappingsJson.trim(),
+              groups_attribute: samlGroupsAttribute.trim(),
+              policies: splitList(policies),
+              token_ttl_secs: ttl,
+            },
+          };
     setSaving(true);
     try {
       await onSave(input);
@@ -1014,6 +1117,34 @@ function SsoProviderModal({
           <h3 className="text-sm font-semibold text-[var(--color-text)]">
             Identification
           </h3>
+          {!isEdit && (
+            <div>
+              <label className="block text-sm font-medium text-[var(--color-text-muted)] mb-1">
+                Protocol
+              </label>
+              <div className="flex gap-2">
+                {(["oidc", "saml"] as const).map((k) => (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() => setKind(k)}
+                    className={`flex-1 py-2 px-3 rounded-lg border text-sm font-medium transition-colors ${
+                      kind === k
+                        ? "border-[var(--color-primary)] bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                        : "border-[var(--color-border)] text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                    }`}
+                  >
+                    {k === "oidc" ? "OpenID Connect" : "SAML 2.0"}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+                {kind === "oidc"
+                  ? "Use OIDC for modern IdPs (Okta OAuth, Google, Azure AD app registrations, Auth0)."
+                  : "Use SAML 2.0 for legacy / enterprise IdPs (ADFS, Shibboleth, Okta SAML, Azure AD Enterprise Applications)."}
+              </p>
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-3">
             <Input
               label="Display Name"
@@ -1028,7 +1159,7 @@ function SsoProviderModal({
               onChange={(e) =>
                 setMount(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""))
               }
-              placeholder="oidc"
+              placeholder={kind === "oidc" ? "oidc" : "saml"}
               disabled={isEdit}
               hint={
                 isEdit
@@ -1040,6 +1171,7 @@ function SsoProviderModal({
         </section>
 
         {/* ─── OIDC provider ──────────────────────────────────── */}
+        {kind === "oidc" && (
         <section className="space-y-3">
           <h3 className="text-sm font-semibold text-[var(--color-text)]">
             OIDC Provider
@@ -1064,12 +1196,12 @@ function SsoProviderModal({
               value={clientSecret}
               onChange={(e) => setClientSecret(e.target.value)}
               placeholder={
-                isEdit && provider?.client_secret_set
+                isEdit && oidcCfg?.client_secret_set
                   ? "••••••• (leave blank to keep)"
                   : "(leave blank for PKCE-only)"
               }
               hint={
-                isEdit && provider?.client_secret_set
+                isEdit && oidcCfg?.client_secret_set
                   ? "Blank leaves the stored secret unchanged."
                   : "Omit for public/PKCE clients. Never surfaced on read."
               }
@@ -1083,6 +1215,98 @@ function SsoProviderModal({
             hint={`Comma-separated. Common: ${COMMON_OIDC_SCOPES.join(", ")}.`}
           />
         </section>
+        )}
+
+        {/* ─── SAML provider ──────────────────────────────────── */}
+        {kind === "saml" && (
+        <section className="space-y-3">
+          <h3 className="text-sm font-semibold text-[var(--color-text)]">
+            SAML 2.0 Provider
+          </h3>
+          <p className="text-xs text-[var(--color-text-muted)]">
+            SAML identifies the Service Provider (this vault) by its
+            entity ID and the Assertion Consumer Service (ACS) URL.
+            Configure one IdP metadata source — either a metadata URL,
+            inline metadata XML, or an SSO URL + signing certificate
+            pair for air-gapped setups.
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <Input
+              label="SP Entity ID"
+              value={samlEntityId}
+              onChange={(e) => setSamlEntityId(e.target.value)}
+              placeholder="https://vault.example.com/saml"
+              hint="Identifies this SP on Issuer + Audience. Register it with your IdP."
+            />
+            <Input
+              label="ACS URL"
+              value={samlAcsUrl}
+              onChange={(e) => setSamlAcsUrl(e.target.value)}
+              placeholder="https://vault.example.com/v1/auth/saml/callback"
+              hint="Where the IdP POSTs the signed SAML Response."
+            />
+          </div>
+          <Input
+            label="IdP Metadata URL"
+            value={samlMetadataUrl}
+            onChange={(e) => setSamlMetadataUrl(e.target.value)}
+            placeholder="https://idp.example.com/metadata"
+            hint="Preferred. Lets the IdP rotate certs without re-configuring the vault."
+          />
+          <label className="block text-sm text-[var(--color-text-muted)]">
+            <span className="block mb-1">
+              Inline IdP Metadata XML {samlCfg?.idp_metadata_xml_set && (
+                <span className="text-[var(--color-text)]">(set — blank to keep)</span>
+              )}
+            </span>
+            <textarea
+              value={samlMetadataXml}
+              onChange={(e) => setSamlMetadataXml(e.target.value)}
+              placeholder="<EntityDescriptor>…</EntityDescriptor>"
+              rows={3}
+              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-[var(--color-primary)]"
+            />
+            <span className="text-xs">
+              Alternative to a metadata URL for air-gapped / offline IdPs.
+              Redacted on read.
+            </span>
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <Input
+              label="IdP SSO URL"
+              value={samlIdpSsoUrl}
+              onChange={(e) => setSamlIdpSsoUrl(e.target.value)}
+              placeholder="https://idp.example.com/sso"
+              hint="Only needed if you skip metadata. Paired with IdP Cert below."
+            />
+            <Input
+              label="IdP Logout URL"
+              value={samlIdpSloUrl}
+              onChange={(e) => setSamlIdpSloUrl(e.target.value)}
+              placeholder="https://idp.example.com/slo"
+              hint="Optional. Single-logout endpoint."
+            />
+          </div>
+          <label className="block text-sm text-[var(--color-text-muted)]">
+            <span className="block mb-1">
+              IdP Signing Certificate (PEM) {samlCfg?.idp_cert_set && (
+                <span className="text-[var(--color-text)]">(set — blank to keep)</span>
+              )}
+            </span>
+            <textarea
+              value={samlIdpCert}
+              onChange={(e) => setSamlIdpCert(e.target.value)}
+              placeholder={"-----BEGIN CERTIFICATE-----\nMIIC…\n-----END CERTIFICATE-----"}
+              rows={4}
+              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-[var(--color-primary)]"
+            />
+            <span className="text-xs">
+              Used to verify the RSA-SHA256 / RSA-SHA1 signature on incoming
+              assertions. Redacted on read.
+            </span>
+          </label>
+        </section>
+        )}
 
         {/* ─── Redirect URIs ──────────────────────────────────── */}
         <section className="space-y-3">
@@ -1145,8 +1369,9 @@ function SsoProviderModal({
             Default Role
           </h3>
           <p className="text-xs text-[var(--color-text-muted)]">
-            Users sign in through this role. It names the vault policies to
-            attach and which claim identifies the user.
+            {kind === "oidc"
+              ? "Users sign in through this role. It names the vault policies to attach and which claim identifies the user."
+              : "Users sign in through this role. It names the vault policies to attach and which SAML attributes / subjects are accepted."}
           </p>
           <div className="grid grid-cols-2 gap-3">
             <Input
@@ -1158,22 +1383,6 @@ function SsoProviderModal({
               placeholder="user"
             />
             <Input
-              label="User Claim"
-              value={userClaim}
-              onChange={(e) => setUserClaim(e.target.value)}
-              placeholder="preferred_username"
-              hint="Claim used as the principal's display name."
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <Input
-              label="Groups Claim"
-              value={groupsClaim}
-              onChange={(e) => setGroupsClaim(e.target.value)}
-              placeholder="groups"
-              hint="Optional. Claim carrying the user's groups list."
-            />
-            <Input
               label="Token TTL (seconds)"
               type="number"
               value={tokenTtlSecs}
@@ -1182,6 +1391,106 @@ function SsoProviderModal({
               hint="0 = token store default."
             />
           </div>
+
+          {kind === "oidc" && (
+            <>
+              <div className="grid grid-cols-2 gap-3">
+                <Input
+                  label="User Claim"
+                  value={userClaim}
+                  onChange={(e) => setUserClaim(e.target.value)}
+                  placeholder="preferred_username"
+                  hint="Claim used as the principal's display name."
+                />
+                <Input
+                  label="Groups Claim"
+                  value={groupsClaim}
+                  onChange={(e) => setGroupsClaim(e.target.value)}
+                  placeholder="groups"
+                  hint="Optional. Claim carrying the user's groups list."
+                />
+              </div>
+              <Input
+                label="Bound Audiences"
+                value={boundAudiences}
+                onChange={(e) => setBoundAudiences(e.target.value)}
+                placeholder="my-client-id"
+                hint="Comma-separated. If set, the ID token's aud must match one."
+              />
+              <label className="block text-sm text-[var(--color-text-muted)]">
+                <span className="block mb-1">Bound Claims (JSON)</span>
+                <textarea
+                  value={boundClaimsJson}
+                  onChange={(e) => setBoundClaimsJson(e.target.value)}
+                  placeholder='{"hd":["example.com"]}'
+                  rows={2}
+                  className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-[var(--color-primary)]"
+                />
+                <span className="text-xs">
+                  Optional JSON object of claim → allowed-values. Login is
+                  denied if any listed claim is missing or doesn't match.
+                </span>
+              </label>
+            </>
+          )}
+
+          {kind === "saml" && (
+            <>
+              <div className="grid grid-cols-2 gap-3">
+                <Input
+                  label="Groups Attribute"
+                  value={samlGroupsAttribute}
+                  onChange={(e) => setSamlGroupsAttribute(e.target.value)}
+                  placeholder="groups"
+                  hint="Optional. SAML attribute carrying the user's groups."
+                />
+                <Input
+                  label="Bound Subjects Type"
+                  value={samlBoundSubjectsType}
+                  onChange={(e) => setSamlBoundSubjectsType(e.target.value)}
+                  placeholder="emailAddress"
+                  hint="Optional. Required NameID Format (e.g. `emailAddress`, `persistent`)."
+                />
+              </div>
+              <Input
+                label="Bound Subjects"
+                value={samlBoundSubjects}
+                onChange={(e) => setSamlBoundSubjects(e.target.value)}
+                placeholder="alice@example.com, bob@example.com"
+                hint="Optional comma-separated NameID allow-list. Empty = any subject."
+              />
+              <label className="block text-sm text-[var(--color-text-muted)]">
+                <span className="block mb-1">Bound Attributes (JSON)</span>
+                <textarea
+                  value={samlBoundAttributesJson}
+                  onChange={(e) => setSamlBoundAttributesJson(e.target.value)}
+                  placeholder='{"department":["engineering","sre"]}'
+                  rows={2}
+                  className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-[var(--color-primary)]"
+                />
+                <span className="text-xs">
+                  Optional JSON object of SAML attribute → allowed-values.
+                  Login is denied if any listed attribute is missing or
+                  doesn't match.
+                </span>
+              </label>
+              <label className="block text-sm text-[var(--color-text-muted)]">
+                <span className="block mb-1">Attribute Mappings (JSON)</span>
+                <textarea
+                  value={samlAttributeMappingsJson}
+                  onChange={(e) => setSamlAttributeMappingsJson(e.target.value)}
+                  placeholder='{"email":"email","displayName":"name"}'
+                  rows={2}
+                  className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-[var(--color-primary)]"
+                />
+                <span className="text-xs">
+                  Optional JSON object of SAML attribute → vault-metadata
+                  key. Renames attributes before they land on the vault token.
+                </span>
+              </label>
+            </>
+          )}
+
           <Input
             label="Policies"
             value={policies}
@@ -1189,27 +1498,6 @@ function SsoProviderModal({
             placeholder="default, readonly"
             hint="Comma-separated. At least one is required."
           />
-          <Input
-            label="Bound Audiences"
-            value={boundAudiences}
-            onChange={(e) => setBoundAudiences(e.target.value)}
-            placeholder="my-client-id"
-            hint="Comma-separated. If set, the ID token's aud must match one."
-          />
-          <label className="block text-sm text-[var(--color-text-muted)]">
-            <span className="block mb-1">Bound Claims (JSON)</span>
-            <textarea
-              value={boundClaimsJson}
-              onChange={(e) => setBoundClaimsJson(e.target.value)}
-              placeholder='{"hd":["example.com"]}'
-              rows={2}
-              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-[var(--color-primary)]"
-            />
-            <span className="text-xs">
-              Optional JSON object of claim → allowed-values. Login is denied
-              if any listed claim is missing or doesn't match.
-            </span>
-          </label>
         </section>
       </div>
     </Modal>
