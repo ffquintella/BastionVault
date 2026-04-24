@@ -32,6 +32,35 @@
 #
 # Cargo does not support per-crate env vars in this file, so the
 # var has to live in your shell profile or CI config.
+#
+# ── Disk-hungry incremental cache (optional disable) ───────────────
+#
+# `target/debug/incremental/` stores rustc's per-query incremental
+# state. On this workspace (Tauri + wry + webview2 + openssl +
+# authenticator + bv_crypto + the four cloud FileTargets + hiqlite)
+# it routinely grows to 5-20 GB under heavy iteration — each
+# compiler session writes a new generation and rotation only culls
+# after the verify pass succeeds.
+#
+# Three trade-offs operators can pick from:
+#
+#   (a) Leave incremental ON (current default). Fastest per-edit
+#       rebuilds (2-5 s), largest target/ dir.
+#
+#   (b) Run `make prune` periodically. Deletes target/*/incremental
+#       without touching the crate-level cache. Next rebuild is
+#       slower; subsequent ones fast again.
+#
+#   (c) Uncomment the `[build]` stanza below to disable incremental
+#       entirely. `target/` shrinks ~5-10x; single-file edits
+#       trigger whole-crate rebuilds (10-60 s) but crate-level
+#       caching still avoids recompiling unchanged deps. Best for
+#       laptops + CI.
+#
+# Run `make target-size` to see where the space is going today.
+#
+# [build]
+# incremental = false
 
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-Clink-arg=/PDBPAGESIZE:8192"]

@@ -22,7 +22,7 @@ OPENSSL_SRC_PERL ?= C:/Strawberry/perl/bin/perl.exe
 export OPENSSL_SRC_PERL
 endif
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch bootstrap win-bootstrap clean gui-clean docs-clean deep-clean
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune target-size
 
 help: ## List available commands
 	@echo "BastionVault v$(VERSION)"
@@ -96,6 +96,28 @@ deep-clean: clean gui-clean docs-clean ## Run every clean target + drop cargo lo
 	rm -f gui/package-lock.json
 	rm -f docs/package-lock.json
 	@echo "deep-clean complete."
+
+target-size: ## Show which target/ subdirectories are eating disk
+	@test -d target || { echo "target/ does not exist — nothing to measure"; exit 0; }
+	@echo "==> target/ top-level"
+	@du -sh target 2>/dev/null || true
+	@echo "==> incremental caches (safe to delete; first rebuild will be slower)"
+	@du -sh target/*/incremental 2>/dev/null || echo "  (none)"
+	@echo "==> dep artefacts"
+	@du -sh target/*/deps 2>/dev/null || echo "  (none)"
+	@echo "==> full binaries"
+	@du -sh target/*/bastion_vault* target/*/bvault* target/*/bastion-vault-gui* 2>/dev/null || echo "  (none)"
+
+prune: ## Drop rustc incremental caches (saves GBs; next rebuild is slower but correct)
+	@echo "==> Removing target/debug/incremental + target/release/incremental"
+	@rm -rf target/debug/incremental 2>/dev/null || true
+	@rm -rf target/release/incremental 2>/dev/null || true
+	@rm -rf gui/src-tauri/target/debug/incremental 2>/dev/null || true
+	@rm -rf gui/src-tauri/target/release/incremental 2>/dev/null || true
+	@echo "==> If you want finer-grained cleanup, install cargo-sweep:"
+	@echo "      cargo install cargo-sweep"
+	@echo "    then: cargo sweep --time 7 --recursive"
+	@echo "prune complete."
 
 bootstrap: ## Install dependencies and set up the development environment
 	rustup update stable
