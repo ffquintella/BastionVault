@@ -80,6 +80,11 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        // `dialog` exposes OS-native file / directory pickers; the
+        // Add Local Vault modal uses the directory picker so the
+        // operator can browse to the storage location instead of
+        // typing the full path.
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
         .setup(|app| {
             #[cfg(target_os = "windows")]

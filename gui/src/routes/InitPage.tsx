@@ -48,6 +48,19 @@ export function InitPage() {
   const [showKeystoreRecovery, setShowKeystoreRecovery] = useState(false);
   const [recoveryUnsealKey, setRecoveryUnsealKey] = useState("");
   const [recovering, setRecovering] = useState(false);
+
+  // Post-init YubiKey enrolment. ConnectPage's Add-Local-Vault
+  // modal stashes `bv.init.yubikey.<profile-id>` in localStorage
+  // with the picked YubiKey's serial when the operator ticked
+  // "Require a YubiKey for unlock." After a successful init we
+  // pop a PIN prompt here and call `yubikey_register` with it,
+  // then clear the stashed preference.
+  const [pendingYubiKeySerial, setPendingYubiKeySerial] = useState<
+    number | null
+  >(null);
+  const [yubiKeyPin, setYubiKeyPin] = useState("");
+  const [registeringYubiKey, setRegisteringYubiKey] = useState(false);
+
   const { toast } = useToast();
 
   useEffect(() => {
@@ -227,6 +240,28 @@ export function InitPage() {
       const result = await api.initVault();
       await api.savePreferences("Embedded");
       setRootToken(result.root_token);
+
+      // Pick up the ConnectPage-stashed YubiKey preference for this
+      // profile id. Presence means the operator opted in during
+      // Add-Local-Vault; we pop a PIN prompt below and hand the
+      // registration to the YubiKey bridge. Absent → keychain-only
+      // setup, same as every pre-Phase-2 install.
+      try {
+        const list = await api.listVaultProfiles();
+        const pid = list.lastUsedId;
+        if (pid) {
+          const raw = window.localStorage.getItem(`bv.init.yubikey.${pid}`);
+          if (raw) {
+            const serial = Number(raw);
+            if (Number.isFinite(serial) && serial > 0) {
+              setPendingYubiKeySerial(serial);
+            }
+            window.localStorage.removeItem(`bv.init.yubikey.${pid}`);
+          }
+        }
+      } catch {
+        /* localStorage unavailable → skip yubikey enrolment */
+      }
     } catch (e: unknown) {
       const msg = extractError(e);
       // If the vault is already initialized, switch to the already-initialized view
@@ -237,6 +272,33 @@ export function InitPage() {
       }
       setInitializing(false);
     }
+  }
+
+  async function handleRegisterYubiKey() {
+    if (pendingYubiKeySerial === null) return;
+    if (yubiKeyPin.trim().length < 4) {
+      toast("error", "PIV PIN is required (4+ digits).");
+      return;
+    }
+    setRegisteringYubiKey(true);
+    try {
+      await api.yubikeyRegister(pendingYubiKeySerial, yubiKeyPin);
+      toast(
+        "success",
+        `YubiKey ${pendingYubiKeySerial} registered as a failsafe unlock path`,
+      );
+      setPendingYubiKeySerial(null);
+      setYubiKeyPin("");
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    } finally {
+      setRegisteringYubiKey(false);
+    }
+  }
+
+  function handleSkipYubiKey() {
+    setPendingYubiKeySerial(null);
+    setYubiKeyPin("");
   }
 
   async function handleReset() {
@@ -312,9 +374,55 @@ export function InitPage() {
             </div>
           </div>
 
+          {pendingYubiKeySerial !== null && (
+            <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-lg space-y-3">
+              <p className="text-amber-400 font-medium text-sm">
+                Register YubiKey #{pendingYubiKeySerial} as unlock failsafe
+              </p>
+              <p className="text-amber-400/80 text-xs">
+                Enter the PIV PIN (default on factory-reset cards is
+                123456). The card will sign a one-off salt so the keystore
+                can derive a post-quantum key from it — the PIN is never
+                persisted and the card's private key never leaves the
+                device. Registers as an ADDITIONAL unlock slot alongside
+                the OS keychain.
+              </p>
+              <div>
+                <label className="block text-xs text-amber-400/70 mb-1">
+                  PIV PIN
+                </label>
+                <input
+                  type="password"
+                  value={yubiKeyPin}
+                  onChange={(e) => setYubiKeyPin(e.target.value)}
+                  placeholder="••••••"
+                  autoComplete="off"
+                  className="w-full bg-[var(--color-bg)] border border-amber-500/30 rounded-lg px-3 py-2 text-sm font-mono text-amber-300 placeholder:text-amber-500/30"
+                />
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={handleSkipYubiKey}
+                  disabled={registeringYubiKey}
+                  className="flex-1 py-2 bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] rounded-lg text-sm transition-colors hover:bg-[var(--color-border)] disabled:opacity-50"
+                >
+                  Skip
+                </button>
+                <button
+                  onClick={handleRegisterYubiKey}
+                  disabled={registeringYubiKey || !yubiKeyPin.trim()}
+                  className="flex-1 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
+                >
+                  {registeringYubiKey ? "Registering…" : "Register YubiKey"}
+                </button>
+              </div>
+            </div>
+          )}
+
           <button
             onClick={handleContinue}
-            className="w-full py-2.5 bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] text-white rounded-lg font-medium transition-colors"
+            disabled={pendingYubiKeySerial !== null && registeringYubiKey}
+            className="w-full py-2.5 bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] disabled:opacity-50 text-white rounded-lg font-medium transition-colors"
           >
             Continue to Dashboard
           </button>

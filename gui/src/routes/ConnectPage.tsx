@@ -152,6 +152,23 @@ export function ConnectPage() {
   // canonical default per storage kind; the user can edit it or hit
   // "Reset to default" to re-fill. Empty string means "use default",
   // so we translate to `undefined` on the way into the VaultSpec.
+  // YubiKey-at-init preference for the new Local Vault. When on, the
+  // InitPage registers the picked YubiKey as an additional unlock
+  // slot on the machine-wide keystore after the vault's init step
+  // succeeds. Stored transiently via `localStorage` keyed by the
+  // new profile's id so the preference survives the navigation
+  // from ConnectPage → InitPage without polluting the saved
+  // profile schema. PIN is NEVER persisted — InitPage prompts for
+  // it at register time and clears immediately after.
+  const [localRequireYubiKey, setLocalRequireYubiKey] = useState(false);
+  const [localYubiKeyDevices, setLocalYubiKeyDevices] = useState<
+    import("../lib/api").YubiKeyDeviceInfo[]
+  >([]);
+  const [localYubiKeySerial, setLocalYubiKeySerial] = useState<number | null>(
+    null,
+  );
+  const [localYubiKeyLoading, setLocalYubiKeyLoading] = useState(false);
+
   const [localStorageKind, setLocalStorageKind] = useState<
     "file" | "hiqlite"
   >("file");
@@ -641,6 +658,20 @@ export function ConnectPage() {
         spec,
         setDefault: true,
       });
+      // Stash the Local-Vault YubiKey preference for the InitPage to
+      // consume post-init. Key is per-profile-id so multi-vault
+      // operators don't cross-contaminate. No PIN here — InitPage
+      // prompts for it at register time.
+      if (addKind === "local" && localRequireYubiKey && localYubiKeySerial) {
+        try {
+          window.localStorage.setItem(
+            `bv.init.yubikey.${id}`,
+            String(localYubiKeySerial),
+          );
+        } catch {
+          /* storage full / disabled — fall back to no-yubikey init */
+        }
+      }
       setAddKind(null);
       await refreshProfiles();
       // Immediately open the newly-added profile so the user doesn't
@@ -854,13 +885,45 @@ export function ConnectPage() {
                 ]}
               />
               <div>
-                <Input
-                  label="Location"
-                  value={localDataDir}
-                  onChange={(e) => setLocalDataDir(e.target.value)}
-                  placeholder={localDefaultDir}
-                  hint="Directory that will hold the encrypted vault files. Empty = use the default below."
-                />
+                <div className="flex gap-2 items-end">
+                  <div className="flex-1 min-w-0">
+                    <Input
+                      label="Location"
+                      value={localDataDir}
+                      onChange={(e) => setLocalDataDir(e.target.value)}
+                      placeholder={localDefaultDir}
+                      hint="Directory that will hold the encrypted vault files. Empty = use the default below."
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={async () => {
+                      // Dialog plugin is async-imported so plain-browser
+                      // vitest runs (where `@tauri-apps/plugin-dialog` is
+                      // not available at module resolution time) don't
+                      // crash on page import. The button is only visible
+                      // inside Tauri anyway.
+                      try {
+                        const { open } = await import(
+                          "@tauri-apps/plugin-dialog"
+                        );
+                        const picked = await open({
+                          directory: true,
+                          defaultPath: localDataDir || localDefaultDir,
+                          title: "Select vault data directory",
+                        });
+                        if (typeof picked === "string" && picked.length > 0) {
+                          setLocalDataDir(picked);
+                        }
+                      } catch (e) {
+                        toast("error", extractError(e));
+                      }
+                    }}
+                  >
+                    Browse…
+                  </Button>
+                </div>
                 <div className="flex items-center justify-between mt-1 text-xs text-[var(--color-text-muted)]">
                   <span className="font-mono truncate mr-2" title={localDefaultDir}>
                     Default: {localDefaultDir || "(resolving…)"}
@@ -875,6 +938,114 @@ export function ConnectPage() {
                     </button>
                   )}
                 </div>
+              </div>
+
+              {/* YubiKey-at-init toggle. When on, InitPage prompts
+                  for the PIV PIN after the vault's init step and
+                  registers the selected device as an additional
+                  unlock slot on the machine-wide keystore. The
+                  OS-keychain slot stays enrolled too, so the
+                  YubiKey is a FAILSAFE (either path unlocks), not
+                  a hard requirement that would brick the vault
+                  if the card is lost. */}
+              <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-3 space-y-2">
+                <label className="flex items-center justify-between gap-3 cursor-pointer select-none">
+                  <div className="min-w-0">
+                    <p className="text-sm text-[var(--color-text)] font-medium">
+                      Require a YubiKey for unlock
+                    </p>
+                    <p className="text-xs text-[var(--color-text-muted)] mt-0.5">
+                      Registers a YubiKey as an additional unlock path for
+                      the machine-wide keystore right after init. Either
+                      the OS keychain OR the card unlocks the file — losing
+                      the card doesn't brick the vault.
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={localRequireYubiKey}
+                    onChange={async (e) => {
+                      const on = e.target.checked;
+                      setLocalRequireYubiKey(on);
+                      if (on && localYubiKeyDevices.length === 0) {
+                        setLocalYubiKeyLoading(true);
+                        try {
+                          const devices = await api.yubikeyListDevices();
+                          setLocalYubiKeyDevices(devices);
+                          if (
+                            devices.length > 0 &&
+                            localYubiKeySerial === null
+                          ) {
+                            setLocalYubiKeySerial(devices[0].serial);
+                          }
+                        } catch {
+                          setLocalYubiKeyDevices([]);
+                        } finally {
+                          setLocalYubiKeyLoading(false);
+                        }
+                      }
+                    }}
+                    className="accent-[var(--color-primary)] w-4 h-4 shrink-0"
+                  />
+                </label>
+
+                {localRequireYubiKey && (
+                  <div className="pt-2 border-t border-[var(--color-border)]">
+                    {localYubiKeyLoading ? (
+                      <p className="text-xs text-[var(--color-text-muted)]">
+                        Scanning for connected YubiKeys…
+                      </p>
+                    ) : localYubiKeyDevices.length === 0 ? (
+                      <div className="space-y-2">
+                        <p className="text-xs text-[var(--color-warning)]">
+                          No YubiKey detected. Plug one in and click
+                          Refresh.
+                        </p>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          onClick={async () => {
+                            setLocalYubiKeyLoading(true);
+                            try {
+                              const devices = await api.yubikeyListDevices();
+                              setLocalYubiKeyDevices(devices);
+                              if (
+                                devices.length > 0 &&
+                                localYubiKeySerial === null
+                              ) {
+                                setLocalYubiKeySerial(devices[0].serial);
+                              }
+                            } finally {
+                              setLocalYubiKeyLoading(false);
+                            }
+                          }}
+                        >
+                          Refresh
+                        </Button>
+                      </div>
+                    ) : (
+                      <Select
+                        label="YubiKey to register"
+                        value={
+                          localYubiKeySerial !== null
+                            ? String(localYubiKeySerial)
+                            : ""
+                        }
+                        onChange={(e) => {
+                          const n = Number(e.target.value);
+                          setLocalYubiKeySerial(
+                            Number.isFinite(n) ? n : null,
+                          );
+                        }}
+                        options={localYubiKeyDevices.map((d) => ({
+                          value: String(d.serial),
+                          label: `#${d.serial}${d.slot_occupied ? "" : " (slot 9a empty)"}`,
+                        }))}
+                      />
+                    )}
+                  </div>
+                )}
               </div>
             </>
           )}
