@@ -393,7 +393,27 @@ fn try_open_slot(
     let cipher = ChaCha20Poly1305::new((&wrap_key).into());
     let content_key_vec = cipher
         .decrypt(Nonce::from_slice(&wrap_nonce), wrapped.as_slice())
-        .map_err(|e| CommandError::from(format!("aead unwrap content key: {e}")))?;
+        .map_err(|e| {
+            // This is the most common "something is wrong with the
+            // local keystore" path: the KEM seed we derived from
+            // the current OS keychain entry doesn't match what was
+            // used to seal the file. Happens when the keychain
+            // entry gets wiped between runs (OS credential-manager
+            // cleanup, uninstall/reinstall, moving the profile
+            // across machines). The cloud bucket's own data is
+            // unaffected — only the cached unseal key is — so the
+            // remediation is to reset the local keystore and
+            // re-enter the vault's unseal key on next open.
+            CommandError::from(format!(
+                "local keystore: unable to unwrap the cached content key \
+                 with this machine's Local Key ({e}). The keychain entry \
+                 `local-master-key` no longer matches the one that sealed \
+                 the file — most likely the OS keychain was wiped between \
+                 runs. Vault data on disk / in the cloud is unaffected; \
+                 run `Settings → Reset local key cache` and re-enter the \
+                 vault's unseal key on next open."
+            ))
+        })?;
     if content_key_vec.len() != KEY_LEN {
         return Err(CommandError::from(format!(
             "unwrapped content key has wrong length: {} bytes",

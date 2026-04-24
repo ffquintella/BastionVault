@@ -96,6 +96,15 @@ export function ConnectPage() {
   const [resetText, setResetText] = useState("");
   const [resetting, setResetting] = useState(false);
 
+  // Local-keystore mismatch recovery. Distinct from `showReset`
+  // because the remediation is different: this wipes the GUI's
+  // cached unseal keys (the encrypted vault-keys.enc file +
+  // keychain entry) while leaving every vault's actual data
+  // intact. Triggered when an open fails with the keystore-unwrap
+  // error signature.
+  const [showLocalKeystoreReset, setShowLocalKeystoreReset] = useState(false);
+  const [resettingLocalKeystore, setResettingLocalKeystore] = useState(false);
+
   // Add-vault modal state.
   const [addKind, setAddKind] = useState<AddKind>(null);
   const [addBusy, setAddBusy] = useState(false);
@@ -362,18 +371,43 @@ export function ConnectPage() {
     } catch (e: unknown) {
       const msg = extractError(e);
       setError(msg);
-      // Offer reset when the vault seems decryptable with the wrong key.
-      if (
+      const lower = msg.toLowerCase();
+      // Local-keystore mismatch takes precedence over the
+      // wipe-the-vault-data recovery because it's the safer
+      // remediation (vault data stays untouched).
+      if (lower.includes("local keystore") || lower.includes("unwrap")) {
+        setShowLocalKeystoreReset(true);
+      } else if (
         profile.spec.kind !== "remote" &&
-        (msg.toLowerCase().includes("unseal") ||
-          msg.toLowerCase().includes("invalid") ||
-          msg.toLowerCase().includes("decrypt"))
+        (lower.includes("unseal") ||
+          lower.includes("invalid") ||
+          lower.includes("decrypt"))
       ) {
         setShowReset(true);
       }
       throw e;
     } finally {
       setOpening(null);
+    }
+  }
+
+  async function handleResetLocalKeystore() {
+    setResettingLocalKeystore(true);
+    try {
+      await api.resetLocalKeystore();
+      toast(
+        "success",
+        "Local key cache cleared. Re-open the vault and re-enter its unseal key.",
+      );
+      setShowLocalKeystoreReset(false);
+      setError(null);
+      // Re-list so the cards re-render (nothing visibly changes,
+      // but the error badge disappears).
+      await refreshProfiles();
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    } finally {
+      setResettingLocalKeystore(false);
     }
   }
 
@@ -650,6 +684,37 @@ export function ConnectPage() {
       {error && (
         <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
           {error}
+        </div>
+      )}
+
+      {showLocalKeystoreReset && (
+        <div className="mb-4 p-4 bg-amber-500/10 border border-amber-500/30 rounded-lg space-y-3">
+          <p className="text-amber-400 font-medium text-sm">
+            The local key cache cannot be unwrapped on this machine.
+          </p>
+          <p className="text-amber-400/80 text-xs">
+            This usually means the OS keychain entry that sealed the cached
+            unseal keys was regenerated (reinstall, keychain cleanup, moved
+            the GUI between user accounts). <span className="font-medium">Your vault data is safe</span> — only
+            the local copy of the unseal key is. Clearing the cache lets
+            you re-open the vault; you'll just need to enter the unseal
+            key once on next open.
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setShowLocalKeystoreReset(false)}
+              className="flex-1 py-2 bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] rounded-lg text-sm transition-colors hover:bg-[var(--color-border)]"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleResetLocalKeystore}
+              disabled={resettingLocalKeystore}
+              className="flex-1 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
+            >
+              {resettingLocalKeystore ? "Clearing..." : "Clear local key cache"}
+            </button>
+          </div>
         </div>
       )}
 

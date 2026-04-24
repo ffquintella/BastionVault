@@ -933,6 +933,39 @@ export function SettingsPage() {
                 Sign Out
               </Button>
             </div>
+
+            <div className="flex items-center justify-between pt-3 border-t border-[var(--color-border)]">
+              <div className="pr-4">
+                <p className="text-sm font-medium">Reset local key cache</p>
+                <p className="text-xs text-[var(--color-text-muted)]">
+                  Clears the encrypted vault-keys.enc file + its OS-keychain
+                  seal. Vault data (local or cloud) is not touched — only
+                  the cached unseal keys are. You'll re-enter each vault's
+                  unseal key on next open. Use when "aead unwrap content
+                  key" / "local keystore" errors appear on the chooser.
+                </p>
+              </div>
+              <Button
+                variant="danger"
+                size="sm"
+                onClick={async () => {
+                  if (
+                    !confirm(
+                      "Clear the local key cache? You'll need to re-enter each vault's unseal key on next open. Vault data is NOT affected.",
+                    )
+                  )
+                    return;
+                  try {
+                    await api.resetLocalKeystore();
+                    toast("success", "Local key cache cleared");
+                  } catch (e: unknown) {
+                    toast("error", extractError(e));
+                  }
+                }}
+              >
+                Reset Cache
+              </Button>
+            </div>
           </div>
         </Card>
       </div>

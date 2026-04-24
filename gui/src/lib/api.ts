@@ -83,6 +83,14 @@ export const initVault = () => invoke<InitResponse>("init_vault");
 export const openVault = () => invoke<void>("open_vault");
 export const sealVault = () => invoke<void>("seal_vault");
 export const resetVault = () => invoke<void>("reset_vault");
+/** Recovery escape hatch — wipes the local keystore (the encrypted
+ *  file + the OS-keychain entry that seals it) while leaving every
+ *  vault's actual data intact. Used when the local keystore file is
+ *  unreadable because the OS keychain entry was regenerated between
+ *  runs. Operators re-enter each vault's unseal key on next open to
+ *  repopulate the cache. */
+export const resetLocalKeystore = () =>
+  invoke<void>("reset_local_keystore");
 /** Close the active embedded vault handle without touching on-disk
  *  data or saved preferences. Used by the Switch-vault flow so the
  *  AppState slot is free for a subsequent `openVault` against a

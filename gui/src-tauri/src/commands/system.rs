@@ -145,6 +145,28 @@ pub async fn get_vault_status(state: State<'_, AppState>) -> CmdResult<VaultStat
     }
 }
 
+/// Blow away the local keystore — the encrypted file that caches
+/// per-vault unseal keys + root tokens alongside the OS keychain
+/// entry that seals it. Leaves ALL vault data intact (the actual
+/// secrets live in the storage backend, encrypted by the barrier
+/// under the unseal key; this command only clears the local
+/// convenience cache).
+///
+/// Used as a recovery escape hatch when the local keystore file is
+/// unreadable — typically because the OS keychain entry was wiped
+/// between runs, leaving the ML-KEM keypair that sealed the file
+/// non-derivable. The operator re-enters each vault's unseal key
+/// on next open to repopulate the cache.
+#[tauri::command]
+pub async fn reset_local_keystore(state: State<'_, AppState>) -> CmdResult<()> {
+    // Drop the in-process vault handle + cached token too — they
+    // reference the now-invalid local keystore state.
+    *state.vault.lock().await = None;
+    *state.token.lock().await = None;
+    crate::local_keystore::wipe_all()?;
+    Ok(())
+}
+
 /// Close the active embedded-vault handle without touching the
 /// on-disk data, keychain, or saved preferences. Used by the
 /// Switch-vault flow so the AppState slot is free for a subsequent

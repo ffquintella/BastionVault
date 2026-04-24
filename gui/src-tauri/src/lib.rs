@@ -142,6 +142,7 @@ pub fn run() {
             commands::system::open_vault,
             commands::system::seal_vault,
             commands::system::reset_vault,
+            commands::system::reset_local_keystore,
             commands::system::disconnect_vault,
             commands::system::get_vault_status,
             commands::system::list_mounts,
