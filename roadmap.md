@@ -92,7 +92,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 - [SAML 2.0 Authentication](features/saml-auth.md)
   SAML 2.0 auth backend with SP-initiated SSO and attribute-to-policy role mappings.
 - [Cloud FileTarget Memory Cache](features/cloud-storage-backend.md)
-  Bounded TTL-based `CachingTarget` decorator (`src/storage/physical/file/cache.rs`) with 30s read TTL / 10s list TTL / 4096-entry / 64 MiB-byte soft caps, write-and-delete invalidation (including prefix-affected list entries), negative-result caching, FIFO eviction, and `bvault_cache_*{layer="cloud_target"}` Prometheus metrics. Default-on for `s3`/`onedrive`/`gdrive`/`dropbox`, default-off for `local`. Zero new deps. 9 unit tests green. Background prefetch + stale-while-revalidate + singleflight deferred as follow-ups.
+  Bounded TTL-based `CachingTarget` decorator (`src/storage/physical/file/cache.rs`) with 30s read TTL / 10s list TTL / 65,536-entry / 500 MiB soft caps, write-and-delete invalidation (including prefix-affected list entries), negative-result caching, FIFO eviction, per-key singleflight coalescing, stale-while-revalidate refresh via `tokio::spawn`, opt-in bounded-concurrency background prefetch, and `bvault_cache_*{layer="cloud_target"}` Prometheus metrics. Default-on for `s3`/`onedrive`/`gdrive`/`dropbox`, default-off for `local`. Config keys: `cache_{read_ttl_secs,list_ttl_secs,max_entries,max_bytes,stale_ratio,prefetch_keys,prefetch_concurrency}`. Zero new deps. 13 unit tests green.
 
 ## Deferred sub-initiatives
 

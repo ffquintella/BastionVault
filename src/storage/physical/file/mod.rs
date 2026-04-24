@@ -61,6 +61,35 @@ fn cache_config_from(conf: &HashMap<String, Value>) -> cache::CacheConfig {
     if let Some(n) = conf.get("cache_max_bytes").and_then(|v| v.as_u64()) {
         cfg.max_bytes = n;
     }
+    // Stale-while-revalidate threshold. `0.5` means entries proactively
+    // refresh halfway through their TTL. Clamped into `[0,1]` by the
+    // cache ctor, so hand-edited configs can't break it.
+    if let Some(n) = conf.get("cache_stale_ratio").and_then(|v| v.as_f64()) {
+        cfg.stale_ratio = n as f32;
+    }
+    // Opt-in background prefetch. Accepts either a JSON array of
+    // strings or a comma-separated string for CLI-friendliness.
+    if let Some(v) = conf.get("cache_prefetch_keys") {
+        cfg.prefetch_keys = match v {
+            Value::Array(a) => a
+                .iter()
+                .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect(),
+            Value::String(s) => s
+                .split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            _ => Vec::new(),
+        };
+    }
+    if let Some(n) = conf
+        .get("cache_prefetch_concurrency")
+        .and_then(|v| v.as_u64())
+    {
+        cfg.prefetch_concurrency = n as usize;
+    }
     cfg
 }
 
