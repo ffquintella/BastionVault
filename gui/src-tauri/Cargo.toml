@@ -24,6 +24,21 @@ authenticator = { version = "0.5", default-features = false, features = ["crypto
 webauthn-rs-proto = "0.5"
 base64urlsafedata = "0.5"
 base64 = "0.22"
+# AEAD + KDF + PQC primitives used by the local keystore
+# (`src-tauri/src/local_keystore.rs`). ChaCha20-Poly1305 wraps the
+# on-disk vault-keys file; HKDF derives sub-keys; ML-KEM provides
+# the post-quantum envelope so a future quantum adversary cannot
+# retroactively decrypt a captured file even if the symmetric
+# master key were somehow recovered. See docs/security-structure.md.
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+rand = "0.9"
+# ML-KEM-768 PQC envelope (Phase 3) is deferred until the `ml-kem`
+# crate version skew with the vault's own PQC deps resolves. The
+# symmetric layer below already provides 256-bit post-quantum
+# confidentiality (Grover-search leaves ~128 bits); the PQC envelope
+# is a defense-in-depth addition, not a prerequisite. See
+# docs/security-structure.md § "Deferred: ML-KEM envelope".
 
 [target.'cfg(windows)'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }

@@ -265,11 +265,17 @@ pub async fn init_embedded() -> Result<InitOutcome, CommandError> {
 
     let init_result = vault.init(&seal_config).await.map_err(|e| CommandError::from(e))?;
 
-    // Store the unseal key and root token in the OS keychain.
+    // Store the unseal key and root token in the local keystore,
+    // indexed by the active vault profile's id. `local_keystore`
+    // encrypts the whole set with a single OS-keychain-anchored
+    // master key, so creating a second vault after this one does
+    // NOT overwrite the first one's secrets (the bug this commit
+    // exists to fix). See `local_keystore` module docstring.
     let unseal_key_hex = hex::encode(&init_result.secret_shares[0]);
     let root_token = init_result.root_token.clone();
-    secure_store::store_unseal_key(&unseal_key_hex)?;
-    secure_store::store_root_token(&root_token)?;
+    let vault_id = current_vault_id();
+    crate::local_keystore::store_unseal_key(&vault_id, &unseal_key_hex)?;
+    crate::local_keystore::store_root_token(&vault_id, &root_token)?;
 
     // Unseal immediately.
     let key_bytes = &init_result.secret_shares[0];
@@ -414,10 +420,17 @@ pub async fn open_embedded() -> Result<Arc<BastionVault>, CommandError> {
     let backend = build_backend().await?;
     let vault = BastionVault::new(backend, None).map_err(|e| CommandError::from(e))?;
 
-    let unseal_key_hex = secure_store::get_unseal_key()?
-        .ok_or("No unseal key found in keychain. Was the vault initialized?")?;
+    // Look up the unseal key for the currently-selected vault
+    // profile. Falls back to the legacy single-entry keychain slot
+    // (via the migration path inside `local_keystore::get_unseal_key`)
+    // so existing installs upgrade transparently.
+    let vault_id = current_vault_id();
+    let unseal_key_hex = crate::local_keystore::get_unseal_key(&vault_id)?
+        .ok_or_else(|| CommandError::from(format!(
+            "No unseal key found for vault `{vault_id}`. Was the vault initialized?"
+        )))?;
     let unseal_key = hex::decode(&unseal_key_hex)
-        .map_err(|_| CommandError::from("Invalid unseal key in keychain"))?;
+        .map_err(|_| CommandError::from("Invalid unseal key in local keystore"))?;
 
     vault.unseal(&[&unseal_key]).await.map_err(|e| CommandError::from(e))?;
 
@@ -427,4 +440,17 @@ pub async fn open_embedded() -> Result<Arc<BastionVault>, CommandError> {
 /// Seal the vault.
 pub async fn seal_vault(vault: &BastionVault) -> Result<(), CommandError> {
     vault.core.load().seal().await.map_err(|e| CommandError::from(e))
+}
+
+/// Resolve the "active" vault id used to index the local keystore.
+/// Falls back to `"default"` when no profile has been marked
+/// last-used — typical of a fresh install's first init. This keeps
+/// single-vault deployments working identically to the pre-keystore
+/// behavior while still giving multi-vault installs their own
+/// per-id slots.
+pub fn current_vault_id() -> String {
+    crate::preferences::load()
+        .ok()
+        .and_then(|p| p.last_used_id)
+        .unwrap_or_else(|| "default".to_string())
 }

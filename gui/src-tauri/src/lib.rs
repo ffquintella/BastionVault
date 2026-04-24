@@ -2,6 +2,7 @@ mod commands;
 mod embedded;
 mod error;
 mod preferences;
+mod local_keystore;
 mod secure_store;
 mod state;
 

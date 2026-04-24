@@ -55,7 +55,11 @@ pub async fn open_vault(state: State<'_, AppState>) -> CmdResult<()> {
     *vault_guard = Some(vault);
     drop(vault_guard);
 
-    if let Some(token) = crate::secure_store::get_root_token()? {
+    // Restore the per-vault root token the init flow stashed under
+    // this profile's id. Keeps the post-open session alive without
+    // a re-login in the single-operator / local-install case.
+    let vault_id = crate::embedded::current_vault_id();
+    if let Some(token) = crate::local_keystore::get_root_token(&vault_id)? {
         *state.token.lock().await = Some(token);
     }
 
@@ -167,6 +171,12 @@ pub async fn reset_vault(state: State<'_, AppState>) -> CmdResult<()> {
     *state.token.lock().await = None;
 
     // Remove keychain entries.
+    // Drop the per-vault entry for the currently-active profile
+    // (the one whose data we're about to nuke) plus any legacy
+    // single-slot keychain residue. Other vaults' entries stay
+    // intact so this action is scoped to the one being reset.
+    let vault_id = crate::embedded::current_vault_id();
+    crate::local_keystore::remove_vault(&vault_id)?;
     crate::secure_store::delete_all_keys()?;
 
     // Remove the data directory.
