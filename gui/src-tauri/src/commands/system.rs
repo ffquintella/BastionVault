@@ -242,9 +242,26 @@ pub async fn reset_vault(state: State<'_, AppState>) -> CmdResult<()> {
     // (the one whose data we're about to nuke) plus any legacy
     // single-slot keychain residue. Other vaults' entries stay
     // intact so this action is scoped to the one being reset.
+    //
+    // Best-effort: if the keystore is unreadable (the exact
+    // scenario that put the operator on the Destroy-and-Reset
+    // path in the first place) `remove_vault` now falls back to
+    // `wipe_all`, but even if both fail we keep going — the cloud
+    // bucket wipe below is what the operator actually came here
+    // for. Failing out of the whole command on a keystore I/O
+    // error used to leave the bucket intact and the button
+    // appearing to "do nothing."
     let vault_id = crate::embedded::current_vault_id();
-    crate::local_keystore::remove_vault(&vault_id)?;
-    crate::secure_store::delete_all_keys()?;
+    if let Err(e) = crate::local_keystore::remove_vault(&vault_id) {
+        eprintln!(
+            "reset: keystore remove_vault(`{vault_id}`) failed: {e}. \
+             Forcing a full keystore wipe and continuing."
+        );
+        let _ = crate::local_keystore::wipe_all();
+    }
+    if let Err(e) = crate::secure_store::delete_all_keys() {
+        eprintln!("reset: legacy keychain cleanup failed: {e}. Continuing.");
+    }
 
     // Branch on the active profile's spec. Cloud vaults live in a
     // bucket / drive and require a backend-level wipe — just

@@ -761,13 +761,35 @@ pub fn remove_vault(vault_id: &str) -> Result<(), CommandError> {
     if !path.exists() {
         return Ok(());
     }
-    let mut contents = load_contents()?;
+    // If the file is unreadable (keystore corrupt / keychain entry
+    // regenerated / etc.) we can't surgically remove just this
+    // vault's entry — but the callers that reach here are the
+    // Destroy-and-Reset flows, which accept data loss on the vault
+    // they're resetting. Nuking the whole keystore is at least as
+    // destructive as what the caller asked for, and strictly
+    // necessary for the reset to make forward progress. Log a
+    // breadcrumb so operators can tell the targeted-remove
+    // degenerated into a full wipe.
+    let contents = match load_contents() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "local_keystore: unreadable file during remove_vault(`{vault_id}`): {e}. \
+                 Falling back to wiping the whole file + keychain entry."
+            );
+            return wipe_all();
+        }
+    };
+    let mut contents = contents;
     if contents.vaults.remove(vault_id).is_none() {
         return Ok(());
     }
     if contents.vaults.is_empty() {
-        let _ = fs::remove_file(&path);
-        return Ok(());
+        // Last vault removed — blow the file away AND the keychain
+        // entry so the next launch starts from a clean slate. A
+        // lingering empty file would still require the Local Key
+        // to decrypt and buys nothing.
+        return wipe_all();
     }
     save_contents(&contents)
 }
