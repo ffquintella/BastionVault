@@ -55,7 +55,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Kubernetes Integration | Todo |
 | Web UI / Desktop GUI (Tauri) | Done (all 9 phases) |
 | Auth: OIDC | Done (server module + GUI login + full provider admin lifecycle — `src/modules/credential/oidc/` ships Authorization-Code-Flow-with-PKCE, provider config + role CRUD, `auth_url` + `callback`, ID-token verification, claim-to-policy mapping, token renewal. Login page SSO tab shows one clickable button per configured provider — no mount/role typing; Settings page "Single Sign-On (SSO)" card drives the full mount + config + role admin from the root token, with mode-aware redirect-URI hints (stable server URL for remote, RFC 8252 loopback for desktop). Global enable/disable toggle persisted at `core/sso/settings`. Unauth `sys/sso/providers` discovery endpoint drives the login tab visibility.) |
-| Auth: SAML 2.0 | In Progress (Phases 1 + 2 — scaffold + config/role CRUD shipped in `src/modules/credential/saml/` with 13 unit + 1 CRUD integration test. Phase 3 — login/callback + XML-signature verification — deferred pending crate decision.) |
+| Auth: SAML 2.0 | Done (server module — pure-Rust SP-initiated SSO in `src/modules/credential/saml/`: AuthnRequest + HTTP-Redirect encoding, Response parsing via `quick-xml`, structural validation, RSA-SHA256/SHA1 signature verification via `rsa 0.9` + `x509-parser` with a hand-rolled Exclusive C14N that handles every major IdP's output format. Zero libxml2/libxmlsec1/OpenSSL footprint. 46 unit + integration tests, including an end-to-end sign-and-verify roundtrip.) |
 | Auth: FIDO2 / WebAuthn / YubiKey | Done (server module) |
 | Compliance Reporting | Todo |
 
@@ -90,10 +90,16 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 - [Cloud FileTarget Memory Cache](features/cloud-storage-backend.md)
   Feature-complete bounded TTL-based `CachingTarget` decorator (`src/storage/physical/file/cache.rs`) with 30s read TTL / 10s list TTL / 65,536-entry / **500 MiB** soft caps, write-and-delete invalidation (including prefix-affected list entries), negative-result caching, FIFO eviction, **per-key singleflight coalescing** (8 concurrent misses → 1 provider call via `tokio::sync::Mutex`), **stale-while-revalidate** (default `stale_ratio = 0.5` — entries past the halfway point serve cached value + spawn background refresh via `tokio::spawn` so hot keys stay hot under steady traffic), **opt-in bounded-concurrency background prefetch** (non-empty `prefetch_keys` triggers a warmup task on construction), and `bvault_cache_*{layer="cloud_target"}` Prometheus metrics. Default-on for `s3`/`onedrive`/`gdrive`/`dropbox`, default-off for `local`. All async features `#[cfg(not(feature = "sync_handler"))]`-gated — sync builds fall back to v1 pure-TTL behavior. Config keys: `cache_{read_ttl_secs,list_ttl_secs,max_entries,max_bytes,stale_ratio,prefetch_keys,prefetch_concurrency}`. Zero new deps. 13 unit tests green.
 
+- [SAML 2.0 Authentication](features/saml-auth.md)
+  Server module shipped end-to-end. `src/modules/credential/saml/` implements SP-initiated SSO with a fully pure-Rust stack — no `samael` / `libxml2` / `libxmlsec1` / OpenSSL dependency. AuthnRequest generation + HTTP-Redirect encoding, streaming `quick-xml` Response parsing, structural validation (status + Destination + InResponseTo + Issuer + Audience + timestamp with 60 s clock-skew grace), RSA-SHA256 / RSA-SHA1 signature verification via `rsa 0.9` + `x509-parser`, and a hand-rolled Exclusive XML Canonicalization that handles the output format every major IdP (Azure AD, Okta, Keycloak, Shibboleth, ADFS) emits. Attribute-to-policy role mappings with per-role `bound_attributes` / `bound_subjects` enforcement at callback time. Login + callback paths `auth/<mount>/login` + `auth/<mount>/callback` (both unauth), state persisted at `state/<relay_state>` with 5-minute TTL and single-use load-and-delete. 46 unit + integration tests, including an end-to-end sign-and-verify roundtrip against a freshly-generated RSA keypair.
+
 ## Active Initiatives
 
-- [SAML 2.0 Authentication](features/saml-auth.md)
-  SAML 2.0 auth backend with SP-initiated SSO and attribute-to-policy role mappings. Phases 1 + 2 (scaffold + config/role CRUD in `src/modules/credential/saml/`, 13 unit + 1 CRUD integration test) shipped. Phase 3 — login / callback / XML-signature verification — deferred pending the XML-DSig crate decision (`samael` with `libxml2` + `libxmlsec1` C deps vs. pure-Rust alternatives).
+No active initiatives — all previously-active items have closed out.
+Next up are the items tracked under `Todo` in the Feature Status
+table (Secret Versioning & Soft-Delete, Transit / TOTP / SSH secret
+engines, Dynamic Secrets, HSM Support, Kubernetes Integration,
+Compliance Reporting, Plugin System).
 
 ## Deferred sub-initiatives
 

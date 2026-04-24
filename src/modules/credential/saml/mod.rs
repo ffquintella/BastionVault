@@ -1,4 +1,4 @@
-//! SAML 2.0 authentication backend — Phase 1 + 2 scaffold.
+//! SAML 2.0 authentication backend — full SP-initiated SSO flow.
 //!
 //! Mirrors the Module/Backend pattern used by `userpass`, `approle`,
 //! and `oidc`:
@@ -35,8 +35,14 @@ use crate::{
     new_logical_backend, new_logical_backend_internal,
 };
 
+pub mod authn_request;
+pub mod path_callback;
 pub mod path_config;
+pub mod path_login;
 pub mod path_roles;
+pub mod response;
+pub mod validate;
+pub mod verify;
 
 static SAML_BACKEND_HELP: &str = r#"
 The "saml" credential provider allows authentication against any
@@ -74,16 +80,21 @@ impl SamlBackend {
     }
 
     pub fn new_backend(&self) -> LogicalBackend {
+        let saml_backend_ref = self.inner.clone();
         let mut backend = new_logical_backend!({
-            // `login` and `callback` will be added in Phase 3 as
-            // unauth paths; nothing is unauth yet.
-            unauth_paths: [],
+            // `login` and `callback` are the two endpoints the
+            // browser-mediated flow needs to hit without a vault
+            // token in hand; everything else is root-path admin.
+            unauth_paths: ["login", "callback"],
+            auth_renew_handler: saml_backend_ref.login_renew,
             help: SAML_BACKEND_HELP,
         });
 
         backend.paths.push(Arc::new(self.config_path()));
         backend.paths.push(Arc::new(self.roles_path()));
         backend.paths.push(Arc::new(self.role_list_path()));
+        backend.paths.push(Arc::new(self.login_path()));
+        backend.paths.push(Arc::new(self.callback_path()));
 
         backend
     }

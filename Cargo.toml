@@ -73,7 +73,12 @@ cryptr = { version = "0.10", optional = true, default-features = false }
 # existing `ureq` dep, so enabling `cloud_s3` does not pull in
 # reqwest / hyper / aws-sdk-*. See `features/cloud-storage-backend.md`.
 rusty-s3 = { version = "0.9", optional = true }
-quick-xml = { version = "0.36", optional = true }
+# Now non-optional: SAML Phase 3 (`src/modules/credential/saml/`) uses
+# it to parse IdP responses. `cloud_s3` also consumes it, but gating
+# it on that feature would force a feature-flag dance for the SAML
+# code path — keeping it always-on is simpler and the transitive
+# footprint is small (~3 crates).
+quick-xml = { version = "0.36" }
 # OS keychain writer for `credentials_ref = "keychain:..."`. Uses the
 # platform-native secret store on macOS (Keychain) / Windows
 # (Credential Vault) / Linux (Secret Service). Feature-gated so
@@ -116,6 +121,20 @@ hmac = "0.13"
 openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
 sha1 = "0.11"
 sha2 = "0.11"
+# SAML 2.0 auth backend (Phase 3) — pure-Rust stack instead of
+# `samael`'s libxml2/libxmlsec1 C deps. `rsa` verifies IdP-signed
+# assertions, `x509-parser` pulls the public key out of the
+# configured PEM cert, `flate2` handles the HTTP-Redirect binding's
+# DEFLATE envelope. `rsa 0.9` expects `digest 0.10` which is what
+# the aliased `sha1-saml` / `sha2-saml` deps below pull in — the
+# project's main `sha1 = "0.11"` and `sha2 = "0.11"` deps use
+# `digest 0.11` and are incompatible with the `rsa::signature::Verifier`
+# trait bounds. Renaming keeps the two coexistent.
+rsa = "0.9"
+x509-parser = "0.17"
+flate2 = "1.0"
+sha1-saml = { package = "sha1", version = "0.10", features = ["oid"] }
+sha2-saml = { package = "sha2", version = "0.10", features = ["oid"] }
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
 webauthn-rs-proto = "0.5"
 zstd = "0.13"
@@ -135,7 +154,7 @@ sync_handler = ["maybe-async/is_sync"]
 # Cloud Storage Targets for the Encrypted File backend.
 # See `features/cloud-storage-backend.md`. Default build stays lean —
 # operators who don't need cloud targets pay no compile / binary cost.
-cloud_s3 = ["rusty-s3", "quick-xml"]
+cloud_s3 = ["rusty-s3"]
 # OneDrive target pulls no new external deps — reuses `ureq` for HTTP,
 # `serde_json` for Graph API JSON, and the shared OAuth infra from
 # `file/oauth.rs`. The feature flag still exists so operators who

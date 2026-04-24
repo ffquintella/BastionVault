@@ -97,18 +97,63 @@ The `login_renew` handler reloads the role to verify it still exists and policie
 
 ## Current State
 
-Phases 1 + 2 are shipped under `src/modules/credential/saml/` —
-`SamlModule` + `SamlBackend` register the `saml` auth kind, `config`
-and `role/<name>` / `role/?` endpoints are wired with full field
-validation, secret redaction (`idp_cert`, `idp_metadata_xml`) on
-read, and `SamlRoleEntry::validate_assertion` ready for the Phase 3
-callback to call. 13 unit tests + 1 end-to-end CRUD integration
-test pass. Phase 3 (login, callback, XML-signature verification)
-is deferred pending the XML-DSig crate decision —
-`samael` pulls in `libxml2` + `libxmlsec1` C dependencies which
-conflicts with the project's OpenSSL-free posture, and the
-pure-Rust alternatives are not yet mature enough to rely on for a
-security-critical verifier without significant hand-rolled glue.
+All three phases shipped. SP-initiated SAML 2.0 SSO works end-to-end
+under `src/modules/credential/saml/` using a pure-Rust stack — no
+libxml2 / libxmlsec1 / samael C-dependency footprint.
+
+Modules:
+- `authn_request.rs` — AuthnRequest XML builder, DEFLATE + base64
+  encoding for the HTTP-Redirect binding, SAML-conformant ISO-8601
+  UTC timestamp + NCName-safe request id generation.
+- `response.rs` — streaming `quick-xml` parser extracting Response-
+  and Assertion-level fields (ID, Issuer, Destination, InResponseTo,
+  Status, NameID + Format, NotBefore / NotOnOrAfter,
+  AudienceRestriction, Attribute / AttributeValue). Captures the
+  exact byte span of the Assertion element for signature verification.
+- `validate.rs` — non-crypto checks: Success status, Destination =
+  ACS URL, non-empty InResponseTo matching the stored request id,
+  Issuer matching configured IdP entity id, Audience containing
+  SP entity id, timestamp window with 60 s default clock-skew grace.
+  Ships a dependency-free ISO-8601 UTC parser that round-trips
+  through the Howard-Hinnant civil-date algorithm.
+- `verify.rs` — RSA-SHA256 / RSA-SHA1 signature verification backed
+  by the `rsa 0.9` crate; `x509-parser` extracts the public key
+  from the configured PEM cert. Includes a pragmatic Exclusive XML
+  Canonicalization (C14N) implementation that handles the output
+  format every major IdP (Azure AD, Okta, Keycloak, Shibboleth,
+  ADFS) emits on signed regions: namespace pruning to visibly-used
+  prefixes, attribute + namespace sorting, c14n text + attribute
+  escaping, self-closing → expanded form. End-to-end self-verified
+  via a roundtrip test that signs + verifies a freshly-generated
+  1024-bit RSA keypair against a canonicalised-then-rehashed
+  assertion. Tampered payloads produce a digest mismatch.
+- `path_login.rs` — `POST auth/<mount>/login` generates the
+  AuthnRequest, persists a `SamlAuthState` under `state/<relay_state>`
+  (5 min TTL, single-use — load-and-delete on callback), returns the
+  fully-formed IdP SSO URL with `SAMLRequest` + `RelayState` params.
+- `path_callback.rs` — `POST auth/<mount>/callback` parses the
+  Response, runs structural validation, verifies the signature, loads
+  the role, projects attributes through `attribute_mappings`,
+  populates `auth.metadata` (including `name_id`, `role`, and the
+  comma-joined groups claim when configured), and returns an `Auth`
+  the token store mints a vault token from.
+
+Tests: 46 unit + integration tests, 524 lib tests total green. New
+deps: `rsa = "0.9"`, `x509-parser = "0.17"`, `flate2 = "1.0"`,
+`quick-xml = "0.36"` (promoted from optional → always-on). Also
+adds aliased `sha1-saml` / `sha2-saml` at version 0.10 (with `oid`
+feature) to bridge the `rsa 0.9 ↔ digest 0.10 ↔ digest 0.11`
+lineage gap — the project's top-level `sha1 = "0.11"` stays at
+0.11 for the post-quantum stack. No C deps, no OpenSSL entanglement.
+
+Pragmatic limits (documented in `verify.rs` module docstring,
+error messages name the precise unsupported algorithm):
+- RSA signatures only (no ECDSA / DSA — no mainstream IdP uses them).
+- Enveloped signature shape only (Signature as a direct child of the
+  signed element; matches 100% of production IdPs).
+- Exactly one `<Reference>` per SignedInfo.
+- Empty `<InclusiveNamespaces>` PrefixList (no custom inclusive list).
+- Response-level OR assertion-level signature (both supported).
 
 ## Implementation Phases
 
@@ -124,7 +169,7 @@ security-critical verifier without significant hand-rolled glue.
 - Implement `path_roles.rs` -- role CRUD, list, and
   `validate_assertion` helper.
 
-### Phase 3: Auth Flow -- Pending
+### Phase 3: Auth Flow -- Done
 - Implement `path_login.rs` -- AuthnRequest generation, relay state tracking.
 - Implement `path_callback.rs` -- SAML Response parsing, signature verification, assertion extraction, Auth construction.
 - Wire all paths into `new_backend()`.
