@@ -80,6 +80,21 @@ export function Layout({ children }: LayoutProps) {
     navigate("/connect");
   }
 
+  /**
+   * Jump to the vault chooser on the Connect page. Clears the
+   * current session (auth token + vault-mode state) first so the
+   * chooser starts from a clean slate — otherwise `/connect` would
+   * auto-reopen the current vault and land the user right back in
+   * this Layout. The `?choose=1` query arg tells ConnectPage to
+   * render the chooser view rather than the auto-open flow. Mirror
+   * of the Login page's "Switch vault" link.
+   */
+  function handleSwitchVault() {
+    clearAuth();
+    reset();
+    navigate("/connect?choose=1");
+  }
+
   return (
     <div className="flex h-screen">
       {/* Sidebar */}
@@ -137,17 +152,37 @@ export function Layout({ children }: LayoutProps) {
         </nav>
 
         <div className="p-3 border-t border-[var(--color-border)] space-y-2">
-          {/* Mode indicator */}
-          <div className="flex items-center gap-1.5">
-            <span
-              className={`w-2 h-2 rounded-full ${
-                mode === "Remote" ? "bg-blue-400" : "bg-green-400"
-              }`}
-            />
-            <span className="text-[10px] text-[var(--color-text-muted)] uppercase tracking-wider">
-              {mode === "Remote" ? "Remote" : "Local"}
+          {/* Mode indicator + Switch-vault trigger. The mode dot is
+              clickable so the operator can jump back to the vault
+              chooser without going through Sign Out → re-land-on-
+              Connect. Clicking the row reads as "I'm done with this
+              vault, show me the others." */}
+          <button
+            type="button"
+            onClick={handleSwitchVault}
+            title="Switch vault"
+            aria-label="Switch vault"
+            className="w-full flex items-center justify-between gap-2 rounded-md px-1.5 py-1 text-left hover:bg-[var(--color-surface-hover)] transition-colors group"
+          >
+            <span className="flex items-center gap-1.5 min-w-0">
+              <span
+                className={`w-2 h-2 rounded-full shrink-0 ${
+                  mode === "Remote" ? "bg-blue-400" : "bg-green-400"
+                }`}
+              />
+              <span className="text-[10px] text-[var(--color-text-muted)] uppercase tracking-wider truncate">
+                {mode === "Remote"
+                  ? remoteProfile?.name || "Remote"
+                  : "Local"}
+              </span>
             </span>
-          </div>
+            <span
+              className="text-[10px] text-[var(--color-text-muted)] opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
+              aria-hidden
+            >
+              switch
+            </span>
+          </button>
 
           {status && (
             <StatusBadge
