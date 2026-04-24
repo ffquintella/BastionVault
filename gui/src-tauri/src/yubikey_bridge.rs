@@ -163,18 +163,18 @@ pub fn sign(serial: u32, pin: &[u8], salt: &[u8]) -> Result<Vec<u8>, CommandErro
     // chip applies PKCS1 padding internally) and a SHA-256 digest
     // in ECDSA mode. We match both conventions so the registration
     // flow works regardless of operator key choice.
+    // `AlgorithmId` is non-exhaustive for some `yubikey` builds but
+    // the four variants below cover every RSA/ECC key the bridge
+    // accepts. `detect_algorithm` rejects anything else before we
+    // get here (non-asymmetric management algorithms return an
+    // error out of that helper), so the match is structurally
+    // total for this code path.
     let to_sign: Vec<u8> = match algo {
         AlgorithmId::Rsa1024 | AlgorithmId::Rsa2048 => salt.to_vec(),
         AlgorithmId::EccP256 | AlgorithmId::EccP384 => {
             let mut h = Sha256::new();
             h.update(salt);
             h.finalize().to_vec()
-        }
-        other => {
-            return Err(CommandError::from(format!(
-                "yubikey: slot 9a uses unsupported algorithm `{other:?}` — \
-                 register an RSA-2048 or ECC-P256/P384 key"
-            )));
         }
     };
 

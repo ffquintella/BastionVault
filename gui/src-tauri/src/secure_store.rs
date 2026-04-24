@@ -1,3 +1,17 @@
+//! Legacy single-slot keychain entries.
+//!
+//! Pre-multi-vault revisions stored the active vault's unseal key
+//! and root token directly in the OS keychain under fixed entries
+//! `unseal-key` and `root-token`. The current keystore at
+//! `local_keystore.rs` replaces that with a per-vault-id layer on
+//! top of a single `local-master-key` keychain entry.
+//!
+//! This module now contains ONLY the read + delete paths, which
+//! `local_keystore::migrate_legacy_if_needed` calls on every
+//! `get_*` to pull values out of the legacy slots and wipe them.
+//! The `store_*` write-side functions are gone — nothing should
+//! ever write into the legacy slots again.
+
 use keyring::Entry;
 
 use crate::error::CommandError;
@@ -8,22 +22,12 @@ fn entry(key: &str) -> Result<Entry, CommandError> {
     Entry::new(SERVICE, key).map_err(|e| CommandError::from(format!("Keychain entry error: {e}")))
 }
 
-pub fn store_unseal_key(key: &str) -> Result<(), CommandError> {
-    entry("unseal-key")?.set_password(key)?;
-    Ok(())
-}
-
 pub fn get_unseal_key() -> Result<Option<String>, CommandError> {
     match entry("unseal-key")?.get_password() {
         Ok(v) => Ok(Some(v)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(e.into()),
     }
-}
-
-pub fn store_root_token(token: &str) -> Result<(), CommandError> {
-    entry("root-token")?.set_password(token)?;
-    Ok(())
 }
 
 pub fn get_root_token() -> Result<Option<String>, CommandError> {

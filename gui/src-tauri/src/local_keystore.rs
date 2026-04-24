@@ -745,6 +745,12 @@ pub fn remove_vault(vault_id: &str) -> Result<(), CommandError> {
     save_contents(&contents)
 }
 
+/// Blow away the whole keystore file + the local key. Only called
+/// from the test suite today; kept `pub` behind `#[allow(dead_code)]`
+/// so a future "Full Reset" command can reach it without the
+/// visibility gymnastics of moving tests-only API into a separate
+/// module.
+#[allow(dead_code)]
 pub fn wipe_all() -> Result<(), CommandError> {
     if let Ok(path) = keys_file_path() {
         let _ = fs::remove_file(path);
@@ -864,7 +870,12 @@ pub fn register_yubikey(serial: u32, pin: String) -> Result<RegisteredYubiKey, C
     // registration — the caller's session is done with it.
     clear_yubikey_pin();
 
-    contents.vaults = contents.vaults; // silence unused-mut warnings
+    // `contents` was loaded up-top so the migration path had its
+    // mut binding; nothing mutates it on the happy path, and the
+    // encrypted payload we just wrote above is derived from it
+    // verbatim. Drop the binding here to silence the unused-mut
+    // lint without the earlier self-assignment hack.
+    drop(contents);
     Ok(RegisteredYubiKey {
         serial,
         key_id: key_id_b64,

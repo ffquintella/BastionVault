@@ -10,7 +10,6 @@ use serde_json::{Map, Value};
 
 use crate::error::CommandError;
 use crate::preferences::{self, CloudStorageConfig};
-use crate::secure_store;
 
 // ── Storage selection ──────────────────────────────────────────────
 //
@@ -458,26 +457,37 @@ pub async fn seal_vault(vault: &BastionVault) -> Result<(), CommandError> {
 /// as "don't know" and usually default to "not initialised" so the
 /// operator can retry rather than get stuck on a false positive.
 fn probe_cloud_initialized() -> Result<bool, CommandError> {
-    // Build a fresh tokio runtime for the probe so we don't require
-    // our synchronous caller to live inside an async context. The
-    // cost is one runtime creation per `is_initialized` call; calls
-    // happen once on GUI startup + once per reset / init ceremony,
-    // so the overhead is negligible.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| CommandError::from(format!("probe tokio build: {e}")))?;
-    rt.block_on(async {
-        let backend = build_backend().await?;
-        // The first write `init_vault` does lands under `core/`.
-        // If that prefix has any child, we treat the bucket as
-        // initialised. A raw `list("")` works too but is
-        // potentially expensive on large buckets; `core/` is
-        // always small and scoped to vault metadata.
-        use bastion_vault::storage::Backend;
-        let entries = backend.list("core/").await.unwrap_or_default();
-        Ok::<bool, CommandError>(!entries.is_empty())
-    })
+    // Run the probe on a dedicated OS thread so the inner tokio
+    // runtime lives outside whatever runtime the caller is already
+    // inside. Tauri commands run on the tokio worker and cannot
+    // `block_on` a nested runtime — that would panic with
+    // "Cannot start a runtime from within a runtime". A fresh
+    // `std::thread::spawn` + `join()` keeps the probe synchronous
+    // from the caller's perspective and side-steps the runtime
+    // nesting entirely. Join blocks the caller, which is fine
+    // because `is_initialized` is itself advertised as a sync
+    // function and gets called at most once per GUI-startup /
+    // init / reset ceremony.
+    let handle = std::thread::spawn(|| -> Result<bool, CommandError> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| CommandError::from(format!("probe tokio build: {e}")))?;
+        rt.block_on(async {
+            let backend = build_backend().await?;
+            // The first write `init_vault` does lands under
+            // `core/`. If that prefix has any child, we treat the
+            // bucket as initialised. A raw `list("")` works too
+            // but is potentially expensive on large buckets;
+            // `core/` is always small and scoped to vault metadata.
+            // `Backend` is already in scope via the file-level `use`.
+            let entries = backend.list("core/").await.unwrap_or_default();
+            Ok::<bool, CommandError>(!entries.is_empty())
+        })
+    });
+    handle
+        .join()
+        .map_err(|_| CommandError::from("probe thread panicked".to_string()))?
 }
 
 /// Resolve the "active" vault id used to index the local keystore.

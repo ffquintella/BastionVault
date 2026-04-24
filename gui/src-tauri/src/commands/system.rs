@@ -225,8 +225,8 @@ pub async fn reset_vault(state: State<'_, AppState>) -> CmdResult<()> {
 /// session. Empty enumeration is a no-op, which is the expected
 /// state after a successful reset.
 async fn wipe_cloud_backend() -> Result<(), crate::error::CommandError> {
-    use bastion_vault::storage::Backend;
-
+    // `backend` is `Arc<dyn Backend>`; trait methods resolve through
+    // the trait object directly, no `use Backend` needed.
     let backend = crate::embedded::build_backend().await?;
 
     // BFS-style walk: start at "" (the provider's root) and recurse
