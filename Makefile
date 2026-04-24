@@ -22,7 +22,7 @@ OPENSSL_SRC_PERL ?= C:/Strawberry/perl/bin/perl.exe
 export OPENSSL_SRC_PERL
 endif
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch bootstrap win-bootstrap
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch bootstrap win-bootstrap clean gui-clean docs-clean deep-clean
 
 help: ## List available commands
 	@echo "BastionVault v$(VERSION)"
@@ -72,6 +72,30 @@ bump-major: ## Bump major version (x.0.0)
 	@NEW=$$(echo $(VERSION) | awk -F. '{printf "%d.0.0", $$1+1}'); \
 	sed -i '' "s/^version = \"$(VERSION)\"/version = \"$$NEW\"/" Cargo.toml; \
 	echo "Bumped version: $(VERSION) -> $$NEW"
+
+clean: ## Remove Cargo build artefacts (target/) across the workspace
+	cargo clean
+	@echo "clean complete."
+
+gui-clean: ## Remove GUI frontend build artefacts (node_modules, dist, vite cache)
+	rm -rf gui/node_modules
+	rm -rf gui/dist
+	rm -rf gui/.vite
+	rm -rf gui/src-tauri/target
+	rm -rf gui/src-tauri/gen
+	@echo "gui-clean complete."
+
+docs-clean: ## Remove docs-site build artefacts (node_modules, .docusaurus, build)
+	rm -rf docs/node_modules
+	rm -rf docs/.docusaurus
+	rm -rf docs/build
+	@echo "docs-clean complete."
+
+deep-clean: clean gui-clean docs-clean ## Run every clean target + drop cargo lockfiles so the next build resolves from scratch
+	rm -f Cargo.lock
+	rm -f gui/package-lock.json
+	rm -f docs/package-lock.json
+	@echo "deep-clean complete."
 
 bootstrap: ## Install dependencies and set up the development environment
 	rustup update stable
