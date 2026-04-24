@@ -664,9 +664,22 @@ export function ConnectPage() {
       // prompts for it at register time.
       if (addKind === "local" && localRequireYubiKey && localYubiKeySerial) {
         try {
+          // Stash serial AND slot-occupied status so the InitPage
+          // knows whether to provision slot 9a first (cards with
+          // no signing key in 9a need `piv generate` + a
+          // self-signed cert before `yubikey_register` can work).
+          // JSON rather than bare serial so we can evolve the
+          // schema without a format bump; unknown fields are
+          // ignored on the consumer side.
+          const picked = localYubiKeyDevices.find(
+            (d) => d.serial === localYubiKeySerial,
+          );
           window.localStorage.setItem(
             `bv.init.yubikey.${id}`,
-            String(localYubiKeySerial),
+            JSON.stringify({
+              serial: localYubiKeySerial,
+              slot_occupied: picked?.slot_occupied ?? true,
+            }),
           );
         } catch {
           /* storage full / disabled — fall back to no-yubikey init */

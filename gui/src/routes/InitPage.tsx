@@ -58,6 +58,13 @@ export function InitPage() {
   const [pendingYubiKeySerial, setPendingYubiKeySerial] = useState<
     number | null
   >(null);
+  // Track whether the picked YubiKey's slot 9a was populated when
+  // ConnectPage enumerated it. false → we need to run the
+  // `yubikey_provision_slot_9a` ceremony before `yubikey_register`
+  // can succeed (register reads the signing cert, which isn't
+  // there on a factory-fresh card).
+  const [pendingYubiKeySlotOccupied, setPendingYubiKeySlotOccupied] =
+    useState<boolean>(true);
   const [yubiKeyPin, setYubiKeyPin] = useState("");
   const [registeringYubiKey, setRegisteringYubiKey] = useState(false);
 
@@ -252,9 +259,27 @@ export function InitPage() {
         if (pid) {
           const raw = window.localStorage.getItem(`bv.init.yubikey.${pid}`);
           if (raw) {
-            const serial = Number(raw);
-            if (Number.isFinite(serial) && serial > 0) {
+            // Tolerate both shapes for forward-compat: the original
+            // bare-serial string, and the new JSON-object shape that
+            // carries slot_occupied alongside the serial.
+            let serial: number | null = null;
+            let slotOccupied = true;
+            try {
+              const parsed = JSON.parse(raw);
+              if (typeof parsed === "object" && parsed !== null) {
+                const s = Number(parsed.serial);
+                if (Number.isFinite(s) && s > 0) serial = s;
+                if (typeof parsed.slot_occupied === "boolean") {
+                  slotOccupied = parsed.slot_occupied;
+                }
+              }
+            } catch {
+              const s = Number(raw);
+              if (Number.isFinite(s) && s > 0) serial = s;
+            }
+            if (serial !== null) {
               setPendingYubiKeySerial(serial);
+              setPendingYubiKeySlotOccupied(slotOccupied);
             }
             window.localStorage.removeItem(`bv.init.yubikey.${pid}`);
           }
@@ -282,6 +307,20 @@ export function InitPage() {
     }
     setRegisteringYubiKey(true);
     try {
+      // Factory-fresh cards have no signing key in slot 9a. Without
+      // one, `yubikey_register` fails reading the cert. Run the
+      // provisioning ceremony first — RSA-2048 + self-signed X.509
+      // — using the same PIN the operator just supplied. The
+      // provisioning uses the default management key; cards with a
+      // rotated management key surface a descriptive error that
+      // points at `ykman piv access change-management-key`.
+      if (!pendingYubiKeySlotOccupied) {
+        await api.yubikeyProvisionSlot9a(pendingYubiKeySerial, yubiKeyPin);
+        toast(
+          "info",
+          `Provisioned slot 9a on YubiKey ${pendingYubiKeySerial}. Registering…`,
+        );
+      }
       await api.yubikeyRegister(pendingYubiKeySerial, yubiKeyPin);
       toast(
         "success",
@@ -377,16 +416,32 @@ export function InitPage() {
           {pendingYubiKeySerial !== null && (
             <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-lg space-y-3">
               <p className="text-amber-400 font-medium text-sm">
-                Register YubiKey #{pendingYubiKeySerial} as unlock failsafe
+                {pendingYubiKeySlotOccupied
+                  ? `Register YubiKey #${pendingYubiKeySerial} as unlock failsafe`
+                  : `Provision & register YubiKey #${pendingYubiKeySerial}`}
               </p>
-              <p className="text-amber-400/80 text-xs">
-                Enter the PIV PIN (default on factory-reset cards is
-                123456). The card will sign a one-off salt so the keystore
-                can derive a post-quantum key from it — the PIN is never
-                persisted and the card's private key never leaves the
-                device. Registers as an ADDITIONAL unlock slot alongside
-                the OS keychain.
-              </p>
+              {pendingYubiKeySlotOccupied ? (
+                <p className="text-amber-400/80 text-xs">
+                  Enter the PIV PIN (default on factory-reset cards is
+                  123456). The card will sign a one-off salt so the keystore
+                  can derive a post-quantum key from it — the PIN is never
+                  persisted and the card's private key never leaves the
+                  device. Registers as an ADDITIONAL unlock slot alongside
+                  the OS keychain.
+                </p>
+              ) : (
+                <p className="text-amber-400/80 text-xs">
+                  Slot 9a on this card is empty. We'll run two steps: first
+                  generate a fresh RSA-2048 keypair + self-signed cert on
+                  the card (the <span className="font-mono">provisioning</span>
+                  step), then register it as an unlock slot. Both use the
+                  PIN below — PIN never leaves the machine, private key
+                  never leaves the card. Requires the factory-default
+                  management key; rotate it back first with{" "}
+                  <code className="font-mono">ykman piv access change-management-key</code>{" "}
+                  if you've changed it.
+                </p>
+              )}
               <div>
                 <label className="block text-xs text-amber-400/70 mb-1">
                   PIV PIN
@@ -413,7 +468,13 @@ export function InitPage() {
                   disabled={registeringYubiKey || !yubiKeyPin.trim()}
                   className="flex-1 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
                 >
-                  {registeringYubiKey ? "Registering…" : "Register YubiKey"}
+                  {registeringYubiKey
+                    ? pendingYubiKeySlotOccupied
+                      ? "Registering…"
+                      : "Provisioning & registering…"
+                    : pendingYubiKeySlotOccupied
+                      ? "Register YubiKey"
+                      : "Provision & register"}
                 </button>
               </div>
             </div>

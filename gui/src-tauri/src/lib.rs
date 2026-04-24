@@ -165,6 +165,7 @@ pub fn run() {
             commands::sso_admin::sso_admin_callback_hints,
             commands::yubikey::yubikey_list_devices,
             commands::yubikey::yubikey_list_registered,
+            commands::yubikey::yubikey_provision_slot_9a,
             commands::yubikey::yubikey_register,
             commands::yubikey::yubikey_remove,
             commands::yubikey::yubikey_set_pin,

@@ -46,6 +46,10 @@ bv_crypto = { path = "../../crates/bv_crypto" }
 # on operator-supplied salts. Used by the YubiKey failsafe unlock
 # path in `src-tauri/src/local_keystore.rs`.
 yubikey = "0.8"
+# Needed for the YubiKey provisioning flow (self-signed X.509 cert
+# minted into slot 9a when the operator picks an empty-slot card
+# from the Add-Local-Vault modal).
+x509-cert = { version = "0.2", features = ["builder"] }
 
 [target.'cfg(windows)'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }

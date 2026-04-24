@@ -153,6 +153,99 @@ pub fn load_signing_public_key(serial: u32) -> Result<(YubiKeyId, Vec<u8>), Comm
 /// path because older YubiKey firmwares pre-5.7 didn't carry it;
 /// the registration flow rejects a slot-9a cert whose algorithm
 /// isn't in `supported_algorithm`.
+/// Generate a fresh RSA-2048 keypair in PIV slot 9a and write a
+/// minimal self-signed certificate so subsequent
+/// `load_signing_public_key` / `sign` calls succeed. Called from
+/// the Add-Local-Vault modal when the operator picks a YubiKey
+/// whose slot 9a was empty at enumeration time.
+///
+/// Requires the PIV PIN and assumes the management key is still the
+/// factory default (`01020304...01020304`). Cards where the
+/// management key has been rotated return a distinct error so the
+/// operator can reset it via `ykman piv access change-management-key`
+/// before retrying.
+///
+/// The generated cert is intentionally minimal: 20-year validity,
+/// subject `CN=BastionVault PIV`, no extensions. The host never
+/// consumes it as a trust anchor — it's only a container for the
+/// public key that `load_signing_public_key` hashes. Operators
+/// who want a richer cert can overwrite the slot later via
+/// `ykman piv certificates import`.
+pub fn provision_slot_9a(serial: u32, pin: &[u8]) -> Result<(), CommandError> {
+    use std::str::FromStr;
+    use std::time::Duration;
+    use x509_cert::{
+        name::Name,
+        serial_number::SerialNumber,
+        time::Validity,
+    };
+    use yubikey::{
+        certificate::{
+            yubikey_signer::{Rsa2048, YubiRsa},
+            Certificate,
+        },
+        piv::{self, AlgorithmId},
+        MgmKey, PinPolicy, TouchPolicy,
+    };
+
+    let mut yk = open_by_serial(serial)?;
+
+    yk.verify_pin(pin)
+        .map_err(|e| CommandError::from(format!("yubikey: PIN verify: {e}")))?;
+
+    // PIV card administration requires the "management key" (a
+    // 3DES key, 24 bytes). Factory default is well-known; operators
+    // who rotated it need to reset the card or pre-provision the
+    // slot themselves before using the GUI registration flow.
+    yk.authenticate(MgmKey::default()).map_err(|e| {
+        CommandError::from(format!(
+            "yubikey: management-key auth failed ({e}). If the card's management key was \
+             changed from the factory default, reset it with `ykman piv access \
+             change-management-key --generate` or provision slot 9a externally via \
+             `ykman piv keys generate 9a` + `ykman piv certificates generate 9a`, then \
+             retry registration."
+        ))
+    })?;
+
+    // 1. Generate RSA-2048 on-card. PIN / touch policies left at
+    //    Default (PIN required once per session for signing, no
+    //    touch required) — matches how operators typically use the
+    //    signing slot for non-interactive workflows.
+    let public_key = piv::generate(
+        &mut yk,
+        SIGNING_SLOT,
+        AlgorithmId::Rsa2048,
+        PinPolicy::Default,
+        TouchPolicy::Default,
+    )
+    .map_err(|e| CommandError::from(format!("yubikey: piv::generate: {e}")))?;
+
+    // 2. Build + sign + write the X.509 envelope. 20 years so the
+    //    host-side `load_signing_public_key` keeps reading a
+    //    non-expired cert for the lifetime of the card; expiry
+    //    doesn't affect the crypto we actually use (signature over
+    //    an operator-supplied salt) but x509-cert rejects obviously
+    //    malformed validity windows.
+    let subject = Name::from_str("CN=BastionVault PIV")
+        .map_err(|e| CommandError::from(format!("yubikey: build subject: {e}")))?;
+    let validity = Validity::from_now(Duration::from_secs(60 * 60 * 24 * 365 * 20))
+        .map_err(|e| CommandError::from(format!("yubikey: validity window: {e}")))?;
+    let cert_serial = SerialNumber::from(1u8);
+
+    Certificate::generate_self_signed::<_, YubiRsa<Rsa2048>>(
+        &mut yk,
+        SIGNING_SLOT,
+        cert_serial,
+        validity,
+        subject,
+        public_key,
+        |_builder| Ok(()),
+    )
+    .map_err(|e| CommandError::from(format!("yubikey: self-sign cert: {e}")))?;
+
+    Ok(())
+}
+
 pub fn sign(serial: u32, pin: &[u8], salt: &[u8]) -> Result<Vec<u8>, CommandError> {
     let mut yk = open_by_serial(serial)?;
     yk.verify_pin(pin)

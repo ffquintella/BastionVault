@@ -130,6 +130,16 @@ export const yubikeyListRegistered = () =>
 export const yubikeyRegister = (serial: number, pin: string) =>
   invoke<RegisteredYubiKeyDto>("yubikey_register", { serial, pin });
 
+/** Generate a fresh RSA-2048 keypair in PIV slot 9a and self-sign a
+ *  minimal X.509 certificate over it. Used when the operator picks
+ *  a YubiKey whose slot 9a was empty — without this bootstrap the
+ *  subsequent `yubikeyRegister` call would fail reading the
+ *  non-existent signing cert. Assumes the management key is still
+ *  the factory default; cards with rotated management keys need to
+ *  be pre-provisioned via `ykman piv` or reset. */
+export const yubikeyProvisionSlot9a = (serial: number, pin: string) =>
+  invoke<void>("yubikey_provision_slot_9a", { serial, pin });
+
 export const yubikeyRemove = (serial: number) =>
   invoke<void>("yubikey_remove", { serial });
 

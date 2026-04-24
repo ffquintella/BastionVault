@@ -68,6 +68,18 @@ pub async fn yubikey_list_registered() -> CmdResult<Vec<RegisteredYubiKeyDto>> {
         .collect())
 }
 
+/// Provision PIV slot 9a on the given card: generate RSA-2048,
+/// self-sign a minimal X.509, write both. Invoked from the
+/// Add-Local-Vault / Settings YubiKey flows when the operator
+/// picks a card whose slot 9a was empty at enumeration time.
+/// Requires the PIN and assumes the factory-default management
+/// key — surfaces a descriptive error if it was rotated.
+#[tauri::command]
+pub async fn yubikey_provision_slot_9a(serial: u32, pin: String) -> CmdResult<()> {
+    crate::yubikey_bridge::provision_slot_9a(serial, pin.as_bytes())?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn yubikey_register(
     serial: u32,
