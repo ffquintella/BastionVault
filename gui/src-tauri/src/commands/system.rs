@@ -166,11 +166,13 @@ pub async fn disconnect_vault(state: State<'_, AppState>) -> CmdResult<()> {
 
 #[tauri::command]
 pub async fn reset_vault(state: State<'_, AppState>) -> CmdResult<()> {
-    // Drop the vault instance first.
+    use crate::preferences::{self, VaultSpec};
+
+    // Drop the active vault + session first so we don't race with
+    // ongoing reads during the wipe.
     *state.vault.lock().await = None;
     *state.token.lock().await = None;
 
-    // Remove keychain entries.
     // Drop the per-vault entry for the currently-active profile
     // (the one whose data we're about to nuke) plus any legacy
     // single-slot keychain residue. Other vaults' entries stay
@@ -179,15 +181,122 @@ pub async fn reset_vault(state: State<'_, AppState>) -> CmdResult<()> {
     crate::local_keystore::remove_vault(&vault_id)?;
     crate::secure_store::delete_all_keys()?;
 
-    // Remove the data directory.
-    let dir = embedded::data_dir()?;
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).map_err(|e| {
-            crate::error::CommandError::from(format!("Failed to remove vault data: {e}"))
-        })?;
+    // Branch on the active profile's spec. Cloud vaults live in a
+    // bucket / drive and require a backend-level wipe — just
+    // removing the local data dir (which is what earlier revisions
+    // did) left the bucket intact, so the next open saw
+    // "initialized" again and the user's Reset button appeared to
+    // do nothing. Local profiles continue to delete their data dir.
+    let profile = preferences::load().ok().and_then(|p| p.default_profile().cloned());
+    match profile.as_ref().map(|p| &p.spec) {
+        Some(VaultSpec::Cloud { .. }) => {
+            // Build the cloud backend the same way `open_vault`
+            // would, then enumerate every key and delete it. This
+            // wipes barrier markers, keyring, and all logical paths
+            // in one pass.
+            wipe_cloud_backend().await?;
+        }
+        Some(VaultSpec::Remote { .. }) => {
+            // Reset-vault against a remote server doesn't make
+            // sense here — the operator does that server-side.
+            // We've already cleared the local session state, which
+            // is all this command can legitimately touch.
+        }
+        _ => {
+            // Local (or no profile configured at all) — delete the
+            // effective data directory. Honours per-profile custom
+            // `data_dir` overrides that `build_backend` applies.
+            let dir = active_local_data_dir()?;
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir).map_err(|e| {
+                    crate::error::CommandError::from(format!("Failed to remove vault data: {e}"))
+                })?;
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Enumerate every object stored under the active cloud profile and
+/// issue a backend-level `delete` for each. Run under a fresh
+/// backend handle — the active vault is already closed by the
+/// caller, so building one here doesn't race with an in-flight
+/// session. Empty enumeration is a no-op, which is the expected
+/// state after a successful reset.
+async fn wipe_cloud_backend() -> Result<(), crate::error::CommandError> {
+    use bastion_vault::storage::Backend;
+
+    let backend = crate::embedded::build_backend().await?;
+
+    // BFS-style walk: start at "" (the provider's root) and recurse
+    // into any directory-shaped entries (trailing "/"). Leaf entries
+    // get deleted; directories get expanded. This handles Hiqlite's
+    // flat-key layout and cloud targets' virtual-hierarchy view
+    // identically.
+    let mut queue: Vec<String> = vec![String::new()];
+    let mut deleted = 0usize;
+    while let Some(prefix) = queue.pop() {
+        let entries = match backend.list(&prefix).await {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!(
+                    "reset: cloud list(`{prefix}`) failed: {e} — continuing best-effort"
+                );
+                continue;
+            }
+        };
+        for entry in entries {
+            let full = format!("{prefix}{entry}");
+            if entry.ends_with('/') {
+                queue.push(full);
+            } else {
+                match backend.delete(&full).await {
+                    Ok(()) => {
+                        deleted += 1;
+                    }
+                    Err(e) => {
+                        // Best-effort: don't abort the whole wipe
+                        // on one stubborn object. Operators who see
+                        // repeated resets not fully clearing the
+                        // bucket can check the log + use their
+                        // provider's console to remove the rest.
+                        eprintln!(
+                            "reset: cloud delete(`{full}`) failed: {e} — continuing"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("reset: cloud backend wipe complete ({deleted} object(s) removed)");
+    Ok(())
+}
+
+/// Resolve the data directory that would be used by the currently-
+/// active local profile. Mirrors the effective-dir logic in
+/// `embedded::build_backend`: honours the profile's custom
+/// `data_dir` override, falls back to the canonical per-kind
+/// default otherwise.
+fn active_local_data_dir() -> Result<std::path::PathBuf, crate::error::CommandError> {
+    use crate::embedded::{data_dir, data_dir_for, StorageKind};
+    use crate::preferences::{self, VaultSpec};
+
+    if let Ok(prefs) = preferences::load() {
+        if let Some(profile) = prefs.default_profile() {
+            if let VaultSpec::Local { data_dir: dir, storage_kind } = &profile.spec {
+                if let Some(custom) = dir.as_ref().filter(|s| !s.is_empty()) {
+                    return Ok(std::path::PathBuf::from(custom));
+                }
+                let kind = match storage_kind.as_str() {
+                    "hiqlite" => StorageKind::Hiqlite,
+                    _ => StorageKind::File,
+                };
+                return data_dir_for(kind);
+            }
+        }
+    }
+    data_dir()
 }
 
 #[derive(Serialize)]

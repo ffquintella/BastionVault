@@ -206,17 +206,25 @@ async fn build_cloud_backend(cloud: CloudStorageConfig) -> Result<Arc<dyn Backen
 /// fallback is what catches hiqlite's SQLite files (hiqlite stores the
 /// barrier as rows, not as a literal `_barrier` file).
 pub fn is_initialized() -> Result<bool, CommandError> {
-    // Cloud Vault: can't cheaply check without a network round-trip,
-    // so we treat it as always-initialized once the config is saved.
-    // The caller's subsequent `open_embedded` will surface a clear
-    // error if the underlying bucket / folder doesn't actually have
-    // a vault on it yet (unseal will fail on a missing barrier).
-    // First-time-ever boot uses `init_vault` explicitly from the UI,
-    // so this lives in the "open when possible" code path only.
+    // Cloud Vault: earlier revisions short-circuited to `true` here
+    // to avoid a startup round-trip against the bucket. That broke
+    // the post-reset flow — after `reset_vault` wiped the bucket
+    // the GUI still reported "Already Initialized" because this
+    // check never looked at the remote state. We now actually
+    // probe: the cloud `list("")` walks the top level and decides
+    // on a couple of sentinel entries the init flow writes
+    // (`core/master`, `core/keyring`). If neither exists the vault
+    // is treated as uninitialised and the operator is taken back
+    // through init. The probe runs on a fresh tokio runtime scoped
+    // to this call so we don't need the async `data_dir()` caller
+    // to be async. Failure (network blip, bad credentials, etc.)
+    // falls through to "not initialised" — the subsequent init /
+    // open flow will surface a more descriptive error than a
+    // boolean could.
     if let Ok(prefs) = preferences::load() {
         if let Some(profile) = prefs.default_profile() {
             if matches!(profile.spec, preferences::VaultSpec::Cloud { .. }) {
-                return Ok(true);
+                return Ok(probe_cloud_initialized().unwrap_or(false));
             }
         }
     }
@@ -440,6 +448,36 @@ pub async fn open_embedded() -> Result<Arc<BastionVault>, CommandError> {
 /// Seal the vault.
 pub async fn seal_vault(vault: &BastionVault) -> Result<(), CommandError> {
     vault.core.load().seal().await.map_err(|e| CommandError::from(e))
+}
+
+/// Probe the cloud bucket for init markers. Returns `Ok(true)` when
+/// the bucket has anything under `core/` (the vault's first-write
+/// namespace — barrier marker, keyring, master key record). Returns
+/// `Ok(false)` for a freshly-wiped / freshly-connected bucket.
+/// Anything goes wrong → returns an error; callers treat an error
+/// as "don't know" and usually default to "not initialised" so the
+/// operator can retry rather than get stuck on a false positive.
+fn probe_cloud_initialized() -> Result<bool, CommandError> {
+    // Build a fresh tokio runtime for the probe so we don't require
+    // our synchronous caller to live inside an async context. The
+    // cost is one runtime creation per `is_initialized` call; calls
+    // happen once on GUI startup + once per reset / init ceremony,
+    // so the overhead is negligible.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| CommandError::from(format!("probe tokio build: {e}")))?;
+    rt.block_on(async {
+        let backend = build_backend().await?;
+        // The first write `init_vault` does lands under `core/`.
+        // If that prefix has any child, we treat the bucket as
+        // initialised. A raw `list("")` works too but is
+        // potentially expensive on large buckets; `core/` is
+        // always small and scoped to vault metadata.
+        use bastion_vault::storage::Backend;
+        let entries = backend.list("core/").await.unwrap_or_default();
+        Ok::<bool, CommandError>(!entries.is_empty())
+    })
 }
 
 /// Resolve the "active" vault id used to index the local keystore.
