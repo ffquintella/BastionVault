@@ -12,6 +12,11 @@ import type {
   ResourceFieldDef,
   PasswordPolicy,
 } from "../lib/types";
+import type {
+  SsoAdminProvider,
+  SsoAdminInput,
+  SsoCallbackHints,
+} from "../lib/api";
 import { DEFAULT_RESOURCE_TYPES, mergeTypeConfig } from "../lib/resourceTypes";
 import { CloudStorageCard } from "../components/CloudStorageCard";
 import * as api from "../lib/api";
@@ -49,6 +54,16 @@ export function SettingsPage() {
   const [deleteTypeId, setDeleteTypeId] = useState<string | null>(null);
   const [showAddType, setShowAddType] = useState(false);
 
+  // SSO (Single Sign-On) admin: global toggle + provider list (each
+  // provider is a mount + config + default role, managed as a unit).
+  const [ssoEnabled, setSsoEnabled] = useState(false);
+  const [ssoLoaded, setSsoLoaded] = useState(false);
+  const [ssoSaving, setSsoSaving] = useState(false);
+  const [ssoProviders, setSsoProviders] = useState<SsoAdminProvider[]>([]);
+  const [editingProvider, setEditingProvider] = useState<SsoAdminProvider | null>(null);
+  const [showAddProvider, setShowAddProvider] = useState(false);
+  const [deletingMount, setDeletingMount] = useState<string | null>(null);
+
   // Password policy
   const passwordPolicy = usePasswordPolicyStore((s) => s.policy);
   const loadPasswordPolicy = usePasswordPolicyStore((s) => s.load);
@@ -61,7 +76,73 @@ export function SettingsPage() {
     loadFido2Config();
     loadResourceTypes();
     loadPasswordPolicy();
+    loadSsoState();
   }, [loadPasswordPolicy]);
+
+  async function loadSsoState() {
+    try {
+      const enabled = await api.getSsoSettings();
+      setSsoEnabled(enabled);
+    } catch {
+      /* fall through — default to disabled */
+    } finally {
+      setSsoLoaded(true);
+    }
+    await reloadSsoProviders();
+  }
+
+  async function reloadSsoProviders() {
+    try {
+      const list = await api.ssoAdminList();
+      setSsoProviders(list);
+    } catch {
+      setSsoProviders([]);
+    }
+  }
+
+  async function handleToggleSso(next: boolean) {
+    setSsoSaving(true);
+    try {
+      await api.setSsoSettings(next);
+      setSsoEnabled(next);
+      toast("success", next ? "SSO enabled" : "SSO disabled");
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    } finally {
+      setSsoSaving(false);
+    }
+  }
+
+  async function handleSaveProvider(input: SsoAdminInput, isEdit: boolean) {
+    try {
+      if (isEdit) {
+        await api.ssoAdminUpdate(input);
+      } else {
+        await api.ssoAdminCreate(input);
+      }
+      toast(
+        "success",
+        isEdit ? "SSO provider updated" : "SSO provider created",
+      );
+      setEditingProvider(null);
+      setShowAddProvider(false);
+      await reloadSsoProviders();
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
+  }
+
+  async function handleDeleteProvider() {
+    if (!deletingMount) return;
+    try {
+      await api.ssoAdminDelete(deletingMount);
+      toast("success", "SSO provider removed");
+      setDeletingMount(null);
+      await reloadSsoProviders();
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
+  }
 
   // Keep the draft in sync with the store when not actively editing.
   useEffect(() => {
@@ -281,6 +362,134 @@ export function SettingsPage() {
             <p className="text-sm text-[var(--color-text-muted)]">Loading...</p>
           )}
         </Card>
+
+        {/* Single Sign-On (SSO) */}
+        <Card
+          title="Single Sign-On (SSO)"
+          actions={
+            <div className="flex items-center gap-3">
+              <Button size="sm" onClick={() => setShowAddProvider(true)}>
+                Add Provider
+              </Button>
+              {ssoLoaded && (
+                <label className="flex items-center gap-2 cursor-pointer select-none text-sm">
+                  <input
+                    type="checkbox"
+                    checked={ssoEnabled}
+                    disabled={ssoSaving}
+                    onChange={(e) => handleToggleSso(e.target.checked)}
+                    className="accent-[var(--color-primary)] w-4 h-4"
+                  />
+                  <span className="text-[var(--color-text-muted)]">
+                    {ssoEnabled ? "Enabled" : "Disabled"}
+                  </span>
+                </label>
+              )}
+            </div>
+          }
+        >
+          <div className="space-y-3">
+            <p className="text-xs text-[var(--color-text-muted)]">
+              Configure identity providers users sign in through. Each
+              provider is one OIDC auth mount with its own discovery URL,
+              client credentials, allowed redirect URIs, and default role.
+              Disable the top-right toggle to hide the SSO tab on the login
+              screen without removing providers.
+            </p>
+
+            {ssoProviders.length === 0 ? (
+              <p className="text-sm text-[var(--color-text-muted)] py-4 text-center">
+                No providers configured yet. Click <span className="text-[var(--color-text)]">Add Provider</span> to set one up.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {ssoProviders.map((p) => (
+                  <div
+                    key={p.mount}
+                    className="flex items-center justify-between py-2 border-b border-[var(--color-border)] last:border-0"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-[var(--color-text)] truncate">
+                          {p.display_name || p.mount}
+                        </span>
+                        <Badge
+                          label={p.kind.toUpperCase()}
+                          variant="info"
+                        />
+                        {!p.client_secret_set && (
+                          <Badge label="PKCE" variant="neutral" />
+                        )}
+                        {p.role === null && (
+                          <Badge label="Missing role" variant="warning" />
+                        )}
+                      </div>
+                      <div className="text-xs text-[var(--color-text-muted)] mt-0.5 flex gap-3 flex-wrap">
+                        <span className="font-mono">mount: {p.mount}</span>
+                        {p.discovery_url && (
+                          <span className="font-mono truncate max-w-md">
+                            {p.discovery_url}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex gap-1 shrink-0 ml-3">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setEditingProvider(p)}
+                      >
+                        Edit
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="danger"
+                        onClick={() => setDeletingMount(p.mount)}
+                      >
+                        Delete
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {ssoEnabled && ssoProviders.length === 0 && (
+              <p className="text-xs text-[var(--color-warning)]">
+                SSO is enabled but no providers are configured — the SSO
+                login tab will stay hidden until at least one is added.
+              </p>
+            )}
+            {!ssoEnabled && ssoProviders.length > 0 && (
+              <p className="text-xs text-[var(--color-text-muted)]">
+                SSO is currently disabled. Flip the toggle above to expose
+                these providers on the login screen.
+              </p>
+            )}
+          </div>
+        </Card>
+
+        {(editingProvider || showAddProvider) && (
+          <SsoProviderModal
+            provider={editingProvider}
+            onSave={(input) =>
+              handleSaveProvider(input, editingProvider !== null)
+            }
+            onClose={() => {
+              setEditingProvider(null);
+              setShowAddProvider(false);
+            }}
+          />
+        )}
+
+        <ConfirmModal
+          open={deletingMount !== null}
+          onClose={() => setDeletingMount(null)}
+          onConfirm={handleDeleteProvider}
+          title="Remove SSO Provider"
+          message={`Disable and remove the \`${deletingMount}\` auth mount? Users currently signed in via this provider will keep their tokens until they expire.`}
+          confirmLabel="Remove"
+        />
 
         {/* Password Policy */}
         <Card
@@ -672,6 +881,336 @@ function TypeEditorModal({ typeDef, onSave, onClose }: {
             )}
           </div>
         </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ── SSO Provider Editor ────────────────────────────────────────────
+//
+// One modal for create + edit. The server side enforces the rules
+// documented inline; this UI just validates the obvious misses
+// up-front so the user doesn't round-trip to learn `policies` was
+// required. `client_secret` field behavior is documented next to
+// the input — blank on edit means "keep existing".
+
+const COMMON_OIDC_SCOPES = ["openid", "profile", "email", "groups"];
+
+function SsoProviderModal({
+  provider,
+  onSave,
+  onClose,
+}: {
+  provider: SsoAdminProvider | null;
+  onSave: (input: SsoAdminInput) => void;
+  onClose: () => void;
+}) {
+  const isEdit = provider !== null;
+  const [mount, setMount] = useState(provider?.mount ?? "oidc");
+  const [displayName, setDisplayName] = useState(provider?.display_name ?? "");
+  const [discoveryUrl, setDiscoveryUrl] = useState(provider?.discovery_url ?? "");
+  const [clientId, setClientId] = useState(provider?.client_id ?? "");
+  const [clientSecret, setClientSecret] = useState("");
+  const [allowedRedirectUris, setAllowedRedirectUris] = useState(
+    (provider?.allowed_redirect_uris ?? []).join("\n"),
+  );
+  const [scopes, setScopes] = useState(
+    (provider?.scopes ?? COMMON_OIDC_SCOPES.slice(0, 3)).join(", "),
+  );
+  const [defaultRole, setDefaultRole] = useState(provider?.default_role ?? "user");
+
+  const [userClaim, setUserClaim] = useState(
+    provider?.role?.user_claim ?? "preferred_username",
+  );
+  const [groupsClaim, setGroupsClaim] = useState(provider?.role?.groups_claim ?? "");
+  const [boundAudiences, setBoundAudiences] = useState(
+    (provider?.role?.bound_audiences ?? []).join(", "),
+  );
+  const [boundClaimsJson, setBoundClaimsJson] = useState(
+    provider?.role?.bound_claims_json ?? "",
+  );
+  const [policies, setPolicies] = useState(
+    (provider?.role?.policies ?? ["default"]).join(", "),
+  );
+  const [tokenTtlSecs, setTokenTtlSecs] = useState(
+    String(provider?.role?.token_ttl_secs ?? 3600),
+  );
+
+  const [hints, setHints] = useState<SsoCallbackHints | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api
+      .ssoAdminCallbackHints(mount.trim() || "oidc")
+      .then(setHints)
+      .catch(() => setHints(null));
+  }, [mount]);
+
+  function splitList(raw: string): string[] {
+    return raw
+      .split(/[\n,]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  async function handleCopy(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      /* ignore; not fatal */
+    }
+  }
+
+  async function handleSubmit() {
+    const input: SsoAdminInput = {
+      mount: mount.trim(),
+      display_name: displayName.trim(),
+      discovery_url: discoveryUrl.trim(),
+      client_id: clientId.trim(),
+      client_secret: clientSecret,
+      allowed_redirect_uris: splitList(allowedRedirectUris),
+      scopes: splitList(scopes),
+      default_role: defaultRole.trim(),
+      role: {
+        name: defaultRole.trim(),
+        user_claim: userClaim.trim(),
+        groups_claim: groupsClaim.trim(),
+        bound_audiences: splitList(boundAudiences),
+        bound_claims_json: boundClaimsJson.trim(),
+        policies: splitList(policies),
+        token_ttl_secs: Number.isFinite(Number(tokenTtlSecs))
+          ? Math.max(0, Math.floor(Number(tokenTtlSecs)))
+          : 0,
+      },
+    };
+    setSaving(true);
+    try {
+      await onSave(input);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={isEdit ? `Edit SSO Provider: ${provider!.display_name || provider!.mount}` : "Add SSO Provider"}
+      size="lg"
+      actions={
+        <>
+          <Button variant="ghost" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button onClick={handleSubmit} loading={saving}>
+            {isEdit ? "Save Changes" : "Create Provider"}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-5">
+        {/* ─── Identification ─────────────────────────────────── */}
+        <section className="space-y-3">
+          <h3 className="text-sm font-semibold text-[var(--color-text)]">
+            Identification
+          </h3>
+          <div className="grid grid-cols-2 gap-3">
+            <Input
+              label="Display Name"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder="Acme SSO"
+              hint="Shown on the 'Sign in with …' button."
+            />
+            <Input
+              label="Mount Path"
+              value={mount}
+              onChange={(e) =>
+                setMount(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""))
+              }
+              placeholder="oidc"
+              disabled={isEdit}
+              hint={
+                isEdit
+                  ? "Mount path is fixed after creation."
+                  : "Vault auth-mount path. Lowercase, alphanumeric, - or _."
+              }
+            />
+          </div>
+        </section>
+
+        {/* ─── OIDC provider ──────────────────────────────────── */}
+        <section className="space-y-3">
+          <h3 className="text-sm font-semibold text-[var(--color-text)]">
+            OIDC Provider
+          </h3>
+          <Input
+            label="Discovery URL"
+            value={discoveryUrl}
+            onChange={(e) => setDiscoveryUrl(e.target.value)}
+            placeholder="https://login.example.com"
+            hint="The IdP issuer URL. The vault appends /.well-known/openid-configuration."
+          />
+          <div className="grid grid-cols-2 gap-3">
+            <Input
+              label="Client ID"
+              value={clientId}
+              onChange={(e) => setClientId(e.target.value)}
+              placeholder="1234abcd-..."
+            />
+            <Input
+              label="Client Secret"
+              type="password"
+              value={clientSecret}
+              onChange={(e) => setClientSecret(e.target.value)}
+              placeholder={
+                isEdit && provider?.client_secret_set
+                  ? "••••••• (leave blank to keep)"
+                  : "(leave blank for PKCE-only)"
+              }
+              hint={
+                isEdit && provider?.client_secret_set
+                  ? "Blank leaves the stored secret unchanged."
+                  : "Omit for public/PKCE clients. Never surfaced on read."
+              }
+            />
+          </div>
+          <Input
+            label="Scopes"
+            value={scopes}
+            onChange={(e) => setScopes(e.target.value)}
+            placeholder="openid, profile, email"
+            hint={`Comma-separated. Common: ${COMMON_OIDC_SCOPES.join(", ")}.`}
+          />
+        </section>
+
+        {/* ─── Redirect URIs ──────────────────────────────────── */}
+        <section className="space-y-3">
+          <h3 className="text-sm font-semibold text-[var(--color-text)]">
+            Allowed Redirect URIs
+          </h3>
+          {hints && (
+            <div className="p-3 rounded-lg bg-[var(--color-bg)] border border-[var(--color-border)] space-y-2">
+              <div className="flex items-center gap-2 text-xs">
+                <Badge
+                  label={hints.mode === "embedded" ? "Desktop" : "Remote"}
+                  variant="info"
+                />
+                <span className="text-[var(--color-text-muted)]">
+                  Register this with your IdP:
+                </span>
+              </div>
+              {hints.suggested.map((s) => (
+                <div key={s} className="flex items-center gap-2">
+                  <code className="flex-1 text-xs font-mono bg-[var(--color-surface)] px-2 py-1 rounded border border-[var(--color-border)] truncate">
+                    {s}
+                  </code>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => handleCopy(s)}
+                  >
+                    Copy
+                  </Button>
+                </div>
+              ))}
+              {hints.notes.map((n, i) => (
+                <p key={i} className="text-xs text-[var(--color-text-muted)]">
+                  {n}
+                </p>
+              ))}
+            </div>
+          )}
+          <label className="block text-sm text-[var(--color-text-muted)]">
+            <span className="block mb-1">
+              Redirect URIs the vault will accept on callback
+            </span>
+            <textarea
+              value={allowedRedirectUris}
+              onChange={(e) => setAllowedRedirectUris(e.target.value)}
+              placeholder="http://127.0.0.1/callback&#10;https://vault.example.com/v1/auth/oidc/callback"
+              rows={3}
+              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-[var(--color-primary)]"
+            />
+            <span className="text-xs">
+              One per line or comma-separated. Leave blank to accept any URI
+              (development only).
+            </span>
+          </label>
+        </section>
+
+        {/* ─── Default role ───────────────────────────────────── */}
+        <section className="space-y-3">
+          <h3 className="text-sm font-semibold text-[var(--color-text)]">
+            Default Role
+          </h3>
+          <p className="text-xs text-[var(--color-text-muted)]">
+            Users sign in through this role. It names the vault policies to
+            attach and which claim identifies the user.
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <Input
+              label="Role Name"
+              value={defaultRole}
+              onChange={(e) =>
+                setDefaultRole(e.target.value.replace(/[^a-zA-Z0-9_-]/g, ""))
+              }
+              placeholder="user"
+            />
+            <Input
+              label="User Claim"
+              value={userClaim}
+              onChange={(e) => setUserClaim(e.target.value)}
+              placeholder="preferred_username"
+              hint="Claim used as the principal's display name."
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Input
+              label="Groups Claim"
+              value={groupsClaim}
+              onChange={(e) => setGroupsClaim(e.target.value)}
+              placeholder="groups"
+              hint="Optional. Claim carrying the user's groups list."
+            />
+            <Input
+              label="Token TTL (seconds)"
+              type="number"
+              value={tokenTtlSecs}
+              onChange={(e) => setTokenTtlSecs(e.target.value)}
+              placeholder="3600"
+              hint="0 = token store default."
+            />
+          </div>
+          <Input
+            label="Policies"
+            value={policies}
+            onChange={(e) => setPolicies(e.target.value)}
+            placeholder="default, readonly"
+            hint="Comma-separated. At least one is required."
+          />
+          <Input
+            label="Bound Audiences"
+            value={boundAudiences}
+            onChange={(e) => setBoundAudiences(e.target.value)}
+            placeholder="my-client-id"
+            hint="Comma-separated. If set, the ID token's aud must match one."
+          />
+          <label className="block text-sm text-[var(--color-text-muted)]">
+            <span className="block mb-1">Bound Claims (JSON)</span>
+            <textarea
+              value={boundClaimsJson}
+              onChange={(e) => setBoundClaimsJson(e.target.value)}
+              placeholder='{"hd":["example.com"]}'
+              rows={2}
+              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-[var(--color-primary)]"
+            />
+            <span className="text-xs">
+              Optional JSON object of claim → allowed-values. Login is denied
+              if any listed claim is missing or doesn't match.
+            </span>
+          </label>
+        </section>
       </div>
     </Modal>
   );

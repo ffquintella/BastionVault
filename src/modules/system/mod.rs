@@ -138,6 +138,9 @@ impl SystemBackend {
         let sys_backend_internal_ui_mount_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_cache_flush = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_owner_backfill = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_sso_settings_read = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_sso_settings_write = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_sso_providers = self.self_ptr.upgrade().unwrap().clone();
 
         let backend = new_logical_backend!({
             paths: [
@@ -542,10 +545,41 @@ impl SystemBackend {
                     operations: [
                         {op: Operation::Write, handler: sys_backend_owner_backfill.handle_owner_backfill}
                     ]
+                },
+                {
+                    // Global SSO enable/disable toggle. Root-gated —
+                    // flipping this off makes `sys/sso/providers` return
+                    // an empty list, which the GUI uses to hide the
+                    // SSO login tab entirely.
+                    pattern: "sso/settings$",
+                    fields: {
+                        "enabled": {
+                            field_type: FieldType::Bool,
+                            default: false,
+                            description: "When true, configured SSO backends are advertised via sys/sso/providers."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read,  handler: sys_backend_sso_settings_read.handle_sso_settings_read},
+                        {op: Operation::Write, handler: sys_backend_sso_settings_write.handle_sso_settings_write}
+                    ]
+                },
+                {
+                    // Unauthenticated discovery endpoint for the login
+                    // page: returns a list of configured SSO backends
+                    // by mount path + operator-supplied description.
+                    // Returns an empty list when the toggle is off
+                    // or when no SSO-capable backends are mounted.
+                    // Deliberately does NOT expose provider config
+                    // (discovery URL, client id) — only display metadata.
+                    pattern: "sso/providers$",
+                    operations: [
+                        {op: Operation::Read, handler: sys_backend_sso_providers.handle_sso_providers}
+                    ]
                 }
             ],
-            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "seal", "raw/*", "revoke-prefix/*", "cache/flush", "owner/backfill"],
-            unauth_paths: ["internal/ui/mounts", "internal/ui/mounts/*", "init", "seal-status", "unseal"],
+            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "seal", "raw/*", "revoke-prefix/*", "cache/flush", "owner/backfill", "sso/settings"],
+            unauth_paths: ["internal/ui/mounts", "internal/ui/mounts/*", "init", "seal-status", "unseal", "sso/providers"],
             help: SYSTEM_BACKEND_HELP,
         });
 
@@ -1524,6 +1558,131 @@ impl SystemBackend {
         self.core.barrier.put(&entry).await?;
 
         Ok(None)
+    }
+
+    /// Storage key for the global SSO toggle. Lives in the barrier
+    /// (AEAD-encrypted at rest) alongside the rest of the system
+    /// backend's persisted state.
+    const SSO_SETTINGS_KEY: &'static str = "core/sso/settings";
+
+    /// Auth-backend kinds that participate in the SSO login flow.
+    /// Growing this list (e.g. for `saml` once Phase 3 lands) is the
+    /// one place a new federated auth kind needs to be registered
+    /// for the GUI to pick it up.
+    const SSO_KINDS: &'static [&'static str] = &["oidc"];
+
+    pub async fn handle_sso_settings_read(
+        &self,
+        _backend: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let enabled = self.load_sso_enabled().await?;
+        let mut data = Map::new();
+        data.insert("enabled".into(), Value::Bool(enabled));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_sso_settings_write(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        // `get_data` goes through the field-layer's Bool coercion,
+        // which accepts true/false/"true"/"false"/1/0.
+        let enabled = req
+            .get_data("enabled")
+            .ok()
+            .and_then(|v| match v {
+                Value::Bool(b) => Some(b),
+                Value::String(s) => match s.to_ascii_lowercase().as_str() {
+                    "true" | "1" | "yes" | "on" => Some(true),
+                    "false" | "0" | "no" | "off" => Some(false),
+                    _ => None,
+                },
+                Value::Number(n) => n.as_i64().map(|i| i != 0),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                RvError::ErrString("sso/settings: `enabled` must be a boolean".into())
+            })?;
+
+        let payload = json!({ "enabled": enabled });
+        let entry = StorageEntry {
+            key: Self::SSO_SETTINGS_KEY.to_string(),
+            value: serde_json::to_vec(&payload)?,
+        };
+        self.core.barrier.put(&entry).await?;
+        Ok(None)
+    }
+
+    pub async fn handle_sso_providers(
+        &self,
+        _backend: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        // Disabled: return an empty list rather than erroring so the
+        // GUI's "no providers ⇒ hide tab" branch fires naturally.
+        // This keeps the unauth surface minimal — callers learn
+        // "SSO is not on", not "SSO exists but is turned off".
+        let enabled = self.load_sso_enabled().await?;
+
+        let mut providers: Vec<Value> = Vec::new();
+        if enabled {
+            let auth_module = self.get_module::<AuthModule>("auth")?;
+            let mounts = auth_module.mounts_router.entries.read()?;
+            for mount_entry in mounts.values() {
+                let entry = mount_entry.read()?;
+                if !Self::SSO_KINDS.iter().any(|k| *k == entry.logical_type) {
+                    continue;
+                }
+                // `entry.path` already includes the trailing slash
+                // enforced by the mount layer. Strip it for a clean
+                // display/API shape; the OIDC callback routes accept
+                // either form.
+                let mount = entry.path.trim_end_matches('/').to_string();
+                // Description is the operator-facing display label
+                // (set via `sys/auth/<mount>` description field). Fall
+                // back to the mount path so a blank description still
+                // renders something clickable.
+                let name = if entry.description.trim().is_empty() {
+                    mount.clone()
+                } else {
+                    entry.description.clone()
+                };
+                let mut row = Map::new();
+                row.insert("mount".into(), Value::String(mount));
+                row.insert("name".into(), Value::String(name));
+                row.insert("kind".into(), Value::String(entry.logical_type.clone()));
+                providers.push(Value::Object(row));
+            }
+            // Stable ordering for the GUI — by display name, then by mount
+            // so the list doesn't jitter between reads.
+            providers.sort_by(|a, b| {
+                let na = a.get("name").and_then(Value::as_str).unwrap_or("");
+                let nb = b.get("name").and_then(Value::as_str).unwrap_or("");
+                na.cmp(nb).then_with(|| {
+                    let ma = a.get("mount").and_then(Value::as_str).unwrap_or("");
+                    let mb = b.get("mount").and_then(Value::as_str).unwrap_or("");
+                    ma.cmp(mb)
+                })
+            });
+        }
+
+        let mut data = Map::new();
+        data.insert("enabled".into(), Value::Bool(enabled));
+        data.insert("providers".into(), Value::Array(providers));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    async fn load_sso_enabled(&self) -> Result<bool, RvError> {
+        let Some(entry) = self.core.barrier.get(Self::SSO_SETTINGS_KEY).await? else {
+            return Ok(false);
+        };
+        let parsed: Value = serde_json::from_slice(&entry.value).unwrap_or(Value::Null);
+        Ok(parsed
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false))
     }
 
     pub async fn handle_raw_delete(

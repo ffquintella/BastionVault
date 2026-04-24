@@ -54,6 +54,12 @@ pub enum CacheLayer {
     Token,
     Policy,
     Secret,
+    /// Cloud FileTarget read/list cache. Sits just above the provider
+    /// target (S3 / OneDrive / Google Drive / Dropbox) and holds
+    /// already-ciphertext bytes — safe to cache because the barrier
+    /// sits two layers above and ciphertext at rest is equivalent to
+    /// ciphertext in memory.
+    CloudTarget,
 }
 
 impl EncodeLabelValue for CacheLayer {
@@ -62,6 +68,7 @@ impl EncodeLabelValue for CacheLayer {
             CacheLayer::Token => writer.write_str("token"),
             CacheLayer::Policy => writer.write_str("policy"),
             CacheLayer::Secret => writer.write_str("secret"),
+            CacheLayer::CloudTarget => writer.write_str("cloud_target"),
         }
     }
 }

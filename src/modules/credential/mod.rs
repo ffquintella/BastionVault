@@ -6,5 +6,6 @@ pub mod approle;
 pub mod cert;
 pub mod fido2;
 pub mod oidc;
+pub mod saml;
 pub mod token;
 pub mod userpass;

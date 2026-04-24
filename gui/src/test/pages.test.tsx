@@ -11,6 +11,25 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => mockInvoke(...args),
 }));
 
+// LoginPage mounts with `listen()` calls against the Tauri event bus
+// (FIDO2 status + PIN prompt channels). Without this mock, each
+// `listen()` tries to use the real `window.__TAURI_INTERNALS__` which
+// isn't present under jsdom — producing the `transformCallback`
+// unhandled rejections we were seeing as "Vitest caught N unhandled
+// errors during the test run". Returning a no-op unlisten keeps the
+// page's useEffect cleanup path happy.
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: () => Promise.resolve(() => {}),
+  emit: () => Promise.resolve(),
+}));
+
+// Similarly, the Reset-vault button shells out via `@tauri-apps/plugin-shell`
+// `open()`. Not relied on by any assertion but the LoginPage imports
+// it at the top level; stub it so import resolution works under jsdom.
+vi.mock("@tauri-apps/plugin-shell", () => ({
+  open: () => Promise.resolve(),
+}));
+
 function renderWithProviders(ui: React.ReactNode, { route = "/" } = {}) {
   return render(
     <MemoryRouter initialEntries={[route]}>
@@ -22,6 +41,15 @@ function renderWithProviders(ui: React.ReactNode, { route = "/" } = {}) {
 describe("LoginPage", () => {
   beforeEach(() => {
     mockInvoke.mockReset();
+    // The page mounts with a background `list_sso_providers` fetch
+    // (unauth discovery for the SSO tab). Tests that don't care
+    // about SSO still need the call to resolve, not return undefined.
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_sso_providers") {
+        return Promise.resolve({ enabled: false, providers: [] });
+      }
+      return Promise.reject(new Error(`unmocked: ${cmd}`));
+    });
     useAuthStore.setState({ token: null, policies: [], isAuthenticated: false });
   });
 

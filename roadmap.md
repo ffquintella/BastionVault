@@ -55,7 +55,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Kubernetes Integration | Todo |
 | Web UI / Desktop GUI (Tauri) | Done (all 9 phases) |
 | Auth: OIDC | Done (server module — OIDC auth backend in `src/modules/credential/oidc/` with Authorization-Code-Flow-with-PKCE, provider config + role CRUD, `auth_url` + `callback`, ID-token verification, claim-to-policy mapping, token renewal; 18 tests green. GUI login integration is a separate follow-up.) |
-| Auth: SAML 2.0 | Todo |
+| Auth: SAML 2.0 | In Progress (Phases 1 + 2 — scaffold + config/role CRUD shipped in `src/modules/credential/saml/` with 13 unit + 1 CRUD integration test. Phase 3 — login/callback + XML-signature verification — deferred pending crate decision.) |
 | Auth: FIDO2 / WebAuthn / YubiKey | Done (server module) |
 | Compliance Reporting | Todo |
 
@@ -91,6 +91,9 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 
 - [SAML 2.0 Authentication](features/saml-auth.md)
   SAML 2.0 auth backend with SP-initiated SSO and attribute-to-policy role mappings.
+- [Cloud FileTarget Memory Cache](features/cloud-storage-backend.md)
+  Bounded TTL-based `CachingTarget` decorator (`src/storage/physical/file/cache.rs`) with 30s read TTL / 10s list TTL / 4096-entry / 64 MiB-byte soft caps, write-and-delete invalidation (including prefix-affected list entries), negative-result caching, FIFO eviction, and `bvault_cache_*{layer="cloud_target"}` Prometheus metrics. Default-on for `s3`/`onedrive`/`gdrive`/`dropbox`, default-off for `local`. Zero new deps. 9 unit tests green. Background prefetch + stale-while-revalidate + singleflight deferred as follow-ups.
+
 ## Deferred sub-initiatives
 
 Tracked separately from Active Initiatives because each is self-contained, needs its own crate decision + container-based integration-test infrastructure, and has no current blocker on the core features that incubated it. Each can graduate to Active when operator demand + a specific crate candidate are confirmed.

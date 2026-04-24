@@ -37,7 +37,9 @@ use crate::{
     logical::{Request, Response},
     modules::{
         auth::AuthModule,
-        credential::{approle::AppRoleModule, oidc::OidcModule, userpass::UserPassModule},
+        credential::{
+            approle::AppRoleModule, oidc::OidcModule, saml::SamlModule, userpass::UserPassModule,
+        },
         policy::PolicyModule,
     },
     mount::MountsMonitor,
@@ -147,6 +149,10 @@ impl BastionVault {
         // add credential module: oidc
         let oidc_module = OidcModule::new(core.clone());
         core.module_manager.add_module(Arc::new(oidc_module))?;
+
+        // add credential module: saml (Phase 1+2 — config + roles only)
+        let saml_module = SamlModule::new(core.clone());
+        core.module_manager.add_module(Arc::new(saml_module))?;
 
         let handlers = core.handlers.load().clone();
         for handler in handlers.iter() {

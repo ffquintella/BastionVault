@@ -1041,7 +1041,14 @@ pub async fn test_mount_auth_api(core: &Core, token: &str, atype: &str, path: &s
 
 pub fn get_project_binary_path() -> String {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let bin_name = env::var("CARGO_BIN_NAME").unwrap_or_else(|_| "unknown".to_string());
+    // `CARGO_BIN_NAME` is only set when cargo is running a `[[bin]]`
+    // target's own tests. Library-test callers (the common case) fall
+    // through to the project's single runnable bin — `bvault` —
+    // which is what every `cli()` invocation below actually wants
+    // to launch. Previously this defaulted to `"unknown"`, which
+    // silently produced a path to a nonexistent binary and made
+    // every subprocess-driven test fail with a cryptic spawn error.
+    let bin_name = env::var("CARGO_BIN_NAME").unwrap_or_else(|_| "bvault".to_string());
     let build_profile = env::var("CARGO_PROFILE_RELEASE_DEBUG").unwrap_or("debug".into());
     let mut binary_path = PathBuf::from(manifest_dir);
     if build_profile == "release" {

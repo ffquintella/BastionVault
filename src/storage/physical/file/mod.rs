@@ -24,6 +24,7 @@ use crate::{
     storage::{Backend, BackendEntry},
 };
 
+pub mod cache;
 pub mod creds;
 pub mod local;
 pub mod obfuscate;
@@ -41,6 +42,41 @@ pub mod oauth;
 pub use local::LocalFsTarget;
 pub use target::FileTarget;
 
+/// Build a `CacheConfig` from the target's config map. Parses the
+/// optional `cache_read_ttl_secs`, `cache_list_ttl_secs`,
+/// `cache_max_entries`, `cache_max_bytes` keys; missing keys fall
+/// through to the `CacheConfig::default` values documented in
+/// `cache.rs`.
+fn cache_config_from(conf: &HashMap<String, Value>) -> cache::CacheConfig {
+    let mut cfg = cache::CacheConfig::default();
+    if let Some(n) = conf.get("cache_read_ttl_secs").and_then(|v| v.as_u64()) {
+        cfg.read_ttl = std::time::Duration::from_secs(n);
+    }
+    if let Some(n) = conf.get("cache_list_ttl_secs").and_then(|v| v.as_u64()) {
+        cfg.list_ttl = std::time::Duration::from_secs(n);
+    }
+    if let Some(n) = conf.get("cache_max_entries").and_then(|v| v.as_u64()) {
+        cfg.max_entries = n as usize;
+    }
+    if let Some(n) = conf.get("cache_max_bytes").and_then(|v| v.as_u64()) {
+        cfg.max_bytes = n;
+    }
+    cfg
+}
+
+/// Whether the cache decorator should wrap a target of kind `kind`.
+/// Defaults to on for every cloud kind (S3 / OneDrive / Google Drive
+/// / Dropbox) because those are the latency-dominant case, and off
+/// for `local` because the local filesystem already serves faster
+/// than the cache's own lookup. Explicit `cache = true`/`false` in
+/// config overrides the default in either direction.
+fn cache_enabled_for(kind: &str, conf: &HashMap<String, Value>) -> bool {
+    if let Some(explicit) = conf.get("cache").and_then(|v| v.as_bool()) {
+        return explicit;
+    }
+    matches!(kind, "s3" | "onedrive" | "gdrive" | "dropbox")
+}
+
 #[derive(Debug)]
 pub struct FileBackend {
     target: Arc<dyn FileTarget>,
@@ -57,6 +93,7 @@ impl FileBackend {
             .get("target")
             .and_then(|v| v.as_str())
             .unwrap_or("local");
+        let use_cache = cache_enabled_for(kind, conf);
 
         // Loud warning when `obfuscate_keys` is set through the
         // sync path — the salt bootstrap needs async I/O, so this
@@ -121,9 +158,19 @@ impl FileBackend {
             )),
             other => {
                 log::error!("unknown file target kind: {other}");
-                Err(RvError::ErrPhysicalConfigItemMissing)
+                return Err(RvError::ErrPhysicalConfigItemMissing);
             }
         }
+        .map(|b: Self| {
+            if use_cache {
+                let cfg = cache_config_from(conf);
+                Self {
+                    target: Arc::new(cache::CachingTarget::new(b.target, cfg)),
+                }
+            } else {
+                b
+            }
+        })
     }
 
     /// Test hook / future-phase hook: construct a `FileBackend` from
@@ -230,7 +277,25 @@ mod test {
         test_backend_list_prefix(backend.as_ref()).await;
     }
 
+    /// Drives a second vault process against the same backend via
+    /// the `bvault` CLI, so the project's runnable binary must be
+    /// pre-built before this test will succeed.
+    ///
+    /// Run with:
+    ///
+    /// ```sh
+    /// cargo build --bin bvault
+    /// cargo test --lib test_file_backend_multi_routine -- --ignored
+    /// ```
+    ///
+    /// Marked `#[ignore]` so a plain `cargo test` doesn't surface a
+    /// spawn failure that actually means "the operator forgot to
+    /// build the bin." The MySQL sibling at `mysql_backend.rs` has
+    /// the same prerequisite and is only run behind the
+    /// `storage_mysql` feature flag, which similarly gates it from
+    /// default test runs.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    #[ignore]
     async fn test_file_backend_multi_routine() {
         let dir = new_test_temp_dir("test_file_backend_multi_routine");
         let backend = new_test_file_backend(&dir);

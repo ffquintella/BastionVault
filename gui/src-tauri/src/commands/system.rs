@@ -319,6 +319,114 @@ pub async fn list_audit_events(
     Ok(out)
 }
 
+// ── SSO discovery + admin toggle ───────────────────────────────────
+//
+// `sys/sso/providers` is unauthenticated on the backend so the login
+// page can fetch the list before the user has a token. `sys/sso/settings`
+// is root-gated — only an operator with a sudo token flips the
+// global enable bit.
+
+#[derive(Serialize, Debug, Clone)]
+pub struct SsoProvider {
+    pub mount: String,
+    pub name: String,
+    pub kind: String,
+}
+
+#[derive(Serialize, Debug)]
+pub struct SsoProvidersResult {
+    pub enabled: bool,
+    pub providers: Vec<SsoProvider>,
+}
+
+/// Read the unauth discovery endpoint. Used by the login page to
+/// decide whether the SSO tab is shown at all.
+#[tauri::command]
+pub async fn list_sso_providers(state: State<'_, AppState>) -> CmdResult<SsoProvidersResult> {
+    let data = read_sys_path(&state, "sys/sso/providers", /* authed = */ false).await?;
+    let enabled = data
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let providers = data
+        .get("providers")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| {
+            let o = v.as_object()?;
+            Some(SsoProvider {
+                mount: o.get("mount")?.as_str()?.to_string(),
+                name: o
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                kind: o
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            })
+        })
+        .collect();
+    Ok(SsoProvidersResult { enabled, providers })
+}
+
+#[tauri::command]
+pub async fn get_sso_settings(state: State<'_, AppState>) -> CmdResult<bool> {
+    let data = read_sys_path(&state, "sys/sso/settings", /* authed = */ true).await?;
+    Ok(data.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false))
+}
+
+#[tauri::command]
+pub async fn set_sso_settings(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> CmdResult<()> {
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let token = state.token.lock().await.clone().unwrap_or_default();
+
+    let mut req = Request::default();
+    req.operation = Operation::Write;
+    req.path = "sys/sso/settings".to_string();
+    req.client_token = token;
+    let mut body = serde_json::Map::new();
+    body.insert("enabled".into(), Value::Bool(enabled));
+    req.body = Some(body);
+
+    core.handle_request(&mut req)
+        .await
+        .map_err(CommandError::from)?;
+    Ok(())
+}
+
+async fn read_sys_path(
+    state: &State<'_, AppState>,
+    path: &str,
+    authed: bool,
+) -> Result<serde_json::Map<String, Value>, CommandError> {
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+
+    let mut req = Request::default();
+    req.operation = Operation::Read;
+    req.path = path.to_string();
+    if authed {
+        req.client_token = state.token.lock().await.clone().unwrap_or_default();
+    }
+
+    let resp = core
+        .handle_request(&mut req)
+        .await
+        .map_err(CommandError::from)?;
+    Ok(resp.and_then(|r| r.data).unwrap_or_default())
+}
+
 fn mount_map_to_info(map: &serde_json::Map<String, Value>) -> Vec<MountInfo> {
     let mut out: Vec<MountInfo> = map
         .iter()

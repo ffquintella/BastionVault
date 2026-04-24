@@ -95,19 +95,36 @@ Follows the same Module/Backend pattern as `userpass` and `approle`.
 
 The `login_renew` handler reloads the role to verify it still exists and policies haven't changed. If the role was deleted or policies differ, renewal fails.
 
+## Current State
+
+Phases 1 + 2 are shipped under `src/modules/credential/saml/` —
+`SamlModule` + `SamlBackend` register the `saml` auth kind, `config`
+and `role/<name>` / `role/?` endpoints are wired with full field
+validation, secret redaction (`idp_cert`, `idp_metadata_xml`) on
+read, and `SamlRoleEntry::validate_assertion` ready for the Phase 3
+callback to call. 13 unit tests + 1 end-to-end CRUD integration
+test pass. Phase 3 (login, callback, XML-signature verification)
+is deferred pending the XML-DSig crate decision —
+`samael` pulls in `libxml2` + `libxmlsec1` C dependencies which
+conflicts with the project's OpenSSL-free posture, and the
+pure-Rust alternatives are not yet mature enough to rely on for a
+security-critical verifier without significant hand-rolled glue.
+
 ## Implementation Phases
 
-### Phase 1: Scaffolding
-- Add `samael` to `Cargo.toml`.
+### Phase 1: Scaffolding -- Done
 - Create module structure, bare Module + Backend structs.
-- Register in `src/lib.rs`.
+- Register in `src/lib.rs` + `src/modules/credential/mod.rs`.
 - Verify compilation.
+- `samael` dep deferred to Phase 3 (crate decision pending).
 
-### Phase 2: Config and Roles
-- Implement `path_config.rs` -- config read/write with IdP metadata parsing.
-- Implement `path_roles.rs` -- role CRUD and list.
+### Phase 2: Config and Roles -- Done
+- Implement `path_config.rs` -- config read/write, `idp_cert` and
+  `idp_metadata_xml` redacted on read.
+- Implement `path_roles.rs` -- role CRUD, list, and
+  `validate_assertion` helper.
 
-### Phase 3: Auth Flow
+### Phase 3: Auth Flow -- Pending
 - Implement `path_login.rs` -- AuthnRequest generation, relay state tracking.
 - Implement `path_callback.rs` -- SAML Response parsing, signature verification, assertion extraction, Auth construction.
 - Wire all paths into `new_backend()`.

@@ -13,5 +13,6 @@ pub mod connection;
 pub mod policies;
 pub mod resources;
 pub mod secrets;
+pub mod sso_admin;
 pub mod system;
 pub mod users;

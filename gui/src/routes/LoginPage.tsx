@@ -12,6 +12,12 @@ import { extractError } from "../lib/error";
 type Tab = "token" | "login" | "oidc";
 type LoginStep = "username" | "password";
 
+interface SsoProviderOption {
+  mount: string;
+  name: string;
+  kind: string;
+}
+
 export function LoginPage() {
   const navigate = useNavigate();
   const setAuth = useAuthStore((s) => s.setAuth);
@@ -41,14 +47,49 @@ export function LoginPage() {
   const [resetConfirmText, setResetConfirmText] = useState("");
   const [resetting, setResetting] = useState(false);
 
-  // OIDC login form state. `oidcMount` defaults to the canonical
-  // mount path `oidc` — operators with multiple mounts (e.g.
-  // `okta`, `azuread`) just pick a different value. Role is
-  // optional; when blank, the vault falls back to
-  // `OidcConfig.default_role`.
-  const [oidcMount, setOidcMount] = useState("oidc");
-  const [oidcRole, setOidcRole] = useState("");
+  // SSO state. The login page never asks the user for mount/role —
+  // an admin configures those once via the Settings page + the per-
+  // mount auth backend, and the user just picks a provider by name.
+  // Providers come from the unauth `sys/sso/providers` endpoint,
+  // which returns the empty list when SSO is globally disabled
+  // (→ the SSO tab is hidden entirely).
+  const [ssoProviders, setSsoProviders] = useState<SsoProviderOption[]>([]);
+  const [ssoLoaded, setSsoLoaded] = useState(false);
   const [oidcPhase, setOidcPhase] = useState<"idle" | "consent">("idle");
+  const [pendingMount, setPendingMount] = useState<string | null>(null);
+
+  // Fetch the SSO provider list on mount. Failure is silent — we
+  // just end up with an empty list, the SSO tab hides, and the user
+  // falls back to token/password. Backend returns `{enabled, providers}`
+  // but a disabled toggle also produces an empty list, so we only
+  // need to check the array.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .listSsoProviders()
+      .then((result) => {
+        if (cancelled) return;
+        setSsoProviders(result.enabled ? result.providers : []);
+        setSsoLoaded(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setSsoProviders([]);
+        setSsoLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // If the active tab is SSO but providers disappeared (admin
+  // disabled it between loads, or mount was removed), bounce the
+  // user back to the default login tab.
+  useEffect(() => {
+    if (ssoLoaded && tab === "oidc" && ssoProviders.length === 0) {
+      setTab("login");
+    }
+  }, [ssoLoaded, tab, ssoProviders.length]);
 
   // Listen for FIDO2 status and PIN events
   useEffect(() => {
@@ -114,20 +155,17 @@ export function LoginPage() {
    * 5-minute default timeout. The phase state drives the in-flight
    * status text ("Waiting for browser callback…").
    */
-  async function handleOidcLogin(e: React.FormEvent) {
-    e.preventDefault();
-    if (!oidcMount.trim()) {
-      setError("Mount is required (e.g. `oidc` or the mount path of your OIDC backend)");
-      return;
-    }
+  async function handleSsoLogin(provider: SsoProviderOption) {
     setLoading(true);
     setError(null);
+    setPendingMount(provider.mount);
     let sessionId: string | null = null;
     try {
-      const start = await api.oidcLoginStart({
-        mount: oidcMount.trim(),
-        role: oidcRole.trim() || undefined,
-      });
+      // Role is deliberately omitted — the vault resolves it via
+      // `OidcConfig.default_role` on the mount. Admin-side config
+      // is the single source of truth for what role an SSO login
+      // maps to.
+      const start = await api.oidcLoginStart({ mount: provider.mount });
       sessionId = start.sessionId;
       setOidcPhase("consent");
       await shellOpen(start.authUrl);
@@ -146,6 +184,7 @@ export function LoginPage() {
       }
     } finally {
       setOidcPhase("idle");
+      setPendingMount(null);
       setLoading(false);
     }
   }
@@ -240,14 +279,16 @@ export function LoginPage() {
     }
   }
 
+  // The SSO tab only surfaces when the admin toggle is on AND at
+  // least one SSO-capable auth mount is configured. Zero providers
+  // ⇒ hide entirely — the login page should never advertise a
+  // feature the user can't actually use.
   const tabs: { id: Tab; label: string }[] = [
     { id: "login", label: "Login" },
     { id: "token", label: "Token" },
-    // Third tab — only meaningful when the vault has an `oidc`
-    // mount. Always showing it keeps the surface discoverable;
-    // operators without an OIDC mount get a helpful error on
-    // Sign In rather than a hidden option.
-    { id: "oidc", label: "SSO" },
+    ...(ssoProviders.length > 0
+      ? [{ id: "oidc" as const, label: "SSO" }]
+      : []),
   ];
 
   return (
@@ -305,53 +346,38 @@ export function LoginPage() {
       )}
 
       {tab === "oidc" && (
-        <form onSubmit={handleOidcLogin} className="space-y-4">
+        <div className="space-y-3">
           <p className="text-xs text-[var(--color-text-muted)]">
             Sign in through your organization's identity provider. A new
             browser window will open for consent; come back here once
             you've approved.
           </p>
-          <div>
-            <label className="block text-sm text-[var(--color-text-muted)] mb-1">
-              Mount
-            </label>
-            <input
-              type="text"
-              value={oidcMount}
-              onChange={(e) => setOidcMount(e.target.value)}
-              placeholder="oidc"
-              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[var(--color-primary)]"
-            />
-            <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-              Path the OIDC backend is mounted at. Default <code>oidc</code>;
-              change if your vault uses a different mount
-              (e.g. <code>okta</code>, <code>azuread</code>).
-            </p>
+          <div className="space-y-2">
+            {ssoProviders.map((p) => {
+              const isPending = pendingMount === p.mount;
+              return (
+                <button
+                  key={p.mount}
+                  type="button"
+                  onClick={() => handleSsoLogin(p)}
+                  disabled={loading}
+                  className="w-full py-2.5 px-4 bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] disabled:opacity-50 text-white rounded-lg font-medium transition-colors text-left flex items-center justify-between gap-2"
+                >
+                  <span>
+                    {isPending
+                      ? oidcPhase === "consent"
+                        ? `Waiting for ${p.name}…`
+                        : `Opening ${p.name}…`
+                      : `Sign in with ${p.name}`}
+                  </span>
+                  {isPending && (
+                    <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin shrink-0" />
+                  )}
+                </button>
+              );
+            })}
           </div>
-          <div>
-            <label className="block text-sm text-[var(--color-text-muted)] mb-1">
-              Role <span className="text-[var(--color-text-muted)]">(optional)</span>
-            </label>
-            <input
-              type="text"
-              value={oidcRole}
-              onChange={(e) => setOidcRole(e.target.value)}
-              placeholder="Leave blank for the mount's default role"
-              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[var(--color-primary)]"
-            />
-          </div>
-          <button
-            type="submit"
-            disabled={loading || !oidcMount.trim()}
-            className="w-full py-2.5 bg-[var(--color-primary)] hover:bg-[var(--color-primary-hover)] disabled:opacity-50 text-white rounded-lg font-medium transition-colors"
-          >
-            {loading
-              ? oidcPhase === "consent"
-                ? "Waiting for browser callback…"
-                : "Opening identity provider…"
-              : "Sign in with SSO"}
-          </button>
-        </form>
+        </div>
       )}
 
       {tab === "login" && loginStep === "username" && (

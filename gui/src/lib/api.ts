@@ -515,3 +515,94 @@ export const oidcLoginComplete = (args: {
 
 export const oidcLoginCancel = (sessionId: string) =>
   invoke<void>("oidc_login_cancel", { sessionId });
+
+// ── SSO discovery + admin toggle ───────────────────────────────────
+//
+// The login page calls `listSsoProviders` unauthenticated — the
+// backend's `sys/sso/providers` route is marked unauth. Zero results
+// (either disabled or no SSO backends mounted) means the SSO tab
+// should be hidden.
+
+export interface SsoProvider {
+  mount: string;
+  name: string;
+  kind: string;
+}
+
+export interface SsoProvidersResult {
+  enabled: boolean;
+  providers: SsoProvider[];
+}
+
+export const listSsoProviders = () =>
+  invoke<SsoProvidersResult>("list_sso_providers");
+
+export const getSsoSettings = () => invoke<boolean>("get_sso_settings");
+
+export const setSsoSettings = (enabled: boolean) =>
+  invoke<void>("set_sso_settings", { enabled });
+
+// ── SSO admin (Settings page — root-token flow) ─────────────────────
+//
+// Drive mount + config + role as one unit so the admin never has to
+// touch the raw `sys/auth/<mount>` / `auth/<mount>/config` /
+// `auth/<mount>/role/<name>` surface. `client_secret_set` is the
+// redacted-secret presence hint; the actual secret is never returned.
+
+export interface SsoAdminRole {
+  name: string;
+  user_claim: string;
+  groups_claim: string;
+  bound_audiences: string[];
+  bound_claims_json: string;
+  policies: string[];
+  token_ttl_secs: number;
+}
+
+export interface SsoAdminProvider {
+  mount: string;
+  display_name: string;
+  kind: string;
+  discovery_url: string;
+  client_id: string;
+  client_secret_set: boolean;
+  allowed_redirect_uris: string[];
+  scopes: string[];
+  default_role: string;
+  role: SsoAdminRole | null;
+}
+
+export interface SsoAdminInput {
+  mount: string;
+  display_name: string;
+  discovery_url: string;
+  client_id: string;
+  client_secret: string;
+  allowed_redirect_uris: string[];
+  scopes: string[];
+  default_role: string;
+  role: SsoAdminRole;
+}
+
+export interface SsoCallbackHints {
+  mode: string;
+  suggested: string[];
+  notes: string[];
+}
+
+export const ssoAdminList = () => invoke<SsoAdminProvider[]>("sso_admin_list");
+
+export const ssoAdminGet = (mount: string) =>
+  invoke<SsoAdminProvider>("sso_admin_get", { mount });
+
+export const ssoAdminCreate = (input: SsoAdminInput) =>
+  invoke<void>("sso_admin_create", { input });
+
+export const ssoAdminUpdate = (input: SsoAdminInput) =>
+  invoke<void>("sso_admin_update", { input });
+
+export const ssoAdminDelete = (mount: string) =>
+  invoke<void>("sso_admin_delete", { mount });
+
+export const ssoAdminCallbackHints = (mount: string) =>
+  invoke<SsoCallbackHints>("sso_admin_callback_hints", { mount });
