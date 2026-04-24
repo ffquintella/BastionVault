@@ -81,17 +81,23 @@ export function Layout({ children }: LayoutProps) {
   }
 
   /**
-   * Jump to the vault chooser on the Connect page. Clears the
-   * current session (auth token + vault-mode state) first so the
-   * chooser starts from a clean slate — otherwise `/connect` would
-   * auto-reopen the current vault and land the user right back in
-   * this Layout. The `?choose=1` query arg tells ConnectPage to
-   * render the chooser view rather than the auto-open flow. Mirror
-   * of the Login page's "Switch vault" link.
+   * Jump to the vault chooser on the Connect page.
+   *
+   * Does NOT clear the auth store or the vault-mode store — those
+   * are the "remembered session" for the current vault. The
+   * ConnectPage chooser's `openProfile` path detects whether the
+   * target equals the currently-open vault (no-op round-trip) or
+   * a different one (disconnect → open → try `restoreSession` → skip
+   * to /dashboard if the cached token is still valid).
+   *
+   * Earlier revisions cleared state here and then `navigate("/connect")`
+   * — but the eager-clear triggered a route-guard redirect to
+   * /login against the old URL before the navigate landed, so the
+   * user ended up at the login screen for the same vault. Leaving
+   * the state intact and letting ConnectPage + openProfile handle
+   * the transition is both the correct UX and race-free.
    */
   function handleSwitchVault() {
-    clearAuth();
-    reset();
     navigate("/connect?choose=1");
   }
 

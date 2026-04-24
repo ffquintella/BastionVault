@@ -22,6 +22,34 @@ export function LoginPage() {
   const navigate = useNavigate();
   const setAuth = useAuthStore((s) => s.setAuth);
   const loadEntity = useAuthStore((s) => s.loadEntity);
+  const rememberSession = useAuthStore((s) => s.rememberSession);
+
+  /**
+   * Run after every successful login (Token, UserPass, FIDO2, SSO).
+   * Updates the auth store, kicks off the best-effort entity-self
+   * fetch, AND stashes the session under the current vault's
+   * `last_used_id` so the Switch-vault flow can resume without a
+   * re-login next time. Silent failure to resolve the vault id
+   * just means the session isn't cached — login still works.
+   */
+  async function finalizeLogin(token: string, policies: string[]) {
+    setAuth(token, policies);
+    try {
+      const list = await api.listVaultProfiles();
+      if (list.lastUsedId) {
+        // Wait for loadEntity so the entity_id also makes it into
+        // the cached session — otherwise the first Switch-back
+        // loses ownership attribution until the next loadEntity
+        // round-trip.
+        await loadEntity();
+        rememberSession(list.lastUsedId);
+      } else {
+        loadEntity().catch(() => {});
+      }
+    } catch {
+      loadEntity().catch(() => {});
+    }
+  }
   const mode = useVaultStore((s) => s.mode);
   const [tab, setTab] = useState<Tab>("login");
   const [error, setError] = useState<string | null>(null);
@@ -170,8 +198,7 @@ export function LoginPage() {
       setOidcPhase("consent");
       await shellOpen(start.authUrl);
       const result = await api.oidcLoginComplete({ sessionId });
-      setAuth(result.token, result.policies);
-      loadEntity().catch(() => {});
+      await finalizeLogin(result.token, result.policies);
       navigate("/dashboard");
     } catch (err: unknown) {
       setError(extractError(err));
@@ -195,11 +222,7 @@ export function LoginPage() {
     setError(null);
     try {
       const result = await api.loginToken(token);
-      setAuth(result.token, result.policies);
-      // Best-effort: populate the caller's entity_id so ownership &
-      // sharing UI knows "who am I?". Failure is silent — features
-      // gracefully degrade to "owner unknown".
-      loadEntity().catch(() => {});
+      await finalizeLogin(result.token, result.policies);
       navigate("/dashboard");
     } catch (err: unknown) {
       setError(extractError(err));
@@ -215,8 +238,8 @@ export function LoginPage() {
     setError(null);
     try {
       // Try to start FIDO2 login — if user has keys, this succeeds
-      await api.fido2NativeLogin(username).then((result) => {
-        setAuth(result.token, result.policies);
+      await api.fido2NativeLogin(username).then(async (result) => {
+        await finalizeLogin(result.token, result.policies);
         navigate("/dashboard");
       });
     } catch (fido2Err: unknown) {
@@ -241,11 +264,7 @@ export function LoginPage() {
     setError(null);
     try {
       const result = await api.loginUserpass(username, password);
-      setAuth(result.token, result.policies);
-      // Best-effort: populate the caller's entity_id so ownership &
-      // sharing UI knows "who am I?". Failure is silent — features
-      // gracefully degrade to "owner unknown".
-      loadEntity().catch(() => {});
+      await finalizeLogin(result.token, result.policies);
       navigate("/dashboard");
     } catch (err: unknown) {
       setError(extractError(err));

@@ -83,6 +83,11 @@ export const initVault = () => invoke<InitResponse>("init_vault");
 export const openVault = () => invoke<void>("open_vault");
 export const sealVault = () => invoke<void>("seal_vault");
 export const resetVault = () => invoke<void>("reset_vault");
+/** Close the active embedded vault handle without touching on-disk
+ *  data or saved preferences. Used by the Switch-vault flow so the
+ *  AppState slot is free for a subsequent `openVault` against a
+ *  different profile. */
+export const disconnectVault = () => invoke<void>("disconnect_vault");
 export const getVaultStatus = () => invoke<VaultStatus>("get_vault_status");
 export const listMounts = () => invoke<MountInfo[]>("list_mounts");
 export const listAuthMethods = () => invoke<MountInfo[]>("list_auth_methods");

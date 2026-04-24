@@ -10,6 +10,7 @@ import {
   useToast,
 } from "../components/ui";
 import { useVaultStore } from "../stores/vaultStore";
+import { useAuthStore } from "../stores/authStore";
 import type { RemoteProfile } from "../lib/types";
 import type { VaultProfile, VaultSpec } from "../lib/api";
 import * as api from "../lib/api";
@@ -77,6 +78,12 @@ export function ConnectPage() {
   const { toast } = useToast();
   const setMode = useVaultStore((s) => s.setMode);
   const setRemoteProfile = useVaultStore((s) => s.setRemoteProfile);
+  const rememberSession = useAuthStore((s) => s.rememberSession);
+  const restoreSession = useAuthStore((s) => s.restoreSession);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const currentToken = useAuthStore((s) => s.token);
+  const loadEntity = useAuthStore((s) => s.loadEntity);
+  const clearAuth = useAuthStore((s) => s.clearAuth);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -243,10 +250,59 @@ export function ConnectPage() {
    * launch picks it. The auto-resume path passes `false` because the
    * default is already set.
    */
+  /**
+   * Try to re-hydrate the auth store from a cached per-vault
+   * session, skipping the /login round-trip. Returns `true` when
+   * the cached token validated against the newly-opened vault and
+   * we've navigated straight to the dashboard; `false` otherwise
+   * (no cache for this vault, or the cached token was rejected).
+   */
+  async function tryResumeSession(vaultId: string): Promise<boolean> {
+    const ok = await restoreSession(vaultId);
+    if (!ok) return false;
+    // Best-effort entity reload — mirrors the post-login code path in
+    // LoginPage so ownership / sharing UI still has the principal on hand.
+    loadEntity().catch(() => {});
+    navigate("/dashboard");
+    return true;
+  }
+
   async function openProfile(profile: VaultProfile, recordDefault = true) {
     setOpening(profile.id);
     setError(null);
     try {
+      const targetId = profile.id;
+      const currentId = lastUsedId;
+
+      // Switching AWAY from a different vault? Stash its session
+      // and close the handle so the target can take the AppState
+      // slot. When the operator comes back later the cached token
+      // is restored without a re-login. Same-vault re-open is
+      // handled below (idempotent, no disconnect).
+      const switchingAwayFromAnother =
+        currentId !== null && currentId !== targetId;
+      if (switchingAwayFromAnother && isAuthenticated && currentToken) {
+        rememberSession(currentId!);
+      }
+      if (switchingAwayFromAnother) {
+        // Disconnect regardless of embedded/remote — the backend
+        // commands are no-ops if nothing is bound, so running both
+        // in sequence is cheap and correct.
+        try {
+          await api.disconnectVault();
+        } catch {
+          /* nothing bound → fine */
+        }
+        try {
+          await api.disconnectRemote();
+        } catch {
+          /* nothing bound → fine */
+        }
+        // Drop the now-stale auth state; restoreSession will re-hydrate
+        // it post-open when a cached token exists.
+        clearAuth();
+      }
+
       switch (profile.spec.kind) {
         case "local": {
           const initialized = await api.isVaultInitialized();
@@ -258,6 +314,7 @@ export function ConnectPage() {
           await api.openVault();
           setMode("Embedded");
           if (recordDefault) await api.setLastUsedVault(profile.id);
+          if (await tryResumeSession(targetId)) return;
           navigate("/login");
           return;
         }
@@ -266,6 +323,7 @@ export function ConnectPage() {
           setMode("Remote");
           setRemoteProfile(profile.spec.profile);
           if (recordDefault) await api.setLastUsedVault(profile.id);
+          if (await tryResumeSession(targetId)) return;
           navigate("/login");
           return;
         }
@@ -282,6 +340,7 @@ export function ConnectPage() {
           try {
             await api.openVault();
             setMode("Embedded");
+            if (await tryResumeSession(targetId)) return;
             navigate("/login");
           } catch (err) {
             const msg = extractError(err);

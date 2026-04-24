@@ -141,6 +141,25 @@ pub async fn get_vault_status(state: State<'_, AppState>) -> CmdResult<VaultStat
     }
 }
 
+/// Close the active embedded-vault handle without touching the
+/// on-disk data, keychain, or saved preferences. Used by the
+/// Switch-vault flow so the AppState slot is free for a subsequent
+/// `open_vault` to drop in a different profile (embedded's
+/// `build_backend` reads `last_used_id` from preferences, so swapping
+/// the profile is a `set_last_used_vault` + close + open sequence).
+///
+/// Intentionally does NOT clear `state.token` — the GUI caches
+/// per-vault tokens in its auth store so it can restore the session
+/// on the target vault without a full re-login if the stashed token
+/// is still valid. The token IS cleared on the Rust side later by
+/// the open path when the new vault comes up; or on explicit sign-out.
+#[tauri::command]
+pub async fn disconnect_vault(state: State<'_, AppState>) -> CmdResult<()> {
+    *state.vault.lock().await = None;
+    *state.token.lock().await = None;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn reset_vault(state: State<'_, AppState>) -> CmdResult<()> {
     // Drop the vault instance first.
