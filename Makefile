@@ -22,7 +22,14 @@ OPENSSL_SRC_PERL ?= C:/Strawberry/perl/bin/perl.exe
 export OPENSSL_SRC_PERL
 endif
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune target-size
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size
+
+# Number of rustc incremental sessions to keep per crate. Anything
+# older than the Nth most recent is reaped by `prune-stale`. Override
+# from the command line — e.g. `make build KEEP=5` — when debugging
+# an incremental-compilation bug where older generations need to
+# stick around.
+KEEP ?= 3
 
 help: ## List available commands
 	@echo "BastionVault v$(VERSION)"
@@ -31,22 +38,25 @@ help: ## List available commands
 	@echo ""
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
-build: ## Build the project in release mode
+prune-stale: ## Trim rustc incremental caches to the last KEEP sessions (default 3). Auto-runs before every compiling target.
+	@KEEP=$(KEEP) bash scripts/prune-incremental.sh
+
+build: prune-stale ## Build the project in release mode
 	cargo build --release
 
-run-dev: ## Run the development server
+run-dev: prune-stale ## Run the development server
 	cargo run -- server --config config/dev.hcl
 
 gui-deps: ## Install GUI frontend dependencies
 	cd gui && npm install
 
-run-dev-gui: gui-deps ## Run the desktop GUI in dev mode (embedded = file storage)
+run-dev-gui: gui-deps prune-stale ## Run the desktop GUI in dev mode (embedded = file storage)
 	cd gui && BASTION_EMBEDDED_STORAGE=file npx tauri dev -- --features storage_hiqlite
 
-run-dev-gui-hiqlite: gui-deps ## Run the desktop GUI in dev mode, embedded vault on hiqlite (ports 8210/8220)
+run-dev-gui-hiqlite: gui-deps prune-stale ## Run the desktop GUI in dev mode, embedded vault on hiqlite (ports 8210/8220)
 	cd gui && BASTION_EMBEDDED_STORAGE=hiqlite npx tauri dev -- --features storage_hiqlite
 
-gui-build: gui-deps ## Build the desktop GUI for production
+gui-build: gui-deps prune-stale ## Build the desktop GUI for production
 	cd gui && npx tauri build -- --features storage_hiqlite
 
 gui-test: gui-deps ## Run GUI frontend tests (Vitest)
