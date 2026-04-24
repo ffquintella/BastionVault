@@ -64,6 +64,23 @@ export function SettingsPage() {
   const [showAddProvider, setShowAddProvider] = useState(false);
   const [deletingMount, setDeletingMount] = useState<string | null>(null);
 
+  // YubiKey failsafe — list of cards that can unlock the local
+  // vault-keys file (the machine-level keystore, distinct from the
+  // vault's own FIDO2 auth backend). See
+  // `docs/docs/security-structure.md` § YubiKey failsafe.
+  const [ykRegistered, setYkRegistered] = useState<
+    import("../lib/api").RegisteredYubiKeyDto[]
+  >([]);
+  const [ykPlugged, setYkPlugged] = useState<
+    import("../lib/api").YubiKeyDeviceInfo[]
+  >([]);
+  const [ykRegistering, setYkRegistering] = useState(false);
+  const [ykSerialToRegister, setYkSerialToRegister] = useState<number | null>(
+    null,
+  );
+  const [ykPin, setYkPin] = useState("");
+  const [ykError, setYkError] = useState<string | null>(null);
+
   // Password policy
   const passwordPolicy = usePasswordPolicyStore((s) => s.policy);
   const loadPasswordPolicy = usePasswordPolicyStore((s) => s.load);
@@ -77,7 +94,58 @@ export function SettingsPage() {
     loadResourceTypes();
     loadPasswordPolicy();
     loadSsoState();
+    loadYubiKeyState();
   }, [loadPasswordPolicy]);
+
+  async function loadYubiKeyState() {
+    try {
+      setYkRegistered(await api.yubikeyListRegistered());
+    } catch {
+      setYkRegistered([]);
+    }
+    try {
+      setYkPlugged(await api.yubikeyListDevices());
+    } catch {
+      // PC/SC absent or empty — leave the "plugged in" list empty;
+      // the UI surfaces the overall empty state instead of erroring.
+      setYkPlugged([]);
+    }
+  }
+
+  async function handleRegisterYubiKey() {
+    if (!ykSerialToRegister) {
+      setYkError("Pick a connected YubiKey to register.");
+      return;
+    }
+    if (ykPin.trim().length < 4) {
+      setYkError("PIV PIN is required (4+ digits).");
+      return;
+    }
+    setYkRegistering(true);
+    setYkError(null);
+    try {
+      await api.yubikeyRegister(ykSerialToRegister, ykPin);
+      toast("success", `YubiKey ${ykSerialToRegister} registered`);
+      setYkPin("");
+      setYkSerialToRegister(null);
+      await loadYubiKeyState();
+    } catch (e: unknown) {
+      setYkError(extractError(e));
+    } finally {
+      setYkRegistering(false);
+    }
+  }
+
+  async function handleRemoveYubiKey(serial: number) {
+    if (!confirm(`Remove YubiKey ${serial} as an unlock path?`)) return;
+    try {
+      await api.yubikeyRemove(serial);
+      toast("success", `YubiKey ${serial} removed`);
+      await loadYubiKeyState();
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
+  }
 
   async function loadSsoState() {
     try {
@@ -361,6 +429,124 @@ export function SettingsPage() {
           ) : (
             <p className="text-sm text-[var(--color-text-muted)]">Loading...</p>
           )}
+        </Card>
+
+        {/* YubiKey failsafe — additional / alternative unlock paths
+            for the machine-level vault-keys file. Distinct from the
+            vault's own FIDO2 auth backend (which authenticates USERS
+            to the vault). This card adds HARDWARE KEYS that can
+            unlock the local keystore so a spare YubiKey becomes a
+            recovery path if the OS keychain is wiped or the primary
+            card is lost. See docs/docs/security-structure.md. */}
+        <Card title="YubiKey Failsafe">
+          <div className="space-y-4">
+            <p className="text-xs text-[var(--color-text-muted)]">
+              Register one or more YubiKeys as additional unlock paths for
+              this machine's vault-keys file. Each registered card becomes
+              an independent unlock slot — any one is enough to open the
+              file, so a spare key survives loss or damage of the primary.
+              The OS keychain entry still works as the default unlock path.
+            </p>
+
+            {ykRegistered.length > 0 && (
+              <div>
+                <p className="text-xs font-medium text-[var(--color-text)] mb-1">
+                  Registered
+                </p>
+                <div className="space-y-1">
+                  {ykRegistered.map((y) => (
+                    <div
+                      key={y.serial}
+                      className="flex items-center justify-between py-1.5 px-2 rounded bg-[var(--color-bg)] border border-[var(--color-border)] text-sm"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <span className="font-mono">#{y.serial}</span>
+                        <span className="ml-2 text-xs text-[var(--color-text-muted)] font-mono truncate">
+                          id {y.key_id.slice(0, 12)}…
+                        </span>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="danger"
+                        onClick={() => handleRemoveYubiKey(y.serial)}
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div>
+              <p className="text-xs font-medium text-[var(--color-text)] mb-1">
+                Register a new YubiKey
+              </p>
+              {ykPlugged.length === 0 ? (
+                <p className="text-xs text-[var(--color-text-muted)]">
+                  No YubiKeys detected. Plug one in and click the button
+                  below to refresh.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  <Select
+                    label="Device"
+                    value={
+                      ykSerialToRegister !== null
+                        ? String(ykSerialToRegister)
+                        : ""
+                    }
+                    onChange={(e) => {
+                      const n = Number(e.target.value);
+                      setYkSerialToRegister(Number.isFinite(n) ? n : null);
+                    }}
+                    options={[
+                      { value: "", label: "— select a device —" },
+                      ...ykPlugged.map((d) => ({
+                        value: String(d.serial),
+                        label: `#${d.serial}${
+                          d.slot_occupied ? "" : " (slot 9a empty)"
+                        }`,
+                      })),
+                    ]}
+                  />
+                  <Input
+                    label="PIV PIN"
+                    type="password"
+                    value={ykPin}
+                    onChange={(e) => setYkPin(e.target.value)}
+                    placeholder="••••••"
+                    hint="Default PIN on factory-reset cards is 123456. Never stored — cleared as soon as the registration completes."
+                  />
+                  {ykError && (
+                    <p className="text-xs text-[var(--color-danger)]">
+                      {ykError}
+                    </p>
+                  )}
+                </div>
+              )}
+              <div className="flex gap-2 mt-2">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={loadYubiKeyState}
+                  disabled={ykRegistering}
+                >
+                  Refresh
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={handleRegisterYubiKey}
+                  loading={ykRegistering}
+                  disabled={
+                    ykPlugged.length === 0 || ykSerialToRegister === null
+                  }
+                >
+                  Register
+                </Button>
+              </div>
+            </div>
+          </div>
         </Card>
 
         {/* Single Sign-On (SSO) */}

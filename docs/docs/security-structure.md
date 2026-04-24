@@ -79,15 +79,49 @@ Splitting the local key from the per-vault secrets also means an operator who wa
 
 On first launch after upgrade, `local_keystore::get_unseal_key(vault_id)` checks the legacy keychain slots (`unseal-key` / `root-token`). If present AND the target `vault_id` has no record yet in the encrypted file, the values are copied over, then the legacy slots are purged via `secure_store::delete_all_keys()`. The migration path runs from every `get_*` call and is idempotent — re-running after a partial failure just re-copies the same values and no-ops the purge.
 
-### 2.5 Deferred: ML-KEM envelope
+### 2.5 ML-KEM envelope (shipped — v2 file format)
 
-The file is currently protected by symmetric AEAD only. A follow-on phase wraps the plaintext with an additional ML-KEM-768 layer: the Local Key becomes a 32-byte *seed* for deterministic ML-KEM key generation, the file stores both the KEM ciphertext and the AEAD ciphertext, and decryption requires both the KEM private key (re-derived on every open) and successful AEAD tag verification. This adds explicit PQC asymmetric protection on top of the already-PQC-safe symmetric layer, so a future breakthrough against one primitive does not retroactively compromise captured files.
+The on-disk layout is now **`BVK\x02`**. The plaintext JSON is wrapped in a KEM/DEM envelope:
 
-The crate decision is blocked on the `ml-kem 0.2` ↔ vault-core `ml-kem` dependency skew — once the workspace unifies on a single version this module can enable it behind a `cfg(feature = "pqc_envelope")` flag without touching the on-disk layout except to bump the 4-byte magic (`BVK\x01` → `BVK\x02`).
+```
+plaintext JSON
+     │
+     ▼
+ ChaCha20-Poly1305 (content key = 32 random bytes per save)
+     │
+     ▼                       ┌─ per unlock slot ─┐
+ payload_ct + payload_nonce  │  ML-KEM-768       │
+                             │  encapsulate to   │
+                             │  slot's ek        │
+                             │     │             │
+                             │     ▼             │
+                             │  (kem_ct,         │
+                             │   shared_secret)  │
+                             │     │             │
+                             │     ▼             │
+                             │  HKDF(ss, "…      │
+                             │  wrap-v1")        │
+                             │     │             │
+                             │     ▼             │
+                             │  ChaCha20-Poly1305│
+                             │  (wrap_key, nonce,│
+                             │   content_key)    │
+                             │     │             │
+                             │     ▼             │
+                             │  wrapped_content  │
+                             │  _key (48 bytes)  │
+                             └───────────────────┘
+```
+
+Each unlock slot stores its ML-KEM encapsulation key (`ek`), its KEM ciphertext (`kem_ct`), a fresh wrap nonce, and the wrapped content key. Opening the file tries each slot in turn until one decapsulates successfully; saving re-encapsulates against every slot's `ek` (so the operator does not need every registered YubiKey physically present for every save — only to *open* with a given slot).
+
+The Local Key continues to live in the OS keychain. Its role is narrowed: it is no longer an AEAD key, it is *an HKDF input* for a 64-byte ML-KEM seed. That seed deterministically re-generates the ML-KEM-768 keypair on every open. A quantum adversary that captures the on-disk file and the Local Key still has to break ML-KEM-768 to recover the content key; a quantum adversary without the Local Key has no path at all.
+
+Crate: `bv_crypto` (the vault core's own PQC stack) is reused so the GUI inherits the same well-tested `MlKem768Provider` + `KemDemEnvelopeV1` primitives.
 
 ---
 
-## 3. Deferred: YubiKey failsafe
+## 3. YubiKey failsafe (shipped)
 
 The keychain-anchored Local Key gives good-enough protection for most desktop operators, but we also want a path that survives OS-level compromise of the keychain. A YubiKey-anchored recovery flow is the planned Phase 2.
 
@@ -143,13 +177,22 @@ On `init_embedded` (first-vault init), the GUI presents three options:
 
 Later, from Settings → Security → "Register spare YubiKey", operators add additional keys. Each registration opens the file with one of the currently-registered paths, re-encrypts it so the new key's wrapped-content-key lives alongside the existing ones, and writes the updated file atomically.
 
-### 3.4 Crate decision (pending)
+### 3.4 Crate + integration
 
-Candidates:
-- [`yubikey`](https://crates.io/crates/yubikey) — pure-Rust PIV client, supports RSA + ECC sign. Actively maintained.
-- [`yubico`](https://crates.io/crates/yubico) — OATH + challenge-response only; doesn't cover PIV.
+Shipped on [`yubikey = "0.8"`](https://crates.io/crates/yubikey) — pure-Rust PIV client. The bridge module (`gui/src-tauri/src/yubikey_bridge.rs`) exposes `list_devices` + `load_signing_public_key` + `sign` and nothing else; the keystore wraps these with HKDF → ML-KEM seed derivation. Tauri commands under `commands::yubikey` surface enrolment / removal to the GUI; the Settings page "YubiKey Failsafe" card drives the ceremony.
 
-Favoured: `yubikey` + `p256` / `rsa` for host-side signature parsing. Registration + open flows need integration-test infrastructure with a physical device or a PIV emulator — not available in the current CI pipeline.
+Hardware-dependent tests are marked `#[ignore]` — run explicitly with `cargo test -p bastion-vault-gui --lib yubikey_bridge -- --ignored` after plugging in a provisioned card. The non-hardware primitives (seed reproducibility, wrap-key derivation, slot management) run under normal `cargo test`.
+
+### 3.5 Registration prerequisites
+
+Operators provision slot 9a before registration via the standard Yubico toolchain:
+
+```bash
+ykman piv keys generate 9a pub.pem
+ykman piv certificates generate 9a pub.pem
+```
+
+RSA-2048 is the recommended algorithm (best compatibility with YubiKey firmware pre-5.7). ECC P-256 and P-384 also work. Ed25519 is rejected by the bridge today because older firmwares don't carry it — if operator demand grows this is a one-line change in `yubikey_bridge::detect_algorithm`.
 
 ---
 
@@ -180,8 +223,7 @@ When a vault's storage backend is cloud-backed (S3 / OneDrive / Google Drive / D
 | Vault barrier | ChaCha20-Poly1305 (AEAD) | Shamir-split unseal key → rotating keyring | Every logical secret / auth / sys entry |
 | Vault PQC ops | ML-KEM-768 + ML-DSA-65 | Barrier-encrypted at rest | Identity KEM, signatures, TLS key-exchange |
 | Vault TLS | `rustls` + `aws-lc-rs` + `X25519MLKEM768` | Per-connection ephemeral | Vault ↔ client transit |
-| Desktop keystore | ChaCha20-Poly1305 (AEAD) | OS keychain (Local Key) | Per-vault unseal keys + root tokens, GUI-side |
-| Desktop keystore (planned) | ChaCha20-Poly1305 + ML-KEM-768 | OS keychain OR YubiKey signature | Same + PQC envelope + hardware failsafe |
+| Desktop keystore | ChaCha20-Poly1305 + ML-KEM-768 (KEM/DEM) | OS keychain OR YubiKey PIV signature | Per-vault unseal keys + root tokens + PQC envelope + multi-slot failsafe |
 | Cloud target | HMAC-SHA-256 key obfuscation | Per-target random salt | Cloud bucket metadata opacity |
 | Auth cache | None (in-memory only) | User-supplied at login | Vault token reuse within one GUI session |
 

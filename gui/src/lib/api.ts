@@ -88,6 +88,41 @@ export const resetVault = () => invoke<void>("reset_vault");
  *  AppState slot is free for a subsequent `openVault` against a
  *  different profile. */
 export const disconnectVault = () => invoke<void>("disconnect_vault");
+
+// ── YubiKey failsafe (Phase 2) ─────────────────────────────────────
+//
+// Lets the Settings page register additional YubiKeys as spare
+// unlock paths for the vault-keys file. See
+// `src-tauri/src/local_keystore.rs` for the envelope layout and
+// `docs/docs/security-structure.md` for the threat model.
+
+export interface YubiKeyDeviceInfo {
+  serial: number;
+  slot_occupied: boolean;
+}
+
+export interface RegisteredYubiKeyDto {
+  serial: number;
+  key_id: string;
+  registered_at: number;
+}
+
+export const yubikeyListDevices = () =>
+  invoke<YubiKeyDeviceInfo[]>("yubikey_list_devices");
+
+export const yubikeyListRegistered = () =>
+  invoke<RegisteredYubiKeyDto[]>("yubikey_list_registered");
+
+export const yubikeyRegister = (serial: number, pin: string) =>
+  invoke<RegisteredYubiKeyDto>("yubikey_register", { serial, pin });
+
+export const yubikeyRemove = (serial: number) =>
+  invoke<void>("yubikey_remove", { serial });
+
+export const yubikeySetPin = (pin: string) =>
+  invoke<void>("yubikey_set_pin", { pin });
+
+export const yubikeyClearPin = () => invoke<void>("yubikey_clear_pin");
 export const getVaultStatus = () => invoke<VaultStatus>("get_vault_status");
 export const listMounts = () => invoke<MountInfo[]>("list_mounts");
 export const listAuthMethods = () => invoke<MountInfo[]>("list_auth_methods");

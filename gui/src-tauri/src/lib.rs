@@ -4,6 +4,7 @@ mod error;
 mod preferences;
 mod local_keystore;
 mod secure_store;
+mod yubikey_bridge;
 mod state;
 
 use state::AppState;
@@ -155,6 +156,12 @@ pub fn run() {
             commands::sso_admin::sso_admin_update,
             commands::sso_admin::sso_admin_delete,
             commands::sso_admin::sso_admin_callback_hints,
+            commands::yubikey::yubikey_list_devices,
+            commands::yubikey::yubikey_list_registered,
+            commands::yubikey::yubikey_register,
+            commands::yubikey::yubikey_remove,
+            commands::yubikey::yubikey_set_pin,
+            commands::yubikey::yubikey_clear_pin,
             // Auth
             commands::auth::login_token,
             commands::auth::login_userpass,

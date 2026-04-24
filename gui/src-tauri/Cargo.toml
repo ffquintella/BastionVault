@@ -33,12 +33,16 @@ base64 = "0.22"
 chacha20poly1305 = "0.10"
 hkdf = "0.12"
 rand = "0.9"
-# ML-KEM-768 PQC envelope (Phase 3) is deferred until the `ml-kem`
-# crate version skew with the vault's own PQC deps resolves. The
-# symmetric layer below already provides 256-bit post-quantum
-# confidentiality (Grover-search leaves ~128 bits); the PQC envelope
-# is a defense-in-depth addition, not a prerequisite. See
-# docs/security-structure.md § "Deferred: ML-KEM envelope".
+# `bv_crypto` re-exports the vault core's PQC stack: ML-KEM-768 for
+# key establishment, a KEM/DEM envelope type, and deterministic
+# seed-based keygen. The GUI keystore uses the same crate so the
+# PQC primitives match the vault core's (no version skew).
+bv_crypto = { path = "../../crates/bv_crypto" }
+# YubiKey PIV client — enumerates connected YubiKeys, reads the
+# signing cert in slot 9a, and issues RSA-PKCS1 / ECDSA signatures
+# on operator-supplied salts. Used by the YubiKey failsafe unlock
+# path in `src-tauri/src/local_keystore.rs`.
+yubikey = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }

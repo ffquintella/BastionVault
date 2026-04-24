@@ -16,3 +16,4 @@ pub mod secrets;
 pub mod sso_admin;
 pub mod system;
 pub mod users;
+pub mod yubikey;
