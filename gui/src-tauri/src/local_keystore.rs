@@ -346,15 +346,22 @@ fn open_v2(blob: &[u8]) -> Result<Vec<u8>, CommandError> {
         match try_open_slot(slot, &provider, payload_nonce, payload_ct) {
             Ok(plain) => return Ok(plain),
             Err(e) => {
-                // No `log` crate available in the GUI binary — fall
-                // back to eprintln so slot-open failures still leave
-                // a breadcrumb when an operator runs the GUI from a
-                // terminal diagnosing why a card isn't opening the
-                // vault.
-                eprintln!(
-                    "local_keystore: slot {i} ({:?}) failed to open: {e}",
-                    slot.kind
-                );
+                // Slot-open failures are noisy: every Tauri command
+                // that reaches the keystore will hit the same bad
+                // slot and retry the whole open sequence. Dedupe
+                // by hashing the (slot-kind, error-string) pair
+                // and only printing the first time we see each
+                // combination in this process. Operators still
+                // get a breadcrumb when running from a terminal;
+                // the "same error seven times per page load" noise
+                // is gone.
+                let tag = format!("{:?}:{e}", slot.kind);
+                log_once(&tag, || {
+                    eprintln!(
+                        "local_keystore: slot {i} ({:?}) failed to open: {e}",
+                        slot.kind
+                    )
+                });
                 last_err = Some(e);
             }
         }
@@ -1016,6 +1023,28 @@ fn migrate_legacy_if_needed(vault_id: &str) -> Result<(), CommandError> {
 }
 
 // ── Small helpers ──────────────────────────────────────────────────
+
+/// Dedupe diagnostic log output: call `body` the first time we see
+/// `tag`, no-op on subsequent calls with the same `tag`. Keeps the
+/// set bounded by dropping entries once the process has accumulated
+/// a lot of distinct errors — at that point the specific
+/// de-duplication matters less than not holding onto every bad
+/// state string forever.
+fn log_once<F: FnOnce()>(tag: &str, body: F) {
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    if let Ok(mut set) = seen.lock() {
+        if set.len() >= 128 {
+            set.clear();
+        }
+        if set.insert(tag.to_string()) {
+            body();
+        }
+    } else {
+        body();
+    }
+}
 
 fn now_unix() -> u64 {
     std::time::SystemTime::now()

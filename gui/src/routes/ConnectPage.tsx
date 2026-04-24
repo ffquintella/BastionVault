@@ -687,7 +687,10 @@ export function ConnectPage() {
         </div>
       )}
 
-      {showLocalKeystoreReset && (
+      {(showLocalKeystoreReset ||
+        (error !== null &&
+          (error.toLowerCase().includes("local keystore") ||
+            error.toLowerCase().includes("unwrap")))) && (
         <div className="mb-4 p-4 bg-amber-500/10 border border-amber-500/30 rounded-lg space-y-3">
           <p className="text-amber-400 font-medium text-sm">
             The local key cache cannot be unwrapped on this machine.

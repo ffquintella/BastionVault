@@ -351,9 +351,18 @@ export function InitPage() {
           {/* Safer recovery path for the keystore-unwrap failure
               mode. Vault data stays intact; operator pastes their
               unseal key, we clear the bad cache + re-seed it, and
-              retry the open. Shown automatically when the failing
-              Go-to-Login error matches the keystore signature. */}
-          {showKeystoreRecovery && (
+              retry the open. Surfaced EITHER when the handler
+              explicitly opened it OR when the current error
+              message carries the keystore-unwrap signature — the
+              error can arrive via more than one code path (eg an
+              upstream Tauri command called by a different handler)
+              and we want the panel to show regardless of which
+              route set the error state. */}
+          {(showKeystoreRecovery ||
+            (error !== null &&
+              (error.toLowerCase().includes("local keystore") ||
+                error.toLowerCase().includes("unwrap") ||
+                error.toLowerCase().includes("no unseal key found")))) && (
             <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-lg space-y-3">
               <p className="text-amber-400 font-medium text-sm">
                 Recover with your unseal key
