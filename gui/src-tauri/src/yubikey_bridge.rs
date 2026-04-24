@@ -89,13 +89,37 @@ pub fn list_devices() -> Result<Vec<YubiKeyInfo>, CommandError> {
             Err(_) => continue,
         };
         let serial = yk.serial().0;
-        let slot_occupied = Certificate::read(&mut yk, SIGNING_SLOT).is_ok();
+        // "Slot occupied" = card has a usable asymmetric key in
+        // slot 9a. PIV metadata (YubiKey firmware 5.3+) reports
+        // both whether a key exists AND its algorithm in one call,
+        // so we no longer need a cert present for the check. The
+        // prior Certificate::read approach false-negatived on
+        // cards provisioned with `ykman piv keys generate 9a`
+        // alone (no cert) — exactly the state the YubiKey
+        // Authenticator app reports as "Key without certificate
+        // loaded."
+        let slot_occupied = has_asymmetric_key_in_slot_9a(&mut yk);
         out.push(YubiKeyInfo {
             serial,
             slot_occupied,
         });
     }
     Ok(out)
+}
+
+fn has_asymmetric_key_in_slot_9a(yk: &mut YubiKey) -> bool {
+    match yubikey::piv::metadata(yk, SIGNING_SLOT) {
+        Ok(meta) => matches!(
+            meta.algorithm,
+            yubikey::piv::ManagementAlgorithmId::Asymmetric(_)
+        ),
+        Err(_) => {
+            // Metadata unsupported (older firmware) — fall back to
+            // the cert-presence probe. Less accurate (it misses
+            // key-only slots) but better than a hard false.
+            Certificate::read(yk, SIGNING_SLOT).is_ok()
+        }
+    }
 }
 
 /// Open the YubiKey with the given serial. Called lazily by every
@@ -114,23 +138,59 @@ fn open_by_serial(serial: u32) -> Result<YubiKey, CommandError> {
 /// commit to (algorithm + bit length).
 pub fn load_signing_public_key(serial: u32) -> Result<(YubiKeyId, Vec<u8>), CommandError> {
     let mut yk = open_by_serial(serial)?;
-    let cert = Certificate::read(&mut yk, SIGNING_SLOT).map_err(|e| {
-        CommandError::from(format!(
-            "yubikey: no signing certificate in slot 9a on serial {serial} ({e}). \
-             Run `ykman piv keys generate 9a pubkey.pem` + \
-             `ykman piv certificates generate 9a pubkey.pem` first."
-        ))
-    })?;
 
-    // Use the SPKI (SubjectPublicKeyInfo) raw public-key bits as
-    // the stable per-key fingerprint. Two different private keys
-    // in the same slot produce different public-key bits; the
-    // registered slot's key_id therefore tracks the specific key
-    // material, not just the card it lives on.
-    let spki = cert.subject_pki();
-    let pk_bits = spki.subject_public_key.raw_bytes();
+    // PIV metadata (YubiKey firmware 5.3+) returns the public-key
+    // SPKI whether or not a certificate is present in the slot.
+    // Prefer this path so operators who ran `ykman piv keys
+    // generate 9a` (without following up with `certificates
+    // generate`) don't hit a dead-end. The Yubico Authenticator
+    // app reports this state as "Key without certificate loaded."
+    let pk_bits: Vec<u8> = if let Ok(meta) = yubikey::piv::metadata(&mut yk, SIGNING_SLOT) {
+        if matches!(
+            meta.algorithm,
+            yubikey::piv::ManagementAlgorithmId::Asymmetric(_)
+        ) {
+            match meta.public {
+                Some(spki) => spki.subject_public_key.raw_bytes().to_vec(),
+                None => {
+                    return Err(CommandError::from(format!(
+                        "yubikey: slot 9a on serial {serial} has an asymmetric key but \
+                         no public-key metadata was returned. Re-insert the card and \
+                         retry, or provision the slot with `ykman piv keys generate 9a`."
+                    )));
+                }
+            }
+        } else {
+            return Err(CommandError::from(format!(
+                "yubikey: slot 9a on serial {serial} holds a non-asymmetric key \
+                 ({:?}). Register an RSA-2048 or ECC-P256/P384 key first.",
+                meta.algorithm
+            )));
+        }
+    } else {
+        // Firmware too old for PIV metadata — fall back to reading
+        // the certificate's SPKI. Fails when the slot has a key
+        // but no cert; there's nothing we can do about that
+        // pre-5.3 because the card simply won't tell us the
+        // public key without a cert container.
+        let cert = Certificate::read(&mut yk, SIGNING_SLOT).map_err(|e| {
+            CommandError::from(format!(
+                "yubikey: slot 9a on serial {serial} has no readable public key ({e}). \
+                 This firmware is too old to expose PIV metadata; provision a cert \
+                 alongside the key via `ykman piv certificates generate 9a pub.pem` \
+                 and retry."
+            ))
+        })?;
+        cert.subject_pki().subject_public_key.raw_bytes().to_vec()
+    };
+
+    // Use the SPKI raw public-key bits as the stable per-key
+    // fingerprint. Two different private keys in the same slot
+    // produce different public-key bits; the registered slot's
+    // key_id therefore tracks the specific key material, not just
+    // the card it lives on.
     let mut hasher = Sha256::new();
-    hasher.update(pk_bits);
+    hasher.update(&pk_bits);
     let mut key_id = [0u8; 32];
     key_id.copy_from_slice(&hasher.finalize());
 
@@ -139,7 +199,7 @@ pub fn load_signing_public_key(serial: u32) -> Result<(YubiKeyId, Vec<u8>), Comm
             serial,
             key_id_sha256: key_id,
         },
-        pk_bits.to_vec(),
+        pk_bits,
     ))
 }
 
@@ -189,6 +249,20 @@ pub fn provision_slot_9a(serial: u32, pin: &[u8]) -> Result<(), CommandError> {
     };
 
     let mut yk = open_by_serial(serial)?;
+
+    // Refuse to overwrite an existing asymmetric key. Cards that
+    // reach this code path are supposed to have a truly-empty slot
+    // 9a; a key-only slot (no cert) is now handled entirely inside
+    // `load_signing_public_key` via PIV metadata, without needing
+    // to regenerate the key.
+    if has_asymmetric_key_in_slot_9a(&mut yk) {
+        return Err(CommandError::from(format!(
+            "yubikey: slot 9a on serial {serial} already holds an asymmetric key. \
+             Registration reads the public key via PIV metadata directly — no \
+             provisioning needed. If you're seeing this after re-clicking Provision, \
+             just click Register."
+        )));
+    }
 
     yk.verify_pin(pin)
         .map_err(|e| CommandError::from(format!("yubikey: PIN verify: {e}")))?;
