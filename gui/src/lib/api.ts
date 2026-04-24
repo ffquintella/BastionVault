@@ -91,6 +91,12 @@ export const resetVault = () => invoke<void>("reset_vault");
  *  repopulate the cache. */
 export const resetLocalKeystore = () =>
   invoke<void>("reset_local_keystore");
+/** Recovery flow — wipe the current local keystore cache and
+ *  replace it with an operator-supplied unseal key (hex-encoded,
+ *  as shown at init time). After this succeeds the normal open
+ *  path can unseal the vault using the freshly-cached key. */
+export const recoverUnsealKey = (unsealKeyHex: string) =>
+  invoke<void>("recover_unseal_key", { unsealKeyHex });
 /** Close the active embedded vault handle without touching on-disk
  *  data or saved preferences. Used by the Switch-vault flow so the
  *  AppState slot is free for a subsequent `openVault` against a

@@ -38,6 +38,16 @@ export function InitPage() {
   const [showSettings, setShowSettings] = useState(false);
   const [pastedToken, setPastedToken] = useState("");
   const [savingToken, setSavingToken] = useState(false);
+
+  // Local-keystore recovery. Surfaced when an open fails with the
+  // "aead unwrap" / "local keystore" signature — the on-disk vault
+  // is fine, only the cached unseal key is unreadable. The operator
+  // pastes the unseal key they stashed at init time; we clear the
+  // bad cache + re-seed it, then retry the open. Distinct from
+  // "Destroy & Reset" which nukes vault data.
+  const [showKeystoreRecovery, setShowKeystoreRecovery] = useState(false);
+  const [recoveryUnsealKey, setRecoveryUnsealKey] = useState("");
+  const [recovering, setRecovering] = useState(false);
   const { toast } = useToast();
 
   useEffect(() => {
@@ -163,7 +173,50 @@ export function InitPage() {
       await api.openVault();
       navigate("/login");
     } catch (e: unknown) {
-      setError(extractError(e));
+      const msg = extractError(e);
+      setError(msg);
+      // Surface the safer recovery path automatically when the
+      // failure is a keystore-unwrap mismatch — the destructive
+      // "Destroy & Reset" below would nuke vault data the operator
+      // probably doesn't want to lose for a cache-mismatch bug.
+      const lower = msg.toLowerCase();
+      if (
+        lower.includes("local keystore") ||
+        lower.includes("unwrap") ||
+        lower.includes("no unseal key found")
+      ) {
+        setShowKeystoreRecovery(true);
+      }
+    }
+  }
+
+  async function handleKeystoreRecovery() {
+    const key = recoveryUnsealKey.trim();
+    if (!key) {
+      toast("error", "Paste the unseal key to continue.");
+      return;
+    }
+    setRecovering(true);
+    try {
+      await api.recoverUnsealKey(key);
+      toast("success", "Unseal key restored. Opening the vault…");
+      setRecoveryUnsealKey("");
+      setShowKeystoreRecovery(false);
+      setError(null);
+      // Retry the open path the operator originally intended to
+      // take — succeeds now that the cache is re-seeded with a
+      // working key. Failure surfaces a real unseal error
+      // (e.g. wrong key pasted) on the InitPage.
+      try {
+        await api.openVault();
+        navigate("/login");
+      } catch (openErr: unknown) {
+        setError(extractError(openErr));
+      }
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    } finally {
+      setRecovering(false);
     }
   }
 
@@ -294,6 +347,58 @@ export function InitPage() {
           >
             Go to Login
           </button>
+
+          {/* Safer recovery path for the keystore-unwrap failure
+              mode. Vault data stays intact; operator pastes their
+              unseal key, we clear the bad cache + re-seed it, and
+              retry the open. Shown automatically when the failing
+              Go-to-Login error matches the keystore signature. */}
+          {showKeystoreRecovery && (
+            <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-lg space-y-3">
+              <p className="text-amber-400 font-medium text-sm">
+                Recover with your unseal key
+              </p>
+              <p className="text-amber-400/80 text-xs">
+                The cached unseal key on this machine is unreadable, but
+                your vault data is safe. Paste the unseal key you saved
+                at init time to re-seed the cache and continue. This does
+                not touch the vault's stored secrets.
+              </p>
+              <div>
+                <label className="block text-xs text-amber-400/70 mb-1">
+                  Unseal key (hex, 64 characters)
+                </label>
+                <input
+                  type="password"
+                  value={recoveryUnsealKey}
+                  onChange={(e) => setRecoveryUnsealKey(e.target.value)}
+                  placeholder="e.g. a1b2…"
+                  spellCheck={false}
+                  autoComplete="off"
+                  className="w-full bg-[var(--color-bg)] border border-amber-500/30 rounded-lg px-3 py-2 text-sm font-mono text-amber-300 placeholder:text-amber-500/30"
+                />
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    setShowKeystoreRecovery(false);
+                    setRecoveryUnsealKey("");
+                  }}
+                  disabled={recovering}
+                  className="flex-1 py-2 bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] rounded-lg text-sm transition-colors hover:bg-[var(--color-border)] disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleKeystoreRecovery}
+                  disabled={recovering || !recoveryUnsealKey.trim()}
+                  className="flex-1 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
+                >
+                  {recovering ? "Recovering…" : "Restore & open"}
+                </button>
+              </div>
+            </div>
+          )}
 
           {!showResetConfirm ? (
             <button

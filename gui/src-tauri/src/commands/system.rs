@@ -167,6 +167,49 @@ pub async fn reset_local_keystore(state: State<'_, AppState>) -> CmdResult<()> {
     Ok(())
 }
 
+/// Operator-supplied recovery for an opaque local keystore. Wipes
+/// the current cache (in case it's unreadable) and re-seeds it
+/// with the unseal key the operator has stored elsewhere (paper
+/// backup, password manager, etc.). After this call succeeds the
+/// normal `open_vault` path can unseal using the re-populated
+/// cache. Scoped to the currently-active vault profile —
+/// multi-vault operators run the flow once per profile.
+///
+/// `unseal_key_hex` is the hex-encoded unseal key as shown at init
+/// time. Length + hex validity are checked before touching state.
+#[tauri::command]
+pub async fn recover_unseal_key(
+    state: State<'_, AppState>,
+    unseal_key_hex: String,
+) -> CmdResult<()> {
+    let trimmed = unseal_key_hex.trim();
+    if trimmed.is_empty() {
+        return Err("unseal key is required".into());
+    }
+    // The embedded-vault init writes a 32-byte key, i.e. 64 hex
+    // chars. We reject anything else up-front rather than letting
+    // the downstream unseal fail with an opaque error.
+    if trimmed.len() % 2 != 0 {
+        return Err("unseal key hex string has odd length".into());
+    }
+    if !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("unseal key is not valid hex".into());
+    }
+
+    // Drop the active vault + token first so the keystore update
+    // doesn't race an in-flight session.
+    *state.vault.lock().await = None;
+    *state.token.lock().await = None;
+
+    // Wipe then re-seal so the old cache's ML-KEM material
+    // doesn't linger next to the operator-supplied key.
+    crate::local_keystore::wipe_all()?;
+
+    let vault_id = crate::embedded::current_vault_id();
+    crate::local_keystore::store_unseal_key(&vault_id, trimmed)?;
+    Ok(())
+}
+
 /// Close the active embedded-vault handle without touching the
 /// on-disk data, keychain, or saved preferences. Used by the
 /// Switch-vault flow so the AppState slot is free for a subsequent
