@@ -210,35 +210,81 @@ pub fn is_initialized() -> Result<bool, CommandError> {
     // the post-reset flow — after `reset_vault` wiped the bucket
     // the GUI still reported "Already Initialized" because this
     // check never looked at the remote state. We now actually
-    // probe: the cloud `list("")` walks the top level and decides
-    // on a couple of sentinel entries the init flow writes
-    // (`core/master`, `core/keyring`). If neither exists the vault
-    // is treated as uninitialised and the operator is taken back
-    // through init. The probe runs on a fresh tokio runtime scoped
-    // to this call so we don't need the async `data_dir()` caller
-    // to be async. Failure (network blip, bad credentials, etc.)
-    // falls through to "not initialised" — the subsequent init /
-    // open flow will surface a more descriptive error than a
-    // boolean could.
+    // probe: the cloud `list("core/")` walks the top level and
+    // decides on the first-write namespace every init run
+    // populates. If nothing is there, the vault is treated as
+    // uninitialised and the operator is taken back through init.
+    // The probe runs on a dedicated OS thread so the inner tokio
+    // runtime doesn't nest inside whatever runtime the caller is
+    // already sitting on. Failure (network blip, bad credentials,
+    // etc.) falls through to "not initialised" — the subsequent
+    // init / open flow will surface a more descriptive error than
+    // a boolean could.
+    //
+    // Local / Hiqlite profiles: honour the *active* profile's
+    // effective data directory, not the ambient env-var-derived
+    // default. Earlier revisions of this function always looked at
+    // `data_dir()` (which reads `BASTION_EMBEDDED_STORAGE` + the
+    // hard-coded per-kind paths) and ignored the per-profile
+    // `data_dir` override that `build_backend` does honour. The
+    // mismatch meant a newly-added profile with a custom path saw
+    // "initialised = true" because a *different* profile's data
+    // sat at the global default, and the subsequent `open_vault`
+    // against the profile's own (empty) directory failed with
+    // "No unseal key found." We now mirror `build_backend`'s
+    // effective-dir logic so the two agree on which directory to
+    // probe.
     if let Ok(prefs) = preferences::load() {
         if let Some(profile) = prefs.default_profile() {
-            if matches!(profile.spec, preferences::VaultSpec::Cloud { .. }) {
-                return Ok(probe_cloud_initialized().unwrap_or(false));
+            match &profile.spec {
+                preferences::VaultSpec::Cloud { .. } => {
+                    return Ok(probe_cloud_initialized().unwrap_or(false));
+                }
+                preferences::VaultSpec::Local {
+                    data_dir: profile_dir,
+                    storage_kind: sk,
+                } => {
+                    let effective_kind = match sk.as_str() {
+                        "hiqlite" => StorageKind::Hiqlite,
+                        _ => StorageKind::File,
+                    };
+                    let dir = match profile_dir
+                        .as_ref()
+                        .filter(|s| !s.is_empty())
+                    {
+                        Some(custom) => std::path::PathBuf::from(custom),
+                        None => data_dir_for(effective_kind)?,
+                    };
+                    return check_local_dir(&dir);
+                }
+                preferences::VaultSpec::Remote { .. } => {
+                    // Remote profiles don't route through this
+                    // code path — the connect_remote Tauri command
+                    // handles them — but fall through to the
+                    // ambient-default probe for defensive reasons.
+                }
             }
         }
     }
 
     let dir = data_dir()?;
+    check_local_dir(&dir)
+}
+
+/// Probe a local data directory for signs the vault has ever been
+/// initialised against it. Returns `false` for missing / empty
+/// directories, `true` for directories with a file-backend
+/// `_barrier` marker, and `true` for any non-empty state from a
+/// different backend (hiqlite stores barrier data as SQLite rows,
+/// not a literal file).
+fn check_local_dir(dir: &std::path::Path) -> Result<bool, CommandError> {
     if !dir.exists() {
         return Ok(false);
     }
-    // Primary check: file-backend barrier marker.
     if dir.join("_barrier").exists() {
         return Ok(true);
     }
-    // Fallback: any files/subdirs present means some backend has written
-    // to this tree before.
-    let has_files = std::fs::read_dir(&dir)
+    let has_files = std::fs::read_dir(dir)
         .map(|mut entries| entries.next().is_some())
         .unwrap_or(false);
     Ok(has_files)
