@@ -287,22 +287,54 @@ pub fn is_initialized() -> Result<bool, CommandError> {
 }
 
 /// Probe a local data directory for signs the vault has ever been
-/// initialised against it. Returns `false` for missing / empty
-/// directories, `true` for directories with a file-backend
-/// `_barrier` marker, and `true` for any non-empty state from a
-/// different backend (hiqlite stores barrier data as SQLite rows,
-/// not a literal file).
+/// initialised against it. Looks for known per-backend markers:
+///
+///   - File backend: `_barrier` (the barrier-init sentinel the
+///     core writes before touching anything else).
+///   - Hiqlite backend: a `state` directory with any file inside
+///     (hiqlite writes raft state + the SQLite payload under a
+///     per-node subtree — the parent data dir typically contains
+///     `state/`, `logs/`, and `state.sqlite*` files).
+///
+/// Any other contents — stray `.DS_Store`, editor swap files,
+/// leftover lockfiles from an earlier aborted run, or data from
+/// a DIFFERENT backend kind sharing the same parent dir — are
+/// ignored. A dir with only those is treated as "not initialised"
+/// so the operator lands on the init form and can overwrite
+/// cleanly. This is safer than the earlier "any files ⇒ true"
+/// heuristic, which false-positived for operators who manually
+/// deleted vault files but left the directory in place with
+/// unrelated residue.
 fn check_local_dir(dir: &std::path::Path) -> Result<bool, CommandError> {
     if !dir.exists() {
         return Ok(false);
     }
+
+    // File-backend barrier marker. Definitive if present.
     if dir.join("_barrier").exists() {
         return Ok(true);
     }
-    let has_files = std::fs::read_dir(dir)
-        .map(|mut entries| entries.next().is_some())
-        .unwrap_or(false);
-    Ok(has_files)
+
+    // Hiqlite-backend markers. Any of these existing means the
+    // raft backend has initialised against this dir.
+    for marker in &["state", "logs", "state.sqlite", "state.sqlite-wal"] {
+        let p = dir.join(marker);
+        if p.exists() {
+            // Non-empty subdirs count; empty ones don't.
+            if p.is_dir() {
+                if std::fs::read_dir(&p)
+                    .map(|mut it| it.next().is_some())
+                    .unwrap_or(false)
+                {
+                    return Ok(true);
+                }
+            } else if p.is_file() {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
 }
 
 /// Result of a fresh embedded-vault initialization. The caller receives

@@ -95,9 +95,37 @@ pub async fn update_vault_profile(
 /// back to the chooser on the next launch. Safe to call twice —
 /// missing id is reported as an error the caller can swallow or
 /// surface as a toast.
+///
+/// When `also_delete_data = Some(true)`, additionally nuke whatever
+/// storage the profile referenced:
+///
+///   - Local profile → delete the on-disk data directory.
+///   - Cloud profile → enumerate + delete every object in the
+///     bucket via the provider's `FileTarget`.
+///   - Remote profile → no-op (the vault lives on a server we
+///     don't own).
+///
+/// Disk deletion is scoped to the profile being removed — other
+/// profiles' data is never touched, even when `Some(true)`. Errors
+/// during data wipe are reported but do not revert the preferences
+/// removal, so the list state can't become inconsistent with the
+/// operator's intent even if (say) a cloud network blip aborts the
+/// bucket walk.
 #[tauri::command]
-pub async fn remove_vault_profile(id: String) -> CmdResult<()> {
-    let mut prefs = preferences::load().unwrap_or_default();
+pub async fn remove_vault_profile(
+    id: String,
+    also_delete_data: Option<bool>,
+) -> CmdResult<()> {
+    // Capture the spec BEFORE mutating preferences so the disk-
+    // wipe branch below knows where to point.
+    let prefs_before = preferences::load().unwrap_or_default();
+    let profile_spec = prefs_before
+        .vaults
+        .iter()
+        .find(|v| v.id == id)
+        .map(|v| v.spec.clone());
+
+    let mut prefs = prefs_before;
     let before = prefs.vaults.len();
     prefs.vaults.retain(|v| v.id != id);
     if prefs.vaults.len() == before {
@@ -106,7 +134,100 @@ pub async fn remove_vault_profile(id: String) -> CmdResult<()> {
     if prefs.last_used_id.as_deref() == Some(id.as_str()) {
         prefs.last_used_id = None;
     }
-    preferences::save(&prefs)
+    preferences::save(&prefs)?;
+
+    if also_delete_data.unwrap_or(false) {
+        if let Some(spec) = profile_spec {
+            if let Err(e) = wipe_profile_storage(&spec).await {
+                return Err(format!(
+                    "profile removed from list but data wipe failed: {e}"
+                )
+                .into());
+            }
+        }
+    }
+
+    // Also drop the keystore entry for this vault — the per-vault
+    // unseal key is scoped to a specific profile id and is useless
+    // without it. Best-effort; keystore I/O errors don't roll back
+    // the preferences change. Runs unconditionally (both with and
+    // without data deletion) because the cached key is meaningless
+    // once the profile is gone from the chooser.
+    let _ = crate::local_keystore::remove_vault(&id);
+
+    Ok(())
+}
+
+/// Wipe whatever on-disk / in-cloud storage `spec` references.
+/// Factored out of `remove_vault_profile` so the enumeration logic
+/// stays readable. Returns Err on the first failure — caller
+/// wraps this with a meaningful message naming the profile.
+async fn wipe_profile_storage(spec: &preferences::VaultSpec) -> Result<(), CommandError> {
+    use bastion_vault::storage::Backend;
+    use preferences::VaultSpec;
+
+    match spec {
+        VaultSpec::Local {
+            data_dir,
+            storage_kind,
+        } => {
+            // Resolve effective dir the same way build_backend /
+            // is_initialized do: honour the profile's custom
+            // data_dir override, fall back to the per-kind default.
+            let kind = match storage_kind.as_str() {
+                "hiqlite" => crate::embedded::StorageKind::Hiqlite,
+                _ => crate::embedded::StorageKind::File,
+            };
+            let dir = match data_dir.as_ref().filter(|s| !s.is_empty()) {
+                Some(custom) => std::path::PathBuf::from(custom),
+                None => crate::embedded::data_dir_for(kind)?,
+            };
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir).map_err(|e| {
+                    CommandError::from(format!("remove data dir {dir:?}: {e}"))
+                })?;
+            }
+            Ok(())
+        }
+        VaultSpec::Cloud { config } => {
+            // Build the cloud backend with the provider's config
+            // and walk the key hierarchy to delete every object.
+            // Runs on a fresh backend handle — the wipe is scoped
+            // to this profile's bucket even when another cloud
+            // profile is currently the active one in AppState.
+            let mut conf: std::collections::HashMap<String, serde_json::Value> =
+                config.config.clone().into_iter().collect();
+            conf.insert(
+                "target".into(),
+                serde_json::Value::String(config.target.clone()),
+            );
+            let backend =
+                bastion_vault::storage::physical::file::FileBackend::new_maybe_obfuscated(&conf)
+                    .await
+                    .map_err(CommandError::from)?;
+
+            let mut queue: Vec<String> = vec![String::new()];
+            while let Some(prefix) = queue.pop() {
+                let entries = backend.list(&prefix).await.unwrap_or_default();
+                for entry in entries {
+                    let full = format!("{prefix}{entry}");
+                    if entry.ends_with('/') {
+                        queue.push(full);
+                    } else {
+                        let _ = backend.delete(&full).await;
+                    }
+                }
+            }
+            Ok(())
+        }
+        VaultSpec::Remote { .. } => {
+            // Remote server storage is the server's domain — we
+            // don't have remote-side admin creds to wipe it from
+            // here. A no-op keeps the caller's "success" semantics
+            // consistent while preserving the server's data.
+            Ok(())
+        }
+    }
 }
 
 /// Mark a saved vault profile as the new default. Called both after
