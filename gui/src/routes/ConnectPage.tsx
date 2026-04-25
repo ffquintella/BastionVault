@@ -344,15 +344,25 @@ export function ConnectPage() {
 
       switch (profile.spec.kind) {
         case "local": {
+          // Stamp `last_used_id` BEFORE probing initialisation. The
+          // Rust-side `is_initialized()` reads the active profile's
+          // effective data dir off `last_used_id`; if that points
+          // at a previously-removed profile (or None after the
+          // operator removed the previous default), the probe runs
+          // against the wrong directory and returns false even for
+          // a fully-initialised vault. Setting the default first
+          // makes the probe + the subsequent `open_vault` call
+          // both agree on which profile they're talking about.
+          // Mirrors the cloud branch which has always done this in
+          // the right order.
+          if (recordDefault) await api.setLastUsedVault(profile.id);
           const initialized = await api.isVaultInitialized();
           if (!initialized) {
-            if (recordDefault) await api.setLastUsedVault(profile.id);
             navigate("/init");
             return;
           }
           await api.openVault();
           setMode("Embedded");
-          if (recordDefault) await api.setLastUsedVault(profile.id);
           if (await tryResumeSession(targetId)) return;
           navigate("/login");
           return;
