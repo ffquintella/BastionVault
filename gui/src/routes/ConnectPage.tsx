@@ -247,6 +247,13 @@ export function ConnectPage() {
   }
 
   async function checkSavedPreferences() {
+    // Use try/finally so `setLoading(false)` always fires — even
+    // when `openProfile` resolves successfully (which it does on
+    // a normal navigate, BUT ALSO when it parks the open behind
+    // an unlock prompt and returns without navigating). The
+    // earlier code only cleared loading on the throw path, so a
+    // YubiKey-required vault that surfaced the green PIN prompt
+    // sat behind the "Connecting to vault…" spinner indefinitely.
     try {
       const list = await api.listVaultProfiles();
       setProfiles(list.vaults);
@@ -257,10 +264,10 @@ export function ConnectPage() {
         if (def) {
           // Attempt to auto-resume. On failure we fall through to
           // the chooser, leaving the profile in the list so the user
-          // can re-try or remove.
+          // can re-try or remove. On success the navigate already
+          // unmounted us; the setLoading(false) below is harmless.
           try {
             await openProfile(def, /*recordDefault=*/ false);
-            return;
           } catch {
             // Swallow; render chooser below so the user can pick
             // another profile or fix the failed one.
@@ -269,8 +276,9 @@ export function ConnectPage() {
       }
     } catch {
       // Preferences file missing / unreadable → show empty chooser.
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   }
 
   /**
