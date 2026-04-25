@@ -583,6 +583,14 @@ impl Core {
             }
         }
 
+        // Boot the scheduled-exports tick loop. Single-process scheduler;
+        // HA leader gating lands in a follow-up. Detached task — the
+        // returned JoinHandle is dropped intentionally so the loop runs
+        // until the process exits. The loop self-skips when sealed.
+        if let Some(core_arc) = self.self_ptr.upgrade() {
+            let _ = crate::scheduled_exports::start_scheduler(core_arc);
+        }
+
         Ok(())
     }
 

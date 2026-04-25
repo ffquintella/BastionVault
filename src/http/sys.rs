@@ -820,20 +820,83 @@ fn default_format() -> String {
 /// `POST /v1/sys/exchange/export` — produce a `bvx.v1` JSON document
 /// describing the requested scope; optionally wrap it in a password-encrypted
 /// `.bvx` envelope. See `features/import-export-module.md`.
+/// Parse the bytes that will be audit-logged into a JSON map, when
+/// possible. Audit redaction (HMAC-per-string-leaf) runs against this
+/// map inside `AuditEntry::from_response`, so passwords, file_b64,
+/// payloads, etc. are HMAC'd in the persisted entry without us having
+/// to teach the audit layer anything about exchange/plugin schemas.
+fn body_to_audit_map(body: &web::Bytes) -> Option<serde_json::Map<String, serde_json::Value>> {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+}
+
+/// Capture the bits each sys-level handler needs for audit emit before
+/// the request body is consumed by the work closure. Returned struct is
+/// fed to `emit_sys_audit` after the work completes (success or
+/// failure) so every operation produces exactly one audit entry.
+struct SysAuditCtx {
+    core: Arc<Core>,
+    token: String,
+    body_for_audit: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl SysAuditCtx {
+    fn new(req: &HttpRequest, body: &web::Bytes, core: &web::Data<Arc<Core>>) -> Self {
+        Self {
+            core: core.get_ref().clone(),
+            token: request_auth(req).client_token,
+            body_for_audit: body_to_audit_map(body),
+        }
+    }
+
+    /// Variant for handlers without a request body (GET / DELETE / list
+    /// endpoints). The audit entry's `data` field will be empty.
+    fn new_no_body(req: &HttpRequest, core: &web::Data<Arc<Core>>) -> Self {
+        Self {
+            core: core.get_ref().clone(),
+            token: request_auth(req).client_token,
+            body_for_audit: None,
+        }
+    }
+
+    async fn finish(
+        self,
+        result: &Result<HttpResponse, RvError>,
+        path: &str,
+        op: Operation,
+    ) {
+        let err_str = result.as_ref().err().map(|e| format!("{e}"));
+        crate::audit::emit_sys_audit(
+            &self.core,
+            &self.token,
+            path,
+            op,
+            self.body_for_audit,
+            err_str.as_deref(),
+        )
+        .await;
+    }
+}
+
 async fn sys_exchange_export_request_handler(
     req: HttpRequest,
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, RvError> {
-    let _auth = request_auth(&req);
+    let audit = SysAuditCtx::new(&req, &body, &core);
 
-    let mut payload: ExchangeExportRequest =
-        serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+    let result: Result<HttpResponse, RvError> = (async move {
+        let mut payload: ExchangeExportRequest =
+            serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
 
     // Build the bvx.v1 document by walking barrier-decrypted storage.
     let exporter = crate::exchange::ExporterInfo::default();
+    let core_arc = core.get_ref().clone();
+    let mounts = crate::exchange::scope::MountIndex::from_core(&core_arc)?;
     let document = crate::exchange::scope::export_to_document(
         core.barrier.as_storage(),
+        &mounts,
         exporter,
         payload.scope.clone(),
     )
@@ -887,6 +950,10 @@ async fn sys_exchange_export_request_handler(
             "file_b64": body_b64,
         }),
     ))
+    })
+    .await;
+    audit.finish(&result, "sys/exchange/export", Operation::Write).await;
+    result
 }
 
 /// Request body for `POST /v1/sys/exchange/import`.
@@ -914,10 +981,19 @@ async fn sys_exchange_import_preview_handler(
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, RvError> {
-    let _auth = request_auth(&req);
+    let audit = SysAuditCtx::new(&req, &body, &core);
+    // Owner header is needed inside the work block but `req` is not moved
+    // into the closure (we only own a few captures), so resolve it now.
+    let owner_header = req
+        .headers()
+        .get("X-BastionVault-Actor")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
 
-    let mut payload: ExchangeImportRequest =
-        serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+    let result: Result<HttpResponse, RvError> = (async move {
+        let mut payload: ExchangeImportRequest =
+            serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
 
     let document_bytes = match payload.format.as_str() {
         "bvx" => {
@@ -994,21 +1070,14 @@ async fn sys_exchange_import_preview_handler(
         });
     }
 
-    // Owner binding: tokens are bound to the actor's display name. We
-    // pull it from the auth context — empty string when unauthenticated
-    // (the route is gated; root-token operators see "" too, which is
-    // fine since the apply call comes from the same actor).
-    let owner = req.headers()
-        .get("X-BastionVault-Actor")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    let token = core.exchange_preview_store.insert(document, owner);
+    // Owner binding: tokens are bound to the actor's display name; the
+    // header was resolved before we moved into the async block.
+    let preview_token = core.exchange_preview_store.insert(document, owner_header);
 
     Ok(response_json_ok(
         None,
         json!({
-            "token": token,
+            "token": preview_token,
             "expires_in_secs": core.exchange_preview_store.ttl_secs(),
             "total": items.len() as u64,
             "new": new,
@@ -1017,6 +1086,10 @@ async fn sys_exchange_import_preview_handler(
             "items": items,
         }),
     ))
+    })
+    .await;
+    audit.finish(&result, "sys/exchange/import/preview", Operation::Write).await;
+    result
 }
 
 /// `POST /v1/sys/exchange/import/apply` — consume a preview token and
@@ -1033,38 +1106,403 @@ async fn sys_exchange_import_apply_handler(
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, RvError> {
-    let _auth = request_auth(&req);
-
-    let payload: ExchangeApplyRequest =
-        serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
-
-    let owner = req.headers()
+    let audit = SysAuditCtx::new(&req, &body, &core);
+    let owner_header = req
+        .headers()
         .get("X-BastionVault-Actor")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
 
-    let document = core
-        .exchange_preview_store
-        .consume(&payload.token, &owner)?;
+    let result: Result<HttpResponse, RvError> = (async move {
+        let payload: ExchangeApplyRequest =
+            serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
 
-    let result = crate::exchange::scope::import_from_document(
-        core.barrier.as_storage(),
-        &document,
-        payload.conflict_policy,
-    )
-    .await?;
+        let document = core
+            .exchange_preview_store
+            .consume(&payload.token, &owner_header)?;
 
+        let result = crate::exchange::scope::import_from_document(
+            core.barrier.as_storage(),
+            &document,
+            payload.conflict_policy,
+        )
+        .await?;
+
+        Ok(response_json_ok(
+            None,
+            json!({
+                "written": result.written,
+                "unchanged": result.unchanged,
+                "skipped": result.skipped,
+                "renamed": result.renamed,
+                "items": result.items,
+            }),
+        ))
+    })
+    .await;
+    audit.finish(&result, "sys/exchange/import/apply", Operation::Write).await;
+    result
+}
+
+// ── Plugins (Phase 1: WASM substrate) ─────────────────────────────────────
+//
+// Catalog CRUD plus an `invoke` endpoint that runs a registered plugin
+// in a fresh wasmtime sandbox. ML-DSA signature verification, hot reload,
+// and out-of-process runtime are deferred per
+// `features/plugin-system.md`. CI must fail if either OpenSSL or
+// `aws-lc-sys` becomes reachable through this code path.
+
+#[derive(Debug, Deserialize)]
+struct PluginRegisterRequest {
+    manifest: crate::plugins::PluginManifest,
+    /// Base64-encoded WASM binary. Operators upload the bytes inline
+    /// rather than a path so the entire registration is one barrier-
+    /// scoped transaction.
+    binary_b64: String,
+}
+
+async fn sys_plugins_list_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let result: Result<HttpResponse, RvError> = (async move {
+        let catalog = crate::plugins::PluginCatalog::new();
+        let manifests = catalog.list(core.barrier.as_storage()).await?;
+        Ok(response_json_ok(None, json!({ "plugins": manifests })))
+    })
+    .await;
+    audit.finish(&result, "sys/plugins", Operation::List).await;
+    result
+}
+
+async fn sys_plugins_register_handler(
+    req: HttpRequest,
+    body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new(&req, &body, &core);
+    let result: Result<HttpResponse, RvError> = (async move {
+        use base64::Engine;
+        let payload: PluginRegisterRequest =
+            serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+        let binary = base64::engine::general_purpose::STANDARD
+            .decode(payload.binary_b64.as_bytes())
+            .map_err(|_| RvError::ErrRequestInvalid)?;
+
+        let catalog = crate::plugins::PluginCatalog::new();
+        catalog.put(core.barrier.as_storage(), &payload.manifest, &binary).await?;
+        Ok(response_json_ok(None, json!({ "manifest": payload.manifest })))
+    })
+    .await;
+    audit.finish(&result, "sys/plugins/register", Operation::Write).await;
+    result
+}
+
+async fn sys_plugins_get_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let name = req.match_info().get("name").unwrap_or("").to_string();
+    let audit_path = format!("sys/plugins/{name}");
+    let result: Result<HttpResponse, RvError> = (async move {
+        let catalog = crate::plugins::PluginCatalog::new();
+        match catalog.get_manifest(core.barrier.as_storage(), &name).await? {
+            Some(m) => Ok(response_json_ok(None, json!({ "manifest": m }))),
+            None => Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
+        }
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Read).await;
+    result
+}
+
+async fn sys_plugins_delete_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let name = req.match_info().get("name").unwrap_or("").to_string();
+    let audit_path = format!("sys/plugins/{name}");
+    let result: Result<HttpResponse, RvError> = (async move {
+        let catalog = crate::plugins::PluginCatalog::new();
+        catalog.delete(core.barrier.as_storage(), &name).await?;
+        Ok(response_ok(None, None))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Delete).await;
+    result
+}
+
+#[derive(Debug, Deserialize)]
+struct PluginInvokeRequest {
+    /// Base64-encoded request payload handed to the plugin. The plugin
+    /// gets these bytes verbatim in its linear memory; what they mean
+    /// is up to the plugin's contract with its caller.
+    #[serde(default)]
+    input_b64: String,
+    /// Optional fuel override. Capped by the host's max budget regardless.
+    #[serde(default)]
+    fuel: Option<u64>,
+}
+
+async fn sys_plugins_invoke_handler(
+    req: HttpRequest,
+    body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new(&req, &body, &core);
+    let name = req.match_info().get("name").unwrap_or("").to_string();
+    let audit_path = format!("sys/plugins/{name}/invoke");
+
+    let result: Result<HttpResponse, RvError> = (async move {
+    use base64::Engine;
+    let payload: PluginInvokeRequest = if body.is_empty() {
+        PluginInvokeRequest { input_b64: String::new(), fuel: None }
+    } else {
+        serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?
+    };
+    let input = base64::engine::general_purpose::STANDARD
+        .decode(payload.input_b64.as_bytes())
+        .map_err(|_| RvError::ErrRequestInvalid)?;
+
+    let catalog = crate::plugins::PluginCatalog::new();
+    let record = match catalog.get(core.barrier.as_storage(), &name).await? {
+        Some(r) => r,
+        None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
+    };
+
+    let fuel = payload
+        .fuel
+        .unwrap_or(crate::plugins::DEFAULT_FUEL)
+        .min(crate::plugins::DEFAULT_FUEL.saturating_mul(10));
+    let runtime = crate::plugins::WasmRuntime::with_budgets(fuel, crate::plugins::DEFAULT_MEMORY_BYTES)
+        .map_err(|_| RvError::ErrUnknown)?;
+    let output = runtime
+        .invoke(&record.manifest, &record.binary, &input)
+        .map_err(|e| {
+            log::warn!("plugin {} invoke failed: {e}", record.manifest.name);
+            RvError::ErrRequestInvalid
+        })?;
+
+    let (status, plugin_status) = match output.outcome {
+        crate::plugins::InvokeOutcome::Success => ("success", 0),
+        crate::plugins::InvokeOutcome::PluginError(s) => ("plugin_error", s),
+    };
     Ok(response_json_ok(
         None,
         json!({
-            "written": result.written,
-            "unchanged": result.unchanged,
-            "skipped": result.skipped,
-            "renamed": result.renamed,
-            "items": result.items,
+            "status": status,
+            "plugin_status_code": plugin_status,
+            "fuel_consumed": output.fuel_consumed,
+            "response_b64": base64::engine::general_purpose::STANDARD.encode(&output.response),
         }),
     ))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Write).await;
+    result
+}
+
+// ── Scheduled exports ─────────────────────────────────────────────────────
+//
+// CRUD over `core/scheduled_exports/schedules/*` plus run history. The
+// scheduler tick loop is owned by `Core::post_unseal` (see
+// `scheduled_exports::runner::start_scheduler`); these endpoints are the
+// management surface. See `features/scheduled-exports.md`.
+
+async fn sys_scheduled_exports_list_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let result: Result<HttpResponse, RvError> = (async move {
+        let store = crate::scheduled_exports::ScheduleStore::new();
+        let list = store.list(core.barrier.as_storage()).await?;
+        Ok(response_json_ok(None, json!({ "schedules": list })))
+    })
+    .await;
+    audit.finish(&result, "sys/scheduled-exports", Operation::List).await;
+    result
+}
+
+async fn sys_scheduled_exports_create_handler(
+    req: HttpRequest,
+    body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new(&req, &body, &core);
+    let result: Result<HttpResponse, RvError> = (async move {
+        let input: crate::scheduled_exports::ScheduleInput =
+            serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+
+        use std::str::FromStr;
+        cron::Schedule::from_str(&input.cron).map_err(|_| RvError::ErrRequestInvalid)?;
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let sched = crate::scheduled_exports::Schedule {
+            id: id.clone(),
+            name: input.name,
+            cron: input.cron,
+            format: input.format,
+            scope: input.scope,
+            destination: input.destination,
+            password_ref: input.password_ref,
+            allow_plaintext: input.allow_plaintext,
+            comment: input.comment,
+            created_at: now.clone(),
+            updated_at: now,
+            enabled: input.enabled,
+        };
+        let store = crate::scheduled_exports::ScheduleStore::new();
+        store.put(core.barrier.as_storage(), &sched).await?;
+        Ok(response_json_ok(None, json!({ "schedule": sched })))
+    })
+    .await;
+    audit.finish(&result, "sys/scheduled-exports/create", Operation::Write).await;
+    result
+}
+
+async fn sys_scheduled_exports_get_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let id = req.match_info().get("id").unwrap_or("").to_string();
+    let audit_path = format!("sys/scheduled-exports/{id}");
+    let result: Result<HttpResponse, RvError> = (async move {
+        let store = crate::scheduled_exports::ScheduleStore::new();
+        let sched = store.get(core.barrier.as_storage(), &id).await?;
+        match sched {
+            Some(s) => Ok(response_json_ok(None, json!({ "schedule": s }))),
+            None => Ok(response_error(StatusCode::NOT_FOUND, "schedule not found")),
+        }
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Read).await;
+    result
+}
+
+async fn sys_scheduled_exports_update_handler(
+    req: HttpRequest,
+    body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new(&req, &body, &core);
+    let id = req.match_info().get("id").unwrap_or("").to_string();
+    let audit_path = format!("sys/scheduled-exports/{id}");
+    let result: Result<HttpResponse, RvError> = (async move {
+        let input: crate::scheduled_exports::ScheduleInput =
+            serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+
+        use std::str::FromStr;
+        cron::Schedule::from_str(&input.cron).map_err(|_| RvError::ErrRequestInvalid)?;
+
+        let store = crate::scheduled_exports::ScheduleStore::new();
+        let existing = store.get(core.barrier.as_storage(), &id).await?;
+        let existing = match existing {
+            Some(s) => s,
+            None => return Ok(response_error(StatusCode::NOT_FOUND, "schedule not found")),
+        };
+        let sched = crate::scheduled_exports::Schedule {
+            id: existing.id,
+            name: input.name,
+            cron: input.cron,
+            format: input.format,
+            scope: input.scope,
+            destination: input.destination,
+            password_ref: input.password_ref,
+            allow_plaintext: input.allow_plaintext,
+            comment: input.comment,
+            created_at: existing.created_at,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            enabled: input.enabled,
+        };
+        store.put(core.barrier.as_storage(), &sched).await?;
+        Ok(response_json_ok(None, json!({ "schedule": sched })))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Write).await;
+    result
+}
+
+async fn sys_scheduled_exports_delete_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let id = req.match_info().get("id").unwrap_or("").to_string();
+    let audit_path = format!("sys/scheduled-exports/{id}");
+    let result: Result<HttpResponse, RvError> = (async move {
+        let store = crate::scheduled_exports::ScheduleStore::new();
+        store.delete(core.barrier.as_storage(), &id).await?;
+        Ok(response_ok(None, None))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Delete).await;
+    result
+}
+
+async fn sys_scheduled_exports_runs_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let id = req.match_info().get("id").unwrap_or("").to_string();
+    let audit_path = format!("sys/scheduled-exports/{id}/runs");
+    let result: Result<HttpResponse, RvError> = (async move {
+        let store = crate::scheduled_exports::ScheduleStore::new();
+        let runs = store.list_runs(core.barrier.as_storage(), &id).await?;
+        Ok(response_json_ok(None, json!({ "runs": runs })))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::List).await;
+    result
+}
+
+/// Trigger an immediate one-off run, separate from the cron cadence.
+/// Useful for "test my schedule" workflows in the GUI.
+async fn sys_scheduled_exports_run_now_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let id = req.match_info().get("id").unwrap_or("").to_string();
+    let audit_path = format!("sys/scheduled-exports/{id}/run-now");
+    let result: Result<HttpResponse, RvError> = (async move {
+        let store = crate::scheduled_exports::ScheduleStore::new();
+        let sched = store.get(core.barrier.as_storage(), &id).await?
+            .ok_or_else(|| RvError::ErrRequestInvalid)?;
+
+    let core_arc = core.get_ref().clone();
+    let outcome = crate::scheduled_exports::runner::run_once(&core_arc, &sched).await;
+    let record = match outcome {
+        Ok((bytes, dest)) => crate::scheduled_exports::RunRecord {
+            schedule_id: sched.id.clone(),
+            run_at: chrono::Utc::now().to_rfc3339(),
+            status: crate::scheduled_exports::RunStatus::Success,
+            bytes_written: bytes,
+            destination: dest,
+            error: None,
+        },
+        Err(e) => crate::scheduled_exports::RunRecord {
+            schedule_id: sched.id.clone(),
+            run_at: chrono::Utc::now().to_rfc3339(),
+            status: crate::scheduled_exports::RunStatus::Failed,
+            bytes_written: 0,
+            destination: sched.destination.clone(),
+            error: Some(format!("{e}")),
+        },
+    };
+    let _ = store.append_run(core.barrier.as_storage(), &record).await;
+    Ok(response_json_ok(None, json!({ "run": record })))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Write).await;
+    result
 }
 
 /// `POST /v1/sys/exchange/import` — single-shot import, kept for callers
@@ -1075,57 +1513,62 @@ async fn sys_exchange_import_request_handler(
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, RvError> {
-    let _auth = request_auth(&req);
+    let audit = SysAuditCtx::new(&req, &body, &core);
 
-    let mut payload: ExchangeImportRequest =
-        serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+    let result: Result<HttpResponse, RvError> = (async move {
+        let mut payload: ExchangeImportRequest =
+            serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
 
-    let document_bytes = match payload.format.as_str() {
-        "bvx" => {
-            let password = payload.password.as_deref().ok_or(RvError::ErrRequestInvalid)?;
-            let bytes = crate::exchange::decrypt_bvx(payload.file.as_bytes(), password)?;
-            if let Some(ref mut p) = payload.password {
-                p.zeroize();
+        let document_bytes = match payload.format.as_str() {
+            "bvx" => {
+                let password = payload.password.as_deref().ok_or(RvError::ErrRequestInvalid)?;
+                let bytes = crate::exchange::decrypt_bvx(payload.file.as_bytes(), password)?;
+                if let Some(ref mut p) = payload.password {
+                    p.zeroize();
+                }
+                bytes
             }
-            bytes
-        }
-        "json" => {
-            if !payload.allow_plaintext {
+            "json" => {
+                if !payload.allow_plaintext {
+                    return Ok(response_error(
+                        StatusCode::BAD_REQUEST,
+                        "plaintext import refused (set allow_plaintext: true to override)",
+                    ));
+                }
+                payload.file.as_bytes().to_vec()
+            }
+            _ => {
                 return Ok(response_error(
                     StatusCode::BAD_REQUEST,
-                    "plaintext import refused (set allow_plaintext: true to override)",
+                    "format must be \"bvx\" or \"json\"",
                 ));
             }
-            payload.file.as_bytes().to_vec()
-        }
-        _ => {
-            return Ok(response_error(
-                StatusCode::BAD_REQUEST,
-                "format must be \"bvx\" or \"json\"",
-            ));
-        }
-    };
+        };
 
-    let document: crate::exchange::ExchangeDocument =
-        serde_json::from_slice(&document_bytes).map_err(|_| RvError::ErrRequestInvalid)?;
+        let document: crate::exchange::ExchangeDocument =
+            serde_json::from_slice(&document_bytes).map_err(|_| RvError::ErrRequestInvalid)?;
 
-    let result = crate::exchange::scope::import_from_document(
-        core.barrier.as_storage(),
-        &document,
-        payload.conflict_policy,
-    )
-    .await?;
+        let result = crate::exchange::scope::import_from_document(
+            core.barrier.as_storage(),
+            &document,
+            payload.conflict_policy,
+        )
+        .await?;
 
-    Ok(response_json_ok(
-        None,
-        json!({
-            "written": result.written,
-            "unchanged": result.unchanged,
-            "skipped": result.skipped,
-            "renamed": result.renamed,
-            "items": result.items,
-        }),
-    ))
+        Ok(response_json_ok(
+            None,
+            json!({
+                "written": result.written,
+                "unchanged": result.unchanged,
+                "skipped": result.skipped,
+                "renamed": result.renamed,
+                "items": result.items,
+            }),
+        ))
+    })
+    .await;
+    audit.finish(&result, "sys/exchange/import", Operation::Write).await;
+    result
 }
 
 async fn sys_import_request_handler(
@@ -1198,6 +1641,39 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
         .service(web::resource("/exchange/import").route(web::post().to(sys_exchange_import_request_handler)))
         .service(web::resource("/exchange/import/preview").route(web::post().to(sys_exchange_import_preview_handler)))
         .service(web::resource("/exchange/import/apply").route(web::post().to(sys_exchange_import_apply_handler)))
+        .service(
+            web::resource("/scheduled-exports")
+                .route(web::get().to(sys_scheduled_exports_list_handler))
+                .route(web::post().to(sys_scheduled_exports_create_handler)),
+        )
+        .service(
+            web::resource("/scheduled-exports/{id}")
+                .route(web::get().to(sys_scheduled_exports_get_handler))
+                .route(web::put().to(sys_scheduled_exports_update_handler))
+                .route(web::delete().to(sys_scheduled_exports_delete_handler)),
+        )
+        .service(
+            web::resource("/scheduled-exports/{id}/runs")
+                .route(web::get().to(sys_scheduled_exports_runs_handler)),
+        )
+        .service(
+            web::resource("/scheduled-exports/{id}/run-now")
+                .route(web::post().to(sys_scheduled_exports_run_now_handler)),
+        )
+        .service(
+            web::resource("/plugins")
+                .route(web::get().to(sys_plugins_list_handler))
+                .route(web::post().to(sys_plugins_register_handler)),
+        )
+        .service(
+            web::resource("/plugins/{name}")
+                .route(web::get().to(sys_plugins_get_handler))
+                .route(web::delete().to(sys_plugins_delete_handler)),
+        )
+        .service(
+            web::resource("/plugins/{name}/invoke")
+                .route(web::post().to(sys_plugins_invoke_handler)),
+        )
         .service(
             web::resource("/seal")
                 .route(web::post().to(sys_seal_request_handler))

@@ -181,6 +181,13 @@ pub fn run() {
             commands::exchange::exchange_export,
             commands::exchange::exchange_preview,
             commands::exchange::exchange_apply,
+            // Scheduled exports
+            commands::scheduled_exports::scheduled_exports_list,
+            commands::scheduled_exports::scheduled_exports_create,
+            commands::scheduled_exports::scheduled_exports_update,
+            commands::scheduled_exports::scheduled_exports_delete,
+            commands::scheduled_exports::scheduled_exports_runs,
+            commands::scheduled_exports::scheduled_exports_run_now,
             // Secrets
             commands::secrets::list_secrets,
             commands::secrets::read_secret,

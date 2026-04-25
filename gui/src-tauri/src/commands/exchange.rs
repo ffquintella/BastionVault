@@ -79,14 +79,62 @@ pub async fn exchange_export(
     comment: Option<String>,
 ) -> CmdResult<ExchangeExportResult> {
     let scope = parse_scope(&include)?;
-    let allow_plaintext = allow_plaintext.unwrap_or(false);
+    let allow_plaintext_b = allow_plaintext.unwrap_or(false);
 
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
+    let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
+    drop(vault_guard);
+    let token = state.token.lock().await.clone().unwrap_or_default();
 
+    let outcome = exchange_export_inner(
+        &core_arc,
+        scope,
+        format.clone(),
+        password,
+        allow_plaintext_b,
+        comment.clone(),
+    )
+    .await;
+
+    // Audit, success or failure. The audit body records the format +
+    // comment + scope-shape (HMAC redaction handles values inside).
+    let mut body = serde_json::Map::new();
+    body.insert("format".into(), serde_json::Value::String(format));
+    body.insert(
+        "comment".into(),
+        comment.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null),
+    );
+    body.insert("allow_plaintext".into(), serde_json::Value::Bool(allow_plaintext_b));
+    let err_str = match &outcome {
+        Err(e) => Some(format!("{e:?}")),
+        _ => None,
+    };
+    bastion_vault::audit::emit_sys_audit(
+        &core_arc,
+        &token,
+        "sys/exchange/export",
+        bastion_vault::logical::Operation::Write,
+        Some(body),
+        err_str.as_deref(),
+    )
+    .await;
+    outcome
+}
+
+async fn exchange_export_inner(
+    core_arc: &std::sync::Arc<bastion_vault::core::Core>,
+    scope: exchange::ScopeSpec,
+    format: String,
+    password: Option<String>,
+    allow_plaintext: bool,
+    comment: Option<String>,
+) -> CmdResult<ExchangeExportResult> {
+    let mounts = exchange::scope::MountIndex::from_core(core_arc).map_err(CommandError::from)?;
     let document = exchange::scope::export_to_document(
-        core.barrier.as_storage(),
+        core_arc.barrier.as_storage(),
+        &mounts,
         exchange::ExporterInfo::default(),
         scope,
     )
@@ -221,11 +269,30 @@ pub async fn exchange_preview(
     }
 
     let owner = state.token.lock().await.clone().unwrap_or_default();
-    let token = core.exchange_preview_store.insert(document, owner);
+    let preview_token = core.exchange_preview_store.insert(document, owner.clone());
     let expires_in_secs = core.exchange_preview_store.ttl_secs();
 
+    let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
+    drop(vault_guard);
+    let mut audit_body = serde_json::Map::new();
+    audit_body.insert("format".into(), Value::String(format));
+    audit_body.insert("allow_plaintext".into(), Value::Bool(allow_plaintext));
+    audit_body.insert("total".into(), Value::Number(items.len().into()));
+    audit_body.insert("new".into(), Value::Number(new.into()));
+    audit_body.insert("identical".into(), Value::Number(identical.into()));
+    audit_body.insert("conflict".into(), Value::Number(conflict.into()));
+    bastion_vault::audit::emit_sys_audit(
+        &core_arc,
+        &owner,
+        "sys/exchange/import/preview",
+        bastion_vault::logical::Operation::Write,
+        Some(audit_body),
+        None,
+    )
+    .await;
+
     Ok(ExchangePreviewResult {
-        token,
+        token: preview_token,
         expires_in_secs,
         total: items.len() as u64,
         new,
@@ -269,6 +336,27 @@ pub async fn exchange_apply(
     let result = exchange::scope::import_from_document(core.barrier.as_storage(), &document, policy)
         .await
         .map_err(CommandError::from)?;
+
+    let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
+    drop(vault_guard);
+    let mut audit_body = serde_json::Map::new();
+    audit_body.insert(
+        "conflict_policy".into(),
+        Value::String(conflict_policy.unwrap_or_else(|| "skip".to_string())),
+    );
+    audit_body.insert("written".into(), Value::Number(result.written.into()));
+    audit_body.insert("unchanged".into(), Value::Number(result.unchanged.into()));
+    audit_body.insert("skipped".into(), Value::Number(result.skipped.into()));
+    audit_body.insert("renamed".into(), Value::Number(result.renamed.into()));
+    bastion_vault::audit::emit_sys_audit(
+        &core_arc,
+        &owner,
+        "sys/exchange/import/apply",
+        bastion_vault::logical::Operation::Write,
+        Some(audit_body),
+        None,
+    )
+    .await;
 
     Ok(ExchangeApplyResult {
         written: result.written,

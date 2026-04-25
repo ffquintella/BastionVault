@@ -17,7 +17,6 @@ const userNav: NavItem[] = [
   { path: "/secrets", label: "Secrets" },
   { path: "/files", label: "Files" },
   { path: "/sharing", label: "Sharing" },
-  { path: "/exchange", label: "Import / Export" },
 ];
 
 // Features under Admin require elevated access. The menu is hidden when the
@@ -30,10 +29,15 @@ const adminNav: NavItem[] = [
   { path: "/policies", label: "Policies" },
   { path: "/mounts", label: "Mounts" },
   { path: "/audit", label: "Audit" },
+  { path: "/exchange", label: "Import / Export" },
   { path: "/settings", label: "Settings" },
 ];
 
-const adminPolicies = new Set(["root", "admin"]);
+// Policies that grant access to the Admin section as a whole. `root` and
+// `admin` see every admin link. Operators who want to delegate just one
+// admin sub-feature can grant the corresponding *-admin policy below
+// without granting full admin.
+const adminPolicies = new Set(["root", "admin", "exchange-admin"]);
 
 interface LayoutProps {
   children: ReactNode;

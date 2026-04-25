@@ -20,6 +20,7 @@ pub mod broker;
 pub mod entry;
 pub mod file_device;
 pub mod hash_chain;
+pub mod sys_emit;
 
 #[cfg(test)]
 mod tests;
@@ -27,6 +28,7 @@ mod tests;
 pub use broker::{AuditBroker, AuditDeviceConfig};
 pub use entry::{AuditAuth, AuditEntry, AuditRequest, AuditResponse};
 pub use file_device::FileAuditDevice;
+pub use sys_emit::{emit_sys_audit, emit_sys_audit_with_response, outcome_for};
 
 use std::sync::Arc;
 

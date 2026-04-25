@@ -145,6 +145,18 @@ zstd = "0.13"
 # `features/import-export-module.md`.
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "std", "password-hash"] }
 chacha20poly1305 = "0.10"
+# Scheduled-exports cron parser. Pure-Rust, no system deps. See
+# `features/scheduled-exports.md`.
+cron = "0.16"
+# `uuid` is already a transitive dep via webauthn-rs; promote to a direct
+# dep for the scheduled-exports id generation.
+uuid = { version = "1", features = ["v4"] }
+# Plugin system v1: WASM runtime via wasmtime. Pure-Rust JIT with fuel
+# metering + memory limits + linker-based host capability injection. See
+# `features/plugin-system.md`. We disable the cranelift parallel feature
+# to keep the dep tree small; cache + pooling-allocator are off until the
+# plugin system actually needs them.
+wasmtime = { version = "27", default-features = false, features = ["cranelift", "runtime", "wat"] }
 
 [build-dependencies]
 toml = "1.1.2"
@@ -152,6 +164,10 @@ toml = "1.1.2"
 [dev-dependencies]
 serial_test = "3.4"
 cucumber = "0.21"
+# WebAssembly text-format parser. Used only by plugin runtime tests so we
+# can compile small WAT modules inline rather than checking in pre-built
+# `.wasm` blobs.
+wat = "1"
 
 [features]
 default = ["storage_hiqlite"]

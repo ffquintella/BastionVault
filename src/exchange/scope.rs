@@ -8,17 +8,61 @@
 //! the same way the existing `crate::backup::export` module does. The caller
 //! is responsible for handing in a barrier view from `core.barrier.as_storage()`.
 
+use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use serde_json::Value;
 
 use crate::{
+    core::Core,
     errors::RvError,
     exchange::schema::{
-        ExchangeDocument, ExchangeItems, ExporterInfo, KvItem, ScopeSelector, ScopeSpec,
+        AssetGroupItem, ExchangeDocument, ExchangeItems, ExporterInfo, FileItem, KvItem,
+        ResourceGroupItem, ResourceItem, ScopeSelector, ScopeSpec,
     },
+    mount::LOGICAL_BARRIER_PREFIX,
     storage::{Storage, StorageEntry},
 };
+
+/// Resolver context: maps `logical_type` to a list of (mount_path, uuid)
+/// pairs so the resource / group selectors can find the right per-mount
+/// barrier prefix without re-scanning the table on every call.
+#[derive(Default, Clone)]
+pub struct MountIndex {
+    by_type: HashMap<String, Vec<(String, String)>>,
+}
+
+impl MountIndex {
+    pub fn from_core(core: &Arc<Core>) -> Result<Self, RvError> {
+        let entries = core
+            .mounts_router
+            .mounts
+            .entries
+            .read()
+            .map_err(|_| RvError::ErrUnknown)?;
+        let mut by_type: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for (path, lock) in entries.iter() {
+            let me = lock.read().map_err(|_| RvError::ErrUnknown)?;
+            by_type
+                .entry(me.logical_type.clone())
+                .or_default()
+                .push((path.clone(), me.uuid.clone()));
+        }
+        Ok(Self { by_type })
+    }
+
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    pub fn mounts_of_type(&self, logical_type: &str) -> &[(String, String)] {
+        self.by_type
+            .get(logical_type)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+}
 
 /// What to do when an imported item collides with an existing target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -86,8 +130,15 @@ pub struct ImportResult {
 /// Resolve a `ScopeSpec` into an `ExchangeDocument` by reading the
 /// barrier-decrypted storage view. Each `ScopeSelector::KvPath` recursively
 /// walks the storage tree under `mount + path`.
+/// Resolve a `ScopeSpec` into an `ExchangeDocument`.
+///
+/// The `mounts` index lets the resolver find the per-mount barrier prefix
+/// for `resource` / `files` mounts when expanding `Resource` /
+/// `AssetGroup` / `ResourceGroup` selectors. Pass `MountIndex::empty()`
+/// for selectors that only touch raw KV paths (e.g. tests).
 pub async fn export_to_document(
     storage: &dyn Storage,
+    mounts: &MountIndex,
     exporter: ExporterInfo,
     scope: ScopeSpec,
 ) -> Result<ExchangeDocument, RvError> {
@@ -112,26 +163,16 @@ pub async fn export_to_document(
                     }
                 }
             }
-            ScopeSelector::Resource { id }
-            | ScopeSelector::AssetGroup { id }
-            | ScopeSelector::ResourceGroup { id } => {
-                // The schema reserves these variants so future versions can
-                // emit them and older importers ignore them gracefully. The
-                // exporter side requires per-mount UUID resolution against
-                // the mount table, which is wired in a follow-up phase.
-                // Emitting a warning makes the deferral visible in the
-                // document instead of silently producing an empty export.
-                let kind = match selector {
-                    ScopeSelector::Resource { .. } => "resource",
-                    ScopeSelector::AssetGroup { .. } => "asset_group",
-                    ScopeSelector::ResourceGroup { .. } => "resource_group",
-                    _ => unreachable!(),
+            ScopeSelector::Resource { id } => {
+                resolve_resource(storage, mounts, id, &mut items, &mut warnings).await?;
+            }
+            ScopeSelector::AssetGroup { id } | ScopeSelector::ResourceGroup { id } => {
+                let kind = if matches!(selector, ScopeSelector::AssetGroup { .. }) {
+                    GroupKind::Asset
+                } else {
+                    GroupKind::Resource
                 };
-                warnings.push(format!(
-                    "scope selector \"{kind}\" with id={id} not resolved \
-                     (resource / group selectors are reserved in the v1 schema; \
-                     full resolution lands in a follow-up phase)"
-                ));
+                resolve_group(storage, mounts, id, kind, &mut items, &mut warnings).await?;
             }
         }
     }
@@ -142,10 +183,274 @@ pub async fn export_to_document(
     items.files.sort_by(|a, b| a.id.cmp(&b.id));
     items.asset_groups.sort_by(|a, b| a.id.cmp(&b.id));
     items.resource_groups.sort_by(|a, b| a.id.cmp(&b.id));
+    items.kv.dedup_by(|a, b| a.mount == b.mount && a.path == b.path);
+    items.resources.dedup_by(|a, b| a.id == b.id);
+    items.files.dedup_by(|a, b| a.id == b.id);
 
     let mut doc = ExchangeDocument::new(exporter, scope, items);
     doc.warnings = warnings;
     Ok(doc)
+}
+
+#[derive(Copy, Clone)]
+enum GroupKind { Asset, Resource }
+
+/// Read a single resource (and its embedded secrets / metadata / version
+/// history) from the first `resource`-typed mount in the index. Records
+/// emitted under the **mount path** (not UUID) so the importer can re-route
+/// to a destination vault's matching mount.
+async fn resolve_resource(
+    storage: &dyn Storage,
+    mounts: &MountIndex,
+    id: &str,
+    items: &mut ExchangeItems,
+    warnings: &mut Vec<String>,
+) -> Result<(), RvError> {
+    let resource_mounts = mounts.mounts_of_type("resource");
+    if resource_mounts.is_empty() {
+        warnings.push(format!(
+            "scope selector resource id={id} skipped: no mount of type \"resource\" found"
+        ));
+        return Ok(());
+    }
+
+    // Resources are addressed by id, but the same id could in principle
+    // exist on more than one resource mount. We try every mount and emit
+    // the first hit; warn if multiple match (operators normally only
+    // configure one).
+    let mut found = false;
+    for (mount_path, uuid) in resource_mounts {
+        let bp = mount_barrier_prefix(uuid);
+        let meta_key = format!("{bp}meta/{id}");
+        if let Some(meta_entry) = storage.get(&meta_key).await? {
+            if found {
+                warnings.push(format!(
+                    "resource id={id} also exists on mount {mount_path}; first hit kept"
+                ));
+                break;
+            }
+            found = true;
+            let meta_value = parse_json_or_b64(&meta_entry.value);
+            let mut bundle = serde_json::Map::new();
+            bundle.insert("mount_path".to_string(), Value::String(mount_path.clone()));
+            bundle.insert("meta".to_string(), meta_value);
+
+            // Optional: history (best-effort, ignore if absent).
+            if let Ok(Some(h)) = storage.get(&format!("{bp}hist/{id}")).await {
+                bundle.insert("history".to_string(), parse_json_or_b64(&h.value));
+            }
+
+            // Embedded per-resource secrets: meta + value + version log.
+            let secrets = collect_resource_secrets(storage, &bp, id).await?;
+            if !secrets.is_empty() {
+                bundle.insert("secrets".to_string(), Value::Object(secrets));
+            }
+
+            items.resources.push(ResourceItem {
+                id: id.to_string(),
+                data: Value::Object(bundle),
+            });
+        }
+    }
+    if !found {
+        warnings.push(format!("resource id={id} not found in any resource mount"));
+    }
+    Ok(())
+}
+
+/// Walk `secret/<id>/`, `smeta/<id>/`, `sver/<id>/<key>/` under the resource
+/// mount's barrier prefix and return them as a structured map. Each
+/// secret-key bundles its current value, metadata, and version history.
+async fn collect_resource_secrets(
+    storage: &dyn Storage,
+    barrier_prefix: &str,
+    id: &str,
+) -> Result<serde_json::Map<String, Value>, RvError> {
+    let mut out: serde_json::Map<String, Value> = serde_json::Map::new();
+    let secret_prefix = format!("{barrier_prefix}secret/{id}/");
+    let names = match storage.list(&secret_prefix).await {
+        Ok(v) => v,
+        Err(_) => return Ok(out),
+    };
+    for name in names {
+        if name.ends_with('/') { continue; }
+        let key_full = format!("{secret_prefix}{name}");
+        let mut bundle = serde_json::Map::new();
+        if let Some(e) = storage.get(&key_full).await? {
+            bundle.insert("value".to_string(), parse_json_or_b64(&e.value));
+        }
+        if let Ok(Some(meta)) = storage
+            .get(&format!("{barrier_prefix}smeta/{id}/{name}"))
+            .await
+        {
+            bundle.insert("meta".to_string(), parse_json_or_b64(&meta.value));
+        }
+        // Version history (`sver/<id>/<key>/<version>`).
+        let sver_prefix = format!("{barrier_prefix}sver/{id}/{name}/");
+        if let Ok(versions) = storage.list(&sver_prefix).await {
+            let mut vers = serde_json::Map::new();
+            for v in versions {
+                if v.ends_with('/') { continue; }
+                if let Some(ve) = storage.get(&format!("{sver_prefix}{v}")).await? {
+                    vers.insert(v, parse_json_or_b64(&ve.value));
+                }
+            }
+            if !vers.is_empty() {
+                bundle.insert("versions".to_string(), Value::Object(vers));
+            }
+        }
+        out.insert(name, Value::Object(bundle));
+    }
+    Ok(out)
+}
+
+/// Read a resource-group / asset-group record from `sys/resource-group/group/<id>`
+/// and emit it. If the record references resources, KV-secrets, or files,
+/// drag those in too (best-effort — silently skip ones the actor cannot
+/// read; the resource resolver itself emits per-id warnings).
+async fn resolve_group(
+    storage: &dyn Storage,
+    mounts: &MountIndex,
+    id: &str,
+    kind: GroupKind,
+    items: &mut ExchangeItems,
+    warnings: &mut Vec<String>,
+) -> Result<(), RvError> {
+    let canonical = id.trim().to_lowercase();
+    let group_key = format!("sys/resource-group/group/{canonical}");
+    let entry = match storage.get(&group_key).await? {
+        Some(e) => e,
+        None => {
+            warnings.push(format!("group id={id} not found at {group_key}"));
+            return Ok(());
+        }
+    };
+    let group_value: Value = serde_json::from_slice(&entry.value)
+        .unwrap_or_else(|_| parse_json_or_b64(&entry.value));
+
+    // Drag in members.
+    if let Some(members) = group_value.get("members").and_then(|v| v.as_array()) {
+        for m in members {
+            if let Some(member_id) = m.as_str() {
+                resolve_resource(storage, mounts, member_id, items, warnings).await?;
+            }
+        }
+    }
+    if let Some(secrets) = group_value.get("secrets").and_then(|v| v.as_array()) {
+        for s in secrets {
+            if let Some(path) = s.as_str() {
+                drag_in_secret_path(storage, mounts, path, items, warnings).await?;
+            }
+        }
+    }
+    if let Some(files) = group_value.get("files").and_then(|v| v.as_array()) {
+        for f in files {
+            if let Some(file_id) = f.as_str() {
+                resolve_file(storage, mounts, file_id, items, warnings).await?;
+            }
+        }
+    }
+
+    match kind {
+        GroupKind::Asset => {
+            items.asset_groups.push(AssetGroupItem { id: canonical, data: group_value });
+        }
+        GroupKind::Resource => {
+            items.resource_groups.push(ResourceGroupItem { id: canonical, data: group_value });
+        }
+    }
+    Ok(())
+}
+
+async fn drag_in_secret_path(
+    storage: &dyn Storage,
+    mounts: &MountIndex,
+    canonical_path: &str,
+    items: &mut ExchangeItems,
+    warnings: &mut Vec<String>,
+) -> Result<(), RvError> {
+    // The resource_group store keeps secret paths in canonical form
+    // ("<mount-path-without-trailing-slash>/<key>"). Find the matching
+    // KV-or-KV-v2 mount by prefix.
+    let mut best: Option<(&str, &str, String)> = None; // (mount_path, uuid, relative_key)
+    for ty in ["kv", "kv-v2"] {
+        for (mount_path, uuid) in mounts.mounts_of_type(ty) {
+            let mp = mount_path.trim_end_matches('/');
+            if let Some(rest) = canonical_path.strip_prefix(&format!("{mp}/")) {
+                if best.as_ref().map(|(p, _, _)| p.len()).unwrap_or(0) < mp.len() {
+                    best = Some((mount_path.as_str(), uuid.as_str(), rest.to_string()));
+                }
+            }
+        }
+    }
+    let Some((mount_path, uuid, rel)) = best else {
+        warnings.push(format!("secret path {canonical_path} did not match any KV mount"));
+        return Ok(());
+    };
+    let bp = mount_barrier_prefix(uuid);
+    let abs = format!("{bp}{rel}");
+    if let Some(entry) = storage.get(&abs).await? {
+        items.kv.push(KvItem {
+            mount: ensure_trailing_slash(mount_path),
+            path: rel,
+            value: parse_json_or_b64(&entry.value),
+        });
+    } else {
+        warnings.push(format!("secret path {canonical_path} not found in storage"));
+    }
+    Ok(())
+}
+
+async fn resolve_file(
+    storage: &dyn Storage,
+    mounts: &MountIndex,
+    id: &str,
+    items: &mut ExchangeItems,
+    warnings: &mut Vec<String>,
+) -> Result<(), RvError> {
+    let file_mounts = mounts.mounts_of_type("files");
+    if file_mounts.is_empty() {
+        warnings.push(format!("file id={id} skipped: no mount of type \"files\""));
+        return Ok(());
+    }
+    for (_mount_path, uuid) in file_mounts {
+        let bp = mount_barrier_prefix(uuid);
+        let meta_key = format!("{bp}meta/{id}");
+        if let Some(meta_entry) = storage.get(&meta_key).await? {
+            let metadata = parse_json_or_b64(&meta_entry.value);
+            let blob_key = format!("{bp}blob/{id}");
+            let content_b64 = if let Some(blob) = storage.get(&blob_key).await? {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.encode(&blob.value)
+            } else {
+                String::new()
+            };
+            items.files.push(FileItem {
+                id: id.to_string(),
+                metadata,
+                content_b64,
+            });
+            return Ok(());
+        }
+    }
+    warnings.push(format!("file id={id} not found in any files mount"));
+    Ok(())
+}
+
+fn mount_barrier_prefix(uuid: &str) -> String {
+    format!("{LOGICAL_BARRIER_PREFIX}{uuid}/")
+}
+
+/// Parse storage bytes as JSON; fall back to a `{"_base64": "..."}` wrapper
+/// so the document remains self-describing when the value isn't JSON.
+fn parse_json_or_b64(bytes: &[u8]) -> Value {
+    use base64::Engine;
+    match serde_json::from_slice::<Value>(bytes) {
+        Ok(v) => v,
+        Err(_) => serde_json::json!({
+            "_base64": base64::engine::general_purpose::STANDARD.encode(bytes),
+        }),
+    }
 }
 
 /// Apply a parsed `ExchangeDocument` to the vault according to the conflict
@@ -342,7 +647,9 @@ mod tests {
                 path: "myapp/".to_string(),
             }],
         };
-        let doc = export_to_document(&src, ExporterInfo::default(), scope).await.unwrap();
+        let doc = export_to_document(&src, &MountIndex::empty(), ExporterInfo::default(), scope)
+            .await
+            .unwrap();
         assert_eq!(doc.items.kv.len(), 2);
         // Deterministic ordering.
         assert_eq!(doc.items.kv[0].path, "myapp/api");

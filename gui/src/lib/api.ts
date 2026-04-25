@@ -856,3 +856,88 @@ export const exchangeApply = (
     token,
     conflictPolicy,
   });
+
+// ── Scheduled Exports ───────────────────────────────────────────────────────
+//
+// CRUD over recurring `.bvx` (or plaintext JSON) backups driven by cron.
+// See `features/scheduled-exports.md`.
+
+export type ScheduleFormat = "bvx" | "json";
+
+export interface ScheduleDestinationLocalPath {
+  kind: "local_path";
+  path: string;
+}
+export type ScheduleDestination = ScheduleDestinationLocalPath;
+
+export interface SchedulePasswordRefLiteral {
+  kind: "literal";
+  password: string;
+}
+export interface SchedulePasswordRefStaticSecret {
+  kind: "static_secret";
+  mount: string;
+  path: string;
+}
+export type SchedulePasswordRef =
+  | SchedulePasswordRefLiteral
+  | SchedulePasswordRefStaticSecret;
+
+export interface ScheduleScopeSpec {
+  kind: "selective" | "full";
+  include: ExchangeScopeSelector[];
+}
+
+export interface Schedule {
+  id: string;
+  name: string;
+  cron: string;
+  format: ScheduleFormat;
+  scope: ScheduleScopeSpec;
+  destination: ScheduleDestination;
+  password_ref: SchedulePasswordRef | null;
+  allow_plaintext: boolean;
+  comment: string | null;
+  created_at: string;
+  updated_at: string;
+  enabled: boolean;
+}
+
+export interface ScheduleInput {
+  name: string;
+  cron: string;
+  format: ScheduleFormat;
+  scope: ScheduleScopeSpec;
+  destination: ScheduleDestination;
+  password_ref: SchedulePasswordRef | null;
+  allow_plaintext: boolean;
+  comment: string | null;
+  enabled: boolean;
+}
+
+export interface RunRecord {
+  schedule_id: string;
+  run_at: string;
+  status: "success" | "failed";
+  bytes_written: number;
+  destination: ScheduleDestination;
+  error: string | null;
+}
+
+export const scheduledExportsList = () =>
+  invoke<{ schedules: Schedule[] }>("scheduled_exports_list").then((r) => r.schedules);
+
+export const scheduledExportsCreate = (input: ScheduleInput) =>
+  invoke<Schedule>("scheduled_exports_create", { input });
+
+export const scheduledExportsUpdate = (id: string, input: ScheduleInput) =>
+  invoke<Schedule>("scheduled_exports_update", { id, input });
+
+export const scheduledExportsDelete = (id: string) =>
+  invoke<void>("scheduled_exports_delete", { id });
+
+export const scheduledExportsRuns = (id: string) =>
+  invoke<{ runs: RunRecord[] }>("scheduled_exports_runs", { id }).then((r) => r.runs);
+
+export const scheduledExportsRunNow = (id: string) =>
+  invoke<RunRecord>("scheduled_exports_run_now", { id });

@@ -50,6 +50,11 @@ yubikey = "0.8"
 # minted into slot 9a when the operator picks an empty-slot card
 # from the Add-Local-Vault modal).
 x509-cert = { version = "0.2", features = ["builder"] }
+# Cron expression validator for scheduled-exports. Mirrors the dep the
+# core crate uses; pulled directly so the Tauri command can validate
+# operator input before persisting the schedule.
+cron = "0.16"
+uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(windows)'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }

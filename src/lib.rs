@@ -53,6 +53,8 @@ pub mod api;
 pub mod audit;
 pub mod backup;
 pub mod exchange;
+pub mod plugins;
+pub mod scheduled_exports;
 pub mod cache;
 pub mod cli;
 pub mod context;
