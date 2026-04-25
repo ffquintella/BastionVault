@@ -105,6 +105,19 @@ export function ConnectPage() {
   const [showLocalKeystoreReset, setShowLocalKeystoreReset] = useState(false);
   const [resettingLocalKeystore, setResettingLocalKeystore] = useState(false);
 
+  // YubiKey unlock PIN prompt. Triggers when an open fails with
+  // the keystore's "yubikey slot requires PIN" signature — the
+  // operator was registered with require=true, so we need the
+  // PIV PIN to derive the KEM seed before the file unwraps.
+  // Tracks the profile to retry against so the success path can
+  // jump straight to login without re-running the chooser.
+  const [showUnlockPin, setShowUnlockPin] = useState(false);
+  const [unlockPin, setUnlockPin] = useState("");
+  const [unlocking, setUnlocking] = useState(false);
+  const [unlockProfile, setUnlockProfile] = useState<VaultProfile | null>(
+    null,
+  );
+
   // Add-vault modal state.
   const [addKind, setAddKind] = useState<AddKind>(null);
   const [addBusy, setAddBusy] = useState(false);
@@ -387,8 +400,25 @@ export function ConnectPage() {
       }
     } catch (e: unknown) {
       const msg = extractError(e);
-      setError(msg);
       const lower = msg.toLowerCase();
+      // YubiKey-required keystore: surface the PIN prompt instead
+      // of the raw error or the destructive Reset card. Bail out
+      // of the ambient error-state setup so the chooser doesn't
+      // also light up the wipe-data banner alongside.
+      if (lower.includes("yubikey") && lower.includes("pin")) {
+        setError(null);
+        setShowReset(false);
+        setShowLocalKeystoreReset(false);
+        setUnlockProfile(profile);
+        setShowUnlockPin(true);
+        // Don't `throw` — the auto-resume caller treats throw as
+        // "fall through to chooser." We've handled the failure
+        // by surfacing the prompt; the chooser stays up
+        // alongside, but the profile's open is parked behind the
+        // PIN entry.
+        return;
+      }
+      setError(msg);
       // Local-keystore mismatch takes precedence over the
       // wipe-the-vault-data recovery because it's the safer
       // remediation (vault data stays untouched).
@@ -405,6 +435,37 @@ export function ConnectPage() {
       throw e;
     } finally {
       setOpening(null);
+    }
+  }
+
+  async function handleUnlockWithYubiKey() {
+    if (unlockPin.trim().length < 4) {
+      toast("error", "PIV PIN is required (4+ digits).");
+      return;
+    }
+    if (!unlockProfile) return;
+    setUnlocking(true);
+    try {
+      await api.yubikeySetPin(unlockPin);
+      try {
+        // Re-run openProfile against the parked profile. The
+        // PIN is now stashed for the keystore to reach into;
+        // success path navigates to login / dashboard via the
+        // resumeSession check inside openProfile.
+        await openProfile(unlockProfile, /*recordDefault=*/ false);
+        setShowUnlockPin(false);
+        setUnlockProfile(null);
+      } finally {
+        await api.yubikeyClearPin().catch(() => {});
+      }
+    } catch (e: unknown) {
+      setError(extractError(e));
+      // Keep the prompt open so the operator can retry with a
+      // different PIN — a wrong PIN burns one of the YubiKey's
+      // 3 attempts but isn't a permanent state.
+    } finally {
+      setUnlockPin("");
+      setUnlocking(false);
     }
   }
 
@@ -728,6 +789,65 @@ export function ConnectPage() {
       {error && (
         <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
           {error}
+        </div>
+      )}
+
+      {showUnlockPin && (
+        <div className="mb-4 p-4 bg-emerald-500/10 border border-emerald-500/30 rounded-lg space-y-3">
+          <p className="text-emerald-400 font-medium text-sm">
+            YubiKey required to unlock
+            {unlockProfile && (
+              <span className="text-emerald-400/70 font-normal ml-1">
+                — {unlockProfile.name}
+              </span>
+            )}
+          </p>
+          <p className="text-emerald-400/80 text-xs">
+            This vault's keystore is locked behind a registered YubiKey.
+            Insert any one of the registered cards and enter its PIV PIN
+            below. The card signs a one-off salt; the keystore derives
+            its post-quantum key from the signature. PIN is never
+            persisted; cleared the moment the open attempt finishes.
+          </p>
+          <div>
+            <label className="block text-xs text-emerald-400/70 mb-1">
+              PIV PIN
+            </label>
+            <input
+              type="password"
+              value={unlockPin}
+              onChange={(e) => setUnlockPin(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && unlockPin.trim().length >= 4) {
+                  handleUnlockWithYubiKey();
+                }
+              }}
+              placeholder="••••••"
+              autoComplete="off"
+              autoFocus
+              className="w-full bg-[var(--color-bg)] border border-emerald-500/30 rounded-lg px-3 py-2 text-sm font-mono text-emerald-300 placeholder:text-emerald-500/30"
+            />
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => {
+                setShowUnlockPin(false);
+                setUnlockProfile(null);
+                setUnlockPin("");
+              }}
+              disabled={unlocking}
+              className="flex-1 py-2 bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] rounded-lg text-sm transition-colors hover:bg-[var(--color-border)] disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleUnlockWithYubiKey}
+              disabled={unlocking || unlockPin.trim().length < 4}
+              className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
+            >
+              {unlocking ? "Unlocking…" : "Unlock with YubiKey"}
+            </button>
+          </div>
         </div>
       )}
 

@@ -68,6 +68,17 @@ export function InitPage() {
   const [yubiKeyPin, setYubiKeyPin] = useState("");
   const [registeringYubiKey, setRegisteringYubiKey] = useState(false);
 
+  // YubiKey-required-to-unlock prompt. Surfaces when an open
+  // attempt errors with the keystore's "yubikey slot requires
+  // PIN" signature — we stash the operator-supplied PIN via
+  // `yubikey_set_pin`, retry the open, and clear the PIN
+  // afterwards. Independent of the post-init registration flow
+  // above (that one runs after `init_vault`; this one runs after
+  // `open_vault` against an already-required keystore).
+  const [showUnlockPin, setShowUnlockPin] = useState(false);
+  const [unlockPin, setUnlockPin] = useState("");
+  const [unlocking, setUnlocking] = useState(false);
+
   const { toast } = useToast();
 
   useEffect(() => {
@@ -194,12 +205,22 @@ export function InitPage() {
       navigate("/login");
     } catch (e: unknown) {
       const msg = extractError(e);
+      const lower = msg.toLowerCase();
+      // YubiKey-required keystore: the open path returned the
+      // keystore's "yubikey slot requires PIN" signature. Don't
+      // surface the raw error to the operator — pop the unlock
+      // PIN prompt instead. The success path of that prompt
+      // retries the open transparently.
+      if (lower.includes("yubikey") && lower.includes("pin")) {
+        setError(null);
+        setShowUnlockPin(true);
+        return;
+      }
       setError(msg);
       // Surface the safer recovery path automatically when the
       // failure is a keystore-unwrap mismatch — the destructive
       // "Destroy & Reset" below would nuke vault data the operator
       // probably doesn't want to lose for a cache-mismatch bug.
-      const lower = msg.toLowerCase();
       if (
         lower.includes("local keystore") ||
         lower.includes("unwrap") ||
@@ -208,6 +229,39 @@ export function InitPage() {
         setShowKeystoreRecovery(true);
       }
     }
+  }
+
+  async function handleUnlockWithYubiKey() {
+    if (unlockPin.trim().length < 4) {
+      toast("error", "PIV PIN is required (4+ digits).");
+      return;
+    }
+    setUnlocking(true);
+    try {
+      // Stash the PIN so the next `open_vault` call can reach
+      // through to `yubikey_bridge::sign` without bouncing back
+      // up to the GUI for it. Cleared either way after the
+      // attempt — success or failure — so the PIN doesn't sit
+      // in the static across the rest of the session.
+      await api.yubikeySetPin(unlockPin);
+      try {
+        await api.openVault();
+        navigate("/login");
+      } finally {
+        await api.yubikeyClearPin().catch(() => {});
+      }
+    } catch (e: unknown) {
+      setError(extractError(e));
+      setShowUnlockPin(false);
+    } finally {
+      setUnlockPin("");
+      setUnlocking(false);
+    }
+  }
+
+  function handleCancelUnlock() {
+    setShowUnlockPin(false);
+    setUnlockPin("");
   }
 
   async function handleKeystoreRecovery() {
@@ -523,6 +577,63 @@ export function InitPage() {
           >
             Go to Login
           </button>
+
+          {/* YubiKey unlock PIN prompt. Triggers when the keystore
+              is in YubiKey-required posture and `open_vault` fails
+              with the "yubikey slot requires PIN" signature. The
+              operator types the PIV PIN, we hand it to the
+              keystore via `yubikey_set_pin`, retry the open, and
+              clear the PIN regardless of outcome. */}
+          {showUnlockPin && (
+            <div className="p-4 bg-emerald-500/10 border border-emerald-500/30 rounded-lg space-y-3">
+              <p className="text-emerald-400 font-medium text-sm">
+                YubiKey required to unlock
+              </p>
+              <p className="text-emerald-400/80 text-xs">
+                This vault's keystore is locked behind a registered YubiKey.
+                Insert any one of the registered cards and enter its PIV
+                PIN below — the card signs a one-off salt, the keystore
+                derives its post-quantum key from the signature, and the
+                vault unlocks. PIN is never persisted; cleared the moment
+                the open attempt finishes.
+              </p>
+              <div>
+                <label className="block text-xs text-emerald-400/70 mb-1">
+                  PIV PIN
+                </label>
+                <input
+                  type="password"
+                  value={unlockPin}
+                  onChange={(e) => setUnlockPin(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && unlockPin.trim().length >= 4) {
+                      handleUnlockWithYubiKey();
+                    }
+                  }}
+                  placeholder="••••••"
+                  autoComplete="off"
+                  autoFocus
+                  className="w-full bg-[var(--color-bg)] border border-emerald-500/30 rounded-lg px-3 py-2 text-sm font-mono text-emerald-300 placeholder:text-emerald-500/30"
+                />
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={handleCancelUnlock}
+                  disabled={unlocking}
+                  className="flex-1 py-2 bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] rounded-lg text-sm transition-colors hover:bg-[var(--color-border)] disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleUnlockWithYubiKey}
+                  disabled={unlocking || unlockPin.trim().length < 4}
+                  className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
+                >
+                  {unlocking ? "Unlocking…" : "Unlock with YubiKey"}
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Safer recovery path for the keystore-unwrap failure
               mode. Vault data stays intact; operator pastes their
