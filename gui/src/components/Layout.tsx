@@ -124,15 +124,30 @@ export function Layout({ children }: LayoutProps) {
           ))}
 
           {isAdmin && (
-            <>
+            <div className="mt-4 pt-3 border-t border-[var(--color-border)]">
               <button
                 type="button"
                 onClick={() => setAdminOpen((v) => !v)}
-                className="mt-3 mb-0.5 w-full flex items-center justify-between px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
+                className="w-full flex items-center justify-between px-2 py-1.5 rounded-md text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-surface-hover)] transition-colors"
                 aria-expanded={effectiveAdminOpen}
                 aria-controls="nav-admin-section"
               >
-                <span>Admin</span>
+                <span className="flex items-center gap-1.5">
+                  <svg
+                    className="w-3 h-3 shrink-0"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                  </svg>
+                  Admin
+                </span>
                 <span
                   className={`transition-transform text-[14px] leading-none ${
                     effectiveAdminOpen ? "rotate-90" : ""
@@ -143,7 +158,10 @@ export function Layout({ children }: LayoutProps) {
                 </span>
               </button>
               {effectiveAdminOpen && (
-                <div id="nav-admin-section" className="space-y-0.5">
+                <div
+                  id="nav-admin-section"
+                  className="mt-1 ml-2 pl-2 border-l border-[var(--color-border)] space-y-0.5"
+                >
                   {adminNav.map((item) => (
                     <NavLink
                       key={item.path}
@@ -153,7 +171,7 @@ export function Layout({ children }: LayoutProps) {
                   ))}
                 </div>
               )}
-            </>
+            </div>
           )}
         </nav>
 

@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Layout } from "../components/Layout";
-import { Button, Card, Badge, Input, Select, Modal, ConfirmModal, useToast } from "../components/ui";
+import { Button, Card, Badge, Input, Select, Modal, ConfirmModal, Tabs, useToast } from "../components/ui";
 import { useVaultStore } from "../stores/vaultStore";
 import { useAuthStore } from "../stores/authStore";
 import { usePasswordPolicyStore } from "../stores/passwordPolicyStore";
@@ -40,6 +40,19 @@ export function SettingsPage() {
   const clearAuth = useAuthStore((s) => s.clearAuth);
   const reset = useVaultStore((s) => s.reset);
   const [sealing, setSealing] = useState(false);
+  const [activeTab, setActiveTab] = useState<string>(() => {
+    try { return localStorage.getItem("settings.activeTab") || "general"; } catch { return "general"; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("settings.activeTab", activeTab); } catch { /* ignore */ }
+  }, [activeTab]);
+  const SETTINGS_TABS = [
+    { id: "general",  label: "General" },
+    { id: "security", label: "Security" },
+    { id: "identity", label: "Identity" },
+    { id: "resources", label: "Resources" },
+    { id: "storage", label: "Storage" },
+  ];
   // Effective data location for the currently-default Local profile.
   // Resolved at mount time so the Connection card reflects what
   // build_backend / is_initialized actually use, not a hardcoded
@@ -373,6 +386,9 @@ export function SettingsPage() {
       <div className="space-y-6">
         <h1 className="text-2xl font-bold">Settings</h1>
 
+        <Tabs tabs={SETTINGS_TABS} active={activeTab} onChange={setActiveTab} />
+
+        {activeTab === "general" && (<>
         {/* Connection info */}
         <Card title="Connection">
           <div className="space-y-3 text-sm">
@@ -429,7 +445,9 @@ export function SettingsPage() {
             </div>
           </div>
         </Card>
+        </>)}
 
+        {activeTab === "security" && (<>
         {/* FIDO2 Configuration */}
         <Card
           title="FIDO2 / Security Keys"
@@ -590,7 +608,9 @@ export function SettingsPage() {
             </div>
           </div>
         </Card>
+        </>)}
 
+        {activeTab === "identity" && (<>
         {/* Single Sign-On (SSO) */}
         <Card
           title="Single Sign-On (SSO)"
@@ -707,6 +727,7 @@ export function SettingsPage() {
             )}
           </div>
         </Card>
+        </>)}
 
         {(editingProvider || showAddProvider) && (
           <SsoProviderModal
@@ -730,6 +751,7 @@ export function SettingsPage() {
           confirmLabel="Remove"
         />
 
+        {activeTab === "security" && (<>
         {/* Password Policy */}
         <Card
           title="Password Policy"
@@ -890,7 +912,9 @@ export function SettingsPage() {
             </div>
           )}
         </Card>
+        </>)}
 
+        {activeTab === "resources" && (<>
         {/* Resource Types */}
         <Card title="Resource Types" actions={
           <div className="flex gap-2">
@@ -916,6 +940,7 @@ export function SettingsPage() {
             )}
           </div>
         </Card>
+        </>)}
 
         {/* Edit/Add Type Modal */}
         {(editType || showAddType) && (
@@ -931,10 +956,13 @@ export function SettingsPage() {
           message={`Delete the "${deleteTypeId}" resource type? Existing resources of this type will keep their data but won't have field definitions.`}
           confirmLabel="Delete" />
 
+        {activeTab === "storage" && (<>
         {/* Cloud Storage Targets — OAuth connect flow. Phase 7 of
             features/cloud-storage-backend.md. */}
         <CloudStorageCard />
+        </>)}
 
+        {activeTab === "general" && (<>
         {/* Actions */}
         <Card title="Actions">
           <div className="space-y-3">
@@ -1010,6 +1038,7 @@ export function SettingsPage() {
             </div>
           </div>
         </Card>
+        </>)}
       </div>
     </Layout>
   );
