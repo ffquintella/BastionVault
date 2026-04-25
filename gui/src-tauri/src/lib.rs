@@ -188,6 +188,14 @@ pub fn run() {
             commands::scheduled_exports::scheduled_exports_delete,
             commands::scheduled_exports::scheduled_exports_runs,
             commands::scheduled_exports::scheduled_exports_run_now,
+            // Plugins
+            commands::plugins::plugins_list,
+            commands::plugins::plugins_get,
+            commands::plugins::plugins_register,
+            commands::plugins::plugins_delete,
+            commands::plugins::plugins_invoke,
+            commands::plugins::plugins_get_config,
+            commands::plugins::plugins_set_config,
             // Secrets
             commands::secrets::list_secrets,
             commands::secrets::read_secret,

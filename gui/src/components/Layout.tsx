@@ -29,6 +29,7 @@ const adminNav: NavItem[] = [
   { path: "/policies", label: "Policies" },
   { path: "/mounts", label: "Mounts" },
   { path: "/audit", label: "Audit" },
+  { path: "/plugins", label: "Plugins" },
   { path: "/exchange", label: "Import / Export" },
   { path: "/settings", label: "Settings" },
 ];
@@ -37,7 +38,12 @@ const adminNav: NavItem[] = [
 // `admin` see every admin link. Operators who want to delegate just one
 // admin sub-feature can grant the corresponding *-admin policy below
 // without granting full admin.
-const adminPolicies = new Set(["root", "admin", "exchange-admin"]);
+const adminPolicies = new Set([
+  "root",
+  "admin",
+  "exchange-admin",
+  "plugin-admin",
+]);
 
 interface LayoutProps {
   children: ReactNode;

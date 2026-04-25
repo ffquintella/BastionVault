@@ -16,6 +16,7 @@ import { PoliciesPage } from "./routes/PoliciesPage";
 import { MountsPage } from "./routes/MountsPage";
 import { SettingsPage } from "./routes/SettingsPage";
 import { ExchangePage } from "./routes/ExchangePage";
+import { PluginsPage } from "./routes/PluginsPage";
 import { useAuthStore } from "./stores/authStore";
 import { ToastProvider } from "./components/ui";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -93,6 +94,10 @@ export default function App() {
             <Route
               path="/exchange"
               element={<ProtectedRoute><ExchangePage /></ProtectedRoute>}
+            />
+            <Route
+              path="/plugins"
+              element={<ProtectedRoute><PluginsPage /></ProtectedRoute>}
             />
           </Routes>
         </HashRouter>

@@ -23,6 +23,7 @@ exclude = [
 members = [
     ".",
     "crates/bv_crypto",
+    "crates/bastion-plugin-sdk",
     "gui/src-tauri",
 ]
 resolver = "2"
@@ -98,7 +99,7 @@ ipnetwork = { version = "0.21", features = ["serde"] }
 blake2b_simd = "1.0"
 derive_more = "2.1.1"
 dashmap = "6.1"
-tokio = { version = "1.51", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.51", features = ["rt-multi-thread", "macros", "process", "time", "io-util"] }
 ctor = "0.9.1"
 better_default = "1.0.5"
 prometheus-client = "0.24.1"
@@ -156,7 +157,7 @@ uuid = { version = "1", features = ["v4"] }
 # `features/plugin-system.md`. We disable the cranelift parallel feature
 # to keep the dep tree small; cache + pooling-allocator are off until the
 # plugin system actually needs them.
-wasmtime = { version = "27", default-features = false, features = ["cranelift", "runtime", "wat"] }
+wasmtime = { version = "27", default-features = false, features = ["cranelift", "runtime", "wat", "async"] }
 
 [build-dependencies]
 toml = "1.1.2"

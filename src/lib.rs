@@ -77,6 +77,24 @@ pub mod utils;
 #[cfg(test)]
 pub mod test_utils;
 
+/// When the test binary is spawned as a plugin subprocess (the
+/// `ProcessRuntime` does this — same exe acts as runner *and* plugin
+/// in the test suite), this constructor catches the env var the
+/// runtime sets and dispatches into the subprocess plugin handler
+/// before the test runner's `main` ever gets a chance. The handler
+/// reads stdin, drives the JSON-RPC dance, exits.
+///
+/// Production builds don't run tests so this code is never reached
+/// in a real deployment — gated on `cfg(test)` to keep it out of the
+/// shipping crate.
+#[cfg(test)]
+#[ctor::ctor]
+fn maybe_act_as_test_subprocess_plugin() {
+    if std::env::var("BV_PLUGIN_MODE").ok().as_deref() == Some("1") {
+        crate::plugins::process_runtime::run_test_subprocess_plugin();
+    }
+}
+
 /// Exit ok
 pub const EXIT_CODE_OK: sysexits::ExitCode = sysexits::ExitCode::Ok;
 /// Exit code when server exits unexpectedly

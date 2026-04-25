@@ -941,3 +941,92 @@ export const scheduledExportsRuns = (id: string) =>
 
 export const scheduledExportsRunNow = (id: string) =>
   invoke<RunRecord>("scheduled_exports_run_now", { id });
+
+// ── Plugins (admin) ───────────────────────────────────────────────────────
+//
+// WASM plugin catalog management. See `features/plugin-system.md`.
+// Backend: `crate::plugins::PluginCatalog` + `WasmRuntime` via the
+// `plugins_*` Tauri commands.
+
+export interface PluginCapabilities {
+  log_emit: boolean;
+  storage_prefix: string | null;
+  audit_emit: boolean;
+  allowed_keys: string[];
+  allowed_hosts: string[];
+}
+
+export interface PluginManifest {
+  name: string;
+  version: string;
+  plugin_type: string;
+  /** "wasm" or "process" — Phase 2 lights up out-of-process plugins. */
+  runtime: "wasm" | "process";
+  abi_version: string;
+  /** SHA-256 of the binary, hex-encoded. */
+  sha256: string;
+  size: number;
+  capabilities: PluginCapabilities;
+  description: string;
+  /** Operator-configurable knobs declared by the plugin author. */
+  config_schema?: PluginConfigField[];
+}
+
+export interface PluginInvokeResult {
+  status: "success" | "plugin_error";
+  plugin_status_code: number;
+  fuel_consumed: number;
+  response_b64: string;
+}
+
+export const pluginsList = () =>
+  invoke<{ plugins: PluginManifest[] }>("plugins_list").then((r) => r.plugins);
+
+export const pluginsGet = (name: string) =>
+  invoke<PluginManifest | null>("plugins_get", { name });
+
+export const pluginsRegister = (manifest: PluginManifest, binaryB64: string) =>
+  invoke<PluginManifest>("plugins_register", {
+    input: { manifest, binary_b64: binaryB64 },
+  });
+
+export const pluginsDelete = (name: string) =>
+  invoke<void>("plugins_delete", { name });
+
+export const pluginsInvoke = (name: string, inputB64?: string, fuel?: number) =>
+  invoke<PluginInvokeResult>("plugins_invoke", {
+    name,
+    inputB64: inputB64 ?? null,
+    fuel: fuel ?? null,
+  });
+
+// ── Plugin config ──────────────────────────────────────────────────────────
+//
+// Plugins declare a `config_schema` in their manifest; operators set
+// values via the GUI Configure modal; the host persists at
+// `core/plugins/<name>/config`; the plugin reads at run time via
+// `bv.config_get`.
+
+export type PluginConfigFieldKind = "string" | "int" | "bool" | "secret" | "select";
+
+export interface PluginConfigField {
+  name: string;
+  kind: PluginConfigFieldKind;
+  label?: string | null;
+  description?: string | null;
+  required?: boolean;
+  default?: string | null;
+  options?: string[];
+}
+
+export interface PluginConfigResult {
+  schema: PluginConfigField[];
+  /** Map of name → string value. Secret-kind fields show as `"<set>"` if populated. */
+  values: Record<string, string>;
+}
+
+export const pluginsGetConfig = (name: string) =>
+  invoke<PluginConfigResult>("plugins_get_config", { name });
+
+export const pluginsSetConfig = (name: string, values: Record<string, string>) =>
+  invoke<void>("plugins_set_config", { name, values });

@@ -22,6 +22,60 @@ impl Default for RuntimeKind {
     }
 }
 
+/// One operator-settable config knob the plugin declares in its
+/// manifest. The GUI renders a form from this; the host stores the
+/// resulting key→value map at `core/plugins/<name>/config`; the plugin
+/// reads values at run-time via `bv.config_get`.
+///
+/// Values cross the host/plugin boundary as **UTF-8 strings**. Numeric
+/// / boolean / select-of-options fields are still strings on the wire
+/// — the plugin parses. This keeps the host import surface minimal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConfigField {
+    /// Stable key the plugin reads via `bv.config_get(key)`. Required
+    /// to be a valid identifier (no whitespace, no slashes).
+    pub name: String,
+    pub kind: ConfigFieldKind,
+    /// Human-readable label rendered as the form field's `<label>`.
+    /// Defaults to `name` if omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Optional helper text rendered under the input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// When true, the GUI refuses to save a config that leaves this
+    /// field unset.
+    #[serde(default)]
+    pub required: bool,
+    /// Default value shown in the form, applied if the operator hasn't
+    /// written a value yet. String for every kind; the GUI parses for
+    /// non-string kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    /// For `Select` kind: the allowed options.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigFieldKind {
+    /// Plain text input.
+    String,
+    /// Integer input. Stored as a base-10 string; the plugin parses.
+    Int,
+    /// Checkbox. Stored as `"true"` / `"false"`.
+    Bool,
+    /// Password-style input. Same storage as `String` (barrier-
+    /// encrypted at rest like every other vault state) but the GUI
+    /// masks it and the host never returns the value in
+    /// `GET /v1/sys/plugins/<name>/config` responses — only a
+    /// `"<set>"` placeholder.
+    Secret,
+    /// Dropdown. The `options` list constrains the set of valid values.
+    Select,
+}
+
 /// Capability surface declared by the plugin author and pinned by the
 /// operator at registration. v1 enforces only `log_emit`; the rest are
 /// reserved keys that future runtime versions will gate on.
@@ -72,6 +126,14 @@ pub struct PluginManifest {
     pub capabilities: Capabilities,
     #[serde(default)]
     pub description: String,
+    /// Operator-configurable knobs the plugin reads at run-time via
+    /// `bv.config_get`. The GUI renders a form from this schema; the
+    /// host persists the resulting key→value map at
+    /// `core/plugins/<name>/config`. Empty when the plugin needs no
+    /// config — older manifests without this field still parse
+    /// cleanly thanks to `serde(default)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config_schema: Vec<ConfigField>,
 }
 
 fn default_abi_version() -> String {
@@ -96,9 +158,21 @@ impl PluginManifest {
             return Err("manifest.abi_version must start with \"1.\"");
         }
         match self.runtime {
-            RuntimeKind::Wasm => Ok(()),
-            RuntimeKind::Process => Err("process runtime is reserved (Phase 2)"),
+            RuntimeKind::Wasm | RuntimeKind::Process => {}
         }
+        for field in &self.config_schema {
+            if field.name.trim().is_empty()
+                || field.name.contains(char::is_whitespace)
+                || field.name.contains('/')
+                || field.name.contains("..")
+            {
+                return Err("config_schema field has invalid name");
+            }
+            if matches!(field.kind, ConfigFieldKind::Select) && field.options.is_empty() {
+                return Err("config_schema field of kind=select must declare options");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -117,6 +191,7 @@ mod tests {
             size: 1024,
             capabilities: Capabilities::default(),
             description: "TOTP secret engine".to_string(),
+            config_schema: vec![],
         }
     }
 
@@ -133,10 +208,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_process_runtime() {
+    fn accepts_process_runtime() {
         let mut m = fixture();
         m.runtime = RuntimeKind::Process;
-        assert!(m.validate().is_err());
+        // Process runtime was reserved in Phase 1; Phase 2 lights it
+        // up. Validation should now succeed.
+        assert!(m.validate().is_ok());
     }
 
     #[test]
@@ -144,5 +221,59 @@ mod tests {
         let mut m = fixture();
         m.abi_version = "2.0".to_string();
         assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_config_field_name() {
+        let mut m = fixture();
+        m.config_schema.push(ConfigField {
+            name: "bad name with spaces".to_string(),
+            kind: ConfigFieldKind::String,
+            label: None,
+            description: None,
+            required: false,
+            default: None,
+            options: vec![],
+        });
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_select_without_options() {
+        let mut m = fixture();
+        m.config_schema.push(ConfigField {
+            name: "algo".to_string(),
+            kind: ConfigFieldKind::Select,
+            label: None,
+            description: None,
+            required: false,
+            default: None,
+            options: vec![],
+        });
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn accepts_well_formed_config_schema() {
+        let mut m = fixture();
+        m.config_schema.push(ConfigField {
+            name: "endpoint_url".to_string(),
+            kind: ConfigFieldKind::String,
+            label: Some("Endpoint URL".to_string()),
+            description: Some("Where the plugin POSTs results".to_string()),
+            required: true,
+            default: None,
+            options: vec![],
+        });
+        m.config_schema.push(ConfigField {
+            name: "algorithm".to_string(),
+            kind: ConfigFieldKind::Select,
+            label: None,
+            description: None,
+            required: false,
+            default: Some("sha256".to_string()),
+            options: vec!["sha1".to_string(), "sha256".to_string(), "sha512".to_string()],
+        });
+        assert!(m.validate().is_ok());
     }
 }

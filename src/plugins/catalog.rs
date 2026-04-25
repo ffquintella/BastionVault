@@ -174,6 +174,7 @@ mod tests {
             size: binary.len() as u64,
             capabilities: Capabilities::default(),
             description: String::new(),
+            config_schema: vec![],
         }
     }
 

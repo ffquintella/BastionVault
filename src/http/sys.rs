@@ -1248,6 +1248,74 @@ struct PluginInvokeRequest {
     fuel: Option<u64>,
 }
 
+async fn sys_plugins_config_get_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let name = req.match_info().get("name").unwrap_or("").to_string();
+    let audit_path = format!("sys/plugins/{name}/config");
+    let result: Result<HttpResponse, RvError> = (async move {
+        let catalog = crate::plugins::PluginCatalog::new();
+        let manifest = match catalog
+            .get_manifest(core.barrier.as_storage(), &name)
+            .await?
+        {
+            Some(m) => m,
+            None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
+        };
+        let store = crate::plugins::ConfigStore::new();
+        let values = store
+            .get_redacted(core.barrier.as_storage(), &manifest)
+            .await?;
+        Ok(response_json_ok(
+            None,
+            json!({
+                "schema": manifest.config_schema,
+                "values": values,
+            }),
+        ))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Read).await;
+    result
+}
+
+#[derive(Debug, Deserialize)]
+struct PluginConfigPutRequest {
+    values: std::collections::BTreeMap<String, String>,
+}
+
+async fn sys_plugins_config_put_handler(
+    req: HttpRequest,
+    body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new(&req, &body, &core);
+    let name = req.match_info().get("name").unwrap_or("").to_string();
+    let audit_path = format!("sys/plugins/{name}/config");
+    let result: Result<HttpResponse, RvError> = (async move {
+        let payload: PluginConfigPutRequest =
+            serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+        let catalog = crate::plugins::PluginCatalog::new();
+        let manifest = match catalog
+            .get_manifest(core.barrier.as_storage(), &name)
+            .await?
+        {
+            Some(m) => m,
+            None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
+        };
+        let store = crate::plugins::ConfigStore::new();
+        store
+            .put(core.barrier.as_storage(), &manifest, payload.values)
+            .await?;
+        Ok(response_ok(None, None))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Write).await;
+    result
+}
+
 async fn sys_plugins_invoke_handler(
     req: HttpRequest,
     body: web::Bytes,
@@ -1274,18 +1342,49 @@ async fn sys_plugins_invoke_handler(
         None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
     };
 
-    let fuel = payload
-        .fuel
-        .unwrap_or(crate::plugins::DEFAULT_FUEL)
-        .min(crate::plugins::DEFAULT_FUEL.saturating_mul(10));
-    let runtime = crate::plugins::WasmRuntime::with_budgets(fuel, crate::plugins::DEFAULT_MEMORY_BYTES)
-        .map_err(|_| RvError::ErrUnknown)?;
-    let output = runtime
-        .invoke(&record.manifest, &record.binary, &input)
-        .map_err(|e| {
-            log::warn!("plugin {} invoke failed: {e}", record.manifest.name);
-            RvError::ErrRequestInvalid
-        })?;
+    // Load operator-supplied config (if any) before invoking — both
+    // runtimes accept a config map and expose it to the plugin via
+    // `bv.config_get`.
+    let core_arc: Arc<Core> = Arc::clone(&*core);
+    let config_store = crate::plugins::ConfigStore::new();
+    let config = config_store
+        .get(core_arc.barrier.as_storage(), &record.manifest.name)
+        .await
+        .unwrap_or_default();
+
+    // Dispatch by manifest.runtime: WASM stays in the wasmtime sandbox,
+    // Process spawns a subprocess and mediates host calls over JSON-RPC
+    // on stdio. The output shape is identical regardless of runtime.
+    let output = match record.manifest.runtime {
+        crate::plugins::RuntimeKind::Wasm => {
+            let fuel = payload
+                .fuel
+                .unwrap_or(crate::plugins::DEFAULT_FUEL)
+                .min(crate::plugins::DEFAULT_FUEL.saturating_mul(10));
+            let runtime = crate::plugins::WasmRuntime::with_budgets(
+                fuel,
+                crate::plugins::DEFAULT_MEMORY_BYTES,
+            )
+            .map_err(|_| RvError::ErrUnknown)?;
+            runtime
+                .invoke_with_config(&record.manifest, &record.binary, &input, Some(core_arc), config)
+                .await
+                .map_err(|e| {
+                    log::warn!("plugin {} wasm invoke failed: {e}", record.manifest.name);
+                    RvError::ErrRequestInvalid
+                })?
+        }
+        crate::plugins::RuntimeKind::Process => {
+            let runtime = crate::plugins::ProcessRuntime::new();
+            runtime
+                .invoke_with_config(&record.manifest, &record.binary, &input, Some(core_arc), config)
+                .await
+                .map_err(|e| {
+                    log::warn!("plugin {} process invoke failed: {e}", record.manifest.name);
+                    RvError::ErrRequestInvalid
+                })?
+        }
+    };
 
     let (status, plugin_status) = match output.outcome {
         crate::plugins::InvokeOutcome::Success => ("success", 0),
@@ -1673,6 +1772,11 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
         .service(
             web::resource("/plugins/{name}/invoke")
                 .route(web::post().to(sys_plugins_invoke_handler)),
+        )
+        .service(
+            web::resource("/plugins/{name}/config")
+                .route(web::get().to(sys_plugins_config_get_handler))
+                .route(web::put().to(sys_plugins_config_put_handler)),
         )
         .service(
             web::resource("/seal")

@@ -11,6 +11,7 @@ pub mod files;
 pub mod groups;
 pub mod connection;
 pub mod exchange;
+pub mod plugins;
 pub mod scheduled_exports;
 pub mod policies;
 pub mod resources;

@@ -1,0 +1,42 @@
+[package]
+name = "bastion-plugin-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "SDK for authoring BastionVault WASM plugins. See features/plugin-system.md."
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+# Plugin authors use this crate to build `cdylib` artifacts targeting
+# `wasm32-wasip1` (or `wasm32-unknown-unknown`). The SDK itself compiles
+# on every target; on non-wasm hosts the host-call extern declarations
+# are replaced by `host_test` stubs so plugin authors can `cargo test`
+# their handlers without a wasmtime runtime.
+
+[lib]
+# `rlib` so this crate works as a normal Rust dependency in plugin
+# author crates. Plugin authors set `crate-type = ["cdylib", "rlib"]`
+# on their own lib so they get a `.wasm` artifact when targeting
+# wasm32.
+crate-type = ["rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+
+[dev-dependencies]
+# Serializes the host_test tests so the shared in-memory STATE in
+# bindings::tests doesn't get clobbered by interleaving test threads.
+serial_test = "3"
+
+[features]
+# Optional helpers for plugins that want to encode their request /
+# response as JSON. Off by default to keep the SDK's default footprint
+# small.
+default = []
+json = ["dep:serde", "dep:serde_json"]
+
+# Replace `extern "C"` host imports with thread-local stubs so plugin
+# authors can `cargo test` their handlers on the host. Implies the SDK
+# does not generate `#[no_mangle]` exports — those only appear in real
+# wasm builds.
+host_test = []
