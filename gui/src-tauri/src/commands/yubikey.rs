@@ -84,13 +84,32 @@ pub async fn yubikey_provision_slot_9a(serial: u32, pin: String) -> CmdResult<()
 pub async fn yubikey_register(
     serial: u32,
     pin: String,
+    require: Option<bool>,
 ) -> CmdResult<RegisteredYubiKeyDto> {
-    let reg = crate::local_keystore::register_yubikey(serial, pin)?;
+    let reg =
+        crate::local_keystore::register_yubikey(serial, pin, require.unwrap_or(false))?;
     Ok(RegisteredYubiKeyDto {
         serial: reg.serial,
         key_id: reg.key_id,
         registered_at: reg.registered_at,
     })
+}
+
+/// Re-enable the OS-keychain unlock path on a keystore that
+/// previously dropped it (via `yubikey_register(..., require=true)`).
+/// Idempotent — no-op when a keychain slot is already present.
+#[tauri::command]
+pub async fn yubikey_enable_keychain_slot() -> CmdResult<()> {
+    crate::local_keystore::enable_keychain_slot()?;
+    Ok(())
+}
+
+/// Whether the keystore currently has a keychain unlock slot
+/// enrolled. Used by the Settings page to show the active posture
+/// and offer the "Re-enable keychain unlock" recovery button.
+#[tauri::command]
+pub async fn yubikey_keychain_slot_present() -> CmdResult<bool> {
+    Ok(crate::local_keystore::keychain_slot_present()?)
 }
 
 #[tauri::command]

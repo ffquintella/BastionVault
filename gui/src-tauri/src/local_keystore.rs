@@ -597,26 +597,52 @@ fn save_contents(contents: &FileContents) -> Result<(), CommandError> {
     Ok(())
 }
 
-/// Build the list of slots to include on a save. We always include
-/// a keychain slot (the default, primary path). Each registered
-/// YubiKey extends the list; loaded on-demand from `registered_yk`.
-fn build_slot_seal_inputs() -> Result<Vec<SlotSealInput>, CommandError> {
+/// Build the list of slots to include on a save.
+///
+/// The keychain slot's presence in the re-sealed file is decided
+/// per-call:
+///   - `KeychainSlotPolicy::Auto` → keep whatever the existing file
+///     had. Default for routine writes (store_unseal_key, etc.) so
+///     a previous yubikey-required setup isn't accidentally
+///     re-enabling the keychain slot every time something writes.
+///   - `KeychainSlotPolicy::Include` → force the keychain slot in
+///     even if the existing file dropped it. Used by the
+///     "Add keychain unlock back" recovery flow.
+///   - `KeychainSlotPolicy::Exclude` → force the keychain slot
+///     OUT, even if the existing file had it. Used by
+///     `register_yubikey(require = true)`.
+///
+/// YubiKey slots are always preserved verbatim from the existing
+/// file (callers that want to add a NEW yubikey append after this
+/// helper).
+fn build_slot_seal_inputs_with_policy(
+    keychain_policy: KeychainSlotPolicy,
+) -> Result<Vec<SlotSealInput>, CommandError> {
     let mut slots = Vec::new();
 
-    // Keychain slot: derive the seed, generate the PQC keypair,
-    // keep the encapsulation key for re-seal.
-    let seed = seed_from_keychain()?;
-    let provider = MlKem768Provider;
-    let keypair = provider
-        .keypair_from_seed(&seed)
-        .map_err(|e| CommandError::from(format!("ml-kem keypair for keychain slot: {e}")))?;
-    slots.push(SlotSealInput {
-        kind: SlotKind::Keychain,
-        encapsulation_key: keypair.public_key().to_vec(),
-        yk_serial: None,
-        yk_key_id: None,
-        yk_salt: None,
-    });
+    let existing_has_keychain = existing_keystore_has_keychain_slot()?;
+    let include_keychain = match keychain_policy {
+        KeychainSlotPolicy::Auto => existing_has_keychain,
+        KeychainSlotPolicy::Include => true,
+        KeychainSlotPolicy::Exclude => false,
+    };
+
+    if include_keychain {
+        // Keychain slot: derive the seed, generate the PQC keypair,
+        // keep the encapsulation key for re-seal.
+        let seed = seed_from_keychain()?;
+        let provider = MlKem768Provider;
+        let keypair = provider.keypair_from_seed(&seed).map_err(|e| {
+            CommandError::from(format!("ml-kem keypair for keychain slot: {e}"))
+        })?;
+        slots.push(SlotSealInput {
+            kind: SlotKind::Keychain,
+            encapsulation_key: keypair.public_key().to_vec(),
+            yk_serial: None,
+            yk_key_id: None,
+            yk_salt: None,
+        });
+    }
 
     // YubiKey slots: read back from the existing file header so we
     // re-include every registered card. Each slot already has its
@@ -627,7 +653,53 @@ fn build_slot_seal_inputs() -> Result<Vec<SlotSealInput>, CommandError> {
             slots.push(slot);
         }
     }
+    // First-write fallback: if there is no file yet AND the policy
+    // didn't emit a keychain slot above, fall back to keychain-only
+    // (otherwise the seal would error out with "no slots"). Caller
+    // setting Exclude on an empty keystore would be a bug.
+    if slots.is_empty() {
+        let seed = seed_from_keychain()?;
+        let provider = MlKem768Provider;
+        let keypair = provider
+            .keypair_from_seed(&seed)
+            .map_err(|e| CommandError::from(format!("ml-kem keypair: {e}")))?;
+        slots.push(SlotSealInput {
+            kind: SlotKind::Keychain,
+            encapsulation_key: keypair.public_key().to_vec(),
+            yk_serial: None,
+            yk_key_id: None,
+            yk_salt: None,
+        });
+    }
     Ok(slots)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeychainSlotPolicy {
+    Auto,
+    Include,
+    Exclude,
+}
+
+/// Convenience wrapper used by every routine write path
+/// (store_unseal_key, store_root_token, etc.). Preserves whatever
+/// keychain-slot policy the operator has already configured.
+fn build_slot_seal_inputs() -> Result<Vec<SlotSealInput>, CommandError> {
+    build_slot_seal_inputs_with_policy(KeychainSlotPolicy::Auto)
+}
+
+fn existing_keystore_has_keychain_slot() -> Result<bool, CommandError> {
+    let path = keys_file_path()?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    let blob = fs::read(&path)
+        .map_err(|e| CommandError::from(format!("read {path:?}: {e}")))?;
+    if !blob.starts_with(MAGIC_V2) {
+        return Ok(false);
+    }
+    let (header, _, _) = parse_v2(&blob)?;
+    Ok(header.slots.iter().any(|s| s.kind == SlotKind::Keychain))
 }
 
 fn load_existing_yubikey_slots() -> Result<Option<Vec<SlotSealInput>>, CommandError> {
@@ -846,11 +918,25 @@ pub fn list_registered_yubikeys() -> Result<Vec<RegisteredYubiKey>, CommandError
     Ok(out)
 }
 
-/// Register a new YubiKey as an additional unlock slot. Requires
-/// the PIN for the slot-9a signing key so we can derive the ML-KEM
-/// keypair deterministically and verify the roundtrip before
-/// committing the slot to disk.
-pub fn register_yubikey(serial: u32, pin: String) -> Result<RegisteredYubiKey, CommandError> {
+/// Register a new YubiKey as an unlock slot.
+///
+/// When `require = false` (the default failsafe behavior), the
+/// new card is added alongside the existing keychain + yubikey
+/// slots — operators who want a hardware FAILSAFE without losing
+/// the keychain convenience.
+///
+/// When `require = true`, the keychain slot is dropped from the
+/// re-sealed file. After this call only the YubiKey(s) can open
+/// the keystore. Existing yubikey slots are preserved (registering
+/// a SECOND card with `require = true` keeps the first one
+/// enrolled — multi-card setups are the recommended posture, since
+/// a single-card-required posture loses access permanently if
+/// that one card is damaged or lost).
+pub fn register_yubikey(
+    serial: u32,
+    pin: String,
+    require: bool,
+) -> Result<RegisteredYubiKey, CommandError> {
     // Load the current file so we re-encrypt with the new slot
     // alongside the existing ones. Empty keystore → start a new file.
     let mut contents = load_contents().unwrap_or_default();
@@ -889,9 +975,16 @@ pub fn register_yubikey(serial: u32, pin: String) -> Result<RegisteredYubiKey, C
     // Inject the slot into the existing file header by round-
     // tripping the contents through `save_contents` after having
     // written the slot record via the standard seal path. The
-    // simplest way is to do a direct seal: build slot-seal-inputs
-    // manually including the new yubikey entry + the existing ones.
-    let mut slot_seeds = build_slot_seal_inputs()?;
+    // `require` flag flips the keychain-slot policy: when true,
+    // we drop the keychain slot from the re-sealed file so only
+    // YubiKey(s) can unlock; when false, we preserve whatever
+    // keychain policy the existing file already had.
+    let policy = if require {
+        KeychainSlotPolicy::Exclude
+    } else {
+        KeychainSlotPolicy::Auto
+    };
+    let mut slot_seeds = build_slot_seal_inputs_with_policy(policy)?;
     slot_seeds.push(SlotSealInput {
         kind: SlotKind::Yubikey,
         encapsulation_key: keypair.public_key().to_vec(),
@@ -919,6 +1012,40 @@ pub fn register_yubikey(serial: u32, pin: String) -> Result<RegisteredYubiKey, C
     // registration — the caller's session is done with it.
     clear_yubikey_pin();
 
+    // CRYPTOGRAPHIC enforcement of the require posture: now that
+    // the file has been atomically replaced with a version that
+    // does NOT contain a keychain slot, the OS keychain entry is
+    // useless and stays around as an attractive nuisance. Delete
+    // it so a future attacker who steals the keychain has no
+    // material capable of unlocking the file — the YubiKey is the
+    // only path that derives a working KEM seed, and the wrapped
+    // content key on disk only decrypts under a KEM secret derived
+    // from a real card signature.
+    //
+    // Deletion runs ONLY AFTER the new file is on disk; if the
+    // seal/rename above had failed, the keychain entry would still
+    // be present to keep the existing keychain slot openable.
+    // Re-enabling keychain unlock later (`enable_keychain_slot`)
+    // mints a fresh entry via `load_or_create_local_key` — the
+    // forgotten old key is unrecoverable, which is fine because
+    // its slot is no longer in the file either.
+    if require {
+        if let Ok(entry) = keyring::Entry::new(SERVICE, LOCAL_KEY_ENTRY) {
+            // Best-effort: missing entry is the desired end state,
+            // so a NoEntry error is silently OK. Other errors are
+            // logged but don't roll back the registration — the
+            // YubiKey-only posture is already in effect on disk.
+            match entry.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => {}
+                Err(e) => eprintln!(
+                    "local_keystore: yubikey require posture set, but failed to \
+                     delete keychain entry `{LOCAL_KEY_ENTRY}` ({e}). The entry is \
+                     unused but should be removed manually for hygiene."
+                ),
+            }
+        }
+    }
+
     // `contents` was loaded up-top so the migration path had its
     // mut binding; nothing mutates it on the happy path, and the
     // encrypted payload we just wrote above is derived from it
@@ -930,6 +1057,48 @@ pub fn register_yubikey(serial: u32, pin: String) -> Result<RegisteredYubiKey, C
         key_id: key_id_b64,
         registered_at: now_unix(),
     })
+}
+
+/// Re-enable keychain unlock alongside any registered YubiKeys.
+/// The recovery direction for `register_yubikey(require = true)`:
+/// after the operator has decided they want the OS keychain to
+/// also unlock the file, this re-seals the keystore with both a
+/// keychain slot AND every existing yubikey slot. No-op if a
+/// keychain slot is already present.
+pub fn enable_keychain_slot() -> Result<(), CommandError> {
+    if existing_keystore_has_keychain_slot()? {
+        return Ok(());
+    }
+    // Round-trip the existing contents through a re-seal that
+    // forces a keychain slot in. Mirrors the register_yubikey
+    // body's hand-rolled seal path so we touch the file once,
+    // atomically.
+    let contents = load_contents()?;
+    let slot_seeds = build_slot_seal_inputs_with_policy(KeychainSlotPolicy::Include)?;
+    let plaintext = serde_json::to_vec(&contents)
+        .map_err(|e| CommandError::from(format!("serialise vault-keys JSON: {e}")))?;
+    let blob = seal_v2(&plaintext, &slot_seeds)?;
+    let path = keys_file_path()?;
+    let tmp = path.with_extension("enc.tmp");
+    let mut f = fs::File::create(&tmp)
+        .map_err(|e| CommandError::from(format!("create {tmp:?}: {e}")))?;
+    f.write_all(&blob)
+        .map_err(|e| CommandError::from(format!("write {tmp:?}: {e}")))?;
+    f.sync_all()
+        .map_err(|e| CommandError::from(format!("sync {tmp:?}: {e}")))?;
+    drop(f);
+    fs::rename(&tmp, &path)
+        .map_err(|e| CommandError::from(format!("rename {tmp:?} → {path:?}: {e}")))?;
+    Ok(())
+}
+
+/// Whether the current keystore file requires a YubiKey to open
+/// (i.e. has at least one yubikey slot AND no keychain slot).
+/// Surfaced to the UI so the Settings page can show the operator
+/// the active posture and offer the "Re-enable keychain unlock"
+/// button when applicable.
+pub fn keychain_slot_present() -> Result<bool, CommandError> {
+    existing_keystore_has_keychain_slot()
 }
 
 /// Remove a YubiKey slot by serial. Refuses to remove the LAST

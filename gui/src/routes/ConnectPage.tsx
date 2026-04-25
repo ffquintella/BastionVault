@@ -955,12 +955,17 @@ export function ConnectPage() {
 
               {/* YubiKey-at-init toggle. When on, InitPage prompts
                   for the PIV PIN after the vault's init step and
-                  registers the selected device as an additional
-                  unlock slot on the machine-wide keystore. The
-                  OS-keychain slot stays enrolled too, so the
-                  YubiKey is a FAILSAFE (either path unlocks), not
-                  a hard requirement that would brick the vault
-                  if the card is lost. */}
+                  registers the selected device as the unlock slot,
+                  DROPPING the OS-keychain slot from the keystore.
+                  After this, ONLY a registered YubiKey can unlock
+                  the vault on this machine. Operators are strongly
+                  encouraged to register a SPARE YubiKey via
+                  Settings → YubiKey Failsafe — losing every
+                  registered card with no keychain fallback means
+                  losing access to the cached unseal key. (The
+                  vault data itself is recoverable: re-enter the
+                  unseal key on next open via the InitPage
+                  recovery flow, or wipe + re-init.) */}
               <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-3 space-y-2">
                 <label className="flex items-center justify-between gap-3 cursor-pointer select-none">
                   <div className="min-w-0">
@@ -968,10 +973,12 @@ export function ConnectPage() {
                       Require a YubiKey for unlock
                     </p>
                     <p className="text-xs text-[var(--color-text-muted)] mt-0.5">
-                      Registers a YubiKey as an additional unlock path for
-                      the machine-wide keystore right after init. Either
-                      the OS keychain OR the card unlocks the file — losing
-                      the card doesn't brick the vault.
+                      Registers a YubiKey as the unlock path for the
+                      machine-wide keystore right after init. ONLY
+                      registered YubiKeys will unlock — the OS-keychain
+                      slot is dropped. Strongly recommended: register a
+                      spare card from Settings later so losing one card
+                      doesn't lock you out.
                     </p>
                   </div>
                   <input

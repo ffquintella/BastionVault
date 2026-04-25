@@ -321,10 +321,15 @@ export function InitPage() {
           `Provisioned slot 9a on YubiKey ${pendingYubiKeySerial}. Registering…`,
         );
       }
-      await api.yubikeyRegister(pendingYubiKeySerial, yubiKeyPin);
+      // The toggle on Add-Local-Vault is labelled "Require a YubiKey
+      // for unlock" — pass require=true so the OS-keychain slot is
+      // dropped from the re-sealed keystore. Operators who later
+      // want to fall back to keychain unlock can re-enable it from
+      // Settings via `yubikey_enable_keychain_slot`.
+      await api.yubikeyRegister(pendingYubiKeySerial, yubiKeyPin, true);
       toast(
         "success",
-        `YubiKey ${pendingYubiKeySerial} registered as a failsafe unlock path`,
+        `YubiKey ${pendingYubiKeySerial} now required to unlock the vault`,
       );
       setPendingYubiKeySerial(null);
       setYubiKeyPin("");
@@ -426,8 +431,10 @@ export function InitPage() {
                   123456). The card will sign a one-off salt so the keystore
                   can derive a post-quantum key from it — the PIN is never
                   persisted and the card's private key never leaves the
-                  device. Registers as an ADDITIONAL unlock slot alongside
-                  the OS keychain.
+                  device. After this the OS-keychain unlock slot is REMOVED;
+                  only registered YubiKeys will unlock. Register a spare
+                  card from Settings → YubiKey Failsafe so losing this one
+                  doesn't lock you out.
                 </p>
               ) : (
                 <p className="text-amber-400/80 text-xs">

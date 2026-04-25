@@ -167,6 +167,17 @@ Properties:
 - **No private key material ever leaves the YubiKey.** The signature is computed on-card. HKDF + ML-KEM keygen happen in the host process from the signature value.
 - **Spare YubiKeys**: each registered YubiKey has its own (salt, public-key-for-identification, ML-KEM-wrapped-content-key) triple in the file header. Decryption tries each in turn until one succeeds. Operators can register N keys and lose N-1 without being locked out.
 
+### 3.2.1 "Require YubiKey" posture is cryptographically enforced
+
+When the operator picks "Require a YubiKey for unlock" at vault-add time (or removes the keychain slot via Settings later), the keystore takes two actions:
+
+1. **The keychain slot is removed from the file header.** A re-seal of `vault-keys.enc` runs without it — the resulting ciphertext has no slot whose KEM ciphertext can be unwrapped using a keychain-derived seed.
+2. **The OS-keychain entry `local-master-key` is deleted.** Even if an attacker later compromises the operator's OS keychain, no key material capable of producing a working KEM seed exists there. The only paths that produce a usable seed are signatures from a registered YubiKey.
+
+Together this is *cryptographic* enforcement, not policy enforcement: the file's content key is no longer reachable without a real signature from a registered YubiKey. The host process can't be tricked into unlocking via a forgotten keychain slot, because the slot doesn't exist in the ciphertext and the keychain doesn't carry the matching key.
+
+Recovery direction (`yubikey_enable_keychain_slot`) re-mints a fresh `local-master-key` and adds a keychain slot back. The old key is gone forever — that's intentional. The new key is bound to the new slot.
+
 ### 3.3 Registration flow
 
 On `init_embedded` (first-vault init), the GUI presents three options:

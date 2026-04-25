@@ -168,6 +168,8 @@ pub fn run() {
             commands::yubikey::yubikey_provision_slot_9a,
             commands::yubikey::yubikey_register,
             commands::yubikey::yubikey_remove,
+            commands::yubikey::yubikey_enable_keychain_slot,
+            commands::yubikey::yubikey_keychain_slot_present,
             commands::yubikey::yubikey_set_pin,
             commands::yubikey::yubikey_clear_pin,
             // Auth

@@ -127,8 +127,26 @@ export const yubikeyListDevices = () =>
 export const yubikeyListRegistered = () =>
   invoke<RegisteredYubiKeyDto[]>("yubikey_list_registered");
 
-export const yubikeyRegister = (serial: number, pin: string) =>
-  invoke<RegisteredYubiKeyDto>("yubikey_register", { serial, pin });
+/** Register a YubiKey as an unlock slot. When `require = true`,
+ *  drops the OS-keychain slot from the re-sealed file so ONLY
+ *  registered YubiKeys can unlock. Defaults to `false` (failsafe
+ *  posture: keychain stays, the YubiKey is an additional path). */
+export const yubikeyRegister = (
+  serial: number,
+  pin: string,
+  require?: boolean,
+) =>
+  invoke<RegisteredYubiKeyDto>("yubikey_register", { serial, pin, require });
+
+/** Re-enable the OS-keychain unlock path after a previous
+ *  yubikey-required registration removed it. Idempotent. */
+export const yubikeyEnableKeychainSlot = () =>
+  invoke<void>("yubikey_enable_keychain_slot");
+
+/** Whether the keystore currently has a keychain unlock slot
+ *  enrolled. False means YubiKey-only posture is active. */
+export const yubikeyKeychainSlotPresent = () =>
+  invoke<boolean>("yubikey_keychain_slot_present");
 
 /** Generate a fresh RSA-2048 keypair in PIV slot 9a and self-sign a
  *  minimal X.509 certificate over it. Used when the operator picks
