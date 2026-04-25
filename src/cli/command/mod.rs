@@ -37,6 +37,9 @@ pub mod operator_init;
 pub mod operator_backup;
 pub mod operator_export;
 pub mod operator_import;
+pub mod exchange;
+pub mod exchange_export;
+pub mod exchange_import;
 #[cfg(not(feature = "sync_handler"))]
 pub mod operator_migrate;
 #[cfg(not(feature = "sync_handler"))]

@@ -776,3 +776,83 @@ export const ssoAdminDelete = (mount: string) =>
 
 export const ssoAdminCallbackHints = (mount: string, kind: "oidc" | "saml") =>
   invoke<SsoCallbackHints>("sso_admin_callback_hints", { mount, kind });
+
+// ── Exchange (Import / Export) ──────────────────────────────────────────────
+//
+// User-facing portable export of vault subsets, with optional Argon2id +
+// XChaCha20-Poly1305 password-encrypted .bvx envelope. Distinct from the
+// operator-level BVBK backup. See `features/import-export-module.md`.
+
+export interface ExchangeScopeSelector {
+  type: "kv_path" | "resource" | "asset_group" | "resource_group";
+  mount?: string;
+  path?: string;
+  id?: string;
+}
+
+export interface ExchangeExportResult {
+  /** Base64-encoded `.bvx` envelope (or plaintext JSON when format = "json"). */
+  file_b64: string;
+  size_bytes: number;
+  format: string;
+}
+
+export interface ExchangePreviewItem {
+  mount: string;
+  path: string;
+  classification: "new" | "identical" | "conflict";
+}
+
+export interface ExchangePreviewResult {
+  token: string;
+  expires_in_secs: number;
+  total: number;
+  new: number;
+  identical: number;
+  conflict: number;
+  items: ExchangePreviewItem[];
+}
+
+export interface ExchangeApplyResult {
+  written: number;
+  unchanged: number;
+  skipped: number;
+  renamed: number;
+}
+
+export const exchangeExport = (
+  include: ExchangeScopeSelector[],
+  format: "bvx" | "json",
+  password?: string,
+  allowPlaintext: boolean = false,
+  comment?: string,
+) =>
+  invoke<ExchangeExportResult>("exchange_export", {
+    include,
+    format,
+    password: password ?? null,
+    allowPlaintext,
+    comment: comment ?? null,
+  });
+
+export const exchangePreview = (
+  fileB64: string,
+  format: "bvx" | "json",
+  password?: string,
+  allowPlaintext: boolean = false,
+) =>
+  invoke<ExchangePreviewResult>("exchange_preview", {
+    fileB64,
+    format,
+    password: password ?? null,
+    allowPlaintext,
+  });
+
+export const exchangeApply = (
+  token: string,
+  conflictPolicy: "skip" | "overwrite" | "rename" = "skip",
+) =>
+  invoke<ExchangeApplyResult>("exchange_apply", {
+    token,
+    conflictPolicy,
+  });

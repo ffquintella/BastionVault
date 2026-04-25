@@ -177,6 +177,10 @@ pub fn run() {
             commands::auth::login_userpass,
             commands::auth::get_current_token,
             commands::auth::logout,
+            // Exchange (import / export module)
+            commands::exchange::exchange_export,
+            commands::exchange::exchange_preview,
+            commands::exchange::exchange_apply,
             // Secrets
             commands::secrets::list_secrets,
             commands::secrets::read_secret,

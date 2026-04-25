@@ -17,6 +17,7 @@ const userNav: NavItem[] = [
   { path: "/secrets", label: "Secrets" },
   { path: "/files", label: "Files" },
   { path: "/sharing", label: "Sharing" },
+  { path: "/exchange", label: "Import / Export" },
 ];
 
 // Features under Admin require elevated access. The menu is hidden when the

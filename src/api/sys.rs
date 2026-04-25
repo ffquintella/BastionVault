@@ -195,4 +195,40 @@ impl Sys<'_> {
     ) -> Result<HttpResponse, RvError> {
         self.request_write(format!("{}/sys/import/{mount}", self.api_prefix()), data)
     }
+
+    /// `POST /v1/sys/exchange/export` — returns a JSON envelope whose
+    /// `file_b64` field is the base64 of the produced `.bvx` (or
+    /// plaintext JSON) document.
+    pub fn exchange_export(
+        &self,
+        body: serde_json::Map<String, Value>,
+    ) -> Result<HttpResponse, RvError> {
+        self.request_write(format!("{}/sys/exchange/export", self.api_prefix()), Some(body))
+    }
+
+    /// `POST /v1/sys/exchange/import` — single-shot import.
+    pub fn exchange_import(
+        &self,
+        body: serde_json::Map<String, Value>,
+    ) -> Result<HttpResponse, RvError> {
+        self.request_write(format!("{}/sys/exchange/import", self.api_prefix()), Some(body))
+    }
+
+    /// `POST /v1/sys/exchange/import/preview` — two-step import,
+    /// preview phase. Returns a per-item classification table + opaque
+    /// `token` for `exchange_apply`.
+    pub fn exchange_preview(
+        &self,
+        body: serde_json::Map<String, Value>,
+    ) -> Result<HttpResponse, RvError> {
+        self.request_write(format!("{}/sys/exchange/import/preview", self.api_prefix()), Some(body))
+    }
+
+    /// `POST /v1/sys/exchange/import/apply` — consume a preview token.
+    pub fn exchange_apply(
+        &self,
+        body: serde_json::Map<String, Value>,
+    ) -> Result<HttpResponse, RvError> {
+        self.request_write(format!("{}/sys/exchange/import/apply", self.api_prefix()), Some(body))
+    }
 }

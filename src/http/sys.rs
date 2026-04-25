@@ -797,6 +797,337 @@ async fn sys_export_request_handler(
     Ok(response_json_ok(None, export_data))
 }
 
+/// Request body for `POST /v1/sys/exchange/export`.
+#[derive(Debug, Deserialize)]
+struct ExchangeExportRequest {
+    #[serde(default = "default_format")]
+    format: String,
+    scope: crate::exchange::ScopeSpec,
+    /// Required when `format = "bvx"`. Refused (with `allow_plaintext: false`)
+    /// when `format = "json"` unless explicitly opted in.
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    allow_plaintext: bool,
+    #[serde(default)]
+    comment: Option<String>,
+}
+
+fn default_format() -> String {
+    "bvx".to_string()
+}
+
+/// `POST /v1/sys/exchange/export` — produce a `bvx.v1` JSON document
+/// describing the requested scope; optionally wrap it in a password-encrypted
+/// `.bvx` envelope. See `features/import-export-module.md`.
+async fn sys_exchange_export_request_handler(
+    req: HttpRequest,
+    body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let _auth = request_auth(&req);
+
+    let mut payload: ExchangeExportRequest =
+        serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+
+    // Build the bvx.v1 document by walking barrier-decrypted storage.
+    let exporter = crate::exchange::ExporterInfo::default();
+    let document = crate::exchange::scope::export_to_document(
+        core.barrier.as_storage(),
+        exporter,
+        payload.scope.clone(),
+    )
+    .await?;
+
+    // Canonical JSON — sorted keys, no whitespace, deterministic across runs.
+    let inner_bytes = crate::exchange::canonical::to_canonical_vec(&document)?;
+
+    let (body_bytes, format_label) = match payload.format.as_str() {
+        "json" => {
+            if !payload.allow_plaintext {
+                // Loud refusal: the default is encrypted. Operators who want
+                // plaintext must opt in explicitly so the choice is auditable.
+                return Ok(response_error(
+                    StatusCode::BAD_REQUEST,
+                    "plaintext export refused (set allow_plaintext: true to override)",
+                ));
+            }
+            (inner_bytes, "json")
+        }
+        "bvx" => {
+            let password = payload.password.as_deref().ok_or(RvError::ErrRequestInvalid)?;
+            let bytes = crate::exchange::encrypt_bvx(
+                &inner_bytes,
+                password,
+                "",
+                payload.comment.clone(),
+            )?;
+            // Zeroise the password buffer in our local copy.
+            if let Some(ref mut p) = payload.password {
+                p.zeroize();
+            }
+            (bytes, "bvx")
+        }
+        _ => {
+            return Ok(response_error(
+                StatusCode::BAD_REQUEST,
+                "format must be \"bvx\" or \"json\"",
+            ));
+        }
+    };
+
+    use base64::Engine;
+    let body_b64 = base64::engine::general_purpose::STANDARD.encode(&body_bytes);
+
+    Ok(response_json_ok(
+        None,
+        json!({
+            "format": format_label,
+            "size_bytes": body_bytes.len(),
+            "file_b64": body_b64,
+        }),
+    ))
+}
+
+/// Request body for `POST /v1/sys/exchange/import`.
+#[derive(Debug, Deserialize)]
+struct ExchangeImportRequest {
+    /// Either the raw `bvx.v1` JSON document (when `format == "json"`) or
+    /// the `.bvx` envelope JSON (when `format == "bvx"`). Sent as a UTF-8
+    /// string to keep the payload schema simple.
+    file: String,
+    #[serde(default = "default_format")]
+    format: String,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    conflict_policy: crate::exchange::ConflictPolicy,
+    #[serde(default)]
+    allow_plaintext: bool,
+}
+
+/// `POST /v1/sys/exchange/import/preview` — decrypt + parse + classify.
+/// Stores the parsed document keyed by an opaque token; the apply call
+/// must present the same token within the configured TTL.
+async fn sys_exchange_import_preview_handler(
+    req: HttpRequest,
+    body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let _auth = request_auth(&req);
+
+    let mut payload: ExchangeImportRequest =
+        serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+
+    let document_bytes = match payload.format.as_str() {
+        "bvx" => {
+            let password = payload.password.as_deref().ok_or(RvError::ErrRequestInvalid)?;
+            let bytes = crate::exchange::decrypt_bvx(payload.file.as_bytes(), password)?;
+            if let Some(ref mut p) = payload.password {
+                p.zeroize();
+            }
+            bytes
+        }
+        "json" => {
+            if !payload.allow_plaintext {
+                return Ok(response_error(
+                    StatusCode::BAD_REQUEST,
+                    "plaintext import refused (set allow_plaintext: true to override)",
+                ));
+            }
+            payload.file.as_bytes().to_vec()
+        }
+        _ => {
+            return Ok(response_error(
+                StatusCode::BAD_REQUEST,
+                "format must be \"bvx\" or \"json\"",
+            ));
+        }
+    };
+
+    let document: crate::exchange::ExchangeDocument =
+        serde_json::from_slice(&document_bytes).map_err(|_| RvError::ErrRequestInvalid)?;
+    document.validate_schema_tag().map_err(|_| RvError::ErrRequestInvalid)?;
+
+    // Classify each item against the destination *without* writing.
+    let storage = core.barrier.as_storage();
+    let mut new = 0u64;
+    let mut identical = 0u64;
+    let mut conflict = 0u64;
+    let mut items: Vec<crate::exchange::PreviewClassificationItem> = Vec::with_capacity(document.items.kv.len());
+    for kv in &document.items.kv {
+        let mount = if kv.mount.ends_with('/') { kv.mount.clone() } else { format!("{}/", kv.mount) };
+        let path = kv.path.strip_prefix('/').unwrap_or(&kv.path);
+        let full_path = format!("{mount}{path}");
+        let new_bytes = match &kv.value {
+            serde_json::Value::Object(map) if map.len() == 1 && map.contains_key("_base64") => {
+                if let Some(serde_json::Value::String(b64)) = map.get("_base64") {
+                    use base64::Engine;
+                    base64::engine::general_purpose::STANDARD
+                        .decode(b64.as_bytes())
+                        .map_err(|_| RvError::ErrRequestInvalid)?
+                } else {
+                    serde_json::to_vec(&kv.value)?
+                }
+            }
+            _ => serde_json::to_vec(&kv.value)?,
+        };
+        let existing = storage.get(&full_path).await?;
+        let classification = match &existing {
+            None => {
+                new += 1;
+                crate::exchange::ImportClassification::New
+            }
+            Some(e) if e.value == new_bytes => {
+                identical += 1;
+                crate::exchange::ImportClassification::Identical
+            }
+            Some(_) => {
+                conflict += 1;
+                crate::exchange::ImportClassification::Conflict
+            }
+        };
+        items.push(crate::exchange::PreviewClassificationItem {
+            mount: kv.mount.clone(),
+            path: kv.path.clone(),
+            classification,
+        });
+    }
+
+    // Owner binding: tokens are bound to the actor's display name. We
+    // pull it from the auth context — empty string when unauthenticated
+    // (the route is gated; root-token operators see "" too, which is
+    // fine since the apply call comes from the same actor).
+    let owner = req.headers()
+        .get("X-BastionVault-Actor")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let token = core.exchange_preview_store.insert(document, owner);
+
+    Ok(response_json_ok(
+        None,
+        json!({
+            "token": token,
+            "expires_in_secs": core.exchange_preview_store.ttl_secs(),
+            "total": items.len() as u64,
+            "new": new,
+            "identical": identical,
+            "conflict": conflict,
+            "items": items,
+        }),
+    ))
+}
+
+/// `POST /v1/sys/exchange/import/apply` — consume a preview token and
+/// write the items per the supplied conflict policy.
+#[derive(Debug, Deserialize)]
+struct ExchangeApplyRequest {
+    token: String,
+    #[serde(default)]
+    conflict_policy: crate::exchange::ConflictPolicy,
+}
+
+async fn sys_exchange_import_apply_handler(
+    req: HttpRequest,
+    body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let _auth = request_auth(&req);
+
+    let payload: ExchangeApplyRequest =
+        serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+
+    let owner = req.headers()
+        .get("X-BastionVault-Actor")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let document = core
+        .exchange_preview_store
+        .consume(&payload.token, &owner)?;
+
+    let result = crate::exchange::scope::import_from_document(
+        core.barrier.as_storage(),
+        &document,
+        payload.conflict_policy,
+    )
+    .await?;
+
+    Ok(response_json_ok(
+        None,
+        json!({
+            "written": result.written,
+            "unchanged": result.unchanged,
+            "skipped": result.skipped,
+            "renamed": result.renamed,
+            "items": result.items,
+        }),
+    ))
+}
+
+/// `POST /v1/sys/exchange/import` — single-shot import, kept for callers
+/// (CLI scripts, automation pipelines) that don't want to round-trip a
+/// preview token. The two-step flow above is the GUI default.
+async fn sys_exchange_import_request_handler(
+    req: HttpRequest,
+    body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let _auth = request_auth(&req);
+
+    let mut payload: ExchangeImportRequest =
+        serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+
+    let document_bytes = match payload.format.as_str() {
+        "bvx" => {
+            let password = payload.password.as_deref().ok_or(RvError::ErrRequestInvalid)?;
+            let bytes = crate::exchange::decrypt_bvx(payload.file.as_bytes(), password)?;
+            if let Some(ref mut p) = payload.password {
+                p.zeroize();
+            }
+            bytes
+        }
+        "json" => {
+            if !payload.allow_plaintext {
+                return Ok(response_error(
+                    StatusCode::BAD_REQUEST,
+                    "plaintext import refused (set allow_plaintext: true to override)",
+                ));
+            }
+            payload.file.as_bytes().to_vec()
+        }
+        _ => {
+            return Ok(response_error(
+                StatusCode::BAD_REQUEST,
+                "format must be \"bvx\" or \"json\"",
+            ));
+        }
+    };
+
+    let document: crate::exchange::ExchangeDocument =
+        serde_json::from_slice(&document_bytes).map_err(|_| RvError::ErrRequestInvalid)?;
+
+    let result = crate::exchange::scope::import_from_document(
+        core.barrier.as_storage(),
+        &document,
+        payload.conflict_policy,
+    )
+    .await?;
+
+    Ok(response_json_ok(
+        None,
+        json!({
+            "written": result.written,
+            "unchanged": result.unchanged,
+            "skipped": result.skipped,
+            "renamed": result.renamed,
+            "items": result.items,
+        }),
+    ))
+}
+
 async fn sys_import_request_handler(
     req: HttpRequest,
     mut body: web::Bytes,
@@ -863,6 +1194,10 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
         .service(web::resource("/restore").route(web::post().to(sys_restore_request_handler)))
         .service(web::resource("/export/{path:.*}").route(web::get().to(sys_export_request_handler)))
         .service(web::resource("/import/{mount:.*}").route(web::post().to(sys_import_request_handler)))
+        .service(web::resource("/exchange/export").route(web::post().to(sys_exchange_export_request_handler)))
+        .service(web::resource("/exchange/import").route(web::post().to(sys_exchange_import_request_handler)))
+        .service(web::resource("/exchange/import/preview").route(web::post().to(sys_exchange_import_preview_handler)))
+        .service(web::resource("/exchange/import/apply").route(web::post().to(sys_exchange_import_apply_handler)))
         .service(
             web::resource("/seal")
                 .route(web::post().to(sys_seal_request_handler))

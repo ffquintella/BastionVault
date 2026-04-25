@@ -10,6 +10,7 @@ pub mod fido2_native;
 pub mod files;
 pub mod groups;
 pub mod connection;
+pub mod exchange;
 pub mod policies;
 pub mod resources;
 pub mod secrets;

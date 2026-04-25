@@ -138,6 +138,13 @@ sha2-saml = { package = "sha2", version = "0.10", features = ["oid"] }
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
 webauthn-rs-proto = "0.5"
 zstd = "0.13"
+# Exchange (import/export) module: password-encrypted .bvx files.
+# Argon2id is the OWASP-recommended memory-hard KDF; XChaCha20-Poly1305
+# pairs with it for AEAD with a 192-bit nonce so random-nonce collisions
+# are not a concern even across millions of exports. See
+# `features/import-export-module.md`.
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "std", "password-hash"] }
+chacha20poly1305 = "0.10"
 
 [build-dependencies]
 toml = "1.1.2"

@@ -97,6 +97,12 @@ pub struct Core {
     /// audit subsystem is ready. Handle is installed by
     /// `post_unseal_init_audit` and cleared on seal.
     pub audit_broker: ArcSwapOption<crate::audit::AuditBroker>,
+    /// In-memory preview store backing the two-step
+    /// `/v1/sys/exchange/import/preview` -> `/import/apply` flow.
+    /// Tokens are TTL'd, single-use, and owner-bound. State is
+    /// process-local on purpose: previews carry decrypted plaintext, so
+    /// keeping them out of the barrier minimises the persistence surface.
+    pub exchange_preview_store: crate::exchange::PreviewStore,
 }
 
 impl Default for CoreState {
@@ -132,6 +138,7 @@ impl Default for Core {
             cache_config: CacheConfig::default(),
             state: ArcSwap::from_pointee(CoreState::default()),
             audit_broker: ArcSwapOption::empty(),
+            exchange_preview_store: crate::exchange::PreviewStore::default(),
         }
     }
 }
