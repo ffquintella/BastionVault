@@ -93,6 +93,10 @@ pub async fn build_backend() -> Result<Arc<dyn Backend>, CommandError> {
 
     if let Ok(prefs) = preferences::load() {
         if let Some(profile) = prefs.default_profile() {
+            eprintln!(
+                "embedded: build_backend resolving profile id={} name={:?} spec={:?}",
+                profile.id, profile.name, profile.spec
+            );
             match &profile.spec {
                 preferences::VaultSpec::Cloud { config } => {
                     return build_cloud_backend(config.clone()).await;
@@ -133,6 +137,10 @@ pub async fn build_backend() -> Result<Arc<dyn Backend>, CommandError> {
 
     match effective_kind {
         StorageKind::File => {
+            eprintln!(
+                "embedded: starting file backend at {}",
+                dir.display()
+            );
             conf.insert("path".into(), Value::String(dir_str));
             new_backend("file", &conf).map_err(CommandError::from)
         }

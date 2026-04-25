@@ -40,6 +40,11 @@ export function SettingsPage() {
   const clearAuth = useAuthStore((s) => s.clearAuth);
   const reset = useVaultStore((s) => s.reset);
   const [sealing, setSealing] = useState(false);
+  // Effective data location for the currently-default Local profile.
+  // Resolved at mount time so the Connection card reflects what
+  // build_backend / is_initialized actually use, not a hardcoded
+  // string. Empty until the lookup resolves.
+  const [dataLocation, setDataLocation] = useState<string>("");
 
   // FIDO2 RP config
   const [fido2Config, setFido2Config] = useState<Fido2Config | null>(null);
@@ -95,7 +100,37 @@ export function SettingsPage() {
     loadPasswordPolicy();
     loadSsoState();
     loadYubiKeyState();
+    void loadDataLocation();
   }, [loadPasswordPolicy]);
+
+  // Resolve the active Local profile's effective data dir for the
+  // Connection card. Honours per-profile `data_dir` override and
+  // falls back to the per-engine default — same logic the Rust side
+  // uses in build_backend / is_initialized. Stays empty for Remote /
+  // Cloud modes (the card's branches don't render this row).
+  async function loadDataLocation() {
+    try {
+      const list = await api.listVaultProfiles();
+      const active = list.vaults.find((v) => v.id === list.lastUsedId);
+      if (!active || active.spec.kind !== "local") {
+        setDataLocation("");
+        return;
+      }
+      const custom =
+        typeof active.spec.data_dir === "string" && active.spec.data_dir.trim()
+          ? active.spec.data_dir
+          : null;
+      if (custom) {
+        setDataLocation(custom);
+        return;
+      }
+      const sk = (active.spec.storage_kind as "file" | "hiqlite") ?? "file";
+      const fallback = await api.getDefaultLocalDataDir(sk);
+      setDataLocation(fallback);
+    } catch {
+      setDataLocation("");
+    }
+  }
 
   async function loadYubiKeyState() {
     try {
@@ -366,9 +401,16 @@ export function SettingsPage() {
               </>
             )}
             {mode === "Embedded" && (
-              <div className="flex justify-between items-center">
-                <span className="text-[var(--color-text-muted)]">Data Location</span>
-                <span className="font-mono text-xs">~/.bastion_vault_gui/data/</span>
+              <div className="flex justify-between items-center gap-3">
+                <span className="text-[var(--color-text-muted)] shrink-0">
+                  Data Location
+                </span>
+                <span
+                  className="font-mono text-xs truncate min-w-0 text-right"
+                  title={dataLocation || "(resolving…)"}
+                >
+                  {dataLocation || "(resolving…)"}
+                </span>
               </div>
             )}
           </div>
