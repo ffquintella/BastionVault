@@ -335,24 +335,46 @@ fn check_local_dir(dir: &std::path::Path) -> Result<bool, CommandError> {
         return Ok(true);
     }
 
-    // Per-backend marker subdirectories. Each counts as initialised
-    // when non-empty. Order biases toward the most common +
-    // earliest-written entries first to avoid scanning every
-    // candidate when an obvious one is present.
-    const MARKERS: &[&str] = &[
-        // File backend. `core/` is written by every init run.
-        "core",
-        "barrier",
-        "auth",
-        "logical",
-        "sys",
-        // Hiqlite backend.
+    // File-backend probe: look for vault-specific FILES inside
+    // the per-prefix subdirs, not just the subdir's existence.
+    // The bare-subdir check false-positived for operators who
+    // browsed to a path that happened to contain a `core/` or
+    // `auth/` directory from an unrelated project (super common —
+    // both names are heavily reused in source repos, OS config
+    // trees, etc.). Vault-written filenames all start with `_`
+    // and are specific enough that finding any of them is a
+    // strong signal.
+    let file_backend_signals: &[(&str, &[&str])] = &[
+        // (subdir, vault-specific filenames inside it)
+        (
+            "core",
+            &["_seal-config", "_auth", "_mounts", "_used-unseal-keys-set"],
+        ),
+        ("barrier", &["_init"]),
+    ];
+    for (sub, filenames) in file_backend_signals {
+        let subdir = dir.join(sub);
+        if !subdir.is_dir() {
+            continue;
+        }
+        for fname in *filenames {
+            if subdir.join(fname).is_file() {
+                return Ok(true);
+            }
+        }
+    }
+
+    // Hiqlite-backend probe: the marker directory names ARE
+    // unique enough on their own (no general-purpose repo we've
+    // seen has a `state_machine_cache/` at its root) so the
+    // non-empty-subdir check stays loose for these.
+    const HIQLITE_MARKERS: &[&str] = &[
         "state_machine",
         "logs",
         "logs_cache",
         "state_machine_cache",
     ];
-    for marker in MARKERS {
+    for marker in HIQLITE_MARKERS {
         let p = dir.join(marker);
         if p.is_dir()
             && std::fs::read_dir(&p)
