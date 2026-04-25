@@ -43,21 +43,21 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Auth: Userpass | Done |
 | Auth: Certificate | Done |
 | **Secret Engines** | |
-| Secret Engine: PKI (legacy, retired from default build) | Partial |
-| Secret Engine: Transit | Todo |
-| Secret Engine: TOTP | Todo |
-| Secret Engine: SSH | Todo |
-| Dynamic Secrets | Todo |
+| Secret Engine: PKI (pure-Rust, PQC-capable -- [spec](features/pki-secret-engine.md)) | Todo |
+| Secret Engine: Transit ([spec](features/transit-secret-engine.md)) | Todo |
+| Secret Engine: TOTP ([spec](features/totp-secret-engine.md)) | Todo |
+| Secret Engine: SSH ([spec](features/ssh-secret-engine.md)) | Todo |
+| Dynamic Secrets ([spec](features/dynamic-secrets.md)) | Todo |
 | **Infrastructure** | |
 | High Availability (Raft consensus via Hiqlite) | Done |
-| Plugin System (dynamic loading) | Todo |
-| Namespaces / Multi-tenancy | Partial |
-| Kubernetes Integration | Todo |
+| Plugin System (dynamic loading) ([spec](features/plugin-system.md)) | Todo |
+| Namespaces / Multi-tenancy ([spec](features/namespaces-multitenancy.md)) | Partial |
+| Kubernetes Integration ([spec](features/kubernetes-integration.md)) | Todo |
 | Web UI / Desktop GUI (Tauri) | Done (all 9 phases) |
 | Auth: OIDC | Done (server module + GUI login + full provider admin lifecycle — `src/modules/credential/oidc/` ships Authorization-Code-Flow-with-PKCE, provider config + role CRUD, `auth_url` + `callback`, ID-token verification, claim-to-policy mapping, token renewal. Login page SSO tab shows one clickable button per configured provider — no mount/role typing; Settings page "Single Sign-On (SSO)" card drives the full mount + config + role admin from the root token, with mode-aware redirect-URI hints (stable server URL for remote, RFC 8252 loopback for desktop). Global enable/disable toggle persisted at `core/sso/settings`. Unauth `sys/sso/providers` discovery endpoint drives the login tab visibility.) |
 | Auth: SAML 2.0 | Done (server module — pure-Rust SP-initiated SSO in `src/modules/credential/saml/`: AuthnRequest + HTTP-Redirect encoding, Response parsing via `quick-xml`, structural validation, RSA-SHA256/SHA1 signature verification via `rsa 0.9` + `x509-parser` with a hand-rolled Exclusive C14N that handles every major IdP's output format. Zero libxml2/libxmlsec1/OpenSSL footprint. 46 unit + integration tests, including an end-to-end sign-and-verify roundtrip.) |
 | Auth: FIDO2 / WebAuthn / YubiKey | Done (server module) |
-| Compliance Reporting | Todo |
+| Compliance Reporting ([spec](features/compliance-reporting.md)) | Todo |
 
 ## Completed Initiatives
 
