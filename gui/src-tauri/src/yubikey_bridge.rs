@@ -330,14 +330,25 @@ pub fn sign(serial: u32, pin: &[u8], salt: &[u8]) -> Result<Vec<u8>, CommandErro
     // chip applies PKCS1 padding internally) and a SHA-256 digest
     // in ECDSA mode. We match both conventions so the registration
     // flow works regardless of operator key choice.
-    // `AlgorithmId` is non-exhaustive for some `yubikey` builds but
-    // the four variants below cover every RSA/ECC key the bridge
-    // accepts. `detect_algorithm` rejects anything else before we
-    // get here (non-asymmetric management algorithms return an
-    // error out of that helper), so the match is structurally
-    // total for this code path.
+    // The `yubikey` crate's `sign_data` is a thin wrapper over the
+    // PIV AUTHENTICATE command — the card does NOT apply padding
+    // for us. RSA slots want input sized to the key length (128 /
+    // 256 bytes) with PKCS#1 v1.5 padding of a DigestInfo already
+    // applied by the host. ECDSA slots accept a raw hash up to the
+    // key's byte length. Build the right shape for each variant.
+    //
+    // `detect_algorithm` rejects anything outside RSA-1024/2048 +
+    // ECC-P256/P384 before we get here, so the match is
+    // structurally total for this code path.
     let to_sign: Vec<u8> = match algo {
-        AlgorithmId::Rsa1024 | AlgorithmId::Rsa2048 => salt.to_vec(),
+        AlgorithmId::Rsa1024 | AlgorithmId::Rsa2048 => {
+            let key_size_bytes = if matches!(algo, AlgorithmId::Rsa2048) {
+                256
+            } else {
+                128
+            };
+            pkcs1v15_sha256_encode(salt, key_size_bytes)
+        }
         AlgorithmId::EccP256 | AlgorithmId::EccP384 => {
             let mut h = Sha256::new();
             h.update(salt);
@@ -348,6 +359,54 @@ pub fn sign(serial: u32, pin: &[u8], salt: &[u8]) -> Result<Vec<u8>, CommandErro
     let signature = piv::sign_data(&mut yk, &to_sign, algo, SIGNING_SLOT)
         .map_err(|e| CommandError::from(format!("yubikey: sign_data: {e}")))?;
     Ok(signature.to_vec())
+}
+
+/// PKCS#1 v1.5 signature-encoding of a SHA-256 digest of `input`,
+/// padded out to `key_size_bytes`. Used by `sign` for RSA-1024 /
+/// RSA-2048 PIV slots where the card expects the host to apply
+/// padding — the YubiKey does not run PKCS1 padding inside the
+/// signing routine.
+///
+/// Layout (RFC 8017 § 9.2, EMSA-PKCS1-v1_5):
+///
+///   0x00 || 0x01 || (0xff)* || 0x00 || DigestInfo || hash
+///
+/// DigestInfo for SHA-256 is the fixed 19-byte ASN.1 prefix below.
+/// Deterministic: the same (key_size, input) pair always yields
+/// the same encoded block — required so the keystore can re-derive
+/// its ML-KEM seed from this signature on every open.
+fn pkcs1v15_sha256_encode(input: &[u8], key_size_bytes: usize) -> Vec<u8> {
+    // ASN.1 DER for `DigestInfo { algorithm = SHA-256, digest = <32 bytes> }`:
+    //   SEQ len=0x31
+    //     SEQ len=0x0d
+    //       OID 2.16.840.1.101.3.4.2.1 (SHA-256)
+    //       NULL
+    //     OCTET STRING len=0x20 (32 bytes of hash follow)
+    const SHA256_DIGEST_INFO_PREFIX: &[u8; 19] = &[
+        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+        0x05, 0x00, 0x04, 0x20,
+    ];
+
+    let digest = Sha256::digest(input);
+    let t_len = SHA256_DIGEST_INFO_PREFIX.len() + digest.len(); // 19 + 32 = 51
+    // key_size_bytes ≥ t_len + 11 must hold per PKCS#1 (3 bytes of
+    // framing + at least 8 padding bytes). For RSA-2048 we have
+    // 256 − 51 − 3 = 202 bytes of 0xff padding; for RSA-1024 we'd
+    // have 74. Both well above the 8-byte minimum, but assert
+    // defensively in case a future AlgorithmId variant slips
+    // through.
+    debug_assert!(key_size_bytes >= t_len + 11, "RSA key too small for SHA-256 PKCS1v15");
+    let padding_len = key_size_bytes - t_len - 3;
+
+    let mut out = Vec::with_capacity(key_size_bytes);
+    out.push(0x00);
+    out.push(0x01);
+    out.extend(std::iter::repeat(0xffu8).take(padding_len));
+    out.push(0x00);
+    out.extend_from_slice(SHA256_DIGEST_INFO_PREFIX);
+    out.extend_from_slice(&digest);
+    debug_assert_eq!(out.len(), key_size_bytes);
+    out
 }
 
 /// Ask the YubiKey which algorithm is provisioned in slot 9a.
@@ -373,6 +432,38 @@ fn detect_algorithm(yk: &mut YubiKey) -> Result<AlgorithmId, CommandError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pkcs1v15_encoding_has_correct_shape() {
+        let salt = [0x42u8; 32];
+        let encoded = pkcs1v15_sha256_encode(&salt, 256);
+        assert_eq!(encoded.len(), 256, "RSA-2048 block must be 256 bytes");
+        assert_eq!(&encoded[..2], &[0x00, 0x01], "leader must be 00 01");
+        // Padding is 0xff bytes up to the 0x00 separator.
+        let sep_idx = encoded.iter().position(|&b| b == 0x00 && encoded[0] == 0x00 && encoded[1] == 0x01).unwrap_or(0);
+        // First 0x00 is at index 0; find the NEXT 0x00 after the 0xff run.
+        let mut idx = 2;
+        while idx < encoded.len() && encoded[idx] == 0xff {
+            idx += 1;
+        }
+        assert_eq!(encoded[idx], 0x00, "separator 0x00 expected after padding");
+        let _ = sep_idx;
+        // DigestInfo prefix lands right after the 0x00 separator.
+        assert_eq!(&encoded[idx + 1..idx + 1 + 19][0..2], &[0x30, 0x31]);
+        // Last 32 bytes are the SHA-256 of the salt.
+        let expected_digest = Sha256::digest(salt);
+        assert_eq!(&encoded[encoded.len() - 32..], expected_digest.as_slice());
+    }
+
+    #[test]
+    fn pkcs1v15_encoding_is_deterministic() {
+        // Same input → same output every time (critical for seed
+        // reproducibility across opens).
+        let salt = [0x5au8; 32];
+        let a = pkcs1v15_sha256_encode(&salt, 256);
+        let b = pkcs1v15_sha256_encode(&salt, 256);
+        assert_eq!(a, b);
+    }
 
     #[test]
     fn yubikey_id_hash_is_stable() {
