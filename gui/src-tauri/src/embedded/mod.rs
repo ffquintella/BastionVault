@@ -287,50 +287,79 @@ pub fn is_initialized() -> Result<bool, CommandError> {
 }
 
 /// Probe a local data directory for signs the vault has ever been
-/// initialised against it. Looks for known per-backend markers:
+/// initialised against it. Both supported backends write a known
+/// set of top-level subdirectories on init; we enumerate them and
+/// short-circuit on the first non-empty match.
 ///
-///   - File backend: `_barrier` (the barrier-init sentinel the
-///     core writes before touching anything else).
-///   - Hiqlite backend: any of `logs/`, `logs_cache/`,
-///     `state_machine/` — the three top-level directories the
-///     hiqlite crate creates the moment a node spins up. State-
-///     machine houses the actual SQLite payload (`state_machine/db/*`);
-///     `logs/` + `logs_cache/` carry the raft log + cache. Any one
-///     of them being non-empty means a hiqlite vault has been
-///     initialised against this directory.
+/// File backend (`storage_kind = "file"`, default path
+/// `<data_local>/.bastion_vault_gui/data`):
+///   - `core/` — the barrier writes its keyring + barrier-init
+///     records under this prefix on the very first init step,
+///     before touching anything else. Most reliable indicator.
+///   - `barrier/` — direct barrier-encrypted records land here
+///     under the AES-GCM / ChaCha20 cipher.
+///   - `auth/`, `logical/`, `sys/` — populated as auth backends
+///     mount + secrets are written. Presence of any of these is
+///     redundant evidence on top of `core/`.
+///   - Legacy `_barrier` *file* marker — older revisions stored
+///     a single file at the root before the per-prefix layout
+///     existed; kept here for backward compat with vaults
+///     created against pre-2024 cores.
 ///
-/// Any other contents — stray `.DS_Store`, editor swap files,
-/// leftover lockfiles from an earlier aborted run, or data from
-/// a DIFFERENT backend kind sharing the same parent dir — are
-/// ignored. A dir with only those is treated as "not initialised"
-/// so the operator lands on the init form and can overwrite
-/// cleanly. This is safer than the earlier "any files ⇒ true"
-/// heuristic, which false-positived for operators who manually
-/// deleted vault files but left the directory in place with
-/// unrelated residue.
+/// Hiqlite backend (`storage_kind = "hiqlite"`, default path
+/// `<data_local>/.bastion_vault_gui/data-hiqlite`):
+///   - `logs/` — raft logs.
+///   - `logs_cache/` — raft cache.
+///   - `state_machine/` — state-machine root containing the
+///     SQLite payload at `state_machine/db/*`.
+///   - `state_machine_cache/` — observed in current installs.
+///
+/// Source references: file backend
+/// `src/storage/physical/file/mod.rs`; hiqlite path helpers at
+/// `crates.io/hiqlite-0.13/src/store/logs/mod.rs` +
+/// `state_machine/sqlite/state_machine.rs::path_base`.
+///
+/// Anything else in the directory (`.DS_Store`, editor swap
+/// files, leftover lockfiles) is ignored — those don't count as
+/// "initialised" and the operator gets to land on the init form
+/// for a fresh start.
 fn check_local_dir(dir: &std::path::Path) -> Result<bool, CommandError> {
     if !dir.exists() {
         return Ok(false);
     }
 
-    // File-backend barrier marker. Definitive if present.
+    // Legacy file-backend single-file barrier marker. Definitive
+    // if present (no current version writes this, but pre-2024
+    // installs may still have it lying around).
     if dir.join("_barrier").exists() {
         return Ok(true);
     }
 
-    // Hiqlite-backend markers. Crate-level path helpers are at
-    // `crates.io/hiqlite-0.13/src/store/logs/mod.rs` and
-    // `state_machine/sqlite/state_machine.rs::path_base`. The
-    // names we look for here mirror those constants verbatim.
-    for marker in &["logs", "logs_cache", "state_machine"] {
+    // Per-backend marker subdirectories. Each counts as initialised
+    // when non-empty. Order biases toward the most common +
+    // earliest-written entries first to avoid scanning every
+    // candidate when an obvious one is present.
+    const MARKERS: &[&str] = &[
+        // File backend. `core/` is written by every init run.
+        "core",
+        "barrier",
+        "auth",
+        "logical",
+        "sys",
+        // Hiqlite backend.
+        "state_machine",
+        "logs",
+        "logs_cache",
+        "state_machine_cache",
+    ];
+    for marker in MARKERS {
         let p = dir.join(marker);
-        if p.exists() && p.is_dir() {
-            if std::fs::read_dir(&p)
+        if p.is_dir()
+            && std::fs::read_dir(&p)
                 .map(|mut it| it.next().is_some())
                 .unwrap_or(false)
-            {
-                return Ok(true);
-            }
+        {
+            return Ok(true);
         }
     }
 
