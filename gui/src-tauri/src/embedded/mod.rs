@@ -375,6 +375,13 @@ fn check_local_dir(dir: &std::path::Path) -> Result<bool, CommandError> {
 /// reopening would deadlock or panic.
 pub struct InitOutcome {
     pub root_token: String,
+    /// Hex-encoded unseal key — the cryptographic master that
+    /// every subsequent open ceremony depends on. The keystore
+    /// stashes a copy under the active profile's vault-id, but
+    /// operators MUST be given the chance to back this up
+    /// out-of-band. Without it, a wiped keystore + a sealed vault
+    /// is unrecoverable.
+    pub unseal_key_hex: String,
     pub vault: Arc<BastionVault>,
 }
 
@@ -416,6 +423,7 @@ pub async fn init_embedded() -> Result<InitOutcome, CommandError> {
 
     Ok(InitOutcome {
         root_token,
+        unseal_key_hex,
         vault: Arc::new(vault),
     })
 }

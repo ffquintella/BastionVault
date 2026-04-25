@@ -13,12 +13,17 @@ export function InitPage() {
   const [loading, setLoading] = useState(true);
   const [initializing, setInitializing] = useState(false);
   const [rootToken, setRootToken] = useState<string | null>(null);
+  const [unsealKey, setUnsealKey] = useState<string | null>(null);
+  // Per-field copy-confirmation flash, so each Copy button has its
+  // own "Copied!" state instead of sharing one boolean across both.
+  const [copiedKey, setCopiedKey] = useState<"unseal" | "token" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [alreadyInitialized, setAlreadyInitialized] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetConfirmText, setResetConfirmText] = useState("");
   const [resetting, setResetting] = useState(false);
-  const [copied, setCopied] = useState(false);
+  // (legacy single-key `copied` state removed — both Copy buttons
+  //  now share the per-target `copiedKey` discriminator below.)
   // "local" | "cloud" — drives the copy so the init page correctly
   // describes what the user is about to create. Pulled from the
   // current default vault profile; remote profiles never reach
@@ -301,6 +306,7 @@ export function InitPage() {
       const result = await api.initVault();
       await api.savePreferences("Embedded");
       setRootToken(result.root_token);
+      setUnsealKey(result.unseal_key_hex);
 
       // Pick up the ConnectPage-stashed YubiKey preference for this
       // profile id. Presence means the operator opted in during
@@ -436,13 +442,64 @@ export function InitPage() {
     return (
       <AuthLayout
         title="Vault Initialized"
-        subtitle="Save your root token securely"
+        subtitle="Back up your unseal key and root token"
       >
         <div className="space-y-4">
           <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-yellow-400 text-sm">
-            Your root token has been saved to the OS keychain. You can also copy
-            it below for safekeeping.
+            <p className="font-medium mb-1">
+              Save these values somewhere safe.
+            </p>
+            <p className="text-yellow-400/80 text-xs">
+              The <span className="font-mono">unseal key</span> is the
+              cryptographic master that unlocks the sealed vault on every
+              open ceremony. The <span className="font-mono">root token</span>
+              is the highest-privilege auth token. Both are cached in this
+              machine's keystore for convenience, but if the keystore is
+              ever wiped (clean install, lost YubiKey with no fallback,
+              etc.) the only way to recover access is to paste the unseal
+              key back via the InitPage's "Recover with your unseal key"
+              panel. <strong>Without the unseal key the vault data is
+              unrecoverable.</strong> Copy both into a password manager
+              or printed backup before continuing.
+            </p>
           </div>
+
+          {/* Unseal key — listed FIRST because it's the irreplaceable
+              cryptographic material. Root tokens can be re-generated
+              from a working vault; the unseal key cannot. */}
+          {unsealKey && (
+            <div>
+              <label className="block text-sm text-[var(--color-text-muted)] mb-1">
+                Unseal Key
+                <span className="ml-2 text-xs text-[var(--color-warning)]">
+                  (irreplaceable — back this up)
+                </span>
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  readOnly
+                  value={unsealKey}
+                  spellCheck={false}
+                  className="flex-1 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm font-mono"
+                />
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(unsealKey);
+                    setCopiedKey("unseal");
+                    setTimeout(() => setCopiedKey(null), 2000);
+                  }}
+                  className={`px-3 py-2 border rounded-lg text-sm transition-colors ${
+                    copiedKey === "unseal"
+                      ? "bg-green-500/20 border-green-500/40 text-green-400"
+                      : "bg-[var(--color-surface-hover)] border-[var(--color-border)] hover:bg-[var(--color-border)]"
+                  }`}
+                >
+                  {copiedKey === "unseal" ? "Copied!" : "Copy"}
+                </button>
+              </div>
+            </div>
+          )}
 
           <div>
             <label className="block text-sm text-[var(--color-text-muted)] mb-1">
@@ -453,21 +510,22 @@ export function InitPage() {
                 type="text"
                 readOnly
                 value={rootToken}
+                spellCheck={false}
                 className="flex-1 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm font-mono"
               />
               <button
                 onClick={() => {
                   navigator.clipboard.writeText(rootToken);
-                  setCopied(true);
-                  setTimeout(() => setCopied(false), 2000);
+                  setCopiedKey("token");
+                  setTimeout(() => setCopiedKey(null), 2000);
                 }}
                 className={`px-3 py-2 border rounded-lg text-sm transition-colors ${
-                  copied
+                  copiedKey === "token"
                     ? "bg-green-500/20 border-green-500/40 text-green-400"
                     : "bg-[var(--color-surface-hover)] border-[var(--color-border)] hover:bg-[var(--color-border)]"
                 }`}
               >
-                {copied ? "Copied!" : "Copy"}
+                {copiedKey === "token" ? "Copied!" : "Copy"}
               </button>
             </div>
           </div>

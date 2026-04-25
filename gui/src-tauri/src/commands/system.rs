@@ -10,6 +10,13 @@ use crate::state::AppState;
 #[derive(Serialize)]
 pub struct InitResponse {
     pub root_token: String,
+    /// Hex-encoded unseal key — surfaced to the GUI so the
+    /// post-init success screen can prompt the operator to back
+    /// it up out-of-band. Without this material a future wiped
+    /// keystore + sealed vault is unrecoverable; with it, the
+    /// operator can paste it back via the InitPage's
+    /// "Recover with your unseal key" panel.
+    pub unseal_key_hex: String,
 }
 
 #[derive(Serialize)]
@@ -35,11 +42,15 @@ pub async fn init_vault(state: State<'_, AppState>) -> CmdResult<InitResponse> {
     // collide with its still-held lockfile (hiqlite) or be wasteful (file).
     let outcome = embedded::init_embedded().await?;
     let root_token = outcome.root_token.clone();
+    let unseal_key_hex = outcome.unseal_key_hex.clone();
     *vault_guard = Some(outcome.vault);
     drop(vault_guard);
     *state.token.lock().await = Some(root_token.clone());
 
-    Ok(InitResponse { root_token })
+    Ok(InitResponse {
+        root_token,
+        unseal_key_hex,
+    })
 }
 
 #[tauri::command]

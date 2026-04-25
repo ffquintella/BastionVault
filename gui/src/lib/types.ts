@@ -50,6 +50,12 @@ export const DEFAULT_PASSWORD_POLICY: PasswordPolicy = {
 
 export interface InitResponse {
   root_token: string;
+  /** Hex-encoded unseal key — the cryptographic master that
+   *  unlocks the sealed vault on every open ceremony. The GUI
+   *  caches a copy keyed by vault-id, but the InitPage success
+   *  screen prompts the operator to back this up out-of-band:
+   *  losing it AND the keystore cache means losing the vault. */
+  unseal_key_hex: string;
 }
 
 export interface LoginResponse {
