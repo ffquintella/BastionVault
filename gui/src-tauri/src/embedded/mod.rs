@@ -291,10 +291,13 @@ pub fn is_initialized() -> Result<bool, CommandError> {
 ///
 ///   - File backend: `_barrier` (the barrier-init sentinel the
 ///     core writes before touching anything else).
-///   - Hiqlite backend: a `state` directory with any file inside
-///     (hiqlite writes raft state + the SQLite payload under a
-///     per-node subtree — the parent data dir typically contains
-///     `state/`, `logs/`, and `state.sqlite*` files).
+///   - Hiqlite backend: any of `logs/`, `logs_cache/`,
+///     `state_machine/` — the three top-level directories the
+///     hiqlite crate creates the moment a node spins up. State-
+///     machine houses the actual SQLite payload (`state_machine/db/*`);
+///     `logs/` + `logs_cache/` carry the raft log + cache. Any one
+///     of them being non-empty means a hiqlite vault has been
+///     initialised against this directory.
 ///
 /// Any other contents — stray `.DS_Store`, editor swap files,
 /// leftover lockfiles from an earlier aborted run, or data from
@@ -315,20 +318,17 @@ fn check_local_dir(dir: &std::path::Path) -> Result<bool, CommandError> {
         return Ok(true);
     }
 
-    // Hiqlite-backend markers. Any of these existing means the
-    // raft backend has initialised against this dir.
-    for marker in &["state", "logs", "state.sqlite", "state.sqlite-wal"] {
+    // Hiqlite-backend markers. Crate-level path helpers are at
+    // `crates.io/hiqlite-0.13/src/store/logs/mod.rs` and
+    // `state_machine/sqlite/state_machine.rs::path_base`. The
+    // names we look for here mirror those constants verbatim.
+    for marker in &["logs", "logs_cache", "state_machine"] {
         let p = dir.join(marker);
-        if p.exists() {
-            // Non-empty subdirs count; empty ones don't.
-            if p.is_dir() {
-                if std::fs::read_dir(&p)
-                    .map(|mut it| it.next().is_some())
-                    .unwrap_or(false)
-                {
-                    return Ok(true);
-                }
-            } else if p.is_file() {
+        if p.exists() && p.is_dir() {
+            if std::fs::read_dir(&p)
+                .map(|mut it| it.next().is_some())
+                .unwrap_or(false)
+            {
                 return Ok(true);
             }
         }
