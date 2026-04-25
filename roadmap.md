@@ -31,6 +31,8 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Storage Backend: Hiqlite (embedded Raft SQLite, HA) | Done |
 | Storage Backend: Cloud targets for `Encrypted File` (S3 / OneDrive / Google Drive / Dropbox) | Done (all 8 phases shipped; `FileTarget` trait + four provider backends behind `cloud_*` feature flags + OAuth/PKCE infra + CLI + GUI + OS keychain + key-obfuscation decorator; see Completed Initiatives) |
 | Import/Export & Backup/Restore | Done |
+| Import / Export Module (user-facing JSON + password-encrypted `.bvx`) ([spec](features/import-export-module.md)) | Todo |
+| Scheduled Exports (cron-driven `.bvx` / BVBK with retention + verification) ([spec](features/scheduled-exports.md)) | Todo |
 | Resource Management (inventory + grouped secrets) | Done |
 | File Resources (binary blobs + local-FS sync) | Done (Phases 1–4 + 8 shipped — engine + CRUD + history + 32 MiB cap + SHA-256 integrity + ownership / sharing / admin transfer / backfill + asset-group membership + local-FS sync target + GUI + content versioning. Phases 5–7 — SMB / SFTP / SCP transports + periodic re-sync — deferred as separate follow-up initiatives; see feature file) |
 | Caching | Done |
