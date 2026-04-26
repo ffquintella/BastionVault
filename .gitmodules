@@ -1,0 +1,3 @@
+[submodule "plugins-ext"]
+	path = plugins-ext
+	url = https://github.com/ffquintella/BastionVault-Plugins.git

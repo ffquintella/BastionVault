@@ -26,6 +26,13 @@ members = [
     "crates/bastion-plugin-sdk",
     "gui/src-tauri",
 ]
+# `plugins-ext/` is a git submodule with its own Cargo workspace
+# (BastionVault-Plugins, the Phase-4 reference plugins). It depends on
+# `crates/bastion-plugin-sdk` via a relative path, but is built
+# separately — its build artefacts shouldn't pollute the host's
+# `target/`, and its release-profile (panic=abort, opt=s) shouldn't
+# leak into our normal builds.
+exclude = ["plugins-ext"]
 resolver = "2"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
