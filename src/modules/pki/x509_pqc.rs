@@ -44,7 +44,7 @@ use x509_cert::{
 
 use super::{
     path_roles::RoleEntry,
-    pqc::MlDsaSigner,
+    pqc::{MlDsaLevel, MlDsaSigner},
     x509::{RevokedEntry, SubjectInput},
 };
 use crate::errors::RvError;
@@ -125,6 +125,69 @@ pub fn build_leaf(
             &KeyUsage(KeyUsages::DigitalSignature | KeyUsages::KeyEncipherment | KeyUsages::KeyAgreement),
         )?,
         encode_ext_octets(SubjectKeyIdentifier::OID, false, subject_key_identifier(leaf_signer.public_key())?)?,
+        encode_aki(&ca_ski)?,
+    ];
+    if let Some(eku) = build_extended_key_usage(role)? {
+        extensions.push(eku);
+    }
+    if let Some(san) = build_subject_alt_name(subject)? {
+        extensions.push(san);
+    }
+
+    let tbs = TbsCertificateInner {
+        version: Version::V3,
+        serial_number: serial,
+        signature: ca_alg.clone(),
+        issuer,
+        validity,
+        subject: subject_dn,
+        subject_public_key_info: spki,
+        issuer_unique_id: None,
+        subject_unique_id: None,
+        extensions: Some(extensions),
+    };
+
+    let cert = sign_certificate(tbs, ca_signer, ca_alg)?;
+    Ok((pem_encode("CERTIFICATE", &cert.to_der().map_err(der_err)?), serial_bytes))
+}
+
+/// Build a leaf cert from a CSR-supplied ML-DSA public key, signed by an
+/// ML-DSA CA. Mirrors [`super::x509::build_leaf_from_spki`] for the PQC
+/// path: the leaf's public key comes from the CSR (the requester holds the
+/// private key), and the CA signs the TBS.
+pub fn build_leaf_from_pqc_spki(
+    role: &RoleEntry,
+    subject: &SubjectInput,
+    ttl: Duration,
+    leaf_pk_bytes: &[u8],
+    leaf_level: MlDsaLevel,
+    ca_signer: &MlDsaSigner,
+    ca_cert_pem: &str,
+) -> Result<(String, Vec<u8>), RvError> {
+    let leaf_alg = AlgorithmIdentifierOwned { oid: leaf_level.oid(), parameters: None };
+    let ca_alg = AlgorithmIdentifierOwned { oid: ca_signer.level().oid(), parameters: None };
+
+    let spki = SubjectPublicKeyInfoOwned {
+        algorithm: leaf_alg.clone(),
+        subject_public_key: BitString::from_bytes(leaf_pk_bytes).map_err(der_err)?,
+    };
+
+    let ca_cert = parse_cert_pem(ca_cert_pem)?;
+    let issuer = ca_cert.tbs_certificate.subject.clone();
+    let ca_ski = extract_ski(&ca_cert)?;
+
+    let subject_dn = build_leaf_dn(role, &subject.common_name)?;
+    let validity = build_validity(role.not_before_duration, ttl)?;
+    let serial_bytes = super::x509::random_serial_bytes();
+    let serial = SerialNumber::new(&serial_bytes).map_err(der_err)?;
+
+    let mut extensions = vec![
+        encode_ext(true, &BasicConstraints { ca: false, path_len_constraint: None })?,
+        encode_ext(
+            true,
+            &KeyUsage(KeyUsages::DigitalSignature | KeyUsages::KeyEncipherment | KeyUsages::KeyAgreement),
+        )?,
+        encode_ext_octets(SubjectKeyIdentifier::OID, false, subject_key_identifier(leaf_pk_bytes)?)?,
         encode_aki(&ca_ski)?,
     ];
     if let Some(eku) = build_extended_key_usage(role)? {

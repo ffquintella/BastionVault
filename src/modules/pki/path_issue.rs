@@ -222,19 +222,35 @@ impl PkiBackendInner {
         let ca_key_pem = storage::get_string(req, KEY_CA_KEY).await?
             .ok_or(RvError::ErrPkiCaKeyNotFound)?;
         let ca_signer = Signer::from_storage_pem(&ca_key_pem)?;
-        let Signer::Classical(ca_classical) = &ca_signer else {
-            // PQC / composite CAs cannot sign a classical-keypair CSR with
-            // current rcgen-driven signing; same gap as PQC issue (Phase 2),
-            // and the right answer is to land PQC CSR support behind a
-            // future `csr.rs` extension that recognises ML-DSA SPKIs.
-            return Err(RvError::ErrPkiKeyTypeInvalid);
-        };
 
         let subject =
             super::x509::SubjectInput { common_name: common_name.clone(), alt_names: alt_dns, ip_sans: alt_ips };
-        let (cert, serial_bytes) =
-            x509::build_leaf_from_spki(&role, &subject, ttl, &parsed.spki_der, ca_classical, &ca_cert_pem)?;
-        let cert_pem = cert.pem();
+
+        // Dispatch on (CSR class, CA class). Mixed-chain rejection is the
+        // same default-secure rule as Phase 2's `pki/issue`: a PQC CA can
+        // only sign a PQC CSR, classical can only sign classical.
+        use super::csr::CsrAlgClass;
+        let (cert_pem, serial_bytes) = match (&parsed.algorithm_class, &ca_signer) {
+            (CsrAlgClass::Classical, Signer::Classical(ca_classical)) => {
+                let (cert, serial) = x509::build_leaf_from_spki(
+                    &role, &subject, ttl, &parsed.spki_der, ca_classical, &ca_cert_pem,
+                )?;
+                (cert.pem(), serial)
+            }
+            (CsrAlgClass::MlDsa(level), Signer::MlDsa(ca_ml)) => {
+                super::x509_pqc::build_leaf_from_pqc_spki(
+                    &role,
+                    &subject,
+                    ttl,
+                    &parsed.raw_public_key,
+                    *level,
+                    ca_ml,
+                    &ca_cert_pem,
+                )?
+            }
+            // Mixed CSR / CA classes — refuse to issue.
+            _ => return Err(RvError::ErrPkiKeyTypeInvalid),
+        };
         let serial_hex = storage::serial_to_hex(&serial_bytes);
 
         if !role.no_store {
@@ -288,9 +304,6 @@ impl PkiBackendInner {
         let ca_key_pem = storage::get_string(req, KEY_CA_KEY).await?
             .ok_or(RvError::ErrPkiCaKeyNotFound)?;
         let ca_signer = Signer::from_storage_pem(&ca_key_pem)?;
-        let Signer::Classical(ca_classical) = &ca_signer else {
-            return Err(RvError::ErrPkiKeyTypeInvalid);
-        };
 
         // Synthesize a permissive role: server+client EKUs, no CN
         // restrictions. The CSR-supplied SANs flow through unmodified.
@@ -313,9 +326,32 @@ impl PkiBackendInner {
             alt_names: alt_dns,
             ip_sans: parsed.requested_ip_sans.clone(),
         };
-        let (cert, serial_bytes) =
-            x509::build_leaf_from_spki(&role, &subject, ttl, &parsed.spki_der, ca_classical, &ca_cert_pem)?;
-        let cert_pem = cert.pem();
+
+        // Same class-match dispatch as `sign_csr_role`. PQC CSR + PQC CA →
+        // PQC builder; classical + classical → rcgen builder; mixed →
+        // reject (default-secure). Phase 5.1 closes the gap that PQC roles
+        // could `issue` but not sign a CSR.
+        use super::csr::CsrAlgClass;
+        let (cert_pem, serial_bytes) = match (&parsed.algorithm_class, &ca_signer) {
+            (CsrAlgClass::Classical, Signer::Classical(ca_classical)) => {
+                let (cert, serial) = x509::build_leaf_from_spki(
+                    &role, &subject, ttl, &parsed.spki_der, ca_classical, &ca_cert_pem,
+                )?;
+                (cert.pem(), serial)
+            }
+            (CsrAlgClass::MlDsa(level), Signer::MlDsa(ca_ml)) => {
+                super::x509_pqc::build_leaf_from_pqc_spki(
+                    &role,
+                    &subject,
+                    ttl,
+                    &parsed.raw_public_key,
+                    *level,
+                    ca_ml,
+                    &ca_cert_pem,
+                )?
+            }
+            _ => return Err(RvError::ErrPkiKeyTypeInvalid),
+        };
         let serial_hex = storage::serial_to_hex(&serial_bytes);
 
         // sign-verbatim records get persisted unconditionally (Vault parity)
