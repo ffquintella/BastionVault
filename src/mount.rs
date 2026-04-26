@@ -184,10 +184,20 @@ impl MountsRouter {
 
     pub fn get_backend(&self, logical_type: &str) -> Result<Arc<LogicalBackendNewFunc>, RvError> {
         if let Some(backend) = self.backends.get(logical_type) {
-            Ok(backend.clone())
-        } else {
-            Err(RvError::ErrCoreLogicalBackendNoExist)
+            return Ok(backend.clone());
         }
+        // `plugin:<name>` is a synthetic mount type that resolves to a
+        // `PluginLogicalBackend` bound to the given plugin. The plugin
+        // must be registered in the catalog at request time (lookup is
+        // deferred — registration order doesn't matter as long as the
+        // plugin exists when the mount is actually used).
+        if let Some(name) = logical_type.strip_prefix(crate::plugins::PLUGIN_MOUNT_PREFIX) {
+            if name.is_empty() {
+                return Err(RvError::ErrCoreLogicalBackendNoExist);
+            }
+            return Ok(crate::plugins::plugin_logical_backend_factory(name.to_string()));
+        }
+        Err(RvError::ErrCoreLogicalBackendNoExist)
     }
 
     pub fn add_backend(&self, logical_type: &str, backend: Arc<LogicalBackendNewFunc>) -> Result<(), RvError> {

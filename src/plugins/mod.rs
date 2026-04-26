@@ -23,6 +23,7 @@
 
 pub mod catalog;
 pub mod config;
+pub mod logical_backend;
 pub mod manifest;
 pub mod module_cache;
 pub mod process_runtime;
@@ -30,7 +31,13 @@ pub mod runtime;
 
 pub use catalog::{PluginCatalog, PluginRecord, PLUGIN_PREFIX};
 pub use config::ConfigStore;
+pub use logical_backend::{factory_for as plugin_logical_backend_factory, PluginLogicalBackend};
 pub use manifest::{ConfigField, ConfigFieldKind, PluginManifest, RuntimeKind};
 pub use module_cache::ModuleCache;
 pub use process_runtime::{ProcessRuntime, ProcessRuntimeError, DEFAULT_INVOKE_TIMEOUT};
 pub use runtime::{InvokeOutput, InvokeOutcome, RuntimeError, WasmRuntime, DEFAULT_FUEL, DEFAULT_MEMORY_BYTES};
+
+/// Mount type-prefix that triggers the [`PluginLogicalBackend`] path.
+/// Used in `MountsRouter::get_backend` to dispatch `plugin:<name>`
+/// strings to the dynamic factory.
+pub const PLUGIN_MOUNT_PREFIX: &str = "plugin:";

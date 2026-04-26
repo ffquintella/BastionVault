@@ -15,10 +15,22 @@ import type { MountInfo } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 
-const ENGINE_TYPES = [
+const BUILTIN_ENGINE_TYPES = [
   { value: "kv", label: "KV (Version 1)" },
   { value: "kv-v2", label: "KV (Version 2)" },
 ];
+
+/// Plugin types a mount can be backed by. The host's
+/// `MountsRouter::get_backend` resolves `plugin:<name>` strings
+/// dynamically, so we just need to surface the registered plugins
+/// of the right kind in the dropdown — no per-plugin dropdown entry
+/// needs to be hard-coded.
+const MOUNTABLE_PLUGIN_TYPES = new Set<string>([
+  "secret-engine",
+  "secret",
+  "database",
+  "transform",
+]);
 
 const AUTH_TYPES = [
   { value: "userpass", label: "Username & Password" },
@@ -49,6 +61,14 @@ export function MountsPage() {
   const [deleteMount, setDeleteMount] = useState<string | null>(null);
   const [deleteAuth, setDeleteAuth] = useState<string | null>(null);
 
+  // Plugin-as-mount: registered plugins of mountable kinds appear in
+  // the Engine Type dropdown as `plugin:<name>` so an operator can
+  // mount them the same way they'd mount KV.
+  const [pluginEngineOptions, setPluginEngineOptions] = useState<
+    { value: string; label: string }[]
+  >([]);
+  const engineTypeOptions = [...BUILTIN_ENGINE_TYPES, ...pluginEngineOptions];
+
   useEffect(() => {
     loadAll();
   }, []);
@@ -56,12 +76,21 @@ export function MountsPage() {
   async function loadAll() {
     setLoading(true);
     try {
-      const [m, a] = await Promise.all([
+      const [m, a, plugins] = await Promise.all([
         api.listMounts().catch(() => [] as MountInfo[]),
         api.listAuthMethods().catch(() => [] as MountInfo[]),
+        api.pluginsList().catch(() => []),
       ]);
       setMounts(m);
       setAuthMethods(a);
+      setPluginEngineOptions(
+        plugins
+          .filter((p) => MOUNTABLE_PLUGIN_TYPES.has(p.plugin_type))
+          .map((p) => ({
+            value: `plugin:${p.name}`,
+            label: `${p.name} v${p.version} (plugin · ${p.plugin_type})`,
+          })),
+      );
     } finally {
       setLoading(false);
     }
@@ -241,7 +270,7 @@ export function MountsPage() {
               label="Engine Type"
               value={engineType}
               onChange={(e) => setEngineType(e.target.value)}
-              options={ENGINE_TYPES}
+              options={engineTypeOptions}
             />
             <Input
               label="Description"
