@@ -1,8 +1,11 @@
 //! `pki/revoke` — revoke an issued cert by serial.
 //!
-//! On revoke we (1) flip the stored `CertRecord.revoked_at_unix`, (2) append
-//! the serial to the persistent `CrlState`, and (3) bump `crl_number` and
-//! rebuild + cache the CRL. This keeps `GET /v1/pki/crl` cheap and cache-able.
+//! Phase 5.2: per-issuer CRL state. The cert's `CertRecord.issuer_id`
+//! identifies which issuer signed it; the CRL state for *that* issuer
+//! gets the new revocation entry, and only that issuer's CRL is rebuilt.
+//! A cert with an empty `issuer_id` (record written before 5.2)
+//! transparently routes to the mount default — same behaviour the migration
+//! shim leaves things in.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -10,8 +13,8 @@ use serde_json::{json, Map, Value};
 
 use super::{
     crypto::Signer,
-    storage::{self, CertRecord, CrlConfig, CrlState, RevokedSerial, KEY_CA_CERT, KEY_CA_KEY, KEY_CONFIG_CRL,
-              KEY_CRL_CACHED, KEY_CRL_STATE},
+    issuers::{self, IssuerHandle},
+    storage::{self, CertRecord, CrlConfig, CrlState, RevokedSerial, KEY_CONFIG_CRL},
     x509::{self, RevokedEntry},
     x509_pqc,
     PkiBackend, PkiBackendInner,
@@ -62,48 +65,58 @@ impl PkiBackendInner {
             record.revoked_at_unix = Some(now);
             storage::put_json(req, &cert_key, &record).await?;
 
-            let mut state: CrlState = storage::get_json(req, KEY_CRL_STATE).await?.unwrap_or_default();
+            // Resolve the cert's issuer; pre-5.2 records may have an empty
+            // `issuer_id` and route to the mount default.
+            let issuer = if record.issuer_id.is_empty() {
+                issuers::load_default_issuer(req).await?
+            } else {
+                issuers::load_issuer(req, &record.issuer_id).await?
+            };
+            let crl_state_key = storage::issuer_crl_state_key(&issuer.id);
+            let mut state: CrlState = storage::get_json(req, &crl_state_key).await?.unwrap_or_default();
             if !state.revoked.iter().any(|e| e.serial_hex == serial_hex) {
                 state.revoked.push(RevokedSerial { serial_hex: serial_hex.clone(), revoked_at_unix: now });
             }
             state.crl_number = state.crl_number.saturating_add(1);
-            storage::put_json(req, KEY_CRL_STATE, &state).await?;
+            storage::put_json(req, &crl_state_key, &state).await?;
 
-            // Rebuild the CRL eagerly so the next read is a cache hit.
-            rebuild_crl(req).await?;
+            rebuild_crl_for_issuer(req, &issuer).await?;
         }
 
         let mut data: Map<String, Value> = Map::new();
         data.insert("revocation_time".into(), json!(record.revoked_at_unix.unwrap_or(now)));
         data.insert("serial_number".into(), json!(serial_hex));
+        data.insert("issuer_id".into(), json!(record.issuer_id));
         Ok(Some(Response::data_response(Some(data))))
     }
 }
 
+/// Rebuild the CRL for a *specific* issuer. Used by `revoke_cert` (after
+/// flipping a cert's `revoked_at_unix`) and by `path_crl::rotate_crl` /
+/// `path_crl::read_crl` (which now operate on the default issuer).
 #[maybe_async::maybe_async]
-pub async fn rebuild_crl(req: &Request) -> Result<String, RvError> {
-    let ca_cert_pem = storage::get_string(req, KEY_CA_CERT).await?
-        .ok_or(RvError::ErrPkiCaNotConfig)?;
-    let ca_key_pem = storage::get_string(req, KEY_CA_KEY).await?
-        .ok_or(RvError::ErrPkiCaKeyNotFound)?;
-    let signer = Signer::from_storage_pem(&ca_key_pem)?;
-    let state: CrlState = storage::get_json(req, KEY_CRL_STATE).await?.unwrap_or_default();
+pub async fn rebuild_crl_for_issuer(req: &Request, issuer: &IssuerHandle) -> Result<String, RvError> {
     let cfg: CrlConfig = storage::get_json(req, KEY_CONFIG_CRL).await?.unwrap_or_default();
+    let crl_state_key = storage::issuer_crl_state_key(&issuer.id);
+    let crl_cached_key = storage::issuer_crl_cached_key(&issuer.id);
+    let state: CrlState = storage::get_json(req, &crl_state_key).await?.unwrap_or_default();
 
     let revoked: Vec<RevokedEntry> = state
         .revoked
         .iter()
-        .filter_map(|s| hex_to_bytes(&s.serial_hex).map(|bytes| RevokedEntry { serial: bytes, revoked_at_unix: s.revoked_at_unix }))
+        .filter_map(|s| {
+            hex_to_bytes(&s.serial_hex).map(|bytes| RevokedEntry { serial: bytes, revoked_at_unix: s.revoked_at_unix })
+        })
         .collect();
 
     let crl_number = if state.crl_number == 0 { 1 } else { state.crl_number };
-    let pem = match &signer {
+    let pem = match &issuer.signer {
         Signer::Classical(cs) => {
-            let crl = x509::build_crl(crl_number, cfg.expiry_seconds.max(60), &revoked, cs, &ca_cert_pem)?;
+            let crl = x509::build_crl(crl_number, cfg.expiry_seconds.max(60), &revoked, cs, &issuer.cert_pem)?;
             crl.pem().map_err(super::crypto::rcgen_err)?
         }
         Signer::MlDsa(ml) => {
-            x509_pqc::build_crl(crl_number, cfg.expiry_seconds.max(60), &revoked, ml, &ca_cert_pem)?
+            x509_pqc::build_crl(crl_number, cfg.expiry_seconds.max(60), &revoked, ml, &issuer.cert_pem)?
         }
         #[cfg(feature = "pki_pqc_composite")]
         Signer::Composite(c) => super::x509_composite::build_crl(
@@ -111,11 +124,19 @@ pub async fn rebuild_crl(req: &Request) -> Result<String, RvError> {
             cfg.expiry_seconds.max(60),
             &revoked,
             c,
-            &ca_cert_pem,
+            &issuer.cert_pem,
         )?,
     };
-    storage::put_string(req, KEY_CRL_CACHED, &pem).await?;
+    storage::put_string(req, &crl_cached_key, &pem).await?;
     Ok(pem)
+}
+
+/// Backwards-compatible wrapper that operates on the mount's default
+/// issuer. The Phase 4 tidy job and the existing CRL routes call this.
+#[maybe_async::maybe_async]
+pub async fn rebuild_crl(req: &Request) -> Result<String, RvError> {
+    let issuer = issuers::load_default_issuer(req).await?;
+    rebuild_crl_for_issuer(req, &issuer).await
 }
 
 fn hex_to_bytes(hex: &str) -> Option<Vec<u8>> {

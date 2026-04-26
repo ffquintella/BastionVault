@@ -12,7 +12,7 @@ use serde_json::{json, Map, Value};
 
 use super::{
     crypto::{AlgorithmClass, Signer},
-    storage::{self, CertRecord, KEY_CA_CERT, KEY_CA_KEY},
+    storage::{self, CertRecord},
     x509::{self, SubjectInput},
     x509_pqc,
     PkiBackend, PkiBackendInner,
@@ -34,7 +34,8 @@ impl PkiBackend {
                 "common_name": { field_type: FieldType::Str, required: true, description: "Subject CN." },
                 "alt_names": { field_type: FieldType::Str, default: "", description: "Comma-separated DNS / IP SANs." },
                 "ip_sans": { field_type: FieldType::Str, default: "", description: "Comma-separated IP SANs." },
-                "ttl": { field_type: FieldType::Str, default: "", description: "Requested TTL." }
+                "ttl": { field_type: FieldType::Str, default: "", description: "Requested TTL." },
+                "issuer_ref": { field_type: FieldType::Str, default: "", description: "Issuer ID or name to sign with; empty = role pin or mount default." }
             },
             operations: [{op: Operation::Write, handler: r.issue_cert}],
             help: "Issue a certificate against the named role."
@@ -50,7 +51,8 @@ impl PkiBackend {
                 "csr": { field_type: FieldType::Str, required: true, description: "PEM- or DER-encoded PKCS#10 CSR." },
                 "common_name": { field_type: FieldType::Str, default: "", description: "Override CN if role.use_csr_common_name is false." },
                 "alt_names": { field_type: FieldType::Str, default: "", description: "Override SANs if role.use_csr_sans is false." },
-                "ttl": { field_type: FieldType::Str, default: "", description: "Requested TTL." }
+                "ttl": { field_type: FieldType::Str, default: "", description: "Requested TTL." },
+                "issuer_ref": { field_type: FieldType::Str, default: "", description: "Issuer ID or name to sign with; empty = role pin or mount default." }
             },
             operations: [{op: Operation::Write, handler: r.sign_csr_role}],
             help: "Sign a CSR against the named role."
@@ -63,7 +65,8 @@ impl PkiBackend {
             pattern: r"sign-verbatim$",
             fields: {
                 "csr": { field_type: FieldType::Str, required: true, description: "PEM- or DER-encoded PKCS#10 CSR." },
-                "ttl": { field_type: FieldType::Str, default: "", description: "Requested TTL." }
+                "ttl": { field_type: FieldType::Str, default: "", description: "Requested TTL." },
+                "issuer_ref": { field_type: FieldType::Str, default: "", description: "Issuer ID or name to sign with; empty = mount default." }
             },
             operations: [{op: Operation::Write, handler: r.sign_csr_verbatim}],
             help: "Sign a CSR using exactly the subject and SANs from the request."
@@ -96,13 +99,21 @@ impl PkiBackendInner {
         let requested_ttl = parse_optional_ttl(req, "ttl")?;
         let ttl = role.effective_ttl(requested_ttl);
 
-        // Load the CA. Phase 1 supports a single issuer per mount; the same
-        // assumption holds in Phase 2.
-        let ca_cert_pem = storage::get_string(req, KEY_CA_CERT).await?
-            .ok_or(RvError::ErrPkiCaNotConfig)?;
-        let ca_key_pem = storage::get_string(req, KEY_CA_KEY).await?
-            .ok_or(RvError::ErrPkiCaKeyNotFound)?;
-        let ca_signer = Signer::from_storage_pem(&ca_key_pem)?;
+        // Phase 5.2: pick the issuer to sign with, in this priority order:
+        //   1. `issuer_ref` from the request body (operator override),
+        //   2. `role.issuer_ref` (role-level pin),
+        //   3. mount default.
+        let request_issuer_ref = req.get_data_or_default("issuer_ref")?.as_str().unwrap_or("").to_string();
+        let issuer = if !request_issuer_ref.is_empty() {
+            super::issuers::load_issuer(req, &request_issuer_ref).await?
+        } else if !role.issuer_ref.is_empty() {
+            super::issuers::load_issuer(req, &role.issuer_ref).await?
+        } else {
+            super::issuers::load_default_issuer(req).await?
+        };
+        let ca_cert_pem = issuer.cert_pem.clone();
+        let ca_signer = issuer.signer;
+        let issuer_id = issuer.id.clone();
 
         let role_alg = role.algorithm()?;
 
@@ -159,6 +170,7 @@ impl PkiBackendInner {
                 issued_at_unix: now,
                 revoked_at_unix: None,
                 not_after_unix,
+                issuer_id: issuer_id.clone(),
             };
             storage::put_json(req, &storage::cert_storage_key(&serial_hex), &record).await?;
         }
@@ -169,6 +181,7 @@ impl PkiBackendInner {
         data.insert("private_key".into(), json!(leaf_key_pem));
         data.insert("private_key_type".into(), json!(role.algorithm()?.as_str()));
         data.insert("serial_number".into(), json!(serial_hex));
+        data.insert("issuer_id".into(), json!(issuer_id));
         Ok(Some(Response::data_response(Some(data))))
     }
 
@@ -217,11 +230,19 @@ impl PkiBackendInner {
         let requested_ttl = parse_optional_ttl(req, "ttl")?;
         let ttl = role.effective_ttl(requested_ttl);
 
-        let ca_cert_pem = storage::get_string(req, KEY_CA_CERT).await?
-            .ok_or(RvError::ErrPkiCaNotConfig)?;
-        let ca_key_pem = storage::get_string(req, KEY_CA_KEY).await?
-            .ok_or(RvError::ErrPkiCaKeyNotFound)?;
-        let ca_signer = Signer::from_storage_pem(&ca_key_pem)?;
+        // Same issuer-resolution priority as `issue_cert`:
+        //   request body > role-level pin > mount default.
+        let request_issuer_ref = req.get_data_or_default("issuer_ref")?.as_str().unwrap_or("").to_string();
+        let issuer = if !request_issuer_ref.is_empty() {
+            super::issuers::load_issuer(req, &request_issuer_ref).await?
+        } else if !role.issuer_ref.is_empty() {
+            super::issuers::load_issuer(req, &role.issuer_ref).await?
+        } else {
+            super::issuers::load_default_issuer(req).await?
+        };
+        let ca_cert_pem = issuer.cert_pem.clone();
+        let ca_signer = issuer.signer;
+        let issuer_id = issuer.id.clone();
 
         let subject =
             super::x509::SubjectInput { common_name: common_name.clone(), alt_names: alt_dns, ip_sans: alt_ips };
@@ -265,6 +286,7 @@ impl PkiBackendInner {
                 issued_at_unix: now,
                 revoked_at_unix: None,
                 not_after_unix,
+                issuer_id: issuer_id.clone(),
             };
             storage::put_json(req, &storage::cert_storage_key(&serial_hex), &record).await?;
         }
@@ -273,6 +295,7 @@ impl PkiBackendInner {
         data.insert("certificate".into(), json!(cert_pem));
         data.insert("issuing_ca".into(), json!(ca_cert_pem));
         data.insert("serial_number".into(), json!(serial_hex));
+        data.insert("issuer_id".into(), json!(issuer_id));
         Ok(Some(Response::data_response(Some(data))))
     }
 
@@ -299,11 +322,16 @@ impl PkiBackendInner {
             _ => max,
         };
 
-        let ca_cert_pem = storage::get_string(req, KEY_CA_CERT).await?
-            .ok_or(RvError::ErrPkiCaNotConfig)?;
-        let ca_key_pem = storage::get_string(req, KEY_CA_KEY).await?
-            .ok_or(RvError::ErrPkiCaKeyNotFound)?;
-        let ca_signer = Signer::from_storage_pem(&ca_key_pem)?;
+        // sign-verbatim takes the same `issuer_ref` knob as sign/:role.
+        let request_issuer_ref = req.get_data_or_default("issuer_ref")?.as_str().unwrap_or("").to_string();
+        let issuer = if !request_issuer_ref.is_empty() {
+            super::issuers::load_issuer(req, &request_issuer_ref).await?
+        } else {
+            super::issuers::load_default_issuer(req).await?
+        };
+        let ca_cert_pem = issuer.cert_pem.clone();
+        let ca_signer = issuer.signer;
+        let issuer_id = issuer.id.clone();
 
         // Synthesize a permissive role: server+client EKUs, no CN
         // restrictions. The CSR-supplied SANs flow through unmodified.
@@ -366,6 +394,7 @@ impl PkiBackendInner {
             issued_at_unix: now,
             revoked_at_unix: None,
             not_after_unix: (now as i64).saturating_add(ttl.as_secs() as i64),
+            issuer_id: issuer_id.clone(),
         };
         storage::put_json(req, &storage::cert_storage_key(&serial_hex), &record).await?;
 
@@ -373,6 +402,7 @@ impl PkiBackendInner {
         data.insert("certificate".into(), json!(cert_pem));
         data.insert("issuing_ca".into(), json!(ca_cert_pem));
         data.insert("serial_number".into(), json!(serial_hex));
+        data.insert("issuer_id".into(), json!(issuer_id));
         Ok(Some(Response::data_response(Some(data))))
     }
 }

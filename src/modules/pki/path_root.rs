@@ -12,7 +12,7 @@ use serde_json::{json, Map, Value};
 
 use super::{
     crypto::{KeyAlgorithm, Signer},
-    storage::{self, CaMetadata, CrlConfig, CrlState, KEY_CA_CERT, KEY_CA_KEY, KEY_CA_META, KEY_CONFIG_CRL, KEY_CRL_STATE},
+    storage::{self, CrlConfig, KEY_CA_CERT, KEY_CA_KEY, KEY_CA_META, KEY_CONFIG_CRL, KEY_CRL_STATE},
     x509, x509_pqc,
     PkiBackend, PkiBackendInner,
 };
@@ -36,7 +36,8 @@ impl PkiBackend {
                 "organization": { field_type: FieldType::Str, default: "", description: "Subject Organization." },
                 "key_type": { field_type: FieldType::Str, default: "ec", description: "rsa | ec | ed25519 | ml-dsa-44 | ml-dsa-65 | ml-dsa-87." },
                 "key_bits": { field_type: FieldType::Int, default: 0, description: "Key size (0 = default)." },
-                "ttl": { field_type: FieldType::Str, default: "", description: "Validity duration (e.g. 8760h)." }
+                "ttl": { field_type: FieldType::Str, default: "", description: "Validity duration (e.g. 8760h)." },
+                "issuer_name": { field_type: FieldType::Str, default: "", description: "Name to register this issuer under (Phase 5.2). Defaults to `default` for the first issuer, `issuer-N` for subsequent ones." }
             },
             operations: [{op: Operation::Write, handler: r.generate_root}],
             help: "Generate a self-signed root CA."
@@ -48,9 +49,10 @@ impl PkiBackend {
 #[maybe_async::maybe_async]
 impl PkiBackendInner {
     pub async fn generate_root(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        if storage::get_string(req, KEY_CA_CERT).await?.is_some() {
-            return Err(RvError::ErrPkiCaNotConfig);
-        }
+        // Phase 5.2: this route is now additive. The legacy "refuse if a CA
+        // already exists" check is gone — adding a second issuer to a mount
+        // is a first-class operation, gated only by name uniqueness in
+        // `issuers::add_issuer`.
 
         let exported = req.get_data("exported")?.as_str().unwrap_or("").to_string();
         let common_name = req.get_data("common_name")?.as_str()
@@ -59,6 +61,7 @@ impl PkiBackendInner {
         let key_type = req.get_data_or_default("key_type")?.as_str().unwrap_or("ec").to_string();
         let key_bits = req.get_data_or_default("key_bits")?.as_u64().unwrap_or(0) as u32;
         let alg = KeyAlgorithm::from_role(&key_type, key_bits)?;
+        let requested_name = req.get_data_or_default("issuer_name")?.as_str().unwrap_or("").to_string();
 
         let ttl_str = req.get_data_or_default("ttl")?.as_str().unwrap_or("").to_string();
         let ttl = if ttl_str.is_empty() {
@@ -85,32 +88,35 @@ impl PkiBackendInner {
             }
         };
         let key_pem = signer.to_storage_pem();
-
-        // Persist CA cert + key (barrier-encrypted at the storage layer) +
-        // metadata + initial CRL state.
-        storage::put_string(req, KEY_CA_CERT, &cert_pem).await?;
-        storage::put_string(req, KEY_CA_KEY, &key_pem).await?;
-
         let serial_hex = storage::serial_to_hex(&serial_bytes);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let meta = CaMetadata {
-            key_type: alg.as_str().to_string(),
-            key_bits: alg.key_bits(),
-            common_name: common_name.clone(),
-            serial_hex,
-            created_at_unix: now,
-            not_after_unix: (now as i64) + (ttl.as_secs() as i64),
-            ca_kind: super::storage::CaKind::Root,
-        };
-        storage::put_json(req, KEY_CA_META, &meta).await?;
+        let not_after_unix = (now as i64) + (ttl.as_secs() as i64);
 
-        // Seed CRL state if absent so revoke can append immediately.
-        if storage::get_json::<CrlState>(req, KEY_CRL_STATE).await?.is_none() {
-            storage::put_json(req, KEY_CRL_STATE, &CrlState::default()).await?;
-        }
+        // Resolve the issuer name. Empty → next-default-name (`"default"`,
+        // then `"issuer-2"`, etc.) so an operator can call this route over
+        // and over without having to think about names.
+        let issuer_name = if requested_name.is_empty() {
+            let index = super::issuers::list_issuers(req).await?;
+            super::issuers::next_default_name(&index)
+        } else {
+            requested_name
+        };
+        let issuer_id = super::issuers::add_issuer(
+            req,
+            &issuer_name,
+            &cert_pem,
+            &signer,
+            &common_name,
+            &serial_hex,
+            not_after_unix,
+            super::storage::CaKind::Root,
+        )
+        .await?;
+
+        // CRL config is mount-wide; seed it once if absent.
         if storage::get_json::<CrlConfig>(req, KEY_CONFIG_CRL).await?.is_none() {
             storage::put_json(req, KEY_CONFIG_CRL, &CrlConfig::default()).await?;
         }
@@ -118,11 +124,16 @@ impl PkiBackendInner {
         let mut data: Map<String, Value> = Map::new();
         data.insert("certificate".into(), json!(cert_pem));
         data.insert("issuing_ca".into(), json!(cert_pem));
-        data.insert("expiration".into(), json!(meta.not_after_unix));
+        data.insert("issuer_id".into(), json!(issuer_id));
+        data.insert("issuer_name".into(), json!(issuer_name));
+        data.insert("expiration".into(), json!(not_after_unix));
         if exported == "exported" {
             data.insert("private_key".into(), json!(key_pem));
             data.insert("private_key_type".into(), json!(alg.as_str()));
         }
+        // Reference the legacy storage-key constants so unused-import lints
+        // don't fire on them while the migration shim keeps owning them.
+        let _ = (KEY_CA_CERT, KEY_CA_KEY, KEY_CA_META, KEY_CRL_STATE);
         Ok(Some(Response::data_response(Some(data))))
     }
 

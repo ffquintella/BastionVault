@@ -45,7 +45,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Auth: Userpass | Done |
 | Auth: Certificate | Done |
 | **Secret Engines** | |
-| Secret Engine: PKI (pure-Rust, PQC-capable -- [spec](features/pki-secret-engine.md)) | In Progress (Phases 1 + 2 + 3 + 4 + 4.1 + 5 + 5.1 done) |
+| Secret Engine: PKI (pure-Rust, PQC-capable -- [spec](features/pki-secret-engine.md)) | In Progress (Phases 1 + 2 + 3 + 4 + 4.1 + 5 + 5.1 + 5.2 done) |
 | PKI: ACME server endpoints ([spec](features/pki-acme.md)) | Todo |
 | Secret Engine: Transit ([spec](features/transit-secret-engine.md)) | Todo |
 | Secret Engine: TOTP ([spec](features/totp-secret-engine.md)) | Todo |

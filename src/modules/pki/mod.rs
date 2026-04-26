@@ -21,8 +21,10 @@ use crate::{
 pub mod composite;
 pub mod crypto;
 pub mod csr;
+pub mod issuers;
 pub mod path_config;
 pub mod path_intermediate;
+pub mod path_issuers;
 pub mod path_crl;
 pub mod path_fetch;
 pub mod path_issue;
@@ -84,6 +86,10 @@ impl PkiBackend {
             self.revoke_path(),
             self.crl_path(),
             self.crl_rotate_path(),
+            self.issuer_crl_path(),
+            self.issuers_list_path(),
+            self.issuer_path(),
+            self.config_issuers_path(),
             self.config_ca_path(),
             self.config_urls_path(),
             self.config_crl_path(),

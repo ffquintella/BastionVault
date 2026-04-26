@@ -11,7 +11,7 @@ use x509_cert::der::Decode;
 
 use super::{
     crypto::Signer,
-    storage::{self, CaKind, CaMetadata, CrlConfig, CrlState, UrlsConfig, KEY_CA_CERT, KEY_CA_KEY,
+    storage::{self, CaKind, CrlConfig, UrlsConfig, KEY_CA_CERT, KEY_CA_KEY,
               KEY_CA_META, KEY_CONFIG_CRL, KEY_CONFIG_URLS, KEY_CRL_STATE},
     PkiBackend, PkiBackendInner,
 };
@@ -29,7 +29,8 @@ impl PkiBackend {
             pattern: r"config/ca$",
             fields: {
                 "pem_bundle": { field_type: FieldType::Str, required: true,
-                    description: "PEM bundle: a private key plus one or more CERTIFICATE blocks (the leaf-most cert is treated as the CA)." }
+                    description: "PEM bundle: a private key plus one or more CERTIFICATE blocks (the leaf-most cert is treated as the CA)." },
+                "issuer_name": { field_type: FieldType::Str, default: "", description: "Name to register this issuer under (Phase 5.2). Empty = next-default-name." }
             },
             operations: [{op: Operation::Write, handler: r.import_config_ca}],
             help: "Import an externally-generated CA cert + private key bundle."
@@ -117,14 +118,12 @@ impl PkiBackendInner {
     /// validates that the cert's SubjectPublicKeyInfo matches the keypair,
     /// then installs both.
     pub async fn import_config_ca(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        if storage::get_string(req, KEY_CA_CERT).await?.is_some() {
-            // Refuse to silently clobber an existing CA. Operators who want
-            // to rotate must explicitly delete the existing one first.
-            return Err(RvError::ErrPkiCaNotConfig);
-        }
-
+        // Phase 5.2: import is additive; the operator can supply an
+        // optional `issuer_name` so the imported CA is registered under a
+        // specific name. Empty = next-default-name.
         let bundle = req.get_data("pem_bundle")?.as_str()
             .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let requested_name = req.get_data_or_default("issuer_name")?.as_str().unwrap_or("").to_string();
         let (cert_pem, key_pem) = split_pem_bundle(&bundle)?;
 
         // Round-trip the key through the unified Signer so we exercise the
@@ -150,14 +149,6 @@ impl PkiBackendInner {
             return Err(RvError::ErrPkiCertKeyMismatch);
         }
 
-        // Persist + bootstrap CRL state.
-        storage::put_string(req, KEY_CA_CERT, &cert_pem).await?;
-        storage::put_string(req, KEY_CA_KEY, &signer.to_storage_pem()).await?;
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
         let serial_hex = storage::serial_to_hex(cert.tbs_certificate.serial_number.as_bytes());
         // The DN's `Display` impl renders `CN=foo,O=bar,...`; pluck CN out.
         let dn_str = cert.tbs_certificate.subject.to_string();
@@ -165,30 +156,36 @@ impl PkiBackendInner {
             .split(',')
             .find_map(|piece| piece.trim().strip_prefix("CN=").map(|v| v.to_string()))
             .unwrap_or_default();
-        storage::put_json(
+        let not_after_unix = cert.tbs_certificate.validity.not_after.to_unix_duration().as_secs() as i64;
+
+        let issuer_name = if requested_name.is_empty() {
+            let index = super::issuers::list_issuers(req).await?;
+            super::issuers::next_default_name(&index)
+        } else {
+            requested_name
+        };
+        let issuer_id = super::issuers::add_issuer(
             req,
-            KEY_CA_META,
-            &CaMetadata {
-                key_type: classical.algorithm().as_str().to_string(),
-                key_bits: classical.algorithm().key_bits(),
-                common_name,
-                serial_hex,
-                created_at_unix: now,
-                not_after_unix: cert.tbs_certificate.validity.not_after.to_unix_duration().as_secs() as i64,
-                ca_kind: CaKind::Imported,
-            },
+            &issuer_name,
+            &cert_pem,
+            &signer,
+            &common_name,
+            &serial_hex,
+            not_after_unix,
+            CaKind::Imported,
         )
         .await?;
-        if storage::get_json::<CrlState>(req, KEY_CRL_STATE).await?.is_none() {
-            storage::put_json(req, KEY_CRL_STATE, &CrlState::default()).await?;
-        }
+
         if storage::get_json::<CrlConfig>(req, KEY_CONFIG_CRL).await?.is_none() {
             storage::put_json(req, KEY_CONFIG_CRL, &CrlConfig::default()).await?;
         }
 
         let mut data: Map<String, Value> = Map::new();
-        data.insert("imported_issuers".into(), json!([]));
-        data.insert("imported_keys".into(), json!([]));
+        data.insert("imported_issuers".into(), json!([&issuer_id]));
+        data.insert("imported_keys".into(), json!([&issuer_id]));
+        data.insert("issuer_id".into(), json!(issuer_id));
+        data.insert("issuer_name".into(), json!(issuer_name));
+        let _ = (KEY_CA_CERT, KEY_CA_KEY, KEY_CA_META, KEY_CRL_STATE);
         Ok(Some(Response::data_response(Some(data))))
     }
 }

@@ -25,7 +25,7 @@ use x509_cert::der::Decode;
 use super::{
     crypto::{KeyAlgorithm, Signer},
     storage::{
-        self, CaKind, CaMetadata, CrlConfig, CrlState, PendingIntermediate, KEY_CA_CERT, KEY_CA_KEY,
+        self, CaKind, CrlConfig, PendingIntermediate, KEY_CA_CERT, KEY_CA_KEY,
         KEY_CA_META, KEY_CA_PENDING_CSR, KEY_CA_PENDING_KEY, KEY_CA_PENDING_META, KEY_CONFIG_CRL,
         KEY_CRL_STATE,
     },
@@ -63,7 +63,8 @@ impl PkiBackend {
         new_path!({
             pattern: r"intermediate/set-signed$",
             fields: {
-                "certificate": { field_type: FieldType::Str, required: true, description: "PEM of the signed intermediate cert (from the upstream CA)." }
+                "certificate": { field_type: FieldType::Str, required: true, description: "PEM of the signed intermediate cert (from the upstream CA)." },
+                "issuer_name": { field_type: FieldType::Str, default: "", description: "Name to register this issuer under (Phase 5.2). Defaults to the next-available `default` / `issuer-N`." }
             },
             operations: [{op: Operation::Write, handler: r.set_signed_intermediate}],
             help: "Install a signed intermediate cert produced from this mount's pending CSR."
@@ -79,10 +80,11 @@ impl PkiBackend {
                 "common_name": { field_type: FieldType::Str, default: "", description: "Override CN; defaults to the CSR's CN." },
                 "organization": { field_type: FieldType::Str, default: "", description: "Subject Organization." },
                 "ttl": { field_type: FieldType::Str, default: "", description: "Lifetime of the intermediate (default 5y)." },
-                "max_path_length": { field_type: FieldType::Int, default: -1, description: "BasicConstraints pathLenConstraint; negative = unconstrained." }
+                "max_path_length": { field_type: FieldType::Int, default: -1, description: "BasicConstraints pathLenConstraint; negative = unconstrained." },
+                "issuer_ref": { field_type: FieldType::Str, default: "", description: "Issuer ID or name to sign with; empty = mount default." }
             },
             operations: [{op: Operation::Write, handler: r.sign_intermediate}],
-            help: "Sign an intermediate-CA CSR with this mount's CA."
+            help: "Sign an intermediate-CA CSR with one of this mount's issuers."
         })
     }
 }
@@ -90,13 +92,12 @@ impl PkiBackend {
 #[maybe_async::maybe_async]
 impl PkiBackendInner {
     pub async fn generate_intermediate(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        // Refuse if the mount is already active *or* if there's a pending
-        // generation that hasn't been resolved by `set-signed`. Operators
-        // who want to abandon an in-flight pending cert should delete the
-        // mount; we don't expose a `cancel` knob in Phase 5.
-        if storage::get_string(req, KEY_CA_CERT).await?.is_some() {
-            return Err(RvError::ErrPkiCaNotConfig);
-        }
+        // Phase 5.2: this route is additive — having other issuers on the
+        // mount does not block generating a new pending intermediate. The
+        // only constraint is that there can be only ONE pending generation
+        // at a time (the storage path `ca/pending/*` is singleton). An
+        // operator who wants two intermediates in flight should land the
+        // first via `set-signed` first.
         if storage::get_string(req, KEY_CA_PENDING_KEY).await?.is_some() {
             return Err(RvError::ErrPkiCaNotConfig);
         }
@@ -184,15 +185,10 @@ impl PkiBackendInner {
             return Err(RvError::ErrPkiCertKeyMismatch);
         }
 
-        // Promote pending → active.
-        storage::put_string(req, KEY_CA_CERT, &signed_pem).await?;
-        storage::put_string(req, KEY_CA_KEY, &pending_key).await?;
-
-        // CA metadata + CRL state.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        // Phase 5.2: install as a *new issuer* alongside any existing
+        // issuers, rather than clobbering a singleton ca/cert. Pick the
+        // operator-supplied `issuer_name` if any, else next-available
+        // (`default`, `issuer-2`, ...).
         let not_after_unix = cert
             .tbs_certificate
             .validity
@@ -200,38 +196,41 @@ impl PkiBackendInner {
             .to_unix_duration()
             .as_secs() as i64;
         let serial_hex = storage::serial_to_hex(cert.tbs_certificate.serial_number.as_bytes());
-        storage::put_json(
+
+        let requested_name = req.get_data_or_default("issuer_name")?.as_str().unwrap_or("").to_string();
+        let issuer_name = if requested_name.is_empty() {
+            let index = super::issuers::list_issuers(req).await?;
+            super::issuers::next_default_name(&index)
+        } else {
+            requested_name
+        };
+        let issuer_id = super::issuers::add_issuer(
             req,
-            KEY_CA_META,
-            &CaMetadata {
-                key_type: pending_meta.key_type,
-                key_bits: pending_meta.key_bits,
-                common_name: pending_meta.common_name,
-                serial_hex,
-                created_at_unix: now,
-                not_after_unix,
-                ca_kind: CaKind::Intermediate,
-            },
+            &issuer_name,
+            &signed_pem,
+            &signer,
+            &pending_meta.common_name,
+            &serial_hex,
+            not_after_unix,
+            CaKind::Intermediate,
         )
         .await?;
-        if storage::get_json::<CrlState>(req, KEY_CRL_STATE).await?.is_none() {
-            storage::put_json(req, KEY_CRL_STATE, &CrlState::default()).await?;
-        }
+
         if storage::get_json::<CrlConfig>(req, KEY_CONFIG_CRL).await?.is_none() {
             storage::put_json(req, KEY_CONFIG_CRL, &CrlConfig::default()).await?;
         }
 
-        // Clear pending state so a future `intermediate/generate` can run
-        // (after first deleting `ca/cert` + `ca/key` — Phase 5 doesn't
-        // expose that, but a DELETE on `pki/config/ca` would). For now,
-        // clearing the pending records keeps storage tidy.
-        req.storage_delete(KEY_CA_PENDING_KEY).await?;
-        req.storage_delete(KEY_CA_PENDING_CSR).await?;
-        req.storage_delete(KEY_CA_PENDING_META).await?;
+        // Clear pending state so the next `intermediate/generate` can run.
+        let _ = req.storage_delete(KEY_CA_PENDING_KEY).await;
+        let _ = req.storage_delete(KEY_CA_PENDING_CSR).await;
+        let _ = req.storage_delete(KEY_CA_PENDING_META).await;
 
         let mut data: Map<String, Value> = Map::new();
-        data.insert("imported_issuers".into(), json!([]));
-        data.insert("imported_keys".into(), json!([]));
+        data.insert("imported_issuers".into(), json!([&issuer_id]));
+        data.insert("imported_keys".into(), json!([&issuer_id]));
+        data.insert("issuer_id".into(), json!(issuer_id));
+        data.insert("issuer_name".into(), json!(issuer_name));
+        let _ = (KEY_CA_CERT, KEY_CA_KEY, KEY_CA_META, KEY_CRL_STATE);
         Ok(Some(Response::data_response(Some(data))))
     }
 
@@ -260,11 +259,14 @@ impl PkiBackendInner {
         let max_path_length = req.get_data_or_default("max_path_length")?.as_i64().unwrap_or(-1);
         let path_len: Option<u8> = if max_path_length < 0 { None } else { Some(max_path_length.min(255) as u8) };
 
-        let ca_cert_pem = storage::get_string(req, KEY_CA_CERT).await?
-            .ok_or(RvError::ErrPkiCaNotConfig)?;
-        let ca_key_pem = storage::get_string(req, KEY_CA_KEY).await?
-            .ok_or(RvError::ErrPkiCaKeyNotFound)?;
-        let ca_signer = Signer::from_storage_pem(&ca_key_pem)?;
+        let request_issuer_ref = req.get_data_or_default("issuer_ref")?.as_str().unwrap_or("").to_string();
+        let issuer = if !request_issuer_ref.is_empty() {
+            super::issuers::load_issuer(req, &request_issuer_ref).await?
+        } else {
+            super::issuers::load_default_issuer(req).await?
+        };
+        let ca_cert_pem = issuer.cert_pem.clone();
+        let ca_signer = issuer.signer;
         let Signer::Classical(ca_classical) = &ca_signer else {
             return Err(RvError::ErrPkiKeyTypeInvalid);
         };

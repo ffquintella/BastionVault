@@ -191,45 +191,68 @@ pub async fn run_tidy_inner(
     }
 
     // ── Sweep CRL revoked-list ──────────────────────────────────────
+    // Phase 5.2: CRL state is per-issuer. Iterate over every issuer, sweep
+    // each one's `crl/issuer/<id>/state`, and rebuild that issuer's CRL
+    // when revoked entries get removed. The legacy `crl/state` is also
+    // checked for any pre-migration data — the migration shim moves it
+    // into the default issuer's slot, but a stray legacy entry that
+    // somehow survives gets swept here.
     if tidy_revoked_certs {
-        let mut state: CrlState = storage::get_json(req, KEY_CRL_STATE).await?.unwrap_or_default();
-        let before = state.revoked.len();
-        // We need each revoked entry's NotAfter to decide; pull the (still
-        // present, possibly already swept) cert record for that serial. If
-        // the cert record is gone (already swept above) we know it expired
-        // past cutoff and the CRL entry is fair game for removal too.
-        let mut keep: Vec<storage::RevokedSerial> = Vec::with_capacity(before);
-        for entry in state.revoked.drain(..) {
-            let storage_key = format!("certs/{}", entry.serial_hex);
-            let cert = storage::get_json::<CertRecord>(req, &storage_key).await?;
-            let expired_past_buffer = match cert {
-                Some(c) if c.not_after_unix > 0 => c.not_after_unix < cutoff,
-                Some(_) => false, // pre-Phase-4 record without not_after — be conservative
-                None => true,     // cert already gone → its CRL entry is too
-            };
-            if expired_past_buffer {
-                revoked_deleted += 1;
+        // Collect issuer IDs (best-effort — empty index means a fresh
+        // mount with nothing to sweep, which is fine).
+        let index = super::issuers::list_issuers(req).await.unwrap_or_default();
+        let mut issuer_ids: Vec<String> = index.by_id.keys().cloned().collect();
+        // Always also walk the legacy singleton in case it survived a
+        // partial migration; identified by an empty issuer-id sentinel.
+        issuer_ids.push(String::new());
+
+        for issuer_id in issuer_ids {
+            let state_key = if issuer_id.is_empty() {
+                KEY_CRL_STATE.to_string()
             } else {
-                keep.push(entry);
+                storage::issuer_crl_state_key(&issuer_id)
+            };
+            let mut state: CrlState = match storage::get_json(req, &state_key).await? {
+                Some(s) => s,
+                None => continue,
+            };
+            let before = state.revoked.len();
+            let mut keep: Vec<storage::RevokedSerial> = Vec::with_capacity(before);
+            let mut sweep_count: u64 = 0;
+            for entry in state.revoked.drain(..) {
+                let storage_key = format!("certs/{}", entry.serial_hex);
+                let cert = storage::get_json::<CertRecord>(req, &storage_key).await?;
+                let expired_past_buffer = match cert {
+                    Some(c) if c.not_after_unix > 0 => c.not_after_unix < cutoff,
+                    Some(_) => false, // pre-Phase-4 record — be conservative
+                    None => true,     // cert already gone → CRL entry is too
+                };
+                if expired_past_buffer {
+                    sweep_count += 1;
+                } else {
+                    keep.push(entry);
+                }
+            }
+            state.revoked = keep;
+            if sweep_count > 0 {
+                state.crl_number = state.crl_number.saturating_add(1);
+                storage::put_json(req, &state_key, &state).await?;
+                revoked_deleted += sweep_count;
+                crl_state_changed = true;
+                // Rebuild only this issuer's CRL. Skip the legacy sentinel
+                // since `rebuild_crl_for_issuer` requires a real issuer.
+                if !issuer_id.is_empty() {
+                    if let Ok(issuer) = super::issuers::load_issuer(req, &issuer_id).await {
+                        if let Err(e) = super::path_revoke::rebuild_crl_for_issuer(req, &issuer).await {
+                            log::warn!("pki/tidy: CRL rebuild for issuer {issuer_id} failed: {e:?}");
+                        }
+                    }
+                }
             }
         }
-        state.revoked = keep;
-        if revoked_deleted > 0 {
-            // Bump crl_number on any meaningful CRL state change so verifiers
-            // that cache by number invalidate.
-            state.crl_number = state.crl_number.saturating_add(1);
-            storage::put_json(req, KEY_CRL_STATE, &state).await?;
-            crl_state_changed = true;
-        }
     }
-
-    // Rebuild CRL if we changed the revoked-list. Best-effort: a CRL rebuild
-    // failure must not lose the storage deletions we already committed.
-    if crl_state_changed {
-        if let Err(e) = rebuild_crl(req).await {
-            log::warn!("pki/tidy: CRL rebuild failed after sweep: {e:?}");
-        }
-    }
+    let _ = crl_state_changed;
+    let _ = rebuild_crl; // back-compat helper still exposed
 
     let status = TidyStatus {
         last_run_at_unix: now_unix,

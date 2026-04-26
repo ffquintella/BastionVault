@@ -21,6 +21,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{errors::RvError, logical::Request, storage::StorageEntry};
 
+// Legacy singleton paths (Phases 1–5.1). Read-only after the lazy
+// migration in [`super::issuers`] runs on first use of any multi-issuer
+// helper. New writes always go through the per-issuer paths.
 pub const KEY_CA_CERT: &str = "ca/cert";
 pub const KEY_CA_KEY: &str = "ca/key";
 pub const KEY_CA_META: &str = "ca/meta";
@@ -30,6 +33,45 @@ pub const KEY_CONFIG_URLS: &str = "config/urls";
 pub const KEY_CONFIG_CRL: &str = "config/crl";
 pub const KEY_CONFIG_AUTO_TIDY: &str = "config/auto-tidy";
 pub const KEY_TIDY_STATUS: &str = "tidy/status";
+
+// Multi-issuer paths (Phase 5.2).
+pub const KEY_ISSUERS_INDEX: &str = "issuers/index";
+pub const KEY_CONFIG_ISSUERS: &str = "config/issuers";
+
+pub fn issuer_cert_key(id: &str) -> String { format!("issuers/{id}/cert") }
+pub fn issuer_key_key(id: &str) -> String { format!("issuers/{id}/key") }
+pub fn issuer_meta_key(id: &str) -> String { format!("issuers/{id}/meta") }
+pub fn issuer_crl_state_key(id: &str) -> String { format!("crl/issuer/{id}/state") }
+pub fn issuer_crl_cached_key(id: &str) -> String { format!("crl/issuer/{id}/cached") }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IssuersIndex {
+    /// Map of issuer_id (uuid) → human-readable name. Names must be unique
+    /// within a mount; the engine enforces that on `add_issuer`.
+    pub by_id: std::collections::BTreeMap<String, String>,
+}
+
+impl IssuersIndex {
+    pub fn name_to_id(&self, name: &str) -> Option<String> {
+        self.by_id.iter().find_map(|(id, n)| if n == name { Some(id.clone()) } else { None })
+    }
+
+    /// Resolve an `issuer_ref` (either UUID or name) against this index.
+    pub fn resolve(&self, reference: &str) -> Option<String> {
+        if self.by_id.contains_key(reference) {
+            return Some(reference.to_string());
+        }
+        self.name_to_id(reference)
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IssuersConfig {
+    /// UUID of the default issuer for this mount. `pki/ca`, `pki/crl`,
+    /// and `pki/issue/:role` (when no `issuer_ref` is given) all route to
+    /// this issuer.
+    pub default_id: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaMetadata {
@@ -89,6 +131,12 @@ pub struct CertRecord {
     /// backwards-compatible with records written before Phase 4.
     #[serde(default)]
     pub not_after_unix: i64,
+    /// Phase 5.2: which issuer (UUID) signed this cert. Empty string means
+    /// "the mount's default issuer" — that's what records written before
+    /// 5.2 deserialize to. The CRL builder uses this to group revocations
+    /// by issuer when the mount has more than one.
+    #[serde(default)]
+    pub issuer_id: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

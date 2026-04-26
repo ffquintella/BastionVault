@@ -73,11 +73,15 @@ async fn test_pki_phase1_end_to_end() {
     assert!(root_pem.contains("BEGIN CERTIFICATE"), "root cert PEM missing header");
     assert!(root_resp.get("private_key").is_none(), "internal mode must not leak private key");
 
-    // Re-generating must fail (single-issuer-per-mount).
-    let dup = json!({
+    // Phase 5.2: a second `root/generate` is now additive (creates another
+    // issuer alongside the first). What still gets rejected is *duplicate
+    // names*: trying to register a new issuer under the existing
+    // `default` name must fail.
+    let dup_name = json!({
         "common_name": "second-root",
         "key_type": "ec",
-        "ttl": "1h"
+        "ttl": "1h",
+        "issuer_name": "default"
     })
     .as_object()
     .unwrap()
@@ -85,8 +89,11 @@ async fn test_pki_phase1_end_to_end() {
     let mut req = Request::new("pki/root/generate/internal");
     req.operation = Operation::Write;
     req.client_token = token.to_string();
-    req.body = Some(dup);
-    assert!(core.handle_request(&mut req).await.is_err(), "second root generation must be rejected");
+    req.body = Some(dup_name);
+    assert!(
+        core.handle_request(&mut req).await.is_err(),
+        "registering a new issuer under an already-taken name must be rejected"
+    );
 
     // Fetch the CA cert via /pki/ca.
     let ca = read(&core, &token, "pki/ca").await.unwrap();

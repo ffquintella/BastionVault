@@ -276,20 +276,33 @@ async fn test_pki_phase5_intermediate_chain() {
     assert_eq!(leaf_cert.issuer().to_string(), int_cert.subject().to_string());
     assert_eq!(int_cert.issuer().to_string(), root_cert.subject().to_string());
 
-    // 5. Negative: re-running intermediate/generate must fail because a
-    //    pending generation is now resolved (cert is installed).
+    // 5. Phase 5.2: a second `intermediate/generate` is now additive — it
+    //    starts a *new* pending intermediate alongside the already-installed
+    //    one. What still gets rejected is two pending generations in flight
+    //    at the same time (singleton `ca/pending/*` storage).
+    write_expect_ok(
+        &core,
+        &token,
+        "pki-int/intermediate/generate/internal",
+        json!({"common_name": "another-int", "key_type": "ec"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .await;
+    // Second pending in flight must fail.
     let mut req = Request::new("pki-int/intermediate/generate/internal");
     req.operation = Operation::Write;
     req.client_token = token.clone();
     req.body = Some(
-        json!({"common_name": "another-int", "key_type": "ec"})
+        json!({"common_name": "third-int", "key_type": "ec"})
             .as_object()
             .unwrap()
             .clone(),
     );
     assert!(
         core.handle_request(&mut req).await.is_err(),
-        "second intermediate/generate on an already-active mount must be rejected"
+        "two simultaneous pending intermediates must be rejected"
     );
 }
 
@@ -328,14 +341,22 @@ async fn test_pki_phase5_config_ca_import() {
     )
     .await;
 
-    // Re-import must fail (CA already configured).
+    // Phase 5.2: re-importing the same bundle under the *same name* is
+    // now a duplicate-name conflict (rather than a singleton conflict). A
+    // re-import under a different name would succeed and create a second
+    // imported issuer.
     let mut req = Request::new("pki/config/ca");
     req.operation = Operation::Write;
     req.client_token = token.clone();
-    req.body = Some(json!({"pem_bundle": format!("{cert_pem}{key_pem}")}).as_object().unwrap().clone());
+    req.body = Some(
+        json!({"pem_bundle": format!("{cert_pem}{key_pem}"), "issuer_name": "default"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
     assert!(
         core.handle_request(&mut req).await.is_err(),
-        "re-importing into a configured mount must be rejected"
+        "re-importing under an already-taken issuer name must be rejected"
     );
 
     // Issue a cert under the imported CA.

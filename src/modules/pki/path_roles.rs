@@ -63,6 +63,12 @@ pub struct RoleEntry {
     pub ou: String,
     pub no_store: bool,
     pub generate_lease: bool,
+    /// Phase 5.2: pin issuance to a specific issuer (by ID or name). Empty
+    /// = use the mount default. The runtime priority is request body
+    /// `issuer_ref` > role `issuer_ref` > mount default. `#[serde(default)]`
+    /// keeps roles persisted before 5.2 readable.
+    #[serde(default)]
+    pub issuer_ref: String,
 }
 
 impl RoleEntry {
@@ -112,7 +118,8 @@ impl PkiBackend {
                 "ou": { field_type: FieldType::Str, default: "", description: "Subject OU." },
                 "no_store": { field_type: FieldType::Bool, default: false, description: "Skip persisting issued certs." },
                 "generate_lease": { field_type: FieldType::Bool, default: false, description: "Attach a Vault lease to issued certs." },
-                "not_before_duration": { field_type: FieldType::Int, default: 30, description: "Backdate seconds for NotBefore." }
+                "not_before_duration": { field_type: FieldType::Int, default: 30, description: "Backdate seconds for NotBefore." },
+                "issuer_ref": { field_type: FieldType::Str, default: "", description: "Pin issuance to a specific issuer (ID or name). Empty = mount default." }
             },
             operations: [
                 {op: Operation::Read, handler: r1.read_role},
@@ -198,6 +205,7 @@ impl PkiBackendInner {
             ou: str_or(req, "ou")?,
             no_store: bool_or(req, "no_store", false)?,
             generate_lease: bool_or(req, "generate_lease", false)?,
+            issuer_ref: str_or(req, "issuer_ref")?,
         };
 
         let entry = StorageEntry::new(format!("role/{name}").as_str(), &role)?;

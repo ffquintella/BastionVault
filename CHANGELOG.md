@@ -50,6 +50,29 @@ EXAMPLE ENTRY:
 #### GUI Developer Tooling
 - **Local Tauri MCP bridge** -- Add an optional `mcp_local_dev` GUI Cargo feature for the `hypothesi/mcp-server-tauri` bridge, registered only in debug builds when `BASTION_TAURI_MCP=1` is set and bound to `127.0.0.1`. `make run-dev-gui` now enables this local-only development path for AI-assisted GUI inspection while production builds remain unchanged.
 
+#### Secret Engine — PKI Phase 5.2 (multi-issuer per mount)
+- **Each mount can now hold multiple issuer certificates / keys** at `issuers/<id>/{cert,key,meta}`, with a registry at `issuers/index` and a default-issuer pointer at `config/issuers`. The single-issuer-per-mount call-out from Phase 1's "Not In Scope" list is closed.
+- **New routes** ([src/modules/pki/path_issuers.rs](src/modules/pki/path_issuers.rs)):
+  - `LIST   /v1/pki/issuers` — list issuer IDs with `key_info` (name + `is_default`).
+  - `READ   /v1/pki/issuer/:ref` — fetch a specific issuer's cert + metadata. `:ref` is either UUID or name.
+  - `WRITE  /v1/pki/issuer/:ref` — rename (`{"issuer_name": "<new>"}`); duplicate names rejected.
+  - `DELETE /v1/pki/issuer/:ref` — remove an issuer. Refuses to delete the current default while siblings exist (operator must reassign default first via `pki/config/issuers`). Cert records issued by the deleted issuer are intentionally left in `certs/<serial>` for audit; `pki/tidy` sweeps them after expiry.
+  - `READ/WRITE /v1/pki/config/issuers` — round-trips the default-issuer pointer.
+  - `READ /v1/pki/issuer/:ref/crl` — per-issuer CRL fetch.
+- **`root/generate`, `intermediate/set-signed`, `config/ca` are now additive.** Each call adds a new named issuer to the mount rather than refusing if one already exists. The first issuer added auto-becomes default; subsequent issuers must be made default explicitly. New `issuer_name` request field on all three; empty = auto-allocate (`default`, then `issuer-2`, `issuer-3`, ...).
+- **`issue/:role`, `sign/:role`, `sign-verbatim`, `root/sign-intermediate` accept `issuer_ref`.** Resolution priority: request body `issuer_ref` > role-level `issuer_ref` > mount default. The cert response carries `issuer_id` so callers can reconcile against the new registry.
+- **`RoleEntry.issuer_ref`** — new `#[serde(default)]` field on roles for pin-issuance-to-this-issuer. Phase-1-through-5.1 roles deserialize unchanged.
+- **Per-issuer CRL state** — revocations route to `crl/issuer/<issuer_id>/state` based on `CertRecord.issuer_id`; the legacy mount-wide `crl/state` is migrated into the default issuer's slot. `pki/tidy` sweeps every issuer's CRL state on every run.
+- **Lazy migration shim** ([src/modules/pki/issuers.rs](src/modules/pki/issuers.rs)) — Phase 1-through-5.1 mounts with the legacy `ca/cert` + `ca/key` + `ca/meta` singletons lift themselves into `issuers/<auto-uuid>/*` on first call to any multi-issuer helper. Idempotent, observable in tests, and keeps every Phase 1–5.1 integration test passing without modification (apart from two assertions that explicitly tested *behaviour* that's now legitimately additive — those were updated to assert duplicate-name rejection, the equivalent default-secure check under multi-issuer).
+- **Tests** — [tests/test_pki_phase5_2.rs](tests/test_pki_phase5_2.rs), 4 cases:
+  1. Two issuers + default swap: list shows both; `pki/ca` returns default; `config/issuers` flip works; duplicate `issuer_name` rejected.
+  2. `issue/:role` with explicit `issuer_ref` (request body), role-level pin (`role.issuer_ref`), and default fallback — each routes to the right issuer; per-issuer CRL only lists serials issued by *that* issuer.
+  3. `WRITE /v1/pki/issuer/:ref` rename; `DELETE` non-default works; `DELETE` default-with-siblings rejected.
+  4. Migration shim observable: a Phase-1-style `root/generate` then `LIST /v1/pki/issuers` shows the lifted entry with `name=default`, `is_default=true`.
+
+  All 12 PKI integration tests pass (Phase 1 + 2 + 4 + 4.1 + 5 + 5.1 + 5.2); Phase 3 composite test passes with `--features pki_pqc_composite`.
+- **What's still deferred**: per-issuer `usage` flags (which issuer is allowed for which role kinds — Vault has `issuing_certificates` / `crl_signing` / `ocsp_signing` per issuer); cross-mount issuer references; per-issuer `pki/issuer/:ref/sign-intermediate` and `pki/issuer/:ref/issue/:role` route variants (today the operator selects via `issuer_ref` field, which covers the same surface).
+
 #### Secret Engine — PKI Phase 5.1 (PQC CSR signing)
 - **`pki/sign/:role` and `pki/sign-verbatim` now accept ML-DSA CSRs.** Closes the asymmetry shipped in Phase 5 where PQC roles could `pki/issue` (engine generates the keypair) but not sign a CSR.
 - **CSR algorithm detection in [csr.rs](src/modules/pki/csr.rs).** The `parse_and_verify` entry point now classifies the CSR's SubjectPublicKeyInfo OID into [`CsrAlgClass::Classical`](src/modules/pki/csr.rs) or `CsrAlgClass::MlDsa(level)`. Classical CSRs continue to verify via `x509-parser`'s `verify_signature()`; PQC CSRs verify with `fips204` directly because x509-parser only knows ring/aws_lc_rs algorithms (and we forbid `aws_lc_rs_unstable`). The parsed result carries both `spki_der` (for the rcgen path) and `raw_public_key` (for the PQC path).

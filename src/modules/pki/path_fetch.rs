@@ -5,7 +5,7 @@ use std::{collections::HashMap, sync::Arc};
 use serde_json::{json, Map, Value};
 
 use super::{
-    storage::{self, CertRecord, KEY_CA_CERT},
+    storage::{self, CertRecord},
     PkiBackend, PkiBackendInner,
 };
 use crate::{
@@ -77,10 +77,13 @@ impl PkiBackendInner {
     }
 
     pub async fn read_ca(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let pem = storage::get_string(req, KEY_CA_CERT).await?
-            .ok_or(RvError::ErrPkiCaNotConfig)?;
+        // Phase 5.2: `pki/ca` returns the *default* issuer's cert, falling
+        // back through the migration shim for any pre-5.2 mount.
+        let issuer = super::issuers::load_default_issuer(req).await?;
         let mut data: Map<String, Value> = Map::new();
-        data.insert("certificate".into(), json!(pem));
+        data.insert("certificate".into(), json!(issuer.cert_pem));
+        data.insert("issuer_id".into(), json!(issuer.id));
+        data.insert("issuer_name".into(), json!(issuer.name));
         Ok(Some(Response::data_response(Some(data))))
     }
 
