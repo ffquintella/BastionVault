@@ -653,7 +653,27 @@ impl Core {
             std::mem::drop(src_entry);
         }
 
+        // Rekey the mounts_router HashMap so subsequent `delete(dst)` lookups
+        // hit the correct entry. Without this, `unmount(dst)` silently no-ops
+        // on the table and the entry survives until restart even though the
+        // router trie no longer routes to it.
+        {
+            let mut entries = self.mounts_router.entries.write()?;
+            if let Some(entry) = entries.remove(&src) {
+                entries.insert(dst.clone(), entry);
+            }
+        }
+
         if let Err(e) = self.mounts_router.persist(self.barrier.as_storage()).await {
+            // Best-effort rollback: put the entry back under its original key
+            // and restore the path field so the in-memory state matches what
+            // is on disk.
+            {
+                let mut entries = self.mounts_router.entries.write()?;
+                if let Some(entry) = entries.remove(&dst) {
+                    entries.insert(src.clone(), entry);
+                }
+            }
             let mut src_entry = src_match.write()?;
             src_entry.path = src_path;
             src_entry.tainted = true;
