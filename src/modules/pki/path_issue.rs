@@ -125,6 +125,10 @@ impl PkiBackendInner {
             (AlgorithmClass::Pqc, Signer::MlDsa(ca), Signer::MlDsa(leaf)) => {
                 x509_pqc::build_leaf(&role, &subject, ttl, leaf, ca, &ca_cert_pem)?
             }
+            #[cfg(feature = "pki_pqc_composite")]
+            (AlgorithmClass::Composite, Signer::Composite(ca), Signer::Composite(leaf)) => {
+                super::x509_composite::build_leaf(&role, &subject, ttl, leaf, ca, &ca_cert_pem)?
+            }
             // Mixed cases were already screened above; this arm is here to
             // make the compiler happy without falling through silently.
             _ => return Err(RvError::ErrPkiKeyTypeInvalid),

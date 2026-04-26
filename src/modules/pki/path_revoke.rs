@@ -105,6 +105,14 @@ pub async fn rebuild_crl(req: &Request) -> Result<String, RvError> {
         Signer::MlDsa(ml) => {
             x509_pqc::build_crl(crl_number, cfg.expiry_seconds.max(60), &revoked, ml, &ca_cert_pem)?
         }
+        #[cfg(feature = "pki_pqc_composite")]
+        Signer::Composite(c) => super::x509_composite::build_crl(
+            crl_number,
+            cfg.expiry_seconds.max(60),
+            &revoked,
+            c,
+            &ca_cert_pem,
+        )?,
     };
     storage::put_string(req, KEY_CRL_CACHED, &pem).await?;
     Ok(pem)

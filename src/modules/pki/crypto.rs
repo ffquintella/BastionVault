@@ -12,6 +12,8 @@
 use rcgen::{KeyPair, SignatureAlgorithm};
 use zeroize::Zeroizing;
 
+#[cfg(feature = "pki_pqc_composite")]
+use super::composite::CompositeSigner;
 use super::pqc::{MlDsaLevel, MlDsaSigner};
 use crate::errors::RvError;
 
@@ -29,6 +31,10 @@ pub enum KeyAlgorithm {
     MlDsa44,
     MlDsa65,
     MlDsa87,
+    /// Composite ECDSA-P256 + ML-DSA-65. Phase 3 preview, gated behind the
+    /// `pki_pqc_composite` feature.
+    #[cfg(feature = "pki_pqc_composite")]
+    CompositeEcdsaP256MlDsa65,
 }
 
 /// Coarse partition used by the PKI engine to enforce "no mixed chains by
@@ -38,6 +44,11 @@ pub enum KeyAlgorithm {
 pub enum AlgorithmClass {
     Classical,
     Pqc,
+    /// Composite (hybrid) — both halves valid. Distinct from `Classical` and
+    /// `Pqc` so the mixed-chain guard in [`super::path_issue`] reads cleanly:
+    /// composite role on composite CA only, no cross-class issuance.
+    #[cfg(feature = "pki_pqc_composite")]
+    Composite,
 }
 
 impl KeyAlgorithm {
@@ -61,6 +72,11 @@ impl KeyAlgorithm {
             ("ml-dsa-65", 0) => Ok(Self::MlDsa65),
             ("ml-dsa-87", 0) => Ok(Self::MlDsa87),
             ("ml-dsa-44" | "ml-dsa-65" | "ml-dsa-87", _) => Err(RvError::ErrPkiKeyBitsInvalid),
+            // Composite roles — same `key_bits = 0` rule as PQC.
+            #[cfg(feature = "pki_pqc_composite")]
+            ("ecdsa-p256+ml-dsa-65", 0) => Ok(Self::CompositeEcdsaP256MlDsa65),
+            #[cfg(feature = "pki_pqc_composite")]
+            ("ecdsa-p256+ml-dsa-65", _) => Err(RvError::ErrPkiKeyBitsInvalid),
             ("rsa", _) => Err(RvError::ErrPkiKeyBitsInvalid),
             ("ec", _) => Err(RvError::ErrPkiKeyBitsInvalid),
             _ => Err(RvError::ErrPkiKeyTypeInvalid),
@@ -70,6 +86,8 @@ impl KeyAlgorithm {
     pub fn class(self) -> AlgorithmClass {
         match self {
             Self::MlDsa44 | Self::MlDsa65 | Self::MlDsa87 => AlgorithmClass::Pqc,
+            #[cfg(feature = "pki_pqc_composite")]
+            Self::CompositeEcdsaP256MlDsa65 => AlgorithmClass::Composite,
             _ => AlgorithmClass::Classical,
         }
     }
@@ -91,6 +109,8 @@ impl KeyAlgorithm {
             Self::MlDsa44 => "ml-dsa-44",
             Self::MlDsa65 => "ml-dsa-65",
             Self::MlDsa87 => "ml-dsa-87",
+            #[cfg(feature = "pki_pqc_composite")]
+            Self::CompositeEcdsaP256MlDsa65 => "ecdsa-p256+ml-dsa-65",
         }
     }
 
@@ -102,6 +122,8 @@ impl KeyAlgorithm {
             Self::EcdsaP256 => 256,
             Self::EcdsaP384 => 384,
             Self::Ed25519 | Self::MlDsa44 | Self::MlDsa65 | Self::MlDsa87 => 0,
+            #[cfg(feature = "pki_pqc_composite")]
+            Self::CompositeEcdsaP256MlDsa65 => 0,
         }
     }
 
@@ -117,6 +139,8 @@ impl KeyAlgorithm {
             Self::Ed25519 => &rcgen::PKCS_ED25519,
             // PQC algorithms are not driven through rcgen — see [`super::x509_pqc`].
             Self::MlDsa44 | Self::MlDsa65 | Self::MlDsa87 => return Err(RvError::ErrPkiKeyTypeInvalid),
+            #[cfg(feature = "pki_pqc_composite")]
+            Self::CompositeEcdsaP256MlDsa65 => return Err(RvError::ErrPkiKeyTypeInvalid),
         })
     }
 }
@@ -194,10 +218,18 @@ pub(crate) fn rcgen_err(e: rcgen::Error) -> RvError {
 pub enum Signer {
     Classical(CertSigner),
     MlDsa(MlDsaSigner),
+    /// Composite (hybrid) signer pairing one classical and one PQC half. See
+    /// [`super::composite`] for the format and feature-flag context.
+    #[cfg(feature = "pki_pqc_composite")]
+    Composite(CompositeSigner),
 }
 
 impl Signer {
     pub fn generate(alg: KeyAlgorithm) -> Result<Self, RvError> {
+        #[cfg(feature = "pki_pqc_composite")]
+        if matches!(alg, KeyAlgorithm::CompositeEcdsaP256MlDsa65) {
+            return Ok(Self::Composite(CompositeSigner::generate()?));
+        }
         match alg.ml_dsa_level() {
             Some(level) => Ok(Self::MlDsa(MlDsaSigner::generate(level)?)),
             None => Ok(Self::Classical(CertSigner::generate(alg)?)),
@@ -212,22 +244,29 @@ impl Signer {
                 MlDsaLevel::L65 => KeyAlgorithm::MlDsa65,
                 MlDsaLevel::L87 => KeyAlgorithm::MlDsa87,
             },
+            #[cfg(feature = "pki_pqc_composite")]
+            Self::Composite(_) => KeyAlgorithm::CompositeEcdsaP256MlDsa65,
         }
     }
 
     /// Storage round-trip: caller persists this string as the CA private key
-    /// (barrier-encrypted at the storage layer). For classical the body is the
-    /// PKCS#8 PEM rcgen produced; for PQC it's a custom envelope (see
-    /// [`MlDsaSigner::to_storage_pem`]). The dispatch on read is a string
-    /// prefix sniff — no out-of-band metadata required.
+    /// (barrier-encrypted at the storage layer). The dispatch on read is a
+    /// string prefix sniff — composite envelopes carry their own marker, PQC
+    /// has its own, and everything else falls through to PKCS#8 PEM.
     pub fn to_storage_pem(&self) -> String {
         match self {
             Self::Classical(s) => s.pem_pkcs8().to_string(),
             Self::MlDsa(s) => s.to_storage_pem(),
+            #[cfg(feature = "pki_pqc_composite")]
+            Self::Composite(s) => s.to_storage_pem(),
         }
     }
 
     pub fn from_storage_pem(pem: &str) -> Result<Self, RvError> {
+        #[cfg(feature = "pki_pqc_composite")]
+        if CompositeSigner::is_storage_pem(pem) {
+            return Ok(Self::Composite(CompositeSigner::from_storage_pem(pem)?));
+        }
         if MlDsaSigner::is_storage_pem(pem) {
             Ok(Self::MlDsa(MlDsaSigner::from_storage_pem(pem)?))
         } else {
@@ -245,6 +284,14 @@ impl Signer {
     pub fn ml_dsa(&self) -> Option<&MlDsaSigner> {
         match self {
             Self::MlDsa(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    #[cfg(feature = "pki_pqc_composite")]
+    pub fn composite(&self) -> Option<&CompositeSigner> {
+        match self {
+            Self::Composite(s) => Some(s),
             _ => None,
         }
     }

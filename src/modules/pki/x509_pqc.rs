@@ -211,7 +211,7 @@ pub fn build_crl(
 
 // ── helpers ────────────────────────────────────────────────────────────
 
-fn sign_certificate(
+pub(super) fn sign_certificate(
     tbs: TbsCertificateInner,
     signer: &MlDsaSigner,
     alg_id: AlgorithmIdentifierOwned,
@@ -225,7 +225,7 @@ fn sign_certificate(
     })
 }
 
-fn build_dn_cn_o(common_name: &str, organization: &str) -> Result<Name, RvError> {
+pub(super) fn build_dn_cn_o(common_name: &str, organization: &str) -> Result<Name, RvError> {
     let s = if organization.is_empty() {
         format!("CN={}", common_name)
     } else {
@@ -234,7 +234,7 @@ fn build_dn_cn_o(common_name: &str, organization: &str) -> Result<Name, RvError>
     Name::from_str(&s).map_err(der_err)
 }
 
-fn build_leaf_dn(role: &RoleEntry, cn: &str) -> Result<Name, RvError> {
+pub(super) fn build_leaf_dn(role: &RoleEntry, cn: &str) -> Result<Name, RvError> {
     let mut parts: Vec<String> = Vec::new();
     if !cn.is_empty() {
         parts.push(format!("CN={cn}"));
@@ -257,7 +257,7 @@ fn build_leaf_dn(role: &RoleEntry, cn: &str) -> Result<Name, RvError> {
     Name::from_str(&parts.join(",")).map_err(der_err)
 }
 
-fn build_validity(backdate: Duration, lifetime: Duration) -> Result<Validity, RvError> {
+pub(super) fn build_validity(backdate: Duration, lifetime: Duration) -> Result<Validity, RvError> {
     let now = SystemTime::now();
     let start = now - backdate;
     let end = now + lifetime;
@@ -267,7 +267,7 @@ fn build_validity(backdate: Duration, lifetime: Duration) -> Result<Validity, Rv
 /// RFC 5280 §4.1.2.5: dates ≤ 2049 use UTCTime, dates ≥ 2050 use
 /// GeneralizedTime. `Time::try_from(SystemTime)` only emits UTCTime, which
 /// silently truncates 4-digit years; we steer the choice manually.
-fn time_from_system(t: SystemTime) -> Result<Time, RvError> {
+pub(super) fn time_from_system(t: SystemTime) -> Result<Time, RvError> {
     let dur = t.duration_since(SystemTime::UNIX_EPOCH).map_err(|_| RvError::ErrPkiInternal)?;
     let utc = UtcTime::from_unix_duration(dur);
     match utc {
@@ -279,7 +279,7 @@ fn time_from_system(t: SystemTime) -> Result<Time, RvError> {
     }
 }
 
-fn subject_key_identifier(public_key: &[u8]) -> Result<OctetString, RvError> {
+pub(super) fn subject_key_identifier(public_key: &[u8]) -> Result<OctetString, RvError> {
     let mut h = Sha256::new();
     h.update(public_key);
     let digest = h.finalize();
@@ -287,7 +287,7 @@ fn subject_key_identifier(public_key: &[u8]) -> Result<OctetString, RvError> {
     OctetString::new(digest[..20].to_vec()).map_err(der_err)
 }
 
-fn encode_aki(ca_ski: &OctetString) -> Result<Extension, RvError> {
+pub(super) fn encode_aki(ca_ski: &OctetString) -> Result<Extension, RvError> {
     let aki = AuthorityKeyIdentifier {
         key_identifier: Some(ca_ski.clone()),
         authority_cert_issuer: None,
@@ -296,7 +296,7 @@ fn encode_aki(ca_ski: &OctetString) -> Result<Extension, RvError> {
     encode_ext(false, &aki)
 }
 
-fn encode_ext<E: Encode + const_oid::AssociatedOid>(critical: bool, value: &E) -> Result<Extension, RvError> {
+pub(super) fn encode_ext<E: Encode + const_oid::AssociatedOid>(critical: bool, value: &E) -> Result<Extension, RvError> {
     Ok(Extension {
         extn_id: E::OID,
         critical,
@@ -304,12 +304,12 @@ fn encode_ext<E: Encode + const_oid::AssociatedOid>(critical: bool, value: &E) -
     })
 }
 
-fn encode_ext_octets(oid: ObjectIdentifier, critical: bool, value: OctetString) -> Result<Extension, RvError> {
+pub(super) fn encode_ext_octets(oid: ObjectIdentifier, critical: bool, value: OctetString) -> Result<Extension, RvError> {
     let der = value.to_der().map_err(der_err)?;
     Ok(Extension { extn_id: oid, critical, extn_value: OctetString::new(der).map_err(der_err)? })
 }
 
-fn build_extended_key_usage(role: &RoleEntry) -> Result<Option<Extension>, RvError> {
+pub(super) fn build_extended_key_usage(role: &RoleEntry) -> Result<Option<Extension>, RvError> {
     let server_auth: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.1");
     let client_auth: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.2");
 
@@ -326,7 +326,7 @@ fn build_extended_key_usage(role: &RoleEntry) -> Result<Option<Extension>, RvErr
     Ok(Some(encode_ext(false, &ExtendedKeyUsage(oids))?))
 }
 
-fn build_subject_alt_name(subject: &SubjectInput) -> Result<Option<Extension>, RvError> {
+pub(super) fn build_subject_alt_name(subject: &SubjectInput) -> Result<Option<Extension>, RvError> {
     if subject.alt_names.is_empty() && subject.ip_sans.is_empty() {
         return Ok(None);
     }
@@ -345,12 +345,12 @@ fn build_subject_alt_name(subject: &SubjectInput) -> Result<Option<Extension>, R
     Ok(Some(encode_ext(false, &SubjectAltName(names))?))
 }
 
-fn parse_cert_pem(pem: &str) -> Result<Certificate, RvError> {
+pub(super) fn parse_cert_pem(pem: &str) -> Result<Certificate, RvError> {
     let der = pem_decode_first(pem)?;
     Certificate::from_der(&der).map_err(der_err)
 }
 
-fn extract_ski(cert: &Certificate) -> Result<OctetString, RvError> {
+pub(super) fn extract_ski(cert: &Certificate) -> Result<OctetString, RvError> {
     if let Some(exts) = &cert.tbs_certificate.extensions {
         for ext in exts {
             if ext.extn_id == SubjectKeyIdentifier::OID {
@@ -370,7 +370,7 @@ fn extract_ski(cert: &Certificate) -> Result<OctetString, RvError> {
     subject_key_identifier(pk_der)
 }
 
-fn pem_decode_first(pem: &str) -> Result<Vec<u8>, RvError> {
+pub(super) fn pem_decode_first(pem: &str) -> Result<Vec<u8>, RvError> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     let mut in_block = false;
     let mut b64 = String::new();
@@ -389,7 +389,7 @@ fn pem_decode_first(pem: &str) -> Result<Vec<u8>, RvError> {
     STANDARD.decode(b64.as_bytes()).map_err(|_| RvError::ErrPkiPemBundleInvalid)
 }
 
-fn pem_encode(label: &str, der: &[u8]) -> String {
+pub(super) fn pem_encode(label: &str, der: &[u8]) -> String {
     use base64::{engine::general_purpose::STANDARD, Engine};
     let body = STANDARD.encode(der);
     let mut out = String::with_capacity(body.len() + 64);
@@ -406,7 +406,7 @@ fn pem_encode(label: &str, der: &[u8]) -> String {
     out
 }
 
-fn der_err(e: impl std::fmt::Debug) -> RvError {
+pub(super) fn der_err(e: impl std::fmt::Debug) -> RvError {
     log::error!("pki/x509-pqc: DER error: {e:?}");
     RvError::ErrPkiInternal
 }

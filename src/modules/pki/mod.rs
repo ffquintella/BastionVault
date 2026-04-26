@@ -17,6 +17,8 @@ use crate::{
     modules::Module,
 };
 
+#[cfg(feature = "pki_pqc_composite")]
+pub mod composite;
 pub mod crypto;
 pub mod path_config;
 pub mod path_crl;
@@ -28,6 +30,8 @@ pub mod path_root;
 pub mod pqc;
 pub mod storage;
 pub mod x509;
+#[cfg(feature = "pki_pqc_composite")]
+pub mod x509_composite;
 pub mod x509_pqc;
 
 const PKI_BACKEND_HELP: &str = r#"

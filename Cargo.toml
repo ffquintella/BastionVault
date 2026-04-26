@@ -193,6 +193,12 @@ toml = "1.1.2"
 [dev-dependencies]
 serial_test = "3.4"
 cucumber = "0.21"
+# Pulled in for the Phase-3 composite-signature test so we can verify the
+# classical ECDSA-P256 half of the composite signature directly. p256 +
+# sha2 are already in the dep tree transitively; promoting them keeps the
+# test self-contained without inflating the main build's surface.
+p256 = { version = "0.13", features = ["ecdsa"] }
+sha2 = "0.11"
 # WebAssembly text-format parser. Used only by plugin runtime tests so we
 # can compile small WAT modules inline rather than checking in pre-built
 # `.wasm` blobs.
@@ -220,6 +226,13 @@ cloud_gdrive = []
 cloud_dropbox = []
 cloud_keychain = ["keyring"]
 cloud_targets = ["cloud_s3", "cloud_onedrive", "cloud_gdrive", "cloud_dropbox", "cloud_keychain"]
+# PKI Phase 3 — composite / hybrid signatures (ECDSA-P256 + ML-DSA-65).
+# Off by default. The IETF draft `draft-ietf-lamps-pq-composite-sigs`
+# is still moving (random salt, pre-hash construction, OID arc have
+# all churned across recent revisions), so the engine ships this as
+# an opt-in preview rather than a stable interop guarantee. See
+# `features/pki-secret-engine.md`.
+pki_pqc_composite = []
 
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5"

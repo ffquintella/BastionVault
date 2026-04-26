@@ -94,10 +94,11 @@ impl PkiBackendInner {
             parse_duration(&ttl_str).map_err(|_| RvError::ErrRequestFieldInvalid)?
         };
 
-        // Phase 2: dispatch on algorithm class. Classical (RSA/EC/Ed25519)
-        // goes through rcgen; PQC (ML-DSA) goes through the manual x509-cert
-        // builder in `x509_pqc`. Either way the result is the same shape:
-        // (PEM cert, serial bytes, PEM private key).
+        // Dispatch on algorithm class. Classical (RSA/EC/Ed25519) goes
+        // through rcgen; PQC (ML-DSA) through the manual x509-cert builder
+        // in `x509_pqc`; composite (Phase 3 preview) through `x509_composite`.
+        // Either way the result is the same shape: (PEM cert, serial bytes,
+        // PEM private key).
         let signer = Signer::generate(alg)?;
         let (cert_pem, serial_bytes) = match &signer {
             Signer::Classical(cs) => {
@@ -105,6 +106,10 @@ impl PkiBackendInner {
                 (cert.pem(), serial)
             }
             Signer::MlDsa(ml) => x509_pqc::build_root_ca(&common_name, &organization, ttl, ml)?,
+            #[cfg(feature = "pki_pqc_composite")]
+            Signer::Composite(c) => {
+                super::x509_composite::build_root_ca(&common_name, &organization, ttl, c)?
+            }
         };
         let key_pem = signer.to_storage_pem();
 

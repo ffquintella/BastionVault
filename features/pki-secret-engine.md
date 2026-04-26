@@ -15,7 +15,7 @@ This feature replaces the retired legacy module at `src/modules/pki/` (currently
 
 ## Current State
 
-**Phases 1 + 2 — Done.** Phase 1 ships the pure-Rust classical engine (RSA / ECDSA P-256/P-384 / Ed25519) on `rcgen` 0.14 with the `ring` provider; Phase 2 layers on ML-DSA-44/65/87 PQC roles built directly on `x509-cert` + `der` + `fips204`, sidestepping rcgen for PQC because rcgen's ML-DSA support is gated behind `aws_lc_rs_unstable` (forbidden). No `openssl-sys` or `aws-lc-sys` is pulled in by this module across either phase. The legacy OpenSSL-bound `path_*.rs` files have been removed; the new module lives in flat layout at `src/modules/pki/`:
+**Phases 1 + 2 + 3 — Done.** Phase 3 ships behind the `pki_pqc_composite` cargo feature flag (off by default) since the IETF draft for composite signatures is still moving. Phase 1 ships the pure-Rust classical engine (RSA / ECDSA P-256/P-384 / Ed25519) on `rcgen` 0.14 with the `ring` provider; Phase 2 layers on ML-DSA-44/65/87 PQC roles built directly on `x509-cert` + `der` + `fips204`, sidestepping rcgen for PQC because rcgen's ML-DSA support is gated behind `aws_lc_rs_unstable` (forbidden). No `openssl-sys` or `aws-lc-sys` is pulled in by this module across either phase. The legacy OpenSSL-bound `path_*.rs` files have been removed; the new module lives in flat layout at `src/modules/pki/`:
 
 - [`mod.rs`](../src/modules/pki/mod.rs) — `PkiModule` + `PkiBackend` + route registration
 - [`crypto.rs`](../src/modules/pki/crypto.rs) — `CertSigner` (classical), `Signer` (unified Classical | MlDsa enum that path handlers round-trip through storage), `KeyAlgorithm` + `AlgorithmClass` (the mixed-chain gate)
@@ -30,6 +30,7 @@ Wired into [`set_default_modules`](../src/module_manager.rs:38) so a fresh core 
 End-to-end coverage:
 - [tests/test_pki_engine.rs](../tests/test_pki_engine.rs) — Phase 1 classical: mount → generate root → fetch CA → create / list roles → issue leaf (DNS + IP SANs) → fetch by serial → empty CRL → revoke → CRL contains revoked serial (parsed via `x509-parser`) → stubs return clear errors.
 - [tests/test_pki_pqc.rs](../tests/test_pki_pqc.rs) — Phase 2 ML-DSA-65: mount → generate ML-DSA-65 root → confirm signatureAlgorithm OID → directly verify the root self-signature with `fips204` against the SPKI-extracted public key (proves our TBS DER path is correct) → role with `key_type=ml-dsa-65` (and `key_bits != 0` rejected) → issue leaf → re-verify leaf signature under root pk → revoke → CRL contains revoked serial → mixed-chain rejection (classical role on PQC CA fails).
+- [tests/test_pki_composite.rs](../tests/test_pki_composite.rs) — Phase 3 composite (feature-gated; run with `cargo test --features pki_pqc_composite`): mount → generate composite root → confirm composite OID → split SPKI into `(PQ pk, classical pk)` → independently verify both halves of the root self-signature (`fips204` for PQ, `p256::ecdsa::VerifyingKey` for classical) → composite leaf issuance → independently verify both halves of the chain signature → revoke + composite-signed CRL → mixed-chain rejection.
 
 **Implementation deviations from the spec, called out for review:**
 
@@ -38,7 +39,8 @@ End-to-end coverage:
 - **RSA generation is rejected at signer creation time** with `ErrPkiKeyTypeInvalid`. `rcgen` cannot generate RSA keypairs through its provider stack; rather than panic mid-issuance, we fail early. Phase 2 will plug a `rsa`-crate-backed `SigningKey` impl into rcgen so `key_type = "rsa"` works.
 - **`sign/:role`, `sign-verbatim`, `sign-intermediate`, `intermediate/{generate,set-signed}`, `tidy`, `config/ca` are stubs** that return `ErrLogicalOperationUnsupported`. They live on the route table so clients see Vault-shape responses; their handler bodies will be filled in alongside the CSR-parsing infrastructure in a Phase 1.1 / 2.1 follow-up.
 - **PQC private key returned by `pki/issue/:role` is in our `BV PQC SIGNER` envelope, not PKCS#8.** There is no widely-deployed PKCS#8 wrapper for ML-DSA seeds yet (the IETF-LAMPS draft was still in flux when this shipped). The envelope is engine-defined but the body is plain JSON containing the seed and public key — clients can extract those directly. When the IETF draft stabilises, Phase 2.1 will add a PKCS#8-encoded variant alongside the existing envelope.
-- **Mixed-chain `--allow-mixed-chain` opt-in is not yet exposed.** Phase 2 ships the closed-by-default form: PQC role → PQC CA, classical → classical, mixed → reject. The migration-window opt-in lands in Phase 2.1.
+- **Mixed-chain `--allow-mixed-chain` opt-in is not yet exposed.** Phase 2 ships the closed-by-default form: PQC role → PQC CA, classical → classical, mixed → reject. Phase 3 extends this to composite (composite role on classical/PQC CA → reject). The migration-window opt-in lands in Phase 2.1.
+- **Phase 3 composite is non-interop preview.** The IETF draft `draft-ietf-lamps-pq-composite-sigs` is still moving (random salt, prehash construction, OID arc have all churned across recent revisions). The engine pins the OID and the SEQUENCE-of-two-BIT-STRINGs structure, but the prehash is a BastionVault-internal `SHA-256("BastionVault-PKI-Composite-v0/MLDSA65+ECDSAP256/v0" || M)` rather than the draft's `Domain || Random || M'` shape. Certs verify against themselves but should not be expected to interoperate with arbitrary draft-conformant verifiers until the draft locks. The `bv_prehash` function in [composite.rs](../src/modules/pki/composite.rs) is the single point of swap when that happens.
 - **`allowed_domains` / `allow_glob_domains` are not yet enforced.** The Phase 1 role schema accepts `allow_any_name`, `allow_localhost`, `allow_subdomains`, `allow_bare_domains` (used as Vault parity flags) but the constraint matrix beyond `allow_any_name + allow_localhost` is deferred. Roles default to `allow_any_name = true` to match the legacy stub's behaviour.
 
 Crypto building blocks now in tree (additions over what was already present):
@@ -46,6 +48,7 @@ Crypto building blocks now in tree (additions over what was already present):
 - Phase 1: `rcgen = "0.14"` with `x509-parser` feature on, `time = "0.3"` (top-level `Cargo.toml`)
 - Phase 2: `x509-cert = "0.2"` (`builder` + `pem` + `std` features), `fips204 = "0.4"` (direct), `const-oid = "0.9"` with `db` feature
 - bv_crypto: new `ml-dsa-44` and `ml-dsa-87` features (default-on) wrapping `fips204::ml_dsa_{44,87}`, mirroring the existing `ml-dsa-65` provider.
+- Phase 3: no new direct production deps — composite is built on existing `rcgen`, `fips204`, `x509-cert`, `der`, `sha2`. Test pulls `p256` + `sha2` as `dev-dependencies` so the composite-signature test can verify the classical half independently.
 
 Already in tree from prior work and reused: `rsa = "0.9"`, `x509-parser = "0.17"`, `zeroize`, `rand = "0.10"`, `der = "0.7"` (transitive via `x509-cert`), `spki = "0.7"` (transitive via `x509-cert`).
 
@@ -238,6 +241,17 @@ Final layout differs slightly from the original plan (flat, not nested under `cr
 | `src/modules/pki/path_roles.rs` (extension) | `key_type = "ml-dsa-*"` validation; rejects `key_bits != 0` for PQC roles. |
 | `src/modules/pki/path_root.rs` / `path_issue.rs` / `path_revoke.rs` (extensions) | Dispatch on `Signer` variant; PQC chains route through `x509_pqc` builders. Mixed-chain rejection at issue time. |
 
+### Phase 3 -- Composite / Hybrid Signatures (Feature-Gated) — **Done (preview)**
+
+Feature flag: `pki_pqc_composite`. Off by default. Honest non-interop preview — see "Implementation deviations" below for the IETF draft caveat.
+
+| File | Purpose |
+|---|---|
+| `src/modules/pki/composite.rs` | `CompositeSigner` (ECDSA-P256 + ML-DSA-65), composite OID `2.16.840.1.114027.80.8.1.28`, prehash `bv_prehash` (single-point-of-swap when the IETF draft locks), `BV PQC COMPOSITE SIGNER` storage envelope. |
+| `src/modules/pki/x509_composite.rs` | Composite TBS / TBSCertList DER assembly. Reuses helpers elevated from `x509_pqc` (DN, validity, SAN/EKU/SKI/AKI extensions, cert parsing) so only the algorithm-identifier and signing seam are new. |
+| `src/modules/pki/crypto.rs` (extension) | `KeyAlgorithm::CompositeEcdsaP256MlDsa65`, `AlgorithmClass::Composite`, `Signer::Composite(CompositeSigner)` — all gated behind `pki_pqc_composite`. |
+| `src/modules/pki/path_*.rs` (extensions) | Composite arms in the `match` on `Signer` variant, all `#[cfg(feature = "pki_pqc_composite")]`. Mixed-chain guard now rejects all three cross-class cases. |
+
 Dependency:
 
 ```toml
@@ -246,14 +260,9 @@ fips204 = { version = "0.4.6", default-features = false, features = ["default-rn
 
 (Already a dep of `bv_crypto`; we'd re-use it through `bv_crypto` rather than adding a second copy when feasible.)
 
-### Phase 3 -- Composite / Hybrid Signatures (Feature-Gated)
+### Phase 3 -- Composite / Hybrid Signatures (Feature-Gated) — **Done (preview)**
 
-Feature flag: `pki_pqc_composite` (default off until the IETF draft stabilises).
-
-| File | Purpose |
-|---|---|
-| `src/modules/pki/crypto/composite.rs` | `CompositeSigner` pairing one classical + one PQC signer. |
-| `src/modules/pki/x509/pqc_oids.rs` (extension) | Composite OIDs. |
+Final layout differs from the original plan (flat, with `composite.rs` and `x509_composite.rs` siblings of `pqc.rs` / `x509_pqc.rs`). See the Current State table above for the file map. Feature flag: `pki_pqc_composite` (default off).
 
 ### Phase 4 -- CRL Modernisation and Tidy
 
