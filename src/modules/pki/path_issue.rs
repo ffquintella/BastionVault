@@ -59,14 +59,6 @@ impl PkiBackend {
         })
     }
 
-    pub fn tidy_stub(&self) -> Path {
-        let r = self.inner.clone();
-        new_path!({
-            pattern: r"tidy$",
-            operations: [{op: Operation::Write, handler: r.unsupported}],
-            help: "(Phase 4) Sweep expired certs from the store and CRL."
-        })
-    }
 }
 
 #[maybe_async::maybe_async]
@@ -144,11 +136,19 @@ impl PkiBackendInner {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
+            // Capture NotAfter so Phase 4's tidy sweep can identify expired
+            // records without re-parsing the PEM. `ttl` came from the role +
+            // request body and was already used to build the cert above, so
+            // adding it to `now` reproduces the in-cert NotAfter to within a
+            // millisecond — close enough for tidy decisions that include a
+            // safety buffer.
+            let not_after_unix = (now as i64).saturating_add(ttl.as_secs() as i64);
             let record = CertRecord {
                 serial_hex: serial_hex.clone(),
                 certificate_pem: cert_pem.clone(),
                 issued_at_unix: now,
                 revoked_at_unix: None,
+                not_after_unix,
             };
             storage::put_json(req, &storage::cert_storage_key(&serial_hex), &record).await?;
         }

@@ -28,6 +28,8 @@ pub const KEY_CRL_STATE: &str = "crl/state";
 pub const KEY_CRL_CACHED: &str = "crl/cached";
 pub const KEY_CONFIG_URLS: &str = "config/urls";
 pub const KEY_CONFIG_CRL: &str = "config/crl";
+pub const KEY_CONFIG_AUTO_TIDY: &str = "config/auto-tidy";
+pub const KEY_TIDY_STATUS: &str = "tidy/status";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaMetadata {
@@ -45,6 +47,12 @@ pub struct CertRecord {
     pub certificate_pem: String,
     pub issued_at_unix: u64,
     pub revoked_at_unix: Option<u64>,
+    /// Unix timestamp of the certificate's NotAfter, captured at issue time
+    /// so [`super::path_tidy`] can sweep expired records without re-parsing
+    /// the stored PEM. `#[serde(default)]` keeps deserialization
+    /// backwards-compatible with records written before Phase 4.
+    #[serde(default)]
+    pub not_after_unix: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -81,6 +89,53 @@ impl Default for CrlConfig {
     fn default() -> Self {
         Self { expiry_seconds: 72 * 3600, disable: false }
     }
+}
+
+/// Configuration for the periodic tidy job.
+///
+/// Phase 4 ships the *config endpoint* (so operators can persist their
+/// preference) but defers the actual scheduler — the values here are read
+/// only by an on-demand `pki/tidy` invocation today. A follow-up will wire
+/// a tokio task that fires at `interval_seconds` and runs the same handler
+/// the operator can call manually.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoTidyConfig {
+    pub enabled: bool,
+    /// How often the periodic tidy fires. Vault default is 12 hours.
+    pub interval_seconds: u64,
+    /// Sweep certs from `certs/<serial>` whose NotAfter has passed.
+    pub tidy_cert_store: bool,
+    /// Sweep entries from the CRL revoked-list whose certs have already
+    /// expired (the operating thinking is: an expired cert no longer needs
+    /// to appear in a CRL because verifiers reject it on date alone).
+    pub tidy_revoked_certs: bool,
+    /// Wait this long *after* a record's NotAfter before deleting, so a
+    /// brief operator window remains for forensic inspection. Vault default
+    /// is 72 hours.
+    pub safety_buffer_seconds: u64,
+}
+
+impl Default for AutoTidyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_seconds: 12 * 3600,
+            tidy_cert_store: true,
+            tidy_revoked_certs: true,
+            safety_buffer_seconds: 72 * 3600,
+        }
+    }
+}
+
+/// Snapshot of the most recent tidy run, surfaced via `pki/tidy-status`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TidyStatus {
+    pub last_run_at_unix: u64,
+    pub last_run_duration_ms: u64,
+    pub certs_deleted: u64,
+    pub revoked_entries_deleted: u64,
+    pub safety_buffer_seconds: u64,
+    pub source: String,
 }
 
 pub fn serial_to_hex(serial: &[u8]) -> String {

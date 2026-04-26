@@ -15,7 +15,7 @@ This feature replaces the retired legacy module at `src/modules/pki/` (currently
 
 ## Current State
 
-**Phases 1 + 2 + 3 — Done.** Phase 3 ships behind the `pki_pqc_composite` cargo feature flag (off by default) since the IETF draft for composite signatures is still moving. Phase 1 ships the pure-Rust classical engine (RSA / ECDSA P-256/P-384 / Ed25519) on `rcgen` 0.14 with the `ring` provider; Phase 2 layers on ML-DSA-44/65/87 PQC roles built directly on `x509-cert` + `der` + `fips204`, sidestepping rcgen for PQC because rcgen's ML-DSA support is gated behind `aws_lc_rs_unstable` (forbidden). No `openssl-sys` or `aws-lc-sys` is pulled in by this module across either phase. The legacy OpenSSL-bound `path_*.rs` files have been removed; the new module lives in flat layout at `src/modules/pki/`:
+**Phases 1 + 2 + 3 + 4 — Done.** Phase 3 ships behind the `pki_pqc_composite` cargo feature flag (off by default) since the IETF draft for composite signatures is still moving. Phase 4 ships the `pki/tidy` sweep on-demand; the periodic scheduler is the only piece deferred to 4.1. Phase 1 ships the pure-Rust classical engine (RSA / ECDSA P-256/P-384 / Ed25519) on `rcgen` 0.14 with the `ring` provider; Phase 2 layers on ML-DSA-44/65/87 PQC roles built directly on `x509-cert` + `der` + `fips204`, sidestepping rcgen for PQC because rcgen's ML-DSA support is gated behind `aws_lc_rs_unstable` (forbidden). No `openssl-sys` or `aws-lc-sys` is pulled in by this module across either phase. The legacy OpenSSL-bound `path_*.rs` files have been removed; the new module lives in flat layout at `src/modules/pki/`:
 
 - [`mod.rs`](../src/modules/pki/mod.rs) — `PkiModule` + `PkiBackend` + route registration
 - [`crypto.rs`](../src/modules/pki/crypto.rs) — `CertSigner` (classical), `Signer` (unified Classical | MlDsa enum that path handlers round-trip through storage), `KeyAlgorithm` + `AlgorithmClass` (the mixed-chain gate)
@@ -24,6 +24,7 @@ This feature replaces the retired legacy module at `src/modules/pki/` (currently
 - [`x509_pqc.rs`](../src/modules/pki/x509_pqc.rs) — PQC TBS / CRL DER assembly via `x509-cert` + `der`, signed with `MlDsaSigner`. Emits BasicConstraints, KeyUsage, ExtendedKeyUsage, SubjectAltName (DNS + IP), SubjectKeyIdentifier (RFC 7093 method 1), AuthorityKeyIdentifier; CRLs carry `crlNumber`.
 - [`storage.rs`](../src/modules/pki/storage.rs) — sealed-storage layout (`ca/cert`, `ca/key`, `certs/<hex>`, `crl/state`, `crl/cached`, `config/{urls,crl}`)
 - [`path_roles.rs`](../src/modules/pki/path_roles.rs), [`path_root.rs`](../src/modules/pki/path_root.rs), [`path_issue.rs`](../src/modules/pki/path_issue.rs), [`path_fetch.rs`](../src/modules/pki/path_fetch.rs), [`path_revoke.rs`](../src/modules/pki/path_revoke.rs), [`path_crl.rs`](../src/modules/pki/path_crl.rs), [`path_config.rs`](../src/modules/pki/path_config.rs) — dispatch on `Signer` variant; classical roles flow through `x509`, PQC through `x509_pqc`.
+- [`path_tidy.rs`](../src/modules/pki/path_tidy.rs) — Phase 4 tidy handler + status + auto-tidy config. `run_tidy_inner` is split out as a `pub(super)` helper so the upcoming periodic scheduler can call it with the same semantics as the on-demand handler.
 
 Wired into [`set_default_modules`](../src/module_manager.rs:38) so a fresh core registers the `pki` engine type automatically.
 
@@ -31,6 +32,7 @@ End-to-end coverage:
 - [tests/test_pki_engine.rs](../tests/test_pki_engine.rs) — Phase 1 classical: mount → generate root → fetch CA → create / list roles → issue leaf (DNS + IP SANs) → fetch by serial → empty CRL → revoke → CRL contains revoked serial (parsed via `x509-parser`) → stubs return clear errors.
 - [tests/test_pki_pqc.rs](../tests/test_pki_pqc.rs) — Phase 2 ML-DSA-65: mount → generate ML-DSA-65 root → confirm signatureAlgorithm OID → directly verify the root self-signature with `fips204` against the SPKI-extracted public key (proves our TBS DER path is correct) → role with `key_type=ml-dsa-65` (and `key_bits != 0` rejected) → issue leaf → re-verify leaf signature under root pk → revoke → CRL contains revoked serial → mixed-chain rejection (classical role on PQC CA fails).
 - [tests/test_pki_composite.rs](../tests/test_pki_composite.rs) — Phase 3 composite (feature-gated; run with `cargo test --features pki_pqc_composite`): mount → generate composite root → confirm composite OID → split SPKI into `(PQ pk, classical pk)` → independently verify both halves of the root self-signature (`fips204` for PQ, `p256::ecdsa::VerifyingKey` for classical) → composite leaf issuance → independently verify both halves of the chain signature → revoke + composite-signed CRL → mixed-chain rejection.
+- [tests/test_pki_tidy.rs](../tests/test_pki_tidy.rs) — Phase 4 tidy: issue two 1-second-TTL certs, revoke one, sleep past NotAfter, `pki/tidy` with `safety_buffer=0s` → both certs swept, revoked entry purged from CRL (parsed via `x509-parser`), `pki/tidy-status` reports the run, `pki/config/auto-tidy` round-trips config.
 
 **Implementation deviations from the spec, called out for review:**
 
@@ -264,9 +266,16 @@ fips204 = { version = "0.4.6", default-features = false, features = ["default-rn
 
 Final layout differs from the original plan (flat, with `composite.rs` and `x509_composite.rs` siblings of `pqc.rs` / `x509_pqc.rs`). See the Current State table above for the file map. Feature flag: `pki_pqc_composite` (default off).
 
-### Phase 4 -- CRL Modernisation and Tidy
+### Phase 4 -- CRL Modernisation and Tidy — **Done (on-demand sweep + config; scheduler in 4.1)**
 
-CRL build via `x509-cert::crl`. `tidy` job sweeps expired entries from the CRL and from the cert index; runs on a configurable interval (Vault parity).
+| File | Purpose |
+|---|---|
+| `src/modules/pki/path_tidy.rs` | `pki/tidy` (sync sweep), `pki/tidy-status` (last-run snapshot), `pki/config/auto-tidy` (config round-trip; periodic scheduler deferred). `run_tidy_inner` is the shared sweep entry point. |
+| `src/modules/pki/storage.rs` (extension) | `CertRecord.not_after_unix` (#[serde(default)] for backwards compat), `AutoTidyConfig`, `TidyStatus`, two new storage keys. |
+| `src/modules/pki/path_issue.rs` (extension) | Captures `not_after_unix` at issue time so tidy doesn't re-parse PEM. |
+| `src/modules/pki/path_revoke.rs::rebuild_crl` (reused) | Tidy fires a CRL rebuild when the revoked-list shrinks. |
+
+The "CRL modernisation via `x509-cert::crl`" hint in the original spec applied to the classical path — Phase 4 leaves it on `rcgen` because it works and a refactor belongs in a focused commit, not entangled with the tidy handler. PQC and composite CRLs already use `x509-cert::crl` via Phase 2 / Phase 3.
 
 ### Not In Scope
 

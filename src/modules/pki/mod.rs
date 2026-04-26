@@ -27,6 +27,7 @@ pub mod path_issue;
 pub mod path_revoke;
 pub mod path_roles;
 pub mod path_root;
+pub mod path_tidy;
 pub mod pqc;
 pub mod storage;
 pub mod x509;
@@ -70,7 +71,9 @@ impl PkiBackend {
             self.issue_path(),
             self.sign_role_stub(),
             self.sign_verbatim_stub(),
-            self.tidy_stub(),
+            self.tidy_path(),
+            self.tidy_status_path(),
+            self.config_auto_tidy_path(),
             self.fetch_cert_path(),
             self.fetch_ca_path(),
             self.fetch_ca_chain_path(),
