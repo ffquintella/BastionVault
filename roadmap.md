@@ -45,7 +45,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Auth: Userpass | Done |
 | Auth: Certificate | Done |
 | **Secret Engines** | |
-| Secret Engine: PKI (pure-Rust, PQC-capable -- [spec](features/pki-secret-engine.md)) | In Progress (Phases 1 + 2 + 3 + 4 + 4.1 + 5 + 5.1 + 5.2 done) |
+| Secret Engine: PKI (pure-Rust, PQC-capable -- [spec](features/pki-secret-engine.md)) | Done (Phases 1–5.2) — pure-Rust X.509 + CRL on `rcgen` 0.14 + RustCrypto, ML-DSA-44/65/87 PQC roles via `fips204` + `x509-cert` (no `openssl-sys` / `aws-lc-sys`), composite ECDSA-P256+ML-DSA-65 signatures behind `pki_pqc_composite` feature, full Vault-shape surface — `roles` + `root/generate` + `intermediate/{generate,set-signed}` + `root/sign-intermediate` + `issue/:role` + `sign/:role` + `sign-verbatim` + `revoke` + `tidy` + `crl` + `config/{ca,crl,urls,issuers,auto-tidy}` + multi-issuer registry (`issuers/*` with rename/delete + role-level pinning + per-issuer CRL) + on-demand `pki/tidy` + auto-tidy scheduler. 12 integration tests + 1 feature-gated composite test, all green. See "Completed Initiatives". |
 | PKI: ACME server endpoints ([spec](features/pki-acme.md)) | Todo |
 | Secret Engine: Transit ([spec](features/transit-secret-engine.md)) | Todo |
 | Secret Engine: TOTP ([spec](features/totp-secret-engine.md)) | Todo |
@@ -93,6 +93,9 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 - [Cloud FileTarget Memory Cache](features/cloud-storage-backend.md)
   Feature-complete bounded TTL-based `CachingTarget` decorator (`src/storage/physical/file/cache.rs`) with 30s read TTL / 10s list TTL / 65,536-entry / **500 MiB** soft caps, write-and-delete invalidation (including prefix-affected list entries), negative-result caching, FIFO eviction, **per-key singleflight coalescing** (8 concurrent misses → 1 provider call via `tokio::sync::Mutex`), **stale-while-revalidate** (default `stale_ratio = 0.5` — entries past the halfway point serve cached value + spawn background refresh via `tokio::spawn` so hot keys stay hot under steady traffic), **opt-in bounded-concurrency background prefetch** (non-empty `prefetch_keys` triggers a warmup task on construction), and `bvault_cache_*{layer="cloud_target"}` Prometheus metrics. Default-on for `s3`/`onedrive`/`gdrive`/`dropbox`, default-off for `local`. All async features `#[cfg(not(feature = "sync_handler"))]`-gated — sync builds fall back to v1 pure-TTL behavior. Config keys: `cache_{read_ttl_secs,list_ttl_secs,max_entries,max_bytes,stale_ratio,prefetch_keys,prefetch_concurrency}`. Zero new deps. 13 unit tests green.
 
+- [PKI Secret Engine](features/pki-secret-engine.md)
+  All seven phases shipped (1, 2, 3, 4, 4.1, 5, 5.1, 5.2). Pure-Rust X.509 + CRL on `rcgen` 0.14 + RustCrypto for the classical path; ML-DSA-44/65/87 PQC roles built directly on `x509-cert` + `der` + `fips204` (sidesteps rcgen because its ML-DSA support is gated behind `aws_lc_rs_unstable`); composite ECDSA-P256 + ML-DSA-65 signatures behind the `pki_pqc_composite` feature flag (preview — IETF draft `draft-ietf-lamps-pq-composite-sigs` not yet locked); on-demand `pki/tidy` + a periodic auto-tidy scheduler hooked into `Core::post_unseal`. Full Vault-shape route surface: roles, root + intermediate hierarchies, `config/ca` import, CSR signing (`sign/:role` + `sign-verbatim`, classical and PQC), revoke + per-issuer CRL state, multi-issuer per mount (`pki/issuers`, `pki/issuer/:ref` Read/Write/Delete, `pki/config/issuers`, role-level `issuer_ref` pinning, request-body override, lazy migration shim that lifts pre-5.2 mounts on first read). Mixed-chain rejection at issue time across classical / PQC / composite classes (no `--allow-mixed-chain` opt-in yet). No `openssl-sys` and no `aws-lc-sys` reachable from the engine. 12 integration tests pass on the default build; the composite test passes with `--features pki_pqc_composite`.
+
 - [SAML 2.0 Authentication](features/saml-auth.md)
   Server module shipped end-to-end. `src/modules/credential/saml/` implements SP-initiated SSO with a fully pure-Rust stack — no `samael` / `libxml2` / `libxmlsec1` / OpenSSL dependency. AuthnRequest generation + HTTP-Redirect encoding, streaming `quick-xml` Response parsing, structural validation (status + Destination + InResponseTo + Issuer + Audience + timestamp with 60 s clock-skew grace), RSA-SHA256 / RSA-SHA1 signature verification via `rsa 0.9` + `x509-parser`, and a hand-rolled Exclusive XML Canonicalization that handles the output format every major IdP (Azure AD, Okta, Keycloak, Shibboleth, ADFS) emits. Attribute-to-policy role mappings with per-role `bound_attributes` / `bound_subjects` enforcement at callback time. Login + callback paths `auth/<mount>/login` + `auth/<mount>/callback` (both unauth), state persisted at `state/<relay_state>` with 5-minute TTL and single-use load-and-delete. 46 unit + integration tests, including an end-to-end sign-and-verify roundtrip against a freshly-generated RSA keypair.
 
@@ -100,9 +103,9 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 
 No active initiatives — all previously-active items have closed out.
 Next up are the items tracked under `Todo` in the Feature Status
-table (Secret Versioning & Soft-Delete, Transit / TOTP / SSH secret
-engines, Dynamic Secrets, HSM Support, Kubernetes Integration,
-Compliance Reporting, Plugin System).
+table (Secret Versioning & Soft-Delete, PKI ACME server endpoints,
+Transit / TOTP / SSH secret engines, Dynamic Secrets, HSM Support,
+Kubernetes Integration, Compliance Reporting, Plugin System).
 
 ## Deferred sub-initiatives
 
@@ -113,6 +116,14 @@ Tracked separately from Active Initiatives because each is self-contained, needs
 - **File Resources — periodic re-sync** — internal-scheduler vs. external-tick-endpoint design question; cluster coordination via `hiqlite::dlock`. Blocked on at least one non-local sync transport landing first (nothing to re-sync with only local-FS). See `features/file-resources.md` § "Deferred sub-initiatives".
 - **Cloud Storage Targets — rekey CLI** — library pieces present (`ObfuscatingTarget::with_salt`, `list("")` enumeration); end-to-end CLI that walks old-salt → new-salt is not shipped. Production rekey today via `operator migrate` through a non-obfuscated intermediate.
 - **Cloud Storage Targets — server-mode obfuscation bootstrap** — desktop mode honors `obfuscate_keys` via `FileBackend::new_maybe_obfuscated`; server mode's sync `storage::new_backend` logs a warning when the flag is set. Requires propagating the async bootstrap through the broader storage chain.
+- **PKI — `--allow-mixed-chain` opt-in** — today the mixed-chain guard is closed by default with no override (PQC role on classical CA, composite role on PQC CA, etc. → `ErrPkiKeyTypeInvalid` at issue time). The spec called out an opt-in for migration windows; trivial to add as a request-body or role-level flag, deferred until a real migration scenario asks for it.
+- **PKI — AIA / CRL Distribution Points / Name Constraints extensions in issued certs** — `pki/config/urls` round-trips the URLs already; the cert builders just don't emit the corresponding extensions yet. Cross-phase deferral (classical, PQC, and composite paths share this gap).
+- **PKI — classical CRL via `x509-cert::crl`** — PQC and composite CRLs already use `x509-cert::crl`; classical still uses `rcgen`. Pure refactor, no behavioural change. Spec hinted at "CRL modernisation" in Phase 4.
+- **PKI — composite IETF-draft tracking** — the Phase 3 composite preview pins the OID + structure but uses a BastionVault-internal prehash domain. When `draft-ietf-lamps-pq-composite-sigs` locks on its `Domain || Random || PH(M)` shape, `composite::bv_prehash` is the single point of swap.
+- **PKI — additional composite variants** — Phase 3 ships `id-MLDSA65-ECDSA-P256-SHA512` only. Other pairings (`mldsa44+ecdsa-p256-sha256`, `mldsa87+ecdsa-p384-sha512`, RSA-PSS pairs) follow the same structure; deferred until operator demand confirms which to add first.
+- **PKI — PKCS#8 envelope for ML-DSA private keys** — `pki/issue` returns PQC private keys in the engine-internal `BV PQC SIGNER` JSON envelope today, because there's no widely-deployed PKCS#8 wrapper for ML-DSA seeds yet. Add the PKCS#8 variant alongside the envelope when the IETF `OneAsymmetricKey` draft for ML-DSA stabilises.
+- **PKI — RSA generation** — `KeyAlgorithm::Rsa{2048,3072,4096}` are accepted at role / root configuration time but `Signer::generate` rejects them because rcgen's `ring` provider can't generate RSA keypairs. Plugging an `rsa`-crate-backed `SigningKey` impl into rcgen's trait closes the gap; ECDSA + Ed25519 work today.
+- **PKI — multi-issuer `usage` flags** — Vault's `usages = ["issuing-certificates", "crl-signing", "ocsp-signing"]` per issuer would let an operator dedicate one issuer to issue and another to CRL signing. Phase 5.2 ships the registry but treats every issuer as fully-capable; per-usage gating is a small additive change.
 
 ## Notes
 
