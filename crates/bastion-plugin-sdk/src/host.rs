@@ -195,36 +195,37 @@ impl Host {
 
 #[cfg(all(target_arch = "wasm32", not(feature = "host_test")))]
 mod bindings {
-    use core::ffi::c_void;
-    use core::sync::atomic::{AtomicI32, Ordering};
-
-    // Imports declared by the host. The `bv` module name + function
-    // names match what `crate::plugins::runtime::register_host_imports`
-    // registers on the wasmtime side.
-    #[link(wasm_import_module = "bv")]
-    extern "C" {
-        fn log(level: i32, ptr: i32, len: i32);
-        fn set_response(ptr: i32, len: i32);
-        fn storage_get(key_ptr: i32, key_len: i32, out_ptr: i32, out_max: i32) -> i32;
-        fn storage_put(key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32) -> i32;
-        fn storage_delete(key_ptr: i32, key_len: i32) -> i32;
-        fn storage_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_max: i32) -> i32;
-        fn audit_emit(payload_ptr: i32, payload_len: i32) -> i32;
-        fn now_unix_ms() -> i64;
-        fn config_get(key_ptr: i32, key_len: i32, out_ptr: i32, out_max: i32) -> i32;
+    // Raw extern imports declared by the host. The `bv` module name +
+    // function names match what `crate::plugins::runtime::register_host_imports`
+    // registers on the wasmtime side. Kept in a private inner `raw`
+    // module so the safe `&[u8]`-taking wrappers below can share names
+    // with the extern declarations without colliding.
+    mod raw {
+        #[link(wasm_import_module = "bv")]
+        extern "C" {
+            pub fn log(level: i32, ptr: i32, len: i32);
+            pub fn set_response(ptr: i32, len: i32);
+            pub fn storage_get(key_ptr: i32, key_len: i32, out_ptr: i32, out_max: i32) -> i32;
+            pub fn storage_put(key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32) -> i32;
+            pub fn storage_delete(key_ptr: i32, key_len: i32) -> i32;
+            pub fn storage_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_max: i32) -> i32;
+            pub fn audit_emit(payload_ptr: i32, payload_len: i32) -> i32;
+            pub fn now_unix_ms() -> i64;
+            pub fn config_get(key_ptr: i32, key_len: i32, out_ptr: i32, out_max: i32) -> i32;
+        }
     }
 
     pub fn log(level: i32, msg: &[u8]) {
-        unsafe { self::log(level, msg.as_ptr() as i32, msg.len() as i32); }
+        unsafe { raw::log(level, msg.as_ptr() as i32, msg.len() as i32); }
     }
 
     pub fn set_response(bytes: &[u8]) {
-        unsafe { self::set_response(bytes.as_ptr() as i32, bytes.len() as i32); }
+        unsafe { raw::set_response(bytes.as_ptr() as i32, bytes.len() as i32); }
     }
 
     pub fn storage_get(key: &[u8], out: &mut [u8]) -> i32 {
         unsafe {
-            self::storage_get(
+            raw::storage_get(
                 key.as_ptr() as i32,
                 key.len() as i32,
                 out.as_mut_ptr() as i32,
@@ -235,7 +236,7 @@ mod bindings {
 
     pub fn storage_put(key: &[u8], val: &[u8]) -> i32 {
         unsafe {
-            self::storage_put(
+            raw::storage_put(
                 key.as_ptr() as i32,
                 key.len() as i32,
                 val.as_ptr() as i32,
@@ -245,12 +246,12 @@ mod bindings {
     }
 
     pub fn storage_delete(key: &[u8]) -> i32 {
-        unsafe { self::storage_delete(key.as_ptr() as i32, key.len() as i32) }
+        unsafe { raw::storage_delete(key.as_ptr() as i32, key.len() as i32) }
     }
 
     pub fn storage_list(prefix: &[u8], out: &mut [u8]) -> i32 {
         unsafe {
-            self::storage_list(
+            raw::storage_list(
                 prefix.as_ptr() as i32,
                 prefix.len() as i32,
                 out.as_mut_ptr() as i32,
@@ -260,16 +261,16 @@ mod bindings {
     }
 
     pub fn audit_emit(payload: &[u8]) -> i32 {
-        unsafe { self::audit_emit(payload.as_ptr() as i32, payload.len() as i32) }
+        unsafe { raw::audit_emit(payload.as_ptr() as i32, payload.len() as i32) }
     }
 
     pub fn now_unix_ms() -> i64 {
-        unsafe { self::now_unix_ms() }
+        unsafe { raw::now_unix_ms() }
     }
 
     pub fn config_get(key: &[u8], out: &mut [u8]) -> i32 {
         unsafe {
-            self::config_get(
+            raw::config_get(
                 key.as_ptr() as i32,
                 key.len() as i32,
                 out.as_mut_ptr() as i32,
@@ -278,13 +279,6 @@ mod bindings {
         }
     }
 
-    // Silence the unused `c_void` and `AtomicI32` imports — keep them
-    // around for future wasm-side state (e.g., thread-local response
-    // window if the ABI ever needs it).
-    #[allow(dead_code)]
-    fn _silence() -> (Option<*const c_void>, AtomicI32) {
-        (None, AtomicI32::new(0))
-    }
 }
 
 #[cfg(any(not(target_arch = "wasm32"), feature = "host_test"))]
