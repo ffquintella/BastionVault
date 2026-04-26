@@ -28,6 +28,7 @@ pub mod path_revoke;
 pub mod path_roles;
 pub mod path_root;
 pub mod path_tidy;
+pub mod scheduler;
 pub mod pqc;
 pub mod storage;
 pub mod x509;

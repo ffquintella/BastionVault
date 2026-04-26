@@ -591,6 +591,15 @@ impl Core {
             let _ = crate::scheduled_exports::start_scheduler(core_arc);
         }
 
+        // Boot the PKI auto-tidy scheduler (Phase 4.1). Same lifecycle
+        // pattern as scheduled-exports above — detached task, self-skip
+        // when sealed, single-process scheduler, HA leader gating
+        // deferred. Tick fires every 30s; per-mount cadence comes from
+        // each mount's persisted `pki/config/auto-tidy`.
+        if let Some(core_arc) = self.self_ptr.upgrade() {
+            let _ = crate::modules::pki::scheduler::start_pki_tidy_scheduler(core_arc);
+        }
+
         Ok(())
     }
 
