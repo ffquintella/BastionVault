@@ -1,177 +1,95 @@
+//! `pki/cert/:serial`, `pki/ca[/pem]`, `pki/ca_chain` — read-only fetch endpoints.
+
 use std::{collections::HashMap, sync::Arc};
 
-use serde_json::json;
+use serde_json::{json, Map, Value};
 
-use super::{PkiBackend, PkiBackendInner};
+use super::{
+    storage::{self, CertRecord, KEY_CA_CERT},
+    PkiBackend, PkiBackendInner,
+};
 use crate::{
     context::Context,
     errors::RvError,
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
     new_fields, new_fields_internal, new_path, new_path_internal,
-    storage::StorageEntry,
-    utils::cert::CertBundle,
 };
 
-#[maybe_async::maybe_async]
 impl PkiBackend {
-    pub fn fetch_ca_path(&self) -> Path {
-        let pki_backend_ref = self.inner.clone();
-
-        let path = new_path!({
-            pattern: "ca(/pem)?",
-            operations: [
-                {op: Operation::Read, handler: pki_backend_ref.read_path_fetch_ca}
-            ],
-            help: r#"
-This allows certificates to be fetched. If using the fetch/ prefix any non-revoked certificate can be fetched.
-Using "ca" or "crl" as the value fetches the appropriate information in DER encoding. Add "/pem" to either to get PEM encoding.
-                "#
-        });
-
-        path
-    }
-
-    pub fn fetch_crl_path(&self) -> Path {
-        let pki_backend_ref = self.inner.clone();
-
-        let path = new_path!({
-            pattern: "crl(/pem)?",
-            operations: [
-                {op: Operation::Read, handler: pki_backend_ref.read_path_fetch_crl}
-            ],
-            help: r#"
-This allows certificates to be fetched. If using the fetch/ prefix any non-revoked certificate can be fetched.
-Using "ca" or "crl" as the value fetches the appropriate information in DER encoding. Add "/pem" to either to get PEM encoding.
-                "#
-        });
-
-        path
-    }
-
     pub fn fetch_cert_path(&self) -> Path {
-        let pki_backend_ref = self.inner.clone();
-
-        let path = new_path!({
-            pattern: r"cert/(?P<serial>[0-9A-Fa-f-:]+)",
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"cert/(?P<serial>[0-9a-fA-F:\-]+)",
             fields: {
-                "serial": {
-                    field_type: FieldType::Str,
-                    description: "Certificate serial number, in colon- or hyphen-separated octal"
-                }
+                "serial": { field_type: FieldType::Str, required: true, description: "Cert serial (hex)." }
             },
-            operations: [
-                {op: Operation::Read, handler: pki_backend_ref.read_path_fetch_cert}
-            ],
-            help: r#"
-This allows certificates to be fetched. If using the fetch/ prefix any non-revoked certificate can be fetched.
-Using "ca" or "crl" as the value fetches the appropriate information in DER encoding. Add "/pem" to either to get PEM encoding.
-                "#
-        });
-
-        path
+            operations: [{op: Operation::Read, handler: r.read_cert}],
+            help: "Fetch a previously issued certificate by serial."
+        })
     }
 
-    pub fn fetch_cert_crl_path(&self) -> Path {
-        let pki_backend_ref = self.inner.clone();
+    pub fn fetch_ca_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"ca(/pem)?$",
+            operations: [{op: Operation::Read, handler: r.read_ca}],
+            help: "Fetch the active CA certificate."
+        })
+    }
 
-        let path = new_path!({
-            pattern: "cert/crl",
-            operations: [
-                {op: Operation::Read, handler: pki_backend_ref.read_path_fetch_cert_crl}
-            ],
-            help: r#"
-This allows certificates to be fetched. If using the fetch/ prefix any non-revoked certificate can be fetched.
-Using "ca" or "crl" as the value fetches the appropriate information in DER encoding. Add "/pem" to either to get PEM encoding.
-                "#
-        });
+    pub fn fetch_ca_chain_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"ca_chain$",
+            operations: [{op: Operation::Read, handler: r.read_ca}],
+            help: "Fetch the CA chain (Phase 1: root only)."
+        })
+    }
 
-        path
+    pub fn list_certs_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"certs/?$",
+            operations: [{op: Operation::List, handler: r.list_certs}],
+            help: "List issued certificate serials."
+        })
     }
 }
 
 #[maybe_async::maybe_async]
 impl PkiBackendInner {
-    pub async fn handle_fetch_cert_bundle(&self, cert_bundle: &CertBundle) -> Result<Option<Response>, RvError> {
-        let ca_chain_pem = crate::utils::cert::certificate_chain_pem_string(&cert_bundle.ca_chain, true)?;
-        let resp_data = json!({
-            "ca_chain": ca_chain_pem,
-            "certificate": crate::utils::cert::certificate_pem_string(&cert_bundle.certificate)?,
-            "serial_number": cert_bundle.serial_number.clone(),
-        })
-        .as_object()
-        .cloned();
+    pub async fn read_cert(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let serial_raw = req.get_data("serial")?.as_str()
+            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let serial_hex = normalize_serial_hex(&serial_raw);
+        let key = storage::cert_storage_key(&serial_hex);
+        let record: Option<CertRecord> = storage::get_json(req, &key).await?;
+        let record = record.ok_or(RvError::ErrPkiCertNotFound)?;
 
-        Ok(Some(Response::data_response(resp_data)))
-    }
-
-    pub async fn read_path_fetch_ca(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let ca_bundle = self.fetch_ca_bundle(req).await?;
-        self.handle_fetch_cert_bundle(&ca_bundle).await
-    }
-
-    pub async fn read_path_fetch_crl(
-        &self,
-        _backend: &dyn Backend,
-        _req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        Ok(None)
-    }
-
-    pub async fn read_path_fetch_cert(
-        &self,
-        _backend: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let serial_number_value = req.get_data("serial")?;
-        let serial_number = serial_number_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?;
-        let serial_number_hex = serial_number.replace(':', "-").to_lowercase();
-        let cert_der = self.fetch_cert_der(req, &serial_number_hex).await?;
-        let ca_bundle = self.fetch_ca_bundle(req).await?;
-
-        let mut ca_chain_pem = crate::utils::cert::certificate_chain_pem_string(&ca_bundle.ca_chain, true)?;
-
-        ca_chain_pem.push_str(&crate::utils::cert::certificate_pem_string(&ca_bundle.certificate)?);
-
-        let resp_data = json!({
-            "ca_chain": ca_chain_pem,
-            "certificate": crate::utils::cert::certificate_pem_string_from_der(&cert_der)?,
-            "serial_number": serial_number,
-        })
-        .as_object()
-        .cloned();
-
-        Ok(Some(Response::data_response(resp_data)))
-    }
-
-    pub async fn read_path_fetch_cert_crl(
-        &self,
-        _backend: &dyn Backend,
-        _req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        Ok(None)
-    }
-
-    pub async fn fetch_cert_der(&self, req: &Request, serial_number: &str) -> Result<Vec<u8>, RvError> {
-        let entry = req.storage_get(format!("certs/{serial_number}").as_str()).await?;
-        if entry.is_none() {
-            return Err(RvError::ErrPkiCertNotFound);
+        let mut data: Map<String, Value> = Map::new();
+        data.insert("certificate".into(), json!(record.certificate_pem));
+        data.insert("serial_number".into(), json!(record.serial_hex));
+        data.insert("issued_at".into(), json!(record.issued_at_unix));
+        if let Some(t) = record.revoked_at_unix {
+            data.insert("revoked_at".into(), json!(t));
         }
-
-        Ok(entry.unwrap().value)
+        Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn store_cert_der(&self, req: &Request, serial_number: &str, value: Vec<u8>) -> Result<(), RvError> {
-        let entry = StorageEntry { key: format!("certs/{serial_number}"), value };
-        req.storage_put(&entry).await?;
-        Ok(())
+    pub async fn read_ca(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let pem = storage::get_string(req, KEY_CA_CERT).await?
+            .ok_or(RvError::ErrPkiCaNotConfig)?;
+        let mut data: Map<String, Value> = Map::new();
+        data.insert("certificate".into(), json!(pem));
+        Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn delete_cert(&self, req: &Request, serial_number: &str) -> Result<(), RvError> {
-        req.storage_delete(format!("certs/{serial_number}").as_str()).await?;
-        Ok(())
+    pub async fn list_certs(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let keys = req.storage_list("certs/").await?;
+        Ok(Some(Response::list_response(&keys)))
     }
+}
+
+fn normalize_serial_hex(s: &str) -> String {
+    s.chars().filter(|c| c.is_ascii_hexdigit()).collect::<String>().to_ascii_lowercase()
 }

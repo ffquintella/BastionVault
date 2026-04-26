@@ -1,131 +1,169 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+//! `pki/issue/:role` — generate a fresh keypair and issue a leaf cert.
+//!
+//! `pki/sign/:role` and `pki/sign-verbatim` are stubbed for Phase 1: CSR
+//! parsing requires plumbing through `x509-parser` to reconstruct an `rcgen`
+//! `PublicKey`, which lands in a follow-up so the Phase 1 surface stays
+//! reviewable.
+
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use humantime::parse_duration;
 use serde_json::{json, Map, Value};
 
-use super::{util, PkiBackend, PkiBackendInner};
+use super::{
+    crypto::{AlgorithmClass, Signer},
+    storage::{self, CertRecord, KEY_CA_CERT, KEY_CA_KEY},
+    x509::{self, SubjectInput},
+    x509_pqc,
+    PkiBackend, PkiBackendInner,
+};
 use crate::{
     context::Context,
     errors::RvError,
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
-    new_fields, new_fields_internal, new_path, new_path_internal, utils,
+    new_fields, new_fields_internal, new_path, new_path_internal,
 };
 
 impl PkiBackend {
     pub fn issue_path(&self) -> Path {
-        let pki_backend_ref = self.inner.clone();
-
-        let path = new_path!({
-            pattern: r"issue/(?P<role>\w[\w-]+\w)",
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"issue/(?P<role>\w[\w-]*\w)",
             fields: {
-                "role": {
-                    field_type: FieldType::Str,
-                    description: "The desired role with configuration for this request"
-                },
-                "common_name": {
-                    field_type: FieldType::Str,
-                    description: r#"
-        The requested common name; if you want more than one, specify the alternative names in the alt_names map"#
-                },
-                "alt_names": {
-                    required: false,
-                    field_type: FieldType::Str,
-                    description: r#"
-        The requested Subject Alternative Names, if any, in a comma-delimited list"#
-                },
-                "ip_sans": {
-                    required: false,
-                    field_type: FieldType::Str,
-                    description: r#"The requested IP SANs, if any, in a comma-delimited list"#
-                },
-                "ttl": {
-                    required: false,
-                    field_type: FieldType::Str,
-                    description: r#"Specifies requested Time To Live"#
-                }
+                "role": { field_type: FieldType::Str, required: true, description: "Role name." },
+                "common_name": { field_type: FieldType::Str, required: true, description: "Subject CN." },
+                "alt_names": { field_type: FieldType::Str, default: "", description: "Comma-separated DNS / IP SANs." },
+                "ip_sans": { field_type: FieldType::Str, default: "", description: "Comma-separated IP SANs." },
+                "ttl": { field_type: FieldType::Str, default: "", description: "Requested TTL." }
             },
-            operations: [
-                {op: Operation::Write, handler: pki_backend_ref.issue_cert}
-            ],
-            help: r#"
-This path allows requesting certificates to be issued according to the
-policy of the given role. The certificate will only be issued if the
-requested common name is allowed by the role policy.
-                "#
-        });
+            operations: [{op: Operation::Write, handler: r.issue_cert}],
+            help: "Issue a certificate against the named role."
+        })
+    }
 
-        path
+    pub fn sign_role_stub(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"sign/(?P<role>\w[\w-]*\w)",
+            operations: [{op: Operation::Write, handler: r.unsupported}],
+            help: "(Phase 1.1) Sign a CSR against the named role."
+        })
+    }
+
+    pub fn sign_verbatim_stub(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"sign-verbatim$",
+            operations: [{op: Operation::Write, handler: r.unsupported}],
+            help: "(Phase 1.1) Sign a CSR verbatim."
+        })
+    }
+
+    pub fn tidy_stub(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"tidy$",
+            operations: [{op: Operation::Write, handler: r.unsupported}],
+            help: "(Phase 4) Sweep expired certs from the store and CRL."
+        })
     }
 }
 
 #[maybe_async::maybe_async]
 impl PkiBackendInner {
-    pub async fn issue_cert(&self, backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let role = self.get_role(req, req.get_data("role")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?).await?;
-        if role.is_none() {
-            return Err(RvError::ErrPkiRoleNotFound);
-        }
-        let role_entry = role.unwrap();
+    pub async fn issue_cert(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let role_name = req.get_data("role")?.as_str()
+            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let role = self.get_role(req, &role_name).await?
+            .ok_or(RvError::ErrPkiRoleNotFound)?;
 
-        let ca_bundle = self.fetch_ca_bundle(req).await?;
-        let not_before = SystemTime::now() - Duration::from_secs(10);
-        let mut not_after = not_before + parse_duration("30d").unwrap();
+        let common_name = req.get_data("common_name")?.as_str()
+            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        x509::validate_common_name(&role, &common_name)?;
 
-        if let Ok(ttl_value) = req.get_data("ttl") {
-            let ttl = ttl_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?;
-            let ttl_dur = parse_duration(ttl)?;
-            let req_ttl_not_after_dur = SystemTime::now() + ttl_dur;
-            utils::cert::ensure_not_after_within_ca(&ca_bundle.certificate, req_ttl_not_after_dur)?;
-            not_after = req_ttl_not_after_dur;
-        }
-
-        // Build the Certificate (subject name + SANs) via the shared utility, then
-        // override not_before/not_after with the CA-TTL-checked values computed above.
-        let mut cert = util::generate_certificate(&role_entry, req)?;
-        cert.not_before = not_before;
-        cert.not_after = not_after;
-
-        let cert_bundle = cert.to_cert_bundle(Some(&ca_bundle.certificate), Some(ca_bundle.private_key.as_slice()))?;
-
-        if !role_entry.no_store {
-            let serial_number_hex = cert_bundle.serial_number.replace(':', "-").to_lowercase();
-            self.store_cert_der(req, &serial_number_hex, cert_bundle.certificate.to_der()?).await?;
+        let alt_str = req.get_data_or_default("alt_names")?.as_str().unwrap_or("").to_string();
+        let (mut alt_dns, mut alt_ips) = x509::split_alt_names(&alt_str);
+        let ip_str = req.get_data_or_default("ip_sans")?.as_str().unwrap_or("").to_string();
+        let (extra_dns, extra_ips) = x509::split_alt_names(&ip_str);
+        alt_dns.extend(extra_dns);
+        alt_ips.extend(extra_ips);
+        if !role.allow_ip_sans && !alt_ips.is_empty() {
+            return Err(RvError::ErrPkiDataInvalid);
         }
 
-        let cert_expiration = utils::asn1time_to_timestamp(cert_bundle.certificate.not_after().to_string().as_str())?;
-        let ca_chain_pem = utils::cert::certificate_chain_pem_string(&cert_bundle.ca_chain, false)?;
+        let requested_ttl = parse_optional_ttl(req, "ttl")?;
+        let ttl = role.effective_ttl(requested_ttl);
 
-        let resp_data = json!({
-            "expiration": cert_expiration,
-            "issuing_ca": utils::cert::certificate_pem_string(&ca_bundle.certificate)?,
-            "ca_chain": ca_chain_pem,
-            "certificate": utils::cert::certificate_pem_string(&cert_bundle.certificate)?,
-            "private_key": String::from_utf8_lossy(&cert_bundle.private_key),
-            "private_key_type": cert_bundle.private_key_type.clone(),
-            "serial_number": cert_bundle.serial_number.clone(),
-        })
-        .as_object()
-        .cloned();
+        // Load the CA. Phase 1 supports a single issuer per mount; the same
+        // assumption holds in Phase 2.
+        let ca_cert_pem = storage::get_string(req, KEY_CA_CERT).await?
+            .ok_or(RvError::ErrPkiCaNotConfig)?;
+        let ca_key_pem = storage::get_string(req, KEY_CA_KEY).await?
+            .ok_or(RvError::ErrPkiCaKeyNotFound)?;
+        let ca_signer = Signer::from_storage_pem(&ca_key_pem)?;
 
-        if role_entry.generate_lease {
-            let mut secret_data: Map<String, Value> = Map::new();
-            secret_data.insert("serial_number".to_string(), Value::String(cert_bundle.serial_number.clone()));
+        let role_alg = role.algorithm()?;
 
-            let mut resp = backend.secret("pki").unwrap().response(resp_data, Some(secret_data));
-            let secret = resp.secret.as_mut().unwrap();
-
-            let now_timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?;
-
-            secret.lease.ttl = Duration::from_secs(cert_expiration as u64) - now_timestamp;
-            secret.lease.renewable = true;
-
-            Ok(Some(resp))
-        } else {
-            Ok(Some(Response::data_response(resp_data)))
+        // Mixed-chain rejection (Phase 2). A PQC role must run on a PQC CA,
+        // and a classical role must run on a classical CA. The spec exposes
+        // an `--allow-mixed-chain` opt-in for migration scenarios; that knob
+        // lands in a follow-up so the default-secure behaviour is shipped
+        // first. Without it, the engine fails closed.
+        if role_alg.class() != ca_signer.algorithm().class() {
+            return Err(RvError::ErrPkiKeyTypeInvalid);
         }
+
+        // Generate the leaf keypair using the role's algorithm.
+        let leaf_signer = Signer::generate(role_alg)?;
+
+        let subject = SubjectInput { common_name, alt_names: alt_dns, ip_sans: alt_ips };
+        let (cert_pem, serial_bytes) = match (role_alg.class(), &ca_signer, &leaf_signer) {
+            (AlgorithmClass::Classical, Signer::Classical(ca), Signer::Classical(leaf)) => {
+                let (cert, serial) = x509::build_leaf(&role, &subject, ttl, leaf, ca, &ca_cert_pem)?;
+                (cert.pem(), serial)
+            }
+            (AlgorithmClass::Pqc, Signer::MlDsa(ca), Signer::MlDsa(leaf)) => {
+                x509_pqc::build_leaf(&role, &subject, ttl, leaf, ca, &ca_cert_pem)?
+            }
+            // Mixed cases were already screened above; this arm is here to
+            // make the compiler happy without falling through silently.
+            _ => return Err(RvError::ErrPkiKeyTypeInvalid),
+        };
+        let leaf_key_pem = leaf_signer.to_storage_pem();
+
+        let serial_hex = storage::serial_to_hex(&serial_bytes);
+
+        // Persist the cert (unless the role opts out) so revoke can find it
+        // and the CRL builder can include it.
+        if !role.no_store {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let record = CertRecord {
+                serial_hex: serial_hex.clone(),
+                certificate_pem: cert_pem.clone(),
+                issued_at_unix: now,
+                revoked_at_unix: None,
+            };
+            storage::put_json(req, &storage::cert_storage_key(&serial_hex), &record).await?;
+        }
+
+        let mut data: Map<String, Value> = Map::new();
+        data.insert("certificate".into(), json!(cert_pem));
+        data.insert("issuing_ca".into(), json!(ca_cert_pem));
+        data.insert("private_key".into(), json!(leaf_key_pem));
+        data.insert("private_key_type".into(), json!(role.algorithm()?.as_str()));
+        data.insert("serial_number".into(), json!(serial_hex));
+        Ok(Some(Response::data_response(Some(data))))
     }
+}
+
+fn parse_optional_ttl(req: &Request, key: &str) -> Result<Option<Duration>, RvError> {
+    let v = req.get_data_or_default(key)?;
+    let s = v.as_str().unwrap_or("");
+    if s.is_empty() {
+        return Ok(None);
+    }
+    parse_duration(s).map(Some).map_err(|_| RvError::ErrRequestFieldInvalid)
 }

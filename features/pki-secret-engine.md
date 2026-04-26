@@ -15,22 +15,39 @@ This feature replaces the retired legacy module at `src/modules/pki/` (currently
 
 ## Current State
 
-- Active code: a no-op stub. `PkiModule::setup()` logs `"legacy PKI module is disabled in the OpenSSL-free build"` and returns; no routes are mounted.
-- Legacy source preserved as reference (do not call into these directly -- they are OpenSSL-bound):
-  - `src/modules/pki/path_roles.rs`
-  - `src/modules/pki/path_root.rs`
-  - `src/modules/pki/path_keys.rs`
-  - `src/modules/pki/path_issue.rs`
-  - `src/modules/pki/path_revoke.rs`
-  - `src/modules/pki/path_fetch.rs`
-  - `src/modules/pki/path_config_ca.rs`
-  - `src/modules/pki/path_config_crl.rs`
-- Crypto building blocks already in tree:
-  - `rsa = "0.9"` (RustCrypto, pure Rust) -- top-level `Cargo.toml`.
-  - `x509-parser = "0.17"` -- top-level `Cargo.toml`. Used for read-only parsing today.
-  - `ml-kem = "0.3.0-rc.2"` and `fips204 = "0.4.6"` (ML-DSA-65) behind feature flags in `bv_crypto`.
+**Phases 1 + 2 — Done.** Phase 1 ships the pure-Rust classical engine (RSA / ECDSA P-256/P-384 / Ed25519) on `rcgen` 0.14 with the `ring` provider; Phase 2 layers on ML-DSA-44/65/87 PQC roles built directly on `x509-cert` + `der` + `fips204`, sidestepping rcgen for PQC because rcgen's ML-DSA support is gated behind `aws_lc_rs_unstable` (forbidden). No `openssl-sys` or `aws-lc-sys` is pulled in by this module across either phase. The legacy OpenSSL-bound `path_*.rs` files have been removed; the new module lives in flat layout at `src/modules/pki/`:
 
-The path forward is to throw away the OpenSSL-bound code, keep the route layout, and rebuild the engine on RustCrypto + `rcgen`.
+- [`mod.rs`](../src/modules/pki/mod.rs) — `PkiModule` + `PkiBackend` + route registration
+- [`crypto.rs`](../src/modules/pki/crypto.rs) — `CertSigner` (classical), `Signer` (unified Classical | MlDsa enum that path handlers round-trip through storage), `KeyAlgorithm` + `AlgorithmClass` (the mixed-chain gate)
+- [`pqc.rs`](../src/modules/pki/pqc.rs) — `MlDsaSigner` + `MlDsaLevel` + OID table for `2.16.840.1.101.3.4.3.{17,18,19}`. Wraps `bv_crypto::MlDsa{44,65,87}Provider`; storage envelope is a custom `BV PQC SIGNER` PEM (engine-internal, barrier-encrypted, never returned over the API in `internal` mode).
+- [`x509.rs`](../src/modules/pki/x509.rs) — classical TBS / CRL builders via `rcgen::CertificateParams`
+- [`x509_pqc.rs`](../src/modules/pki/x509_pqc.rs) — PQC TBS / CRL DER assembly via `x509-cert` + `der`, signed with `MlDsaSigner`. Emits BasicConstraints, KeyUsage, ExtendedKeyUsage, SubjectAltName (DNS + IP), SubjectKeyIdentifier (RFC 7093 method 1), AuthorityKeyIdentifier; CRLs carry `crlNumber`.
+- [`storage.rs`](../src/modules/pki/storage.rs) — sealed-storage layout (`ca/cert`, `ca/key`, `certs/<hex>`, `crl/state`, `crl/cached`, `config/{urls,crl}`)
+- [`path_roles.rs`](../src/modules/pki/path_roles.rs), [`path_root.rs`](../src/modules/pki/path_root.rs), [`path_issue.rs`](../src/modules/pki/path_issue.rs), [`path_fetch.rs`](../src/modules/pki/path_fetch.rs), [`path_revoke.rs`](../src/modules/pki/path_revoke.rs), [`path_crl.rs`](../src/modules/pki/path_crl.rs), [`path_config.rs`](../src/modules/pki/path_config.rs) — dispatch on `Signer` variant; classical roles flow through `x509`, PQC through `x509_pqc`.
+
+Wired into [`set_default_modules`](../src/module_manager.rs:38) so a fresh core registers the `pki` engine type automatically.
+
+End-to-end coverage:
+- [tests/test_pki_engine.rs](../tests/test_pki_engine.rs) — Phase 1 classical: mount → generate root → fetch CA → create / list roles → issue leaf (DNS + IP SANs) → fetch by serial → empty CRL → revoke → CRL contains revoked serial (parsed via `x509-parser`) → stubs return clear errors.
+- [tests/test_pki_pqc.rs](../tests/test_pki_pqc.rs) — Phase 2 ML-DSA-65: mount → generate ML-DSA-65 root → confirm signatureAlgorithm OID → directly verify the root self-signature with `fips204` against the SPKI-extracted public key (proves our TBS DER path is correct) → role with `key_type=ml-dsa-65` (and `key_bits != 0` rejected) → issue leaf → re-verify leaf signature under root pk → revoke → CRL contains revoked serial → mixed-chain rejection (classical role on PQC CA fails).
+
+**Implementation deviations from the spec, called out for review:**
+
+- **Layout is flat**, not the nested `backend/`, `crypto/`, `x509/` tree the design proposed. After Phase 2 the file count is now 11; if Phase 3 (composite) doubles that we'll consider promoting `crypto/{classical,ml_dsa,composite}.rs` and `x509/{classical,pqc}.rs` directories. Today flat is still readable.
+- **`rcgen` is configured with `ring`, not "ring-free"**. The spec asked for a ring-free profile, but `rcgen` 0.14 only supports `ring` or `aws_lc_rs` as crypto providers — there is no provider-less mode that still does cert assembly. We picked `ring` because it has no system C dep (the spec's CI failure condition is `openssl-sys` / `aws-lc-sys`, both of which `ring` avoids). Phase 2's ML-DSA work can decouple from rcgen's provider entirely by going through the `SigningKey` trait + `x509-cert` for DER assembly, at which point ring becomes optional.
+- **RSA generation is rejected at signer creation time** with `ErrPkiKeyTypeInvalid`. `rcgen` cannot generate RSA keypairs through its provider stack; rather than panic mid-issuance, we fail early. Phase 2 will plug a `rsa`-crate-backed `SigningKey` impl into rcgen so `key_type = "rsa"` works.
+- **`sign/:role`, `sign-verbatim`, `sign-intermediate`, `intermediate/{generate,set-signed}`, `tidy`, `config/ca` are stubs** that return `ErrLogicalOperationUnsupported`. They live on the route table so clients see Vault-shape responses; their handler bodies will be filled in alongside the CSR-parsing infrastructure in a Phase 1.1 / 2.1 follow-up.
+- **PQC private key returned by `pki/issue/:role` is in our `BV PQC SIGNER` envelope, not PKCS#8.** There is no widely-deployed PKCS#8 wrapper for ML-DSA seeds yet (the IETF-LAMPS draft was still in flux when this shipped). The envelope is engine-defined but the body is plain JSON containing the seed and public key — clients can extract those directly. When the IETF draft stabilises, Phase 2.1 will add a PKCS#8-encoded variant alongside the existing envelope.
+- **Mixed-chain `--allow-mixed-chain` opt-in is not yet exposed.** Phase 2 ships the closed-by-default form: PQC role → PQC CA, classical → classical, mixed → reject. The migration-window opt-in lands in Phase 2.1.
+- **`allowed_domains` / `allow_glob_domains` are not yet enforced.** The Phase 1 role schema accepts `allow_any_name`, `allow_localhost`, `allow_subdomains`, `allow_bare_domains` (used as Vault parity flags) but the constraint matrix beyond `allow_any_name + allow_localhost` is deferred. Roles default to `allow_any_name = true` to match the legacy stub's behaviour.
+
+Crypto building blocks now in tree (additions over what was already present):
+
+- Phase 1: `rcgen = "0.14"` with `x509-parser` feature on, `time = "0.3"` (top-level `Cargo.toml`)
+- Phase 2: `x509-cert = "0.2"` (`builder` + `pem` + `std` features), `fips204 = "0.4"` (direct), `const-oid = "0.9"` with `db` feature
+- bv_crypto: new `ml-dsa-44` and `ml-dsa-87` features (default-on) wrapping `fips204::ml_dsa_{44,87}`, mirroring the existing `ml-dsa-65` provider.
+
+Already in tree from prior work and reused: `rsa = "0.9"`, `x509-parser = "0.17"`, `zeroize`, `rand = "0.10"`, `der = "0.7"` (transitive via `x509-cert`), `spki = "0.7"` (transitive via `x509-cert`).
 
 ## Design
 
@@ -179,7 +196,7 @@ POST   /v1/pki/config/crl
 
 ## Implementation Scope
 
-### Phase 1 -- Pure-Rust Classical Engine
+### Phase 1 -- Pure-Rust Classical Engine — **Done**
 
 Re-implement the legacy engine on `rcgen` + RustCrypto, no PQC yet. This proves the OpenSSL-free path before adding novel cryptography.
 
@@ -209,15 +226,17 @@ ed25519-dalek  = { version = "2.1", features = ["rand_core", "pem"] }
 
 (`rsa` and `x509-parser` are already present.)
 
-### Phase 2 -- PQC Roles (ML-DSA)
+### Phase 2 -- PQC Roles (ML-DSA) — **Done**
+
+Final layout differs slightly from the original plan (flat, not nested under `crypto/` and `x509/`):
 
 | File | Purpose |
 |---|---|
-| `src/modules/pki/crypto/ml_dsa.rs` | ML-DSA-44/65/87 signers wrapping `fips204`. |
-| `src/modules/pki/x509/pqc_oids.rs` | OID table + `AlgorithmIdentifier` constructors for each ML-DSA level. |
-| `src/modules/pki/x509/mod.rs` (extension) | Teach the TBS builder to emit ML-DSA `SubjectPublicKeyInfo` and `signatureAlgorithm`. |
-| `src/modules/pki/path_roles.rs` (extension) | Validate `key_type = "ml-dsa-*"`; reject incompatible knobs (`key_bits`, `signature_bits`). |
-| `src/modules/pki/path_root.rs` (extension) | Allow generating PQC root CAs. |
+| `src/modules/pki/pqc.rs` | OID table for `2.16.840.1.101.3.4.3.{17,18,19}`, `MlDsaLevel`, `MlDsaSigner` (wraps `bv_crypto::MlDsa{44,65,87}Provider`), `BV PQC SIGNER` storage envelope. |
+| `src/modules/pki/x509_pqc.rs` | Manual TBSCertificate / TBSCertList DER assembly via `x509-cert` + `der`, signed with ML-DSA. |
+| `src/modules/pki/crypto.rs` (extension) | `KeyAlgorithm::MlDsa{44,65,87}` variants, `AlgorithmClass`, unified `Signer` enum dispatching Classical vs PQC. |
+| `src/modules/pki/path_roles.rs` (extension) | `key_type = "ml-dsa-*"` validation; rejects `key_bits != 0` for PQC roles. |
+| `src/modules/pki/path_root.rs` / `path_issue.rs` / `path_revoke.rs` (extensions) | Dispatch on `Signer` variant; PQC chains route through `x509_pqc` builders. Mixed-chain rejection at issue time. |
 
 Dependency:
 

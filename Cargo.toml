@@ -166,6 +166,26 @@ uuid = { version = "1", features = ["v4"] }
 # to keep the dep tree small; cache + pooling-allocator are off until the
 # plugin system actually needs them.
 wasmtime = { version = "27", default-features = false, features = ["cranelift", "runtime", "wat", "async"] }
+# PKI Secret Engine (Phase 1): pure-Rust X.509 + CRL stack. `rcgen`
+# handles DER encoding for certs / CSRs / CRLs and provides a `SigningKey`
+# trait we plug post-quantum signers into in Phase 2. We use the default
+# feature set, which selects `ring` (pure Rust + asm, no C system deps)
+# as the classical crypto provider — explicitly *not* `aws_lc_rs`, since
+# the build must stay free of `openssl-sys` and `aws-lc-sys`. `time` is
+# rcgen's exposed timestamp type; already transitively in the tree.
+# See `features/pki-secret-engine.md`.
+rcgen = { version = "0.14", features = ["x509-parser"] }
+time = { version = "0.3", default-features = false, features = ["std"] }
+# PKI Phase 2 (PQC roles): ML-DSA-44/65/87 certs and CRLs. `rcgen` 0.14
+# gates its built-in ML-DSA support behind `aws_lc_rs_unstable`, which
+# pulls `aws-lc-sys` — forbidden by `features/pki-secret-engine.md`.
+# So Phase 2 assembles `TBSCertificate` / `TBSCertList` directly with
+# `x509-cert` + `der` and signs the DER bytes with `fips204`. Pure Rust,
+# no C system deps. `const-oid` (already transitive via `der`) carries
+# the algorithm OIDs.
+x509-cert = { version = "0.2", default-features = false, features = ["builder", "pem", "std"] }
+fips204 = { version = "0.4", default-features = false, features = ["default-rng", "ml-dsa-44", "ml-dsa-65", "ml-dsa-87"] }
+const-oid = { version = "0.9", features = ["db"] }
 
 [build-dependencies]
 toml = "1.1.2"

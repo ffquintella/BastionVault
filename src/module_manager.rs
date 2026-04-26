@@ -17,7 +17,7 @@ use crate::{
     errors::RvError,
     modules::{
         files::FilesModule, identity::IdentityModule, kv::KvModule, kv_v2::KvV2Module,
-        resource::ResourceModule, resource_group::ResourceGroupModule, system::SystemModule,
+        pki::PkiModule, resource::ResourceModule, resource_group::ResourceGroupModule, system::SystemModule,
         Module,
     },
 };
@@ -36,6 +36,7 @@ impl ModuleManager {
         let modules: Vec<Arc<dyn Module>> = vec![
             Arc::new(KvModule::new(core.clone())),
             Arc::new(KvV2Module::new(core.clone())),
+            Arc::new(PkiModule::new(core.clone())),
             Arc::new(ResourceModule::new(core.clone())),
             Arc::new(FilesModule::new(core.clone())),
             Arc::new(IdentityModule::new(core.clone())),

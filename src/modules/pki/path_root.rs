@@ -1,94 +1,153 @@
-use std::{collections::HashMap, sync::Arc};
+//! `pki/root/generate/{exported|internal}` — generate a self-signed root CA.
+//!
+//! Phase 1 supports root generation only. `sign-intermediate`, `intermediate/*`,
+//! and `set-signed` are exposed as stub endpoints that return
+//! `ErrLogicalOperationUnsupported` — the route surface stays Vault-shaped so
+//! clients see a clear "not implemented" rather than a 404 mismatch.
 
-use serde_json::{json, Value};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use super::{field, util, PkiBackend, PkiBackendInner};
+use humantime::parse_duration;
+use serde_json::{json, Map, Value};
+
+use super::{
+    crypto::{KeyAlgorithm, Signer},
+    storage::{self, CaMetadata, CrlConfig, CrlState, KEY_CA_CERT, KEY_CA_KEY, KEY_CA_META, KEY_CONFIG_CRL, KEY_CRL_STATE},
+    x509, x509_pqc,
+    PkiBackend, PkiBackendInner,
+};
 use crate::{
     context::Context,
     errors::RvError,
-    logical::{Backend, Operation, Path, PathOperation, Request, Response},
-    new_path, new_path_internal, utils,
+    logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
+    new_fields, new_fields_internal, new_path, new_path_internal,
 };
+
+const DEFAULT_ROOT_TTL: Duration = Duration::from_secs(10 * 365 * 24 * 3600); // ~10y
 
 impl PkiBackend {
     pub fn root_generate_path(&self) -> Path {
-        let pki_backend_ref = self.inner.clone();
-
-        let mut path = new_path!({
-            pattern: r"root/generate/(?P<exported>.+)",
-            operations: [
-                {op: Operation::Write, handler: pki_backend_ref.generate_root}
-            ],
-            help: "Generate a new CA certificate and private key used for signing."
-        });
-
-        path.fields.extend(field::ca_common_fields());
-        path.fields.extend(field::ca_key_generation_fields());
-        path.fields.extend(field::ca_issue_fields());
-
-        path
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"root/generate/(?P<exported>internal|exported)",
+            fields: {
+                "exported": { field_type: FieldType::Str, required: true, description: "internal | exported." },
+                "common_name": { field_type: FieldType::Str, required: true, description: "Subject Common Name." },
+                "organization": { field_type: FieldType::Str, default: "", description: "Subject Organization." },
+                "key_type": { field_type: FieldType::Str, default: "ec", description: "rsa | ec | ed25519 | ml-dsa-44 | ml-dsa-65 | ml-dsa-87." },
+                "key_bits": { field_type: FieldType::Int, default: 0, description: "Key size (0 = default)." },
+                "ttl": { field_type: FieldType::Str, default: "", description: "Validity duration (e.g. 8760h)." }
+            },
+            operations: [{op: Operation::Write, handler: r.generate_root}],
+            help: "Generate a self-signed root CA."
+        })
     }
 
-    pub fn root_delete_path(&self) -> Path {
-        let pki_backend_ref = self.inner.clone();
+    /// Stubs for the not-yet-implemented signing paths.
+    pub fn root_sign_intermediate_stub(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"root/sign-intermediate$",
+            operations: [{op: Operation::Write, handler: r.unsupported}],
+            help: "(Phase 2) Sign an intermediate CA CSR."
+        })
+    }
 
-        let path = new_path!({
-            pattern: r"root",
-            operations: [
-                {op: Operation::Delete, handler: pki_backend_ref.delete_root}
-            ],
-            help: "Deletes the root CA key to allow a new one to be generated."
-        });
+    pub fn intermediate_generate_stub(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"intermediate/generate/(?P<exported>internal|exported)",
+            operations: [{op: Operation::Write, handler: r.unsupported}],
+            help: "(Phase 2) Generate an intermediate CA CSR."
+        })
+    }
 
-        path
+    pub fn intermediate_set_signed_stub(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"intermediate/set-signed$",
+            operations: [{op: Operation::Write, handler: r.unsupported}],
+            help: "(Phase 2) Install a signed intermediate."
+        })
     }
 }
 
 #[maybe_async::maybe_async]
 impl PkiBackendInner {
-    pub async fn generate_root(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let mut export_private_key = false;
-        if req.get_data_or_default("exported")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)? == "exported" {
-            export_private_key = true;
+    pub async fn generate_root(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        if storage::get_string(req, KEY_CA_CERT).await?.is_some() {
+            return Err(RvError::ErrPkiCaNotConfig);
         }
 
-        let role_entry = util::get_role_params(req)?;
+        let exported = req.get_data("exported")?.as_str().unwrap_or("").to_string();
+        let common_name = req.get_data("common_name")?.as_str()
+            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let organization = req.get_data_or_default("organization")?.as_str().unwrap_or("").to_string();
+        let key_type = req.get_data_or_default("key_type")?.as_str().unwrap_or("ec").to_string();
+        let key_bits = req.get_data_or_default("key_bits")?.as_u64().unwrap_or(0) as u32;
+        let alg = KeyAlgorithm::from_role(&key_type, key_bits)?;
 
-        let mut cert = util::generate_certificate(&role_entry, req)?;
+        let ttl_str = req.get_data_or_default("ttl")?.as_str().unwrap_or("").to_string();
+        let ttl = if ttl_str.is_empty() {
+            DEFAULT_ROOT_TTL
+        } else {
+            parse_duration(&ttl_str).map_err(|_| RvError::ErrRequestFieldInvalid)?
+        };
 
-        cert.is_ca = true;
+        // Phase 2: dispatch on algorithm class. Classical (RSA/EC/Ed25519)
+        // goes through rcgen; PQC (ML-DSA) goes through the manual x509-cert
+        // builder in `x509_pqc`. Either way the result is the same shape:
+        // (PEM cert, serial bytes, PEM private key).
+        let signer = Signer::generate(alg)?;
+        let (cert_pem, serial_bytes) = match &signer {
+            Signer::Classical(cs) => {
+                let (cert, serial) = x509::build_root_ca(&common_name, &organization, ttl, cs)?;
+                (cert.pem(), serial)
+            }
+            Signer::MlDsa(ml) => x509_pqc::build_root_ca(&common_name, &organization, ttl, ml)?,
+        };
+        let key_pem = signer.to_storage_pem();
 
-        let cert_bundle = cert.to_cert_bundle(None, None)?;
+        // Persist CA cert + key (barrier-encrypted at the storage layer) +
+        // metadata + initial CRL state.
+        storage::put_string(req, KEY_CA_CERT, &cert_pem).await?;
+        storage::put_string(req, KEY_CA_KEY, &key_pem).await?;
 
-        self.store_ca_bundle(req, &cert_bundle).await?;
+        let serial_hex = storage::serial_to_hex(&serial_bytes);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let meta = CaMetadata {
+            key_type: alg.as_str().to_string(),
+            key_bits: alg.key_bits(),
+            common_name: common_name.clone(),
+            serial_hex,
+            created_at_unix: now,
+            not_after_unix: (now as i64) + (ttl.as_secs() as i64),
+        };
+        storage::put_json(req, KEY_CA_META, &meta).await?;
 
-        let cert_expiration = utils::asn1time_to_timestamp(cert_bundle.certificate.not_after().to_string().as_str())?;
-
-        let mut resp_data = json!({
-            "expiration": cert_expiration,
-            "issuing_ca": String::from_utf8_lossy(&cert_bundle.certificate.to_pem()?),
-            "certificate": String::from_utf8_lossy(&cert_bundle.certificate.to_pem()?),
-            "serial_number": cert_bundle.serial_number.clone(),
-        })
-        .as_object()
-        .unwrap()
-        .clone();
-
-        if export_private_key {
-            resp_data.insert(
-                "private_key".to_string(),
-                Value::String(
-                    String::from_utf8_lossy(&cert_bundle.private_key).to_string(),
-                ),
-            );
-            resp_data.insert("private_key_type".to_string(), Value::String(cert_bundle.private_key_type.clone()));
+        // Seed CRL state if absent so revoke can append immediately.
+        if storage::get_json::<CrlState>(req, KEY_CRL_STATE).await?.is_none() {
+            storage::put_json(req, KEY_CRL_STATE, &CrlState::default()).await?;
+        }
+        if storage::get_json::<CrlConfig>(req, KEY_CONFIG_CRL).await?.is_none() {
+            storage::put_json(req, KEY_CONFIG_CRL, &CrlConfig::default()).await?;
         }
 
-        Ok(Some(Response::data_response(Some(resp_data))))
+        let mut data: Map<String, Value> = Map::new();
+        data.insert("certificate".into(), json!(cert_pem));
+        data.insert("issuing_ca".into(), json!(cert_pem));
+        data.insert("expiration".into(), json!(meta.not_after_unix));
+        if exported == "exported" {
+            data.insert("private_key".into(), json!(key_pem));
+            data.insert("private_key_type".into(), json!(alg.as_str()));
+        }
+        Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn delete_root(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        self.delete_ca_bundle(req).await?;
-        Ok(None)
+    pub async fn unsupported(&self, _b: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
+        Err(RvError::ErrLogicalOperationUnsupported)
     }
 }

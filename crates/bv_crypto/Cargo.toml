@@ -6,13 +6,19 @@ license = "Apache-2.0"
 description = "Small, auditable cryptographic primitives for BastionVault migrations."
 
 [features]
-default = ["ml-kem-768", "ml-dsa-65"]
+default = ["ml-kem-768", "ml-dsa-44", "ml-dsa-65", "ml-dsa-87"]
 ml-kem-768 = ["dep:ml-kem"]
-ml-dsa-65 = ["dep:fips204"]
+# ML-DSA security levels. Each turns on the corresponding fips204 feature.
+# The PKI engine's Phase 2 PQC roles use 65 by default; 44 and 87 are
+# offered for operators who need a smaller signature or higher security
+# margin respectively.
+ml-dsa-44 = ["dep:fips204", "fips204/ml-dsa-44"]
+ml-dsa-65 = ["dep:fips204", "fips204/ml-dsa-65"]
+ml-dsa-87 = ["dep:fips204", "fips204/ml-dsa-87"]
 
 [dependencies]
 chacha20poly1305 = { version = "0.10", features = ["std"] }
-fips204 = { version = "0.4.6", optional = true, default-features = false, features = ["default-rng", "ml-dsa-65"] }
+fips204 = { version = "0.4.6", optional = true, default-features = false, features = ["default-rng"] }
 ml-kem = { version = "0.3.0-rc.2", features = ["getrandom", "zeroize"], optional = true }
 rand = "0.10"
 serde = { version = "1", features = ["derive"] }
