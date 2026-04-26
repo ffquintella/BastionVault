@@ -1,0 +1,67 @@
+# Pin line endings to LF on every platform, on disk and in the index.
+#
+# Without this file the repo is at the mercy of each contributor's
+# `core.autocrlf` setting: Windows checkouts get CRLF in the working tree,
+# Linux/macOS checkouts get LF, and tools that emit LF directly (editors,
+# code generators, this project's automation) trigger the
+# "LF will be replaced by CRLF the next time Git touches it" warning on
+# every commit. Five files in this tree had ended up with *mixed* line
+# endings (partial LF, partial CRLF) by the time this attributes file was
+# added — that's a real correctness hazard for shell scripts and patch
+# tools.
+#
+# `* text=auto eol=lf` says:
+#   - Detect text vs binary automatically (same as `text=auto` alone).
+#   - For text files: store LF in the index AND check out LF in the
+#     working tree on every platform, regardless of `core.autocrlf` or
+#     `core.eol`. This file's directives override those settings.
+#
+# Binary files that happen to be detected as text (or that we want to
+# pin as binary regardless of content sniffing) are listed below.
+
+* text=auto eol=lf
+
+# ── Binaries ────────────────────────────────────────────────────────
+# Never apply line-ending or whitespace normalization to these.
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.gif      binary
+*.ico      binary
+*.icns     binary
+*.bmp      binary
+*.svg      binary
+*.pdf      binary
+*.zip      binary
+*.tar      binary
+*.tar.gz   binary
+*.tgz      binary
+*.bz2      binary
+*.xz       binary
+*.7z       binary
+*.gz       binary
+*.zst      binary
+*.wasm     binary
+*.bvplugin binary
+*.bvx      binary
+*.bvbk     binary
+*.crt      binary
+*.cer      binary
+*.der      binary
+*.p12      binary
+*.pfx      binary
+*.woff     binary
+*.woff2    binary
+*.ttf      binary
+*.otf      binary
+*.eot      binary
+*.mp3      binary
+*.mp4      binary
+*.webm     binary
+*.webp     binary
+
+# ── Generated files ─────────────────────────────────────────────────
+# Lock files are text but should not be diffed in PR reviews; mark them
+# linguist-generated so GitHub collapses them.
+Cargo.lock         linguist-generated
+gui/package-lock.json linguist-generated
