@@ -43,33 +43,6 @@ impl PkiBackend {
         })
     }
 
-    /// Stubs for the not-yet-implemented signing paths.
-    pub fn root_sign_intermediate_stub(&self) -> Path {
-        let r = self.inner.clone();
-        new_path!({
-            pattern: r"root/sign-intermediate$",
-            operations: [{op: Operation::Write, handler: r.unsupported}],
-            help: "(Phase 2) Sign an intermediate CA CSR."
-        })
-    }
-
-    pub fn intermediate_generate_stub(&self) -> Path {
-        let r = self.inner.clone();
-        new_path!({
-            pattern: r"intermediate/generate/(?P<exported>internal|exported)",
-            operations: [{op: Operation::Write, handler: r.unsupported}],
-            help: "(Phase 2) Generate an intermediate CA CSR."
-        })
-    }
-
-    pub fn intermediate_set_signed_stub(&self) -> Path {
-        let r = self.inner.clone();
-        new_path!({
-            pattern: r"intermediate/set-signed$",
-            operations: [{op: Operation::Write, handler: r.unsupported}],
-            help: "(Phase 2) Install a signed intermediate."
-        })
-    }
 }
 
 #[maybe_async::maybe_async]
@@ -130,6 +103,7 @@ impl PkiBackendInner {
             serial_hex,
             created_at_unix: now,
             not_after_unix: (now as i64) + (ttl.as_secs() as i64),
+            ca_kind: super::storage::CaKind::Root,
         };
         storage::put_json(req, KEY_CA_META, &meta).await?;
 

@@ -41,24 +41,34 @@ impl PkiBackend {
         })
     }
 
-    pub fn sign_role_stub(&self) -> Path {
+    pub fn sign_path(&self) -> Path {
         let r = self.inner.clone();
         new_path!({
             pattern: r"sign/(?P<role>\w[\w-]*\w)",
-            operations: [{op: Operation::Write, handler: r.unsupported}],
-            help: "(Phase 1.1) Sign a CSR against the named role."
+            fields: {
+                "role": { field_type: FieldType::Str, required: true, description: "Role name." },
+                "csr": { field_type: FieldType::Str, required: true, description: "PEM- or DER-encoded PKCS#10 CSR." },
+                "common_name": { field_type: FieldType::Str, default: "", description: "Override CN if role.use_csr_common_name is false." },
+                "alt_names": { field_type: FieldType::Str, default: "", description: "Override SANs if role.use_csr_sans is false." },
+                "ttl": { field_type: FieldType::Str, default: "", description: "Requested TTL." }
+            },
+            operations: [{op: Operation::Write, handler: r.sign_csr_role}],
+            help: "Sign a CSR against the named role."
         })
     }
 
-    pub fn sign_verbatim_stub(&self) -> Path {
+    pub fn sign_verbatim_path(&self) -> Path {
         let r = self.inner.clone();
         new_path!({
             pattern: r"sign-verbatim$",
-            operations: [{op: Operation::Write, handler: r.unsupported}],
-            help: "(Phase 1.1) Sign a CSR verbatim."
+            fields: {
+                "csr": { field_type: FieldType::Str, required: true, description: "PEM- or DER-encoded PKCS#10 CSR." },
+                "ttl": { field_type: FieldType::Str, default: "", description: "Requested TTL." }
+            },
+            operations: [{op: Operation::Write, handler: r.sign_csr_verbatim}],
+            help: "Sign a CSR using exactly the subject and SANs from the request."
         })
     }
-
 }
 
 #[maybe_async::maybe_async]
@@ -158,6 +168,174 @@ impl PkiBackendInner {
         data.insert("issuing_ca".into(), json!(ca_cert_pem));
         data.insert("private_key".into(), json!(leaf_key_pem));
         data.insert("private_key_type".into(), json!(role.algorithm()?.as_str()));
+        data.insert("serial_number".into(), json!(serial_hex));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// `pki/sign/:role` — sign a client-supplied CSR, applying the role's
+    /// constraints. Phase 5: supports classical CAs only. PQC and composite
+    /// CAs reject CSR-based signing for now (the engine still generates
+    /// PQC keypairs server-side via `pki/issue`).
+    pub async fn sign_csr_role(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let role_name = req.get_data("role")?.as_str()
+            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let role = self.get_role(req, &role_name).await?.ok_or(RvError::ErrPkiRoleNotFound)?;
+
+        let csr_input = req.get_data("csr")?.as_str()
+            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let parsed = super::csr::parse_and_verify(&csr_input)?;
+
+        // Decide CN + SANs based on role policy. `use_csr_common_name` /
+        // `use_csr_sans` are Vault-parity knobs that let an operator force
+        // the values from the request body even when the CSR is signed by
+        // someone the engine implicitly trusts (e.g. a Kubernetes node).
+        let common_name = if role.use_csr_common_name {
+            parsed.common_name.clone().unwrap_or_default()
+        } else {
+            req.get_data_or_default("common_name")?.as_str().unwrap_or("").to_string()
+        };
+        if common_name.is_empty() {
+            return Err(RvError::ErrPkiDataInvalid);
+        }
+        x509::validate_common_name(&role, &common_name)?;
+
+        let (mut alt_dns, mut alt_ips) = if role.use_csr_sans {
+            (parsed.requested_dns_sans.clone(), parsed.requested_ip_sans.clone())
+        } else {
+            let alt_str = req.get_data_or_default("alt_names")?.as_str().unwrap_or("").to_string();
+            x509::split_alt_names(&alt_str)
+        };
+        if !role.allow_ip_sans && !alt_ips.is_empty() {
+            return Err(RvError::ErrPkiDataInvalid);
+        }
+        // De-dup CN out of alt_dns (rcgen treats SAN list as authoritative).
+        alt_dns.retain(|d| d != &common_name);
+        // No-op kept to silence warnings if `alt_ips` ends up unused on a
+        // future role with `allow_ip_sans = false` and no IPs.
+        let _ = &mut alt_ips;
+
+        let requested_ttl = parse_optional_ttl(req, "ttl")?;
+        let ttl = role.effective_ttl(requested_ttl);
+
+        let ca_cert_pem = storage::get_string(req, KEY_CA_CERT).await?
+            .ok_or(RvError::ErrPkiCaNotConfig)?;
+        let ca_key_pem = storage::get_string(req, KEY_CA_KEY).await?
+            .ok_or(RvError::ErrPkiCaKeyNotFound)?;
+        let ca_signer = Signer::from_storage_pem(&ca_key_pem)?;
+        let Signer::Classical(ca_classical) = &ca_signer else {
+            // PQC / composite CAs cannot sign a classical-keypair CSR with
+            // current rcgen-driven signing; same gap as PQC issue (Phase 2),
+            // and the right answer is to land PQC CSR support behind a
+            // future `csr.rs` extension that recognises ML-DSA SPKIs.
+            return Err(RvError::ErrPkiKeyTypeInvalid);
+        };
+
+        let subject =
+            super::x509::SubjectInput { common_name: common_name.clone(), alt_names: alt_dns, ip_sans: alt_ips };
+        let (cert, serial_bytes) =
+            x509::build_leaf_from_spki(&role, &subject, ttl, &parsed.spki_der, ca_classical, &ca_cert_pem)?;
+        let cert_pem = cert.pem();
+        let serial_hex = storage::serial_to_hex(&serial_bytes);
+
+        if !role.no_store {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let not_after_unix = (now as i64).saturating_add(ttl.as_secs() as i64);
+            let record = CertRecord {
+                serial_hex: serial_hex.clone(),
+                certificate_pem: cert_pem.clone(),
+                issued_at_unix: now,
+                revoked_at_unix: None,
+                not_after_unix,
+            };
+            storage::put_json(req, &storage::cert_storage_key(&serial_hex), &record).await?;
+        }
+
+        let mut data: Map<String, Value> = Map::new();
+        data.insert("certificate".into(), json!(cert_pem));
+        data.insert("issuing_ca".into(), json!(ca_cert_pem));
+        data.insert("serial_number".into(), json!(serial_hex));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// `pki/sign-verbatim` — sign the CSR's subject and SANs as-is, no role
+    /// constraints. Useful for service-mesh control planes that have already
+    /// authorised the request out-of-band. The TTL still gets clamped to
+    /// the engine's max so a runaway request can't issue a 100-year cert.
+    pub async fn sign_csr_verbatim(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let csr_input = req.get_data("csr")?.as_str()
+            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let parsed = super::csr::parse_and_verify(&csr_input)?;
+
+        let common_name = parsed.common_name.clone().unwrap_or_default();
+        if common_name.is_empty() {
+            return Err(RvError::ErrPkiDataInvalid);
+        }
+
+        let requested_ttl = parse_optional_ttl(req, "ttl")?;
+        // No role: cap at 30 days to match Vault's sign-verbatim default
+        // ceiling. Operators who want longer should use `sign/:role`.
+        let max = std::time::Duration::from_secs(30 * 24 * 3600);
+        let ttl = match requested_ttl {
+            Some(d) if !d.is_zero() => std::cmp::min(d, max),
+            _ => max,
+        };
+
+        let ca_cert_pem = storage::get_string(req, KEY_CA_CERT).await?
+            .ok_or(RvError::ErrPkiCaNotConfig)?;
+        let ca_key_pem = storage::get_string(req, KEY_CA_KEY).await?
+            .ok_or(RvError::ErrPkiCaKeyNotFound)?;
+        let ca_signer = Signer::from_storage_pem(&ca_key_pem)?;
+        let Signer::Classical(ca_classical) = &ca_signer else {
+            return Err(RvError::ErrPkiKeyTypeInvalid);
+        };
+
+        // Synthesize a permissive role: server+client EKUs, no CN
+        // restrictions. The CSR-supplied SANs flow through unmodified.
+        let role = super::path_roles::RoleEntry {
+            ttl,
+            max_ttl: ttl,
+            not_before_duration: std::time::Duration::from_secs(30),
+            key_type: "ec".to_string(),
+            allow_any_name: true,
+            allow_ip_sans: true,
+            server_flag: true,
+            client_flag: true,
+            ..Default::default()
+        };
+
+        let mut alt_dns = parsed.requested_dns_sans.clone();
+        alt_dns.retain(|d| d != &common_name);
+        let subject = super::x509::SubjectInput {
+            common_name: common_name.clone(),
+            alt_names: alt_dns,
+            ip_sans: parsed.requested_ip_sans.clone(),
+        };
+        let (cert, serial_bytes) =
+            x509::build_leaf_from_spki(&role, &subject, ttl, &parsed.spki_der, ca_classical, &ca_cert_pem)?;
+        let cert_pem = cert.pem();
+        let serial_hex = storage::serial_to_hex(&serial_bytes);
+
+        // sign-verbatim records get persisted unconditionally (Vault parity)
+        // so they show up in revocation flows.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let record = CertRecord {
+            serial_hex: serial_hex.clone(),
+            certificate_pem: cert_pem.clone(),
+            issued_at_unix: now,
+            revoked_at_unix: None,
+            not_after_unix: (now as i64).saturating_add(ttl.as_secs() as i64),
+        };
+        storage::put_json(req, &storage::cert_storage_key(&serial_hex), &record).await?;
+
+        let mut data: Map<String, Value> = Map::new();
+        data.insert("certificate".into(), json!(cert_pem));
+        data.insert("issuing_ca".into(), json!(ca_cert_pem));
         data.insert("serial_number".into(), json!(serial_hex));
         Ok(Some(Response::data_response(Some(data))))
     }

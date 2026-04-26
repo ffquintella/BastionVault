@@ -39,6 +39,42 @@ pub struct CaMetadata {
     pub serial_hex: String,
     pub created_at_unix: u64,
     pub not_after_unix: i64,
+    /// What kind of CA the operator installed at this mount. Tracked so
+    /// `sys/internal/ui/mounts` and admin tooling can render
+    /// "intermediate-CA mount waiting for signed cert" without re-parsing
+    /// the cert. `#[serde(default)]` keeps Phase 1–4 records readable.
+    #[serde(default)]
+    pub ca_kind: CaKind,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CaKind {
+    /// `pki/root/generate/*` — the engine generated a self-signed root.
+    #[default]
+    Root,
+    /// `pki/intermediate/set-signed` — the engine generated the keypair
+    /// and the operator installed an externally-signed cert.
+    Intermediate,
+    /// `pki/config/ca` — the operator imported an externally-generated
+    /// CA bundle wholesale.
+    Imported,
+}
+
+/// Stored alongside the active CA when an intermediate-CA generation is in
+/// flight: the engine has produced a keypair, returned a CSR, and is
+/// waiting on `pki/intermediate/set-signed` to install the issuer's
+/// counter-signed cert. Until that arrives, `ca/cert` is absent and issue
+/// calls fail with `ErrPkiCaNotConfig`, which is the right behaviour.
+pub const KEY_CA_PENDING_KEY: &str = "ca/pending/key";
+pub const KEY_CA_PENDING_CSR: &str = "ca/pending/csr";
+pub const KEY_CA_PENDING_META: &str = "ca/pending/meta";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingIntermediate {
+    pub key_type: String,
+    pub key_bits: u32,
+    pub common_name: String,
+    pub created_at_unix: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -20,7 +20,9 @@ use crate::{
 #[cfg(feature = "pki_pqc_composite")]
 pub mod composite;
 pub mod crypto;
+pub mod csr;
 pub mod path_config;
+pub mod path_intermediate;
 pub mod path_crl;
 pub mod path_fetch;
 pub mod path_issue;
@@ -66,12 +68,12 @@ impl PkiBackend {
             self.roles_path(),
             self.roles_list_path(),
             self.root_generate_path(),
-            self.root_sign_intermediate_stub(),
-            self.intermediate_generate_stub(),
-            self.intermediate_set_signed_stub(),
+            self.root_sign_intermediate_path(),
+            self.intermediate_generate_path(),
+            self.intermediate_set_signed_path(),
             self.issue_path(),
-            self.sign_role_stub(),
-            self.sign_verbatim_stub(),
+            self.sign_path(),
+            self.sign_verbatim_path(),
             self.tidy_path(),
             self.tidy_status_path(),
             self.config_auto_tidy_path(),
@@ -82,7 +84,7 @@ impl PkiBackend {
             self.revoke_path(),
             self.crl_path(),
             self.crl_rotate_path(),
-            self.config_ca_stub(),
+            self.config_ca_path(),
             self.config_urls_path(),
             self.config_crl_path(),
         ];

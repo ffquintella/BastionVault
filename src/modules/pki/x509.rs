@@ -181,6 +181,91 @@ pub fn build_leaf(
     Ok((cert, serial))
 }
 
+/// Build a leaf cert from a CSR-supplied public key, signed by the
+/// provided CA. Used by `pki/sign/:role` and `pki/sign-verbatim` — the
+/// caller picks `subject` based on the role's policy on which fields to
+/// honour from the CSR (`use_csr_common_name`, `use_csr_sans`).
+pub fn build_leaf_from_spki(
+    role: &RoleEntry,
+    subject: &SubjectInput,
+    ttl: Duration,
+    spki_der: &[u8],
+    ca_signer: &CertSigner,
+    ca_cert_pem: &str,
+) -> Result<(Certificate, Vec<u8>), RvError> {
+    let serial = random_serial_bytes();
+    let params = params_for_subject(role, subject, ttl, &serial)?;
+    let issuer = reload_issuer(ca_signer, ca_cert_pem)?;
+    let public_key = rcgen::SubjectPublicKeyInfo::from_der(spki_der).map_err(rcgen_err)?;
+    let cert = params.signed_by(&public_key, &issuer).map_err(rcgen_err)?;
+    Ok((cert, serial))
+}
+
+/// Build an intermediate-CA cert signed by this mount's root. The result is
+/// a cert with `BasicConstraints(ca=true)` plus key-cert-sign / crl-sign
+/// usage, suitable for an operator to install on another mount via
+/// `pki/intermediate/set-signed`.
+pub fn build_intermediate_ca(
+    common_name: &str,
+    organization: &str,
+    ttl: Duration,
+    spki_der: &[u8],
+    ca_signer: &CertSigner,
+    ca_cert_pem: &str,
+    path_len: Option<u8>,
+) -> Result<(Certificate, Vec<u8>), RvError> {
+    use rcgen::{BasicConstraints, IsCa, KeyUsagePurpose};
+    use time::OffsetDateTime;
+
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).map_err(rcgen_err)?;
+    let mut dn = rcgen::DistinguishedName::new();
+    dn.push(rcgen::DnType::CommonName, common_name.to_string());
+    if !organization.is_empty() {
+        dn.push(rcgen::DnType::OrganizationName, organization.to_string());
+    }
+    params.distinguished_name = dn;
+    params.is_ca = match path_len {
+        Some(n) => IsCa::Ca(BasicConstraints::Constrained(n)),
+        None => IsCa::Ca(BasicConstraints::Unconstrained),
+    };
+    params.key_usages =
+        vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign, KeyUsagePurpose::DigitalSignature];
+    let now = OffsetDateTime::now_utc();
+    params.not_before = now - time::Duration::seconds(30);
+    params.not_after = now + time::Duration::seconds(ttl.as_secs() as i64);
+    let serial = random_serial_bytes();
+    params.serial_number = Some(rcgen::SerialNumber::from_slice(&serial));
+
+    let issuer = reload_issuer(ca_signer, ca_cert_pem)?;
+    let public_key = rcgen::SubjectPublicKeyInfo::from_der(spki_der).map_err(rcgen_err)?;
+    let cert = params.signed_by(&public_key, &issuer).map_err(rcgen_err)?;
+    Ok((cert, serial))
+}
+
+/// Build a CSR for an intermediate keypair. The intermediate mount uses
+/// this in `pki/intermediate/generate` to hand the operator a CSR they can
+/// sign on a root mount (or out-of-band on an offline root).
+///
+/// The CSR is *just* the subject + public key + (no extensions). CA-ness,
+/// path length, and key usages are decided by the signing root via
+/// `pki/root/sign-intermediate`, not by the CSR — putting `is_ca = true`
+/// in a CSR is a polite hint only and rcgen 0.14 errors on
+/// `serialize_request` if it's set.
+pub fn build_intermediate_csr(
+    common_name: &str,
+    organization: &str,
+    signer: &CertSigner,
+) -> Result<rcgen::CertificateSigningRequest, RvError> {
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).map_err(rcgen_err)?;
+    let mut dn = rcgen::DistinguishedName::new();
+    dn.push(rcgen::DnType::CommonName, common_name.to_string());
+    if !organization.is_empty() {
+        dn.push(rcgen::DnType::OrganizationName, organization.to_string());
+    }
+    params.distinguished_name = dn;
+    params.serialize_request(signer.key_pair()).map_err(rcgen_err)
+}
+
 /// `rcgen::Issuer` consumes its signing key, so we reconstruct one from the
 /// CertSigner's PKCS#8 PEM each time we need an issuer handle. The CertSigner
 /// itself remains live and reusable.

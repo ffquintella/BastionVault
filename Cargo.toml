@@ -140,7 +140,7 @@ sha2 = "0.11"
 # `digest 0.11` and are incompatible with the `rsa::signature::Verifier`
 # trait bounds. Renaming keeps the two coexistent.
 rsa = "0.9"
-x509-parser = "0.17"
+x509-parser = { version = "0.17", features = ["verify"] }
 flate2 = "1.0"
 sha1-saml = { package = "sha1", version = "0.10", features = ["oid"] }
 sha2-saml = { package = "sha2", version = "0.10", features = ["oid"] }
