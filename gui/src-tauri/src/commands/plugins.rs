@@ -233,6 +233,150 @@ pub async fn plugins_set_config(
     outcome
 }
 
+#[derive(Debug, Serialize)]
+pub struct PluginVersionsResult {
+    pub versions: Vec<PluginManifest>,
+    pub active: Option<String>,
+}
+
+#[tauri::command]
+pub async fn plugins_versions(
+    state: State<'_, AppState>,
+    name: String,
+) -> CmdResult<PluginVersionsResult> {
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let catalog = PluginCatalog::new();
+    let versions = catalog
+        .list_versions(core.barrier.as_storage(), &name)
+        .await
+        .map_err(CommandError::from)?;
+    let active = catalog
+        .get_active_version(core.barrier.as_storage(), &name)
+        .await
+        .map_err(CommandError::from)?;
+    Ok(PluginVersionsResult { versions, active })
+}
+
+#[tauri::command]
+pub async fn plugins_activate_version(
+    state: State<'_, AppState>,
+    name: String,
+    version: String,
+) -> CmdResult<()> {
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
+    drop(vault_guard);
+
+    let catalog = PluginCatalog::new();
+    let outcome = catalog
+        .set_active(core_arc.barrier.as_storage(), &name, &version)
+        .await
+        .map_err(CommandError::from);
+
+    if outcome.is_ok() {
+        if let Ok(cache) = bastion_vault::plugins::ModuleCache::shared() {
+            cache.invalidate(&name);
+        }
+    }
+
+    let token = state.token.lock().await.clone().unwrap_or_default();
+    let mut audit_body = serde_json::Map::new();
+    audit_body.insert("name".into(), serde_json::Value::String(name.clone()));
+    audit_body.insert("version".into(), serde_json::Value::String(version.clone()));
+    let err_str = match &outcome {
+        Err(e) => Some(format!("{e:?}")),
+        _ => None,
+    };
+    bastion_vault::audit::emit_sys_audit(
+        &core_arc,
+        &token,
+        &format!("sys/plugins/{name}/versions/{version}/activate"),
+        bastion_vault::logical::Operation::Write,
+        Some(audit_body),
+        err_str.as_deref(),
+    )
+    .await;
+    outcome
+}
+
+#[tauri::command]
+pub async fn plugins_delete_version(
+    state: State<'_, AppState>,
+    name: String,
+    version: String,
+) -> CmdResult<()> {
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let catalog = PluginCatalog::new();
+    catalog
+        .delete_version(core.barrier.as_storage(), &name, &version)
+        .await
+        .map_err(CommandError::from)?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+pub struct PluginReloadResult {
+    pub name: String,
+    pub active_version: String,
+    pub sha256: String,
+    pub cache_entries_evicted: usize,
+}
+
+#[tauri::command]
+pub async fn plugins_reload(
+    state: State<'_, AppState>,
+    name: String,
+) -> CmdResult<PluginReloadResult> {
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
+    drop(vault_guard);
+
+    let catalog = PluginCatalog::new();
+    let record = catalog
+        .get(core_arc.barrier.as_storage(), &name)
+        .await
+        .map_err(CommandError::from)?
+        .ok_or("plugin not found")?;
+    let cache = bastion_vault::plugins::ModuleCache::shared().map_err(|e| format!("{e}"))?;
+    let evicted = cache.invalidate(&name);
+
+    let token = state.token.lock().await.clone().unwrap_or_default();
+    let mut audit_body = serde_json::Map::new();
+    audit_body.insert("name".into(), serde_json::Value::String(name.clone()));
+    audit_body.insert(
+        "active_version".into(),
+        serde_json::Value::String(record.manifest.version.clone()),
+    );
+    audit_body.insert(
+        "cache_entries_evicted".into(),
+        serde_json::Value::Number(evicted.into()),
+    );
+    bastion_vault::audit::emit_sys_audit(
+        &core_arc,
+        &token,
+        &format!("sys/plugins/{name}/reload"),
+        bastion_vault::logical::Operation::Write,
+        Some(audit_body),
+        None,
+    )
+    .await;
+
+    Ok(PluginReloadResult {
+        name,
+        active_version: record.manifest.version,
+        sha256: record.manifest.sha256,
+        cache_entries_evicted: evicted,
+    })
+}
+
 #[tauri::command]
 pub async fn plugins_invoke(
     state: State<'_, AppState>,

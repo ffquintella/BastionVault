@@ -162,6 +162,25 @@ impl ProcessRuntime {
         if let Ok(p) = std::env::var("PATH") {
             cmd.env("PATH", p);
         }
+        // Windows requires `SystemRoot`, `SystemDrive`, `windir`, and
+        // `TEMP`/`TMP` to be present in the child's environment for
+        // DLL search, CRT initialisation, and the Win32 base services.
+        // Stripping them via `env_clear()` causes the spawned process
+        // to fast-fail during static init with
+        // `STATUS_STACK_BUFFER_OVERRUN` (0xC0000409) before the
+        // plugin handler even runs. Forward only this minimal set —
+        // not arbitrary parent env.
+        #[cfg(target_os = "windows")]
+        for var in &[
+            "SystemRoot", "SystemDrive", "windir", "TEMP", "TMP",
+            "USERPROFILE", "LOCALAPPDATA", "APPDATA", "ProgramData",
+            "ProgramFiles", "ProgramFiles(x86)", "COMSPEC",
+            "PATHEXT", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+        ] {
+            if let Ok(v) = std::env::var(var) {
+                cmd.env(var, v);
+            }
+        }
         // Tests use the same binary as both runner and plugin; signal
         // plugin mode via env so the ctor in lib.rs picks it up.
         cmd.env("BV_PLUGIN_MODE", "1");
@@ -554,13 +573,39 @@ fn generate_bootstrap_token() -> String {
 pub fn run_test_subprocess_plugin() -> ! {
     use std::io::{stdin, stdout, BufRead, Write};
 
+    // Critical: this function runs from a `#[ctor::ctor]` (which is
+    // `extern "C"` and `nounwind`). Any panic here aborts the
+    // process via fast-fail (`STATUS_STACK_BUFFER_OVERRUN` on
+    // Windows), and the panic message is **lost** because stderr
+    // doesn't flush before the abort. So we use explicit
+    // `eprintln!` + `process::exit(N)` for every failure path —
+    // never `.expect()`, never `.unwrap()`.
+
     let stdin = stdin();
     let mut stdout = stdout();
 
-    // Read init.
+    // Read init. EOF here = parent dropped stdin before writing,
+    // which is itself a bug — surface it loudly with exit code 90 so
+    // the parent's `UnexpectedExit` carries identifiable info.
     let mut init_line = String::new();
-    stdin.lock().read_line(&mut init_line).expect("read init");
-    let init: Value = serde_json::from_str(init_line.trim()).expect("parse init");
+    let bytes_read = match stdin.lock().read_line(&mut init_line) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("[bv-test-plugin] stdin read failed: {e}");
+            std::process::exit(91);
+        }
+    };
+    if bytes_read == 0 {
+        eprintln!("[bv-test-plugin] stdin EOF before init — parent never wrote it");
+        std::process::exit(90);
+    }
+    let init: Value = match serde_json::from_str(init_line.trim()) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[bv-test-plugin] init parse failed: {e} (line: {init_line:?})");
+            std::process::exit(92);
+        }
+    };
     let input_b64 = init.get("input").and_then(|v| v.as_str()).unwrap_or("");
     let plugin_name = init.get("plugin_name").and_then(|v| v.as_str()).unwrap_or("");
     let input = base64::engine::general_purpose::STANDARD

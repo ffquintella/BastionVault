@@ -1030,3 +1030,29 @@ export const pluginsGetConfig = (name: string) =>
 
 export const pluginsSetConfig = (name: string, values: Record<string, string>) =>
   invoke<void>("plugins_set_config", { name, values });
+
+// ── Plugin reload + versioning (Phase 3) ─────────────────────────────────
+
+export interface PluginVersionsResult {
+  versions: PluginManifest[];
+  active: string | null;
+}
+
+export interface PluginReloadResult {
+  name: string;
+  active_version: string;
+  sha256: string;
+  cache_entries_evicted: number;
+}
+
+export const pluginsVersions = (name: string) =>
+  invoke<PluginVersionsResult>("plugins_versions", { name });
+
+export const pluginsActivateVersion = (name: string, version: string) =>
+  invoke<void>("plugins_activate_version", { name, version });
+
+export const pluginsDeleteVersion = (name: string, version: string) =>
+  invoke<void>("plugins_delete_version", { name, version });
+
+export const pluginsReload = (name: string) =>
+  invoke<PluginReloadResult>("plugins_reload", { name });

@@ -24,11 +24,13 @@
 pub mod catalog;
 pub mod config;
 pub mod manifest;
+pub mod module_cache;
 pub mod process_runtime;
 pub mod runtime;
 
 pub use catalog::{PluginCatalog, PluginRecord, PLUGIN_PREFIX};
 pub use config::ConfigStore;
 pub use manifest::{ConfigField, ConfigFieldKind, PluginManifest, RuntimeKind};
+pub use module_cache::ModuleCache;
 pub use process_runtime::{ProcessRuntime, ProcessRuntimeError, DEFAULT_INVOKE_TIMEOUT};
 pub use runtime::{InvokeOutput, InvokeOutcome, RuntimeError, WasmRuntime, DEFAULT_FUEL, DEFAULT_MEMORY_BYTES};

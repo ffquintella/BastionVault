@@ -66,7 +66,7 @@
 
 use std::sync::Arc;
 
-use wasmtime::{AsContextMut, Caller, Config, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc};
+use wasmtime::{AsContextMut, Caller, Linker, Memory, Store, StoreLimits, StoreLimitsBuilder, TypedFunc};
 
 use crate::{
     audit,
@@ -75,6 +75,7 @@ use crate::{
 };
 
 use super::manifest::PluginManifest;
+use super::module_cache::ModuleCache;
 
 pub const DEFAULT_FUEL: u64 = 100_000_000;
 pub const DEFAULT_MEMORY_BYTES: usize = 256 * 1024 * 1024;
@@ -171,11 +172,13 @@ impl PluginCtx {
     }
 }
 
-/// Reusable runtime: holds a single `Engine` so module compilation is
-/// shared across invocations, and a default fuel / memory budget that
-/// each invocation starts with.
+/// Reusable runtime. Holds the per-invoke fuel / memory budget. The
+/// underlying wasmtime `Engine` and the compiled-module cache live in
+/// [`ModuleCache::shared()`] — process-global and shared across every
+/// `WasmRuntime` instance, so re-invoking the same plugin skips
+/// compilation.
 pub struct WasmRuntime {
-    engine: Engine,
+    cache: ModuleCache,
     fuel_budget: u64,
     memory_budget: usize,
 }
@@ -186,16 +189,8 @@ impl WasmRuntime {
     }
 
     pub fn with_budgets(fuel_budget: u64, memory_budget: usize) -> Result<Self, RuntimeError> {
-        let mut config = Config::new();
-        config.consume_fuel(true);
-        config.async_support(true);
-        // Wasm-side stack guard. Async wasmtime allocates its own stack
-        // per coroutine; cap it so a malicious plugin can't exhaust
-        // host memory through deep recursion.
-        config.async_stack_size(1 * 1024 * 1024);
-        config.max_wasm_stack(1 * 1024 * 1024);
-        let engine = Engine::new(&config).map_err(|e| RuntimeError::Engine(e.to_string()))?;
-        Ok(Self { engine, fuel_budget, memory_budget })
+        let cache = ModuleCache::shared()?;
+        Ok(Self { cache, fuel_budget, memory_budget })
     }
 
     pub fn fuel_budget(&self) -> u64 {
@@ -234,8 +229,11 @@ impl WasmRuntime {
         core: Option<Arc<Core>>,
         config: std::collections::BTreeMap<String, String>,
     ) -> Result<InvokeOutput, RuntimeError> {
-        let module = Module::new(&self.engine, wasm_bytes)
-            .map_err(|e| RuntimeError::Compile(e.to_string()))?;
+        // Reuse a previously-compiled module when one is cached for
+        // this `(name, sha256)` pair; otherwise compile + insert.
+        let module = self
+            .cache
+            .get_or_compile(&manifest.name, &manifest.sha256, wasm_bytes)?;
 
         let limits = StoreLimitsBuilder::new()
             .memory_size(self.memory_budget)
@@ -252,13 +250,13 @@ impl WasmRuntime {
             config,
         };
 
-        let mut store: Store<PluginCtx> = Store::new(&self.engine, ctx);
+        let mut store: Store<PluginCtx> = Store::new(self.cache.engine(), ctx);
         store.limiter(|c| &mut c.limits);
         store
             .set_fuel(self.fuel_budget)
             .map_err(|e| RuntimeError::Engine(e.to_string()))?;
 
-        let mut linker: Linker<PluginCtx> = Linker::new(&self.engine);
+        let mut linker: Linker<PluginCtx> = Linker::new(self.cache.engine());
         register_host_imports(&mut linker, manifest)?;
 
         let instance = linker

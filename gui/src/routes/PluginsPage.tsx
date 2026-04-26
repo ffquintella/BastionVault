@@ -28,6 +28,8 @@ export function PluginsPage() {
   const [deletingName, setDeletingName] = useState<string | null>(null);
   const [invoking, setInvoking] = useState<PluginManifest | null>(null);
   const [configuring, setConfiguring] = useState<PluginManifest | null>(null);
+  const [versioning, setVersioning] = useState<PluginManifest | null>(null);
+  const [reloading, setReloading] = useState<string | null>(null);
 
   async function refresh() {
     setLoading(true);
@@ -83,8 +85,24 @@ export function PluginsPage() {
                 <PluginRow
                   key={p.name}
                   plugin={p}
+                  reloading={reloading === p.name}
                   onInvoke={() => setInvoking(p)}
                   onConfigure={() => setConfiguring(p)}
+                  onVersions={() => setVersioning(p)}
+                  onReload={async () => {
+                    setReloading(p.name);
+                    try {
+                      const r = await api.pluginsReload(p.name);
+                      toast(
+                        "success",
+                        `Reloaded ${p.name} (active v${r.active_version}, evicted ${r.cache_entries_evicted} cache entry${r.cache_entries_evicted === 1 ? "" : "ies"}).`,
+                      );
+                    } catch (e) {
+                      toast("error", extractError(e));
+                    } finally {
+                      setReloading(null);
+                    }
+                  }}
                   onDelete={() => setDeletingName(p.name)}
                 />
               ))}
@@ -112,6 +130,17 @@ export function PluginsPage() {
         />
       )}
 
+      {versioning && (
+        <VersionsModal
+          plugin={versioning}
+          onClose={() => setVersioning(null)}
+          onChanged={() => {
+            setVersioning(null);
+            refresh();
+          }}
+        />
+      )}
+
       <ConfirmModal
         open={deletingName !== null}
         onClose={() => setDeletingName(null)}
@@ -126,13 +155,19 @@ export function PluginsPage() {
 
 function PluginRow({
   plugin,
+  reloading,
   onInvoke,
   onConfigure,
+  onVersions,
+  onReload,
   onDelete,
 }: {
   plugin: PluginManifest;
+  reloading: boolean;
   onInvoke: () => void;
   onConfigure: () => void;
+  onVersions: () => void;
+  onReload: () => void;
   onDelete: () => void;
 }) {
   const hasConfig = (plugin.config_schema?.length ?? 0) > 0;
@@ -160,6 +195,10 @@ function PluginRow({
         {hasConfig && (
           <Button size="sm" variant="secondary" onClick={onConfigure}>Configure</Button>
         )}
+        <Button size="sm" variant="ghost" onClick={onVersions}>Versions</Button>
+        <Button size="sm" variant="ghost" onClick={onReload} loading={reloading}>
+          Reload
+        </Button>
         <Button size="sm" variant="danger" onClick={onDelete}>Delete</Button>
       </div>
     </div>
@@ -627,4 +666,134 @@ function ConfigInput({
         />
       );
   }
+}
+
+/**
+ * Versions panel: lists every registered version of a plugin, marks
+ * the active one, lets the operator activate or delete non-active
+ * versions. Activation invalidates the module-compilation cache so
+ * the next invoke compiles the newly-active binary.
+ */
+function VersionsModal({
+  plugin,
+  onClose,
+  onChanged,
+}: {
+  plugin: PluginManifest;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const { toast } = useToast();
+  const [versions, setVersions] = useState<PluginManifest[] | null>(null);
+  const [active, setActive] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  async function refresh() {
+    try {
+      const r = await api.pluginsVersions(plugin.name);
+      setVersions(r.versions);
+      setActive(r.active);
+    } catch (e) {
+      toast("error", extractError(e));
+    }
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    refresh();
+  }, [plugin.name]);
+
+  async function activate(version: string) {
+    setBusy(version);
+    try {
+      await api.pluginsActivateVersion(plugin.name, version);
+      toast("success", `Activated v${version}.`);
+      await refresh();
+      onChanged();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function remove(version: string) {
+    setBusy(version);
+    try {
+      await api.pluginsDeleteVersion(plugin.name, version);
+      toast("success", `Removed v${version}.`);
+      await refresh();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <Modal open={true} onClose={onClose} title={`${plugin.name} — versions`} size="md">
+      {!versions ? (
+        <p className="text-sm text-[var(--color-text-muted)]">Loading…</p>
+      ) : versions.length === 0 ? (
+        <p className="text-sm text-[var(--color-text-muted)]">No versions registered.</p>
+      ) : (
+        <div className="space-y-2">
+          {versions.map((m) => {
+            const isActive = m.version === active;
+            return (
+              <div
+                key={m.version}
+                className={`flex items-center justify-between p-3 border rounded-md gap-3 ${
+                  isActive
+                    ? "border-emerald-500/40 bg-emerald-500/5"
+                    : "border-[var(--color-border)]"
+                }`}
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <p className="font-medium">v{m.version}</p>
+                    {isActive && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400">
+                        active
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-[var(--color-text-muted)] mt-1 font-mono truncate">
+                    sha256: {m.sha256.slice(0, 16)}… · {m.size} bytes
+                  </p>
+                </div>
+                <div className="flex gap-1 shrink-0">
+                  {!isActive && (
+                    <>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => activate(m.version)}
+                        loading={busy === m.version}
+                      >
+                        Activate
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="danger"
+                        onClick={() => remove(m.version)}
+                        loading={busy === m.version}
+                      >
+                        Delete
+                      </Button>
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <p className="text-xs text-[var(--color-text-muted)] mt-3">
+        Activating a different version invalidates the wasmtime
+        compilation cache for this plugin. The next invoke recompiles
+        the newly-active binary; subsequent invocations reuse the
+        cached compile.
+      </p>
+    </Modal>
+  );
 }
