@@ -250,6 +250,7 @@ function RegisterModal({
   const [name, setName] = useState("");
   const [version, setVersion] = useState("0.1.0");
   const [pluginType, setPluginType] = useState("secret-engine");
+  const [runtime, setRuntime] = useState<"wasm" | "process">("wasm");
   const [description, setDescription] = useState("");
   const [logEmit, setLogEmit] = useState(true);
   const [auditEmit, setAuditEmit] = useState(false);
@@ -345,6 +346,9 @@ function RegisterModal({
       setName(bundleManifest.name ?? "");
       setVersion(bundleManifest.version ?? "0.1.0");
       setPluginType(bundleManifest.plugin_type ?? "secret-engine");
+      setRuntime(
+        bundleManifest.runtime === "process" ? "process" : "wasm",
+      );
       setDescription(bundleManifest.description ?? "");
       setLogEmit(bundleManifest.capabilities?.log_emit ?? false);
       setAuditEmit(bundleManifest.capabilities?.audit_emit ?? false);
@@ -360,8 +364,11 @@ function RegisterModal({
       );
     } else {
       // Raw `.wasm` — fall back to a name derived from the filename so
-      // the operator at least gets a starting point.
+      // the operator at least gets a starting point. Runtime is always
+      // wasm in the raw-file case (process plugins never use a .wasm
+      // extension; if you have a process plugin, pack it).
       setConfigSchema(undefined);
+      setRuntime("wasm");
       if (!name) {
         const leaf = displayName.split(/[\\/]/).pop() ?? displayName;
         setName(leaf.replace(/\.(wasm|bvplugin)$/i, ""));
@@ -399,7 +406,7 @@ function RegisterModal({
         name: name.trim(),
         version: version.trim() || "0.1.0",
         plugin_type: pluginType.trim() || "secret-engine",
-        runtime: "wasm",
+        runtime,
         abi_version: "1.0",
         sha256,
         size: fileBytes.length,
@@ -486,6 +493,15 @@ function RegisterModal({
               { value: "database", label: "database" },
               { value: "transform", label: "transform" },
               { value: "other", label: "other" },
+            ]}
+          />
+          <Select
+            label="Runtime"
+            value={runtime}
+            onChange={(e) => setRuntime(e.target.value as "wasm" | "process")}
+            options={[
+              { value: "wasm", label: "wasm (sandboxed)" },
+              { value: "process", label: "process (native subprocess)" },
             ]}
           />
           <Input

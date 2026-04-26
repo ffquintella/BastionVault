@@ -200,12 +200,17 @@ plugins-wasm: plugins-init plugins-target ## Compile the WASM reference plugins 
 	@echo "==> WASM plugins ready in $(PLUGINS_OUT)/"
 	@ls -lh $(PLUGINS_OUT)/*.wasm 2>/dev/null || true
 
-plugins-pack: plugins-wasm plugins-pack-build ## Pack each WASM plugin + its plugin.toml into a .bvplugin bundle
-	@echo "==> packing bastion-plugin-totp into .bvplugin"
+plugins-pack: plugins-wasm plugins-process plugins-pack-build ## Pack each plugin (WASM or process) + its plugin.toml into a .bvplugin bundle
+	@echo "==> packing bastion-plugin-totp (wasm) into .bvplugin"
 	./target/release/bv-plugin-pack$(if $(filter Windows_NT,$(OS)),.exe,) \
 		--manifest $(PLUGINS_DIR)/bastion-plugin-totp/plugin.toml \
 		--binary   $(PLUGINS_OUT)/bastion_plugin_totp.wasm \
 		--out      $(PLUGINS_OUT)/bastion-plugin-totp.bvplugin
+	@echo "==> packing bastion-plugin-postgres (process) into .bvplugin"
+	./target/release/bv-plugin-pack$(if $(filter Windows_NT,$(OS)),.exe,) \
+		--manifest $(PLUGINS_DIR)/bastion-plugin-postgres/plugin.toml \
+		--binary   $(PLUGINS_OUT)/bastion-plugin-postgres$(if $(filter Windows_NT,$(OS)),.exe,) \
+		--out      $(PLUGINS_OUT)/bastion-plugin-postgres.bvplugin
 	@echo ""
 	@echo "==> Bundles ready in $(PLUGINS_OUT)/"
 	@ls -lh $(PLUGINS_OUT)/*.bvplugin 2>/dev/null || true

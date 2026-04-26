@@ -1,25 +1,29 @@
-//! `bv-plugin-pack` — pack a plugin.toml + plugin.wasm into a single
+//! `bv-plugin-pack` — pack a plugin.toml + plugin binary into a single
 //! `.bvplugin` bundle. The GUI's Register modal detects the bundle by
 //! its magic bytes and prefills every form field (name, version, type,
-//! description, capabilities, config_schema) from the embedded
+//! runtime, description, capabilities, config_schema) from the embedded
 //! manifest, so operators don't have to retype anything that the
 //! plugin author already declared.
+//!
+//! Works for both runtimes: a WASM plugin embeds the `.wasm` module; a
+//! process plugin embeds the native executable. The host distinguishes
+//! at registration time via `manifest.runtime`.
 //!
 //! ## Format (v1)
 //!
 //! ```text
-//! offset 0:   "BVPL"        4 bytes magic
-//! offset 4:   0x01          format version (u8)
-//! offset 5:   [0,0,0]       reserved (must be zero)
-//! offset 8:   u32 LE        manifest_json_length
-//! offset 12:  <manifest>    JSON, length above
-//! offset 12+m: <wasm>       rest of file = WASM binary
+//! offset 0:    "BVPL"        4 bytes magic
+//! offset 4:    0x01          format version (u8)
+//! offset 5:    [0,0,0]       reserved (must be zero)
+//! offset 8:    u32 LE        manifest_json_length
+//! offset 12:   <manifest>    JSON, length above
+//! offset 12+m: <binary>      rest of file = plugin binary
 //! ```
 //!
 //! The embedded manifest is JSON because the host's existing
 //! `POST /v1/sys/plugins/<name>` endpoint consumes JSON; the packer
 //! converts the source `plugin.toml` and recomputes `sha256` over the
-//! WASM binary so a tampered binary can't sneak past the bundle.
+//! binary so a tampered binary can't sneak past the bundle.
 
 use std::fs;
 use std::io::Write;
@@ -48,20 +52,24 @@ struct Args {
     out: Option<PathBuf>,
 }
 
+/// Mirrors `bastion_vault::plugins::manifest::ConfigField` exactly,
+/// including `#[serde(skip_serializing_if = ...)]` on optional fields,
+/// so the bundle's embedded manifest deserializes cleanly on the host
+/// without per-field tolerance for `null`.
 #[derive(Debug, Deserialize, Serialize)]
 struct ConfigField {
     name: String,
-    #[serde(default)]
-    label: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
     kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
     #[serde(default)]
     required: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     default: Option<String>,
-    #[serde(default)]
-    options: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    options: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
