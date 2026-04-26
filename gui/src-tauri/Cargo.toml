@@ -13,6 +13,10 @@ tauri-plugin-shell = "2"
 # Native OS directory-picker used by the Add Local Vault modal so
 # operators can browse to the data dir instead of typing the path.
 tauri-plugin-dialog = "2"
+# Development-only MCP bridge used by local AI assistants for GUI inspection
+# and automation. It is optional, feature-gated, and only registered by
+# debug builds when BASTION_TAURI_MCP=1 is set.
+tauri-plugin-mcp-bridge = { version = "0.11.1", optional = true }
 bastion_vault = { path = "../..", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -78,3 +82,4 @@ windows = { version = "0.61", features = ["Win32_Foundation"] }
 default = ["storage_hiqlite", "cloud_targets"]
 storage_hiqlite = ["bastion_vault/storage_hiqlite"]
 cloud_targets = ["bastion_vault/cloud_targets"]
+mcp_local_dev = ["dep:tauri-plugin-mcp-bridge"]

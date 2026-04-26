@@ -78,7 +78,7 @@ pub fn run() {
         }
     }
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         // `dialog` exposes OS-native file / directory pickers; the
         // Add Local Vault modal uses the directory picker so the
@@ -300,7 +300,22 @@ pub fn run() {
             commands::fido2::fido2_login_complete,
             commands::fido2::fido2_list_credentials,
             commands::fido2::fido2_delete_credential,
-        ])
+        ]);
+
+    #[cfg(all(debug_assertions, feature = "mcp_local_dev"))]
+    let builder = {
+        if matches!(std::env::var("BASTION_TAURI_MCP").as_deref(), Ok("1")) {
+            builder.plugin(
+                tauri_plugin_mcp_bridge::Builder::new()
+                    .bind_address("127.0.0.1")
+                    .build(),
+            )
+        } else {
+            builder
+        }
+    };
+
+    builder
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

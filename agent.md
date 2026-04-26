@@ -102,6 +102,21 @@ When making or reviewing changes, prioritize:
 - Prefer feature flags, staged rollouts, and format versioning for risky migrations.
 - Keep observability intact for security-relevant failures.
 
+## Local Tauri MCP Bridge
+
+- The `hypothesi/mcp-server-tauri` bridge is approved only for local GUI
+  development and inspection. It must stay behind the GUI crate's
+  `mcp_local_dev` Cargo feature and a `BASTION_TAURI_MCP=1` runtime opt-in.
+- The bridge must bind only to `127.0.0.1`. Do not switch it to `0.0.0.0`
+  or expose it over a remote interface without a separate security review.
+- Do not enable the bridge in release, production, CI packaging, or builds
+  that handle real operator secrets. Use disposable local development data.
+- `make run-dev-gui` is the intended local entry point; it enables the
+  feature and runtime flag for the embedded file-storage development GUI.
+- Treat MCP screenshots, DOM snapshots, IPC events, backend state, and logs
+  as sensitive. Do not paste or persist them unless they have been reviewed
+  for secret material.
+
 ## What To Avoid
 
 - speculative rewrites
