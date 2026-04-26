@@ -22,7 +22,7 @@ OPENSSL_SRC_PERL ?= C:/Strawberry/perl/bin/perl.exe
 export OPENSSL_SRC_PERL
 endif
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-wasm plugins-process plugins plugins-clean
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -187,6 +187,9 @@ plugins-target: ## Install the wasm32-wasip1 Rust target if missing
 		rustup target add $(PLUGINS_WASM_TARGET); \
 	}
 
+plugins-pack-build: ## Build the bv-plugin-pack helper that produces .bvplugin bundles
+	cargo build --release -p bv-plugin-pack
+
 plugins-wasm: plugins-init plugins-target ## Compile the WASM reference plugins (release)
 	@echo "==> building bastion-plugin-totp ($(PLUGINS_WASM_TARGET))"
 	cd $(PLUGINS_DIR) && cargo build --release --target $(PLUGINS_WASM_TARGET) -p bastion-plugin-totp
@@ -197,6 +200,16 @@ plugins-wasm: plugins-init plugins-target ## Compile the WASM reference plugins 
 	@echo "==> WASM plugins ready in $(PLUGINS_OUT)/"
 	@ls -lh $(PLUGINS_OUT)/*.wasm 2>/dev/null || true
 
+plugins-pack: plugins-wasm plugins-pack-build ## Pack each WASM plugin + its plugin.toml into a .bvplugin bundle
+	@echo "==> packing bastion-plugin-totp into .bvplugin"
+	./target/release/bv-plugin-pack$(if $(filter Windows_NT,$(OS)),.exe,) \
+		--manifest $(PLUGINS_DIR)/bastion-plugin-totp/plugin.toml \
+		--binary   $(PLUGINS_OUT)/bastion_plugin_totp.wasm \
+		--out      $(PLUGINS_OUT)/bastion-plugin-totp.bvplugin
+	@echo ""
+	@echo "==> Bundles ready in $(PLUGINS_OUT)/"
+	@ls -lh $(PLUGINS_OUT)/*.bvplugin 2>/dev/null || true
+
 plugins-process: plugins-init ## Compile the process-runtime reference plugins (release, native target)
 	@echo "==> building bastion-plugin-postgres (native)"
 	cd $(PLUGINS_DIR) && cargo build --release -p bastion-plugin-postgres
@@ -206,7 +219,7 @@ plugins-process: plugins-init ## Compile the process-runtime reference plugins (
 	@echo "==> Process plugins ready in $(PLUGINS_OUT)/"
 	@ls -lh $(PLUGINS_OUT)/bastion-plugin-postgres* 2>/dev/null || true
 
-plugins: plugins-wasm plugins-process ## Build every reference plugin (WASM + process)
+plugins: plugins-pack plugins-process ## Build every reference plugin (WASM + .bvplugin bundle + process)
 	@echo ""
 	@echo "==> All reference plugins built. Upload the artefacts via the GUI"
 	@echo "   Plugins page (Admin → Plugins → Register plugin → Select file…),"

@@ -260,21 +260,112 @@ function RegisterModal({
   const [fileBytes, setFileBytes] = useState<Uint8Array | null>(null);
   const [fileName, setFileName] = useState("");
   const [sha256, setSha256] = useState("");
+  const [fromBundle, setFromBundle] = useState(false);
+  const [configSchema, setConfigSchema] = useState<
+    api.PluginConfigField[] | undefined
+  >(undefined);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
 
+  /// Parse a `.bvplugin` container if the bytes start with the magic
+  /// header; otherwise return null and treat the bytes as a raw `.wasm`.
+  /// Format documented in `crates/bv-plugin-pack/src/main.rs`.
+  function parseBundle(
+    buf: Uint8Array,
+  ): { manifest: api.PluginManifest; wasm: Uint8Array } | null {
+    if (
+      buf.length < 12 ||
+      buf[0] !== 0x42 || // 'B'
+      buf[1] !== 0x56 || // 'V'
+      buf[2] !== 0x50 || // 'P'
+      buf[3] !== 0x4c    // 'L'
+    ) {
+      return null;
+    }
+    const formatVersion = buf[4];
+    if (formatVersion !== 1) {
+      throw new Error(
+        `unsupported bundle format version: ${formatVersion} (this build supports v1)`,
+      );
+    }
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const manifestLen = dv.getUint32(8, true);
+    if (12 + manifestLen > buf.length) {
+      throw new Error("bundle truncated: manifest length exceeds file size");
+    }
+    const manifestBytes = buf.subarray(12, 12 + manifestLen);
+    const manifestText = new TextDecoder("utf-8", { fatal: true }).decode(
+      manifestBytes,
+    );
+    const manifest = JSON.parse(manifestText) as api.PluginManifest;
+    const wasm = buf.subarray(12 + manifestLen);
+    return { manifest, wasm };
+  }
+
   async function ingestFile(buf: Uint8Array, displayName: string) {
-    const digest = await crypto.subtle.digest("SHA-256", buf as BufferSource);
+    let wasm = buf;
+    let bundleManifest: api.PluginManifest | null = null;
+    try {
+      const parsed = parseBundle(buf);
+      if (parsed) {
+        bundleManifest = parsed.manifest;
+        wasm = parsed.wasm;
+      }
+    } catch (e) {
+      toast("error", `Bundle is invalid: ${(e as Error).message}`);
+      return;
+    }
+
+    // sha256 is always over the WASM payload — never over the bundle
+    // header — so re-registering after extracting from the bundle
+    // produces the same hash as a raw .wasm upload.
+    const digest = await crypto.subtle.digest("SHA-256", wasm as BufferSource);
     const hex = Array.from(new Uint8Array(digest))
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
-    setFileBytes(buf);
+
+    setFileBytes(wasm);
     setFileName(displayName);
     setSha256(hex);
-    if (!name) {
-      // Best-effort: derive a default name from the file (operator can
-      // override). Strip the directory and `.wasm` suffix.
-      const leaf = displayName.split(/[\\/]/).pop() ?? displayName;
-      setName(leaf.replace(/\.wasm$/i, ""));
+    setFromBundle(bundleManifest !== null);
+
+    if (bundleManifest) {
+      // Sanity-check the embedded sha256 against what we just computed
+      // — catches tampering between pack and upload.
+      if (bundleManifest.sha256 && bundleManifest.sha256 !== hex) {
+        toast(
+          "error",
+          `Bundle sha256 (${bundleManifest.sha256.slice(0, 16)}…) does not match the embedded WASM (${hex.slice(0, 16)}…). Refusing.`,
+        );
+        setFileBytes(null);
+        setFromBundle(false);
+        return;
+      }
+      // Prefill every field the manifest declared. Operators can still
+      // tweak before clicking Register; we don't lock them out.
+      setName(bundleManifest.name ?? "");
+      setVersion(bundleManifest.version ?? "0.1.0");
+      setPluginType(bundleManifest.plugin_type ?? "secret-engine");
+      setDescription(bundleManifest.description ?? "");
+      setLogEmit(bundleManifest.capabilities?.log_emit ?? false);
+      setAuditEmit(bundleManifest.capabilities?.audit_emit ?? false);
+      const sp = bundleManifest.capabilities?.storage_prefix ?? null;
+      setStorageEnabled(sp !== null && sp !== undefined);
+      setStoragePrefix(sp ?? "");
+      setConfigSchema(bundleManifest.config_schema);
+      toast(
+        "success",
+        `Loaded ${bundleManifest.config_schema?.length ?? 0} config field${
+          (bundleManifest.config_schema?.length ?? 0) === 1 ? "" : "s"
+        } from bundle "${bundleManifest.name}".`,
+      );
+    } else {
+      // Raw `.wasm` — fall back to a name derived from the filename so
+      // the operator at least gets a starting point.
+      setConfigSchema(undefined);
+      if (!name) {
+        const leaf = displayName.split(/[\\/]/).pop() ?? displayName;
+        setName(leaf.replace(/\.(wasm|bvplugin)$/i, ""));
+      }
     }
   }
 
@@ -320,6 +411,12 @@ function RegisterModal({
           allowed_hosts: [],
         },
         description: description.trim(),
+        // Carry the bundle's config_schema through unchanged so the
+        // GUI's Configure modal can render the same form the plugin
+        // author declared.
+        ...(configSchema && configSchema.length > 0
+          ? { config_schema: configSchema }
+          : {}),
       };
       // Base64-encode the binary for the Tauri command boundary.
       let bin = "";
@@ -339,7 +436,12 @@ function RegisterModal({
     <Modal open={true} onClose={onClose} title="Register plugin" size="lg">
       <div className="space-y-4">
         <div>
-          <label className="text-sm font-medium block mb-1">.wasm file</label>
+          <label className="text-sm font-medium block mb-1">
+            Plugin file
+            <span className="ml-2 text-xs font-normal text-[var(--color-text-muted)]">
+              .bvplugin (recommended) or raw .wasm
+            </span>
+          </label>
           <div className="flex items-center gap-2">
             <Button type="button" variant="secondary" onClick={pickFile}>
               Select file…
@@ -347,17 +449,26 @@ function RegisterModal({
             <span className="text-xs text-[var(--color-text-muted)] font-mono truncate min-w-0">
               {fileName ? fileName : "(no file selected)"}
             </span>
+            {fromBundle && <Badge variant="success" label="from bundle" />}
           </div>
           <input
             ref={fileInputRef}
             type="file"
-            accept=".wasm,application/wasm"
+            accept=".wasm,.bvplugin,application/wasm,application/octet-stream"
             onChange={onFile}
             className="hidden"
           />
           {fileName && (
             <p className="text-xs text-[var(--color-text-muted)] mt-1 font-mono">
               {fileBytes?.length ?? 0} bytes · sha256 {sha256.slice(0, 16)}…
+              {fromBundle && (
+                <>
+                  {" · "}
+                  <span className="text-[var(--color-success)]">
+                    manifest auto-filled from bundle
+                  </span>
+                </>
+              )}
             </p>
           )}
         </div>

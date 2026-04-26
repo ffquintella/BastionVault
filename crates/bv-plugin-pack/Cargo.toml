@@ -1,0 +1,18 @@
+[package]
+name = "bv-plugin-pack"
+version = "0.1.0"
+edition = "2021"
+description = "Pack a plugin.toml + .wasm into a .bvplugin bundle so the GUI can self-configure on upload."
+license = "Apache-2.0"
+repository = "https://github.com/ffquintella/BastionVault"
+
+[[bin]]
+name = "bv-plugin-pack"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+sha2 = "0.10"
