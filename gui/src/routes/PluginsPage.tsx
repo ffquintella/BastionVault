@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Layout } from "../components/Layout";
 import { Button, Card, Input, Select, Modal, ConfirmModal, Badge, useToast } from "../components/ui";
 import * as api from "../lib/api";
@@ -260,22 +260,37 @@ function RegisterModal({
   const [fileBytes, setFileBytes] = useState<Uint8Array | null>(null);
   const [fileName, setFileName] = useState("");
   const [sha256, setSha256] = useState("");
+  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
+
+  async function ingestFile(buf: Uint8Array, displayName: string) {
+    const digest = await crypto.subtle.digest("SHA-256", buf as BufferSource);
+    const hex = Array.from(new Uint8Array(digest))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    setFileBytes(buf);
+    setFileName(displayName);
+    setSha256(hex);
+    if (!name) {
+      // Best-effort: derive a default name from the file (operator can
+      // override). Strip the directory and `.wasm` suffix.
+      const leaf = displayName.split(/[\\/]/).pop() ?? displayName;
+      setName(leaf.replace(/\.wasm$/i, ""));
+    }
+  }
 
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
     if (!f) return;
     const buf = new Uint8Array(await f.arrayBuffer());
-    const digest = await crypto.subtle.digest("SHA-256", buf);
-    const hex = Array.from(new Uint8Array(digest))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
-    setFileBytes(buf);
-    setFileName(f.name);
-    setSha256(hex);
-    if (!name) {
-      // Best-effort: derive a default name from the file (operator can override).
-      setName(f.name.replace(/\.wasm$/i, ""));
-    }
+    await ingestFile(buf, f.name);
+  }
+
+  /// Trigger the hidden <input type="file"> via a styled button. The
+  /// WebView2 picker honours the `accept=".wasm"` filter so the
+  /// operator gets a `.wasm`-filtered native dialog without needing a
+  /// separate fs-plugin round-trip to read the bytes back into memory.
+  function pickFile() {
+    fileInputRef.current?.click();
   }
 
   async function handleRegister() {
@@ -325,10 +340,24 @@ function RegisterModal({
       <div className="space-y-4">
         <div>
           <label className="text-sm font-medium block mb-1">.wasm file</label>
-          <input type="file" accept=".wasm,application/wasm" onChange={onFile} className="text-sm" />
+          <div className="flex items-center gap-2">
+            <Button type="button" variant="secondary" onClick={pickFile}>
+              Select file…
+            </Button>
+            <span className="text-xs text-[var(--color-text-muted)] font-mono truncate min-w-0">
+              {fileName ? fileName : "(no file selected)"}
+            </span>
+          </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".wasm,application/wasm"
+            onChange={onFile}
+            className="hidden"
+          />
           {fileName && (
             <p className="text-xs text-[var(--color-text-muted)] mt-1 font-mono">
-              {fileName} · {fileBytes?.length ?? 0} bytes · sha256 {sha256.slice(0, 16)}…
+              {fileBytes?.length ?? 0} bytes · sha256 {sha256.slice(0, 16)}…
             </p>
           )}
         </div>

@@ -22,7 +22,7 @@ OPENSSL_SRC_PERL ?= C:/Strawberry/perl/bin/perl.exe
 export OPENSSL_SRC_PERL
 endif
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-wasm plugins-process plugins plugins-clean
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -163,3 +163,55 @@ win-bootstrap: ## Install Windows build deps (Perl, NASM, Node) via winget and a
 	@echo "To use these tools in the current shell, run:"
 	@echo "    source scripts/win-env.sh"
 	@echo "Or open a new Git Bash shell so winget's PATH updates take effect."
+
+# ── Reference plugins (plugins-ext/ submodule) ──────────────────────────
+# Build the BastionVault-Plugins reference plugins. WASM plugins compile
+# to wasm32-wasip1; process plugins compile native. Operators upload the
+# resulting artefacts via the GUI's Plugins → Register flow.
+
+PLUGINS_DIR := plugins-ext
+PLUGINS_WASM_TARGET := wasm32-wasip1
+PLUGINS_OUT := $(PLUGINS_DIR)/dist
+
+plugins-init: ## Initialise the BastionVault-Plugins submodule (first-time setup)
+	@if [ ! -f "$(PLUGINS_DIR)/Cargo.toml" ]; then \
+		echo "==> initialising plugins-ext submodule"; \
+		git submodule update --init --recursive $(PLUGINS_DIR); \
+	else \
+		echo "==> plugins-ext already initialised"; \
+	fi
+
+plugins-target: ## Install the wasm32-wasip1 Rust target if missing
+	@rustup target list --installed | grep -q '^$(PLUGINS_WASM_TARGET)$$' || { \
+		echo "==> installing rustup target $(PLUGINS_WASM_TARGET)"; \
+		rustup target add $(PLUGINS_WASM_TARGET); \
+	}
+
+plugins-wasm: plugins-init plugins-target ## Compile the WASM reference plugins (release)
+	@echo "==> building bastion-plugin-totp ($(PLUGINS_WASM_TARGET))"
+	cd $(PLUGINS_DIR) && cargo build --release --target $(PLUGINS_WASM_TARGET) -p bastion-plugin-totp
+	@mkdir -p $(PLUGINS_OUT)
+	@cp $(PLUGINS_DIR)/target/$(PLUGINS_WASM_TARGET)/release/bastion_plugin_totp.wasm $(PLUGINS_OUT)/ 2>/dev/null \
+		|| cp $(PLUGINS_DIR)/target/$(PLUGINS_WASM_TARGET)/release/bastion-plugin-totp.wasm $(PLUGINS_OUT)/
+	@echo ""
+	@echo "==> WASM plugins ready in $(PLUGINS_OUT)/"
+	@ls -lh $(PLUGINS_OUT)/*.wasm 2>/dev/null || true
+
+plugins-process: plugins-init ## Compile the process-runtime reference plugins (release, native target)
+	@echo "==> building bastion-plugin-postgres (native)"
+	cd $(PLUGINS_DIR) && cargo build --release -p bastion-plugin-postgres
+	@mkdir -p $(PLUGINS_OUT)
+	@cp $(PLUGINS_DIR)/target/release/bastion-plugin-postgres$(if $(filter Windows_NT,$(OS)),.exe,) $(PLUGINS_OUT)/
+	@echo ""
+	@echo "==> Process plugins ready in $(PLUGINS_OUT)/"
+	@ls -lh $(PLUGINS_OUT)/bastion-plugin-postgres* 2>/dev/null || true
+
+plugins: plugins-wasm plugins-process ## Build every reference plugin (WASM + process)
+	@echo ""
+	@echo "==> All reference plugins built. Upload the artefacts via the GUI"
+	@echo "   Plugins page (Admin → Plugins → Register plugin → Select file…),"
+	@echo "   alongside the matching plugin.toml from $(PLUGINS_DIR)/<plugin>/."
+
+plugins-clean: ## Remove plugins-ext build artefacts
+	@rm -rf $(PLUGINS_DIR)/target $(PLUGINS_OUT)
+	@echo "plugins-clean complete."
