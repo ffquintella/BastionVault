@@ -30,8 +30,8 @@
 *.ico      binary
 *.icns     binary
 *.bmp      binary
-*.svg      binary
 *.pdf      binary
+# SVG is XML; treat as text so it normalizes to LF and diffs cleanly.
 *.zip      binary
 *.tar      binary
 *.tar.gz   binary
