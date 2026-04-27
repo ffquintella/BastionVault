@@ -56,6 +56,36 @@ import type {
   RemoteProfile,
   RemoteStatus,
   PasswordPolicy,
+  PkiMountInfo,
+  PkiIssuerListResult,
+  PkiIssuerDetail,
+  PkiDefaultIssuer,
+  PkiGenerateRootRequest,
+  PkiRootResult,
+  PkiGenerateIntermediateRequest,
+  PkiIntermediateResult,
+  PkiSetSignedIntermediateRequest,
+  PkiSetSignedResult,
+  PkiSignIntermediateRequest,
+  PkiSignIntermediateResult,
+  PkiImportCaBundleRequest,
+  PkiRoleConfig,
+  PkiIssueRequest,
+  PkiIssueResult,
+  PkiSignCsrRequest,
+  PkiSignVerbatimRequest,
+  PkiSignResult,
+  PkiCertRecord,
+  PkiRevokeResult,
+  PkiCaResult,
+  PkiCrlResult,
+  PkiRotateCrlResult,
+  PkiTidyRequest,
+  PkiTidyResult,
+  PkiTidyStatus,
+  PkiAutoTidyConfig,
+  PkiUrlsConfig,
+  PkiCrlConfig,
 } from "./types";
 
 // Connection
@@ -1056,3 +1086,79 @@ export const pluginsDeleteVersion = (name: string, version: string) =>
 
 export const pluginsReload = (name: string) =>
   invoke<PluginReloadResult>("plugins_reload", { name });
+
+// ── PKI Secret Engine ─────────────────────────────────────────────
+
+export const pkiListMounts = () => invoke<PkiMountInfo[]>("pki_list_mounts");
+export const pkiEnableMount = (path: string) => invoke<void>("pki_enable_mount", { path });
+
+export const pkiListIssuers = (mount: string) =>
+  invoke<PkiIssuerListResult>("pki_list_issuers", { mount });
+export const pkiReadIssuer = (mount: string, reference: string) =>
+  invoke<PkiIssuerDetail>("pki_read_issuer", { mount, reference });
+export const pkiRenameIssuer = (mount: string, reference: string, newName: string) =>
+  invoke<void>("pki_rename_issuer", { mount, reference, newName });
+export const pkiSetIssuerUsages = (mount: string, reference: string, usages: string[]) =>
+  invoke<void>("pki_set_issuer_usages", { mount, reference, usages });
+export const pkiDeleteIssuer = (mount: string, reference: string) =>
+  invoke<void>("pki_delete_issuer", { mount, reference });
+export const pkiReadDefaultIssuer = (mount: string) =>
+  invoke<PkiDefaultIssuer>("pki_read_default_issuer", { mount });
+export const pkiSetDefaultIssuer = (mount: string, reference: string) =>
+  invoke<void>("pki_set_default_issuer", { mount, reference });
+
+export const pkiGenerateRoot = (request: PkiGenerateRootRequest) =>
+  invoke<PkiRootResult>("pki_generate_root", { request });
+export const pkiGenerateIntermediate = (request: PkiGenerateIntermediateRequest) =>
+  invoke<PkiIntermediateResult>("pki_generate_intermediate", { request });
+export const pkiSetSignedIntermediate = (request: PkiSetSignedIntermediateRequest) =>
+  invoke<PkiSetSignedResult>("pki_set_signed_intermediate", { request });
+export const pkiSignIntermediate = (request: PkiSignIntermediateRequest) =>
+  invoke<PkiSignIntermediateResult>("pki_sign_intermediate", { request });
+export const pkiImportCaBundle = (request: PkiImportCaBundleRequest) =>
+  invoke<PkiSetSignedResult>("pki_import_ca_bundle", { request });
+
+export const pkiListRoles = (mount: string) => invoke<string[]>("pki_list_roles", { mount });
+export const pkiReadRole = (mount: string, name: string) =>
+  invoke<PkiRoleConfig>("pki_read_role", { mount, name });
+export const pkiWriteRole = (mount: string, name: string, config: PkiRoleConfig) =>
+  invoke<void>("pki_write_role", { mount, name, config });
+export const pkiDeleteRole = (mount: string, name: string) =>
+  invoke<void>("pki_delete_role", { mount, name });
+
+export const pkiIssueCert = (request: PkiIssueRequest) =>
+  invoke<PkiIssueResult>("pki_issue_cert", { request });
+export const pkiSignCsr = (request: PkiSignCsrRequest) =>
+  invoke<PkiSignResult>("pki_sign_csr", { request });
+export const pkiSignVerbatim = (request: PkiSignVerbatimRequest) =>
+  invoke<PkiSignResult>("pki_sign_verbatim", { request });
+
+export const pkiListCerts = (mount: string) => invoke<string[]>("pki_list_certs", { mount });
+export const pkiReadCert = (mount: string, serial: string) =>
+  invoke<PkiCertRecord>("pki_read_cert", { mount, serial });
+export const pkiRevokeCert = (mount: string, serial: string) =>
+  invoke<PkiRevokeResult>("pki_revoke_cert", { mount, serial });
+export const pkiReadCa = (mount: string) => invoke<PkiCaResult>("pki_read_ca", { mount });
+export const pkiReadCrl = (mount: string) => invoke<PkiCrlResult>("pki_read_crl", { mount });
+export const pkiReadIssuerCrl = (mount: string, reference: string) =>
+  invoke<PkiCrlResult>("pki_read_issuer_crl", { mount, reference });
+export const pkiRotateCrl = (mount: string) =>
+  invoke<PkiRotateCrlResult>("pki_rotate_crl", { mount });
+
+export const pkiRunTidy = (request: PkiTidyRequest) =>
+  invoke<PkiTidyResult>("pki_run_tidy", { request });
+export const pkiReadTidyStatus = (mount: string) =>
+  invoke<PkiTidyStatus>("pki_read_tidy_status", { mount });
+export const pkiReadAutoTidy = (mount: string) =>
+  invoke<PkiAutoTidyConfig>("pki_read_auto_tidy", { mount });
+export const pkiWriteAutoTidy = (mount: string, config: PkiAutoTidyConfig) =>
+  invoke<void>("pki_write_auto_tidy", { mount, config });
+
+export const pkiReadConfigUrls = (mount: string) =>
+  invoke<PkiUrlsConfig>("pki_read_config_urls", { mount });
+export const pkiWriteConfigUrls = (mount: string, config: PkiUrlsConfig) =>
+  invoke<void>("pki_write_config_urls", { mount, config });
+export const pkiReadConfigCrl = (mount: string) =>
+  invoke<PkiCrlConfig>("pki_read_config_crl", { mount });
+export const pkiWriteConfigCrl = (mount: string, config: PkiCrlConfig) =>
+  invoke<void>("pki_write_config_crl", { mount, config });

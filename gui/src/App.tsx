@@ -16,6 +16,7 @@ import { PoliciesPage } from "./routes/PoliciesPage";
 import { MountsPage } from "./routes/MountsPage";
 import { SettingsPage } from "./routes/SettingsPage";
 import { ExchangePage } from "./routes/ExchangePage";
+import { PkiPage } from "./routes/PkiPage";
 import { PluginsPage } from "./routes/PluginsPage";
 import { useAuthStore } from "./stores/authStore";
 import { ToastProvider } from "./components/ui";
@@ -98,6 +99,10 @@ export default function App() {
             <Route
               path="/plugins"
               element={<ProtectedRoute><PluginsPage /></ProtectedRoute>}
+            />
+            <Route
+              path="/pki"
+              element={<ProtectedRoute><PkiPage /></ProtectedRoute>}
             />
           </Routes>
         </HashRouter>

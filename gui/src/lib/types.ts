@@ -519,3 +519,251 @@ export interface Fido2CredentialInfo {
   registered_keys: number;
   fido2_enabled: boolean;
 }
+
+// ── PKI Secret Engine ───────────────────────────────────────────────
+
+export interface PkiMountInfo {
+  path: string;
+  mount_type: string;
+}
+
+export interface PkiIssuerSummary {
+  id: string;
+  name: string;
+  is_default: boolean;
+}
+
+export interface PkiIssuerListResult {
+  issuers: PkiIssuerSummary[];
+}
+
+export interface PkiIssuerDetail {
+  id: string;
+  name: string;
+  certificate: string;
+  key_type: string;
+  common_name: string;
+  not_after: number;
+  ca_kind: string;
+  is_default: boolean;
+  usage: string[];
+}
+
+export interface PkiDefaultIssuer {
+  default: string;
+  default_name: string;
+}
+
+export interface PkiGenerateRootRequest {
+  mount: string;
+  /** "internal" | "exported" */
+  mode: "internal" | "exported";
+  common_name: string;
+  organization?: string;
+  /** "rsa" | "ec" | "ed25519" | "ml-dsa-44" | "ml-dsa-65" | "ml-dsa-87" | "ecdsa-p256+ml-dsa-65" */
+  key_type?: string;
+  /** RSA: 2048/3072/4096; EC: 256/384; everything else: 0 */
+  key_bits?: number;
+  ttl?: string;
+  issuer_name?: string;
+}
+
+export interface PkiRootResult {
+  certificate: string;
+  issuer_id: string;
+  issuer_name: string;
+  expiration: number;
+  /** Only populated in `exported` mode. */
+  private_key?: string;
+  private_key_type?: string;
+}
+
+export interface PkiGenerateIntermediateRequest {
+  mount: string;
+  mode: "internal" | "exported";
+  common_name: string;
+  organization?: string;
+  key_type?: string;
+  key_bits?: number;
+}
+
+export interface PkiIntermediateResult {
+  csr: string;
+  private_key?: string;
+  private_key_type?: string;
+}
+
+export interface PkiSetSignedIntermediateRequest {
+  mount: string;
+  certificate: string;
+  issuer_name?: string;
+}
+
+export interface PkiSetSignedResult {
+  issuer_id: string;
+  issuer_name: string;
+}
+
+export interface PkiSignIntermediateRequest {
+  mount: string;
+  csr: string;
+  common_name?: string;
+  organization?: string;
+  ttl?: string;
+  /** Negative = unconstrained pathLen. */
+  max_path_length?: number;
+  issuer_ref?: string;
+}
+
+export interface PkiSignIntermediateResult {
+  certificate: string;
+  issuing_ca: string;
+}
+
+export interface PkiImportCaBundleRequest {
+  mount: string;
+  pem_bundle: string;
+  issuer_name?: string;
+}
+
+export interface PkiRoleConfig {
+  ttl: string;
+  max_ttl: string;
+  key_type: string;
+  key_bits: number;
+  allow_localhost: boolean;
+  allow_any_name: boolean;
+  allow_subdomains: boolean;
+  allow_bare_domains: boolean;
+  allow_ip_sans: boolean;
+  server_flag: boolean;
+  client_flag: boolean;
+  use_csr_sans: boolean;
+  use_csr_common_name: boolean;
+  key_usage: string[];
+  ext_key_usage: string[];
+  country: string;
+  province: string;
+  locality: string;
+  organization: string;
+  ou: string;
+  no_store: boolean;
+  generate_lease: boolean;
+  /** Pin issuance to a specific issuer (UUID or name). Empty = mount default. */
+  issuer_ref: string;
+}
+
+export interface PkiIssueRequest {
+  mount: string;
+  role: string;
+  common_name: string;
+  alt_names?: string;
+  ip_sans?: string;
+  ttl?: string;
+  issuer_ref?: string;
+}
+
+export interface PkiIssueResult {
+  certificate: string;
+  issuing_ca: string;
+  private_key: string;
+  private_key_type: string;
+  serial_number: string;
+  issuer_id: string;
+}
+
+export interface PkiSignCsrRequest {
+  mount: string;
+  role: string;
+  csr: string;
+  common_name?: string;
+  alt_names?: string;
+  ttl?: string;
+  issuer_ref?: string;
+}
+
+export interface PkiSignVerbatimRequest {
+  mount: string;
+  csr: string;
+  ttl?: string;
+  issuer_ref?: string;
+}
+
+export interface PkiSignResult {
+  certificate: string;
+  issuing_ca: string;
+  serial_number: string;
+  issuer_id: string;
+}
+
+export interface PkiCertRecord {
+  serial_number: string;
+  certificate: string;
+  issued_at: number;
+  revoked_at?: number | null;
+}
+
+export interface PkiRevokeResult {
+  revocation_time: number;
+  serial_number: string;
+  issuer_id: string;
+}
+
+export interface PkiCaResult {
+  certificate: string;
+  issuer_id: string;
+  issuer_name: string;
+}
+
+export interface PkiCrlResult {
+  crl: string;
+  issuer_id: string;
+}
+
+export interface PkiRotateCrlResult {
+  crl: string;
+  crl_number: number;
+  issuer_id: string;
+}
+
+export interface PkiTidyRequest {
+  mount: string;
+  tidy_cert_store?: boolean;
+  tidy_revoked_certs?: boolean;
+  safety_buffer?: string;
+}
+
+export interface PkiTidyResult {
+  certs_deleted: number;
+  revoked_entries_deleted: number;
+  duration_ms: number;
+  safety_buffer_seconds: number;
+}
+
+export interface PkiTidyStatus {
+  last_run_at_unix: number;
+  last_run_duration_ms: number;
+  certs_deleted: number;
+  revoked_entries_deleted: number;
+  safety_buffer_seconds: number;
+  source: string;
+}
+
+export interface PkiAutoTidyConfig {
+  enabled: boolean;
+  interval: string;
+  tidy_cert_store: boolean;
+  tidy_revoked_certs: boolean;
+  safety_buffer: string;
+}
+
+export interface PkiUrlsConfig {
+  issuing_certificates: string[];
+  crl_distribution_points: string[];
+  ocsp_servers: string[];
+}
+
+export interface PkiCrlConfig {
+  expiry: string;
+  disable: boolean;
+}

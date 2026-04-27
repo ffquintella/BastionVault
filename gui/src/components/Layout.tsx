@@ -29,6 +29,7 @@ const adminNav: NavItem[] = [
   { path: "/policies", label: "Policies" },
   { path: "/mounts", label: "Mounts" },
   { path: "/audit", label: "Audit" },
+  { path: "/pki", label: "PKI" },
   { path: "/plugins", label: "Plugins" },
   { path: "/exchange", label: "Import / Export" },
   { path: "/settings", label: "Settings" },
