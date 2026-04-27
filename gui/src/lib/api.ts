@@ -86,6 +86,16 @@ import type {
   PkiAutoTidyConfig,
   PkiUrlsConfig,
   PkiCrlConfig,
+  SshMountInfo,
+  SshCaInfo,
+  SshGenerateCaRequest,
+  SshRoleConfig,
+  SshSignRequest,
+  SshSignResult,
+  SshCredsRequest,
+  SshCredsResult,
+  SshLookupRequest,
+  SshLookupResult,
 } from "./types";
 
 // Connection
@@ -1162,3 +1172,32 @@ export const pkiReadConfigCrl = (mount: string) =>
   invoke<PkiCrlConfig>("pki_read_config_crl", { mount });
 export const pkiWriteConfigCrl = (mount: string, config: PkiCrlConfig) =>
   invoke<void>("pki_write_config_crl", { mount, config });
+
+// ── SSH Secret Engine (Phase 4) ─────────────────────────────────
+
+export const sshListMounts = () => invoke<SshMountInfo[]>("ssh_list_mounts");
+export const sshEnableMount = (path: string) =>
+  invoke<void>("ssh_enable_mount", { path });
+
+export const sshReadCa = (mount: string) =>
+  invoke<SshCaInfo>("ssh_read_ca", { mount });
+export const sshGenerateCa = (request: SshGenerateCaRequest) =>
+  invoke<SshCaInfo>("ssh_generate_ca", { request });
+export const sshDeleteCa = (mount: string) =>
+  invoke<void>("ssh_delete_ca", { mount });
+
+export const sshListRoles = (mount: string) =>
+  invoke<string[]>("ssh_list_roles", { mount });
+export const sshReadRole = (mount: string, name: string) =>
+  invoke<SshRoleConfig>("ssh_read_role", { mount, name });
+export const sshWriteRole = (mount: string, name: string, config: SshRoleConfig) =>
+  invoke<void>("ssh_write_role", { mount, name, config });
+export const sshDeleteRole = (mount: string, name: string) =>
+  invoke<void>("ssh_delete_role", { mount, name });
+
+export const sshSign = (request: SshSignRequest) =>
+  invoke<SshSignResult>("ssh_sign", { request });
+export const sshCreds = (request: SshCredsRequest) =>
+  invoke<SshCredsResult>("ssh_creds", { request });
+export const sshLookup = (request: SshLookupRequest) =>
+  invoke<SshLookupResult>("ssh_lookup", { request });

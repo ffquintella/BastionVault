@@ -47,6 +47,17 @@ const userNav: NavItem[] = [
     requires: ["root", "admin", "pki-admin", "pki-user"],
     requiresMountType: "pki",
   },
+  // SSH engine. Same gating shape as PKI: hidden when no `ssh/` mount
+  // exists or when the token has no SSH-relevant policy. We don't ship
+  // dedicated `ssh-admin` / `ssh-user` baseline policies yet — until
+  // those land, root + admin gate the entry; operators who already
+  // delegate via custom policies can override `requires` per install.
+  {
+    path: "/ssh",
+    label: "SSH",
+    requires: ["root", "admin"],
+    requiresMountType: "ssh",
+  },
 ];
 
 // Admin features. The whole section collapses when none of the items

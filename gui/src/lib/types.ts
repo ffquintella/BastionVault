@@ -774,3 +774,85 @@ export interface PkiCrlConfig {
   expiry: string;
   disable: boolean;
 }
+
+// ── SSH Secret Engine (Phase 4) ─────────────────────────────────
+
+export interface SshMountInfo {
+  path: string;
+}
+
+export interface SshCaInfo {
+  public_key: string;
+  algorithm: string;
+}
+
+export interface SshGenerateCaRequest {
+  mount: string;
+  /** `""` / `"ed25519"` → Ed25519 (default), `"mldsa65"` → ML-DSA-65 (requires server `ssh_pqc` build). */
+  algorithm?: string;
+  /** OpenSSH-format private key to import. Mutually exclusive with `algorithm`. */
+  private_key?: string;
+}
+
+export interface SshRoleConfig {
+  key_type: string;
+  algorithm_signer: string;
+  cert_type: string;
+  allowed_users: string;
+  default_user: string;
+  allowed_extensions: string;
+  default_extensions: Record<string, string>;
+  allowed_critical_options: string;
+  default_critical_options: Record<string, string>;
+  ttl: string;
+  max_ttl: string;
+  not_before_duration: string;
+  key_id_format: string;
+  cidr_list: string;
+  exclude_cidr_list: string;
+  port: number;
+  pqc_only: boolean;
+}
+
+export interface SshSignRequest {
+  mount: string;
+  role: string;
+  public_key: string;
+  valid_principals?: string;
+  ttl?: string;
+  cert_type?: string;
+  key_id?: string;
+}
+
+export interface SshSignResult {
+  signed_key: string;
+  serial_number: string;
+  algorithm: string;
+}
+
+export interface SshCredsRequest {
+  mount: string;
+  role: string;
+  ip: string;
+  username?: string;
+  ttl?: string;
+}
+
+export interface SshCredsResult {
+  key: string;
+  key_type: string;
+  username: string;
+  ip: string;
+  port: number;
+  ttl: number;
+}
+
+export interface SshLookupRequest {
+  mount: string;
+  ip: string;
+  username?: string;
+}
+
+export interface SshLookupResult {
+  roles: string[];
+}
