@@ -71,6 +71,14 @@ const DEFAULT_ENGINE_SPECS: DefaultEngineSpec[] = [
     gates: "PKI nav (also requires pki-user / pki-admin policy)",
   },
   {
+    path: "ssh/",
+    label: "SSH",
+    logicalType: "ssh",
+    description:
+      "SSH CA + OTP credentials (Ed25519, ML-DSA-65 with `ssh_pqc` build).",
+    gates: "SSH nav (CA / Roles / Sign / Creds tabs)",
+  },
+  {
     path: "identity/",
     label: "Identity",
     logicalType: "identity",
