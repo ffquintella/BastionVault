@@ -37,7 +37,7 @@ use uuid::Uuid;
 use super::{
     crypto::{KeyAlgorithm, Signer},
     storage::{
-        self, CaKind, CaMetadata, CrlConfig, CrlState, IssuersConfig, IssuersIndex,
+        self, CaKind, CaMetadata, CrlConfig, CrlState, IssuerUsages, IssuersConfig, IssuersIndex,
         KEY_CA_CERT, KEY_CA_KEY, KEY_CA_META, KEY_CONFIG_CRL, KEY_CONFIG_ISSUERS, KEY_CRL_CACHED,
         KEY_CRL_STATE, KEY_ISSUERS_INDEX,
     },
@@ -51,6 +51,12 @@ pub struct IssuerHandle {
     pub cert_pem: String,
     pub signer: Signer,
     pub meta: CaMetadata,
+    /// Phase 5.5: the effective usage bits for this issuer. Path
+    /// handlers gate on these — `issue/sign/sign-verbatim/sign-intermediate`
+    /// require `issuing_certificates`; CRL rebuild requires `crl_signing`.
+    /// A freshly-created issuer (or one written before 5.5) carries
+    /// `IssuerUsages::all_enabled()` by default.
+    pub usages: IssuerUsages,
 }
 
 /// Load the mount's default issuer. Performs the lazy lift if needed.
@@ -86,7 +92,31 @@ async fn load_issuer_by_id(req: &Request, id: &str) -> Result<IssuerHandle, RvEr
     let signer = Signer::from_storage_pem(&key_pem)?;
     let index: IssuersIndex = storage::get_json(req, KEY_ISSUERS_INDEX).await?.unwrap_or_default();
     let name = index.by_id.get(id).cloned().unwrap_or_else(|| "default".to_string());
-    Ok(IssuerHandle { id: id.to_string(), name, cert_pem, signer, meta })
+    let usages = index.usages_for(id);
+    Ok(IssuerHandle { id: id.to_string(), name, cert_pem, signer, meta, usages })
+}
+
+/// Update the per-issuer `usages` set in the index. Resolution accepts
+/// either UUID or name; the operator can lock down an issuer to
+/// `issuing-certificates` only, `crl-signing` only, or any combination.
+/// At least one usage must be enabled — refusing the empty set up
+/// front avoids leaving an issuer that nothing can ever invoke. The
+/// caller-supplied `IssuerUsages` is stored verbatim in the index so a
+/// subsequent read returns exactly what was set.
+#[maybe_async::maybe_async]
+pub async fn set_issuer_usages(
+    req: &Request,
+    reference: &str,
+    usages: IssuerUsages,
+) -> Result<(), RvError> {
+    if !usages.issuing_certificates && !usages.crl_signing && !usages.ocsp_signing {
+        return Err(RvError::ErrRequestFieldInvalid);
+    }
+    migrate_legacy_if_needed(req).await?;
+    let mut index: IssuersIndex = storage::get_json(req, KEY_ISSUERS_INDEX).await?.unwrap_or_default();
+    let id = index.resolve(reference).ok_or(RvError::ErrPkiCaNotConfig)?;
+    index.usages_by_id.insert(id, usages);
+    storage::put_json(req, KEY_ISSUERS_INDEX, &index).await
 }
 
 /// Add a brand-new issuer. Allocates a fresh UUID, writes
@@ -300,6 +330,42 @@ pub async fn delete_issuer(req: &Request, reference: &str) -> Result<(), RvError
         storage::put_json(req, KEY_ISSUERS_INDEX, &index).await?;
     }
     Ok(())
+}
+
+/// Gate-check that `issuer` is allowed to issue certificates. Used by
+/// `pki/issue/:role`, `pki/sign/:role`, `pki/sign-verbatim`, and
+/// `pki/root/sign-intermediate`. Returns `ErrPkiKeyTypeInvalid` (the same
+/// error class the engine uses for "this signer can't do that") when the
+/// usage is disabled — keeps the failure mode consistent with the
+/// existing mixed-chain rejection path.
+pub fn require_issuing(issuer: &IssuerHandle) -> Result<(), RvError> {
+    if issuer.usages.issuing_certificates {
+        Ok(())
+    } else {
+        log::warn!(
+            "pki: issuer {} ({}) is not authorised for issuing-certificates",
+            issuer.name,
+            issuer.id
+        );
+        Err(RvError::ErrPkiKeyTypeInvalid)
+    }
+}
+
+/// Gate-check that `issuer` is allowed to sign CRLs. Used by
+/// `path_revoke::rebuild_crl_for_issuer` so a "issuing-certificates only"
+/// issuer cannot accidentally sign a CRL. Same error-class pattern as
+/// [`require_issuing`].
+pub fn require_crl_signing(issuer: &IssuerHandle) -> Result<(), RvError> {
+    if issuer.usages.crl_signing {
+        Ok(())
+    } else {
+        log::warn!(
+            "pki: issuer {} ({}) is not authorised for crl-signing",
+            issuer.name,
+            issuer.id
+        );
+        Err(RvError::ErrPkiKeyTypeInvalid)
+    }
 }
 
 /// Compute a default name for the next-added issuer. First issuer is

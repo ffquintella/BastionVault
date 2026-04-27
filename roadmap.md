@@ -123,7 +123,7 @@ Tracked separately from Active Initiatives because each is self-contained, needs
 - **PKI — additional composite variants** — Phase 3 ships `id-MLDSA65-ECDSA-P256-SHA512` only. Other pairings (`mldsa44+ecdsa-p256-sha256`, `mldsa87+ecdsa-p384-sha512`, RSA-PSS pairs) follow the same structure; deferred until operator demand confirms which to add first.
 - ~~**PKI — PKCS#8 envelope for ML-DSA private keys**~~ — landed in Phase 5.3.
 - ~~**PKI — RSA generation**~~ — landed in Phase 5.3.
-- **PKI — multi-issuer `usage` flags** — Vault's `usages = ["issuing-certificates", "crl-signing", "ocsp-signing"]` per issuer would let an operator dedicate one issuer to issue and another to CRL signing. Phase 5.2 ships the registry but treats every issuer as fully-capable; per-usage gating is a small additive change.
+- ~~**PKI — multi-issuer `usage` flags**~~ — landed in Phase 5.5. Each issuer carries a per-usage allowlist (`issuing-certificates`, `crl-signing`, `ocsp-signing`); enforcement gates `issue/sign/sign-verbatim/sign-intermediate` and `rebuild_crl_for_issuer`.
 
 ## Notes
 

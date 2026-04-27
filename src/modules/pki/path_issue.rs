@@ -111,6 +111,10 @@ impl PkiBackendInner {
         } else {
             super::issuers::load_default_issuer(req).await?
         };
+        // Phase 5.5: gate on the issuer's `usages.issuing_certificates`
+        // bit so an issuer locked down to CRL-signing-only can't be
+        // hijacked into issuing leaves.
+        super::issuers::require_issuing(&issuer)?;
         let ca_cert_pem = issuer.cert_pem.clone();
         let ca_signer = issuer.signer;
         let issuer_id = issuer.id.clone();
@@ -243,6 +247,7 @@ impl PkiBackendInner {
         } else {
             super::issuers::load_default_issuer(req).await?
         };
+        super::issuers::require_issuing(&issuer)?;
         let ca_cert_pem = issuer.cert_pem.clone();
         let ca_signer = issuer.signer;
         let issuer_id = issuer.id.clone();
@@ -332,6 +337,7 @@ impl PkiBackendInner {
         } else {
             super::issuers::load_default_issuer(req).await?
         };
+        super::issuers::require_issuing(&issuer)?;
         let ca_cert_pem = issuer.cert_pem.clone();
         let ca_signer = issuer.signer;
         let issuer_id = issuer.id.clone();

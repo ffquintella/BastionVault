@@ -49,6 +49,13 @@ pub struct IssuersIndex {
     /// Map of issuer_id (uuid) → human-readable name. Names must be unique
     /// within a mount; the engine enforces that on `add_issuer`.
     pub by_id: std::collections::BTreeMap<String, String>,
+    /// Phase 5.5: per-issuer `usage` flags. Sparse by design — an issuer
+    /// missing from this map is treated as "all usages enabled", which
+    /// is the legacy behaviour for issuers created before 5.5 and the
+    /// safe default for newly added issuers. `#[serde(default)]` keeps
+    /// pre-5.5 indexes deserializable.
+    #[serde(default)]
+    pub usages_by_id: std::collections::BTreeMap<String, IssuerUsages>,
 }
 
 impl IssuersIndex {
@@ -62,6 +69,74 @@ impl IssuersIndex {
             return Some(reference.to_string());
         }
         self.name_to_id(reference)
+    }
+
+    /// The effective `IssuerUsages` for an issuer. Returns the explicit
+    /// entry from `usages_by_id` if any; otherwise the all-enabled
+    /// default that legacy / unrestricted issuers carry.
+    pub fn usages_for(&self, id: &str) -> IssuerUsages {
+        self.usages_by_id.get(id).cloned().unwrap_or_else(IssuerUsages::all_enabled)
+    }
+}
+
+/// Per-issuer permission bits. Mirrors Vault's `usage` field on issuers:
+/// an issuer can be locked down so it only signs CRLs (e.g. an offline
+/// root) or only issues leaves (a separated-duties intermediate) without
+/// the operator having to mount the issuer on a separate engine.
+///
+/// The default is **all enabled** — a freshly-created issuer carries
+/// every usage. The operator narrows the set explicitly via
+/// `WRITE /v1/pki/issuer/:ref` with a `usage` field. This matches the
+/// principle that adding a permission-gating mechanism shouldn't break
+/// any existing flow.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IssuerUsages {
+    #[serde(default)]
+    pub issuing_certificates: bool,
+    #[serde(default)]
+    pub crl_signing: bool,
+    /// Phase 5.5 ships the field but no OCSP responder route consumes
+    /// it yet. Keeping it on the struct so when the OCSP feature
+    /// (deferred) lands, the gate is already wired through storage.
+    #[serde(default)]
+    pub ocsp_signing: bool,
+}
+
+impl IssuerUsages {
+    pub fn all_enabled() -> Self {
+        Self { issuing_certificates: true, crl_signing: true, ocsp_signing: true }
+    }
+
+    /// Parse an operator-supplied list of usage names. Accepts either a
+    /// comma-separated string (`"issuing-certificates,crl-signing"`) or
+    /// a JSON array of strings — the request handler unifies both into a
+    /// `Vec<String>` first.
+    pub fn from_names(names: &[String]) -> Result<Self, &'static str> {
+        let mut out = Self::default();
+        for name in names {
+            match name.trim() {
+                "issuing-certificates" | "issuing" => out.issuing_certificates = true,
+                "crl-signing" | "crl" => out.crl_signing = true,
+                "ocsp-signing" | "ocsp" => out.ocsp_signing = true,
+                "" => {}
+                _ => return Err("unknown usage value"),
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn to_names(&self) -> Vec<&'static str> {
+        let mut out = Vec::with_capacity(3);
+        if self.issuing_certificates {
+            out.push("issuing-certificates");
+        }
+        if self.crl_signing {
+            out.push("crl-signing");
+        }
+        if self.ocsp_signing {
+            out.push("ocsp-signing");
+        }
+        out
     }
 }
 

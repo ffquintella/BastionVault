@@ -37,14 +37,16 @@ impl PkiBackend {
             pattern: r"issuer/(?P<ref>[\w\-]+)",
             fields: {
                 "ref": { field_type: FieldType::Str, required: true, description: "Issuer ID (UUID) or name." },
-                "issuer_name": { field_type: FieldType::Str, default: "", description: "(Write) New name for the issuer." }
+                "issuer_name": { field_type: FieldType::Str, default: "", description: "(Write) New name for the issuer." },
+                "usage": { field_type: FieldType::CommaStringSlice, default: "",
+                    description: "(Write) Comma-separated list of usages this issuer is allowed: `issuing-certificates`, `crl-signing`, `ocsp-signing`. Empty = leave existing usages unchanged." }
             },
             operations: [
                 {op: Operation::Read, handler: rr.read_issuer},
                 {op: Operation::Write, handler: rw.write_issuer},
                 {op: Operation::Delete, handler: rd.delete_issuer}
             ],
-            help: "Read, rename, or delete a specific issuer."
+            help: "Read, rename, change usages on, or delete a specific issuer."
         })
     }
 
@@ -97,16 +99,34 @@ impl PkiBackendInner {
         data.insert("not_after".into(), json!(issuer.meta.not_after_unix));
         data.insert("ca_kind".into(), json!(format!("{:?}", issuer.meta.ca_kind).to_lowercase()));
         data.insert("is_default".into(), json!(cfg.default_id == issuer.id));
+        // Phase 5.5: surface the effective usages so an operator can
+        // confirm what an issuer is allowed to do.
+        data.insert("usage".into(), json!(issuer.usages.to_names()));
         Ok(Some(Response::data_response(Some(data))))
     }
 
     pub async fn write_issuer(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        use crate::logical::field::FieldTrait;
         let reference = req.get_data("ref")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         let new_name = req.get_data_or_default("issuer_name")?.as_str().unwrap_or("").to_string();
-        if new_name.is_empty() {
+        let usage_names = req
+            .get_data_or_default("usage")?
+            .as_comma_string_slice()
+            .unwrap_or_default();
+
+        // Empty-everything is a no-op (pure read) — error rather than
+        // silently succeed so the operator knows the request did nothing.
+        if new_name.is_empty() && usage_names.is_empty() {
             return Err(RvError::ErrRequestFieldInvalid);
         }
-        issuers::rename_issuer(req, &reference, &new_name).await?;
+        if !new_name.is_empty() {
+            issuers::rename_issuer(req, &reference, &new_name).await?;
+        }
+        if !usage_names.is_empty() {
+            let usages = super::storage::IssuerUsages::from_names(&usage_names)
+                .map_err(|_| RvError::ErrRequestFieldInvalid)?;
+            issuers::set_issuer_usages(req, &reference, usages).await?;
+        }
         Ok(None)
     }
 

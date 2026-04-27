@@ -270,6 +270,7 @@ impl PkiBackendInner {
         } else {
             super::issuers::load_default_issuer(req).await?
         };
+        super::issuers::require_issuing(&issuer)?;
         let ca_cert_pem = issuer.cert_pem.clone();
         let ca_signer = issuer.signer;
         let Signer::Classical(ca_classical) = &ca_signer else {

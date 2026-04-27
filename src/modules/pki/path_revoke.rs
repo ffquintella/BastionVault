@@ -94,8 +94,12 @@ impl PkiBackendInner {
 /// Rebuild the CRL for a *specific* issuer. Used by `revoke_cert` (after
 /// flipping a cert's `revoked_at_unix`) and by `path_crl::rotate_crl` /
 /// `path_crl::read_crl` (which now operate on the default issuer).
+///
+/// Phase 5.5: gated on `issuer.usages.crl_signing` so an
+/// "issuing-only" issuer cannot accidentally sign a CRL.
 #[maybe_async::maybe_async]
 pub async fn rebuild_crl_for_issuer(req: &Request, issuer: &IssuerHandle) -> Result<String, RvError> {
+    issuers::require_crl_signing(issuer)?;
     let cfg: CrlConfig = storage::get_json(req, KEY_CONFIG_CRL).await?.unwrap_or_default();
     let crl_state_key = storage::issuer_crl_state_key(&issuer.id);
     let crl_cached_key = storage::issuer_crl_cached_key(&issuer.id);
