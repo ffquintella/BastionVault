@@ -22,17 +22,15 @@ describe("SettingsPage FIDO2 config", () => {
   beforeEach(() => {
     mockInvoke.mockReset();
     useAuthStore.setState({ token: "test-token", policies: ["root"], isAuthenticated: true });
-    // SettingsPage is now organised into tabs (general / security /
-    // identity / …) and persists the active tab in localStorage. The
-    // FIDO2 card moved to the `"security"` tab; without this preset
-    // the page renders the General tab and these tests can't see
-    // any FIDO2 markup. Setting the storage value before mount picks
-    // up the right tab via the page's lazy-init `useState` hook.
+    // SettingsPage persists the active tab in localStorage and reads
+    // it through a lazy `useState` initialiser. We don't rely on
+    // priming localStorage here — `gotoSecurityTab()` clicks the
+    // tab button after mount, which is both more reliable across
+    // jsdom resets and a more honest user-flow assertion.
     try {
-      localStorage.setItem("settings.activeTab", "security");
+      localStorage.removeItem("settings.activeTab");
     } catch {
-      /* jsdom occasionally fails on storage; tests fall back to
-         general tab and would FAIL — that's the right signal. */
+      /* jsdom storage absent — tests still drive the tab via clicks. */
     }
   });
 
@@ -40,30 +38,59 @@ describe("SettingsPage FIDO2 config", () => {
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "fido2_config_read") return Promise.resolve(fido2Config);
       if (cmd === "fido2_config_write") return Promise.resolve();
-      return Promise.reject(new Error(`unmocked: ${cmd}`));
+      // Other commands the page fires on mount (vault profiles, mounts,
+      // SSO admin list, YubiKey state, password policy, resource types,
+      // …) are not relevant to these tests; resolve cheaply with a
+      // best-effort empty payload so the page mounts cleanly.
+      if (cmd === "list_mounts") return Promise.resolve([]);
+      if (cmd === "list_vault_profiles") return Promise.resolve({ vaults: [], lastUsedId: null });
+      if (cmd === "yubikey_list_registered") return Promise.resolve([]);
+      if (cmd === "yubikey_list_devices") return Promise.resolve([]);
+      if (cmd === "get_sso_settings") return Promise.resolve(false);
+      if (cmd === "sso_admin_list") return Promise.resolve([]);
+      if (cmd === "resource_types_read") return Promise.resolve(null);
+      if (cmd === "get_password_policy")
+        return Promise.resolve({ min_length: 12, require_upper: true, require_lower: true, require_digit: true, require_symbol: false });
+      // Unknown commands resolve with `null` rather than reject — the
+      // page's many independent loaders all swallow rejections, but a
+      // resolved-null leaves the corresponding state at its default
+      // and avoids flooding the test log with caught-but-noisy errors.
+      return Promise.resolve(null);
     });
+  }
+
+  /// The FIDO2 card lives on the Security tab. SettingsPage opens to
+  /// General by default; click the Security tab button so the FIDO2
+  /// card is in the rendered tree.
+  async function gotoSecurityTab(user: ReturnType<typeof userEvent.setup>) {
+    const tab = await screen.findByRole("button", { name: "Security" });
+    await user.click(tab);
   }
 
   it("shows FIDO2 config in settings", async () => {
     mockSettingsInvoke({ rp_id: "localhost", rp_origin: "https://localhost", rp_name: "Test" });
+    const user = userEvent.setup();
     const { SettingsPage } = await import("../routes/SettingsPage");
     renderWithProviders(<SettingsPage />);
 
-    await waitFor(() => {
-      expect(screen.getByText("FIDO2 / Security Keys")).toBeInTheDocument();
-      expect(screen.getByText("localhost")).toBeInTheDocument();
-    });
+    await gotoSecurityTab(user);
+
+    expect(await screen.findByText("FIDO2 / Security Keys")).toBeInTheDocument();
+    expect(await screen.findByText("localhost")).toBeInTheDocument();
   });
 
   it("shows edit button for FIDO2 config", async () => {
     mockSettingsInvoke({ rp_id: "localhost", rp_origin: "https://localhost", rp_name: "Test" });
+    const user = userEvent.setup();
     const { SettingsPage } = await import("../routes/SettingsPage");
     renderWithProviders(<SettingsPage />);
 
-    await waitFor(() => {
-      // There may be multiple "Edit" buttons; at least one should exist for FIDO2
-      expect(screen.getAllByText("Edit").length).toBeGreaterThanOrEqual(1);
-    });
+    await gotoSecurityTab(user);
+
+    // There may be multiple "Edit" buttons across the Security tab
+    // (FIDO2, Password Policy, …); at least one is the FIDO2 card's.
+    const edits = await screen.findAllByText("Edit");
+    expect(edits.length).toBeGreaterThanOrEqual(1);
   });
 
   it("switches to edit mode when Edit is clicked", async () => {
@@ -72,14 +99,15 @@ describe("SettingsPage FIDO2 config", () => {
     const { SettingsPage } = await import("../routes/SettingsPage");
     renderWithProviders(<SettingsPage />);
 
-    await waitFor(() => {
-      expect(screen.getByText("localhost")).toBeInTheDocument();
-    });
+    await gotoSecurityTab(user);
 
-    // Click the Edit button (first one is the FIDO2 card)
+    await screen.findByText("localhost");
+
+    // Click the FIDO2 card's Edit button. The card is the first one
+    // on the Security tab, so its Edit is `getAllByText("Edit")[0]`.
     await user.click(screen.getAllByText("Edit")[0]);
 
-    expect(screen.getByDisplayValue("localhost")).toBeInTheDocument();
+    expect(await screen.findByDisplayValue("localhost")).toBeInTheDocument();
     expect(screen.getByText("Save")).toBeInTheDocument();
   });
 });
