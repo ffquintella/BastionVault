@@ -701,6 +701,13 @@ export interface PkiCertRecord {
   certificate: string;
   issued_at: number;
   revoked_at?: number | null;
+  /** Subject Common Name parsed from the cert. Empty when the cert
+   *  has no CN attribute on its Subject (rare; identity would then be
+   *  in the SAN). */
+  common_name: string;
+  /** Unix-seconds NotAfter from the cert's validity. `0` when the
+   *  PEM failed to parse — render "—" rather than a wrong date. */
+  not_after: number;
 }
 
 export interface PkiRevokeResult {

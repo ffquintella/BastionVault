@@ -1219,9 +1219,17 @@ function PemBlock({
 
 // ── Certificates Tab ──────────────────────────────────────────────
 
+interface CertSummary {
+  serial: string;
+  common_name: string;
+  not_after: number;
+  revoked_at: number | null;
+}
+
 function CertsTab({ mount }: { mount: string }) {
   const { toast } = useToast();
-  const [serials, setSerials] = useState<string[]>([]);
+  const [summaries, setSummaries] = useState<CertSummary[]>([]);
+  const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [cert, setCert] = useState<{
@@ -1232,11 +1240,37 @@ function CertsTab({ mount }: { mount: string }) {
   const [revokeTarget, setRevokeTarget] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
+    setLoading(true);
     try {
       const list = await api.pkiListCerts(mount);
-      setSerials([...list].sort());
+      const sorted = [...list].sort();
+      // Fetch each cert's metadata in parallel. Each `pkiReadCert`
+      // call returns CN + not_after parsed server-side from the PEM,
+      // so the list view can show identity + expiration without the
+      // user having to click into each row.
+      const records = await Promise.all(
+        sorted.map(async (s) => {
+          try {
+            const c = await api.pkiReadCert(mount, s);
+            return {
+              serial: s,
+              common_name: c.common_name || "",
+              not_after: c.not_after || 0,
+              revoked_at: c.revoked_at ?? null,
+            } satisfies CertSummary;
+          } catch {
+            // A single read failure shouldn't blank the whole list —
+            // surface the serial with empty meta so the operator can
+            // still drill in to investigate.
+            return { serial: s, common_name: "", not_after: 0, revoked_at: null };
+          }
+        }),
+      );
+      setSummaries(records);
     } catch (e) {
       toast("error", extractError(e));
+    } finally {
+      setLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mount]);
@@ -1282,8 +1316,14 @@ function CertsTab({ mount }: { mount: string }) {
   }
 
   const filtered = filter
-    ? serials.filter((s) => s.toLowerCase().includes(filter.toLowerCase()))
-    : serials;
+    ? summaries.filter((s) => {
+        const f = filter.toLowerCase();
+        return (
+          s.serial.toLowerCase().includes(f) ||
+          s.common_name.toLowerCase().includes(f)
+        );
+      })
+    : summaries;
 
   return (
     <Card
@@ -1306,7 +1346,7 @@ function CertsTab({ mount }: { mount: string }) {
         </>
       }
     >
-      {serials.length === 0 ? (
+      {summaries.length === 0 && !loading ? (
         <EmptyState
           title="No certificates issued yet"
           description="Issued certificates appear here. Roles with `no_store = true` skip persistence."
@@ -1314,28 +1354,60 @@ function CertsTab({ mount }: { mount: string }) {
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <div className="max-h-96 overflow-auto">
-            <Table
+            <Table<CertSummary>
               columns={[
                 {
                   key: "serial",
-                  header: "Serial",
-                  render: (s: { serial: string }) => (
+                  header: "Serial / CN",
+                  render: (s) => (
                     <button
                       onClick={() => selectSerial(s.serial)}
-                      className={`text-left w-full font-mono text-xs truncate ${
+                      className={`text-left w-full ${
                         selected === s.serial
                           ? "font-semibold text-[var(--color-primary)]"
                           : ""
                       }`}
                     >
-                      {s.serial}
+                      <div className="font-mono text-xs truncate">{s.serial}</div>
+                      <div
+                        className="text-xs text-[var(--color-text-muted)] truncate"
+                        title={s.common_name}
+                      >
+                        {s.common_name || "—"}
+                      </div>
                     </button>
                   ),
                 },
+                {
+                  key: "expires",
+                  header: "Expires",
+                  render: (s) => {
+                    if (s.revoked_at) {
+                      return (
+                        <span className="text-xs text-[var(--color-danger)]">
+                          revoked
+                        </span>
+                      );
+                    }
+                    if (!s.not_after) return <span className="text-xs">—</span>;
+                    const expired = s.not_after * 1000 < Date.now();
+                    return (
+                      <span
+                        className={`text-xs ${
+                          expired ? "text-[var(--color-danger)]" : ""
+                        }`}
+                        title={fmtUnix(s.not_after)}
+                      >
+                        {fmtUnix(s.not_after).slice(0, 10)}
+                        {expired ? " (expired)" : ""}
+                      </span>
+                    );
+                  },
+                },
               ]}
-              data={filtered.map((s) => ({ serial: s }))}
-              rowKey={(r: { serial: string }) => r.serial}
-              emptyMessage="No matching serials"
+              data={filtered}
+              rowKey={(r) => r.serial}
+              emptyMessage={loading ? "Loading…" : "No matching serials"}
             />
           </div>
           {cert && selected && (

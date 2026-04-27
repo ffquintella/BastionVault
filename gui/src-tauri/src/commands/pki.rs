@@ -784,6 +784,66 @@ pub struct PkiCertRecord {
     pub certificate: String,
     pub issued_at: u64,
     pub revoked_at: Option<u64>,
+    /// Subject Common Name parsed from the cert. Empty when the
+    /// certificate's Subject has no CN attribute (uncommon but legal —
+    /// the SAN would carry the identity in that case).
+    #[serde(default)]
+    pub common_name: String,
+    /// Unix-seconds NotAfter from the cert's validity. `0` if the PEM
+    /// fails to parse for any reason — the GUI surfaces "—" in that
+    /// case rather than a wrong date.
+    #[serde(default)]
+    pub not_after: u64,
+}
+
+/// Parse `(common_name, not_after_unix)` out of a PEM-encoded
+/// certificate. Returns empty / 0 on any parse failure so the caller
+/// can render a graceful fallback instead of erroring out the whole
+/// list view.
+fn parse_cert_meta(pem: &str) -> (String, u64) {
+    use x509_cert::der::Decode;
+    let Ok(der) = bastion_vault::modules::pki::csr::decode_pem_or_der(pem) else {
+        return (String::new(), 0);
+    };
+    let Ok(cert) = x509_cert::Certificate::from_der(&der) else {
+        return (String::new(), 0);
+    };
+
+    // Subject CN: walk the RDN sequence for the OID 2.5.4.3.
+    let cn_oid: x509_cert::der::asn1::ObjectIdentifier =
+        "2.5.4.3".parse().expect("CN OID literal is valid");
+    let mut common_name = String::new();
+    'outer: for rdn in cert.tbs_certificate.subject.0.iter() {
+        for atv in rdn.0.iter() {
+            if atv.oid == cn_oid {
+                if let Ok(s) = atv.value.decode_as::<x509_cert::der::asn1::PrintableStringRef<'_>>() {
+                    common_name = s.as_str().to_string();
+                    break 'outer;
+                }
+                if let Ok(s) = atv.value.decode_as::<x509_cert::der::asn1::Utf8StringRef<'_>>() {
+                    common_name = s.as_str().to_string();
+                    break 'outer;
+                }
+                if let Ok(s) = atv.value.decode_as::<x509_cert::der::asn1::Ia5StringRef<'_>>() {
+                    common_name = s.as_str().to_string();
+                    break 'outer;
+                }
+            }
+        }
+    }
+
+    // NotAfter: x509-cert's Time enum exposes both `UtcTime` and
+    // `GeneralTime`; both convert to `SystemTime` via `to_system_time()`.
+    let not_after = cert
+        .tbs_certificate
+        .validity
+        .not_after
+        .to_system_time()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    (common_name, not_after)
 }
 
 #[tauri::command]
@@ -795,11 +855,15 @@ pub async fn pki_read_cert(
     let mount = mount_prefix(&mount);
     let resp = make_request(&state, Operation::Read, format!("{mount}/cert/{serial}"), None).await?;
     let map = data_to_map(resp);
+    let certificate = val_str(&map, "certificate");
+    let (common_name, not_after) = parse_cert_meta(&certificate);
     Ok(PkiCertRecord {
         serial_number: val_str(&map, "serial_number"),
-        certificate: val_str(&map, "certificate"),
+        certificate,
         issued_at: val_u64(&map, "issued_at"),
         revoked_at: map.get("revoked_at").and_then(|v| v.as_u64()),
+        common_name,
+        not_after,
     })
 }
 
