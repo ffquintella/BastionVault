@@ -79,7 +79,12 @@ windows = { version = "0.61", features = ["Win32_Foundation"] }
 # of the four providers without a custom build flag. Server-only
 # operators who want a leaner binary can override by disabling the
 # cloud_* features at their own workspace level.
-default = ["storage_hiqlite", "cloud_targets"]
+default = ["storage_hiqlite", "cloud_targets", "ssh_pqc"]
 storage_hiqlite = ["bastion_vault/storage_hiqlite"]
 cloud_targets = ["bastion_vault/cloud_targets"]
+# Post-quantum SSH certificates (ML-DSA-65). On by default so the
+# GUI's `/ssh` page can mint PQC CAs without a custom build flag —
+# the PQC code path is gated at sign time, so a build that never
+# selects ML-DSA-65 pays no runtime cost.
+ssh_pqc = ["bastion_vault/ssh_pqc"]
 mcp_local_dev = ["dep:tauri-plugin-mcp-bridge"]

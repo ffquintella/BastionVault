@@ -221,7 +221,14 @@ pkcs8 = { version = "0.10", features = ["pem", "alloc"] }
 wat = "1"
 
 [features]
-default = ["storage_hiqlite"]
+# `ssh_pqc` is on in the default build so the GUI's "Generate CA →
+# ML-DSA-65" path works out of the box. The PQC pulls no new external
+# deps (bv_crypto + ssh-encoding + base64 are already present), and
+# the algorithm is gated at sign time, so an admin who never picks
+# ML-DSA-65 from the dropdown pays no runtime cost. Operators who
+# want to ship a smaller binary can override with `--no-default-features
+# --features storage_hiqlite` at their own workspace level.
+default = ["storage_hiqlite", "ssh_pqc"]
 storage_mysql = ["diesel", "r2d2", "r2d2-diesel"]
 storage_hiqlite = ["hiqlite", "cryptr"]
 sync_handler = ["maybe-async/is_sync"]

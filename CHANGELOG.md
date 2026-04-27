@@ -45,6 +45,11 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Changed
+
+#### SSH `ssh_pqc` feature on by default
+- **Default-build feature flip** ([`Cargo.toml`](Cargo.toml), [`gui/src-tauri/Cargo.toml`](gui/src-tauri/Cargo.toml), [`Makefile`](Makefile)) — `ssh_pqc` is now part of the default feature set on both the server crate and the GUI Tauri host. The dev / prod GUI Make targets pass it explicitly so a skim of the Makefile shows what's compiled in. Previously the GUI's "Generate CA → ML-DSA-65" path returned a build-flag error toast on stock `make gui-build` / `make run-dev-gui` builds; now it works out of the box. PQC pulls no new external deps (`bv_crypto` + `ssh-encoding` + `base64` are already present), and the algorithm is gated at sign time so admins who never select ML-DSA-65 pay no runtime cost. Operators wanting a leaner binary can override with `--no-default-features --features storage_hiqlite`.
+
 ### Added
 
 #### SSH Secret Engine — Phase 4 (GUI integration)

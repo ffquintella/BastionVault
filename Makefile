@@ -50,14 +50,18 @@ run-dev: prune-stale ## Run the development server
 gui-deps: ## Install GUI frontend dependencies
 	cd gui && npm install
 
+# `--features` lists are explicit (not relying solely on the Tauri
+# crate's `default = [...]`) so an operator skimming the Makefile
+# can see exactly what the dev / prod GUI binaries ship with.
+# `ssh_pqc` enables ML-DSA-65 SSH CA generation in the /ssh page.
 run-dev-gui: gui-deps prune-stale ## Run the desktop GUI in dev mode with local MCP bridge enabled
-	cd gui && BASTION_EMBEDDED_STORAGE=file BASTION_TAURI_MCP=1 npx tauri dev -- --features storage_hiqlite,mcp_local_dev
+	cd gui && BASTION_EMBEDDED_STORAGE=file BASTION_TAURI_MCP=1 npx tauri dev -- --features storage_hiqlite,mcp_local_dev,ssh_pqc
 
 run-dev-gui-hiqlite: gui-deps prune-stale ## Run the desktop GUI in dev mode, embedded vault on hiqlite (ports 8210/8220)
-	cd gui && BASTION_EMBEDDED_STORAGE=hiqlite npx tauri dev -- --features storage_hiqlite
+	cd gui && BASTION_EMBEDDED_STORAGE=hiqlite npx tauri dev -- --features storage_hiqlite,ssh_pqc
 
 gui-build: gui-deps prune-stale ## Build the desktop GUI for production
-	cd gui && npx tauri build -- --features storage_hiqlite
+	cd gui && npx tauri build -- --features storage_hiqlite,ssh_pqc
 
 gui-test: gui-deps ## Run GUI frontend tests (Vitest)
 	cd gui && npx vitest run
