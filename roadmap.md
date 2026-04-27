@@ -121,8 +121,8 @@ Tracked separately from Active Initiatives because each is self-contained, needs
 - **PKI — classical CRL via `x509-cert::crl`** — PQC and composite CRLs already use `x509-cert::crl`; classical still uses `rcgen`. Pure refactor, no behavioural change. Spec hinted at "CRL modernisation" in Phase 4.
 - **PKI — composite IETF-draft tracking** — the Phase 3 composite preview pins the OID + structure but uses a BastionVault-internal prehash domain. When `draft-ietf-lamps-pq-composite-sigs` locks on its `Domain || Random || PH(M)` shape, `composite::bv_prehash` is the single point of swap.
 - **PKI — additional composite variants** — Phase 3 ships `id-MLDSA65-ECDSA-P256-SHA512` only. Other pairings (`mldsa44+ecdsa-p256-sha256`, `mldsa87+ecdsa-p384-sha512`, RSA-PSS pairs) follow the same structure; deferred until operator demand confirms which to add first.
-- **PKI — PKCS#8 envelope for ML-DSA private keys** — `pki/issue` returns PQC private keys in the engine-internal `BV PQC SIGNER` JSON envelope today, because there's no widely-deployed PKCS#8 wrapper for ML-DSA seeds yet. Add the PKCS#8 variant alongside the envelope when the IETF `OneAsymmetricKey` draft for ML-DSA stabilises.
-- **PKI — RSA generation** — `KeyAlgorithm::Rsa{2048,3072,4096}` are accepted at role / root configuration time but `Signer::generate` rejects them because rcgen's `ring` provider can't generate RSA keypairs. Plugging an `rsa`-crate-backed `SigningKey` impl into rcgen's trait closes the gap; ECDSA + Ed25519 work today.
+- ~~**PKI — PKCS#8 envelope for ML-DSA private keys**~~ — landed in Phase 5.3.
+- ~~**PKI — RSA generation**~~ — landed in Phase 5.3.
 - **PKI — multi-issuer `usage` flags** — Vault's `usages = ["issuing-certificates", "crl-signing", "ocsp-signing"]` per issuer would let an operator dedicate one issuer to issue and another to CRL signing. Phase 5.2 ships the registry but treats every issuer as fully-capable; per-usage gating is a small additive change.
 
 ## Notes

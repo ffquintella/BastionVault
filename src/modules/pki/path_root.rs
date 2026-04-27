@@ -87,7 +87,7 @@ impl PkiBackendInner {
                 super::x509_composite::build_root_ca(&common_name, &organization, ttl, c)?
             }
         };
-        let key_pem = signer.to_storage_pem();
+        let _ = &signer; // captured for `add_issuer` below
         let serial_hex = storage::serial_to_hex(&serial_bytes);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -128,7 +128,12 @@ impl PkiBackendInner {
         data.insert("issuer_name".into(), json!(issuer_name));
         data.insert("expiration".into(), json!(not_after_unix));
         if exported == "exported" {
-            data.insert("private_key".into(), json!(key_pem));
+            // Caller-facing PKCS#8 (Phase 5.3) for both classical and PQC
+            // roots. The engine's own copy of the key is held inside the
+            // multi-issuer registry by `add_issuer` above, in the storage
+            // envelope form — this is purely the operator's hand-off copy.
+            let pkcs8 = signer.to_pkcs8_pem()?;
+            data.insert("private_key".into(), json!(pkcs8));
             data.insert("private_key_type".into(), json!(alg.as_str()));
         }
         // Reference the legacy storage-key constants so unused-import lints

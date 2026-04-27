@@ -170,8 +170,12 @@ async fn test_pki_phase2_ml_dsa_65_end_to_end() {
     .unwrap();
     let leaf_pem = issued["certificate"].as_str().unwrap().to_string();
     let leaf_serial = issued["serial_number"].as_str().unwrap().to_string();
-    let leaf_key_envelope = issued["private_key"].as_str().unwrap();
-    assert!(leaf_key_envelope.contains("BEGIN BV PQC SIGNER"), "PQC private key uses storage envelope");
+    // Phase 5.3: caller-facing PQC private key is PKCS#8 PEM (per the
+    // IETF lamps draft layout) rather than the engine-internal
+    // `BV PQC SIGNER` envelope. Storage still uses the envelope; only
+    // the API output is standardised.
+    let leaf_key_pem = issued["private_key"].as_str().unwrap();
+    assert!(leaf_key_pem.contains("BEGIN PRIVATE KEY"), "PQC private key returned as PKCS#8 PEM");
 
     let leaf_der = pem_decode_first(&leaf_pem);
     let leaf_cert = Certificate::from_der(&leaf_der).expect("parse leaf");

@@ -121,8 +121,8 @@ impl PkiBackendInner {
         let csr = x509::build_intermediate_csr(&common_name, &organization, classical)?;
         let csr_pem = csr.pem().map_err(super::crypto::rcgen_err)?;
 
-        let key_pem = signer.to_storage_pem();
-        storage::put_string(req, KEY_CA_PENDING_KEY, &key_pem).await?;
+        let storage_key_pem = signer.to_storage_pem();
+        storage::put_string(req, KEY_CA_PENDING_KEY, &storage_key_pem).await?;
         storage::put_string(req, KEY_CA_PENDING_CSR, &csr_pem).await?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -143,7 +143,12 @@ impl PkiBackendInner {
         let mut data: Map<String, Value> = Map::new();
         data.insert("csr".into(), json!(csr_pem));
         if exported == "exported" {
-            data.insert("private_key".into(), json!(key_pem));
+            // Caller-facing PKCS#8 (Phase 5.3). The engine retains the
+            // engine-internal storage envelope at `KEY_CA_PENDING_KEY` for
+            // when `set-signed` later promotes the pending intermediate to
+            // an active issuer.
+            let pkcs8 = signer.to_pkcs8_pem()?;
+            data.insert("private_key".into(), json!(pkcs8));
             data.insert("private_key_type".into(), json!(alg.as_str()));
         }
         Ok(Some(Response::data_response(Some(data))))

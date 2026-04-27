@@ -186,6 +186,12 @@ time = { version = "0.3", default-features = false, features = ["std"] }
 x509-cert = { version = "0.2", default-features = false, features = ["builder", "pem", "std"] }
 fips204 = { version = "0.4", default-features = false, features = ["default-rng", "ml-dsa-44", "ml-dsa-65", "ml-dsa-87"] }
 const-oid = { version = "0.9", features = ["db"] }
+# Phase 5.3: PKCS#8 (`PrivateKeyInfo`) emit/parse for ML-DSA private keys.
+# Already transitive in the dep tree via `der` / `x509-cert` / `rsa` / `p256`,
+# but promoted to a direct dep so the PKI module's `MlDsaSigner::to_pkcs8_pem`
+# / `from_pkcs8_pem` round-trip uses the standard wrapper. The `pem` feature
+# pulls in the PEM encode/decode helpers.
+pkcs8 = { version = "0.10", features = ["pem", "alloc"] }
 
 [build-dependencies]
 toml = "1.1.2"
@@ -199,6 +205,9 @@ cucumber = "0.21"
 # test self-contained without inflating the main build's surface.
 p256 = { version = "0.13", features = ["ecdsa"] }
 sha2 = "0.11"
+# Phase 5.3 test parses an emitted PQC PKCS#8 PEM directly to confirm the
+# inner OCTET STRING really carries the 32-byte ML-DSA seed.
+pkcs8 = { version = "0.10", features = ["pem", "alloc"] }
 # WebAssembly text-format parser. Used only by plugin runtime tests so we
 # can compile small WAT modules inline rather than checking in pre-built
 # `.wasm` blobs.

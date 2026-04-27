@@ -162,6 +162,92 @@ impl MlDsaSigner {
         wrapped
     }
 
+    /// Emit the ML-DSA private key as a standard PKCS#8 `PrivateKeyInfo`
+    /// PEM, per the IETF lamps draft `draft-ietf-lamps-dilithium-certificates`.
+    ///
+    /// The wrapper is RFC-5208 PKCS#8 with:
+    /// - `algorithm.oid` = the ML-DSA-{44,65,87} OID (lamps draft)
+    /// - `algorithm.parameters` = absent
+    /// - `privateKey` = OCTET STRING containing the 32-byte seed
+    ///
+    /// We pass the raw seed bytes (not a CHOICE-of-seed/expanded wrapper)
+    /// because that's the seed-only form most reference implementations
+    /// emit today and the most defensible point on the still-moving
+    /// draft. When the draft locks on a different shape, this function
+    /// is the single point of swap.
+    ///
+    /// In contrast to [`to_storage_pem`](Self::to_storage_pem) — which is
+    /// engine-internal and barrier-encrypted — the PKCS#8 PEM is what
+    /// callers receive over the API (e.g. the `private_key` field on
+    /// `pki/issue` and `pki/intermediate/generate/exported`).
+    pub fn to_pkcs8_pem(&self) -> Result<Zeroizing<String>, RvError> {
+        use pkcs8::{
+            der::{asn1::OctetString, pem::LineEnding, EncodePem},
+            der::Encode,
+            AlgorithmIdentifierRef, PrivateKeyInfo,
+        };
+        let alg = AlgorithmIdentifierRef { oid: self.level.oid(), parameters: None };
+        // PrivateKeyInfo's `private_key` field is the *contents* of the
+        // outer OCTET STRING. The lamps draft wraps the seed in another
+        // OCTET STRING inside, so we DER-encode that nested OCTET STRING
+        // and hand the bytes over.
+        let inner = OctetString::new(self.seed.as_slice()).map_err(der_err)?;
+        let inner_der = inner.to_der().map_err(der_err)?;
+        let info = PrivateKeyInfo::new(alg, &inner_der);
+        let pem = info.to_pem(LineEnding::LF).map_err(pkcs8_err)?;
+        Ok(Zeroizing::new(pem))
+    }
+
+    /// True when the input looks like a PKCS#8 `PRIVATE KEY` envelope
+    /// whose algorithm OID matches an ML-DSA security level. Used by the
+    /// import path so [`from_storage_pem`] can fall back through both
+    /// the legacy `BV PQC SIGNER` envelope and the new PKCS#8 form
+    /// without an out-of-band metadata flag.
+    pub fn is_pkcs8_pem(pem: &str) -> bool {
+        if !pem.contains("-----BEGIN PRIVATE KEY-----") {
+            return false;
+        }
+        // Cheapest non-allocating check: try a parse attempt and bail on
+        // any error.
+        Self::from_pkcs8_pem(pem).is_ok()
+    }
+
+    pub fn from_pkcs8_pem(pem: &str) -> Result<Self, RvError> {
+        use pkcs8::{
+            der::{asn1::OctetString, Decode},
+            PrivateKeyInfo,
+        };
+        // Strip the PEM armor manually — `PrivateKeyInfo<'a>` borrows from
+        // the DER source, and `DecodePem` doesn't compose cleanly through
+        // the type-system's higher-rank lifetimes here. Doing the
+        // base64-decode ourselves keeps the borrow chain simple.
+        let der_bytes = decode_pem_block(pem, "PRIVATE KEY")?;
+        let info = PrivateKeyInfo::from_der(&der_bytes).map_err(pkcs8_err)?;
+        let level = match info.algorithm.oid {
+            o if o == OID_ML_DSA_44 => MlDsaLevel::L44,
+            o if o == OID_ML_DSA_65 => MlDsaLevel::L65,
+            o if o == OID_ML_DSA_87 => MlDsaLevel::L87,
+            _ => return Err(RvError::ErrPkiKeyTypeInvalid),
+        };
+        // Inner OCTET STRING containing the 32-byte seed.
+        let inner = OctetString::from_der(info.private_key).map_err(der_err)?;
+        let bytes = inner.as_bytes();
+        if bytes.len() != 32 {
+            return Err(RvError::ErrPkiPemBundleInvalid);
+        }
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(bytes);
+
+        // Reconstruct the public key from the seed so the rest of the
+        // engine has it cached without a second user-facing field.
+        let pk = match level {
+            MlDsaLevel::L44 => MlDsa44Provider.keypair_from_seed(&seed).map_err(pqc_err)?.public_key().to_vec(),
+            MlDsaLevel::L65 => MlDsa65Provider.keypair_from_seed(&seed).map_err(pqc_err)?.public_key().to_vec(),
+            MlDsaLevel::L87 => MlDsa87Provider.keypair_from_seed(&seed).map_err(pqc_err)?.public_key().to_vec(),
+        };
+        Ok(Self { level, seed: Zeroizing::new(seed), public_key: pk })
+    }
+
     /// Heuristic used by the unified [`Signer`](super::crypto::Signer) loader
     /// to dispatch storage PEM to the PQC path.
     pub fn is_storage_pem(s: &str) -> bool {
@@ -186,4 +272,28 @@ impl MlDsaSigner {
 fn pqc_err(e: bv_crypto::CryptoError) -> RvError {
     log::error!("pki/pqc: {e:?}");
     RvError::ErrPkiInternal
+}
+
+fn der_err(e: impl std::fmt::Debug) -> RvError {
+    log::error!("pki/pqc: DER error: {e:?}");
+    RvError::ErrPkiPemBundleInvalid
+}
+
+fn pkcs8_err(e: impl std::fmt::Debug) -> RvError {
+    log::error!("pki/pqc: PKCS#8 error: {e:?}");
+    RvError::ErrPkiPemBundleInvalid
+}
+
+/// Strip the PEM armor of a single block with the given label and
+/// base64-decode the body. Used by [`MlDsaSigner::from_pkcs8_pem`] so the
+/// caller-side `PrivateKeyInfo<'a>` parse owns its source bytes.
+fn decode_pem_block(pem: &str, label: &str) -> Result<Vec<u8>, RvError> {
+    let begin = format!("-----BEGIN {label}-----");
+    let end = format!("-----END {label}-----");
+    let begin_idx = pem.find(&begin).ok_or(RvError::ErrPkiPemBundleInvalid)?;
+    let end_idx = pem[begin_idx..].find(&end).ok_or(RvError::ErrPkiPemBundleInvalid)?;
+    let body_start = pem[begin_idx..].find('\n').map(|i| begin_idx + i + 1).ok_or(RvError::ErrPkiPemBundleInvalid)?;
+    let body_end = begin_idx + end_idx;
+    let body: String = pem[body_start..body_end].chars().filter(|c| !c.is_whitespace()).collect();
+    STANDARD.decode(body.as_bytes()).map_err(|_| RvError::ErrPkiPemBundleInvalid)
 }

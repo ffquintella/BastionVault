@@ -160,26 +160,82 @@ pub struct CertSigner {
 impl CertSigner {
     /// Generate a fresh keypair for `alg`.
     pub fn generate(alg: KeyAlgorithm) -> Result<Self, RvError> {
-        // RSA generation is not available through `rcgen`'s default crypto
-        // provider; reject early with a clear error rather than panicking
-        // mid-issuance. Phase 2 will plug a `rsa` crate-backed generator
-        // directly into rcgen's `SigningKey` trait.
+        // Phase 5.3: RSA generation goes through the `rsa` crate (which
+        // rcgen 0.14 + ring cannot do natively), then we serialize to
+        // PKCS#8 PEM and load that into rcgen via
+        // `KeyPair::from_pem_and_sign_algo`. The `_and_sign_algo` form
+        // pins the *signing* algorithm — RSA-2048 → SHA-256, RSA-3072 →
+        // SHA-384, RSA-4096 → SHA-512 — because rcgen otherwise picks
+        // SHA-256 by default, which is wrong for the larger key sizes.
         if matches!(alg, KeyAlgorithm::Rsa2048 | KeyAlgorithm::Rsa3072 | KeyAlgorithm::Rsa4096) {
-            return Err(RvError::ErrPkiKeyTypeInvalid);
+            return Self::generate_rsa(alg);
         }
         let kp = KeyPair::generate_for(alg.rcgen_alg()?).map_err(rcgen_err)?;
         let pem = Zeroizing::new(kp.serialize_pem());
         Ok(Self { alg, inner: kp, pem })
     }
 
+    fn generate_rsa(alg: KeyAlgorithm) -> Result<Self, RvError> {
+        use pkcs8::{EncodePrivateKey, LineEnding};
+        use rsa::RsaPrivateKey;
+
+        let bits = alg.key_bits() as usize;
+        // `rsa 0.9` is pinned to `rand_core 0.6`; the project's top-level
+        // `rand = "0.10"` exports a different `OsRng` / `SysRng` that
+        // doesn't satisfy the older `CryptoRngCore` bound. Use rsa's own
+        // re-export for an apples-to-apples RNG. (Same workaround the
+        // SAML signing code uses.)
+        let mut rng = rsa::rand_core::OsRng;
+        let priv_key = RsaPrivateKey::new(&mut rng, bits).map_err(|e| {
+            log::error!("pki: RSA-{bits} generation failed: {e}");
+            RvError::ErrPkiInternal
+        })?;
+        let pem = priv_key
+            .to_pkcs8_pem(LineEnding::LF)
+            .map_err(|e| {
+                log::error!("pki: RSA PKCS#8 emit failed: {e}");
+                RvError::ErrPkiInternal
+            })?
+            .to_string();
+
+        // Hand the PKCS#8 PEM to rcgen, pinning the per-bit-size signing
+        // algorithm. The `_and_sign_algo` variant is what tells rcgen
+        // which SHA hash to use when this keypair signs a TBS later.
+        let sign_alg: &'static rcgen::SignatureAlgorithm = match alg {
+            KeyAlgorithm::Rsa2048 => &rcgen::PKCS_RSA_SHA256,
+            KeyAlgorithm::Rsa3072 => &rcgen::PKCS_RSA_SHA384,
+            KeyAlgorithm::Rsa4096 => &rcgen::PKCS_RSA_SHA512,
+            _ => unreachable!("generate_rsa called with non-RSA algorithm"),
+        };
+        let kp = KeyPair::from_pem_and_sign_algo(&pem, sign_alg).map_err(rcgen_err)?;
+        Ok(Self { alg, inner: kp, pem: Zeroizing::new(pem) })
+    }
+
     /// Reconstruct a signer from its serialized PKCS#8 PEM (as produced by
-    /// `pem_pkcs8`). Algorithm is recovered from the keypair itself.
+    /// [`pem_pkcs8`](Self::pem_pkcs8)). Algorithm is recovered from the
+    /// keypair itself.
+    ///
+    /// For RSA keys the PKCS#8 OID (`rsaEncryption`) does not encode which
+    /// signature hash to use — that's a property of the *signing* step,
+    /// not the key. We sniff the modulus size to pick a sensible default
+    /// (RSA-2048 → SHA-256, RSA-3072 → SHA-384, RSA-4096 → SHA-512) and
+    /// rebuild the keypair with `from_pem_and_sign_algo` so the
+    /// bit-size→hash convention round-trips through storage cleanly.
     pub fn from_pem(pem: &str) -> Result<Self, RvError> {
+        // First, peek for RSA: the rsaEncryption OID is the first
+        // discriminator we can check without going through rcgen.
+        if let Some((alg, sign_alg)) = sniff_rsa_size(pem)? {
+            let kp = KeyPair::from_pem_and_sign_algo(pem, sign_alg).map_err(rcgen_err)?;
+            return Ok(Self { alg, inner: kp, pem: Zeroizing::new(pem.to_string()) });
+        }
         let kp = KeyPair::from_pem(pem).map_err(rcgen_err)?;
         let alg = match kp.algorithm() {
             a if a == &rcgen::PKCS_ECDSA_P256_SHA256 => KeyAlgorithm::EcdsaP256,
             a if a == &rcgen::PKCS_ECDSA_P384_SHA384 => KeyAlgorithm::EcdsaP384,
             a if a == &rcgen::PKCS_ED25519 => KeyAlgorithm::Ed25519,
+            // Fallback if rcgen recognised RSA before our sniff did
+            // (shouldn't happen given the early-return above, but keep the
+            // arms exhaustive).
             a if a == &rcgen::PKCS_RSA_SHA256 => KeyAlgorithm::Rsa2048,
             a if a == &rcgen::PKCS_RSA_SHA384 => KeyAlgorithm::Rsa3072,
             a if a == &rcgen::PKCS_RSA_SHA512 => KeyAlgorithm::Rsa4096,
@@ -210,6 +266,36 @@ impl CertSigner {
 pub(crate) fn rcgen_err(e: rcgen::Error) -> RvError {
     log::error!("pki: rcgen error: {e}");
     RvError::ErrPkiInternal
+}
+
+/// Try to parse `pem` as an RSA PKCS#8 PEM and return the matching
+/// `(KeyAlgorithm, &'static SignatureAlgorithm)` based on the RSA modulus
+/// size. Returns `Ok(None)` when the PEM is not RSA — caller falls
+/// through to the rcgen path.
+fn sniff_rsa_size(
+    pem: &str,
+) -> Result<Option<(KeyAlgorithm, &'static rcgen::SignatureAlgorithm)>, RvError> {
+    use pkcs8::DecodePrivateKey;
+    use rsa::traits::PublicKeyParts;
+    use rsa::RsaPrivateKey;
+
+    let priv_key = match RsaPrivateKey::from_pkcs8_pem(pem) {
+        Ok(k) => k,
+        Err(_) => return Ok(None),
+    };
+    let bits = priv_key.size() * 8;
+    Ok(Some(match bits {
+        2048 => (KeyAlgorithm::Rsa2048, &rcgen::PKCS_RSA_SHA256),
+        3072 => (KeyAlgorithm::Rsa3072, &rcgen::PKCS_RSA_SHA384),
+        4096 => (KeyAlgorithm::Rsa4096, &rcgen::PKCS_RSA_SHA512),
+        // Operator imported a non-standard size: route as RSA-2048 with
+        // SHA-256 (the most permissive verifier compatibility) rather
+        // than rejecting outright. Logging makes this visible.
+        other => {
+            log::warn!("pki: imported RSA key has non-standard {other}-bit modulus; using PKCS_RSA_SHA256");
+            (KeyAlgorithm::Rsa2048, &rcgen::PKCS_RSA_SHA256)
+        }
+    }))
 }
 
 /// Unified handle for the CA's signing key — either a classical
@@ -268,9 +354,42 @@ impl Signer {
             return Ok(Self::Composite(CompositeSigner::from_storage_pem(pem)?));
         }
         if MlDsaSigner::is_storage_pem(pem) {
-            Ok(Self::MlDsa(MlDsaSigner::from_storage_pem(pem)?))
-        } else {
-            Ok(Self::Classical(CertSigner::from_pem(pem)?))
+            return Ok(Self::MlDsa(MlDsaSigner::from_storage_pem(pem)?));
+        }
+        // PKCS#8 PQC import (Phase 5.3+): an operator-supplied
+        // `-----BEGIN PRIVATE KEY-----` whose AlgorithmIdentifier OID is
+        // one of the ML-DSA levels routes through the PQC path before the
+        // classical fallback. Classical PKCS#8 keys (RSA / ECDSA /
+        // Ed25519) fall through to the rcgen branch unchanged.
+        if MlDsaSigner::is_pkcs8_pem(pem) {
+            return Ok(Self::MlDsa(MlDsaSigner::from_pkcs8_pem(pem)?));
+        }
+        Ok(Self::Classical(CertSigner::from_pem(pem)?))
+    }
+
+    /// Caller-facing PKCS#8 PEM. This is what the engine returns over the
+    /// API as `private_key` on `pki/issue` / `pki/intermediate/generate
+    /// /exported` / `pki/root/generate/exported`. PQC keys use the IETF
+    /// lamps draft layout (PrivateKeyInfo wrapping the 32-byte seed);
+    /// classical keys use the standard rcgen-emitted PKCS#8 PEM.
+    ///
+    /// Distinct from [`to_storage_pem`](Self::to_storage_pem), which is
+    /// the engine-internal storage envelope (barrier-encrypted) and uses
+    /// the legacy `BV PQC SIGNER` form for PQC. Storage stays on the
+    /// internal envelope so existing on-disk material reads cleanly; only
+    /// the API output gains the PKCS#8 form.
+    pub fn to_pkcs8_pem(&self) -> Result<String, RvError> {
+        match self {
+            Self::Classical(s) => Ok(s.pem_pkcs8().to_string()),
+            Self::MlDsa(s) => Ok(s.to_pkcs8_pem()?.to_string()),
+            #[cfg(feature = "pki_pqc_composite")]
+            Self::Composite(_) => {
+                // Composite key serialization is not standardised yet — the
+                // IETF draft has not stabilised on a PKCS#8 layout for
+                // composite private keys. Return the storage envelope as a
+                // best-effort caller-facing form until the draft locks.
+                Ok(self.to_storage_pem())
+            }
         }
     }
 

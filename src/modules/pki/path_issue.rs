@@ -146,7 +146,10 @@ impl PkiBackendInner {
             // make the compiler happy without falling through silently.
             _ => return Err(RvError::ErrPkiKeyTypeInvalid),
         };
-        let leaf_key_pem = leaf_signer.to_storage_pem();
+        // Return PKCS#8 to the caller (Phase 5.3). The leaf's private key
+        // is *not* stored anywhere on the engine side — it lives only in
+        // this response — so there's no storage-vs-API split here.
+        let leaf_key_pem = leaf_signer.to_pkcs8_pem()?;
 
         let serial_hex = storage::serial_to_hex(&serial_bytes);
 
