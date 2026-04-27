@@ -214,7 +214,9 @@ pub fn build_leaf_from_pqc_spki(
     Ok((pem_encode("CERTIFICATE", &cert.to_der().map_err(der_err)?), serial_bytes))
 }
 
-/// Build a CRL signed by an ML-DSA CA.
+/// Build a CRL signed by an ML-DSA CA. Thin wrapper over
+/// [`build_crl_with_alg`] that supplies the ML-DSA `AlgorithmIdentifier`
+/// and routes signing through `MlDsaSigner::sign`.
 pub fn build_crl(
     crl_number: u64,
     next_update_secs: u64,
@@ -223,6 +225,32 @@ pub fn build_crl(
     ca_cert_pem: &str,
 ) -> Result<String, RvError> {
     let alg_id = AlgorithmIdentifierOwned { oid: ca_signer.level().oid(), parameters: None };
+    build_crl_with_alg(crl_number, next_update_secs, revoked, ca_cert_pem, alg_id, |tbs_der| {
+        ca_signer.sign(tbs_der)
+    })
+}
+
+/// Generic CRL assembly. Phase 5.4: the classical / PQC / composite paths
+/// all share this helper instead of each maintaining its own near-copy
+/// of the TBS-build + sign + wrap dance.
+///
+/// `alg_id` is the `AlgorithmIdentifier` the verifier expects on the
+/// outer `signatureAlgorithm`; `sign(tbs_der)` produces the signature
+/// bytes that go into the outer BIT STRING. Both paths previously
+/// duplicated this body, including the `crlNumber` extension boilerplate
+/// and the `parse_cert_pem` → issuer-DN extraction. Unifying them means
+/// any future CRL-extension addition (CRL-DP, AKI, IDP) lands once.
+pub(super) fn build_crl_with_alg<F>(
+    crl_number: u64,
+    next_update_secs: u64,
+    revoked: &[RevokedEntry],
+    ca_cert_pem: &str,
+    alg_id: AlgorithmIdentifierOwned,
+    sign: F,
+) -> Result<String, RvError>
+where
+    F: FnOnce(&[u8]) -> Result<Vec<u8>, RvError>,
+{
     let ca_cert = parse_cert_pem(ca_cert_pem)?;
     let issuer = ca_cert.tbs_certificate.subject.clone();
 
@@ -248,8 +276,10 @@ pub fn build_crl(
     let crl_number_ext = Extension {
         extn_id: crl_number_oid,
         critical: false,
-        extn_value: OctetString::new(SerialNumber::<x509_cert::certificate::Rfc5280>::from(crl_number).to_der().map_err(der_err)?)
-            .map_err(der_err)?,
+        extn_value: OctetString::new(
+            SerialNumber::<x509_cert::certificate::Rfc5280>::from(crl_number).to_der().map_err(der_err)?,
+        )
+        .map_err(der_err)?,
     };
 
     let tbs = TbsCertList {
@@ -263,7 +293,7 @@ pub fn build_crl(
     };
 
     let tbs_der = tbs.to_der().map_err(der_err)?;
-    let signature = ca_signer.sign(&tbs_der)?;
+    let signature = sign(&tbs_der)?;
     let crl = CertificateList {
         tbs_cert_list: tbs,
         signature_algorithm: alg_id,
