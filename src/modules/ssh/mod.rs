@@ -33,6 +33,8 @@ pub mod path_lookup;
 pub mod path_roles;
 pub mod path_sign;
 pub mod policy;
+#[cfg(feature = "ssh_pqc")]
+pub mod pqc;
 
 const SSH_BACKEND_HELP: &str = r#"
 The SSH engine issues short-lived SSH credentials in two modes:

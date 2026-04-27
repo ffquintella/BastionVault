@@ -57,6 +57,25 @@ pub struct CaConfig {
     /// and `GET /v1/ssh/public_key` are fast — they don't need to
     /// re-derive from the private key on every read.
     pub public_key_openssh: String,
+
+    // ── PQC fields (Phase 3, feature `ssh_pqc`) ───────────────────
+    //
+    /// Hex-encoded ML-DSA-65 secret seed (32 bytes raw). Populated
+    /// only when `algorithm == "ssh-mldsa65@openssh.com"`. The seed
+    /// is what the FIPS 204 keygen rederives the private key from on
+    /// each sign — we don't persist the expanded private key because
+    /// the seed is the smallest piece that round-trips losslessly,
+    /// and it's the same shape `bv_crypto::MlDsa65Provider` already
+    /// works with. Empty for classical CAs.
+    #[serde(default)]
+    pub pqc_secret_seed_hex: String,
+
+    /// Hex-encoded ML-DSA-65 public-key bytes (1952 bytes raw).
+    /// Persisted alongside the seed so verifies can run without
+    /// touching `private_key_openssh` and so a future `verify` route
+    /// (Phase 3 stretch) can answer without re-running keygen.
+    #[serde(default)]
+    pub pqc_public_key_hex: String,
 }
 
 /// Persisted role definition. Phase 1 fields only — the spec calls
@@ -178,6 +197,15 @@ pub struct RoleEntry {
     /// non-22 port can audit it on the role read.
     #[serde(default = "default_port")]
     pub port: u16,
+
+    // ── PQC-mode field (Phase 3) ──────────────────────────────────
+    //
+    /// Reject sign requests where the **client** public key is
+    /// classical, even if the role's CA is post-quantum. Forces an
+    /// end-to-end PQC chain. The classical-CA path silently ignores
+    /// this flag (it has no PQC chain to enforce in the first place).
+    #[serde(default)]
+    pub pqc_only: bool,
 }
 
 impl Default for RoleEntry {
@@ -199,6 +227,7 @@ impl Default for RoleEntry {
             cidr_list: String::new(),
             exclude_cidr_list: String::new(),
             port: default_port(),
+            pqc_only: false,
         }
     }
 }

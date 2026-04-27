@@ -250,6 +250,15 @@ cloud_targets = ["cloud_s3", "cloud_onedrive", "cloud_gdrive", "cloud_dropbox", 
 # `features/pki-secret-engine.md`.
 pki_pqc_composite = []
 
+# SSH Phase 3 — post-quantum SSH certificates (ML-DSA-65). Off by
+# default because OpenSSH does not yet ship native support for
+# `ssh-mldsa65@openssh.com`, so certs minted under this feature only
+# verify in clients that have implemented the draft wire format.
+# Operators wiring an ML-DSA-aware Rust SSH client into automation
+# pipelines opt in via this flag; everyone else pays nothing. See
+# `features/ssh-secret-engine.md` Phase 3.
+ssh_pqc = []
+
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5"
 

@@ -107,32 +107,51 @@ impl SshBackendInner {
             .await?
             .ok_or_else(|| RvError::ErrString(format!("unknown role `{role_name}`")))?;
 
-        // Phase 1 gate. Roles can only be created in `ca` mode today,
-        // but a future Phase 2 OTP role might already be on disk by the
-        // time a sign request lands — refuse explicitly.
+        // Sign is for CA-mode roles only; OTP roles use /creds.
         if role.key_type != "ca" {
             return Err(RvError::ErrString(format!(
-                "role `{role_name}` has key_type `{}`; only `ca` is signable in Phase 1",
+                "role `{role_name}` has key_type `{}`; /sign is for CA-mode roles (use /creds for OTP)",
                 role.key_type
             )));
         }
-        if role.algorithm_signer != "ssh-ed25519" {
-            return Err(RvError::ErrString(format!(
-                "role `{role_name}` requests algorithm `{}`; only `ssh-ed25519` is supported in Phase 1",
-                role.algorithm_signer
-            )));
-        }
 
-        // ── CA load ────────────────────────────────────────────────
+        // ── CA load + PQC dispatch ─────────────────────────────────
         let ca = self
             .load_ca(req)
             .await?
             .ok_or_else(|| RvError::ErrString("ssh CA not configured; POST /config/ca first".into()))?;
+
+        // PQC dispatch: when the persisted CA is ML-DSA-65, the whole
+        // sign flow runs through `pqc.rs` (different wire format,
+        // different signer). The role's `algorithm_signer` must
+        // either be empty (auto-match the CA) or match the CA's
+        // algo — we don't synthesise one when the operator was
+        // explicit, just refuse the mismatch.
+        #[cfg(feature = "ssh_pqc")]
+        {
+            if ca.algorithm == super::pqc::MLDSA65_ALGO {
+                return self.handle_sign_pqc(req, &role, &ca, &public_key_str).await;
+            }
+        }
+
+        // Classical path requires Ed25519 today (Phase 1 scope). RSA
+        // / ECDSA become a small extension to this match later.
+        if role.algorithm_signer != "ssh-ed25519" {
+            return Err(RvError::ErrString(format!(
+                "role `{role_name}` requests algorithm `{}`; only `ssh-ed25519` is supported on classical CAs today",
+                role.algorithm_signer
+            )));
+        }
+        if role.pqc_only {
+            return Err(RvError::ErrString(
+                "role has pqc_only=true but the CA is classical; configure a PQC CA first".into(),
+            ));
+        }
         let ca_private_key = PrivateKey::from_openssh(ca.private_key_openssh.as_bytes())
             .map_err(|e| RvError::ErrString(format!("CA key load failed: {e}")))?;
         if ca_private_key.algorithm() != Algorithm::Ed25519 {
             return Err(RvError::ErrString(format!(
-                "CA key algorithm `{}` not supported in Phase 1",
+                "CA key algorithm `{}` not supported on the classical sign path",
                 ca_private_key.algorithm().as_str()
             )));
         }
@@ -323,6 +342,188 @@ impl SshBackendInner {
         let mut data = Map::new();
         data.insert("signed_key".into(), Value::String(signed_key));
         data.insert("serial_number".into(), Value::String(format!("{serial:016x}")));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// PQC sign path. Mirrors `handle_sign`'s policy enforcement,
+    /// then routes the cert build through `pqc::sign_cert`. Kept as
+    /// a separate method so the classical handler stays readable and
+    /// the PQC code only compiles when the feature is on.
+    #[cfg(feature = "ssh_pqc")]
+    pub async fn handle_sign_pqc(
+        &self,
+        req: &mut Request,
+        role: &super::policy::RoleEntry,
+        ca_cfg: &super::policy::CaConfig,
+        public_key_str: &str,
+    ) -> Result<Option<Response>, RvError> {
+        use super::pqc::{self, CaKeypair, CertSpec};
+
+        // Client public key must be ML-DSA-65 if `pqc_only`. If it
+        // isn't and the client supplied a classical key, the
+        // hand-rolled parser returns None — surface the mismatch
+        // explicitly so operators understand why a Phase-1 client
+        // can't be issued a PQC cert.
+        let client_pk_bytes = pqc::parse_pqc_public_key(public_key_str.trim());
+        let client_pk_bytes = match client_pk_bytes {
+            Some(b) => b,
+            None => {
+                if role.pqc_only {
+                    return Err(RvError::ErrString(
+                        "role has pqc_only=true; client public key must be ssh-mldsa65@openssh.com".into(),
+                    ));
+                }
+                return Err(RvError::ErrString(
+                    "PQC CA can only sign ML-DSA-65 client public keys; supply an `ssh-mldsa65@openssh.com` key".into(),
+                ));
+            }
+        };
+
+        // Load the CA from on-disk hex fields and feed it to the
+        // PQC signer. The `algorithm` mismatch case is impossible
+        // here because the dispatch in `handle_sign` already gated
+        // on `ca.algorithm == MLDSA65_ALGO`.
+        let ca = CaKeypair::from_hex(&ca_cfg.pqc_secret_seed_hex, &ca_cfg.pqc_public_key_hex)?;
+
+        // ── Policy: principals (subset of allowed_users) ───────────
+        let req_principals = req
+            .get_data("valid_principals")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let mut requested: Vec<String> = req_principals
+            .split(',')
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect();
+        if requested.is_empty() {
+            if !role.default_user.is_empty() {
+                requested.push(role.default_user.clone());
+            } else {
+                return Err(RvError::ErrString(
+                    "no valid_principals supplied and role has no default_user".into(),
+                ));
+            }
+        }
+        let allowed = role.allowed_users_list();
+        let allow_any = allowed.iter().any(|u| u == "*");
+        if !allow_any {
+            if allowed.is_empty() {
+                return Err(RvError::ErrString(
+                    "role has empty allowed_users; sign refused".into(),
+                ));
+            }
+            for p in &requested {
+                if !allowed.iter().any(|a| a == p) {
+                    return Err(RvError::ErrString(format!(
+                        "principal `{p}` is not in role's allowed_users"
+                    )));
+                }
+            }
+        }
+
+        // ── cert_type ──────────────────────────────────────────────
+        let req_cert_type = req
+            .get_data("cert_type")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let cert_type_str = if req_cert_type.is_empty() { role.cert_type.clone() } else { req_cert_type };
+        let cert_type_u32: u32 = match cert_type_str.as_str() {
+            "user" => 1,
+            "host" => 2,
+            other => return Err(RvError::ErrString(format!(
+                "cert_type must be `user` or `host`, got `{other}`"
+            ))),
+        };
+
+        // ── TTL / validity window ──────────────────────────────────
+        let req_ttl_str = req
+            .get_data("ttl")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let req_ttl = if req_ttl_str.trim().is_empty() {
+            None
+        } else {
+            Some(humantime::parse_duration(&req_ttl_str).map_err(|e| {
+                RvError::ErrString(format!(
+                    "ttl: '{req_ttl_str}' is not a valid duration ({e})"
+                ))
+            })?)
+        };
+        let ttl = role.effective_ttl(req_ttl);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map_err(|e| RvError::ErrString(format!("system clock pre-epoch: {e}")))?
+            .as_secs();
+        let valid_after = now.saturating_sub(role.not_before_duration.as_secs());
+        let valid_before = now.saturating_add(ttl.as_secs());
+
+        // ── Extension / critical_option merge ──────────────────────
+        let req_ext = collect_string_map(req, "extensions");
+        let req_opt = collect_string_map(req, "critical_options");
+        let allowed_ext = role.allowed_extensions_list();
+        let allow_any_ext = allowed_ext.iter().any(|e| e == "*");
+        let allowed_opt = role.allowed_critical_options_list();
+        let allow_any_opt = allowed_opt.iter().any(|o| o == "*");
+        let mut extensions: BTreeMap<String, String> = role.default_extensions.clone();
+        for (k, v) in req_ext {
+            if allow_any_ext || allowed_ext.iter().any(|e| e == &k) {
+                extensions.insert(k, v);
+            }
+        }
+        let mut critical_options: BTreeMap<String, String> = role.default_critical_options.clone();
+        for (k, v) in req_opt {
+            if allow_any_opt || allowed_opt.iter().any(|o| o == &k) {
+                critical_options.insert(k, v);
+            }
+        }
+
+        // ── key_id ─────────────────────────────────────────────────
+        let req_key_id = req
+            .get_data("key_id")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let role_name_for_key_id = req
+            .get_data("role")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let key_id = if !req_key_id.is_empty() {
+            req_key_id
+        } else {
+            role.key_id_format.replace("{{role}}", &role_name_for_key_id)
+        };
+
+        // ── Random serial + nonce ──────────────────────────────────
+        let serial: u64 = rand::rng().random();
+        let mut nonce = [0u8; 32];
+        // Reuse the same TLS RNG `path_sign.rs` already uses; OS RNG
+        // for the nonce isn't a security distinction at this scale —
+        // the TLS RNG is seeded from getrandom() too.
+        rand::rng().fill(&mut nonce[..]);
+
+        // ── Build + sign ───────────────────────────────────────────
+        let spec = CertSpec {
+            client_pubkey: &client_pk_bytes,
+            serial,
+            cert_type: cert_type_u32,
+            key_id: &key_id,
+            valid_principals: &requested,
+            valid_after,
+            valid_before,
+            critical_options: &critical_options,
+            extensions: &extensions,
+            nonce: &nonce,
+        };
+        let signed_key = pqc::sign_cert(&ca, &spec)?;
+
+        let mut data = Map::new();
+        data.insert("signed_key".into(), Value::String(signed_key));
+        data.insert("serial_number".into(), Value::String(format!("{serial:016x}")));
+        data.insert("algorithm".into(), Value::String(super::pqc::MLDSA65_ALGO.into()));
         Ok(Some(Response::data_response(Some(data))))
     }
 }

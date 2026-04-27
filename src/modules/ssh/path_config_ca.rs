@@ -70,6 +70,11 @@ impl SshBackend {
                     field_type: FieldType::Str,
                     default: "",
                     description: "Optional pre-existing OpenSSH private key to import. Phase 1 accepts unencrypted Ed25519 only."
+                },
+                "algorithm": {
+                    field_type: FieldType::Str,
+                    default: "",
+                    description: "CA algorithm to generate. Empty / `ed25519` = Ed25519 (Phase 1 default). `mldsa65` requires the `ssh_pqc` feature and generates an ML-DSA-65 CA (Phase 3). Ignored when `private_key` is supplied."
                 }
             },
             operations: [
@@ -148,6 +153,32 @@ impl SshBackendInner {
             .ok()
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_default();
+        let req_algorithm = req
+            .get_data("algorithm")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+
+        // PQC CA generation (feature-gated). The shape `mldsa65` (no
+        // `ssh-` prefix) is what operators type on the CLI; the
+        // canonical wire-format string is `ssh-mldsa65@openssh.com`,
+        // which the engine persists in `algorithm`.
+        #[cfg(feature = "ssh_pqc")]
+        if provided.trim().is_empty()
+            && (req_algorithm == "mldsa65" || req_algorithm == super::pqc::MLDSA65_ALGO)
+        {
+            return self.write_pqc_ca(req).await;
+        }
+        // Without the feature flag, surface a clear error rather than
+        // silently falling through to Ed25519 — operators who asked
+        // for ML-DSA on a build that can't sign one would otherwise
+        // be issuing classical certs that look like the PQC ones.
+        #[cfg(not(feature = "ssh_pqc"))]
+        if req_algorithm == "mldsa65" {
+            return Err(RvError::ErrString(
+                "ML-DSA-65 CA generation requires the `ssh_pqc` feature flag at build time".into(),
+            ));
+        }
 
         let private_key = if !provided.trim().is_empty() {
             PrivateKey::from_openssh(provided.as_bytes())
@@ -190,6 +221,46 @@ impl SshBackendInner {
             algorithm: private_key.algorithm().as_str().to_string(),
             private_key_openssh,
             public_key_openssh: public_key_openssh.clone(),
+            // Phase 3 PQC fields stay empty for the classical path —
+            // the load helpers branch on `algorithm` first and never
+            // reach for them on a non-PQC CA.
+            pqc_secret_seed_hex: String::new(),
+            pqc_public_key_hex: String::new(),
+        };
+        let bytes = serde_json::to_vec(&cfg)?;
+        req.storage_put(&StorageEntry {
+            key: super::policy::CA_CONFIG_KEY.to_string(),
+            value: bytes,
+        })
+        .await?;
+
+        let mut data = Map::new();
+        data.insert("public_key".into(), Value::String(public_key_openssh));
+        data.insert("algorithm".into(), Value::String(cfg.algorithm));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// Generate and persist an ML-DSA-65 CA. Separate from the
+    /// classical handler so the dispatch in `handle_config_ca_write`
+    /// stays a single-line branch and the PQC path is easy to disable
+    /// at the feature-flag level.
+    #[cfg(feature = "ssh_pqc")]
+    pub async fn write_pqc_ca(
+        &self,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        use super::pqc::{CaKeypair, MLDSA65_ALGO};
+
+        let ca = CaKeypair::generate()?;
+        let public_key_openssh = ca.public_key_openssh()?;
+        let cfg = CaConfig {
+            algorithm: MLDSA65_ALGO.to_string(),
+            // Classical fields empty: the PQC sign path reads from the
+            // hex fields below and never touches `private_key_openssh`.
+            private_key_openssh: String::new(),
+            public_key_openssh: public_key_openssh.clone(),
+            pqc_secret_seed_hex: hex::encode(ca.secret_seed),
+            pqc_public_key_hex: hex::encode(&ca.public_key),
         };
         let bytes = serde_json::to_vec(&cfg)?;
         req.storage_put(&StorageEntry {

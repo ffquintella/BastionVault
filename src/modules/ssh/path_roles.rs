@@ -57,7 +57,8 @@ impl SshBackend {
                 "key_id_format": { field_type: FieldType::Str, default: "", description: "Template for the cert's `key id` field." },
                 "cidr_list": { field_type: FieldType::Str, default: "", description: "OTP mode: comma-separated CIDRs the OTP is valid for." },
                 "exclude_cidr_list": { field_type: FieldType::Str, default: "", description: "OTP mode: CIDRs to subtract from `cidr_list`." },
-                "port": { field_type: FieldType::Int, default: 22, description: "OTP mode: default SSH port surfaced to the helper / UI." }
+                "port": { field_type: FieldType::Int, default: 22, description: "OTP mode: default SSH port surfaced to the helper / UI." },
+                "pqc_only": { field_type: FieldType::Bool, default: false, description: "PQC mode: reject sign requests where the client key is classical, even if the CA is PQC. Forces an end-to-end PQC chain." }
             },
             operations: [
                 {op: Operation::Read, handler: read_handler.handle_role_read},
@@ -246,6 +247,12 @@ impl SshBackendInner {
                     )));
                 }
                 role.port = n as u16;
+            }
+        }
+
+        if let Ok(v) = req.get_data("pqc_only") {
+            if let Some(b) = v.as_bool() {
+                role.pqc_only = b;
             }
         }
 

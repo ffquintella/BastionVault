@@ -23,7 +23,8 @@ This is also the first engine that surfaces **post-quantum SSH credentials**: th
 
 - **Phase 1 shipped (CA mode, Ed25519).** Routes live at [`src/modules/ssh/`](../src/modules/ssh/): `path_config_ca.rs` (CA generate/import/read/delete), `path_roles.rs` (role CRUD + LIST), `path_sign.rs` (signing with policy enforcement). `policy.rs` holds the on-disk `CaConfig` + `RoleEntry` types, both forward-compatible via `serde(default)` so Phase 2 / 3 fields land without migrations. End-to-end integration test at [`tests/test_ssh_engine.rs`](../tests/test_ssh_engine.rs) verifies sign output is a valid OpenSSH cert and that role policy (principal subset, extension whitelist, default merge, TTL clamp, critical-option pass-through) actually lands in the wire format.
 - **Phase 2 shipped (OTP mode + helper binary).** New routes: `POST /ssh/creds/:role` mints a one-time password (the plaintext is returned exactly once; storage holds only the SHA-256), `POST /ssh/verify` consumes it (single-use, delete-before-act so a concurrent retry can't double-spend), `POST /ssh/lookup` surfaces which OTP roles cover an `(ip, username)` pair without consuming a credential. `RoleEntry` gained `cidr_list` / `exclude_cidr_list` / `port` (validated as `ipnetwork::IpNetwork` at role-write time so a typo fails up front). The helper binary lives at [`bin/bv_ssh_helper.rs`](../bin/bv_ssh_helper.rs) and ships as the `bv-ssh-helper` Cargo bin — designed for `pam_exec` integration on managed hosts. End-to-end test at [`tests/test_ssh_otp.rs`](../tests/test_ssh_otp.rs) covers mint / lookup / verify / replay-fail / out-of-CIDR-fail / excluded-CIDR-skip.
-- **Phase 3 (PQC: ML-DSA-65), Phase 4 (GUI)** not started. RSA / ECDSA also deferred -- the role's `algorithm_signer` field is parsed and validated at sign time, but only `ssh-ed25519` is accepted today.
+- **Phase 3 shipped (PQC: ML-DSA-65), feature `ssh_pqc`.** New module [`src/modules/ssh/pqc.rs`](../src/modules/ssh/pqc.rs) hand-rolls the OpenSSH cert TBS encoder for the `ssh-mldsa65@openssh.com` algo via `ssh-encoding`'s primitives — `ssh-key` 0.6 doesn't recognise the (still-draft) algo as a `KeyData` variant, so we sidestep its `Builder` for the PQC path entirely and call `bv_crypto::MlDsa65Provider` for the actual FIPS 204 sign. `POST /ssh/config/ca {algorithm: "mldsa65"}` generates an ML-DSA-65 CA, persisting only the 32-byte seed (FIPS 204 keygen rederives the expanded private key on each sign). `path_sign.rs` dispatches to the PQC path when `CaConfig.algorithm == "ssh-mldsa65@openssh.com"`. `RoleEntry.pqc_only` now enforces an end-to-end PQC chain (rejects classical client public keys). Integration test at [`tests/test_ssh_pqc.rs`](../tests/test_ssh_pqc.rs) (gated on `ssh_pqc`) covers PQC CA generate, sign, wire-format envelope sanity, and the classical-client-against-`pqc_only` rejection.
+- **Phase 4 (GUI)** not started. RSA / ECDSA also deferred -- the role's `algorithm_signer` field is parsed and validated at sign time, but only `ssh-ed25519` is accepted on the classical path today.
 - ML-DSA-65 signing is already available via [crates/bv_crypto/src/signature](crates/bv_crypto/src/signature) (`fips204`).
 - The PKI engine spec ([features/pki-secret-engine.md](pki-secret-engine.md)) defines a `CertSigner` trait abstraction that the SSH CA can re-use almost unchanged -- only the TBS encoding differs (OpenSSH cert format vs. X.509).
 - File-resource SFTP/SCP transports are explicitly deferred ([roadmap.md:109](roadmap.md:109)) pending an SSH stack decision; that decision is now: **`russh`** (pure-Rust client, MIT) over `libssh2-sys` (C lib).
@@ -194,14 +195,15 @@ Shipped exactly the file set the spec listed (helper moved to `bin/bv_ssh_helper
 | `src/modules/ssh/path_lookup.rs` | `lookup`. |
 | `bin/bv_ssh_helper.rs` | Helper binary for target hosts (Cargo bin `bv-ssh-helper`). |
 
-### Phase 3 -- PQC SSH Certificates
+### Phase 3 -- PQC SSH Certificates — **Done**
 
-Feature flag: `ssh_pqc`.
+Feature flag: `ssh_pqc`. Off by default — OpenSSH doesn't yet ship native support for the `ssh-mldsa65@openssh.com` algo, so certs minted under this feature only verify in clients that have implemented the draft. The cert TBS encoder is hand-rolled on top of `ssh-encoding` rather than `ssh-key` because the latter's `Builder` won't accept a `KeyData::Other` for arbitrary public-key bytes.
 
 | File | Purpose |
 |---|---|
-| `src/modules/ssh/crypto/pqc_ssh.rs` | ML-DSA-65 SSH cert signer + algo string `ssh-mldsa65@openssh.com`. |
-| `src/modules/ssh/openssh_cert.rs` (extension) | Recognise the PQC algo string in `key_type` field and route to the PQC signer. |
+| `src/modules/ssh/pqc.rs` | ML-DSA-65 OpenSSH wire format (public-key + cert TBS) and signer; `parse_pqc_public_key()` for the inbound client-key path. |
+| `path_config_ca.rs` (extension) | `algorithm = "mldsa65"` request body branch generates an ML-DSA-65 CA (32-byte seed + 1952-byte pubkey persisted hex-encoded). |
+| `path_sign.rs` (extension) | `handle_sign_pqc` parallel sign handler; the top-level dispatcher routes to it when `CaConfig.algorithm` matches the PQC algo string. Also enforces `RoleEntry.pqc_only` at this seam. |
 
 ### Phase 4 -- GUI Integration
 
