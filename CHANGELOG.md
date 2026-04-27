@@ -47,6 +47,16 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### PKI delegated baseline policies
+- **`pki-user` and `pki-admin` seeded policies** ([`src/modules/policy/policy_store.rs`](src/modules/policy/policy_store.rs)) -- ship with every install, registered alongside `standard-user`, `standard-user-readonly`, and `secret-author`. `pki-user` grants issuance/signing on the conventional `pki/` mount (`pki/issue/*`, `pki/sign/*`, `pki/sign-verbatim`, plus read on CA/CRL/issuer public material) without administrative authority over issuers, roles, configuration, or revocation. `pki-admin` grants full PKI mount management and inherits all `pki-user` capabilities. Lets operators delegate PKI usage and PKI administration without granting blanket `admin` or `root`.
+
+#### GUI: PKI is no longer admin-only; mount-aware sidebar
+- **PKI moved out of the Admin section** ([`gui/src/components/Layout.tsx`](gui/src/components/Layout.tsx)) -- the `/pki` link now lives in the workspace nav, gated by policy (`root`, `admin`, `pki-admin`, `pki-user`) instead of by membership in the admin group. Regular users with `pki-user` see and use the PKI page; users without any PKI policy don't.
+- **Per-item nav visibility** -- `NavItem` now carries optional `requires` (policy gate) and `requiresMountType` (mount-table gate). Sidebar links auto-hide when the dependent mount isn't enabled (e.g. PKI disappears if no `pki/` mount exists, Files disappears without a `files/` mount). Permissive fallback applied when `sys/mounts` is unreadable so the route handler still produces a meaningful 403 instead of silent UX dead-ends.
+
+#### GUI: Default Engines admin tab
+- **Mounts → Default Engines** ([`gui/src/routes/MountsPage.tsx`](gui/src/routes/MountsPage.tsx)) -- new admin tab that surfaces the well-known engine mounts (KV, Resources, Files, PKI, Identity, Asset Groups, System) as one-click toggle cards. Each card shows current enabled/disabled state, the mount path + logical type, what sidebar features it gates, and a button to enable or disable. System mounts (`sys/`, `identity/`) render as always-on. Admins who use a non-standard layout (e.g. `pki-corp/`) keep the free-form Mount Engine button on the Secret Engines tab.
+
 #### GUI Developer Tooling
 - **Local Tauri MCP bridge** -- Add an optional `mcp_local_dev` GUI Cargo feature for the `hypothesi/mcp-server-tauri` bridge, registered only in debug builds when `BASTION_TAURI_MCP=1` is set and bound to `127.0.0.1`. `make run-dev-gui` now enables this local-only development path for AI-assisted GUI inspection while production builds remain unchanged.
 

@@ -9,8 +9,8 @@
     },
     {
       "name": "gui-frontend",
-      "runtimeExecutable": "/bin/zsh",
-      "runtimeArgs": ["-i", "-c", "cd gui && npm run dev"],
+      "runtimeExecutable": "npm.cmd",
+      "runtimeArgs": ["run", "dev", "--prefix", "gui"],
       "port": 1420
     },
     {

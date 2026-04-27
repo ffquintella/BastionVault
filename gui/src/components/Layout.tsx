@@ -3,24 +3,55 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useVaultStore } from "../stores/vaultStore";
 import { useAuthStore } from "../stores/authStore";
 import { StatusBadge } from "./StatusBadge";
+import * as api from "../lib/api";
 
 // localStorage key for the persisted expanded/collapsed state of the
 // Admin section in the sidebar. Default (no key set) is expanded so
 // new sessions see admin links immediately.
 const ADMIN_OPEN_KEY = "bv.nav.adminOpen";
 
-type NavItem = { path: string; label: string };
+type NavItem = {
+  path: string;
+  label: string;
+  /**
+   * Policy names that grant access to this item. If unset (or empty)
+   * the item is visible to every authenticated user. The token's
+   * effective policy list is intersected with this set; a single
+   * match is enough.
+   */
+  requires?: string[];
+  /**
+   * Logical mount-type that must be present on the vault for this
+   * item to make sense. If set and no enabled mount has this
+   * `logical_type`, the link is hidden. Use this for engine-driven
+   * features (PKI, files, KV) so operators who haven't enabled the
+   * corresponding mount don't see broken menu items.
+   */
+  requiresMountType?: string;
+};
 
+// Workspace items — visible to every authenticated user, subject to
+// `requires` and `requiresMountType` per item. PKI lives here (not
+// under Admin) because regular users with `pki-user` need to issue
+// certificates; gating is by policy, not by membership in the admin
+// group.
 const userNav: NavItem[] = [
   { path: "/dashboard", label: "Dashboard" },
-  { path: "/resources", label: "Resources" },
-  { path: "/secrets", label: "Secrets" },
-  { path: "/files", label: "Files" },
+  { path: "/resources", label: "Resources", requiresMountType: "resource" },
+  { path: "/secrets", label: "Secrets", requiresMountType: "kv-v2" },
+  { path: "/files", label: "Files", requiresMountType: "files" },
   { path: "/sharing", label: "Sharing" },
+  {
+    path: "/pki",
+    label: "PKI",
+    requires: ["root", "admin", "pki-admin", "pki-user"],
+    requiresMountType: "pki",
+  },
 ];
 
-// Features under Admin require elevated access. The menu is hidden when the
-// current token carries none of the policies in `adminPolicies` below.
+// Admin features. The whole section collapses when none of the items
+// pass their per-item visibility check, or when the token carries no
+// admin policy at all.
 const adminNav: NavItem[] = [
   { path: "/users", label: "Users" },
   { path: "/approle", label: "AppRole" },
@@ -29,22 +60,32 @@ const adminNav: NavItem[] = [
   { path: "/policies", label: "Policies" },
   { path: "/mounts", label: "Mounts" },
   { path: "/audit", label: "Audit" },
-  { path: "/pki", label: "PKI" },
   { path: "/plugins", label: "Plugins" },
   { path: "/exchange", label: "Import / Export" },
   { path: "/settings", label: "Settings" },
 ];
 
-// Policies that grant access to the Admin section as a whole. `root` and
-// `admin` see every admin link. Operators who want to delegate just one
-// admin sub-feature can grant the corresponding *-admin policy below
-// without granting full admin.
+// Policies that grant access to the Admin section as a whole. `root`
+// and `admin` see every admin link. Operators who want to delegate
+// just one admin sub-feature can grant the corresponding *-admin
+// policy below without granting full admin. `pki-admin` does NOT
+// belong here — PKI is a workspace feature now, not an admin one.
 const adminPolicies = new Set([
   "root",
   "admin",
   "exchange-admin",
   "plugin-admin",
 ]);
+
+// Match a NavItem's `requiresMountType` against the live mount table.
+// Treat the kv family as interchangeable (kv ↔ kv-v2) so an operator
+// running KV-v1 still sees the Secrets link.
+function mountTypeMatches(required: string, available: Set<string>): boolean {
+  if (available.has(required)) return true;
+  if (required === "kv-v2" && available.has("kv")) return true;
+  if (required === "kv" && available.has("kv-v2")) return true;
+  return false;
+}
 
 interface LayoutProps {
   children: ReactNode;
@@ -57,9 +98,64 @@ export function Layout({ children }: LayoutProps) {
   const mode = useVaultStore((s) => s.mode);
   const remoteProfile = useVaultStore((s) => s.remoteProfile);
   const policies = useAuthStore((s) => s.policies);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const clearAuth = useAuthStore((s) => s.clearAuth);
   const reset = useVaultStore((s) => s.reset);
   const isAdmin = policies.some((p) => adminPolicies.has(p));
+  const policySet = new Set(policies);
+
+  // Load the live mount-type set so per-item `requiresMountType`
+  // gates work. We only ever need the set of types, not the full
+  // mount records, so collapse to a Set on receive.
+  const [mountTypes, setMountTypes] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    if (!isAuthenticated) {
+      setMountTypes(new Set());
+      return;
+    }
+    let cancelled = false;
+    api
+      .listMounts()
+      .then((mounts) => {
+        if (cancelled) return;
+        setMountTypes(new Set(mounts.map((m) => m.mount_type)));
+      })
+      .catch(() => {
+        // Non-fatal: a token without `sys/mounts` read access falls
+        // back to "show everything that doesn't require a mount."
+        // The route itself will still 403 if the user truly cannot
+        // use it. Clearing the set means *only* mount-gated items
+        // hide; items without a mount requirement remain visible.
+        if (cancelled) return;
+        // Permissive fallback: pretend all known engine types are
+        // enabled so the user sees the links and gets a meaningful
+        // error from the route handler instead of a silent hide.
+        setMountTypes(
+          new Set(["kv-v2", "kv", "resource", "files", "pki"]),
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated]);
+
+  // Per-item visibility filter: passes both the policy gate and the
+  // mount-type gate. An item with no `requires` is visible to all
+  // authenticated users; an item with no `requiresMountType` is
+  // unaffected by the mount table.
+  function itemVisible(item: NavItem): boolean {
+    if (item.requires && item.requires.length > 0) {
+      const ok = item.requires.some((p) => policySet.has(p));
+      if (!ok) return false;
+    }
+    if (item.requiresMountType) {
+      if (!mountTypeMatches(item.requiresMountType, mountTypes)) return false;
+    }
+    return true;
+  }
+
+  const visibleUserNav = userNav.filter(itemVisible);
+  const visibleAdminNav = adminNav.filter(itemVisible);
 
   // Persist admin section open/closed across reloads. Auto-expand when
   // the active route is under the admin section so navigating directly
@@ -127,7 +223,7 @@ export function Layout({ children }: LayoutProps) {
         </div>
 
         <nav className="flex-1 p-2 space-y-0.5 overflow-y-auto">
-          {userNav.map((item) => (
+          {visibleUserNav.map((item) => (
             <NavLink
               key={item.path}
               item={item}
@@ -135,7 +231,7 @@ export function Layout({ children }: LayoutProps) {
             />
           ))}
 
-          {isAdmin && (
+          {isAdmin && visibleAdminNav.length > 0 && (
             <div className="mt-4 pt-3 border-t border-[var(--color-border)]">
               <button
                 type="button"
@@ -174,7 +270,7 @@ export function Layout({ children }: LayoutProps) {
                   id="nav-admin-section"
                   className="mt-1 ml-2 pl-2 border-l border-[var(--color-border)] space-y-0.5"
                 >
-                  {adminNav.map((item) => (
+                  {visibleAdminNav.map((item) => (
                     <NavLink
                       key={item.path}
                       item={item}

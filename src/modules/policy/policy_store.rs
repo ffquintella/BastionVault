@@ -328,6 +328,85 @@ path "cubbyhole/*" {
 }
 "#;
 
+/// PKI consumer baseline. Grants a user the right to *use* a PKI mount
+/// (issue certificates, sign CSRs, read public CA material and CRLs)
+/// without granting any administrative capability over issuers, roles,
+/// configuration, or revocation. Pair this with a wildcard mount path
+/// (the default `pki/`) or a bespoke mount the operator has stood up
+/// for the user's department.
+///
+/// Operators who run multiple PKI mounts can assign this policy to a
+/// group and rely on the inherent path-prefix scoping to limit the
+/// blast radius — the policy purposely uses the conventional `pki/`
+/// path, so a user with this baseline who does not have access to a
+/// `pki-corp/` mount cannot accidentally issue against it.
+static PKI_USER_POLICY_NAME: &str = "pki-user";
+static PKI_USER_POLICY: &str = r#"
+# --- Self service ---
+path "auth/token/lookup-self" { capabilities = ["read"] }
+path "auth/token/renew-self"  { capabilities = ["update"] }
+path "auth/token/revoke-self" { capabilities = ["update"] }
+path "sys/capabilities-self"  { capabilities = ["update"] }
+path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
+
+# --- PKI: issuance and signing (requires create/update on issue/sign) ---
+path "pki/issue/*"          { capabilities = ["create", "update"] }
+path "pki/sign/*"           { capabilities = ["create", "update"] }
+path "pki/sign-verbatim"    { capabilities = ["create", "update"] }
+path "pki/sign-verbatim/*"  { capabilities = ["create", "update"] }
+
+# --- PKI: read public material ---
+path "pki/ca"            { capabilities = ["read"] }
+path "pki/ca/pem"        { capabilities = ["read"] }
+path "pki/ca_chain"      { capabilities = ["read"] }
+path "pki/cert/*"        { capabilities = ["read"] }
+path "pki/certs"         { capabilities = ["list"] }
+path "pki/crl"           { capabilities = ["read"] }
+path "pki/crl/pem"       { capabilities = ["read"] }
+path "pki/issuers"       { capabilities = ["list", "read"] }
+path "pki/issuer/+/json" { capabilities = ["read"] }
+path "pki/issuer/+/pem"  { capabilities = ["read"] }
+path "pki/issuer/+/der"  { capabilities = ["read"] }
+path "pki/issuer/+/crl"  { capabilities = ["read"] }
+path "pki/roles"         { capabilities = ["list"] }
+path "pki/roles/*"       { capabilities = ["read"] }
+
+# --- Private workspace ---
+path "cubbyhole/*" {
+    capabilities = ["create", "read", "update", "delete", "list"]
+}
+"#;
+
+/// PKI administrator baseline. Grants full management of a PKI mount:
+/// issuer lifecycle (root generation/import, intermediate signing,
+/// rename/delete), role lifecycle, configuration (URLs, CRL settings),
+/// tidy/scheduler control, and revocation. Inherits all `pki-user`
+/// capabilities. Operators who want to delegate PKI administration to
+/// a non-root identity should grant this without granting full `admin`.
+static PKI_ADMIN_POLICY_NAME: &str = "pki-admin";
+static PKI_ADMIN_POLICY: &str = r#"
+# --- Self service ---
+path "auth/token/lookup-self" { capabilities = ["read"] }
+path "auth/token/renew-self"  { capabilities = ["update"] }
+path "auth/token/revoke-self" { capabilities = ["update"] }
+path "sys/capabilities-self"  { capabilities = ["update"] }
+path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
+
+# --- Mount discovery (PKI admin needs to see PKI mounts) ---
+path "sys/mounts"   { capabilities = ["read", "list"] }
+path "sys/mounts/*" { capabilities = ["read"] }
+
+# --- PKI: full management ---
+path "pki/*" {
+    capabilities = ["create", "read", "update", "delete", "list"]
+}
+
+# --- Private workspace ---
+path "cubbyhole/*" {
+    capabilities = ["create", "read", "update", "delete", "list"]
+}
+"#;
+
 static _POLICY_STORE_HELP: &str = r#"
 TODO
 "#;
@@ -657,6 +736,11 @@ impl PolicyStore {
         self.load_acl_policy(STANDARD_USER_READONLY_POLICY_NAME, STANDARD_USER_READONLY_POLICY)
             .await?;
         self.load_acl_policy(SECRET_AUTHOR_POLICY_NAME, SECRET_AUTHOR_POLICY).await?;
+        // PKI delegated baselines. `pki-user` grants issuance/signing
+        // without admin authority; `pki-admin` grants full mount
+        // management. See `features/pki-secret-engine.md`.
+        self.load_acl_policy(PKI_USER_POLICY_NAME, PKI_USER_POLICY).await?;
+        self.load_acl_policy(PKI_ADMIN_POLICY_NAME, PKI_ADMIN_POLICY).await?;
         Ok(())
     }
 

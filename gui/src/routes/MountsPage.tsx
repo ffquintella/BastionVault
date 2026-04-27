@@ -20,6 +20,81 @@ const BUILTIN_ENGINE_TYPES = [
   { value: "kv-v2", label: "KV (Version 2)" },
 ];
 
+/// Well-known engines that the GUI surfaces as one-click "Default
+/// Engines" toggles. Each entry pairs the conventional mount path
+/// (e.g. `pki/`) with the logical-type the backend expects when the
+/// admin flips the toggle on. The `gates` field documents which
+/// sidebar features depend on the mount: when the mount is absent
+/// the corresponding nav links auto-hide (see `Layout.tsx`).
+///
+/// `system: true` marks mounts the operator should not unmount
+/// (sys, identity, etc.) — the toggle renders disabled with an
+/// explanation. We surface them so admins see a complete picture
+/// of what's enabled, not so they can break their install.
+type DefaultEngineSpec = {
+  path: string;
+  label: string;
+  logicalType: string;
+  description: string;
+  gates: string;
+  system?: boolean;
+};
+
+const DEFAULT_ENGINE_SPECS: DefaultEngineSpec[] = [
+  {
+    path: "secret/",
+    label: "KV (key/value secrets)",
+    logicalType: "kv-v2",
+    description: "Encrypted key/value secret storage with versioning.",
+    gates: "Secrets nav, secret/data/* paths",
+  },
+  {
+    path: "resources/",
+    label: "Resources",
+    logicalType: "resource",
+    description: "Infrastructure-resource inventory (hosts, accounts, ...).",
+    gates: "Resources nav, Asset-Group resource picker",
+  },
+  {
+    path: "files/",
+    label: "Files",
+    logicalType: "files",
+    description: "Binary file blobs (keys, certs, configs).",
+    gates: "Files nav",
+  },
+  {
+    path: "pki/",
+    label: "PKI",
+    logicalType: "pki",
+    description:
+      "X.509 certificate authority (classical + post-quantum signatures).",
+    gates: "PKI nav (also requires pki-user / pki-admin policy)",
+  },
+  {
+    path: "identity/",
+    label: "Identity",
+    logicalType: "identity",
+    description: "Entity / group store backing the auth system.",
+    gates: "Identity Groups nav, all token issuance",
+    system: true,
+  },
+  {
+    path: "resource-group/",
+    label: "Asset Groups",
+    logicalType: "resource-group",
+    description: "Named collections of resources for sharing/RBAC.",
+    gates: "Asset Groups nav",
+  },
+  {
+    path: "sys/",
+    label: "System",
+    logicalType: "system",
+    description: "Internal control plane endpoints. Cannot be disabled.",
+    gates: "Every admin feature",
+    system: true,
+  },
+];
+
 /// Plugin types a mount can be backed by. The host's
 /// `MountsRouter::get_backend` resolves `plugin:<name>` strings
 /// dynamically, so we just need to surface the registered plugins
@@ -121,6 +196,31 @@ export function MountsPage() {
     }
   }
 
+  // One-click enable/disable for a well-known engine. Operates on the
+  // conventional path (`pki/`, `secret/`, …) and uses the spec's
+  // `logicalType`. We don't try to guess the path: if an admin wants
+  // a custom layout (`pki-corp/`, `pki-internal/`) they can use the
+  // free-form Mount Engine button on the Secret Engines tab.
+  const [togglingDefault, setTogglingDefault] = useState<string | null>(null);
+  async function handleToggleDefault(spec: DefaultEngineSpec, enabled: boolean) {
+    if (spec.system) return;
+    setTogglingDefault(spec.path);
+    try {
+      if (enabled) {
+        await api.unmountEngine(spec.path);
+        toast("success", `Disabled ${spec.label} (${spec.path})`);
+      } else {
+        await api.mountEngine(spec.path, spec.logicalType, spec.description);
+        toast("success", `Enabled ${spec.label} at ${spec.path}`);
+      }
+      await loadAll();
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    } finally {
+      setTogglingDefault(null);
+    }
+  }
+
   async function handleEnableAuth() {
     try {
       await api.enableAuthMethod(authPath, authType, authDesc);
@@ -216,6 +316,7 @@ export function MountsPage() {
         <Tabs
           tabs={[
             { id: "engines", label: "Secret Engines" },
+            { id: "defaults", label: "Default Engines" },
             { id: "auth", label: "Auth Methods" },
           ]}
           active={tab}
@@ -231,6 +332,12 @@ export function MountsPage() {
               data={mounts}
               rowKey={(m) => m.path}
               emptyMessage="No secret engines mounted"
+            />
+          ) : tab === "defaults" ? (
+            <DefaultEngines
+              mounts={mounts}
+              onToggle={handleToggleDefault}
+              busyPath={togglingDefault}
             />
           ) : (
             <Table
@@ -338,5 +445,98 @@ export function MountsPage() {
         />
       </div>
     </Layout>
+  );
+}
+
+/// Rendered as the body of the "Default Engines" tab. Each spec from
+/// `DEFAULT_ENGINE_SPECS` becomes a card with a status pill and a
+/// toggle button. The "enabled" determination is purely path-based:
+/// we look up `spec.path` in the live mount list. Mounts with the
+/// matching path but a *different* logical_type still show as
+/// enabled — the admin can fix that up via the free-form Secret
+/// Engines tab; we don't want this surface to silently re-mount and
+/// destroy their data.
+function DefaultEngines({
+  mounts,
+  onToggle,
+  busyPath,
+}: {
+  mounts: MountInfo[];
+  onToggle: (spec: DefaultEngineSpec, currentlyEnabled: boolean) => void;
+  busyPath: string | null;
+}) {
+  const byPath = new Map(mounts.map((m) => [m.path, m]));
+  return (
+    <div className="space-y-2">
+      <p className="text-xs text-[var(--color-text-muted)] pb-2">
+        Toggle the well-known engines on or off. Sidebar links auto-hide
+        when the corresponding mount is disabled.
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {DEFAULT_ENGINE_SPECS.map((spec) => {
+          const live = byPath.get(spec.path);
+          const enabled = !!live;
+          const typeMatches = !live || live.mount_type === spec.logicalType;
+          const busy = busyPath === spec.path;
+          return (
+            <div
+              key={spec.path}
+              className="border border-[var(--color-border)] rounded-md p-3 flex flex-col gap-2 bg-[var(--color-surface)]"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="font-semibold text-sm truncate">
+                    {spec.label}
+                  </div>
+                  <div className="text-[11px] text-[var(--color-text-muted)] font-mono truncate">
+                    {spec.path}
+                    {" · "}
+                    {spec.logicalType}
+                  </div>
+                </div>
+                <span
+                  className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0 ${
+                    enabled
+                      ? "bg-green-500/15 text-green-400"
+                      : "bg-zinc-500/15 text-[var(--color-text-muted)]"
+                  }`}
+                >
+                  {enabled ? "Enabled" : "Disabled"}
+                </span>
+              </div>
+              <p className="text-xs text-[var(--color-text-muted)]">
+                {spec.description}
+              </p>
+              <p className="text-[11px] text-[var(--color-text-muted)] italic">
+                Gates: {spec.gates}
+              </p>
+              {!typeMatches && (
+                <p className="text-[11px] text-[var(--color-warning)]">
+                  Mounted at {spec.path} with type{" "}
+                  <span className="font-mono">{live?.mount_type}</span> —
+                  manage manually.
+                </p>
+              )}
+              <div className="flex justify-end pt-1">
+                {spec.system ? (
+                  <span className="text-[11px] text-[var(--color-text-muted)] italic">
+                    System mount — always on
+                  </span>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant={enabled ? "danger" : "primary"}
+                    disabled={busy}
+                    onClick={() => onToggle(spec, enabled)}
+                  >
+                    {busy ? "…" : enabled ? "Disable" : "Enable"}
+                  </Button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }

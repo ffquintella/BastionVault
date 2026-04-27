@@ -108,12 +108,12 @@ mod test {
         #[cfg(windows)]
         assert_eq!(
             ret.unwrap(),
-            "default    \r\nmy-policy    \r\nsecret-author    \r\nstandard-user    \r\nstandard-user-readonly    \r\nroot    \r\n",
+            "default    \r\nmy-policy    \r\npki-admin    \r\npki-user    \r\nsecret-author    \r\nstandard-user    \r\nstandard-user-readonly    \r\nroot    \r\n",
         );
         #[cfg(not(windows))]
         assert_eq!(
             ret.unwrap(),
-            "default    \nmy-policy    \nsecret-author    \nstandard-user    \nstandard-user-readonly    \nroot    \n",
+            "default    \nmy-policy    \npki-admin    \npki-user    \nsecret-author    \nstandard-user    \nstandard-user-readonly    \nroot    \n",
         );
 
         // read my-policy with table format
@@ -132,12 +132,12 @@ mod test {
         #[cfg(windows)]
         assert_eq!(
             ret.unwrap(),
-            "default    \r\nmy-policy    \r\nmy-policy1    \r\nsecret-author    \r\nstandard-user    \r\nstandard-user-readonly    \r\nroot    \r\n",
+            "default    \r\nmy-policy    \r\nmy-policy1    \r\npki-admin    \r\npki-user    \r\nsecret-author    \r\nstandard-user    \r\nstandard-user-readonly    \r\nroot    \r\n",
         );
         #[cfg(not(windows))]
         assert_eq!(
             ret.unwrap(),
-            "default    \nmy-policy    \nmy-policy1    \nsecret-author    \nstandard-user    \nstandard-user-readonly    \nroot    \n",
+            "default    \nmy-policy    \nmy-policy1    \npki-admin    \npki-user    \nsecret-author    \nstandard-user    \nstandard-user-readonly    \nroot    \n",
         );
 
         // read my-policy1 with table format

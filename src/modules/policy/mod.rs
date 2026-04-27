@@ -450,6 +450,8 @@ mod mod_policy_tests {
             policies["keys"],
             json!([
                 "default",
+                "pki-admin",
+                "pki-user",
                 policy1_name,
                 "secret-author",
                 "standard-user",
@@ -461,6 +463,8 @@ mod mod_policy_tests {
             policies["policies"],
             json!([
                 "default",
+                "pki-admin",
+                "pki-user",
                 policy1_name,
                 "secret-author",
                 "standard-user",
@@ -506,8 +510,8 @@ mod mod_policy_tests {
         assert_eq!(
             ret.unwrap().1,
             json!({
-                "keys":     ["default", "secret-author", "standard-user", "standard-user-readonly", "root"],
-                "policies": ["default", "secret-author", "standard-user", "standard-user-readonly", "root"],
+                "keys":     ["default", "pki-admin", "pki-user", "secret-author", "standard-user", "standard-user-readonly", "root"],
+                "policies": ["default", "pki-admin", "pki-user", "secret-author", "standard-user", "standard-user-readonly", "root"],
             })
         );
 
@@ -541,8 +545,8 @@ mod mod_policy_tests {
         assert_eq!(
             ret.unwrap().1,
             json!({
-                "keys":     ["default", "policy1", "secret-author", "standard-user", "standard-user-readonly", "root"],
-                "policies": ["default", "policy1", "secret-author", "standard-user", "standard-user-readonly", "root"],
+                "keys":     ["default", "pki-admin", "pki-user", "policy1", "secret-author", "standard-user", "standard-user-readonly", "root"],
+                "policies": ["default", "pki-admin", "pki-user", "policy1", "secret-author", "standard-user", "standard-user-readonly", "root"],
             })
         );
 
@@ -556,8 +560,8 @@ mod mod_policy_tests {
         assert_eq!(
             ret.unwrap().1,
             json!({
-                "keys":     ["default", "secret-author", "standard-user", "standard-user-readonly", "root"],
-                "policies": ["default", "secret-author", "standard-user", "standard-user-readonly", "root"],
+                "keys":     ["default", "pki-admin", "pki-user", "secret-author", "standard-user", "standard-user-readonly", "root"],
+                "policies": ["default", "pki-admin", "pki-user", "secret-author", "standard-user", "standard-user-readonly", "root"],
             })
         );
     }
