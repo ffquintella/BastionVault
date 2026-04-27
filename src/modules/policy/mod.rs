@@ -486,13 +486,32 @@ mod mod_policy_tests {
         // List again
         let policies = test_list_api(&core, &root_token, "sys/policy", true).await;
         let policies = policies.unwrap().unwrap().data.unwrap();
+        // The seeded baselines list grew when `pki-user` / `pki-admin`
+        // were added (commit c1b6402); the assertion didn't. Update so
+        // it matches the current `load_default_acl_policy` output.
         assert_eq!(
             policies["keys"],
-            json!(["default", "secret-author", "standard-user", "standard-user-readonly", "root"])
+            json!([
+                "default",
+                "pki-admin",
+                "pki-user",
+                "secret-author",
+                "standard-user",
+                "standard-user-readonly",
+                "root"
+            ])
         );
         assert_eq!(
             policies["policies"],
-            json!(["default", "secret-author", "standard-user", "standard-user-readonly", "root"])
+            json!([
+                "default",
+                "pki-admin",
+                "pki-user",
+                "secret-author",
+                "standard-user",
+                "standard-user-readonly",
+                "root"
+            ])
         );
     }
 

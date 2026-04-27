@@ -49,10 +49,20 @@ const EC_BITS = [
 
 const ALL_USAGES = ["issuing-certificates", "crl-signing", "ocsp-signing"] as const;
 
+// `humantime::parse_duration` (the parser the PKI engine runs on the
+// backend) accepts these unit suffixes. Validate against this list at
+// submit time so a user who types bare digits gets immediate feedback
+// instead of a server round-trip with a generic error.
+const DURATION_UNIT_RE = /^\s*(\d+\s*(ns|us|µs|ms|s|m|h|d|w|y))(\s*\d+\s*(ns|us|µs|ms|s|m|h|d|w|y))*\s*$/;
+
 function defaultRoleConfig(): PkiRoleConfig {
   return {
-    ttl: "",
-    max_ttl: "",
+    // Pre-fill with sensible defaults that are valid duration strings.
+    // Empty is also accepted by the backend (falls back to engine defaults),
+    // but a no-touch submit with valid units beats a no-touch submit that
+    // round-trips an error.
+    ttl: "720h",
+    max_ttl: "2160h",
     key_type: "ec",
     key_bits: 0,
     allow_localhost: true,
@@ -75,6 +85,18 @@ function defaultRoleConfig(): PkiRoleConfig {
     generate_lease: false,
     issuer_ref: "",
   };
+}
+
+/// Validate a duration string the way the backend's `humantime::parse_duration`
+/// would. Empty is allowed (the backend falls back to engine defaults).
+/// Returns a human-readable error message on rejection, or `null` on accept.
+function validateDurationField(label: string, value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (!DURATION_UNIT_RE.test(trimmed)) {
+    return `${label} '${value}' needs a unit suffix — try '720h', '5m', or '8760h'`;
+  }
+  return null;
 }
 
 function fmtUnix(t: number | null | undefined): string {
@@ -711,6 +733,16 @@ function RolesTab({ mount }: { mount: string }) {
 
   async function handleCreate() {
     if (!newName.trim()) return;
+    const ttlError = validateDurationField("TTL", draft.ttl);
+    if (ttlError) {
+      toast("error", ttlError);
+      return;
+    }
+    const maxTtlError = validateDurationField("Max TTL", draft.max_ttl);
+    if (maxTtlError) {
+      toast("error", maxTtlError);
+      return;
+    }
     try {
       await api.pkiWriteRole(mount, newName.trim(), draft);
       toast("success", `Role ${newName} created`);
@@ -729,6 +761,16 @@ function RolesTab({ mount }: { mount: string }) {
 
   async function handleSaveEdit() {
     if (!selected || !config) return;
+    const ttlError = validateDurationField("TTL", config.ttl);
+    if (ttlError) {
+      toast("error", ttlError);
+      return;
+    }
+    const maxTtlError = validateDurationField("Max TTL", config.max_ttl);
+    if (maxTtlError) {
+      toast("error", maxTtlError);
+      return;
+    }
     try {
       await api.pkiWriteRole(mount, selected, config);
       toast("success", "Role updated");

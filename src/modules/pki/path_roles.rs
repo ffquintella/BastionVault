@@ -242,5 +242,9 @@ fn parse_opt_duration(req: &Request, key: &str, default: Duration) -> Result<Dur
     if s.is_empty() {
         return Ok(default);
     }
-    parse_duration(s).map_err(|_| RvError::ErrRequestFieldInvalid)
+    parse_duration(s).map_err(|e| {
+        RvError::ErrString(format!(
+            "{key}: '{s}' is not a valid duration ({e}); use a unit suffix like '720h' or '5m'"
+        ))
+    })
 }

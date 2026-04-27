@@ -28,9 +28,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const addToast = useCallback((type: ToastType, message: string) => {
     const id = nextId++;
     setToasts((prev) => [...prev, { id, type, message }]);
+    // Error toasts stay on screen longer than success/info ones —
+    // they carry actionable information the user usually wants to read
+    // (and copy / screenshot for support). Success/info auto-dismiss
+    // at 4 s; errors stay for 8 s. The `×` close button always wins.
+    const dismissAfter = type === "error" ? 8000 : 4000;
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 4000);
+    }, dismissAfter);
   }, []);
 
   const removeToast = useCallback((id: number) => {
