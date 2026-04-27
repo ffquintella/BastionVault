@@ -22,6 +22,18 @@ describe("SettingsPage FIDO2 config", () => {
   beforeEach(() => {
     mockInvoke.mockReset();
     useAuthStore.setState({ token: "test-token", policies: ["root"], isAuthenticated: true });
+    // SettingsPage is now organised into tabs (general / security /
+    // identity / …) and persists the active tab in localStorage. The
+    // FIDO2 card moved to the `"security"` tab; without this preset
+    // the page renders the General tab and these tests can't see
+    // any FIDO2 markup. Setting the storage value before mount picks
+    // up the right tab via the page's lazy-init `useState` hook.
+    try {
+      localStorage.setItem("settings.activeTab", "security");
+    } catch {
+      /* jsdom occasionally fails on storage; tests fall back to
+         general tab and would FAIL — that's the right signal. */
+    }
   });
 
   function mockSettingsInvoke(fido2Config: unknown) {

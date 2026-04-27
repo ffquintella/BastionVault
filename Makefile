@@ -68,20 +68,47 @@ gui-check: gui-deps ## Type-check and lint the GUI frontend
 docs: ## Start the documentation site locally
 	cd docs && npm install && npx docusaurus clear && npx docusaurus start
 
-bump-patch: ## Bump patch version (0.0.x)
+# `bump-*` targets bump the workspace version everywhere it lives:
+# - `Cargo.toml` (root crate)
+# - `gui/src-tauri/Cargo.toml` (Tauri host crate)
+# - `gui/package.json` (npm package — drives `npm publish` / vite build IDs)
+# - `gui/src-tauri/tauri.conf.json` (Tauri runtime version, baked into
+#   the desktop app's About page)
+#
+# Each sed pattern is anchored so it only touches the *top-level*
+# version field — `^version =` for the toml files, the indented
+# `^  "version":` for the JSON files (matches the 2-space indentation
+# `npm` and Tauri write).
+#
+# The GUI files don't carry the root crate's old version (they were
+# at 0.1.0 while root was at 0.3.1 before this change), so we match
+# any current value (`[^\"]*`) and overwrite to `$$NEW`. After the
+# first sync run, every subsequent bump keeps all four files in
+# lockstep.
+
+bump-patch: ## Bump patch version (0.0.x) across root + gui
 	@NEW=$$(echo $(VERSION) | awk -F. '{printf "%d.%d.%d", $$1, $$2, $$3+1}'); \
 	sed -i '' "s/^version = \"$(VERSION)\"/version = \"$$NEW\"/" Cargo.toml; \
-	echo "Bumped version: $(VERSION) -> $$NEW"
+	sed -i '' "s/^version = \"[^\"]*\"/version = \"$$NEW\"/" gui/src-tauri/Cargo.toml; \
+	sed -i '' "s/^  \"version\": \"[^\"]*\"/  \"version\": \"$$NEW\"/" gui/package.json; \
+	sed -i '' "s/^  \"version\": \"[^\"]*\"/  \"version\": \"$$NEW\"/" gui/src-tauri/tauri.conf.json; \
+	echo "Bumped version: $(VERSION) -> $$NEW (root + gui)"
 
-bump-minor: ## Bump minor version (0.x.0)
+bump-minor: ## Bump minor version (0.x.0) across root + gui
 	@NEW=$$(echo $(VERSION) | awk -F. '{printf "%d.%d.0", $$1, $$2+1}'); \
 	sed -i '' "s/^version = \"$(VERSION)\"/version = \"$$NEW\"/" Cargo.toml; \
-	echo "Bumped version: $(VERSION) -> $$NEW"
+	sed -i '' "s/^version = \"[^\"]*\"/version = \"$$NEW\"/" gui/src-tauri/Cargo.toml; \
+	sed -i '' "s/^  \"version\": \"[^\"]*\"/  \"version\": \"$$NEW\"/" gui/package.json; \
+	sed -i '' "s/^  \"version\": \"[^\"]*\"/  \"version\": \"$$NEW\"/" gui/src-tauri/tauri.conf.json; \
+	echo "Bumped version: $(VERSION) -> $$NEW (root + gui)"
 
-bump-major: ## Bump major version (x.0.0)
+bump-major: ## Bump major version (x.0.0) across root + gui
 	@NEW=$$(echo $(VERSION) | awk -F. '{printf "%d.0.0", $$1+1}'); \
 	sed -i '' "s/^version = \"$(VERSION)\"/version = \"$$NEW\"/" Cargo.toml; \
-	echo "Bumped version: $(VERSION) -> $$NEW"
+	sed -i '' "s/^version = \"[^\"]*\"/version = \"$$NEW\"/" gui/src-tauri/Cargo.toml; \
+	sed -i '' "s/^  \"version\": \"[^\"]*\"/  \"version\": \"$$NEW\"/" gui/package.json; \
+	sed -i '' "s/^  \"version\": \"[^\"]*\"/  \"version\": \"$$NEW\"/" gui/src-tauri/tauri.conf.json; \
+	echo "Bumped version: $(VERSION) -> $$NEW (root + gui)"
 
 clean: ## Remove Cargo build artefacts (target/) across the workspace
 	cargo clean
