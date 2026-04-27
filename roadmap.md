@@ -49,7 +49,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | PKI: ACME server endpoints ([spec](features/pki-acme.md)) | Todo |
 | Secret Engine: Transit ([spec](features/transit-secret-engine.md)) | Todo |
 | Secret Engine: TOTP ([spec](features/totp-secret-engine.md)) | Todo |
-| Secret Engine: SSH ([spec](features/ssh-secret-engine.md)) | Todo |
+| Secret Engine: SSH ([spec](features/ssh-secret-engine.md)) | In Progress (Phase 1: CA mode, Ed25519) |
 | Dynamic Secrets ([spec](features/dynamic-secrets.md)) | Todo |
 | **Infrastructure** | |
 | High Availability (Raft consensus via Hiqlite) | Done |

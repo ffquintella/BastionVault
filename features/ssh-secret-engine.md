@@ -21,7 +21,8 @@ This is also the first engine that surfaces **post-quantum SSH credentials**: th
 
 ## Current State
 
-- No SSH engine exists in the repository.
+- **Phase 1 shipped (CA mode, Ed25519).** Routes live at [`src/modules/ssh/`](../src/modules/ssh/): `path_config_ca.rs` (CA generate/import/read/delete), `path_roles.rs` (role CRUD + LIST), `path_sign.rs` (signing with policy enforcement). `policy.rs` holds the on-disk `CaConfig` + `RoleEntry` types, both forward-compatible via `serde(default)` so Phase 2 / 3 fields land without migrations. End-to-end integration test at [`tests/test_ssh_engine.rs`](../tests/test_ssh_engine.rs) verifies sign output is a valid OpenSSH cert and that role policy (principal subset, extension whitelist, default merge, TTL clamp, critical-option pass-through) actually lands in the wire format.
+- **Phase 2 (OTP mode + helper binary), Phase 3 (PQC: ML-DSA-65), Phase 4 (GUI)** not started. RSA / ECDSA support also deferred -- the role's `algorithm_signer` field is parsed and validated at sign time, but only `ssh-ed25519` is accepted today.
 - ML-DSA-65 signing is already available via [crates/bv_crypto/src/signature](crates/bv_crypto/src/signature) (`fips204`).
 - The PKI engine spec ([features/pki-secret-engine.md](pki-secret-engine.md)) defines a `CertSigner` trait abstraction that the SSH CA can re-use almost unchanged -- only the TBS encoding differs (OpenSSH cert format vs. X.509).
 - File-resource SFTP/SCP transports are explicitly deferred ([roadmap.md:109](roadmap.md:109)) pending an SSH stack decision; that decision is now: **`russh`** (pure-Rust client, MIT) over `libssh2-sys` (C lib).
@@ -159,7 +160,9 @@ src/bin/bv-ssh-helper.rs    -- target-host helper for OTP-mode (pam_exec friendl
 
 ## Implementation Scope
 
-### Phase 1 -- CA Mode (Classical)
+### Phase 1 -- CA Mode (Classical) — **Done (Ed25519 subset)**
+
+Shipped: Ed25519-only CA + role-gated signing. Dropped from this phase: RSA / ECDSA (deferred to a later phase under the same `algorithm_signer` field, which is already parsed and gated at sign time), `issue/:role` (engine-generated client keypair — `sign/:role` covers the dominant case and adds no key-handling surface for the engine to leak), `openssh_cert.rs` (the `ssh-key` `certificate::Builder` API obviated needing a hand-rolled TBS encoder), and `crypto/ssh_key.rs` (the wrappers turned out to be one-liners inlined in `path_sign.rs`).
 
 | File | Purpose |
 |---|---|

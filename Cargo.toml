@@ -192,6 +192,13 @@ const-oid = { version = "0.9", features = ["db"] }
 # / `from_pkcs8_pem` round-trip uses the standard wrapper. The `pem` feature
 # pulls in the PEM encode/decode helpers.
 pkcs8 = { version = "0.10", features = ["pem", "alloc"] }
+# SSH Secret Engine (Phase 1, CA mode): OpenSSH key + certificate
+# parsing / encoding / signing on a pure-Rust stack (RustCrypto
+# under the hood). `alloc` for heap, `ed25519` for the default CA
+# algorithm, `encryption` for armored OpenSSH private-key handling.
+# Phases 2 (OTP) and later may add `rsa` / `p256` / `p384` features.
+ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519", "encryption"] }
+ssh-encoding = "0.2"
 
 [build-dependencies]
 toml = "1.1.2"

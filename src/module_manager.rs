@@ -17,7 +17,8 @@ use crate::{
     errors::RvError,
     modules::{
         files::FilesModule, identity::IdentityModule, kv::KvModule, kv_v2::KvV2Module,
-        pki::PkiModule, resource::ResourceModule, resource_group::ResourceGroupModule, system::SystemModule,
+        pki::PkiModule, resource::ResourceModule, resource_group::ResourceGroupModule,
+        ssh::SshModule, system::SystemModule,
         Module,
     },
 };
@@ -41,6 +42,7 @@ impl ModuleManager {
             Arc::new(FilesModule::new(core.clone())),
             Arc::new(IdentityModule::new(core.clone())),
             Arc::new(ResourceGroupModule::new(core.clone())),
+            Arc::new(SshModule::new(core.clone())),
             Arc::new(SystemModule::new(core)),
         ];
         self.modules.store(Arc::new(modules));
