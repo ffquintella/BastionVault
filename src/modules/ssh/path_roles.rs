@@ -54,7 +54,10 @@ impl SshBackend {
                 "ttl": { field_type: FieldType::Str, default: "", description: "Default validity (e.g. `30m`)." },
                 "max_ttl": { field_type: FieldType::Str, default: "", description: "Hard cap on per-call TTL." },
                 "not_before_duration": { field_type: FieldType::Str, default: "", description: "Backdate seconds applied to `valid_after` for clock skew." },
-                "key_id_format": { field_type: FieldType::Str, default: "", description: "Template for the cert's `key id` field." }
+                "key_id_format": { field_type: FieldType::Str, default: "", description: "Template for the cert's `key id` field." },
+                "cidr_list": { field_type: FieldType::Str, default: "", description: "OTP mode: comma-separated CIDRs the OTP is valid for." },
+                "exclude_cidr_list": { field_type: FieldType::Str, default: "", description: "OTP mode: CIDRs to subtract from `cidr_list`." },
+                "port": { field_type: FieldType::Int, default: 22, description: "OTP mode: default SSH port surfaced to the helper / UI." }
             },
             operations: [
                 {op: Operation::Read, handler: read_handler.handle_role_read},
@@ -136,11 +139,12 @@ impl SshBackendInner {
                 }
             }
         }
-        // Phase 1: only `ca` mode is implemented. OTP support gates
-        // here when Phase 2 lands.
-        if role.key_type != "ca" {
+        // Phases 1 + 2 implement `ca` and `otp`. Anything else is
+        // typo-or-future and gets rejected at write time so a typoed
+        // `key_type` doesn't silently behave like "ca".
+        if role.key_type != "ca" && role.key_type != "otp" {
             return Err(RvError::ErrString(format!(
-                "ssh engine Phase 1: only `key_type = \"ca\"` is supported; got `{}`",
+                "key_type must be `ca` or `otp`, got `{}`",
                 role.key_type
             )));
         }
@@ -210,6 +214,49 @@ impl SshBackendInner {
         }
         if let Some(d) = parse_duration_field(req, "not_before_duration")? {
             role.not_before_duration = d;
+        }
+
+        // OTP-mode fields. `cidr_list` / `exclude_cidr_list` get
+        // validated here so an operator who mistypes a CIDR finds out
+        // at role-create time, not at the first `creds` call.
+        for (key, target) in [
+            ("cidr_list", &mut role.cidr_list),
+            ("exclude_cidr_list", &mut role.exclude_cidr_list),
+        ] {
+            if let Ok(v) = req.get_data(key) {
+                if let Some(s) = v.as_str() {
+                    for piece in s.split(',') {
+                        let p = piece.trim();
+                        if p.is_empty() { continue; }
+                        if p.parse::<ipnetwork::IpNetwork>().is_err() {
+                            return Err(RvError::ErrString(format!(
+                                "{key}: `{p}` is not a valid CIDR (e.g. `10.0.0.0/24`)"
+                            )));
+                        }
+                    }
+                    *target = s.to_string();
+                }
+            }
+        }
+        if let Ok(v) = req.get_data("port") {
+            if let Some(n) = v.as_i64() {
+                if !(1..=65_535).contains(&n) {
+                    return Err(RvError::ErrString(format!(
+                        "port must be 1..=65535, got {n}"
+                    )));
+                }
+                role.port = n as u16;
+            }
+        }
+
+        // OTP roles need at least one allowed CIDR — refusing the
+        // write here surfaces the misconfiguration immediately rather
+        // than rejecting every `creds` call later with a less
+        // actionable "ip not allowed" error.
+        if role.key_type == "otp" && role.cidr_list.trim().is_empty() {
+            return Err(RvError::ErrString(
+                "otp roles require a non-empty cidr_list".into(),
+            ));
         }
 
         // Persist.

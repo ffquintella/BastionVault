@@ -26,16 +26,26 @@ use crate::{
     modules::Module,
 };
 
+pub mod otp;
 pub mod path_config_ca;
+pub mod path_creds;
+pub mod path_lookup;
 pub mod path_roles;
 pub mod path_sign;
 pub mod policy;
 
 const SSH_BACKEND_HELP: &str = r#"
-The SSH engine signs short-lived OpenSSH client certificates against a
-self-managed CA. Phase 1 supports Ed25519 in CA mode. POST a public
-key to `/sign/:role` to receive an OpenSSH cert constrained by the
-role's principals, extensions, critical options, and TTL caps.
+The SSH engine issues short-lived SSH credentials in two modes:
+
+  * CA mode (Phase 1): POST a public key to `/sign/:role` to receive
+    an OpenSSH certificate constrained by the role's principals,
+    extensions, critical options, and TTL caps. Phase 1 supports
+    Ed25519.
+  * OTP mode (Phase 2): POST `/creds/:role` to mint a one-time
+    password for a single SSH session against a target host that
+    runs `bv-ssh-helper`. The helper validates the OTP via
+    `/verify`. Use `/lookup` to find which OTP roles cover an
+    `(ip, username)` pair without consuming a credential.
 "#;
 
 pub struct SshBackendInner {
@@ -62,6 +72,9 @@ impl SshBackend {
             self.roles_path(),
             self.roles_list_path(),
             self.sign_path(),
+            self.creds_path(),
+            self.verify_path(),
+            self.lookup_path(),
         ];
         let mut backend = LogicalBackend::new();
         for p in paths {

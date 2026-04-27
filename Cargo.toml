@@ -280,6 +280,14 @@ unnecessary_map_or = "allow"
 name = "bvault"
 path = "bin/bastion_vault.rs"
 
+# Phase 2 of the SSH secret engine: target-host helper that PAM's
+# `pam_exec` invokes to validate an OTP against `/v1/ssh/verify`.
+# Tiny binary, deliberately separate from the server so operators can
+# ship it to managed hosts without dragging the full server crate.
+[[bin]]
+name = "bv-ssh-helper"
+path = "bin/bv_ssh_helper.rs"
+
 [[test]]
 name = "test_default_logical"
 path = "tests/test_default_logical.rs"

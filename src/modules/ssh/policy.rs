@@ -15,6 +15,16 @@ use crate::utils::{deserialize_duration, serialize_duration};
 /// Keys for the SSH engine inside its mount's barrier view.
 pub const CA_CONFIG_KEY: &str = "config/ca";
 pub const ROLE_PREFIX: &str = "role/";
+/// OTP entries (Phase 2). Keyed by the hex-encoded SHA-256 of the
+/// generated OTP — the plaintext OTP itself is never persisted, so a
+/// barrier compromise doesn't leak in-flight credentials, only their
+/// pre-image hashes.
+pub const OTP_PREFIX: &str = "otp/";
+
+/// Default validity for an OTP. Short — the OTP is meant to live just
+/// long enough for the user to paste it into ssh and the helper to
+/// validate; a longer window enlarges the replay surface for nothing.
+pub const DEFAULT_OTP_TTL: Duration = Duration::from_secs(2 * 60);
 
 /// Default certificate validity. Mirrors Vault's SSH engine default
 /// (`30m` on `sign`) — small enough that a leaked cert ages out fast,
@@ -144,6 +154,30 @@ pub struct RoleEntry {
     /// audit-traceable to the role and (eventually) the calling identity.
     #[serde(default = "default_key_id_format")]
     pub key_id_format: String,
+
+    // ── OTP-mode fields (Phase 2) ─────────────────────────────────
+    //
+    // These only apply when `key_type == "otp"`. Empty / zero values
+    // are fine for CA-mode roles — the validators in `path_roles.rs`
+    // refuse to write a role where the field set contradicts the
+    // declared mode.
+    /// Comma-separated list of CIDRs the OTP is valid for. The
+    /// caller-supplied `ip` on `creds` is matched against this set.
+    /// Empty = the role refuses to mint OTPs (deny by default).
+    #[serde(default)]
+    pub cidr_list: String,
+
+    /// Comma-separated CIDRs to subtract from `cidr_list`. Useful for
+    /// "10.0.0.0/16 except the management subnet" patterns.
+    #[serde(default)]
+    pub exclude_cidr_list: String,
+
+    /// Default SSH port; the helper logs / surfaces this to the user.
+    /// `0` = "use the system default of 22"; persisted explicitly
+    /// rather than papered over so an operator who really wants a
+    /// non-22 port can audit it on the role read.
+    #[serde(default = "default_port")]
+    pub port: u16,
 }
 
 impl Default for RoleEntry {
@@ -162,6 +196,9 @@ impl Default for RoleEntry {
             max_ttl: default_max_ttl(),
             not_before_duration: default_not_before(),
             key_id_format: default_key_id_format(),
+            cidr_list: String::new(),
+            exclude_cidr_list: String::new(),
+            port: default_port(),
         }
     }
 }
@@ -193,6 +230,59 @@ impl RoleEntry {
     pub fn allowed_critical_options_list(&self) -> Vec<String> {
         comma_split(&self.allowed_critical_options)
     }
+
+    /// Returns true if `ip` falls inside `cidr_list` and outside
+    /// `exclude_cidr_list`. An empty `cidr_list` is treated as
+    /// "deny everything" rather than "allow everything" — the OTP
+    /// flow's whole job is to constrain a credential to a known set
+    /// of hosts, so the safer default at the empty-string boundary
+    /// is closed.
+    pub fn ip_allowed(&self, ip: std::net::IpAddr) -> bool {
+        let allow: Vec<std::net::IpAddr> = vec![ip];
+        let allowed_nets = parse_cidrs(&self.cidr_list);
+        let excluded_nets = parse_cidrs(&self.exclude_cidr_list);
+        if allowed_nets.is_empty() {
+            return false;
+        }
+        let in_allow = allow.iter().any(|a| allowed_nets.iter().any(|n| n.contains(*a)));
+        let in_exclude = excluded_nets.iter().any(|n| n.contains(ip));
+        in_allow && !in_exclude
+    }
+}
+
+/// Comma-separated list of CIDRs → parsed networks. Skips invalid
+/// entries silently (the role-write path validates them up front, so
+/// anything that lands here has already been sanity-checked).
+fn parse_cidrs(s: &str) -> Vec<ipnetwork::IpNetwork> {
+    s.split(',')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .filter_map(|p| p.parse::<ipnetwork::IpNetwork>().ok())
+        .collect()
+}
+
+/// Persisted OTP record. Stored at `otp/<sha256-hex>` — the plaintext
+/// OTP never lands on disk, only its SHA-256, so a barrier compromise
+/// doesn't leak in-flight credentials. Verify hashes the inbound OTP
+/// and looks up by hash-key directly, which makes the storage probe
+/// constant-time per entry rather than scanning every record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OtpEntry {
+    /// Role the OTP was minted under — needed by `verify` to surface
+    /// the canonical username back to the helper.
+    pub role: String,
+    /// Target host IP the user is dialling. The helper passes this
+    /// back through `verify`'s response so the PAM stack can compare
+    /// against the connection's source identity.
+    pub ip: String,
+    /// Username the helper should log the user in as.
+    pub username: String,
+    /// Default port from the role (or override). Surfaced for the
+    /// helper / UI; not enforced.
+    pub port: u16,
+    /// Unix-seconds expiry. `verify` rejects after this point even
+    /// if the entry hasn't been swept yet.
+    pub expires_at: u64,
 }
 
 fn default_key_type() -> String {
@@ -215,6 +305,9 @@ fn default_not_before() -> Duration {
 }
 fn default_key_id_format() -> String {
     "vault-{{role}}-{{token_display_name}}".to_string()
+}
+fn default_port() -> u16 {
+    22
 }
 
 fn comma_split(s: &str) -> Vec<String> {

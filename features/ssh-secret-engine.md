@@ -22,7 +22,8 @@ This is also the first engine that surfaces **post-quantum SSH credentials**: th
 ## Current State
 
 - **Phase 1 shipped (CA mode, Ed25519).** Routes live at [`src/modules/ssh/`](../src/modules/ssh/): `path_config_ca.rs` (CA generate/import/read/delete), `path_roles.rs` (role CRUD + LIST), `path_sign.rs` (signing with policy enforcement). `policy.rs` holds the on-disk `CaConfig` + `RoleEntry` types, both forward-compatible via `serde(default)` so Phase 2 / 3 fields land without migrations. End-to-end integration test at [`tests/test_ssh_engine.rs`](../tests/test_ssh_engine.rs) verifies sign output is a valid OpenSSH cert and that role policy (principal subset, extension whitelist, default merge, TTL clamp, critical-option pass-through) actually lands in the wire format.
-- **Phase 2 (OTP mode + helper binary), Phase 3 (PQC: ML-DSA-65), Phase 4 (GUI)** not started. RSA / ECDSA support also deferred -- the role's `algorithm_signer` field is parsed and validated at sign time, but only `ssh-ed25519` is accepted today.
+- **Phase 2 shipped (OTP mode + helper binary).** New routes: `POST /ssh/creds/:role` mints a one-time password (the plaintext is returned exactly once; storage holds only the SHA-256), `POST /ssh/verify` consumes it (single-use, delete-before-act so a concurrent retry can't double-spend), `POST /ssh/lookup` surfaces which OTP roles cover an `(ip, username)` pair without consuming a credential. `RoleEntry` gained `cidr_list` / `exclude_cidr_list` / `port` (validated as `ipnetwork::IpNetwork` at role-write time so a typo fails up front). The helper binary lives at [`bin/bv_ssh_helper.rs`](../bin/bv_ssh_helper.rs) and ships as the `bv-ssh-helper` Cargo bin — designed for `pam_exec` integration on managed hosts. End-to-end test at [`tests/test_ssh_otp.rs`](../tests/test_ssh_otp.rs) covers mint / lookup / verify / replay-fail / out-of-CIDR-fail / excluded-CIDR-skip.
+- **Phase 3 (PQC: ML-DSA-65), Phase 4 (GUI)** not started. RSA / ECDSA also deferred -- the role's `algorithm_signer` field is parsed and validated at sign time, but only `ssh-ed25519` is accepted today.
 - ML-DSA-65 signing is already available via [crates/bv_crypto/src/signature](crates/bv_crypto/src/signature) (`fips204`).
 - The PKI engine spec ([features/pki-secret-engine.md](pki-secret-engine.md)) defines a `CertSigner` trait abstraction that the SSH CA can re-use almost unchanged -- only the TBS encoding differs (OpenSSH cert format vs. X.509).
 - File-resource SFTP/SCP transports are explicitly deferred ([roadmap.md:109](roadmap.md:109)) pending an SSH stack decision; that decision is now: **`russh`** (pure-Rust client, MIT) over `libssh2-sys` (C lib).
@@ -182,14 +183,16 @@ ssh-key      = { version = "0.6", default-features = false, features = ["alloc",
 ssh-encoding = "0.2"
 ```
 
-### Phase 2 -- OTP Mode + Helper Binary
+### Phase 2 -- OTP Mode + Helper Binary — **Done**
+
+Shipped exactly the file set the spec listed (helper moved to `bin/bv_ssh_helper.rs` to match the existing layout for the server bin). Per-OTP `RwLock` was deemed unnecessary in practice — the storage layer's atomic delete-before-respond on `verify` gives the same single-use guarantee, and the OTP is keyed by SHA-256 hash so even hostile timing of the lookup itself only leaks the hash, not the OTP. The conf file format the helper reads is intentionally `KEY=VALUE` (not TOML) so the helper avoids a serde dep on the target host.
 
 | File | Purpose |
 |---|---|
 | `src/modules/ssh/otp.rs` | OTP gen/store/consume. |
 | `src/modules/ssh/path_creds.rs` | `creds` + `verify`. |
 | `src/modules/ssh/path_lookup.rs` | `lookup`. |
-| `src/bin/bv-ssh-helper.rs` | Helper binary for target hosts. |
+| `bin/bv_ssh_helper.rs` | Helper binary for target hosts (Cargo bin `bv-ssh-helper`). |
 
 ### Phase 3 -- PQC SSH Certificates
 
