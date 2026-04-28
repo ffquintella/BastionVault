@@ -26,6 +26,7 @@ pub const ORDER_PREFIX: &str = "acme/orders/";
 pub const AUTHZ_PREFIX: &str = "acme/authz/";
 pub const CHALL_PREFIX: &str = "acme/chall/";
 pub const NONCE_KEY: &str = "acme/nonces/issued";
+pub const EAB_PREFIX: &str = "acme/eab/";
 
 /// Per-mount ACME config. Persisted at `acme/config`. When the
 /// engine boots without an existing config, ACME endpoints return
@@ -57,6 +58,17 @@ pub struct AcmeConfig {
     /// retry latency, well over a normal request RTT.
     #[serde(default = "default_nonce_ttl")]
     pub nonce_ttl_secs: u64,
+    /// Pinned DNS resolvers for the DNS-01 validator. Each entry is
+    /// `<ip>` (port 53 implied) or `<ip>:<port>`. Empty = use the
+    /// system resolver. Production operators should always pin so a
+    /// misbehaving system resolver isn't on the trust path.
+    #[serde(default)]
+    pub dns_resolvers: Vec<String>,
+    /// When true, `new-account` requires a valid External Account
+    /// Binding inner JWS signed with one of the operator-pre-distributed
+    /// HMAC keys at `acme/eab/<key_id>`. RFC 8555 §7.3.4.
+    #[serde(default)]
+    pub eab_required: bool,
 }
 
 fn default_nonce_ttl() -> u64 {
@@ -71,8 +83,34 @@ impl Default for AcmeConfig {
             default_issuer_ref: String::new(),
             external_hostname: String::new(),
             nonce_ttl_secs: default_nonce_ttl(),
+            dns_resolvers: Vec::new(),
+            eab_required: false,
         }
     }
+}
+
+/// External Account Binding key. Stored at `acme/eab/<key_id>`.
+/// `key_b64` is the URL-safe base64 (no padding) HMAC-SHA-256 key
+/// the operator pre-distributed to the client; the client uses it to
+/// sign the inner EAB JWS that wraps its public account JWK.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EabKey {
+    pub key_id: String,
+    /// HMAC key bytes, URL-safe base64 (no padding). Stored encoded
+    /// so a `vault read` shows the operator the same string the client
+    /// got at provisioning time.
+    pub key_b64: String,
+    /// Optional human-readable note for audit (which client team got
+    /// this key, ticket number, etc.).
+    #[serde(default)]
+    pub comment: String,
+    pub created_at_unix: u64,
+    /// True after a successful `new-account` consumed this binding —
+    /// EAB keys are by spec single-use (RFC 8555 §7.3.4: "an external
+    /// account binding ... has been consumed"). The operator
+    /// re-issues a fresh key per client.
+    #[serde(default)]
+    pub consumed: bool,
 }
 
 /// ACME account record. RFC 8555 §7.1.2.

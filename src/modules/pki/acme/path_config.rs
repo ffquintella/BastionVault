@@ -50,7 +50,9 @@ impl PkiBackend {
                 "default_role":        { field_type: FieldType::Str,  default: "",     description: "Role used by `finalize` (must already exist on the mount)." },
                 "default_issuer_ref":  { field_type: FieldType::Str,  default: "",     description: "Issuer that signs ACME-issued leaves; empty = mount's active issuer." },
                 "external_hostname":   { field_type: FieldType::Str,  default: "",     description: "Hostname advertised in the directory URLs; empty = reflect inbound Host." },
-                "nonce_ttl_secs":      { field_type: FieldType::Int,  default: 300,    description: "Replay-Nonce ring-buffer max age." }
+                "nonce_ttl_secs":      { field_type: FieldType::Int,  default: 300,    description: "Replay-Nonce ring-buffer max age." },
+                "dns_resolvers":       { field_type: FieldType::Str,  default: "",     description: "Comma-separated pinned DNS resolvers (`<ip>` or `<ip>:<port>`) for DNS-01; empty = system resolver." },
+                "eab_required":        { field_type: FieldType::Bool, default: false,  description: "Require External Account Binding on `new-account` (Phase 6.2)." }
             },
             operations: [
                 {op: Operation::Read,   handler: read.handle_acme_config_read},
@@ -108,6 +110,16 @@ impl PkiBackendInner {
             "nonce_ttl_secs".into(),
             Value::Number(cfg.nonce_ttl_secs.into()),
         );
+        data.insert(
+            "dns_resolvers".into(),
+            Value::Array(
+                cfg.dns_resolvers
+                    .iter()
+                    .map(|s| Value::String(s.clone()))
+                    .collect(),
+            ),
+        );
+        data.insert("eab_required".into(), Value::Bool(cfg.eab_required));
         Ok(Some(Response::data_response(Some(data))))
     }
 
@@ -144,6 +156,20 @@ impl PkiBackendInner {
             .ok()
             .and_then(|v| v.as_u64())
             .unwrap_or(existing.nonce_ttl_secs);
+        let dns_resolvers = match req.get_data("dns_resolvers").ok().and_then(|v| v.as_str().map(|s| s.to_string())) {
+            Some(s) if !s.is_empty() => s
+                .split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect(),
+            Some(_) => existing.dns_resolvers,
+            None => existing.dns_resolvers,
+        };
+        let eab_required = req
+            .get_data("eab_required")
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(existing.eab_required);
 
         if enabled && default_role.trim().is_empty() {
             return Err(RvError::ErrString(
@@ -157,6 +183,8 @@ impl PkiBackendInner {
             default_issuer_ref,
             external_hostname,
             nonce_ttl_secs,
+            dns_resolvers,
+            eab_required,
         };
         self.save_acme_config(req, &cfg).await?;
         Ok(None)

@@ -20,9 +20,12 @@
 pub mod account;
 pub mod authz;
 pub mod directory;
+pub mod dns01;
+pub mod eab;
 pub mod jws;
 pub mod order;
 pub mod path_config;
+pub mod revoke;
 pub mod storage;
 
 /// Paths that bypass the standard token-auth check; their handlers
@@ -38,6 +41,7 @@ pub const UNAUTH_PATHS: &[&str] = &[
     "acme/authz/*",
     "acme/chall/*",
     "acme/cert/*",
+    "acme/revoke-cert",
 ];
 
 /// Mint a fresh URL-safe identifier for an ACME object (account,

@@ -129,6 +129,56 @@ impl PkiBackendInner {
             ));
         }
 
+        // EAB (RFC 8555 §7.3.4). When `eab_required = true` the
+        // payload must carry `externalAccountBinding` — an inner
+        // flattened JWS HMAC-signed by an operator-distributed key
+        // we have on file at `acme/eab/<key_id>`. Otherwise we
+        // accept-and-validate when present so the operator can mint
+        // EAB-protected accounts opportunistically while keeping the
+        // surface generally open.
+        let mut consumed_eab_id: Option<String> = None;
+        let eab_present = payload.get("externalAccountBinding").is_some();
+        if cfg.eab_required && !eab_present {
+            return Err(RvError::ErrString(
+                "acme: externalAccountBindingRequired".into(),
+            ));
+        }
+        if eab_present {
+            let eab_value = payload.get("externalAccountBinding").unwrap().clone();
+            // Synchronous lookup: pre-load the kid'd key off
+            // `req.storage_get`. Mirrors the JWS-by-kid pattern
+            // elsewhere in the module.
+            let inner_kid = eab_value
+                .get("protected")
+                .and_then(|p| p.as_str())
+                .and_then(|p| {
+                    use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine as _};
+                    let bytes = B64.decode(p.as_bytes()).ok()?;
+                    let v: Value = serde_json::from_slice(&bytes).ok()?;
+                    v.get("kid")
+                        .and_then(|k| k.as_str())
+                        .map(|s| s.to_string())
+                })
+                .ok_or_else(|| {
+                    RvError::ErrString("acme: eab inner protected.kid missing".into())
+                })?;
+            let key_record = self
+                .load_eab(req, &inner_kid)
+                .await?
+                .ok_or_else(|| {
+                    RvError::ErrString(format!("acme: eab unknown kid `{inner_kid}`"))
+                })?;
+            let key_for_lookup = key_record.clone();
+            super::eab::verify_eab(
+                &eab_value,
+                &verified.jwk,
+                "new-account",
+                move |_k| Some(key_for_lookup),
+            )
+            .map_err(RvError::ErrString)?;
+            consumed_eab_id = Some(key_record.key_id);
+        }
+
         let contact: Vec<String> = payload
             .get("contact")
             .and_then(|v| v.as_array())
@@ -147,6 +197,15 @@ impl PkiBackendInner {
             created_at_unix: unix_now(),
         };
         self.save_account(req, &verified.thumbprint, &account).await?;
+        // Mark the EAB key consumed only after the account is
+        // persisted — order matters: a panic between save_account
+        // and save_eab would otherwise leave a stranded key.
+        if let Some(id) = consumed_eab_id {
+            if let Some(mut k) = self.load_eab(req, &id).await? {
+                k.consumed = true;
+                let _ = self.save_eab(req, &id, &k).await;
+            }
+        }
         self.respond_account(req, &verified.thumbprint, &account, true).await
     }
 

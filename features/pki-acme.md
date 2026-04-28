@@ -8,7 +8,7 @@ This is a **separate feature** from the core PKI engine ([features/pki-secret-en
 
 ## Status
 
-**Phase 6.1 + 6.1.5 shipped** — full RFC 8555 server surface for HTTP-01 issuance: JWS auth, directory + new-nonce, new-account + account/<id> (with contact / deactivate update), new-order + order/<id> + order/<id>/finalize, authz/<id> + chall/<id> with the HTTP-01 validator, and cert/<id> retrieval. `finalize` shims into the existing `pki/sign/<role>` builder using the per-mount `default_role` + `default_issuer_ref`. Phase 6.2 (DNS-01, EAB, revoke-cert) and Phase 6.3 (key-change, expiry sweep, rate limiting) follow.
+**Phases 6.1 + 6.1.5 + 6.2 shipped** — full RFC 8555 server surface for HTTP-01 **and DNS-01** issuance: JWS auth, directory + new-nonce, new-account + account/<id> (with contact / deactivate update **and EAB**), new-order + order/<id> + order/<id>/finalize, authz/<id> + chall/<id> with both HTTP-01 and DNS-01 validators, cert/<id> retrieval, and **revoke-cert** wired to the engine's existing CRL state. Operator-facing `acme/eab/<key_id>` CRUD provisions HMAC keys for External Account Binding. DNS-01 uses pinned resolvers (`dns_resolvers` config). Phase 6.3 (key-change, expiry sweep, rate limiting) follows.
 
 ## Motivation
 
@@ -84,11 +84,12 @@ acme/chall/<id>     # challenge state + last-attempt result
 acme/nonces/issued  # ring buffer of recently issued nonces (replay window)
 ```
 
-### Phase 6.2 — DNS-01 + EAB + revoke
+### Phase 6.2 — DNS-01 + EAB + revoke — **Done**
 
-- DNS-01 validator (resolve `_acme-challenge.<domain>` TXT, match keyAuthorization). Internal-DNS configurable resolver pinning so the engine isn't forced to use the box's `/etc/resolv.conf`.
-- External Account Binding (EAB) so `new-account` requires an HMAC-signed external binding the operator pre-distributed.
-- `revoke-cert` integrated with the engine's existing `pki/revoke` and CRL state.
+Shipped (`src/modules/pki/acme/{dns01,eab,revoke}.rs`):
+- DNS-01 validator (`hickory-resolver` 0.24, `_acme-challenge.<domain>` TXT lookup, match against `base64url(SHA-256(keyAuthorization))`). Pinned resolvers via `acme/config.dns_resolvers` (comma-separated `<ip>` or `<ip>:<port>`); falls back to the system resolver only when the list is empty. New-order now mints both an HTTP-01 and a DNS-01 challenge per authz so the client picks which to satisfy.
+- External Account Binding (RFC 8555 §7.3.4): operator-facing `acme/eab/<key_id>` CRUD mints/lists HMAC-SHA-256 keys; `new-account` validates the inner JWS (`alg = HS256`, `kid` resolves to a stored key, payload JWK matches the outer envelope's account JWK by RFC 7638 thumbprint, HMAC verifies). Per-mount `eab_required` flag gates whether the binding is mandatory; consumed keys are marked single-use.
+- `acme/revoke-cert` (RFC 8555 §7.6): kid-flow JWS, payload `{ certificate: <b64url DER>, reason?: <int> }`. The requesting account must own an order whose stashed cert chain encodes the supplied serial; on match, drops into the same `pki/revoke` plumbing (flip `CertRecord.revoked_at_unix`, append to the issuer's CRL state, rebuild that issuer's CRL).
 
 ### Phase 6.3 — Polish
 

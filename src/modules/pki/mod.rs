@@ -106,6 +106,8 @@ impl PkiBackend {
             self.acme_authz_path(),
             self.acme_chall_path(),
             self.acme_cert_path(),
+            self.acme_revoke_path(),
+            self.acme_eab_path(),
         ];
 
         // The `new_logical_backend!` macro takes a literal path-list. We build

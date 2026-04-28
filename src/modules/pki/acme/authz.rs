@@ -142,9 +142,15 @@ impl PkiBackendInner {
         let thumbprint = super::jws::jwk_thumbprint(&account.jwk)?;
         let expected = key_authorization(&chall.token, &thumbprint);
 
-        // Run the validator. HTTP-01 only in Phase 6.1.5.
+        // Run the validator. HTTP-01 + DNS-01 supported; tls-alpn-01
+        // is out of scope for v1.
         let result = match chall.typ.as_str() {
             "http-01" => http01_validate(&chall.identifier.value, &chall.token, &expected),
+            "dns-01" => super::dns01::dns01_validate(
+                &chall.identifier.value,
+                &expected,
+                &cfg.dns_resolvers,
+            ),
             other => Err(format!("unsupported challenge type `{other}`")),
         };
 

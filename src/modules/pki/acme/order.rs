@@ -151,22 +151,30 @@ impl PkiBackendInner {
                 )));
             }
             let authz_id = new_object_id("az");
-            let chall_id = new_object_id("ch");
-            let token = super::new_nonce(); // fresh 144-bit b64url token
-            let chall = AcmeChall {
-                status: "pending".into(),
-                typ: "http-01".into(),
-                token,
-                authz_id: authz_id.clone(),
-                identifier: ident.clone(),
-                validated: String::new(),
-                error: None,
-            };
-            self.save_chall(req, &chall_id, &chall).await?;
+            // Mint both an HTTP-01 and a DNS-01 challenge per authz —
+            // the client picks which to satisfy. Each gets its own
+            // token (RFC 8555 §8.3 / §8.4). The challenge that the
+            // client triggers via POST `chall/<id>` runs the
+            // matching validator.
+            let mut chall_ids = Vec::with_capacity(2);
+            for typ in ["http-01", "dns-01"] {
+                let chall_id = new_object_id("ch");
+                let chall = AcmeChall {
+                    status: "pending".into(),
+                    typ: typ.into(),
+                    token: super::new_nonce(),
+                    authz_id: authz_id.clone(),
+                    identifier: ident.clone(),
+                    validated: String::new(),
+                    error: None,
+                };
+                self.save_chall(req, &chall_id, &chall).await?;
+                chall_ids.push(chall_id);
+            }
             let authz = AcmeAuthz {
                 status: "pending".into(),
                 identifier: ident.clone(),
-                challenges: vec![chall_id],
+                challenges: chall_ids,
                 expires_at_unix: unix_now() + AUTHZ_TTL_SECS,
                 account_id: account_id.clone(),
                 order_id: order_id.clone(),
