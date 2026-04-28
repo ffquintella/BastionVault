@@ -315,6 +315,12 @@ function ConnectionTab({ mount }: { mount: string }) {
                         <span className="font-mono">{checkResult.resolved.join(", ")}</span>
                       </div>
                     )}
+                    {checkResult.tcp_attempts && checkResult.tcp_attempts.length > 0 && (
+                      <div>
+                        TCP attempts:{" "}
+                        <span className="font-mono">{checkResult.tcp_attempts.join(" · ")}</span>
+                      </div>
+                    )}
                     <div>
                       Timings:{" "}
                       {checkResult.dns_ms !== undefined && (

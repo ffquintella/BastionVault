@@ -339,53 +339,72 @@ impl LdapBackendInner {
             return Ok(Some(Response::data_response(Some(data))));
         }
 
-        // Stage 2: raw TCP connect to the first resolved address.
-        // 5s budget — enough for a far-region link, short enough that
-        // a firewall drop doesn't masquerade as a bind problem.
+        // Stage 2: raw TCP connect. Try every resolved address with
+        // a 5s budget per address — RR-DNS pools commonly have one
+        // dead member and one live member, and ldap3 itself iterates
+        // through all `getaddrinfo` answers. If we only probed the
+        // first, we'd report failure even when the bind would have
+        // succeeded against the second IP.
         let tcp_start = std::time::Instant::now();
-        let target = resolved[0];
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            tokio::net::TcpStream::connect(target),
-        )
-        .await
-        {
-            Err(_) => {
-                data.insert("ok".into(), Value::Bool(false));
-                data.insert("stage".into(), Value::String("tcp".into()));
-                data.insert(
-                    "tcp_ms".into(),
-                    Value::Number((tcp_start.elapsed().as_millis() as u64).into()),
-                );
-                data.insert(
-                    "error".into(),
-                    Value::String(format!(
-                        "TCP connect to {target} timed out after 5s — host unreachable, firewall, or wrong port"
-                    )),
-                );
-                return Ok(Some(Response::data_response(Some(data))));
-            }
-            Ok(Err(e)) => {
-                data.insert("ok".into(), Value::Bool(false));
-                data.insert("stage".into(), Value::String("tcp".into()));
-                data.insert(
-                    "tcp_ms".into(),
-                    Value::Number((tcp_start.elapsed().as_millis() as u64).into()),
-                );
-                data.insert(
-                    "error".into(),
-                    Value::String(format!("TCP connect to {target} failed: {e}")),
-                );
-                return Ok(Some(Response::data_response(Some(data))));
-            }
-            Ok(Ok(stream)) => {
-                drop(stream);
+        let mut tcp_attempts: Vec<String> = Vec::with_capacity(resolved.len());
+        let mut tcp_ok: Option<std::net::SocketAddr> = None;
+        for target in &resolved {
+            let attempt_start = std::time::Instant::now();
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                tokio::net::TcpStream::connect(*target),
+            )
+            .await
+            {
+                Ok(Ok(stream)) => {
+                    drop(stream);
+                    tcp_attempts.push(format!(
+                        "{target} ok ({}ms)",
+                        attempt_start.elapsed().as_millis()
+                    ));
+                    tcp_ok = Some(*target);
+                    break;
+                }
+                Err(_) => {
+                    tcp_attempts.push(format!(
+                        "{target} timeout ({}ms)",
+                        attempt_start.elapsed().as_millis()
+                    ));
+                }
+                Ok(Err(e)) => {
+                    tcp_attempts.push(format!(
+                        "{target} {e} ({}ms)",
+                        attempt_start.elapsed().as_millis()
+                    ));
+                }
             }
         }
         data.insert(
             "tcp_ms".into(),
             Value::Number((tcp_start.elapsed().as_millis() as u64).into()),
         );
+        data.insert(
+            "tcp_attempts".into(),
+            Value::Array(
+                tcp_attempts
+                    .iter()
+                    .map(|s| Value::String(s.clone()))
+                    .collect(),
+            ),
+        );
+        if tcp_ok.is_none() {
+            data.insert("ok".into(), Value::Bool(false));
+            data.insert("stage".into(), Value::String("tcp".into()));
+            data.insert(
+                "error".into(),
+                Value::String(format!(
+                    "TCP connect failed for every resolved address ({} tried) — host unreachable, firewall blocking port {port}, or wrong port. Attempts: {}",
+                    resolved.len(),
+                    tcp_attempts.join("; ")
+                )),
+            );
+            return Ok(Some(Response::data_response(Some(data))));
+        }
 
         // Stage 3: full LDAP connect + TLS + simple bind. Anything
         // that fails here is almost certainly TLS (cert validation,

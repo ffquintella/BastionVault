@@ -1277,6 +1277,7 @@ export type LdapCheckConnectionResult = {
   resolved?: string[];
   dns_ms?: number;
   tcp_ms?: number;
+  tcp_attempts?: string[];
   bind_ms?: number;
   error?: string;
 };

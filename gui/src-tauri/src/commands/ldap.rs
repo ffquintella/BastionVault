@@ -246,6 +246,8 @@ pub struct LdapCheckConnectionResult {
     pub dns_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tcp_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub tcp_attempts: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bind_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -267,6 +269,11 @@ pub async fn ldap_check_connection(
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default();
+    let tcp_attempts: Vec<String> = map
+        .get("tcp_attempts")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
     Ok(LdapCheckConnectionResult {
         ok: val_bool(&map, "ok"),
         url: val_str(&map, "url"),
@@ -279,6 +286,7 @@ pub async fn ldap_check_connection(
         resolved,
         dns_ms: opt_u64("dns_ms"),
         tcp_ms: opt_u64("tcp_ms"),
+        tcp_attempts,
         bind_ms: opt_u64("bind_ms"),
         error: opt_str("error"),
     })
