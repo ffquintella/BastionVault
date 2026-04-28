@@ -1270,6 +1270,14 @@ export type LdapCheckConnectionResult = {
   url: string;
   binddn: string;
   latency_ms: number;
+  stage?: "config" | "url" | "dns" | "tcp" | "ldap-connect" | "ldap-bind" | "bind" | "ldap";
+  host?: string;
+  port?: number;
+  scheme?: string;
+  resolved?: string[];
+  dns_ms?: number;
+  tcp_ms?: number;
+  bind_ms?: number;
   error?: string;
 };
 export const ldapCheckConnection = (mount: string) =>

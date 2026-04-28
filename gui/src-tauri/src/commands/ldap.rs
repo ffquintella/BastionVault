@@ -228,6 +228,26 @@ pub struct LdapCheckConnectionResult {
     pub url: String,
     pub binddn: String,
     pub latency_ms: u64,
+    /// Which stage produced the result: `dns` / `tcp` / `ldap-connect`
+    /// / `ldap-bind` / `bind` (success). Lets the GUI label the
+    /// failure plainly instead of forcing the operator to read the
+    /// raw error string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub resolved: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dns_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tcp_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bind_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -240,13 +260,27 @@ pub async fn ldap_check_connection(
     let path = format!("{}/check-connection", mount_prefix(&mount));
     let resp = make_request(&state, Operation::Read, path, None).await?;
     let map = data_to_map(resp);
-    let error = map.get("error").and_then(|v| v.as_str()).map(String::from);
+    let opt_str = |k: &str| map.get(k).and_then(|v| v.as_str()).map(String::from);
+    let opt_u64 = |k: &str| map.get(k).and_then(|v| v.as_u64());
+    let resolved: Vec<String> = map
+        .get("resolved")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
     Ok(LdapCheckConnectionResult {
         ok: val_bool(&map, "ok"),
         url: val_str(&map, "url"),
         binddn: val_str(&map, "binddn"),
         latency_ms: val_u64(&map, "latency_ms"),
-        error,
+        stage: opt_str("stage"),
+        host: opt_str("host"),
+        port: opt_u64("port").and_then(|p| u16::try_from(p).ok()),
+        scheme: opt_str("scheme"),
+        resolved,
+        dns_ms: opt_u64("dns_ms"),
+        tcp_ms: opt_u64("tcp_ms"),
+        bind_ms: opt_u64("bind_ms"),
+        error: opt_str("error"),
     })
 }
 

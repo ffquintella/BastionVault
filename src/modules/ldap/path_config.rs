@@ -236,6 +236,7 @@ impl LdapBackendInner {
             None => {
                 let mut data = Map::new();
                 data.insert("ok".into(), Value::Bool(false));
+                data.insert("stage".into(), Value::String("config".into()));
                 data.insert(
                     "error".into(),
                     Value::String("ldap engine not configured".into()),
@@ -244,30 +245,235 @@ impl LdapBackendInner {
             }
         };
 
-        // Time the connect+bind round-trip. Use a separate timer
-        // for the bind step so a slow TLS handshake vs. a slow
-        // bind can be told apart in the operator-facing message.
-        let start = std::time::Instant::now();
+        // Stage the probe so the operator-facing error pinpoints which
+        // layer failed — a 10s "timeout" by itself is hard to act on.
+        // Stages: dns → tcp → ldap (bind+TLS through ldap3).
         let mut data = Map::new();
         data.insert("url".into(), Value::String(cfg.url.clone()));
         data.insert("binddn".into(), Value::String(cfg.binddn.clone()));
 
+        let (host, port, scheme) = match parse_ldap_url(&cfg.url) {
+            Ok(x) => x,
+            Err(e) => {
+                data.insert("ok".into(), Value::Bool(false));
+                data.insert("stage".into(), Value::String("url".into()));
+                data.insert("error".into(), Value::String(e));
+                return Ok(Some(Response::data_response(Some(data))));
+            }
+        };
+        data.insert("host".into(), Value::String(host.clone()));
+        data.insert("port".into(), Value::Number(port.into()));
+        data.insert("scheme".into(), Value::String(scheme.to_string()));
+
+        // Stage 1: DNS resolution. Bound to 5 s so a misconfigured
+        // resolver doesn't burn the operator's whole timeout window
+        // before the more useful errors get a chance.
+        let dns_start = std::time::Instant::now();
+        let host_for_dns = host.clone();
+        let resolved: Vec<std::net::SocketAddr> = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || {
+                use std::net::ToSocketAddrs;
+                (host_for_dns.as_str(), port).to_socket_addrs().map(|i| i.collect::<Vec<_>>())
+            }),
+        )
+        .await
+        {
+            Err(_) => {
+                data.insert("ok".into(), Value::Bool(false));
+                data.insert("stage".into(), Value::String("dns".into()));
+                data.insert(
+                    "dns_ms".into(),
+                    Value::Number((dns_start.elapsed().as_millis() as u64).into()),
+                );
+                data.insert(
+                    "error".into(),
+                    Value::String(format!("DNS resolution for `{host}` timed out after 5s")),
+                );
+                return Ok(Some(Response::data_response(Some(data))));
+            }
+            Ok(Err(join_err)) => {
+                data.insert("ok".into(), Value::Bool(false));
+                data.insert("stage".into(), Value::String("dns".into()));
+                data.insert(
+                    "error".into(),
+                    Value::String(format!("DNS task failed: {join_err}")),
+                );
+                return Ok(Some(Response::data_response(Some(data))));
+            }
+            Ok(Ok(Err(e))) => {
+                data.insert("ok".into(), Value::Bool(false));
+                data.insert("stage".into(), Value::String("dns".into()));
+                data.insert(
+                    "dns_ms".into(),
+                    Value::Number((dns_start.elapsed().as_millis() as u64).into()),
+                );
+                data.insert(
+                    "error".into(),
+                    Value::String(format!("DNS resolution failed for `{host}`: {e}")),
+                );
+                return Ok(Some(Response::data_response(Some(data))));
+            }
+            Ok(Ok(Ok(addrs))) => addrs,
+        };
+        data.insert(
+            "dns_ms".into(),
+            Value::Number((dns_start.elapsed().as_millis() as u64).into()),
+        );
+        data.insert(
+            "resolved".into(),
+            Value::Array(
+                resolved
+                    .iter()
+                    .map(|sa| Value::String(sa.to_string()))
+                    .collect(),
+            ),
+        );
+        if resolved.is_empty() {
+            data.insert("ok".into(), Value::Bool(false));
+            data.insert("stage".into(), Value::String("dns".into()));
+            data.insert(
+                "error".into(),
+                Value::String(format!("DNS returned no addresses for `{host}`")),
+            );
+            return Ok(Some(Response::data_response(Some(data))));
+        }
+
+        // Stage 2: raw TCP connect to the first resolved address.
+        // 5s budget — enough for a far-region link, short enough that
+        // a firewall drop doesn't masquerade as a bind problem.
+        let tcp_start = std::time::Instant::now();
+        let target = resolved[0];
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::net::TcpStream::connect(target),
+        )
+        .await
+        {
+            Err(_) => {
+                data.insert("ok".into(), Value::Bool(false));
+                data.insert("stage".into(), Value::String("tcp".into()));
+                data.insert(
+                    "tcp_ms".into(),
+                    Value::Number((tcp_start.elapsed().as_millis() as u64).into()),
+                );
+                data.insert(
+                    "error".into(),
+                    Value::String(format!(
+                        "TCP connect to {target} timed out after 5s — host unreachable, firewall, or wrong port"
+                    )),
+                );
+                return Ok(Some(Response::data_response(Some(data))));
+            }
+            Ok(Err(e)) => {
+                data.insert("ok".into(), Value::Bool(false));
+                data.insert("stage".into(), Value::String("tcp".into()));
+                data.insert(
+                    "tcp_ms".into(),
+                    Value::Number((tcp_start.elapsed().as_millis() as u64).into()),
+                );
+                data.insert(
+                    "error".into(),
+                    Value::String(format!("TCP connect to {target} failed: {e}")),
+                );
+                return Ok(Some(Response::data_response(Some(data))));
+            }
+            Ok(Ok(stream)) => {
+                drop(stream);
+            }
+        }
+        data.insert(
+            "tcp_ms".into(),
+            Value::Number((tcp_start.elapsed().as_millis() as u64).into()),
+        );
+
+        // Stage 3: full LDAP connect + TLS + simple bind. Anything
+        // that fails here is almost certainly TLS (cert validation,
+        // SNI, name mismatch, StartTLS misconfig) or auth (bad
+        // binddn/bindpass) rather than network.
+        let bind_start = std::time::Instant::now();
         match client::bind(&cfg).await {
             Ok(mut ldap) => {
-                let elapsed_ms = start.elapsed().as_millis() as u64;
                 let _ = ldap.unbind().await;
                 data.insert("ok".into(), Value::Bool(true));
-                data.insert("latency_ms".into(), Value::Number(elapsed_ms.into()));
+                data.insert("stage".into(), Value::String("bind".into()));
+                data.insert(
+                    "bind_ms".into(),
+                    Value::Number((bind_start.elapsed().as_millis() as u64).into()),
+                );
+                let total = dns_start.elapsed().as_millis() as u64;
+                data.insert("latency_ms".into(), Value::Number(total.into()));
             }
             Err(e) => {
-                let elapsed_ms = start.elapsed().as_millis() as u64;
+                let bind_ms = bind_start.elapsed().as_millis() as u64;
+                let total = dns_start.elapsed().as_millis() as u64;
+                let stage = match &e {
+                    client::LdapClientError::Connect(_) => "ldap-connect",
+                    client::LdapClientError::Bind(_) => "ldap-bind",
+                    _ => "ldap",
+                };
                 data.insert("ok".into(), Value::Bool(false));
-                data.insert("latency_ms".into(), Value::Number(elapsed_ms.into()));
-                data.insert("error".into(), Value::String(format!("{e}")));
+                data.insert("stage".into(), Value::String(stage.into()));
+                data.insert("bind_ms".into(), Value::Number(bind_ms.into()));
+                data.insert("latency_ms".into(), Value::Number(total.into()));
+                let hint = match stage {
+                    "ldap-connect" => " (TCP succeeded earlier — likely TLS handshake or StartTLS upgrade failure: check `tls_min_version`, `insecure_tls`, server cert SAN/CN, or for an `ldaps://` vs `ldap://` mismatch)",
+                    "ldap-bind" => " (server reachable — check `binddn` and `bindpass`)",
+                    _ => "",
+                };
+                data.insert(
+                    "error".into(),
+                    Value::String(format!("{e}{hint}")),
+                );
             }
         }
         Ok(Some(Response::data_response(Some(data))))
     }
+}
+
+/// Parse an `ldap://host[:port]` or `ldaps://host[:port]` URL into
+/// `(host, port, scheme)`. Default ports per RFC 4516 §2: `389` for
+/// `ldap`, `636` for `ldaps`.
+fn parse_ldap_url(url: &str) -> Result<(String, u16, &'static str), String> {
+    let s = url.trim();
+    let (scheme, rest, default_port) = if let Some(r) = s.strip_prefix("ldaps://") {
+        ("ldaps", r, 636u16)
+    } else if let Some(r) = s.strip_prefix("ldap://") {
+        ("ldap", r, 389u16)
+    } else {
+        return Err(format!("url `{url}` must start with ldap:// or ldaps://"));
+    };
+    // Strip any path the operator may have appended.
+    let host_port = rest.split('/').next().unwrap_or(rest);
+    // IPv6 literal in brackets: `[::1]:636`.
+    if let Some(stripped) = host_port.strip_prefix('[') {
+        let end = stripped
+            .find(']')
+            .ok_or_else(|| format!("url `{url}` has unclosed `[` for IPv6 literal"))?;
+        let host = &stripped[..end];
+        let after = &stripped[end + 1..];
+        let port = if let Some(p) = after.strip_prefix(':') {
+            p.parse::<u16>()
+                .map_err(|_| format!("url `{url}` has invalid port `{p}`"))?
+        } else {
+            default_port
+        };
+        return Ok((host.to_string(), port, scheme));
+    }
+    // host[:port]
+    if let Some((h, p)) = host_port.rsplit_once(':') {
+        // Avoid mis-treating an empty host like `:636`.
+        if !h.is_empty() {
+            let port = p
+                .parse::<u16>()
+                .map_err(|_| format!("url `{url}` has invalid port `{p}`"))?;
+            return Ok((h.to_string(), port, scheme));
+        }
+    }
+    if host_port.is_empty() {
+        return Err(format!("url `{url}` has empty host"));
+    }
+    Ok((host_port.to_string(), default_port, scheme))
 }
 
 fn take_str(req: &Request, key: &str) -> String {
@@ -291,4 +497,37 @@ fn take_bool(req: &Request, key: &str, default: bool) -> bool {
         .ok()
         .and_then(|v| v.as_bool())
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::parse_ldap_url;
+
+    #[test]
+    fn defaults_implicit_ports() {
+        assert_eq!(parse_ldap_url("ldap://h").unwrap(), ("h".into(), 389, "ldap"));
+        assert_eq!(parse_ldap_url("ldaps://h").unwrap(), ("h".into(), 636, "ldaps"));
+    }
+    #[test]
+    fn explicit_port() {
+        assert_eq!(
+            parse_ldap_url("ldap://h:1389").unwrap(),
+            ("h".into(), 1389, "ldap")
+        );
+    }
+    #[test]
+    fn ipv6_literal() {
+        assert_eq!(
+            parse_ldap_url("ldaps://[::1]").unwrap(),
+            ("::1".into(), 636, "ldaps")
+        );
+        assert_eq!(
+            parse_ldap_url("ldaps://[::1]:1636").unwrap(),
+            ("::1".into(), 1636, "ldaps")
+        );
+    }
+    #[test]
+    fn rejects_missing_scheme() {
+        assert!(parse_ldap_url("h:389").is_err());
+    }
 }

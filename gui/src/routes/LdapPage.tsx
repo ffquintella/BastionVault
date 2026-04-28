@@ -275,23 +275,65 @@ function ConnectionTab({ mount }: { mount: string }) {
             {checkResult && (
               <div
                 className={
-                  "rounded border px-3 py-2 text-sm " +
+                  "rounded border px-3 py-2 text-sm space-y-1 " +
                   (checkResult.ok
                     ? "border-green-700 bg-green-950/40 text-green-200"
                     : "border-red-700 bg-red-950/40 text-red-200")
                 }
               >
                 {checkResult.ok ? (
-                  <span>
+                  <div>
                     <strong>Connection OK</strong> — bound as{" "}
                     <span className="font-mono">{checkResult.binddn}</span> in{" "}
                     {checkResult.latency_ms} ms.
-                  </span>
+                  </div>
                 ) : (
-                  <span>
-                    <strong>Connection failed</strong> ({checkResult.latency_ms} ms):{" "}
+                  <div>
+                    <strong>Connection failed</strong>
+                    {checkResult.stage ? (
+                      <>
+                        {" "}at stage <span className="font-mono">{checkResult.stage}</span>
+                      </>
+                    ) : null}
+                    :{" "}
                     <span className="font-mono break-all">{checkResult.error}</span>
-                  </span>
+                  </div>
+                )}
+                {(checkResult.host || (checkResult.resolved && checkResult.resolved.length > 0)) && (
+                  <div className="text-xs opacity-80 space-y-0.5">
+                    {checkResult.host && (
+                      <div>
+                        Target:{" "}
+                        <span className="font-mono">
+                          {checkResult.scheme}://{checkResult.host}:{checkResult.port}
+                        </span>
+                      </div>
+                    )}
+                    {checkResult.resolved && checkResult.resolved.length > 0 && (
+                      <div>
+                        Resolved:{" "}
+                        <span className="font-mono">{checkResult.resolved.join(", ")}</span>
+                      </div>
+                    )}
+                    <div>
+                      Timings:{" "}
+                      {checkResult.dns_ms !== undefined && (
+                        <span className="font-mono">DNS {checkResult.dns_ms}ms</span>
+                      )}
+                      {checkResult.tcp_ms !== undefined && (
+                        <>
+                          {" · "}
+                          <span className="font-mono">TCP {checkResult.tcp_ms}ms</span>
+                        </>
+                      )}
+                      {checkResult.bind_ms !== undefined && (
+                        <>
+                          {" · "}
+                          <span className="font-mono">LDAP {checkResult.bind_ms}ms</span>
+                        </>
+                      )}
+                    </div>
+                  </div>
                 )}
               </div>
             )}
