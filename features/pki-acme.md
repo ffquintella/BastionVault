@@ -8,7 +8,7 @@ This is a **separate feature** from the core PKI engine ([features/pki-secret-en
 
 ## Status
 
-**Not started.** All PKI engine prerequisites are in place — Phase 5 of the core engine landed CSR-driven signing, which is what ACME's `finalize` endpoint ultimately calls into.
+**Phase 6.1 foundation shipped** — JWS auth surface + directory + new-nonce + new-account + account/<id>. The full Phase 6.1 (order / authz / chall state machine + HTTP-01 validator + `finalize` → `pki/sign/<role>` shim + `cert/<id>` retrieval + account-update) is split out as **Phase 6.1.5** and tracked as the next sub-thread. Phase 6.2 (DNS-01, EAB, revoke-cert) and Phase 6.3 (key-change, expiry sweep, rate limiting) follow.
 
 ## Motivation
 
@@ -44,7 +44,26 @@ This is a **separate feature** from the core PKI engine ([features/pki-secret-en
 
 ## Phases
 
-### Phase 6.1 — Read-only flow + HTTP-01
+### Phase 6.1 — Read-only flow + HTTP-01 — **Foundation done; order/authz/finalize tracked as 6.1.5**
+
+**Done in this cut** (`src/modules/pki/acme/{jws,storage,path_config,directory,account}.rs`):
+- JWS verification (RS256 / ES256 / EdDSA) with RFC 7638 thumbprints.
+- Per-mount `pki/acme/config` operator-facing CRUD.
+- `acme/directory` + `acme/new-nonce` (with bounded FIFO ring-buffer nonce store; single-use; aged-out nonces rejected as `acme: badNonce`).
+- `acme/new-account` (verifies embedded `jwk`, persists at `acme/accounts/<thumbprint>`, idempotent on repeat with the same key, `onlyReturnExisting = true` returns `accountDoesNotExist`).
+- `acme/account/<id>` (POST-as-GET; `kid`-flow JWS; refuses thumbprint mismatch).
+- ACME endpoints registered as `unauth_paths`; JWS is the auth.
+- `Replay-Nonce` + `Cache-Control: no-store` + `Link: <directory>;rel="index"` headers on every protocol response.
+
+**Outstanding (Phase 6.1.5 sub-thread)** — the order/cert lifecycle:
+- `acme/new-order`, `acme/order/<id>`, `acme/order/<id>/finalize`.
+- `acme/authz/<id>`, `acme/chall/<id>`.
+- HTTP-01 validator (engine fetches `http://<domain>/.well-known/acme-challenge/<token>`).
+- `acme/cert/<id>` retrieval.
+- `finalize` → existing `pki/sign/<role>` shim using the configured `default_role` + `default_issuer_ref`.
+- Account-update (contact / deactivate).
+
+### Original Phase 6.1 (full) — **Foundation done**
 
 | Surface | Notes |
 |---|---|

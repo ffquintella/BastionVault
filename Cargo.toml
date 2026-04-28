@@ -216,6 +216,11 @@ subtle = "2.6"
 # (ml-kem-768 / ml-dsa-44/65/87) come through bv_crypto.
 ed25519-dalek = "2"
 hkdf = "0.13"
+# ECDSA P-256 verification for the PKI ACME server's `ES256` JWS
+# account-key algorithm. Promoted from dev-deps to direct deps when
+# Phase 6.1 of the ACME spec landed. `digest 0.10` (matches rsa 0.9's
+# family). No new C deps; pure-Rust RustCrypto.
+p256 = { version = "0.13", features = ["ecdsa"], default-features = false }
 # OpenLDAP / AD password-rotation engine (`src/modules/ldap/`).
 # Pure-Rust LDAP client; we pick the `tls-rustls-aws-lc-rs` feature
 # so it consumes the same rustls + aws_lc_rs provider as the rest of

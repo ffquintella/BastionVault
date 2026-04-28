@@ -52,6 +52,25 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### PKI — ACME server endpoints (Phase 6.1 foundation)
+
+First chunk of [RFC 8555](https://datatracker.ietf.org/doc/html/rfc8555) ACME server work on the existing PKI engine. Spec at [`features/pki-acme.md`](features/pki-acme.md).
+
+- **JWS request envelope verification** ([`src/modules/pki/acme/jws.rs`](src/modules/pki/acme/jws.rs)) — flattened-JSON JWS parsing per RFC 7515 + signature verification for the three RFC 8555 §6.2 mandatory algorithms: **RS256** (via `rsa` 0.9 + `sha2-saml`), **ES256** (via `p256` 0.13 — promoted from dev-deps to a direct dep), **EdDSA** (via `ed25519-dalek` 2.x). RFC 7638 canonical JWK SHA-256 thumbprints used as account identifiers; RFC 7638 §3.1 reference vector pinned in tests. RFC 8555 §8.1 keyAuthorization computation. Other algorithms refused at parse with `JwsError::UnsupportedAlg`.
+- **Per-mount ACME config** ([`src/modules/pki/acme/path_config.rs`](src/modules/pki/acme/path_config.rs)) — operator-facing `pki/acme/config` CRUD with `enabled` (off by default), `default_role`, `default_issuer_ref`, `external_hostname`, `nonce_ttl_secs`. Authenticated (Vault-token-gated); writing `enabled = true` without a `default_role` is refused.
+- **Replay-Nonce ring buffer** ([`src/modules/pki/acme/storage.rs`](src/modules/pki/acme/storage.rs)) — bounded FIFO at 1024 nonces; single-use semantics (RFC 8555 §6.5); aged-out / unrecognised nonces surface as `acme: badNonce` (`urn:ietf:params:acme:error:badNonce` shape) and the request is rejected before any state-changing work.
+- **`acme/directory`** ([`src/modules/pki/acme/directory.rs`](src/modules/pki/acme/directory.rs)) — RFC 8555 §7.1.1 directory listing. URLs are rendered absolute, honoring `external_hostname` first and falling back to the inbound `Host` header. Every protocol response includes `Replay-Nonce`, `Cache-Control: no-store`, and a `Link: <directory>;rel="index"` header per RFC 8555 §6.5.
+- **`acme/new-nonce`** — RFC 8555 §7.2; mints a fresh `Replay-Nonce` header.
+- **`acme/new-account`** + **`acme/account/<id>`** ([`src/modules/pki/acme/account.rs`](src/modules/pki/acme/account.rs)) — RFC 8555 §7.3. New-account verifies the embedded `jwk`, computes the canonical thumbprint, and persists the account at `acme/accounts/<thumbprint>` with status `valid`. Repeated new-account calls with the same key return the existing account (RFC 8555 §7.3 idempotence). `onlyReturnExisting = true` returns `accountDoesNotExist` when the key isn't already registered. Account read uses `kid`-flow JWS — the verifier resolves the `kid` against the persisted JWK and refuses on thumbprint mismatch.
+- **Unauthenticated paths** ([`src/modules/pki/mod.rs`](src/modules/pki/mod.rs)) — ACME protocol endpoints bypass the standard token check; JWS in the request body is the auth. The operator-facing `acme/config` stays token-authenticated.
+- **7 unit tests pass** — RFC 7638 RSA thumbprint reference vector, RFC 8555 keyAuthorization shape, EdDSA sign/verify round-trip with a freshly generated key, unsupported-alg rejection, missing-jwk-and-kid rejection, nonce ring single-use semantics + ring-cap age-out.
+
+**Phase 6.1.5 (next sub-thread)** — order / authz / challenge state machine + HTTP-01 validator + `finalize` → existing `pki/sign/<role>` shim + `cert/<id>` retrieval. Account-update (contact / deactivate) lands in the same cut. The wire-protocol foundation + auth (JWS + nonces + accounts) is what's shipped today; the remaining Phase 6.1 work is concentrated in one focused follow-up.
+
+**Deferred follow-ups**: **Phase 6.2** — DNS-01 validator (resolver pinning), External Account Binding (EAB), `revoke-cert`. **Phase 6.3** — `key-change`, order/authz expiry sweep folded into the existing PKI tidy job, per-account rate limiting.
+
+New direct dep: `p256 = "0.13"` with `ecdsa` feature, `default-features = false` (was dev-only). No new C-linked deps; pure-Rust RustCrypto throughout.
+
 #### OpenLDAP / AD password-rotation — Phase 5 identity-aware check-out affinity
 
 - **New `affinity_ttl` field on `LibrarySet`** ([`src/modules/ldap/policy.rs`](src/modules/ldap/policy.rs)) — `Duration::ZERO` (default) keeps every check-out picking the first available account, matching the prior behavior. When set non-zero, the engine writes an `AffinityRecord` keyed by `(set, hex(entity_id))` after every successful check-in; the next check-out from the same entity within the window prefers the previously-held account when it's currently available.

@@ -17,6 +17,7 @@ use crate::{
     modules::Module,
 };
 
+pub mod acme;
 #[cfg(feature = "pki_pqc_composite")]
 pub mod composite;
 pub mod crypto;
@@ -93,6 +94,12 @@ impl PkiBackend {
             self.config_ca_path(),
             self.config_urls_path(),
             self.config_crl_path(),
+            // ── ACME server endpoints (Phase 6.1 foundation) ──
+            self.acme_config_path(),
+            self.acme_directory_path(),
+            self.acme_new_nonce_path(),
+            self.acme_new_account_path(),
+            self.acme_account_path(),
         ];
 
         // The `new_logical_backend!` macro takes a literal path-list. We build
@@ -103,6 +110,16 @@ impl PkiBackend {
         for p in paths {
             backend.paths.push(Arc::new(p));
         }
+        // ACME protocol endpoints are unauthenticated at the engine
+        // layer — JWS in the request body is the auth.
+        // `acme/config` stays authenticated (operator config, not
+        // protocol surface).
+        backend.unauth_paths = Arc::new(
+            acme::UNAUTH_PATHS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+        );
         backend.help = PKI_BACKEND_HELP.to_string();
         backend
     }
