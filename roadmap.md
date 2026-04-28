@@ -1,134 +1,156 @@
 # BastionVault Roadmap
 
-This document is the global entrypoint for roadmap and long-term planning documents in this repository.
+Global entrypoint for roadmap and long-term planning in this repository.
 
 The post-quantum crypto migration is complete. The default build uses a PQ-first, OpenSSL-free cryptographic stack.
 
+## How to read this
+
+- **Status** is one of `Done`, `Todo`, `Partial`, `Removed` — followed by a one-line summary.
+- Detailed phase notes live in each feature's spec under [`features/`](features/).
+- Multi-phase initiatives that have closed out are summarised under **Completed Initiatives**.
+- Currently open follow-ups that aren't a top-line feature live under **Deferred sub-initiatives**.
+
 ## Feature Status
 
+### Core
+
 | Feature | Status |
-|---------|--------|
-| **Core** | |
-| Core Vault Operations (init, seal, unseal, status) | Done |
+|---|---|
+| Core Vault Operations (init / seal / unseal / status) | Done |
 | Secret Management (KV CRUD) | Done |
 | Secret Versioning & Soft-Delete | Todo |
-| Access Control (RBAC, path-based ACL policies) | Done |
-| Identity Groups (user groups, application groups, group→policy mapping) | Done |
-| Per-User Scoping (ownership + policy templating + sharing) | Done (all 10 phases + migration story: ownership, `scopes`, seeded baselines, policy templating with fail-closed substitution + unit-tested wrapper, `ShareStore`, v2 sharing API, `shared` scope, share-cascade, admin transfer, the GUI — `/sharing` page plus per-resource Sharing tab — and the `POST /v2/sys/owner/backfill` admin migration endpoint for deployments upgrading from pre-ownership versions) |
-| Resource Groups (named collections of resources + KV with reverse index, ACL gate, list-filter, lifecycle prune) | Done (full model with ownership + sharing; see Asset Groups row) |
-| Asset Groups (secret + resource collections with group-based ACLs) | Done (full model: ownership, admin transfer, sharing via ShareTargetKind::AssetGroup, and member-redaction on read all shipped) |
-| Audit Logging (tamper-evident, HMAC chain) | Done (Phase 1: file device, hash chain, sys/audit API, pipeline hook, config persistence; syslog/HTTP devices deferred) |
+| Access Control (RBAC + path-based ACL) | Done |
+| Identity Groups (user / app groups → policy mapping) | Done |
+| Per-User Scoping (ownership + policy templating + sharing) | Done — all 10 phases + the migration backfill endpoint |
+| Asset Groups (collections of resources + KV paths with group-based ACLs) | Done — all 13 phases incl. ownership, sharing, member redaction |
+| Audit Logging (tamper-evident, HMAC chain) | Done — Phase 1 (file device); syslog/HTTP devices deferred |
 | Metrics (Prometheus) | Done |
-| **Cryptography** | |
+
+### Cryptography
+
+| Feature | Status |
+|---|---|
 | Post-Quantum Crypto Migration | Done |
 | Key Management (ML-KEM-768, ML-DSA-65, ChaCha20-Poly1305) | Done |
 | Key Rotation & Re-encryption | Done |
 | HSM Support | Todo |
-| **Storage** | |
+
+### Storage
+
+| Feature | Status |
+|---|---|
 | Storage Backend: Encrypted File | Done |
 | Storage Backend: MySQL | Done |
-| Storage Backend: SQLx (removed, libsqlite3-sys conflict) | Removed |
+| Storage Backend: SQLx | Removed (libsqlite3-sys conflict) |
 | Storage Backend: Hiqlite (embedded Raft SQLite, HA) | Done |
-| Storage Backend: Cloud targets for `Encrypted File` (S3 / OneDrive / Google Drive / Dropbox) | Done (all 8 phases shipped; `FileTarget` trait + four provider backends behind `cloud_*` feature flags + OAuth/PKCE infra + CLI + GUI + OS keychain + key-obfuscation decorator; see Completed Initiatives) |
-| Import/Export & Backup/Restore | Done |
-| Import / Export Module (user-facing JSON + password-encrypted `.bvx`) ([spec](features/import-export-module.md)) | Todo |
-| Scheduled Exports (cron-driven `.bvx` / BVBK with retention + verification) ([spec](features/scheduled-exports.md)) | Todo |
+| Cloud targets for Encrypted File (S3 / OneDrive / Google Drive / Dropbox) | Done — all 8 phases incl. cache decorator + key-obfuscation |
+| Import / Export & Backup / Restore | Done |
+| Import / Export Module (`.bvx`) ([spec](features/import-export-module.md)) | Todo |
+| Scheduled Exports ([spec](features/scheduled-exports.md)) | Todo |
+| Caching | Done — token + ciphertext-only secret cache + memory hardening |
+| Batch Operations | Done — Phase 1 (HTTP); CLI + SDK deferred |
+
+### Resources
+
+| Feature | Status |
+|---|---|
 | Resource Management (inventory + grouped secrets) | Done |
-| Resource Connect — in-app SSH / RDP for server resources ([spec](features/resource-connect.md)) | Todo — structured `os_type` on the `server` resource type + a Connect button on the resource detail page that opens a new Tauri WebviewWindow per session (xterm.js + `russh` 0.45 for SSH; `<canvas>` + `ironrdp` for RDP). Each resource carries one or more **Connection profiles** under a new Connection tab, binding the protocol + target + credential source. **Four credential-source kinds**: (1) **Secret** — credential-shaped resource secret (username + password / private_key); (2) **LDAP** — operator-bind via the LDAP secret engine, OR vault-managed via LDAP static-role / library check-out (with paired check-in on session close); (3) **SSH engine** — fresh CA-signed cert / OTP / ML-DSA-65 PQC cert via the SSH secret engine; (4) **PKI** — fresh client cert via `pki/issue/<role>` (headline use: AD smartcard-style RDP via CredSSP). Credential bytes never reach the JS layer or the OS clipboard. TOFU host-key / cert pinning persisted on the resource record. Paired `session.open` / `session.close` audit events with the credential source path. Per-resource-type opt-out. Eight phases: 1 (`os_type` schema), 2 (Connection profiles + tab + Secret source), 3 (SSH window + Secret/SSH-engine sources), 4 (RDP window + Secret source), 5 (LDAP source: operator-bind + static-role + library), 6 (PKI source: CredSSP smartcard for RDP), 7 (polish + per-type policy + recently-connected), 8 (deferred: session recording, SFTP, multi-hop, RD Gateway, VNC). |
-| File Resources (binary blobs + local-FS sync) | Done (Phases 1–4 + 8 shipped — engine + CRUD + history + 32 MiB cap + SHA-256 integrity + ownership / sharing / admin transfer / backfill + asset-group membership + local-FS sync target + GUI + content versioning. Phases 5–7 — SMB / SFTP / SCP transports + periodic re-sync — deferred as separate follow-up initiatives; see feature file) |
-| Caching | Done |
-| Batch Operations | Done (Phase 1: HTTP endpoint; CLI + client SDK deferred) |
-| **Networking & TLS** | |
+| File Resources (binary blobs + local-FS sync) | Done — Phases 1–4 + 8; SMB / SFTP / SCP transports + periodic re-sync deferred |
+| Resource Connect — in-app SSH / RDP for server resources ([spec](features/resource-connect.md)) | Todo — `os_type` field + Connect button + Tauri WebviewWindow per session (xterm.js + `russh` for SSH, `<canvas>` + `ironrdp` for RDP). Per-resource Connection profiles bind protocol + target + credential source. Four credential sources: **Secret**, **LDAP**, **SSH-engine**, **PKI** (CredSSP smartcard). Eight phases. |
+
+### Networking & TLS
+
+| Feature | Status |
+|---|---|
 | TLS & mTLS (Rustls-based) | Done |
-| **Authentication** | |
-| Auth: Token-based | Done |
+
+### Authentication
+
+| Feature | Status |
+|---|---|
+| Auth: Token | Done |
 | Auth: AppRole | Done |
 | Auth: Userpass | Done |
 | Auth: Certificate | Done |
-| **Secret Engines** | |
-| Secret Engine: PKI (pure-Rust, PQC-capable -- [spec](features/pki-secret-engine.md)) | Done (Phases 1–5.2) — pure-Rust X.509 + CRL on `rcgen` 0.14 + RustCrypto, ML-DSA-44/65/87 PQC roles via `fips204` + `x509-cert` (no `openssl-sys` / `aws-lc-sys`), composite ECDSA-P256+ML-DSA-65 signatures behind `pki_pqc_composite` feature, full Vault-shape surface — `roles` + `root/generate` + `intermediate/{generate,set-signed}` + `root/sign-intermediate` + `issue/:role` + `sign/:role` + `sign-verbatim` + `revoke` + `tidy` + `crl` + `config/{ca,crl,urls,issuers,auto-tidy}` + multi-issuer registry (`issuers/*` with rename/delete + role-level pinning + per-issuer CRL) + on-demand `pki/tidy` + auto-tidy scheduler. 12 integration tests + 1 feature-gated composite test, all green. See "Completed Initiatives". |
-| PKI: ACME server endpoints ([spec](features/pki-acme.md)) | Done (Phases 6.1 + 6.1.5 + 6.2 + 6.3 — feature-complete on the RFC 8555 surface): full HTTP-01 + DNS-01 issuance flow, full account / order / cert lifecycle (`directory`, `new-nonce`, `new-account` (+ EAB), `account/<id>` (contact / deactivate), `new-order`, `order/<id>`, `order/<id>/finalize`, `authz/<id>`, `chall/<id>`, `cert/<id>`, `revoke-cert`, `key-change`); JWS (RS256/ES256/EdDSA) + RFC 7638 thumbprints; replay-nonce ring buffer; HTTP-01 hardened (`ureq` 5 s/10 s, no redirects, 4 KiB cap); DNS-01 (`hickory-resolver` 0.24, pinned resolvers); EAB via operator-facing `acme/eab/<id>` HMAC-SHA-256 keys; per-account sliding-window rate limiting (`rate_window_secs` + `rate_orders_per_window`); ACME expiry sweep folded into `pki/tidy`; ACME-issued + ACME-revoked certs land in the engine's normal `certs/<serial>` index and per-issuer CRLs. 12 ACME unit tests green. |
-| Secret Engine: Transit ([spec](features/transit-secret-engine.md)) | Done (Phases 1-4: symmetric AEAD `chacha20-poly1305` + HMAC + random/hash + `ed25519` sign/verify + PQC `ml-kem-768` datakey wrap/unwrap + PQC `ml-dsa-44/65/87` sign/verify, versioned keys with rotate / config / trim, `bvault:vN[:pqc:<algo>]:<b64>` framing, `transit-user` / `transit-admin` baseline policies, **derived + convergent encryption** (HKDF subkey + domain-separated deterministic nonce), **BYOK import** behind `transit_byok` feature (per-mount ML-KEM-768 wrapping key + `/import` + `/import_version`), **hybrid composite signing** `hybrid-ed25519+ml-dsa-65` + **hybrid KEM** `hybrid-x25519+ml-kem-768` behind `transit_pqc_hybrid` feature. RSA / ECDSA classical types remain a separate follow-up.) |
-| Secret Engine: TOTP ([spec](features/totp-secret-engine.md)) | Done (Phases 1-4: HOTP/TOTP RFC 4226/6238, generate + provider modes, replay protection, QR PNG, GUI `/totp` page with live-code widget + validator, `totp-user` / `totp-admin` baseline policies; pure-Rust `hmac` + `sha1`/`sha2` + `subtle` + `qrcode`/`image`.) |
-| Secret Engine: SSH ([spec](features/ssh-secret-engine.md)) | Done (Phases 1-4: CA Ed25519 + OTP + ML-DSA-65 PQC + GUI) |
-| Secret Engine: OpenLDAP / AD password-rotation ([spec](features/ldap-secret-engine.md)) | Done (all five phases: connection config + static-role rotate + library check-out/check-in + rotate-root + auto-rotation scheduler + GUI (`/ldap` page with Connection / Static Roles / Library tabs, 19 Tauri commands) + **identity-aware check-out affinity** (opt-in `affinity_ttl` per set: same entity within the window gets the same account back, still freshly rotated; lazy expiration; graceful fallback to first-available). Pure-Rust `ldap3` 0.12 with `tls-rustls-aws-lc-rs`, TLS-only by default with two-flag `insecure_tls` opt-in, AD `unicodePwd` UTF-16LE-quoted encoding pinned against MSDN, per-set `Mutex` gate on check-out, constant-time identity guard on check-in, 24-char built-in password generator with structural AD complexity, `ldap-user` / `ldap-admin` baseline policies.) |
-| Dynamic Secrets framework ([spec](features/dynamic-secrets.md)) | Todo — host ships only the framework (lease hooks, host-owned connection pool, credential cache, `dynamic_secret` audit pipeline, plugin-host bridge with `dynamic_lease_register` / `dynamic_audit_emit` / `dynamic_pool_checkout` capabilities). Concrete engines (Postgres, MySQL, MSSQL, MongoDB, Redis, AWS, GCP, Azure, SSH dynamic-keys, …) ship as separately-loadable plugins under [`dynamic-engine-plugins/`](dynamic-engine-plugins/) and are loaded on demand by the operator at mount time. Host stays small; the dep graph for any one deployment includes only the engines that operator actually mounted. |
-| **Infrastructure** | |
-| High Availability (Raft consensus via Hiqlite) | Done |
-| Plugin System (dynamic loading) ([spec](features/plugin-system.md)) | Done — WASM runtime + capability-gated host imports + catalog with sha256 integrity + ML-DSA-65 publisher signature verification + per-plugin config + LogicalBackend mount wiring + `bastion-plugin-sdk` + `bv-plugin-pack` + GUI with per-plugin metrics panel + reference `bastion-plugin-totp` + `bastion-plugin-postgres` in `plugins-ext/`. Single-shot subprocess (default) and **opt-in long-lived supervised process runtime** (`manifest.capabilities.long_lived = true`; persistent child per plugin, exponential-backoff restart, restart-budget breaker, single-use bootstrap token, stderr forwarding). Phase 5 production-grade work all in: `bv.crypto_*` host caps backed by Transit, host-side ABI-version major check, net allowlist registration check, reload drain-and-swap, quarantined-mount state preserving data prefix on delete, plugin-issued lease pass-through, capability-widening guard, per-plugin Prometheus metrics. The reference-plugin integration tests against the main `bastion_vault` suite (using the `plugins-ext/` submodule + `testcontainers` for the Postgres demo plugin) are tracked separately as test infrastructure, not as a feature gap. |
+| Auth: OIDC | Done — server module + login + provider admin lifecycle |
+| Auth: SAML 2.0 | Done — pure-Rust SP-initiated SSO, no libxml2 / xmlsec |
+| Auth: FIDO2 / WebAuthn / YubiKey | Done |
+
+### Secret Engines
+
+| Feature | Status |
+|---|---|
+| PKI ([spec](features/pki-secret-engine.md)) | Done — Phases 1–5.2; classical + ML-DSA PQC + composite, multi-issuer, on-demand + auto tidy |
+| PKI: ACME server endpoints ([spec](features/pki-acme.md)) | Done — Phases 6.1 + 6.1.5 + 6.2 + 6.3, feature-complete on RFC 8555 (HTTP-01 + DNS-01, EAB, key-change, revoke, rate limit, expiry sweep) |
+| Transit ([spec](features/transit-secret-engine.md)) | Done — Phases 1–4: AEAD + HMAC + sign/verify + ML-KEM datakey + ML-DSA + derived/convergent + BYOK + hybrid composite |
+| TOTP ([spec](features/totp-secret-engine.md)) | Done — Phases 1–4: HOTP/TOTP + GUI |
+| SSH ([spec](features/ssh-secret-engine.md)) | Done — Phases 1–4: CA Ed25519 + OTP + ML-DSA-65 PQC + GUI |
+| OpenLDAP / AD password-rotation ([spec](features/ldap-secret-engine.md)) | Done — all 5 phases incl. identity-aware check-out affinity |
+| Dynamic Secrets framework ([spec](features/dynamic-secrets.md)) | Todo — host ships only the framework; concrete engines (Postgres, MySQL, AWS, …) ship as plugins under [`dynamic-engine-plugins/`](dynamic-engine-plugins/), loaded on demand |
+
+### Infrastructure
+
+| Feature | Status |
+|---|---|
+| High Availability (Raft via Hiqlite) | Done |
+| Plugin System ([spec](features/plugin-system.md)) | Done — WASM + supervised long-lived process runtime, signed manifests, per-plugin metrics, GUI |
 | Namespaces / Multi-tenancy ([spec](features/namespaces-multitenancy.md)) | Partial |
 | Kubernetes Integration ([spec](features/kubernetes-integration.md)) | Todo |
-| Web UI / Desktop GUI (Tauri) | Done (all 9 phases) |
-| Auth: OIDC | Done (server module + GUI login + full provider admin lifecycle — `src/modules/credential/oidc/` ships Authorization-Code-Flow-with-PKCE, provider config + role CRUD, `auth_url` + `callback`, ID-token verification, claim-to-policy mapping, token renewal. Login page SSO tab shows one clickable button per configured provider — no mount/role typing; Settings page "Single Sign-On (SSO)" card drives the full mount + config + role admin from the root token, with mode-aware redirect-URI hints (stable server URL for remote, RFC 8252 loopback for desktop). Global enable/disable toggle persisted at `core/sso/settings`. Unauth `sys/sso/providers` discovery endpoint drives the login tab visibility.) |
-| Auth: SAML 2.0 | Done (server module — pure-Rust SP-initiated SSO in `src/modules/credential/saml/`: AuthnRequest + HTTP-Redirect encoding, Response parsing via `quick-xml`, structural validation, RSA-SHA256/SHA1 signature verification via `rsa 0.9` + `x509-parser` with a hand-rolled Exclusive C14N that handles every major IdP's output format. Zero libxml2/libxmlsec1/OpenSSL footprint. 46 unit + integration tests, including an end-to-end sign-and-verify roundtrip.) |
-| Auth: FIDO2 / WebAuthn / YubiKey | Done (server module) |
+| Web UI / Desktop GUI (Tauri) | Done — all 9 phases |
 | Compliance Reporting ([spec](features/compliance-reporting.md)) | Todo |
-
-## Completed Initiatives
-
-- [Post-Quantum Crypto Migration](roadmaps/post-quantum-crypto-migration.md)
-  Completed migration removing Tongsuo and OpenSSL, adopting `ChaCha20-Poly1305` for payload encryption, and `ML-KEM-768` plus `ML-DSA-65` for post-quantum key management.
-- [Post-Quantum Crypto Progress](roadmaps/post-quantum-crypto-progress.md)
-  Execution tracker with full completion checklist.
-- [Hiqlite Default HA Storage](roadmaps/hiqlite-default-ha-storage.md)
-  All 6 phases complete: backend implementation, Raft error mapping, cluster health/status endpoints, cluster CLI commands (including failover), post-quantum TLS (X25519MLKEM768), backup/restore/export/import tooling, and HA fault-injection validation (8 multi-node test scenarios).
-- [Tauri GUI with FIDO2/YubiKey Support](roadmaps/tauri-gui-fido2.md)
-  All 9 phases complete: project scaffold, embedded vault mode (auto-init/unseal via OS keychain), core screens (connect, init, login, dashboard), secrets management (KV browser, users, policies, mounts), AppRole dashboard, FIDO2 server module + GUI, remote mode (connection profiles, TLS config, HTTP API client), and polish (error boundary, settings page, packaging). 55 Tauri commands, 49 frontend tests, 79 React modules, 10 pages.
-- [Caching](features/caching.md)
-  Four-slice feature: cache-config scaffold; token lookup cache (keyed by salted hash, zeroized on release, never caches raw tokens); Prometheus metrics (`bvault_cache_{hits,misses,evictions}_total{layer}`); ciphertext-only secret read cache below the barrier (`CachingBackend` decorator, zeroized on release, no negative caching); memory-protection guardrails (`mlockall` on Unix, `PR_SET_DUMPABLE=0` on Linux); `POST /sys/cache/flush` admin endpoint (sudo-gated); automatic flush on seal. No cache at any layer holds plaintext secret material or raw bearer tokens — enforced structurally (secret cache implements `Backend` not `Storage`) and by per-layer zeroize-on-drop wrappers.
-- [Resource Management](features/resources.md)
-  Dedicated resource storage engine (`src/modules/resource/`) with per-resource metadata + secret grouping, per-field change history, per-secret version snapshots, configurable resource types, ownership + sharing + asset-group integration, 14 Tauri commands, and the full Resources GUI page. Goes beyond the original spec (which described a KV-prefix convention) — resources now live in a dedicated barrier-encrypted engine independent of KV.
-- [Per-User Scoping (Ownership & Sharing)](features/per-user-scoping.md)
-  All ten phases + the migration story shipped. `EntityStore` auto-provisioning, `scopes = ["owner" | "shared"]` qualifier with evaluator integration, unified `OwnerStore` with write-records / delete-forgets bookkeeping, LIST-filter that narrows response keys to caller-owned or caller-shared entries, seeded `standard-user-readonly` + `secret-author` baselines, policy templating (`{{username}}`, `{{entity.id}}`, `{{auth.mount}}`) with fail-closed unresolved-placeholder semantics and full unit-test coverage of the `apply_templates` wrapper, the `/v2/identity/sharing/…` CRUD API, `/v2/identity/entity/self` + `/v2/identity/owner/{kv,resource}/…` introspection routes, share-cascade on KV / resource delete, `POST /v2/sys/{kv,resource}-owner/transfer` admin endpoints, the new `POST /v2/sys/owner/backfill` admin migration endpoint (sudo-gated) for upgrading deployments with unowned pre-existing objects, root-token writes now stamping `root` as owner so the Owner card in the GUI is populated for admin-created objects, and the GUI — top-level `/sharing` page plus per-resource Sharing tab with Grant / Revoke / admin-only Transfer. Re-sharing by sharees is intentionally unsupported.
-- [Identity Groups](features/identity-groups.md)
-  User groups and application groups with group-to-policy mapping. Phases 1–7 all shipped: `GroupStore`, `v2/identity/…` HTTP + Tauri surface, default mount, UserPass + AppRole login policy union, integration tests (CRUD, namespace isolation, end-to-end login), the Groups GUI page, and the FIDO2 login policy union. Phase 8 (extension to Certificate / OIDC / SAML) is deliberately deferred on those backends landing — Certificate is currently disabled in the OpenSSL-free build and OIDC / SAML are design-only. The union pattern ships: when the Certificate / OIDC / SAML login handlers arrive they plug into the same `GroupStore::load_group_policies` path that UserPass / AppRole / FIDO2 already use.
-- [Resource Groups / Asset Groups](features/resource-groups.md)
-  All thirteen phases shipped. Named collections of resources **and** KV-secret paths, with two parallel reverse indexes, HTTP + Tauri CRUD + `by-resource` / `by-secret` / `reindex` / history, KV-path canonicalization across v1 and v2 forms, lifecycle prunes on both resource-delete (resource module) and KV-delete (`PolicyStore::post_route`), the ACL `groups = [...]` qualifier with evaluator integration for both target kinds, list-filter that narrows LIST response keys to group members when the list was authorized only via a gated rule, policy-compile warnings for unknown group references, the GUI (Asset Groups page, Termius-style group cards on Resources and Secrets pages with click-to-filter + breadcrumb, chips on each object, collapsible admin menu), **ownership** with first-write capture, admin transfer via `POST /v2/sys/asset-group-owner/transfer`, **sharing** via `ShareTargetKind::AssetGroup` with indirect member-expansion at authorize time, and **member redaction** for non-owner / non-admin readers (cardinality stays truthful, paths are hidden). Mount path stays `resource-group/` for backward compatibility with the initial resource-only ship; the operator-facing label is "Group".
-- [File Resources](features/file-resources.md)
-  Core feature shipped: dedicated `files/` mount with `src/modules/files/mod.rs` — barrier-encrypted metadata + blob storage, per-file history log, 32 MiB hard cap with SHA-256 integrity re-verified on every read (including historical versions). Ownership / sharing / admin transfer / backfill wired through the shared `OwnerStore` + `ShareStore` (new `ShareTargetKind::File` variant); asset-group membership via a third reverse index in `ResourceGroupStore`. Local-filesystem sync target with atomic tmp-then-rename write, optional Unix mode, per-target sync-state, on-demand `POST files/{id}/sync/{name}/push` endpoint. Content versioning with snapshot-on-write + `DEFAULT_VERSION_RETENTION = 5` prune policy + restore (restore is reversible because the displaced content is itself snapshotted). Full Admin → Audit integration emitting `create` / `update` / `delete` / `restore` events with actor entity ids through the shared `FileAuditStore`. GUI: top-level Files page (drag-and-drop upload with Windows WebView2 drop-handler fix, edit metadata modal, sync-targets management, versions tab), per-resource-detail Files tab listing files associated with each resource, `TargetPicker` typeahead for resource association. 22 module tests + integration tests against the full Rust suite. **Phases 5–7 (SMB / SFTP / SCP transports + periodic re-sync) are deferred** as separate follow-up initiatives — each needs its own crate decision (SMB: `pavao` vs. `smb3`; SSH: `russh` vs. `libssh2-sys`) and container-based integration-test infrastructure, and they're additive sync *transports* rather than gaps in the core file-resource model. The local-FS target covers common deployment patterns today (operators often front it with `rclone` / `rsync` / `syncthing` managed out-of-band).
-- [Cloud Storage Targets for the Encrypted File backend](features/cloud-storage-backend.md)
-  All 8 phases shipped. The Encrypted File backend (`src/storage/physical/file/`) now sits on a pluggable `FileTarget` trait with four provider implementations — **AWS S3** via `rusty-s3` + `ureq` (MinIO-compatible), **Microsoft OneDrive** via Graph API (App-folder scoped), **Google Drive** via Drive v3 (app-data scoped, ID-based chain walking + folder-id cache), **Dropbox** via v2 API (dual-host content/api endpoints, supports both OAuth refresh tokens and long-lived access tokens wrapped in a `{"access_token":"..."}` JSON envelope). Each provider is feature-gated (`cloud_s3` / `cloud_onedrive` / `cloud_gdrive` / `cloud_dropbox`) so default builds carry zero cloud code. Shared infrastructure: `credentials_ref` URI grammar (`env:` / `file:` / `inline:` / `keychain:`) with `Secret`-newtype zero-on-drop; OAuth + PKCE + loopback-redirect consent flow (fixed port 8472 so the redirect URI is stable across runs); `bvault operator cloud-target connect` CLI; **Settings → Cloud Storage Targets GUI card** with inline provider consent flow, dev-console help links, "paste existing token" shortcut (uses Dropbox's Generated-access-token), S3 inline credentials, and stable-redirect-URI display with Copy button; OS keychain writer via the `keyring` crate behind `cloud_keychain`; **`ObfuscatingTarget` decorator** (Phase 8) that HMAC-SHA256s every object key with an auto-bootstrapped per-target salt. **Get Started integration**: new "Cloud Vault" option on the chooser backed by the multi-vault saved-profiles model (`VaultProfile` + `last_used_id`, hand-editable JSON preferences, full CRUD + legacy-shape migration). InitPage branches its copy on the active profile's kind and carries ⇄/⚙/🗑 controls (switch, inline credential re-paste, forget) so an init failure is recoverable without leaving the page. Deferred sub-slices (not blocking): rekey-CLI for the obfuscation salt (library pieces present; orchestrator not shipped), and sync-path bootstrap of obfuscation for server-mode boots that go through `storage::new_backend` (desktop uses `FileBackend::new_maybe_obfuscated` directly via `embedded::build_backend`).
-
-- [OIDC Authentication](features/oidc-auth.md)
-  Server module + full GUI admin lifecycle shipped. `src/modules/credential/oidc/` registers the `oidc` auth kind via `OidcModule` + `OidcBackend`. Provider config (discovery URL, client id/secret, allowed redirect URIs, default scopes) and role config (bound audiences, bound claims, claim-to-metadata mappings, user/groups claims, per-role redirect whitelist, policies, token TTLs) CRUD under `auth/<mount>/config` and `auth/<mount>/role/<name>`. Unauth-paths `auth/<mount>/auth_url` (PKCE + CSRF state + nonce, state persisted for 5 minutes at `state/<csrf>`) and `auth/<mount>/callback` (code exchange + ID-token verification via the `openidconnect` crate's JWKS path + bound-claim validation + metadata projection). Token renewal re-loads the role and rejects if policies drifted. Client secrets are redacted on read. **GUI login**: three Tauri commands (`oidc_login_start` / `complete` / `cancel`) bridge a loopback listener to the backend; login page SSO tab shows one clickable button per configured provider — no mount/role typing. **GUI admin**: Settings → Single Sign-On card drives the full mount + config + default-role admin from the root token, with validation, secret-preservation on edit, and mode-aware callback-URI hints (stable server URL for remote; RFC 8252 loopback pattern for desktop with IdP-specific labels — Azure AD's "Mobile and desktop applications", Okta's "Native app", Google's "Desktop app"). Unauth `sys/sso/providers` discovery + root-gated `sys/sso/settings` global toggle (stored at barrier key `core/sso/settings`) drive the login-tab visibility. 17 unit tests + 1 CRUD integration test + 1 `#[ignore]`d live-IdP test.
-
-- [Cloud FileTarget Memory Cache](features/cloud-storage-backend.md)
-  Feature-complete bounded TTL-based `CachingTarget` decorator (`src/storage/physical/file/cache.rs`) with 30s read TTL / 10s list TTL / 65,536-entry / **500 MiB** soft caps, write-and-delete invalidation (including prefix-affected list entries), negative-result caching, FIFO eviction, **per-key singleflight coalescing** (8 concurrent misses → 1 provider call via `tokio::sync::Mutex`), **stale-while-revalidate** (default `stale_ratio = 0.5` — entries past the halfway point serve cached value + spawn background refresh via `tokio::spawn` so hot keys stay hot under steady traffic), **opt-in bounded-concurrency background prefetch** (non-empty `prefetch_keys` triggers a warmup task on construction), and `bvault_cache_*{layer="cloud_target"}` Prometheus metrics. Default-on for `s3`/`onedrive`/`gdrive`/`dropbox`, default-off for `local`. All async features `#[cfg(not(feature = "sync_handler"))]`-gated — sync builds fall back to v1 pure-TTL behavior. Config keys: `cache_{read_ttl_secs,list_ttl_secs,max_entries,max_bytes,stale_ratio,prefetch_keys,prefetch_concurrency}`. Zero new deps. 13 unit tests green.
-
-- [PKI Secret Engine](features/pki-secret-engine.md)
-  All seven phases shipped (1, 2, 3, 4, 4.1, 5, 5.1, 5.2). Pure-Rust X.509 + CRL on `rcgen` 0.14 + RustCrypto for the classical path; ML-DSA-44/65/87 PQC roles built directly on `x509-cert` + `der` + `fips204` (sidesteps rcgen because its ML-DSA support is gated behind `aws_lc_rs_unstable`); composite ECDSA-P256 + ML-DSA-65 signatures behind the `pki_pqc_composite` feature flag (preview — IETF draft `draft-ietf-lamps-pq-composite-sigs` not yet locked); on-demand `pki/tidy` + a periodic auto-tidy scheduler hooked into `Core::post_unseal`. Full Vault-shape route surface: roles, root + intermediate hierarchies, `config/ca` import, CSR signing (`sign/:role` + `sign-verbatim`, classical and PQC), revoke + per-issuer CRL state, multi-issuer per mount (`pki/issuers`, `pki/issuer/:ref` Read/Write/Delete, `pki/config/issuers`, role-level `issuer_ref` pinning, request-body override, lazy migration shim that lifts pre-5.2 mounts on first read). Mixed-chain rejection at issue time across classical / PQC / composite classes (no `--allow-mixed-chain` opt-in yet). No `openssl-sys` and no `aws-lc-sys` reachable from the engine. 12 integration tests pass on the default build; the composite test passes with `--features pki_pqc_composite`.
-
-- [SAML 2.0 Authentication](features/saml-auth.md)
-  Server module shipped end-to-end. `src/modules/credential/saml/` implements SP-initiated SSO with a fully pure-Rust stack — no `samael` / `libxml2` / `libxmlsec1` / OpenSSL dependency. AuthnRequest generation + HTTP-Redirect encoding, streaming `quick-xml` Response parsing, structural validation (status + Destination + InResponseTo + Issuer + Audience + timestamp with 60 s clock-skew grace), RSA-SHA256 / RSA-SHA1 signature verification via `rsa 0.9` + `x509-parser`, and a hand-rolled Exclusive XML Canonicalization that handles the output format every major IdP (Azure AD, Okta, Keycloak, Shibboleth, ADFS) emits. Attribute-to-policy role mappings with per-role `bound_attributes` / `bound_subjects` enforcement at callback time. Login + callback paths `auth/<mount>/login` + `auth/<mount>/callback` (both unauth), state persisted at `state/<relay_state>` with 5-minute TTL and single-use load-and-delete. 46 unit + integration tests, including an end-to-end sign-and-verify roundtrip against a freshly-generated RSA keypair.
 
 ## Active Initiatives
 
-No active initiatives — all previously-active items have closed out.
-Next up are the items tracked under `Todo` in the Feature Status
-table (Secret Versioning & Soft-Delete, PKI ACME server endpoints,
-Dynamic Secrets, HSM Support, Kubernetes Integration, Compliance
-Reporting).
+None — all previously-active items have closed out. Next up are the `Todo` rows above, primarily:
+
+- Secret Versioning & Soft-Delete
+- Resource Connect (Phase 1 unblocks Phases 2–7)
+- Dynamic Secrets framework + first engine plugins
+- HSM Support
+- Kubernetes Integration
+- Compliance Reporting
+
+## Completed Initiatives
+
+Each entry below has a dedicated spec / roadmap document with full phase notes.
+
+- [Post-Quantum Crypto Migration](roadmaps/post-quantum-crypto-migration.md) — removed Tongsuo / OpenSSL, adopted ChaCha20-Poly1305 + ML-KEM-768 + ML-DSA-65.
+- [Hiqlite Default HA Storage](roadmaps/hiqlite-default-ha-storage.md) — 6 phases incl. cluster CLI, PQ TLS (X25519MLKEM768), HA fault-injection.
+- [Tauri GUI with FIDO2 / YubiKey Support](roadmaps/tauri-gui-fido2.md) — 9 phases, 55 Tauri commands, 49 frontend tests, 79 React modules, 10 pages.
+- [Caching](features/caching.md) — token cache + ciphertext-only secret cache + Prometheus metrics + `mlockall` / no-core-dump + sealed-flush + admin flush endpoint.
+- [Resource Management](features/resources.md) — dedicated `resource/` engine, per-resource metadata + secret grouping, history, version snapshots, configurable types, ownership / sharing / asset-group integration, 14 Tauri commands, full GUI.
+- [Per-User Scoping (Ownership & Sharing)](features/per-user-scoping.md) — 10 phases + migration backfill, `OwnerStore` + `ShareStore`, `scopes = ["owner", "shared"]`, policy templating, `/sharing` GUI page + per-resource Sharing tab.
+- [Identity Groups](features/identity-groups.md) — user + app groups, policy union for UserPass / AppRole / FIDO2 logins, integration tests, GUI.
+- [Resource / Asset Groups](features/resource-groups.md) — 13 phases; collections of resources + KV paths, two reverse indexes, ACL `groups = [...]` qualifier, ownership + sharing + member redaction, GUI.
+- [File Resources](features/file-resources.md) — `files/` mount, 32 MiB cap + SHA-256 integrity, ownership / sharing / asset-group membership, local-FS sync target, content versioning, GUI. Phases 5–7 (SMB / SFTP / SCP / periodic re-sync) deferred (see below).
+- [Cloud Storage Targets for Encrypted File](features/cloud-storage-backend.md) — 8 phases; pluggable `FileTarget` trait + S3 / OneDrive / Google Drive / Dropbox providers, OAuth/PKCE infra, OS keychain, key-obfuscation decorator, multi-vault saved profiles.
+- [Cloud FileTarget Memory Cache](features/cloud-storage-backend.md) — bounded TTL cache (30 s read / 10 s list / 65k entries / 500 MiB), singleflight coalescing, stale-while-revalidate, opt-in prefetch, Prometheus metrics. Default-on for cloud providers.
+- [PKI Secret Engine](features/pki-secret-engine.md) — Phases 1–5.2; classical + PQC + composite, multi-issuer with per-usage gates, full Vault-shape route surface, on-demand + auto tidy.
+- [OIDC Authentication](features/oidc-auth.md) — server module + GUI admin lifecycle. PKCE + CSRF + nonce, JWKS verification, claim-to-policy mapping, mode-aware redirect-URI hints (server-stable vs. RFC 8252 loopback).
+- [SAML 2.0 Authentication](features/saml-auth.md) — pure-Rust SP-initiated SSO; AuthnRequest, streaming `quick-xml` parsing, RSA-SHA256/SHA1 verify, hand-rolled Exclusive C14N. Zero libxml2 / xmlsec / OpenSSL footprint. 46 tests.
 
 ## Deferred sub-initiatives
 
-Tracked separately from Active Initiatives because each is self-contained, needs its own crate decision + container-based integration-test infrastructure, and has no current blocker on the core features that incubated it. Each can graduate to Active when operator demand + a specific crate candidate are confirmed.
+Self-contained follow-ups with no current blocker on the parent feature. Each can graduate to Active when operator demand + a specific implementation choice are confirmed.
 
-- **File Resources — SMB sync transport** — `FileSyncTarget { kind = "smb" }` with NTLMv2 + optional Kerberos auth. Crate candidates: `pavao` / `smb3` (alpha); Windows-native via `windows-rs` as an alternative. Samba container in CI for tests. See `features/file-resources.md` § "Deferred sub-initiatives".
-- **File Resources — SFTP + SCP sync transports** — two transports sharing an SSH session; `russh` + `russh-sftp` vs. `libssh2-sys`. Key-stored-in-vault bootstrap ordering needs design. OpenSSH container in CI. See `features/file-resources.md` § "Deferred sub-initiatives".
-- **File Resources — periodic re-sync** — internal-scheduler vs. external-tick-endpoint design question; cluster coordination via `hiqlite::dlock`. Blocked on at least one non-local sync transport landing first (nothing to re-sync with only local-FS). See `features/file-resources.md` § "Deferred sub-initiatives".
-- **Cloud Storage Targets — rekey CLI** — library pieces present (`ObfuscatingTarget::with_salt`, `list("")` enumeration); end-to-end CLI that walks old-salt → new-salt is not shipped. Production rekey today via `operator migrate` through a non-obfuscated intermediate.
-- **Cloud Storage Targets — server-mode obfuscation bootstrap** — desktop mode honors `obfuscate_keys` via `FileBackend::new_maybe_obfuscated`; server mode's sync `storage::new_backend` logs a warning when the flag is set. Requires propagating the async bootstrap through the broader storage chain.
-- **PKI — `--allow-mixed-chain` opt-in** — today the mixed-chain guard is closed by default with no override (PQC role on classical CA, composite role on PQC CA, etc. → `ErrPkiKeyTypeInvalid` at issue time). The spec called out an opt-in for migration windows; trivial to add as a request-body or role-level flag, deferred until a real migration scenario asks for it.
-- **PKI — AIA / CRL Distribution Points / Name Constraints extensions in issued certs** — `pki/config/urls` round-trips the URLs already; the cert builders just don't emit the corresponding extensions yet. Cross-phase deferral (classical, PQC, and composite paths share this gap).
-- ~~**PKI — classical CRL via `x509-cert::crl`**~~ — landed in Phase 5.4. All three signature classes (classical / PQC / composite) now share `x509_pqc::build_crl_with_alg`.
-- **PKI — composite IETF-draft tracking** — the Phase 3 composite preview pins the OID + structure but uses a BastionVault-internal prehash domain. When `draft-ietf-lamps-pq-composite-sigs` locks on its `Domain || Random || PH(M)` shape, `composite::bv_prehash` is the single point of swap.
-- **PKI — additional composite variants** — Phase 3 ships `id-MLDSA65-ECDSA-P256-SHA512` only. Other pairings (`mldsa44+ecdsa-p256-sha256`, `mldsa87+ecdsa-p384-sha512`, RSA-PSS pairs) follow the same structure; deferred until operator demand confirms which to add first.
-- ~~**PKI — PKCS#8 envelope for ML-DSA private keys**~~ — landed in Phase 5.3.
-- ~~**PKI — RSA generation**~~ — landed in Phase 5.3.
-- ~~**PKI — multi-issuer `usage` flags**~~ — landed in Phase 5.5. Each issuer carries a per-usage allowlist (`issuing-certificates`, `crl-signing`, `ocsp-signing`); enforcement gates `issue/sign/sign-verbatim/sign-intermediate` and `rebuild_crl_for_issuer`.
+**File Resources**
+- SMB sync transport — needs `pavao` / `smb3` / `windows-rs` decision + Samba container in CI.
+- SFTP + SCP sync transports — `russh` + `russh-sftp` vs `libssh2-sys`; key-stored-in-vault bootstrap ordering needs design.
+- Periodic re-sync — internal scheduler vs. external tick endpoint; cluster coordination via `hiqlite::dlock`. Blocked on at least one non-local transport landing first.
+
+**Cloud Storage Targets**
+- Rekey CLI for the obfuscation salt — library pieces present (`ObfuscatingTarget::with_salt`); orchestrator not shipped.
+- Server-mode obfuscation bootstrap — desktop honours `obfuscate_keys`; server-mode `storage::new_backend` logs a warning. Needs async bootstrap propagation through the storage chain.
+
+**PKI**
+- `--allow-mixed-chain` opt-in — guard is fail-closed today; trivial to add as a flag for migration windows.
+- AIA / CRL Distribution Points / Name Constraints extensions in issued certs — `pki/config/urls` round-trips the URLs; cert builders don't emit the extensions yet.
+- Composite IETF-draft tracking — Phase 3 pins a BastionVault-internal prehash domain; swap point is `composite::bv_prehash` once `draft-ietf-lamps-pq-composite-sigs` locks.
+- Additional composite variants — Phase 3 ships `id-MLDSA65-ECDSA-P256-SHA512`; other pairings (44+P-256, 87+P-384, RSA-PSS) follow the same structure.
 
 ## Notes
 
-- Put new roadmap documents under [roadmaps](roadmaps/).
+- Put new roadmap documents under [`roadmaps/`](roadmaps/).
 - Keep this file updated whenever a roadmap is added, renamed, or removed.
 - Prefer one roadmap per major initiative so planning, sequencing, and acceptance criteria stay reviewable.
