@@ -96,6 +96,12 @@ import type {
   SshCredsResult,
   SshLookupRequest,
   SshLookupResult,
+  TotpMountInfo,
+  TotpKeyInfo,
+  TotpCreateKeyRequest,
+  TotpCreateKeyResult,
+  TotpCodeResult,
+  TotpValidateResult,
 } from "./types";
 
 // Connection
@@ -1201,3 +1207,23 @@ export const sshCreds = (request: SshCredsRequest) =>
   invoke<SshCredsResult>("ssh_creds", { request });
 export const sshLookup = (request: SshLookupRequest) =>
   invoke<SshLookupResult>("ssh_lookup", { request });
+
+// ── TOTP Secret Engine (Phase 4) ────────────────────────────────
+
+export const totpListMounts = () => invoke<TotpMountInfo[]>("totp_list_mounts");
+export const totpEnableMount = (path: string) =>
+  invoke<void>("totp_enable_mount", { path });
+
+export const totpListKeys = (mount: string) =>
+  invoke<string[]>("totp_list_keys", { mount });
+export const totpReadKey = (mount: string, name: string) =>
+  invoke<TotpKeyInfo>("totp_read_key", { mount, name });
+export const totpCreateKey = (request: TotpCreateKeyRequest) =>
+  invoke<TotpCreateKeyResult>("totp_create_key", { request });
+export const totpDeleteKey = (mount: string, name: string) =>
+  invoke<void>("totp_delete_key", { mount, name });
+
+export const totpGetCode = (mount: string, name: string) =>
+  invoke<TotpCodeResult>("totp_get_code", { mount, name });
+export const totpValidateCode = (mount: string, name: string, code: string) =>
+  invoke<TotpValidateResult>("totp_validate_code", { mount, name, code });

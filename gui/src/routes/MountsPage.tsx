@@ -79,6 +79,14 @@ const DEFAULT_ENGINE_SPECS: DefaultEngineSpec[] = [
     gates: "SSH nav (CA / Roles / Sign / Creds tabs)",
   },
   {
+    path: "totp/",
+    label: "TOTP",
+    logicalType: "totp",
+    description:
+      "Time-based one-time passwords (RFC 6238). Generate or import seeds, fetch live codes, validate.",
+    gates: "TOTP nav (also requires totp-user / totp-admin policy)",
+  },
+  {
     path: "identity/",
     label: "Identity",
     logicalType: "identity",

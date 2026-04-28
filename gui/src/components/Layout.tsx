@@ -58,6 +58,18 @@ const userNav: NavItem[] = [
     requires: ["root", "admin"],
     requiresMountType: "ssh",
   },
+  // TOTP engine. Gated by the dedicated `totp-admin` / `totp-user`
+  // baseline policies (registered server-side in `policy_store.rs`)
+  // plus the conventional admin escalation paths. Same mount-type
+  // gate as PKI / SSH — the link auto-hides when no `totp/` mount
+  // exists, so an operator who hasn't mounted the engine doesn't see
+  // a dead-end nav entry.
+  {
+    path: "/totp",
+    label: "TOTP",
+    requires: ["root", "admin", "totp-admin", "totp-user"],
+    requiresMountType: "totp",
+  },
 ];
 
 // Admin features. The whole section collapses when none of the items

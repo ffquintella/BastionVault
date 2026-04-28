@@ -18,6 +18,7 @@ import { SettingsPage } from "./routes/SettingsPage";
 import { ExchangePage } from "./routes/ExchangePage";
 import { PkiPage } from "./routes/PkiPage";
 import { SshPage } from "./routes/SshPage";
+import { TotpPage } from "./routes/TotpPage";
 import { PluginsPage } from "./routes/PluginsPage";
 import { useAuthStore } from "./stores/authStore";
 import { ToastProvider } from "./components/ui";
@@ -108,6 +109,10 @@ export default function App() {
             <Route
               path="/ssh"
               element={<ProtectedRoute><SshPage /></ProtectedRoute>}
+            />
+            <Route
+              path="/totp"
+              element={<ProtectedRoute><TotpPage /></ProtectedRoute>}
             />
           </Routes>
         </HashRouter>

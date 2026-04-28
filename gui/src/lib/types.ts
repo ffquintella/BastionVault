@@ -856,3 +856,66 @@ export interface SshLookupRequest {
 export interface SshLookupResult {
   roles: string[];
 }
+
+// ── TOTP Secret Engine (Phase 4) ────────────────────────────────
+
+export interface TotpMountInfo {
+  path: string;
+}
+
+export interface TotpKeyInfo {
+  generate: boolean;
+  issuer: string;
+  account_name: string;
+  algorithm: string;
+  digits: number;
+  period: number;
+  skew: number;
+  replay_check: boolean;
+}
+
+export interface TotpCreateKeyRequest {
+  mount: string;
+  name: string;
+  /** True = engine generates the seed; false = operator imports `key` or `url`. */
+  generate: boolean;
+  issuer?: string;
+  account_name?: string;
+  /** SHA1 (default) | SHA256 | SHA512. */
+  algorithm?: string;
+  /** 6 (default) or 8. */
+  digits?: number;
+  period?: number;
+  skew?: number;
+  /** Generate mode: random seed size in bytes (default 20). */
+  key_size?: number;
+  /** Pixel size of the returned PNG QR. 0 disables PNG rendering. */
+  qr_size?: number;
+  /** Generate mode: include the seed in the create response (default true). */
+  exported?: boolean;
+  /** Refuse a second validation of the same step+code (default true). */
+  replay_check?: boolean;
+  /** Provider mode: base32-encoded seed. Mutually exclusive with `url`. */
+  key?: string;
+  /** Provider mode: full `otpauth://` URL. Mutually exclusive with `key`. */
+  url?: string;
+}
+
+export interface TotpCreateKeyResult {
+  name: string;
+  generate: boolean;
+  /** Base32 seed — present only on a generate-mode + exported create. */
+  key: string;
+  /** `otpauth://` URL — present only on a generate-mode + exported create. */
+  url: string;
+  /** Base64 PNG. Empty when `qr_size = 0` or in provider mode. */
+  barcode: string;
+}
+
+export interface TotpCodeResult {
+  code: string;
+}
+
+export interface TotpValidateResult {
+  valid: boolean;
+}

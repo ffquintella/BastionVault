@@ -48,8 +48,9 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Secret Engine: PKI (pure-Rust, PQC-capable -- [spec](features/pki-secret-engine.md)) | Done (Phases 1–5.2) — pure-Rust X.509 + CRL on `rcgen` 0.14 + RustCrypto, ML-DSA-44/65/87 PQC roles via `fips204` + `x509-cert` (no `openssl-sys` / `aws-lc-sys`), composite ECDSA-P256+ML-DSA-65 signatures behind `pki_pqc_composite` feature, full Vault-shape surface — `roles` + `root/generate` + `intermediate/{generate,set-signed}` + `root/sign-intermediate` + `issue/:role` + `sign/:role` + `sign-verbatim` + `revoke` + `tidy` + `crl` + `config/{ca,crl,urls,issuers,auto-tidy}` + multi-issuer registry (`issuers/*` with rename/delete + role-level pinning + per-issuer CRL) + on-demand `pki/tidy` + auto-tidy scheduler. 12 integration tests + 1 feature-gated composite test, all green. See "Completed Initiatives". |
 | PKI: ACME server endpoints ([spec](features/pki-acme.md)) | Todo |
 | Secret Engine: Transit ([spec](features/transit-secret-engine.md)) | Todo |
-| Secret Engine: TOTP ([spec](features/totp-secret-engine.md)) | Todo |
+| Secret Engine: TOTP ([spec](features/totp-secret-engine.md)) | Done (Phases 1-4: HOTP/TOTP RFC 4226/6238, generate + provider modes, replay protection, QR PNG, GUI `/totp` page with live-code widget + validator, `totp-user` / `totp-admin` baseline policies; pure-Rust `hmac` + `sha1`/`sha2` + `subtle` + `qrcode`/`image`.) |
 | Secret Engine: SSH ([spec](features/ssh-secret-engine.md)) | Done (Phases 1-4: CA Ed25519 + OTP + ML-DSA-65 PQC + GUI) |
+| Secret Engine: OpenLDAP / AD password-rotation ([spec](features/ldap-secret-engine.md)) | Todo |
 | Dynamic Secrets ([spec](features/dynamic-secrets.md)) | Todo |
 | **Infrastructure** | |
 | High Availability (Raft consensus via Hiqlite) | Done |
@@ -104,8 +105,9 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 No active initiatives — all previously-active items have closed out.
 Next up are the items tracked under `Todo` in the Feature Status
 table (Secret Versioning & Soft-Delete, PKI ACME server endpoints,
-Transit / TOTP / SSH secret engines, Dynamic Secrets, HSM Support,
-Kubernetes Integration, Compliance Reporting, Plugin System).
+Transit secret engine, OpenLDAP / AD password-rotation engine,
+Dynamic Secrets, HSM Support, Kubernetes Integration, Compliance
+Reporting, Plugin System).
 
 ## Deferred sub-initiatives
 

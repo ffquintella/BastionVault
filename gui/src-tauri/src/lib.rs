@@ -312,6 +312,15 @@ pub fn run() {
             commands::ssh::ssh_sign,
             commands::ssh::ssh_creds,
             commands::ssh::ssh_lookup,
+            // TOTP Secret Engine (Phase 4 GUI)
+            commands::totp::totp_list_mounts,
+            commands::totp::totp_enable_mount,
+            commands::totp::totp_list_keys,
+            commands::totp::totp_read_key,
+            commands::totp::totp_create_key,
+            commands::totp::totp_delete_key,
+            commands::totp::totp_get_code,
+            commands::totp::totp_validate_code,
             // Identity groups
             commands::groups::list_groups,
             commands::groups::read_group,

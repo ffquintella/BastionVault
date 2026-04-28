@@ -19,6 +19,7 @@ pub mod resources;
 pub mod secrets;
 pub mod ssh;
 pub mod sso_admin;
+pub mod totp;
 pub mod system;
 pub mod users;
 pub mod yubikey;

@@ -18,9 +18,10 @@ The engine is built on a fully **pure-Rust** stack -- no OpenSSL, no `aws-lc-sys
 
 ## Current State
 
-- No TOTP engine exists in the repository. The legacy code base never shipped a TOTP module.
-- The barrier (ChaCha20-Poly1305 in [crates/bv_crypto](crates/bv_crypto/src/aead)) handles at-rest encryption of any engine's storage, so per-key TOTP secrets are already protected once the engine writes them through `req.storage_put`.
-- HMAC-SHA1 / SHA-256 / SHA-512 are available transitively through `bv_crypto`'s dependency tree (`hmac` + `sha1` + `sha2`), so no new top-level crypto crates are strictly required.
+- **Phases 1–4 implemented.** The engine ships at [`src/modules/totp/`](../src/modules/totp/) with the full Vault-compatible `/v1/totp/*` HTTP surface (`keys` LIST + CRUD, `code` GET + POST), generate + provider modes, replay protection on by default, opportunistic replay-cache sweep, and QR PNG rendering. `TotpModule` is registered in [`src/module_manager.rs`](../src/module_manager.rs) so operators can mount via `POST /v1/sys/mounts/totp type=totp`.
+- **Crypto stack is pure Rust** — `hmac` 0.13 + `sha1` / `sha2` 0.11 + `subtle` 2.6, plus `base32` 0.5, `qrcode` 0.14 (image feature), `image` 0.25 (PNG only). No OpenSSL, no `aws-lc-sys`. RFC 4226 Appendix D and RFC 6238 Appendix B test vectors pass byte-for-byte across SHA1/SHA256/SHA512.
+- **GUI shipped (Phase 4).** Tauri commands at [`gui/src-tauri/src/commands/totp.rs`](../gui/src-tauri/src/commands/totp.rs); `/totp` route at [`gui/src/routes/TotpPage.tsx`](../gui/src/routes/TotpPage.tsx) with three tabs (Keys / Live Code / Validate), one-shot QR-display result modal, and a live-code widget with a circular timer driven from `Date.now()` (re-fetches only when the step boundary crosses). Sidebar nav auto-hides when no `totp/` mount exists.
+- **Dedicated baseline policies.** `totp-user` (list keys + fetch/validate codes, no key enroll/delete/read-metadata) and `totp-admin` (full mount management) ship by default — both registered in [`src/modules/policy/policy_store.rs`](../src/modules/policy/policy_store.rs).
 
 ## Design
 
@@ -122,7 +123,7 @@ Per-key (above) plus engine-wide tunables on `POST /v1/sys/mounts/totp/tune`:
 
 ## Implementation Scope
 
-### Phase 1 -- Core Engine
+### Phase 1 -- Core Engine — **Done**
 
 | File | Purpose |
 |---|---|
@@ -144,7 +145,7 @@ base32 = "0.5"    # RFC 4648 base32 encode/decode
 
 (`hmac`, `sha2`, `subtle`, `rand_core`, `getrandom` are already available transitively.)
 
-### Phase 2 -- QR Barcode + Authenticator UX
+### Phase 2 -- QR Barcode + Authenticator UX — **Done**
 
 | File | Purpose |
 |---|---|
@@ -156,14 +157,14 @@ image  = { version = "0.25", default-features = false, features = ["png"] }
 base64 = "0.22"   # already in tree
 ```
 
-### Phase 3 -- Replay Protection + Tidy
+### Phase 3 -- Replay Protection + Tidy — **Done**
 
 | File | Purpose |
 |---|---|
 | `src/modules/totp/backend.rs` (extension) | Replay index storage + per-validate dedupe. |
 | `src/modules/totp/tidy.rs` | Sweeper that drops replay entries older than `(skew + 1) * period`. |
 
-### Phase 4 -- GUI Integration
+### Phase 4 -- GUI Integration — **Done**
 
 | File | Purpose |
 |---|---|

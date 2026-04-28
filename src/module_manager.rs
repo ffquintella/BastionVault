@@ -18,7 +18,7 @@ use crate::{
     modules::{
         files::FilesModule, identity::IdentityModule, kv::KvModule, kv_v2::KvV2Module,
         pki::PkiModule, resource::ResourceModule, resource_group::ResourceGroupModule,
-        ssh::SshModule, system::SystemModule,
+        ssh::SshModule, system::SystemModule, totp::TotpModule,
         Module,
     },
 };
@@ -43,6 +43,7 @@ impl ModuleManager {
             Arc::new(IdentityModule::new(core.clone())),
             Arc::new(ResourceGroupModule::new(core.clone())),
             Arc::new(SshModule::new(core.clone())),
+            Arc::new(TotpModule::new(core.clone())),
             Arc::new(SystemModule::new(core)),
         ];
         self.modules.store(Arc::new(modules));

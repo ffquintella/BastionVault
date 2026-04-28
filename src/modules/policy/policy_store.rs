@@ -407,6 +407,67 @@ path "cubbyhole/*" {
 }
 "#;
 
+/// TOTP user baseline. Grants the day-to-day operations of a TOTP
+/// engine consumer — list keys, fetch a generate-mode code, validate a
+/// provider-mode code — while withholding key creation, deletion, and
+/// (most importantly) any read of seed metadata that would let the
+/// holder enumerate which authenticators are enrolled.
+///
+/// Path scoping uses the conventional `totp/` mount. Operators who
+/// mount at `totp-prod/` or other custom paths grant a per-mount
+/// equivalent on top.
+static TOTP_USER_POLICY_NAME: &str = "totp-user";
+static TOTP_USER_POLICY: &str = r#"
+# --- Self service ---
+path "auth/token/lookup-self" { capabilities = ["read"] }
+path "auth/token/renew-self"  { capabilities = ["update"] }
+path "auth/token/revoke-self" { capabilities = ["update"] }
+path "sys/capabilities-self"  { capabilities = ["update"] }
+path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
+
+# --- TOTP: list which keys exist (names only — metadata is admin) ---
+path "totp/keys" { capabilities = ["list"] }
+
+# --- TOTP: generate-mode code fetch + provider-mode validate ---
+path "totp/code/*" { capabilities = ["read", "update", "create"] }
+
+# --- Private workspace ---
+path "cubbyhole/*" {
+    capabilities = ["create", "read", "update", "delete", "list"]
+}
+"#;
+
+/// TOTP administrator baseline. Grants full management of a TOTP
+/// mount: create + delete keys, read key metadata, fetch and validate
+/// codes. Inherits all `totp-user` capabilities. The seed itself is
+/// only ever returned in the create response when `exported = true` —
+/// even an admin token cannot re-extract a previously-disclosed seed
+/// via these paths, which matches the engine's one-shot-disclosure
+/// guarantee.
+static TOTP_ADMIN_POLICY_NAME: &str = "totp-admin";
+static TOTP_ADMIN_POLICY: &str = r#"
+# --- Self service ---
+path "auth/token/lookup-self" { capabilities = ["read"] }
+path "auth/token/renew-self"  { capabilities = ["update"] }
+path "auth/token/revoke-self" { capabilities = ["update"] }
+path "sys/capabilities-self"  { capabilities = ["update"] }
+path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
+
+# --- Mount discovery (TOTP admin needs to see TOTP mounts) ---
+path "sys/mounts"   { capabilities = ["read", "list"] }
+path "sys/mounts/*" { capabilities = ["read"] }
+
+# --- TOTP: full management ---
+path "totp/*" {
+    capabilities = ["create", "read", "update", "delete", "list"]
+}
+
+# --- Private workspace ---
+path "cubbyhole/*" {
+    capabilities = ["create", "read", "update", "delete", "list"]
+}
+"#;
+
 static _POLICY_STORE_HELP: &str = r#"
 TODO
 "#;
@@ -741,6 +802,11 @@ impl PolicyStore {
         // management. See `features/pki-secret-engine.md`.
         self.load_acl_policy(PKI_USER_POLICY_NAME, PKI_USER_POLICY).await?;
         self.load_acl_policy(PKI_ADMIN_POLICY_NAME, PKI_ADMIN_POLICY).await?;
+        // TOTP delegated baselines. `totp-user` grants list + code
+        // fetch/validate; `totp-admin` grants full mount management.
+        // See `features/totp-secret-engine.md`.
+        self.load_acl_policy(TOTP_USER_POLICY_NAME, TOTP_USER_POLICY).await?;
+        self.load_acl_policy(TOTP_ADMIN_POLICY_NAME, TOTP_ADMIN_POLICY).await?;
         Ok(())
     }
 

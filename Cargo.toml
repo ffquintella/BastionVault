@@ -199,6 +199,17 @@ pkcs8 = { version = "0.10", features = ["pem", "alloc"] }
 # Phases 2 (OTP) and later may add `rsa` / `p256` / `p384` features.
 ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519", "encryption"] }
 ssh-encoding = "0.2"
+# TOTP Secret Engine (RFC 6238). Pure-Rust stack:
+#   * `base32` — RFC 4648 base32 codec for the seed.
+#   * `qrcode` — pure-Rust QR encoder; emits an `image::ImageBuffer`.
+#   * `image`  — only the `png` feature; no decoders, no JPEG/WebP/etc.
+#   * `subtle` — constant-time compare for code validation.
+# `hmac`, `sha1`, `sha2`, `url`, `base64`, `rand`, `hex` are already
+# direct deps. See `features/totp-secret-engine.md`.
+base32 = "0.5"
+qrcode = { version = "0.14", default-features = false, features = ["image"] }
+image  = { version = "0.25", default-features = false, features = ["png"] }
+subtle = "2.6"
 
 [build-dependencies]
 toml = "1.1.2"
