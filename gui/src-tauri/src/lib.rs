@@ -78,6 +78,16 @@ pub fn run() {
         }
     }
 
+    // Pin the rustls process-level CryptoProvider before any TLS-using
+    // code runs. Both `aws_lc_rs` and `ring` end up enabled on rustls
+    // through transitive feature unification (hyper-rustls, quinn,
+    // ureq, reqwest, …), so rustls 0.23 refuses to auto-pick and panics
+    // on first use otherwise. Match the rest of the host crate
+    // (`src/cli/command/server.rs`, `src/storage/hiqlite/mod.rs`) by
+    // pinning aws-lc-rs. `install_default` is idempotent — `let _ =`
+    // because re-install on a hot-reload is fine.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         // `dialog` exposes OS-native file / directory pickers; the
