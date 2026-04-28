@@ -11,6 +11,7 @@
 
 use base64::Engine;
 use bastion_vault::plugins::{
+    metrics::{snapshot_all, PluginMetricsSnapshot},
     ConfigField, ConfigStore, InvokeOutcome, PluginCatalog, PluginManifest, WasmRuntime,
     DEFAULT_FUEL, DEFAULT_MEMORY_BYTES,
 };
@@ -475,4 +476,22 @@ pub async fn plugins_invoke(
         fuel_consumed: output.fuel_consumed,
         response_b64: base64::engine::general_purpose::STANDARD.encode(&output.response),
     })
+}
+
+
+// ── Phase 5.12 — per-plugin metrics for the GUI ──
+
+#[derive(Debug, serde::Serialize)]
+pub struct PluginMetricsListResult {
+    pub snapshots: Vec<PluginMetricsSnapshot>,
+}
+
+/// Snapshot every plugin counter the host has recorded since boot.
+/// Each entry projects the per-plugin slice of the Prometheus
+/// families backing `bvault_plugin_invokes_total`,
+/// `bvault_plugin_fuel_consumed_total`, and
+/// `bvault_plugin_invoke_duration_seconds`.
+#[tauri::command]
+pub async fn plugins_metrics(_state: State<'_, AppState>) -> CmdResult<PluginMetricsListResult> {
+    Ok(PluginMetricsListResult { snapshots: snapshot_all() })
 }

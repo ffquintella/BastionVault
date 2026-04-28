@@ -28,6 +28,7 @@ pub mod manifest;
 pub mod metrics;
 pub mod module_cache;
 pub mod process_runtime;
+pub mod process_supervisor;
 pub mod quarantine;
 pub mod reload_lock;
 pub mod runtime;

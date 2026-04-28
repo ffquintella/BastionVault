@@ -182,6 +182,11 @@ impl PluginCatalog {
     ) -> Result<(), RvError> {
         manifest.validate().map_err(|_| RvError::ErrRequestInvalid)?;
         Self::verify_integrity(manifest, binary)?;
+        // Phase 5.4: host-side ABI version major check. Refuses
+        // cross-major manifests (or future-minor manifests against
+        // an older host) with a clear error.
+        super::manifest::check_abi_compatibility(&manifest.abi_version)
+            .map_err(RvError::ErrString)?;
         // Phase 5.5: net allowlist sanity.
         Self::validate_net_allowlist(manifest)?;
         // Phase 5.2: publisher signature verification (or
@@ -390,6 +395,10 @@ impl PluginCatalog {
         // `core/plugins/<name>/data/` — that's the operator's secret
         // material and the whole point of the quarantine model.
         let _ = super::quarantine::quarantine(storage, name, "", &last_active).await;
+        // Phase 5.3: tear down any long-lived supervised child so a
+        // re-register doesn't inherit a wedged process from the
+        // previous version.
+        super::process_supervisor::shutdown_for(name).await;
         Ok(())
     }
 

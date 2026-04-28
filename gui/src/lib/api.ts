@@ -1103,6 +1103,22 @@ export const pluginsDeleteVersion = (name: string, version: string) =>
 export const pluginsReload = (name: string) =>
   invoke<PluginReloadResult>("plugins_reload", { name });
 
+// Phase 5.12 — per-plugin metrics for the GUI panel.
+export interface PluginMetricsSnapshot {
+  plugin: string;
+  invokes_success: number;
+  invokes_plugin_error: number;
+  invokes_runtime_error: number;
+  fuel_consumed_total: number;
+  invoke_duration_count: number;
+  invoke_duration_sum_secs: number;
+}
+
+export const pluginsMetrics = () =>
+  invoke<{ snapshots: PluginMetricsSnapshot[] }>("plugins_metrics").then(
+    (r) => r.snapshots,
+  );
+
 // ── PKI Secret Engine ─────────────────────────────────────────────
 
 export const pkiListMounts = () => invoke<PkiMountInfo[]>("pki_list_mounts");

@@ -178,9 +178,8 @@ impl Backend for PluginLogicalBackend {
                     })
             }
             RuntimeKind::Process => {
-                let runtime = ProcessRuntime::new();
-                runtime
-                    .invoke_with_config(
+                if manifest.capabilities.long_lived {
+                    super::process_supervisor::invoke_with_config(
                         &manifest,
                         &binary,
                         &envelope_bytes,
@@ -190,10 +189,28 @@ impl Backend for PluginLogicalBackend {
                     .await
                     .map_err(|e| {
                         RvError::ErrOther(::anyhow::anyhow!(
-                            "plugin {} (process) invoke failed: {e:?}",
+                            "plugin {} (process, long-lived) invoke failed: {e:?}",
                             self.plugin_name,
                         ))
                     })
+                } else {
+                    let runtime = ProcessRuntime::new();
+                    runtime
+                        .invoke_with_config(
+                            &manifest,
+                            &binary,
+                            &envelope_bytes,
+                            Some(self.core.clone()),
+                            config,
+                        )
+                        .await
+                        .map_err(|e| {
+                            RvError::ErrOther(::anyhow::anyhow!(
+                                "plugin {} (process) invoke failed: {e:?}",
+                                self.plugin_name,
+                            ))
+                        })
+                }
             }
         };
         let elapsed = started.elapsed().as_secs_f64();

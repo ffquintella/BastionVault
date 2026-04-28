@@ -1352,6 +1352,10 @@ async fn sys_plugins_reload_handler(
         };
         let cache = crate::plugins::ModuleCache::shared().map_err(|_| RvError::ErrUnknown)?;
         let evicted = cache.invalidate(&name);
+        // Phase 5.3: also tear down any long-lived supervised child
+        // so the new version doesn't share the previous version's
+        // process. The next invoke respawns under the breaker.
+        crate::plugins::process_supervisor::shutdown_for(&name).await;
         // The reload guard drops here; queued invocations resume
         // against the freshly-compiled module on next call.
         Ok(response_json_ok(

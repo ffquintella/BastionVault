@@ -200,6 +200,7 @@ pub fn run() {
             commands::plugins::plugins_activate_version,
             commands::plugins::plugins_delete_version,
             commands::plugins::plugins_reload,
+            commands::plugins::plugins_metrics,
             // Secrets
             commands::secrets::list_secrets,
             commands::secrets::read_secret,

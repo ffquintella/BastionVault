@@ -96,6 +96,21 @@ pub struct Capabilities {
     /// (Reserved, process-runtime only.) Allowed outbound hosts.
     #[serde(default)]
     pub allowed_hosts: Vec<String>,
+    /// Phase 5.3: when `runtime = "process"`, opt into the long-lived
+    /// supervised runtime. The host spawns one persistent child per
+    /// plugin name, reuses it across invocations, and restarts it on
+    /// crash with exponential backoff. Default `false` keeps the
+    /// existing single-shot semantics — fresh process per invoke —
+    /// so existing plugins (including the SDK reference plugins in
+    /// `plugins-ext/`) keep working unchanged.
+    ///
+    /// Plugins that opt in must implement the long-lived dispatch
+    /// protocol: receive `Init` once, then a stream of `invoke`
+    /// messages each producing one `invoke_done`. Plugin authors
+    /// targeting this mode use `bastion_plugin_sdk::run_long_lived()`
+    /// (the `register!` macro emits a single-shot loop).
+    #[serde(default)]
+    pub long_lived: bool,
 }
 
 fn default_true() -> bool {
@@ -152,6 +167,54 @@ pub struct PluginManifest {
 
 fn default_abi_version() -> String {
     "1.0".to_string()
+}
+
+/// The current host-supported `PluginService` ABI major/minor.
+/// Bumped per the spec at most once per release. Plugins targeting
+/// `(major, ≤ HOST_ABI_MINOR)` are accepted; cross-major mismatches
+/// are refused with a compatibility-matrix link in the error.
+pub const HOST_ABI_MAJOR: u32 = 1;
+pub const HOST_ABI_MINOR: u32 = 0;
+
+/// Phase 5.4 — parse `"major.minor"` from a manifest. Returns
+/// `Err(_)` for any non-numeric or missing component so a typo'd
+/// version field never silently coerces to `(0, 0)`.
+pub fn parse_abi(s: &str) -> Result<(u32, u32), String> {
+    let (major, minor) = s
+        .split_once('.')
+        .ok_or_else(|| format!("abi_version `{s}` is not in `MAJOR.MINOR` form"))?;
+    let major: u32 = major
+        .parse()
+        .map_err(|e| format!("abi_version major `{major}` is not a u32 ({e})"))?;
+    let minor: u32 = minor
+        .parse()
+        .map_err(|e| format!("abi_version minor `{minor}` is not a u32 ({e})"))?;
+    Ok((major, minor))
+}
+
+/// Phase 5.4 — host-side compatibility check. Accepts plugins with
+/// the same major and a minor `≤ HOST_ABI_MINOR`. Cross-major or
+/// future-minor versions return a clear error with a pointer to the
+/// host's supported version. This is the host's promise to plugin
+/// authors: a `(1, 0)` plugin keeps working until the host bumps to
+/// `(2, *)`, at which point the spec commits to a one-release window
+/// where the previous major still loads behind a feature flag.
+pub fn check_abi_compatibility(plugin_abi: &str) -> Result<(), String> {
+    let (maj, min) = parse_abi(plugin_abi)?;
+    if maj != HOST_ABI_MAJOR {
+        return Err(format!(
+            "plugin abi_version `{plugin_abi}` (major {maj}) is not compatible with host \
+             PluginService major {HOST_ABI_MAJOR}; see features/plugin-system.md \
+             § \"Versioning\" for the migration window"
+        ));
+    }
+    if min > HOST_ABI_MINOR {
+        return Err(format!(
+            "plugin abi_version `{plugin_abi}` (minor {min}) is newer than host minor {HOST_ABI_MINOR}; \
+             upgrade BastionVault before loading this plugin"
+        ));
+    }
+    Ok(())
 }
 
 impl PluginManifest {
@@ -214,6 +277,32 @@ mod tests {
     #[test]
     fn validates_well_formed_manifest() {
         assert!(fixture().validate().is_ok());
+    }
+
+    /// Phase 5.4 — host-side ABI compatibility check.
+    #[test]
+    fn abi_compatibility_accepts_same_major_lower_minor() {
+        assert!(super::check_abi_compatibility("1.0").is_ok());
+    }
+
+    #[test]
+    fn abi_compatibility_rejects_cross_major() {
+        let err = super::check_abi_compatibility("2.0").unwrap_err();
+        assert!(err.contains("major 2"));
+        assert!(err.contains("major 1"));
+    }
+
+    #[test]
+    fn abi_compatibility_rejects_future_minor() {
+        let err = super::check_abi_compatibility("1.999").unwrap_err();
+        assert!(err.contains("minor 999"));
+    }
+
+    #[test]
+    fn abi_compatibility_rejects_malformed() {
+        assert!(super::check_abi_compatibility("not-a-version").is_err());
+        assert!(super::check_abi_compatibility("1").is_err());
+        assert!(super::check_abi_compatibility("1.x").is_err());
     }
 
     #[test]

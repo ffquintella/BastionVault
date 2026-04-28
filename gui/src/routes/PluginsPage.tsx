@@ -109,6 +109,8 @@ export function PluginsPage() {
             </div>
           )}
         </Card>
+
+        <PluginMetricsPanel />
       </div>
 
       {showRegister && (
@@ -951,5 +953,103 @@ function VersionsModal({
         cached compile.
       </p>
     </Modal>
+  );
+}
+
+// ── Phase 5.12 — per-plugin metrics panel ─────────────────────────
+//
+// Polls `plugins_metrics` (which projects the per-plugin slices of
+// `bvault_plugin_invokes_total`, `bvault_plugin_fuel_consumed_total`,
+// `bvault_plugin_invoke_duration_seconds` from the host's Prometheus
+// registry) on a 5-second cadence. The full Prometheus surface stays
+// available at `/sys/metrics`; this panel is a quick at-a-glance
+// view for desktop operators who don't run a separate scrape.
+
+function PluginMetricsPanel() {
+  const { toast } = useToast();
+  const [snapshots, setSnapshots] = useState<api.PluginMetricsSnapshot[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function tick() {
+      try {
+        const list = await api.pluginsMetrics();
+        if (!cancelled) {
+          setSnapshots(list);
+          setLoading(false);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          toast("error", extractError(e));
+          setLoading(false);
+        }
+      }
+    }
+    tick();
+    const id = window.setInterval(tick, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [toast]);
+
+  return (
+    <Card title="Per-plugin metrics">
+      {loading ? (
+        <p className="text-sm text-[var(--color-text-muted)]">Loading…</p>
+      ) : snapshots.length === 0 ? (
+        <p className="text-sm text-[var(--color-text-muted)]">
+          No invokes recorded since boot. Mount a plugin and invoke it to
+          populate counters.
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-sm">
+            <thead>
+              <tr className="text-left text-[var(--color-text-muted)] border-b border-[var(--color-border)]">
+                <th className="py-1 pr-4">Plugin</th>
+                <th className="py-1 pr-4">Success</th>
+                <th className="py-1 pr-4">Plugin error</th>
+                <th className="py-1 pr-4">Runtime error</th>
+                <th className="py-1 pr-4">Fuel consumed</th>
+                <th className="py-1 pr-4">Avg latency</th>
+              </tr>
+            </thead>
+            <tbody>
+              {snapshots.map((s) => {
+                const avgMs =
+                  s.invoke_duration_count === 0
+                    ? null
+                    : (s.invoke_duration_sum_secs / s.invoke_duration_count) *
+                      1000;
+                return (
+                  <tr
+                    key={s.plugin}
+                    className="border-b border-[var(--color-border)]/40"
+                  >
+                    <td className="py-1 pr-4 font-mono">{s.plugin}</td>
+                    <td className="py-1 pr-4">{s.invokes_success}</td>
+                    <td className="py-1 pr-4">{s.invokes_plugin_error}</td>
+                    <td className="py-1 pr-4">{s.invokes_runtime_error}</td>
+                    <td className="py-1 pr-4">
+                      {s.fuel_consumed_total.toLocaleString()}
+                    </td>
+                    <td className="py-1 pr-4">
+                      {avgMs === null ? "—" : `${avgMs.toFixed(1)} ms`}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <p className="text-xs text-[var(--color-text-muted)] mt-2">
+        Refreshes every 5 seconds. The full Prometheus surface — including
+        latency-bucket histograms — is available at{" "}
+        <code className="font-mono">/sys/metrics</code>.
+      </p>
+    </Card>
   );
 }

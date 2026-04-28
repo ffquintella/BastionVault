@@ -350,7 +350,7 @@ where
 /// WASM runtime exposes via `register_host_imports`. Returns either a
 /// JSON value (the "result" payload) or a string error the host sends
 /// back as `host_reply.error`.
-async fn handle_host_call(
+pub(super) async fn handle_host_call(
     manifest: &PluginManifest,
     core: Option<&Arc<Core>>,
     config: &std::collections::BTreeMap<String, String>,
@@ -530,7 +530,7 @@ fn rebase_key(manifest: &PluginManifest, requested: &str) -> Option<String> {
     ))
 }
 
-fn write_temp_executable(name: &str, binary: &[u8]) -> Result<std::path::PathBuf, ProcessRuntimeError> {
+pub(super) fn write_temp_executable(name: &str, binary: &[u8]) -> Result<std::path::PathBuf, ProcessRuntimeError> {
     use std::io::Write;
     let mut path = std::env::temp_dir();
     let stem = name
@@ -557,7 +557,7 @@ fn write_temp_executable(name: &str, binary: &[u8]) -> Result<std::path::PathBuf
     Ok(path)
 }
 
-fn generate_bootstrap_token() -> String {
+pub(super) fn generate_bootstrap_token() -> String {
     use rand::Rng;
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
