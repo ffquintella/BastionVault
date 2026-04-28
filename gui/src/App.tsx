@@ -19,6 +19,7 @@ import { ExchangePage } from "./routes/ExchangePage";
 import { PkiPage } from "./routes/PkiPage";
 import { SshPage } from "./routes/SshPage";
 import { TotpPage } from "./routes/TotpPage";
+import { LdapPage } from "./routes/LdapPage";
 import { PluginsPage } from "./routes/PluginsPage";
 import { useAuthStore } from "./stores/authStore";
 import { ToastProvider } from "./components/ui";
@@ -113,6 +114,10 @@ export default function App() {
             <Route
               path="/totp"
               element={<ProtectedRoute><TotpPage /></ProtectedRoute>}
+            />
+            <Route
+              path="/ldap"
+              element={<ProtectedRoute><LdapPage /></ProtectedRoute>}
             />
           </Routes>
         </HashRouter>

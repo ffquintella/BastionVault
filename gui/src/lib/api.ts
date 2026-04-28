@@ -102,6 +102,15 @@ import type {
   TotpCreateKeyResult,
   TotpCodeResult,
   TotpValidateResult,
+  LdapMountInfo,
+  LdapConfigInfo,
+  LdapWriteConfigRequest,
+  LdapStaticRole,
+  LdapStaticCred,
+  LdapRotateRoleResult,
+  LdapLibrarySet,
+  LdapCheckOutResult,
+  LdapLibraryStatus,
 } from "./types";
 
 // Connection
@@ -1243,3 +1252,52 @@ export const totpGetCode = (mount: string, name: string) =>
   invoke<TotpCodeResult>("totp_get_code", { mount, name });
 export const totpValidateCode = (mount: string, name: string, code: string) =>
   invoke<TotpValidateResult>("totp_validate_code", { mount, name, code });
+
+// ── OpenLDAP / AD password-rotation engine (Phase 4) ────────────
+
+export const ldapListMounts = () => invoke<LdapMountInfo[]>("ldap_list_mounts");
+export const ldapEnableMount = (path: string) =>
+  invoke<void>("ldap_enable_mount", { path });
+
+export const ldapReadConfig = (mount: string) =>
+  invoke<LdapConfigInfo | null>("ldap_read_config", { mount });
+export const ldapWriteConfig = (request: LdapWriteConfigRequest) =>
+  invoke<void>("ldap_write_config", { request });
+export const ldapDeleteConfig = (mount: string) =>
+  invoke<void>("ldap_delete_config", { mount });
+export const ldapRotateRoot = (mount: string) =>
+  invoke<void>("ldap_rotate_root", { mount });
+
+export const ldapListStaticRoles = (mount: string) =>
+  invoke<string[]>("ldap_list_static_roles", { mount });
+export const ldapReadStaticRole = (mount: string, name: string) =>
+  invoke<LdapStaticRole | null>("ldap_read_static_role", { mount, name });
+export const ldapWriteStaticRole = (
+  mount: string,
+  name: string,
+  role: LdapStaticRole,
+) => invoke<void>("ldap_write_static_role", { mount, name, role });
+export const ldapDeleteStaticRole = (mount: string, name: string) =>
+  invoke<void>("ldap_delete_static_role", { mount, name });
+export const ldapReadStaticCred = (mount: string, name: string) =>
+  invoke<LdapStaticCred>("ldap_read_static_cred", { mount, name });
+export const ldapRotateRole = (mount: string, name: string) =>
+  invoke<LdapRotateRoleResult>("ldap_rotate_role", { mount, name });
+
+export const ldapListLibraries = (mount: string) =>
+  invoke<string[]>("ldap_list_libraries", { mount });
+export const ldapReadLibrary = (mount: string, set: string) =>
+  invoke<LdapLibrarySet | null>("ldap_read_library", { mount, set });
+export const ldapWriteLibrary = (
+  mount: string,
+  set: string,
+  config: LdapLibrarySet,
+) => invoke<void>("ldap_write_library", { mount, set, config });
+export const ldapDeleteLibrary = (mount: string, set: string) =>
+  invoke<void>("ldap_delete_library", { mount, set });
+export const ldapCheckOut = (mount: string, set: string, ttl?: number) =>
+  invoke<LdapCheckOutResult>("ldap_check_out", { mount, set, ttl });
+export const ldapCheckIn = (mount: string, set: string, account?: string) =>
+  invoke<void>("ldap_check_in", { mount, set, account });
+export const ldapLibraryStatus = (mount: string, set: string) =>
+  invoke<LdapLibraryStatus>("ldap_library_status", { mount, set });

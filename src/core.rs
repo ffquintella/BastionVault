@@ -600,6 +600,16 @@ impl Core {
             let _ = crate::modules::pki::scheduler::start_pki_tidy_scheduler(core_arc);
         }
 
+        // Boot the OpenLDAP / AD static-role auto-rotation scheduler
+        // (Phase 3). Same lifecycle pattern: detached task, self-skip
+        // when sealed, single-process scheduler. Tick fires every 60s;
+        // per-role cadence comes from each role's persisted
+        // `rotation_period`. Roles with `rotation_period = 0` are
+        // skipped (manual rotation only).
+        if let Some(core_arc) = self.self_ptr.upgrade() {
+            let _ = crate::modules::ldap::scheduler::start_ldap_rotation_scheduler(core_arc);
+        }
+
         Ok(())
     }
 

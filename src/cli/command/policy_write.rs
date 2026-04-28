@@ -108,12 +108,12 @@ mod test {
         #[cfg(windows)]
         assert_eq!(
             ret.unwrap(),
-            "default    \r\nmy-policy    \r\npki-admin    \r\npki-user    \r\nsecret-author    \r\nstandard-user    \r\nstandard-user-readonly    \r\ntotp-admin    \r\ntotp-user    \r\ntransit-admin    \r\ntransit-user    \r\nroot    \r\n",
+            "default    \r\nldap-admin    \r\nldap-user    \r\nmy-policy    \r\npki-admin    \r\npki-user    \r\nsecret-author    \r\nstandard-user    \r\nstandard-user-readonly    \r\ntotp-admin    \r\ntotp-user    \r\ntransit-admin    \r\ntransit-user    \r\nroot    \r\n",
         );
         #[cfg(not(windows))]
         assert_eq!(
             ret.unwrap(),
-            "default    \nmy-policy    \npki-admin    \npki-user    \nsecret-author    \nstandard-user    \nstandard-user-readonly    \ntotp-admin    \ntotp-user    \ntransit-admin    \ntransit-user    \nroot    \n",
+            "default    \nldap-admin    \nldap-user    \nmy-policy    \npki-admin    \npki-user    \nsecret-author    \nstandard-user    \nstandard-user-readonly    \ntotp-admin    \ntotp-user    \ntransit-admin    \ntransit-user    \nroot    \n",
         );
 
         // read my-policy with table format
@@ -132,12 +132,12 @@ mod test {
         #[cfg(windows)]
         assert_eq!(
             ret.unwrap(),
-            "default    \r\nmy-policy    \r\nmy-policy1    \r\npki-admin    \r\npki-user    \r\nsecret-author    \r\nstandard-user    \r\nstandard-user-readonly    \r\nroot    \r\n",
+            "default    \r\nldap-admin    \r\nldap-user    \r\nmy-policy    \r\nmy-policy1    \r\npki-admin    \r\npki-user    \r\nsecret-author    \r\nstandard-user    \r\nstandard-user-readonly    \r\ntotp-admin    \r\ntotp-user    \r\ntransit-admin    \r\ntransit-user    \r\nroot    \r\n",
         );
         #[cfg(not(windows))]
         assert_eq!(
             ret.unwrap(),
-            "default    \nmy-policy    \nmy-policy1    \npki-admin    \npki-user    \nsecret-author    \nstandard-user    \nstandard-user-readonly    \nroot    \n",
+            "default    \nldap-admin    \nldap-user    \nmy-policy    \nmy-policy1    \npki-admin    \npki-user    \nsecret-author    \nstandard-user    \nstandard-user-readonly    \ntotp-admin    \ntotp-user    \ntransit-admin    \ntransit-user    \nroot    \n",
         );
 
         // read my-policy1 with table format

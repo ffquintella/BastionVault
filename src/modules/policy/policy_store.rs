@@ -538,6 +538,67 @@ path "cubbyhole/*" {
 }
 "#;
 
+/// OpenLDAP / AD password-rotation user baseline. Grants the
+/// day-to-day operations of an `openldap` engine consumer:
+///   * read static credentials (returns the current password),
+///   * force a static-role rotation,
+///   * check out / check in pool accounts + read pool status,
+///   * list configured roles + sets.
+/// Does NOT grant role / set lifecycle, connection config, or the
+/// `rotate-root` endpoint — those are admin-only.
+static LDAP_USER_POLICY_NAME: &str = "ldap-user";
+static LDAP_USER_POLICY: &str = r#"
+# --- Self service ---
+path "auth/token/lookup-self" { capabilities = ["read"] }
+path "auth/token/renew-self"  { capabilities = ["update"] }
+path "auth/token/revoke-self" { capabilities = ["update"] }
+path "sys/capabilities-self"  { capabilities = ["update"] }
+path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
+
+# --- LDAP: read static credentials + force rotation ---
+path "openldap/static-role"      { capabilities = ["list"] }
+path "openldap/static-cred/*"    { capabilities = ["read"] }
+path "openldap/rotate-role/*"    { capabilities = ["create", "update"] }
+
+# --- LDAP: library check-out / check-in / status ---
+path "openldap/library"          { capabilities = ["list"] }
+path "openldap/library/*/check-out" { capabilities = ["create", "update"] }
+path "openldap/library/*/check-in"  { capabilities = ["create", "update"] }
+path "openldap/library/*/status"    { capabilities = ["read"] }
+
+# --- Private workspace ---
+path "cubbyhole/*" {
+    capabilities = ["create", "read", "update", "delete", "list"]
+}
+"#;
+
+/// LDAP administrator baseline. Grants full management of an
+/// `openldap` mount: connection config CRUD, role CRUD, library
+/// CRUD, `rotate-root`, plus everything `ldap-user` grants.
+static LDAP_ADMIN_POLICY_NAME: &str = "ldap-admin";
+static LDAP_ADMIN_POLICY: &str = r#"
+# --- Self service ---
+path "auth/token/lookup-self" { capabilities = ["read"] }
+path "auth/token/renew-self"  { capabilities = ["update"] }
+path "auth/token/revoke-self" { capabilities = ["update"] }
+path "sys/capabilities-self"  { capabilities = ["update"] }
+path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
+
+# --- Mount discovery ---
+path "sys/mounts"   { capabilities = ["read", "list"] }
+path "sys/mounts/*" { capabilities = ["read"] }
+
+# --- LDAP: full management ---
+path "openldap/*" {
+    capabilities = ["create", "read", "update", "delete", "list"]
+}
+
+# --- Private workspace ---
+path "cubbyhole/*" {
+    capabilities = ["create", "read", "update", "delete", "list"]
+}
+"#;
+
 static _POLICY_STORE_HELP: &str = r#"
 TODO
 "#;
@@ -884,6 +945,9 @@ impl PolicyStore {
         // See `features/transit-secret-engine.md`.
         self.load_acl_policy(TRANSIT_USER_POLICY_NAME, TRANSIT_USER_POLICY).await?;
         self.load_acl_policy(TRANSIT_ADMIN_POLICY_NAME, TRANSIT_ADMIN_POLICY).await?;
+        // OpenLDAP / AD delegated baselines.
+        self.load_acl_policy(LDAP_USER_POLICY_NAME, LDAP_USER_POLICY).await?;
+        self.load_acl_policy(LDAP_ADMIN_POLICY_NAME, LDAP_ADMIN_POLICY).await?;
         Ok(())
     }
 

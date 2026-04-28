@@ -50,7 +50,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Secret Engine: Transit ([spec](features/transit-secret-engine.md)) | Done (Phases 1-4: symmetric AEAD `chacha20-poly1305` + HMAC + random/hash + `ed25519` sign/verify + PQC `ml-kem-768` datakey wrap/unwrap + PQC `ml-dsa-44/65/87` sign/verify, versioned keys with rotate / config / trim, `bvault:vN[:pqc:<algo>]:<b64>` framing, `transit-user` / `transit-admin` baseline policies, **derived + convergent encryption** (HKDF subkey + domain-separated deterministic nonce), **BYOK import** behind `transit_byok` feature (per-mount ML-KEM-768 wrapping key + `/import` + `/import_version`), **hybrid composite signing** `hybrid-ed25519+ml-dsa-65` + **hybrid KEM** `hybrid-x25519+ml-kem-768` behind `transit_pqc_hybrid` feature. RSA / ECDSA classical types remain a separate follow-up.) |
 | Secret Engine: TOTP ([spec](features/totp-secret-engine.md)) | Done (Phases 1-4: HOTP/TOTP RFC 4226/6238, generate + provider modes, replay protection, QR PNG, GUI `/totp` page with live-code widget + validator, `totp-user` / `totp-admin` baseline policies; pure-Rust `hmac` + `sha1`/`sha2` + `subtle` + `qrcode`/`image`.) |
 | Secret Engine: SSH ([spec](features/ssh-secret-engine.md)) | Done (Phases 1-4: CA Ed25519 + OTP + ML-DSA-65 PQC + GUI) |
-| Secret Engine: OpenLDAP / AD password-rotation ([spec](features/ldap-secret-engine.md)) | Todo |
+| Secret Engine: OpenLDAP / AD password-rotation ([spec](features/ldap-secret-engine.md)) | Done (Phases 1-4: connection config + static-role rotate + library check-out/check-in + rotate-root + auto-rotation scheduler + **GUI** (`/ldap` page with Connection / Static Roles / Library tabs, 19 Tauri commands), pure-Rust `ldap3` 0.12 with `tls-rustls-aws-lc-rs`, TLS-only by default with two-flag `insecure_tls` opt-in, AD `unicodePwd` UTF-16LE-quoted encoding pinned against MSDN, per-set `Mutex` gate on check-out, constant-time identity guard on check-in, 24-char built-in password generator with structural AD complexity, `ldap-user` / `ldap-admin` baseline policies. Phase 5 identity-aware affinity is an independent stretch follow-up.) |
 | Dynamic Secrets ([spec](features/dynamic-secrets.md)) | Todo |
 | **Infrastructure** | |
 | High Availability (Raft consensus via Hiqlite) | Done |
@@ -105,11 +105,8 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 No active initiatives — all previously-active items have closed out.
 Next up are the items tracked under `Todo` in the Feature Status
 table (Secret Versioning & Soft-Delete, PKI ACME server endpoints,
-OpenLDAP / AD password-rotation engine, Dynamic Secrets, HSM Support,
-Kubernetes Integration, Compliance Reporting). The **Plugin System
-Phase 5 gap-list** in `features/plugin-system.md` is also queue-ready
-now that the Transit engine has shipped — `bv.crypto_*` and ML-DSA-65
-publisher signature verification are unblocked.
+Dynamic Secrets, HSM Support, Kubernetes Integration, Compliance
+Reporting).
 
 ## Deferred sub-initiatives
 

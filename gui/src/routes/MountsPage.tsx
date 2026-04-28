@@ -95,6 +95,14 @@ const DEFAULT_ENGINE_SPECS: DefaultEngineSpec[] = [
     gates: "Requires transit-user / transit-admin policy. No GUI page yet — drive via API or CLI.",
   },
   {
+    path: "openldap/",
+    label: "OpenLDAP / AD",
+    logicalType: "openldap",
+    description:
+      "Password rotation for OpenLDAP / Active Directory service accounts. Static-role rotation + library check-out / check-in.",
+    gates: "OpenLDAP nav (also requires ldap-user / ldap-admin policy)",
+  },
+  {
     path: "identity/",
     label: "Identity",
     logicalType: "identity",

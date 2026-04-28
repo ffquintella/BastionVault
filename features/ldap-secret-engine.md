@@ -55,7 +55,17 @@ configured `directory_type`.
 
 ## Current State
 
-- No LDAP / AD engine exists in the repository.
+- **Phases 1–4 implemented.** Engine at [`src/modules/ldap/`](../src/modules/ldap/) + desktop GUI at [`gui/src/routes/LdapPage.tsx`](../gui/src/routes/LdapPage.tsx) with three tabs (Connection / Static Roles / Library) backed by 19 Tauri commands in [`gui/src-tauri/src/commands/ldap.rs`](../gui/src-tauri/src/commands/ldap.rs). The engine ships with the full Vault-compatible `/v1/openldap/*` HTTP surface (connection config CRUD, static-role CRUD + LIST, `static-cred` read, `rotate-role`, library set CRUD + LIST, `library/<set>/check-{out,in}`, `library/<set>/status`, `rotate-root`). `LdapModule` is registered in [`src/module_manager.rs`](../src/module_manager.rs); operators mount via `POST /v1/sys/mounts/openldap type=openldap`.
+- **Pure-Rust LDAP client**: new direct dep `ldap3 = "0.12"` with `tls-rustls-aws-lc-rs` so it consumes the same rustls + aws_lc_rs provider as every other TLS surface in the project. No `libldap` / `libsasl` / OpenSSL.
+- **Directory dispatcher** ([`src/modules/ldap/client.rs`](../src/modules/ldap/client.rs)) — `Directory` trait with `OpenLdapDirectory` (Modify Replace `userPassword` UTF-8) and `ActiveDirectoryDirectory` (Modify Replace `unicodePwd` UTF-16LE-quoted-string). The AD encoder is pinned against the MSDN reference byte sequence.
+- **TLS-only by default**: plain `ldap://` requires either `starttls = true` or the **two-flag** `insecure_tls = true` + `acknowledge_insecure_tls = true` opt-in.
+- **Rotation atomicity**: directory write before storage write on every rotation.
+- **Library concurrency**: per-set `tokio::sync::Mutex` serialises check-out attempts; the constant-time identity guard on check-in uses `subtle::ConstantTimeEq`.
+- **Built-in password generator** ([`src/modules/ldap/password.rs`](../src/modules/ldap/password.rs)) — 24-char output structurally satisfies the AD complexity rule by seeding one character from each class before filling from the union pool, then shuffling. Operator-supplied generator policies are spec'd as a follow-up; the field is persisted today and ignored at generation time.
+- **Dedicated baseline policies**: `ldap-user` (daily ops without lifecycle authority) and `ldap-admin` (full mount management) ship by default.
+- **15 unit tests pass** — config validation including the TLS opt-in matrix, policy serde + library invariants, password-generator class invariants over 1000 generations, AD `unicodePwd` MSDN byte sequence, OpenLDAP / AD modify-op shape.
+- **Phase 5 (identity-aware affinity)** is an independent stretch follow-up; everything else in the spec is in.
+- **Auto-rotation scheduler shipped** ([`src/modules/ldap/scheduler.rs`](../src/modules/ldap/scheduler.rs)) — single tokio task started from `Core::post_unseal`, ticks every 60 s, walks every `openldap` mount, finds static-roles whose `last_vault_rotation_unix + rotation_period.as_secs() <= now`, and rotates them. **One bind per mount per tick** when at least one role is due (mounts with no due roles never open a connection that tick); directory-write-before-storage-write atomicity preserved. Roles with `rotation_period = 0` are skipped (manual rotation only). Self-skips when sealed; single-process scheduler today, HA leader gating a follow-up alongside the same gap in `pki/auto-tidy` + `scheduled_exports`.
 - The barrier (ChaCha20-Poly1305 in
   [crates/bv_crypto](../crates/bv_crypto/src/aead)) handles at-rest
   encryption of any engine's storage, so per-account passwords are
@@ -251,7 +261,7 @@ operator tuning.
 
 ## Implementation Scope
 
-### Phase 1 -- Static Roles + Connection Plumbing
+### Phase 1 -- Static Roles + Connection Plumbing — **Done**
 
 | File | Purpose |
 |---|---|
@@ -274,7 +284,7 @@ ldap3 = { version = "0.11", default-features = false, features = ["tls-rustls", 
 rustls-native-certs = "0.8"
 ```
 
-### Phase 2 -- Library / Check-Out Mode
+### Phase 2 -- Library / Check-Out Mode — **Done**
 
 | File | Purpose |
 |---|---|
@@ -282,7 +292,7 @@ rustls-native-certs = "0.8"
 | `src/modules/ldap/path_library.rs` | `/library` CRUD + `/check-out` + `/check-in` + `/status`. |
 | `src/modules/ldap/lease.rs` | Lease `renew_handler` (refuse — check-outs are not renewable) + `revoke_handler` (rotate + release). |
 
-### Phase 3 -- Auto-Rotation Scheduler
+### Phase 3 -- Auto-Rotation Scheduler — **Done**
 
 | File | Purpose |
 |---|---|
@@ -293,7 +303,7 @@ The scheduler hooks off `Core::post_unseal` (same hook the planned
 PKI auto-tidy uses). On HA, the leader-only `hiqlite::dlock` lock
 guards the tick so two nodes don't both rotate.
 
-### Phase 4 -- GUI Integration
+### Phase 4 -- GUI Integration — **Done**
 
 | File | Purpose |
 |---|---|
@@ -301,7 +311,7 @@ guards the tick so two nodes don't both rotate.
 | `gui/src/routes/LdapPage.tsx` | Three-tab page: **Connection** (config + bind probe + rotate-root), **Static Roles** (CRUD + read-current-password with masked-value reveal + force-rotate + countdown to next auto-rotation), **Library** (set CRUD + per-account status table with check-out / check-in buttons + per-mount audit timeline). |
 | `gui/src/components/LdapStatusBadge.tsx` | "Connection OK / Bind failed / TLS error" indicator surfaced on the connection card and as a header chip on every page tab. |
 
-### Phase 5 -- Identity-Aware Check-Out Affinity (Stretch)
+### Phase 5 -- Identity-Aware Check-Out Affinity (Stretch) — **Pending**
 
 When the same entity checks out from the same set repeatedly within
 a short window, hand back the same account (still rotated). Reduces

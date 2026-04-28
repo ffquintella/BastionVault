@@ -919,3 +919,95 @@ export interface TotpCodeResult {
 export interface TotpValidateResult {
   valid: boolean;
 }
+
+// ── OpenLDAP / AD password-rotation engine (Phase 4) ────────────
+
+export interface LdapMountInfo {
+  path: string;
+}
+
+export interface LdapConfigInfo {
+  url: string;
+  binddn: string;
+  userdn: string;
+  /** `openldap` | `active_directory` */
+  directory_type: string;
+  password_policy: string;
+  request_timeout: number;
+  starttls: boolean;
+  /** `tls12` | `tls13` */
+  tls_min_version: string;
+  insecure_tls: boolean;
+  userattr: string;
+  /** Always empty on read — bindpass is redacted server-side. */
+  bindpass: string;
+}
+
+export interface LdapWriteConfigRequest {
+  mount: string;
+  url: string;
+  binddn: string;
+  /** Empty preserves the previous value. Set to a non-empty string to rotate. */
+  bindpass?: string;
+  userdn?: string;
+  /** `openldap` | `active_directory` */
+  directory_type?: string;
+  password_policy?: string;
+  request_timeout?: number;
+  starttls?: boolean;
+  /** `tls12` | `tls13` */
+  tls_min_version?: string;
+  insecure_tls?: boolean;
+  /** Required true alongside `insecure_tls = true`. */
+  acknowledge_insecure_tls?: boolean;
+  userattr?: string;
+}
+
+export interface LdapStaticRole {
+  dn: string;
+  username: string;
+  /** Auto-rotation cadence in seconds. 0 = manual rotation only. */
+  rotation_period: number;
+  password_policy: string;
+}
+
+export interface LdapStaticCred {
+  username: string;
+  dn: string;
+  password: string;
+  last_vault_rotation_unix: number;
+  /** Seconds until next auto-rotation. `null` for manual-only roles. */
+  ttl_secs: number | null;
+}
+
+export interface LdapRotateRoleResult {
+  username: string;
+  dn: string;
+  password: string;
+  last_vault_rotation_unix: number;
+}
+
+export interface LdapLibrarySet {
+  service_account_names: string[];
+  ttl: number;
+  max_ttl: number;
+  disable_check_in_enforcement: boolean;
+}
+
+export interface LdapCheckOutResult {
+  service_account_name: string;
+  password: string;
+  lease_id: string;
+  ttl_secs: number;
+}
+
+export interface LdapLibraryStatusEntry {
+  account: string;
+  lease_id: string;
+  expires_at_unix: number;
+}
+
+export interface LdapLibraryStatus {
+  checked_out: LdapLibraryStatusEntry[];
+  available: string[];
+}

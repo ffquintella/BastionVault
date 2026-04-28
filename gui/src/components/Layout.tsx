@@ -70,6 +70,15 @@ const userNav: NavItem[] = [
     requires: ["root", "admin", "totp-admin", "totp-user"],
     requiresMountType: "totp",
   },
+  // OpenLDAP / AD password-rotation engine. Same gating shape as
+  // TOTP / PKI: hidden when no `openldap/` mount exists or when the
+  // token has no LDAP-relevant policy.
+  {
+    path: "/ldap",
+    label: "OpenLDAP / AD",
+    requires: ["root", "admin", "ldap-admin", "ldap-user"],
+    requiresMountType: "openldap",
+  },
 ];
 
 // Admin features. The whole section collapses when none of the items

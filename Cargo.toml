@@ -216,6 +216,12 @@ subtle = "2.6"
 # (ml-kem-768 / ml-dsa-44/65/87) come through bv_crypto.
 ed25519-dalek = "2"
 hkdf = "0.13"
+# OpenLDAP / AD password-rotation engine (`src/modules/ldap/`).
+# Pure-Rust LDAP client; we pick the `tls-rustls-aws-lc-rs` feature
+# so it consumes the same rustls + aws_lc_rs provider as the rest of
+# the project's TLS surface — no second TLS stack, no native-tls.
+ldap3 = { version = "0.12", default-features = false, features = ["sync", "tls-rustls-aws-lc-rs"] }
+
 # X25519 for the optional `hybrid-x25519+ml-kem-768` Transit key type
 # (Phase 4, behind the `transit_pqc_hybrid` feature flag). `static_secrets`
 # lets us hold the secret half across requests; `zeroize` is on by
