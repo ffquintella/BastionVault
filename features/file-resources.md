@@ -6,7 +6,7 @@ A new resource kind that stores **files** — arbitrary binary blobs with filena
 
 ## Status
 
-**Done (core feature).** Phases 1–4 + 8 shipped and in production use. Phases 5–7 (SMB / SFTP / SCP sync + periodic re-sync) are deferred as separate follow-up initiatives because each needs its own crate decision and container-based integration-test infrastructure — they're additive sync *transports*, not gaps in the core file-resource model. See the "Deferred sub-initiatives" section at the bottom of this file for the specific dependencies and scope each would need.
+**Done (core feature) + Phase 5 (SMB) shipped.** Phases 1–4 + 5 + 8 shipped and in production use. **Phase 5 SMB sync transport** lands behind the `files_smb` Cargo feature using `smolder-smb-core` (pure-Rust SMB2/3 + NTLM, no `libsmbclient` C dep). Phases 6 (SFTP / SCP) and 7 (periodic re-sync) remain deferred — see "Deferred sub-initiatives" at the bottom of this file.
 
 ## Motivation
 
@@ -31,7 +31,9 @@ Non-goals:
 
 **Phases 1 + 2 + 3 + 4 + 8 shipped** (GUI carries Files page + per-file Info / Sync / Versions tabs + Edit modal + drag-and-drop upload with Windows/WebView2 drop-handler fix; resource-detail pages grew a Files tab listing files associated with each resource; Admin → Audit aggregates file lifecycle events). Asset-group membership for files is wired through a third reverse index in `ResourceGroupStore`. Ownership / sharing / admin transfer / backfill flow through the shared `OwnerStore` + `ShareStore` used by KV and Resources.
 
-**Phases 5–7 (SMB / SFTP / SCP sync + periodic re-sync) deferred as separate follow-up initiatives.** They're additive sync transports rather than gaps in the core model — every file-resource feature works today against the local-FS sync target shipped in Phase 3. See "Deferred sub-initiatives" below for scope.
+**Phase 5 (SMB) shipped** (`src/modules/files/smb.rs`, behind `files_smb` Cargo feature). `FileSyncTarget { kind = "smb" }` is now a valid sync target whose `target_path` is `smb://server[:port]/share/path/to/file` (or a backslash UNC `\\server\share\path`). NTLM auth via `smb_username` / `smb_password` / optional `smb_domain` fields on the target record (password barrier-encrypted at rest, redacted on read with a `smb_password_set` boolean surfaced instead). Atomic-ish push via tmp-then-rename in the same directory (matches the local-fs semantics). Driven by [`smolder-smb-core`](https://crates.io/crates/smolder-smb-core) — pure-Rust SMB2/3 + NTLM, no `libsmbclient` / `libsmb2` C dep, no Windows-only restriction. 9 unit tests (URL parser shapes, tmp-path same-directory invariant) + 2 new save-time validation assertions. Live-network integration tests against a Samba container are tracked as test infrastructure.
+
+**Phases 6 (SFTP / SCP) and 7 (periodic re-sync) deferred as separate follow-up initiatives.** They're additive sync transports rather than gaps in the core model — every file-resource feature works today against the local-FS or SMB sync targets. See "Deferred sub-initiatives" below for scope.
 
 Shipped in Phase 1 (`src/modules/files/mod.rs`):
 

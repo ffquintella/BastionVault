@@ -57,6 +57,8 @@ use crate::{
 };
 
 pub mod files_audit_store;
+#[cfg(feature = "files_smb")]
+pub mod smb;
 use files_audit_store::{FileAuditEntry, FileAuditStore};
 
 static FILES_BACKEND_HELP: &str = r#"
@@ -127,12 +129,14 @@ pub struct FileEntry {
 
 /// One sync target attached to a file. `kind` selects the transport;
 /// `target_path` is interpreted by the transport (a filesystem path
-/// for `local-fs`, remote path for SMB/SCP/SFTP in later phases).
+/// for `local-fs`, a UNC-style URL for `smb`).
 ///
-/// Phase 3 ships **local-fs only**. Consumer-drive / network transports
-/// (`smb`, `sftp`, `scp`) are reserved in the enum but reject at
-/// push-time with `RvError::ErrString("unsupported sync kind: ...")`.
-/// Phase 5 / Phase 6 replace the rejection with real transports.
+/// `local-fs` ships in Phase 3. `smb` ships in Phase 5 behind the
+/// `files_smb` Cargo feature; without that feature the engine still
+/// accepts `kind = "smb"` configs (so config round-trips don't break
+/// across builds with different feature sets) but `push` returns a
+/// clear "compiled without files_smb support" error. SCP / SFTP
+/// remain Phase 6 follow-ons.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FileSyncTarget {
     pub name: String,
@@ -141,9 +145,28 @@ pub struct FileSyncTarget {
     #[serde(default)]
     pub target_path: String,
     /// Unix-style mode. Applied on `local-fs` after write. Empty leaves
-    /// the OS default (umask-derived) alone.
+    /// the OS default (umask-derived) alone. Ignored by other transports.
     #[serde(default)]
     pub mode: String,
+    // ── SMB-specific fields ─────────────────────────────────────────
+    // Stored barrier-encrypted at rest like every other sync-target
+    // field. Only relevant when `kind = "smb"`; serde defaults keep
+    // the wire format clean for non-SMB targets.
+    /// Username for NTLM bind. Local SAM accounts work as `username`;
+    /// AD accounts can be supplied as `DOMAIN\username` or just
+    /// `username` with `smb_domain` set separately.
+    #[serde(default)]
+    pub smb_username: String,
+    /// Password for NTLM bind. Returned **redacted** by the read API
+    /// (same pattern as the LDAP engine's `bindpass`).
+    #[serde(default)]
+    pub smb_password: String,
+    /// Optional NetBIOS / AD domain. When empty, NTLM uses an empty
+    /// domain field — fine for local SAM auth and most workgroup
+    /// shares. Required for AD member servers that enforce
+    /// domain-qualified logon.
+    #[serde(default)]
+    pub smb_domain: String,
     /// Not yet honored — on-write auto-sync is a later slice. Present
     /// in the schema so config callers can opt in now without breaking
     /// the wire format later.
@@ -456,20 +479,32 @@ impl FilesBackend {
                         },
                         "kind": {
                             field_type: FieldType::Str,
-                            description: "Transport kind. Only `local-fs` is supported in Phase 3."
+                            description: "Transport kind: `local-fs` or `smb` (the latter requires the `files_smb` build feature)."
                         },
                         "target_path": {
                             field_type: FieldType::Str,
-                            description: "Destination path interpreted by the transport (filesystem path for local-fs)."
+                            description: "Destination path interpreted by the transport. local-fs: a filesystem path. smb: `smb://server[:port]/share/path/to/file` or a backslash UNC `\\\\server\\share\\path`."
                         },
                         "mode": {
                             field_type: FieldType::Str,
-                            description: "Optional Unix mode applied after write (e.g., \"0600\")."
+                            description: "Optional Unix mode applied after write (e.g., \"0600\"). Ignored by transports other than local-fs."
                         },
                         "sync_on_write": {
                             field_type: FieldType::Bool,
                             default: false,
                             description: "Reserved. On-write auto-sync is a later slice."
+                        },
+                        "smb_username": {
+                            field_type: FieldType::Str,
+                            description: "Username for NTLM bind (smb only). Local SAM accounts work as bare `username`; AD accounts can be `DOMAIN\\\\username` or `username` + `smb_domain`."
+                        },
+                        "smb_password": {
+                            field_type: FieldType::Str,
+                            description: "Password for NTLM bind (smb only). Write-only on read; redacted in responses."
+                        },
+                        "smb_domain": {
+                            field_type: FieldType::Str,
+                            description: "Optional NetBIOS / AD domain for NTLM bind (smb only)."
                         }
                     },
                     operations: [
@@ -1097,6 +1132,15 @@ impl FilesBackendInner {
                 if let Ok(t) = serde_json::from_slice::<FileSyncTarget>(&se.value) {
                     let mut entry =
                         serde_json::to_value(&t)?.as_object().cloned().unwrap_or_default();
+                    // Never re-disclose the smb password; surface a
+                    // boolean so the GUI can show "set / not set"
+                    // without round-tripping the secret.
+                    let has_pw = !t.smb_password.is_empty();
+                    entry.remove("smb_password");
+                    entry.insert(
+                        "smb_password_set".into(),
+                        Value::Bool(has_pw),
+                    );
                     // Attach state so the GUI doesn't need a second call.
                     let state_key = format!("{SYNC_STATE_PREFIX}{id}/{n}");
                     let state: FileSyncState = match req.storage_get(&state_key).await? {
@@ -1139,6 +1183,9 @@ impl FilesBackendInner {
             .ok()
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let smb_username = get_str(req, "smb_username");
+        let smb_password = get_str(req, "smb_password");
+        let smb_domain = get_str(req, "smb_domain");
 
         if kind.is_empty() || target_path.is_empty() {
             return Err(RvError::ErrString(
@@ -1146,11 +1193,38 @@ impl FilesBackendInner {
             ));
         }
         // Validate kind up front so operators don't save configs that
-        // fail later. Only `local-fs` is supported in Phase 3.
-        if kind != "local-fs" {
-            return Err(RvError::ErrString(format!(
-                "sync target kind `{kind}` is not supported yet; only `local-fs` is available"
-            )));
+        // fail later. `local-fs` and `smb` are supported; SCP / SFTP
+        // remain Phase 6 follow-ons.
+        match kind.as_str() {
+            "local-fs" => {}
+            "smb" => {
+                if smb_username.trim().is_empty() {
+                    return Err(RvError::ErrString(
+                        "smb: smb_username is required when kind = smb".into(),
+                    ));
+                }
+                if smb_password.is_empty() {
+                    return Err(RvError::ErrString(
+                        "smb: smb_password is required when kind = smb".into(),
+                    ));
+                }
+                // Validate the URL shape now so the operator gets an
+                // immediate config error instead of a push-time
+                // failure later.
+                #[cfg(feature = "files_smb")]
+                {
+                    let _ = super::files::smb::validate_target_path(&target_path)?;
+                }
+                // When the build doesn't include `files_smb`, we
+                // still accept `kind = "smb"` so configs round-trip
+                // across builds with different feature sets — the
+                // push handler emits the not-compiled-in error.
+            }
+            other => {
+                return Err(RvError::ErrString(format!(
+                    "sync target kind `{other}` is not supported yet; available: local-fs, smb"
+                )));
+            }
         }
 
         // The file must exist — don't create dangling sync records.
@@ -1167,10 +1241,27 @@ impl FilesBackendInner {
             None => now.clone(),
         };
 
+        // Preserve the existing smb_password if the operator did not
+        // supply a new one — same write-only-on-update pattern the
+        // LDAP engine uses for `bindpass`.
+        let smb_password = if smb_password.is_empty() && !kind.is_empty() {
+            match req.storage_get(&existing_key).await? {
+                Some(se) => serde_json::from_slice::<FileSyncTarget>(&se.value)
+                    .map(|t| t.smb_password)
+                    .unwrap_or_default(),
+                None => String::new(),
+            }
+        } else {
+            smb_password
+        };
+
         let target = FileSyncTarget {
             name: name.clone(),
             kind,
             target_path,
+            smb_username,
+            smb_password,
+            smb_domain,
             mode,
             sync_on_write,
             created_at,
@@ -1237,6 +1328,19 @@ impl FilesBackendInner {
 
         let push_result = match target.kind.as_str() {
             "local-fs" => push_local_fs(&target, &blob.value),
+            "smb" => {
+                #[cfg(feature = "files_smb")]
+                {
+                    crate::modules::files::smb::push_smb(&target, &blob.value)
+                }
+                #[cfg(not(feature = "files_smb"))]
+                {
+                    Err(RvError::ErrString(
+                        "sync target kind `smb` requires building with --features files_smb"
+                            .into(),
+                    ))
+                }
+            }
             other => Err(RvError::ErrString(format!(
                 "sync target kind `{other}` is not supported yet"
             ))),
@@ -2314,6 +2418,42 @@ mod integration_tests {
         let cfg = json!({
             "kind": "sftp",
             "target_path": "/etc/ssl/thing.pem",
+        })
+        .as_object()
+        .cloned();
+        let _ = crate::test_utils::test_write_api(
+            &core,
+            &root_token,
+            &format!("files/files/{id}/sync/primary"),
+            false, // expect error
+            cfg,
+        )
+        .await;
+
+        // smb without credentials: rejected at save time so the
+        // operator gets an immediate error rather than discovering
+        // the misconfig at first push.
+        let cfg = json!({
+            "kind": "smb",
+            "target_path": "smb://server/share/file.txt",
+        })
+        .as_object()
+        .cloned();
+        let _ = crate::test_utils::test_write_api(
+            &core,
+            &root_token,
+            &format!("files/files/{id}/sync/primary"),
+            false, // expect error
+            cfg,
+        )
+        .await;
+
+        // smb with malformed URL: also rejected at save time.
+        let cfg = json!({
+            "kind": "smb",
+            "target_path": "not-a-smb-url",
+            "smb_username": "user",
+            "smb_password": "pw",
         })
         .as_object()
         .cloned();

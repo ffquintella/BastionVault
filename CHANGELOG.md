@@ -45,6 +45,22 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### File Resources — SMB sync transport (Phase 5)
+
+Closes the SMB slice of the File Resources deferred roadmap. `FileSyncTarget { kind = "smb" }` is now a valid sync-target shape; pushes the file's bytes to a Windows share or Samba server over SMB2/3 with NTLM authentication.
+
+- **Pure-Rust SMB stack** ([`src/modules/files/smb.rs`](src/modules/files/smb.rs)) — uses [`smolder-smb-core`](https://crates.io/crates/smolder-smb-core) `0.3` (typed SMB2/3 client + named-pipe RPC, NTLM via internal sspi-style auth, no `libsmbclient` / `libsmb2` C dep, no Windows-only restriction). Default-features only — Kerberos intentionally not enabled (would pull `reqwest`); NTLM covers the corporate Samba / Windows Server use cases this transport targets in v1.
+- **Behind `files_smb` Cargo feature** — default builds don't ship the SMB stack, keeping the binary size unchanged for operators who only push to local-FS / cloud targets. The engine still **accepts** `kind = "smb"` configs without the feature so configs round-trip across builds with mixed feature sets; the push handler returns a clear `requires building with --features files_smb` error in that case.
+- **`target_path` URL grammar** — accepts both `smb://server[:port]/share/path/to/file` and Windows UNC `\\server\share\path\to\file` (backslashes normalised to `/`). Default port 445. Validated at config-save time so the operator gets an immediate error rather than a push-time failure.
+- **NTLM credentials on the target record** — new `smb_username`, `smb_password`, `smb_domain` fields on [`FileSyncTarget`](src/modules/files/mod.rs). Stored barrier-encrypted alongside the rest of the target record. Read API redacts `smb_password` and surfaces a `smb_password_set` boolean instead (mirrors the LDAP engine's `bindpass` pattern). Update without re-supplying the password preserves the existing one — same write-only-on-update semantics.
+- **Atomic-ish push** — writes to `<basename>.bvsync.<pid>.tmp` in the same directory, then renames to the final basename on success. SMB rename within the same directory is atomic from the server's filesystem perspective. Failure cleans up the orphan temp file. Same semantics as the local-fs transport's tmp+rename.
+- **Hardened call site** — push runs on a fresh OS thread + single-threaded tokio runtime (same pattern the ACME DNS-01 validator uses in [`src/modules/pki/acme/dns01.rs`](src/modules/pki/acme/dns01.rs)) so the call works under both the default async build and `--features sync_handler` without colliding with any ambient runtime. 30-second hard timeout caps the worst-case unresponsive-server stall.
+- **9 SMB unit tests** + 2 new integration assertions in the sync-write handler — URL parse coverage (default port, explicit port, UNC backslash, no-scheme rejection, missing share, missing path, dir-path rejection, invalid port), tmp-path same-directory invariant, and config-save rejections for `kind = smb` without credentials / with malformed URL.
+
+The other File Resources Phase-5/6 transports (SFTP, SCP) and Phase 7 (periodic re-sync) remain deferred — see [`features/file-resources.md`](features/file-resources.md). Live-network integration tests against a Samba container are tracked as test infrastructure, not as a feature gap.
+
 ### Changed
 
 #### SSH `ssh_pqc` feature on by default

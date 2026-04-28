@@ -102,6 +102,14 @@ ureq = { version = "3.3", features = ["json"] }
 # we exclusively use the blocking `Resolver` so no extra runtime is
 # pulled in for DNS-01).
 hickory-resolver = { version = "0.24", default-features = false, features = ["system-config", "tokio-runtime"] }
+# Pure-Rust SMB2/3 client (NTLM auth via the `sspi` crate). Optional —
+# enabled by the `files_smb` feature so default builds don't ship the
+# SMB stack. No direct C deps; sspi pulls `ring` which we already
+# pin via `aws_lc_rs::default_provider().install_default()` at startup.
+# Kerberos is intentionally NOT enabled (would pull `reqwest`); NTLM
+# covers the corporate Samba / Windows Server use cases this transport
+# targets in v1.
+smolder-smb-core = { version = "0.3", optional = true }
 http = "1"
 rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
 rustls-pemfile = "2.2"
@@ -295,6 +303,15 @@ cloud_targets = ["cloud_s3", "cloud_onedrive", "cloud_gdrive", "cloud_dropbox", 
 # an opt-in preview rather than a stable interop guarantee. See
 # `features/pki-secret-engine.md`.
 pki_pqc_composite = []
+
+# File Resources — SMB sync transport. Off by default because the
+# `smb` crate carries its own (pure-Rust) SMB2/3 + NTLM stack and a
+# few hundred KiB of compiled code that operators not pushing files
+# to a Windows / Samba share don't need to pay for. When enabled,
+# `FileSyncTarget { kind = "smb" }` becomes a valid target shape
+# whose `target_path` is parsed as `smb://[user@]host[:port]/share/path`.
+# See `features/file-resources.md` § "Phase 5 — SMB sync transport".
+files_smb = ["smolder-smb-core"]
 
 # Transit Secret Engine — Phase 4 follow-ups, both off by default.
 #

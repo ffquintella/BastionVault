@@ -56,7 +56,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Feature | Status |
 |---|---|
 | Resource Management (inventory + grouped secrets) | Done |
-| File Resources (binary blobs + local-FS sync) | Done — Phases 1–4 + 8; SMB / SFTP / SCP transports + periodic re-sync deferred |
+| File Resources (binary blobs + local-FS sync) | Done — Phases 1–4 + 5 (SMB) + 8; SFTP / SCP transports + periodic re-sync deferred |
 | Resource Connect — in-app SSH / RDP for server resources ([spec](features/resource-connect.md)) | Todo — `os_type` field + Connect button + Tauri WebviewWindow per session (xterm.js + `russh` for SSH, `<canvas>` + `ironrdp` for RDP). Per-resource Connection profiles bind protocol + target + credential source. Four credential sources: **Secret**, **LDAP**, **SSH-engine**, **PKI** (CredSSP smartcard). Eight phases. |
 
 ### Networking & TLS
@@ -135,9 +135,8 @@ Each entry below has a dedicated spec / roadmap document with full phase notes.
 Self-contained follow-ups with no current blocker on the parent feature. Each can graduate to Active when operator demand + a specific implementation choice are confirmed.
 
 **File Resources**
-- SMB sync transport — needs `pavao` / `smb3` / `windows-rs` decision + Samba container in CI.
 - SFTP + SCP sync transports — `russh` + `russh-sftp` vs `libssh2-sys`; key-stored-in-vault bootstrap ordering needs design.
-- Periodic re-sync — internal scheduler vs. external tick endpoint; cluster coordination via `hiqlite::dlock`. Blocked on at least one non-local transport landing first.
+- Periodic re-sync — internal scheduler vs. external tick endpoint; cluster coordination via `hiqlite::dlock`. Now unblocked since SMB landed (Phase 5) — operator demand confirms which schedule shape ships first.
 
 **Cloud Storage Targets**
 - Rekey CLI for the obfuscation salt — library pieces present (`ObfuscatingTarget::with_salt`); orchestrator not shipped.
