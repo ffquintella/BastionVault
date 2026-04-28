@@ -23,6 +23,7 @@ pub mod directory;
 pub mod dns01;
 pub mod eab;
 pub mod jws;
+pub mod key_change;
 pub mod order;
 pub mod path_config;
 pub mod revoke;
@@ -42,6 +43,7 @@ pub const UNAUTH_PATHS: &[&str] = &[
     "acme/chall/*",
     "acme/cert/*",
     "acme/revoke-cert",
+    "acme/key-change",
 ];
 
 /// Mint a fresh URL-safe identifier for an ACME object (account,

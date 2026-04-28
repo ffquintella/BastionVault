@@ -256,11 +256,12 @@ impl PkiBackendInner {
             }
         })?;
         self.check_nonce(req, &verified.header.nonce).await?;
-        if verified.thumbprint != id {
-            return Err(RvError::ErrString(
-                "acme: jws thumbprint does not match account id (key mismatch)".into(),
-            ));
-        }
+        // No thumbprint == id assertion here: after a successful
+        // key-change (RFC 8555 §7.3.5) the live JWK on the account
+        // record changes while the URL (and hence the id) stays
+        // stable. The verifier above already used the persisted JWK
+        // to check the signature, so the kid → JWK binding is
+        // exactly as strong as the storage record.
 
         // POST-as-GET (empty payload) → return current state.
         // Otherwise interpret as an update. RFC 8555 §7.3.2 allows

@@ -8,7 +8,7 @@ This is a **separate feature** from the core PKI engine ([features/pki-secret-en
 
 ## Status
 
-**Phases 6.1 + 6.1.5 + 6.2 shipped** — full RFC 8555 server surface for HTTP-01 **and DNS-01** issuance: JWS auth, directory + new-nonce, new-account + account/<id> (with contact / deactivate update **and EAB**), new-order + order/<id> + order/<id>/finalize, authz/<id> + chall/<id> with both HTTP-01 and DNS-01 validators, cert/<id> retrieval, and **revoke-cert** wired to the engine's existing CRL state. Operator-facing `acme/eab/<key_id>` CRUD provisions HMAC keys for External Account Binding. DNS-01 uses pinned resolvers (`dns_resolvers` config). Phase 6.3 (key-change, expiry sweep, rate limiting) follows.
+**Phases 6.1 + 6.1.5 + 6.2 + 6.3 shipped — feature-complete on the RFC 8555 surface.** JWS auth, directory + new-nonce, new-account (+ EAB) + account/<id> (contact / deactivate update), new-order + order/<id> + order/<id>/finalize, authz/<id> + chall/<id> with both HTTP-01 and DNS-01 validators, cert/<id> retrieval, revoke-cert, **key-change** (account key rollover), per-account **rate limiting** on new-order, and **ACME expiry sweep** folded into the existing `pki/tidy` job. EAB keys provisioned via operator-facing `acme/eab/<key_id>`. DNS-01 uses pinned resolvers.
 
 ## Motivation
 
@@ -91,11 +91,14 @@ Shipped (`src/modules/pki/acme/{dns01,eab,revoke}.rs`):
 - External Account Binding (RFC 8555 §7.3.4): operator-facing `acme/eab/<key_id>` CRUD mints/lists HMAC-SHA-256 keys; `new-account` validates the inner JWS (`alg = HS256`, `kid` resolves to a stored key, payload JWK matches the outer envelope's account JWK by RFC 7638 thumbprint, HMAC verifies). Per-mount `eab_required` flag gates whether the binding is mandatory; consumed keys are marked single-use.
 - `acme/revoke-cert` (RFC 8555 §7.6): kid-flow JWS, payload `{ certificate: <b64url DER>, reason?: <int> }`. The requesting account must own an order whose stashed cert chain encodes the supplied serial; on match, drops into the same `pki/revoke` plumbing (flip `CertRecord.revoked_at_unix`, append to the issuer's CRL state, rebuild that issuer's CRL).
 
-### Phase 6.3 — Polish
+### Phase 6.3 — Polish — **Done**
 
-- Account key rollover (`key-change`).
-- Order/authz expiry sweep (folded into the existing Phase 4 tidy job).
-- Per-mount HMAC-signed external bindings rotation.
+Shipped (`src/modules/pki/acme/key_change.rs`, `path_tidy.rs`, `order.rs`):
+- Account key rollover (`acme/key-change`, RFC 8555 §7.3.5). Outer JWS signed by old key (kid flow); inner JWS signed by new key (embedded jwk) carrying `{ account, oldKey }` bind. New key checked against existing accounts to refuse cross-account collisions; account id stays stable, only the stored JWK rotates.
+- Order/authz/chall expiry sweep folded into the existing `pki/tidy` job. Same `safety_buffer_seconds` as the cert sweep; chall records garbage-collected when their parent authz disappears.
+- Per-account sliding-window rate limiting on `new-order`. Defaults to 300 orders / 1 hour per account; both knobs configurable via `acme/config.rate_window_secs` + `rate_orders_per_window`. Setting either to 0 disables. Over-limit surfaces as `urn:ietf:params:acme:error:rateLimited` per RFC 8555 §6.6.
+
+EAB key rotation is operator-driven via the existing `acme/eab/<key_id>` CRUD (mint a fresh key with a new id; consumed flag prevents replay).
 
 ## Design Sketch
 

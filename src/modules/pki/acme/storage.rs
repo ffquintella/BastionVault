@@ -27,6 +27,7 @@ pub const AUTHZ_PREFIX: &str = "acme/authz/";
 pub const CHALL_PREFIX: &str = "acme/chall/";
 pub const NONCE_KEY: &str = "acme/nonces/issued";
 pub const EAB_PREFIX: &str = "acme/eab/";
+pub const RATE_PREFIX: &str = "acme/rate/";
 
 /// Per-mount ACME config. Persisted at `acme/config`. When the
 /// engine boots without an existing config, ACME endpoints return
@@ -69,6 +70,20 @@ pub struct AcmeConfig {
     /// HMAC keys at `acme/eab/<key_id>`. RFC 8555 §7.3.4.
     #[serde(default)]
     pub eab_required: bool,
+    /// Per-account sliding window for new-order requests. Phase 6.3
+    /// rate limiting: at most `rate_orders_per_window` orders within
+    /// `rate_window_secs` seconds (per account). 0 disables.
+    #[serde(default = "default_rate_window")]
+    pub rate_window_secs: u64,
+    #[serde(default = "default_rate_orders")]
+    pub rate_orders_per_window: u64,
+}
+
+fn default_rate_window() -> u64 {
+    3600
+}
+fn default_rate_orders() -> u64 {
+    300
 }
 
 fn default_nonce_ttl() -> u64 {
@@ -85,8 +100,22 @@ impl Default for AcmeConfig {
             nonce_ttl_secs: default_nonce_ttl(),
             dns_resolvers: Vec::new(),
             eab_required: false,
+            rate_window_secs: default_rate_window(),
+            rate_orders_per_window: default_rate_orders(),
         }
     }
+}
+
+/// Per-account sliding-window rate-limit record. Persisted at
+/// `acme/rate/<account_id>`. We keep a simple list of unix timestamps
+/// of recent new-order calls; expired entries get pruned on every
+/// touch. The window is bounded by config so the list can't grow
+/// without bound.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RateBucket {
+    /// Unix-second timestamps of recent new-order calls, oldest
+    /// first.
+    pub orders: Vec<u64>,
 }
 
 /// External Account Binding key. Stored at `acme/eab/<key_id>`.

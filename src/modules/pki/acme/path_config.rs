@@ -52,7 +52,9 @@ impl PkiBackend {
                 "external_hostname":   { field_type: FieldType::Str,  default: "",     description: "Hostname advertised in the directory URLs; empty = reflect inbound Host." },
                 "nonce_ttl_secs":      { field_type: FieldType::Int,  default: 300,    description: "Replay-Nonce ring-buffer max age." },
                 "dns_resolvers":       { field_type: FieldType::Str,  default: "",     description: "Comma-separated pinned DNS resolvers (`<ip>` or `<ip>:<port>`) for DNS-01; empty = system resolver." },
-                "eab_required":        { field_type: FieldType::Bool, default: false,  description: "Require External Account Binding on `new-account` (Phase 6.2)." }
+                "eab_required":        { field_type: FieldType::Bool, default: false,  description: "Require External Account Binding on `new-account` (Phase 6.2)." },
+                "rate_window_secs":    { field_type: FieldType::Int,  default: 3600,   description: "Sliding-window length for per-account new-order rate limiting (seconds). 0 disables." },
+                "rate_orders_per_window": { field_type: FieldType::Int, default: 300,  description: "Max new-order calls per account within the window. 0 disables." }
             },
             operations: [
                 {op: Operation::Read,   handler: read.handle_acme_config_read},
@@ -120,6 +122,14 @@ impl PkiBackendInner {
             ),
         );
         data.insert("eab_required".into(), Value::Bool(cfg.eab_required));
+        data.insert(
+            "rate_window_secs".into(),
+            Value::Number(cfg.rate_window_secs.into()),
+        );
+        data.insert(
+            "rate_orders_per_window".into(),
+            Value::Number(cfg.rate_orders_per_window.into()),
+        );
         Ok(Some(Response::data_response(Some(data))))
     }
 
@@ -170,6 +180,16 @@ impl PkiBackendInner {
             .ok()
             .and_then(|v| v.as_bool())
             .unwrap_or(existing.eab_required);
+        let rate_window_secs = req
+            .get_data("rate_window_secs")
+            .ok()
+            .and_then(|v| v.as_u64())
+            .unwrap_or(existing.rate_window_secs);
+        let rate_orders_per_window = req
+            .get_data("rate_orders_per_window")
+            .ok()
+            .and_then(|v| v.as_u64())
+            .unwrap_or(existing.rate_orders_per_window);
 
         if enabled && default_role.trim().is_empty() {
             return Err(RvError::ErrString(
@@ -185,6 +205,8 @@ impl PkiBackendInner {
             nonce_ttl_secs,
             dns_resolvers,
             eab_required,
+            rate_window_secs,
+            rate_orders_per_window,
         };
         self.save_acme_config(req, &cfg).await?;
         Ok(None)

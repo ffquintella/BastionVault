@@ -254,6 +254,15 @@ pub async fn run_tidy_inner(
     let _ = crl_state_changed;
     let _ = rebuild_crl; // back-compat helper still exposed
 
+    // ── Sweep ACME orders / authz / chall past expiry ───────────────
+    // Phase 6.3. Same `safety_buffer_seconds` window as the cert
+    // sweep so an operator can inspect a recently-expired order
+    // before it disappears. Records that pre-date Phase 6.1
+    // (no `expires_at_unix`) skip the sweep — same conservative
+    // posture as cert records with `not_after_unix == 0`.
+    let acme_swept = sweep_acme(req, cutoff).await.unwrap_or_default();
+    let _ = acme_swept;
+
     let status = TidyStatus {
         last_run_at_unix: now_unix,
         last_run_duration_ms: started.elapsed().as_millis() as u64,
@@ -264,4 +273,99 @@ pub async fn run_tidy_inner(
     };
     storage::put_json(req, KEY_TIDY_STATUS, &status).await?;
     Ok(status)
+}
+
+/// Sweep expired ACME orders, authzs, and challenges. Walks each
+/// prefix once and deletes records whose `expires_at_unix` is
+/// older than the cutoff. Best-effort — failures on individual
+/// records are ignored so one bad blob doesn't stall the whole
+/// sweep. Returns a coarse `(orders, authz, chall)` count for
+/// future surfacing in tidy-status.
+#[maybe_async::maybe_async]
+async fn sweep_acme(req: &Request, cutoff: i64) -> Result<(u64, u64, u64), RvError> {
+    use super::acme::storage::{
+        AcmeAuthz, AcmeChall, AcmeOrder, AUTHZ_PREFIX, CHALL_PREFIX, ORDER_CERT_SUFFIX,
+        ORDER_PREFIX,
+    };
+    let cutoff_u = if cutoff <= 0 { 0 } else { cutoff as u64 };
+
+    let mut orders_swept = 0u64;
+    let mut authz_swept = 0u64;
+    let mut chall_swept = 0u64;
+
+    // Orders. Skip the `<id>/cert` blobs — those get cleaned with
+    // their parent record when it's swept.
+    if let Ok(keys) = req.storage_list(ORDER_PREFIX).await {
+        for k in keys {
+            if k.ends_with(ORDER_CERT_SUFFIX.trim_start_matches('/'))
+                || k.contains(ORDER_CERT_SUFFIX)
+            {
+                continue;
+            }
+            let full = format!("{ORDER_PREFIX}{k}");
+            let entry = match req.storage_get(&full).await {
+                Ok(Some(e)) => e,
+                _ => continue,
+            };
+            let ord: AcmeOrder = match serde_json::from_slice(&entry.value) {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+            if ord.expires_at_unix > 0 && ord.expires_at_unix < cutoff_u {
+                let _ = req.storage_delete(&full).await;
+                let _ = req
+                    .storage_delete(&format!("{ORDER_PREFIX}{k}{ORDER_CERT_SUFFIX}"))
+                    .await;
+                orders_swept += 1;
+            }
+        }
+    }
+
+    // Authz.
+    if let Ok(keys) = req.storage_list(AUTHZ_PREFIX).await {
+        for k in keys {
+            let full = format!("{AUTHZ_PREFIX}{k}");
+            let entry = match req.storage_get(&full).await {
+                Ok(Some(e)) => e,
+                _ => continue,
+            };
+            let az: AcmeAuthz = match serde_json::from_slice(&entry.value) {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
+            if az.expires_at_unix > 0 && az.expires_at_unix < cutoff_u {
+                let _ = req.storage_delete(&full).await;
+                authz_swept += 1;
+            }
+        }
+    }
+
+    // Challenges. They don't carry their own expiry — they expire
+    // with their owning authz. Sweep any orphan whose `authz_id`
+    // no longer resolves, which captures the authz-was-deleted
+    // case above.
+    if let Ok(keys) = req.storage_list(CHALL_PREFIX).await {
+        for k in keys {
+            let full = format!("{CHALL_PREFIX}{k}");
+            let entry = match req.storage_get(&full).await {
+                Ok(Some(e)) => e,
+                _ => continue,
+            };
+            let ch: AcmeChall = match serde_json::from_slice(&entry.value) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let parent = req
+                .storage_get(&format!("{AUTHZ_PREFIX}{}", ch.authz_id))
+                .await
+                .ok()
+                .flatten();
+            if parent.is_none() {
+                let _ = req.storage_delete(&full).await;
+                chall_swept += 1;
+            }
+        }
+    }
+
+    Ok((orders_swept, authz_swept, chall_swept))
 }

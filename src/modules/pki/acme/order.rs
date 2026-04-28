@@ -125,6 +125,13 @@ impl PkiBackendInner {
         let envelope = parse_envelope(req)?;
         let (account_id, payload) = self.verify_kid_jws(req, &envelope, "new-order").await?;
 
+        // Per-account rate limit (Phase 6.3). Sliding window per
+        // `acme/config`. 0 in either knob disables.
+        if cfg.rate_window_secs > 0 && cfg.rate_orders_per_window > 0 {
+            self.rate_limit_record(req, &account_id, cfg.rate_window_secs, cfg.rate_orders_per_window)
+                .await?;
+        }
+
         // RFC 8555 §7.4: payload is `{ identifiers: [...], notBefore?, notAfter? }`.
         let payload_json: Value = if payload.is_empty() {
             return Err(RvError::ErrString(
@@ -464,6 +471,37 @@ impl PkiBackendInner {
             headers: Some(headers),
             ..Default::default()
         }))
+    }
+
+    /// Append `now` to the per-account rate bucket, prune entries
+    /// outside the window, and refuse the call if the result
+    /// crosses the `max` threshold. RFC 8555 §6.6 maps over-limit
+    /// to `urn:ietf:params:acme:error:rateLimited`; we surface that
+    /// shape in the error string.
+    pub async fn rate_limit_record(
+        &self,
+        req: &mut Request,
+        account_id: &str,
+        window_secs: u64,
+        max: u64,
+    ) -> Result<(), RvError> {
+        use super::storage::{RateBucket, RATE_PREFIX};
+        let key = format!("{RATE_PREFIX}{account_id}");
+        let mut bucket: RateBucket = match req.storage_get(&key).await? {
+            Some(e) => serde_json::from_slice(&e.value).unwrap_or_default(),
+            None => RateBucket::default(),
+        };
+        let now = unix_now();
+        let cutoff = now.saturating_sub(window_secs);
+        bucket.orders.retain(|t| *t >= cutoff);
+        if (bucket.orders.len() as u64) >= max {
+            return Err(RvError::ErrString(format!(
+                "acme: rateLimited (account `{account_id}` exceeded {max} new-order calls per {window_secs}s window)"
+            )));
+        }
+        bucket.orders.push(now);
+        let bytes = serde_json::to_vec(&bucket)?;
+        req.storage_put(&StorageEntry { key, value: bytes }).await
     }
 
     // ── State machine helpers ────────────────────────────────────
