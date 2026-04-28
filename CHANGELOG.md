@@ -52,6 +52,15 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### OpenLDAP / AD password-rotation — Phase 5 identity-aware check-out affinity
+
+- **New `affinity_ttl` field on `LibrarySet`** ([`src/modules/ldap/policy.rs`](src/modules/ldap/policy.rs)) — `Duration::ZERO` (default) keeps every check-out picking the first available account, matching the prior behavior. When set non-zero, the engine writes an `AffinityRecord` keyed by `(set, hex(entity_id))` after every successful check-in; the next check-out from the same entity within the window prefers the previously-held account when it's currently available.
+- **Lazy expiration + graceful fallback** ([`src/modules/ldap/path_library.rs`](src/modules/ldap/path_library.rs)) — `read_affinity` drops stale records on first sight (no separate sweep needed). Affinity hits log at debug; a stale record, an unparseable entry, or an account that's currently checked out by someone else *all* fall back silently to the first-available pick. The caller never observes a "your old account is in use" error — affinity is opportunistic, not load-bearing.
+- **Affinity records hex-encode the entity id** so an entity that legitimately contains `/` or other path-meaningful characters can't escape the per-set `library/<set>/affinity/<hex>` key namespace.
+- **Affinity records swept on `delete_set`** so a re-create of the same set name doesn't inherit stale per-entity hints from the previous incarnation.
+- **GUI exposed** ([`gui/src-tauri/src/commands/ldap.rs`](gui/src-tauri/src/commands/ldap.rs), [`gui/src/lib/types.ts`](gui/src/lib/types.ts), [`gui/src/routes/LdapPage.tsx`](gui/src/routes/LdapPage.tsx)) — Library editor gains an "Affinity TTL (s)" input with a `0 = off` hint; the `LdapLibrarySet` type interface gains the field; the Tauri command round-trips it on read + write.
+- **2 new unit tests** — `affinity_record_serde_roundtrip` and `library_default_affinity_is_off`. **19/19 LDAP tests pass** (was 17). `cargo check --workspace` clean; `npx tsc --noEmit` clean; `npx vitest run` 66/66 pass.
+
 #### OpenLDAP / AD password-rotation — Phase 4 GUI integration
 
 - **Tauri command surface** ([`gui/src-tauri/src/commands/ldap.rs`](gui/src-tauri/src/commands/ldap.rs)) — 19 commands bridging the desktop GUI to the engine: mount list / enable, connection config CRUD + rotate-root, static-role CRUD + LIST + read-current-cred + force-rotate, library set CRUD + LIST + check-out / check-in / status. Same `make_request` thin-wrapper pattern as `commands/ssh.rs` / `commands/transit.rs`; mount path parameterised so a non-default mount works unchanged.

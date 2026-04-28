@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use super::{
     client,
-    policy::{CheckOutRecord, LibrarySet, LIBRARY_PREFIX},
+    policy::{AffinityRecord, CheckOutRecord, LibrarySet, LIBRARY_PREFIX},
     LdapBackend, LdapBackendInner,
 };
 use crate::{
@@ -70,7 +70,8 @@ impl LdapBackend {
                 "service_account_names":        { field_type: FieldType::Str,  default: "", description: "Comma-separated list of DNs / short names." },
                 "ttl":                          { field_type: FieldType::Int,  default: 3600, description: "Default check-out duration in seconds." },
                 "max_ttl":                      { field_type: FieldType::Int,  default: 86400, description: "Hard cap in seconds." },
-                "disable_check_in_enforcement": { field_type: FieldType::Bool, default: false, description: "When true, any caller can check in (default refuses cross-entity check-in)." }
+                "disable_check_in_enforcement": { field_type: FieldType::Bool, default: false, description: "When true, any caller can check in (default refuses cross-entity check-in)." },
+                "affinity_ttl":                 { field_type: FieldType::Int,  default: 0, description: "Phase 5 — when >0, the same entity checking out within this many seconds of its previous check-in gets the same account back (still freshly rotated)." }
             },
             operations: [
                 {op: Operation::Read,   handler: read.handle_set_read},
@@ -181,6 +182,10 @@ impl LdapBackendInner {
                     "disable_check_in_enforcement".into(),
                     Value::Bool(s.disable_check_in_enforcement),
                 );
+                data.insert(
+                    "affinity_ttl".into(),
+                    Value::Number(s.affinity_ttl.as_secs().into()),
+                );
                 Ok(Some(Response::data_response(Some(data))))
             }
         }
@@ -203,6 +208,11 @@ impl LdapBackendInner {
             .collect();
         let ttl = req.get_data("ttl").ok().and_then(|v| v.as_u64()).unwrap_or(3600);
         let max_ttl = req.get_data("max_ttl").ok().and_then(|v| v.as_u64()).unwrap_or(86400);
+        let affinity_ttl = req
+            .get_data("affinity_ttl")
+            .ok()
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let s = LibrarySet {
             service_account_names: names,
             ttl: std::time::Duration::from_secs(ttl),
@@ -212,6 +222,7 @@ impl LdapBackendInner {
                 .ok()
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+            affinity_ttl: std::time::Duration::from_secs(affinity_ttl),
         };
         s.validate().map_err(RvError::ErrString)?;
         self.put_set(req, &set, &s).await?;
@@ -224,11 +235,20 @@ impl LdapBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let set = take_str(req, "set");
-        // Drop check-out records under the set first, then the set itself.
+        // Drop check-out + affinity records under the set first,
+        // then the set itself. We deliberately scrub affinity here
+        // so a re-create of the same set name doesn't inherit
+        // stale per-entity hints from the previous incarnation.
         let prefix = format!("{LIBRARY_PREFIX}{set}/checked-out/");
         if let Ok(children) = req.storage_list(&prefix).await {
             for child in children {
                 let _ = req.storage_delete(&format!("{prefix}{child}")).await;
+            }
+        }
+        let aff_prefix = format!("{LIBRARY_PREFIX}{set}/affinity/");
+        if let Ok(children) = req.storage_list(&aff_prefix).await {
+            for child in children {
+                let _ = req.storage_delete(&format!("{aff_prefix}{child}")).await;
             }
         }
         let _ = req.storage_delete(&format!("{LIBRARY_PREFIX}{set}")).await;
@@ -275,23 +295,49 @@ impl LdapBackendInner {
             ttl = set.max_ttl;
         }
 
-        // Find the first available account.
+        // Find an available account. Phase 5: when `affinity_ttl > 0`
+        // and the calling entity has a fresh affinity record from a
+        // recent check-in, prefer the account it last held — but only
+        // if that account is currently available. Stale or
+        // unavailable affinity falls back silently to the first-
+        // available pick so the caller never observes a "your old
+        // account is in use" error.
         let prefix = format!("{LIBRARY_PREFIX}{set_name}/checked-out/");
         let in_flight = req.storage_list(&prefix).await.unwrap_or_default();
         let in_flight_set: std::collections::BTreeSet<String> = in_flight
             .into_iter()
             .map(|n| n.trim_end_matches('/').to_string())
             .collect();
-        let chosen = set
-            .service_account_names
-            .iter()
-            .find(|n| !in_flight_set.contains(*n))
-            .ok_or_else(|| {
-                RvError::ErrString(format!(
-                    "library `{set_name}` is exhausted; every account is checked out"
-                ))
-            })?
-            .clone();
+
+        let entity = req.client_token.clone();
+        let now_secs = unix_now();
+        let affinity_pick = if !set.affinity_ttl.is_zero() && !entity.is_empty() {
+            self.read_affinity(req, &set_name, &entity, now_secs).await
+        } else {
+            None
+        };
+
+        let chosen = match affinity_pick {
+            Some(account)
+                if set.service_account_names.iter().any(|n| n == &account)
+                    && !in_flight_set.contains(&account) =>
+            {
+                log::debug!(
+                    "openldap: check-out affinity hit on set `{set_name}`: account `{account}`"
+                );
+                account
+            }
+            _ => set
+                .service_account_names
+                .iter()
+                .find(|n| !in_flight_set.contains(*n))
+                .ok_or_else(|| {
+                    RvError::ErrString(format!(
+                        "library `{set_name}` is exhausted; every account is checked out"
+                    ))
+                })?
+                .clone(),
+        };
 
         let cfg = self
             .load_config(req)
@@ -309,12 +355,11 @@ impl LdapBackendInner {
 
         let now = unix_now();
         let lease_id = format!("ldap-library-{}", Uuid::new_v4());
-        let entity = req.client_token.clone(); // best-effort identity carrier
         let record = CheckOutRecord {
             set: set_name.clone(),
             account: chosen.clone(),
             lease_id: lease_id.clone(),
-            checked_out_by: entity,
+            checked_out_by: entity.clone(),
             checked_out_at_unix: now,
             expires_at_unix: now.saturating_add(ttl.as_secs()),
         };
@@ -331,6 +376,55 @@ impl LdapBackendInner {
         data.insert("lease_id".into(), Value::String(lease_id));
         data.insert("ttl_secs".into(), Value::Number(ttl.as_secs().into()));
         Ok(Some(Response::data_response(Some(data))))
+    }
+
+    // ── Phase 5 affinity helpers ─────────────────────────────────
+
+    /// Read the affinity record for `(set, entity)`. Returns `Some(account)`
+    /// when the record exists and is fresh; on any read / parse error,
+    /// or when the record is stale, returns `None` and silently drops
+    /// the stale entry (lazy expiration).
+    pub async fn read_affinity(
+        &self,
+        req: &mut Request,
+        set: &str,
+        entity: &str,
+        now_secs: u64,
+    ) -> Option<String> {
+        let key = affinity_key(set, entity);
+        let entry = req.storage_get(&key).await.ok().flatten()?;
+        let rec: AffinityRecord = serde_json::from_slice(&entry.value).ok()?;
+        if now_secs >= rec.expires_at_unix {
+            // Stale: drop it on the way out so the next check-out
+            // doesn't pay the parse cost. Best-effort delete; failure
+            // is silent (the affinity path is opportunistic).
+            let _ = req.storage_delete(&key).await;
+            return None;
+        }
+        Some(rec.account)
+    }
+
+    pub async fn write_affinity(
+        &self,
+        req: &mut Request,
+        set: &str,
+        entity: &str,
+        account: &str,
+        ttl: std::time::Duration,
+    ) -> Result<(), RvError> {
+        let now = unix_now();
+        let rec = AffinityRecord {
+            set: set.to_string(),
+            entity: entity.to_string(),
+            account: account.to_string(),
+            expires_at_unix: now.saturating_add(ttl.as_secs()),
+        };
+        let bytes = serde_json::to_vec(&rec)?;
+        req.storage_put(&StorageEntry {
+            key: affinity_key(set, entity),
+            value: bytes,
+        })
+        .await
     }
 
     pub async fn handle_check_in(
@@ -416,6 +510,17 @@ impl LdapBackendInner {
         let _ = ldap.unbind().await;
 
         req.storage_delete(&key).await?;
+
+        // Phase 5: write affinity for the next check-out from this
+        // entity. We use the *check-in caller's* entity id, not the
+        // record's owner — under `disable_check_in_enforcement = true`
+        // these can differ, but the spec's intent ("same entity
+        // sees the same account again") is keyed on the caller of
+        // the next check-out, which is also the caller here.
+        if !set.affinity_ttl.is_zero() && !entity.is_empty() {
+            self.write_affinity(req, &set_name, &entity, &to_release, set.affinity_ttl)
+                .await?;
+        }
         Ok(None)
     }
 
@@ -473,4 +578,15 @@ fn unix_now() -> u64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Storage key for the `(set, entity)` affinity record. We store
+/// affinity under a per-set subtree so deleting a library set sweeps
+/// every affinity entry for it without a scan over unrelated sets.
+fn affinity_key(set: &str, entity: &str) -> String {
+    // Hex-encode the entity id so an entity that legitimately
+    // contains `/` or other path-meaningful characters can't escape
+    // the key namespace.
+    let hex: String = entity.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
+    format!("{LIBRARY_PREFIX}{set}/affinity/{hex}")
 }

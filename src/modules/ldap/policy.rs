@@ -78,6 +78,24 @@ pub struct LibrarySet {
     /// entity ids on every event.
     #[serde(default)]
     pub disable_check_in_enforcement: bool,
+    /// Phase 5 — identity-aware check-out affinity. When the same
+    /// entity checks out from this set within `affinity_ttl` of its
+    /// previous check-in, the engine hands back the same account
+    /// (still freshly rotated). Reduces audit-log noise and keeps
+    /// per-account log aggregation meaningful for callers that
+    /// repeatedly grab + release in quick succession (CI runners,
+    /// short-lived agents). `Duration::ZERO` (default) disables
+    /// affinity — every check-out picks the first available account.
+    /// The affinity record is written at check-in time, keyed by
+    /// entity id, and consulted on the next check-out from the same
+    /// entity. Expired records are dropped on first sight (lazy
+    /// expiration); a periodic sweep is a follow-up.
+    #[serde(
+        default,
+        serialize_with = "serialize_duration",
+        deserialize_with = "deserialize_duration"
+    )]
+    pub affinity_ttl: Duration,
 }
 
 fn default_library_ttl() -> Duration {
@@ -86,6 +104,21 @@ fn default_library_ttl() -> Duration {
 
 fn default_library_max_ttl() -> Duration {
     DEFAULT_LIBRARY_MAX_TTL
+}
+
+/// Phase 5 — affinity record persisted under
+/// `library/<set>/affinity/<entity>` after a successful check-in
+/// (when `affinity_ttl > 0`). The next check-out from the same
+/// entity consults the record: if it's still fresh and the recorded
+/// account is currently available, that account is picked. If the
+/// record is stale or the account is checked out by someone else,
+/// affinity falls back silently to the normal first-available pick.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AffinityRecord {
+    pub set: String,
+    pub entity: String,
+    pub account: String,
+    pub expires_at_unix: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +168,7 @@ mod tests {
             ttl: DEFAULT_LIBRARY_TTL,
             max_ttl: DEFAULT_LIBRARY_MAX_TTL,
             disable_check_in_enforcement: false,
+            affinity_ttl: Duration::ZERO,
         };
         assert!(l.validate().is_err());
     }
@@ -146,8 +180,35 @@ mod tests {
             ttl: Duration::from_secs(3600),
             max_ttl: Duration::from_secs(60),
             disable_check_in_enforcement: false,
+            affinity_ttl: Duration::ZERO,
         };
         assert!(l.validate().is_err());
+    }
+
+    #[test]
+    fn affinity_record_serde_roundtrip() {
+        let r = AffinityRecord {
+            set: "etl".into(),
+            entity: "alice".into(),
+            account: "CN=svc_etl_a,DC=example,DC=com".into(),
+            expires_at_unix: 1_700_000_000,
+        };
+        let bytes = serde_json::to_vec(&r).unwrap();
+        let back: AffinityRecord = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(back.account, r.account);
+        assert_eq!(back.expires_at_unix, r.expires_at_unix);
+    }
+
+    #[test]
+    fn library_default_affinity_is_off() {
+        let l = LibrarySet {
+            service_account_names: vec!["svc1".into()],
+            ttl: DEFAULT_LIBRARY_TTL,
+            max_ttl: DEFAULT_LIBRARY_MAX_TTL,
+            disable_check_in_enforcement: false,
+            affinity_ttl: Duration::ZERO,
+        };
+        assert!(l.affinity_ttl.is_zero(), "affinity must be off by default");
     }
 
     #[test]

@@ -1009,6 +1009,7 @@ function LibraryEditModal({
   const [ttl, setTtl] = useState(3600);
   const [maxTtl, setMaxTtl] = useState(86400);
   const [disableEnforcement, setDisableEnforcement] = useState(false);
+  const [affinityTtl, setAffinityTtl] = useState(0);
   const [submitting, setSubmitting] = useState(false);
 
   const onSubmit = async () => {
@@ -1035,6 +1036,7 @@ function LibraryEditModal({
         ttl,
         max_ttl: maxTtl,
         disable_check_in_enforcement: disableEnforcement,
+        affinity_ttl: affinityTtl,
       });
       toast("success", `Library ${name} saved`);
       onSaved();
@@ -1080,6 +1082,13 @@ function LibraryEditModal({
             type="number"
             value={String(maxTtl)}
             onChange={(e) => setMaxTtl(Number(e.target.value) || 86400)}
+          />
+          <Input
+            label="Affinity TTL (s)"
+            type="number"
+            value={String(affinityTtl)}
+            onChange={(e) => setAffinityTtl(Number(e.target.value) || 0)}
+            hint="0 = off. When set, the same entity checking out within this many seconds of its last check-in gets the same account back (still freshly rotated)."
           />
         </div>
         <label className="flex items-center gap-2 text-sm">

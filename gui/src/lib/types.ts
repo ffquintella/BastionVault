@@ -992,6 +992,8 @@ export interface LdapLibrarySet {
   ttl: number;
   max_ttl: number;
   disable_check_in_enforcement: boolean;
+  /** Phase 5 affinity window in seconds. 0 = affinity off (default). */
+  affinity_ttl: number;
 }
 
 export interface LdapCheckOutResult {

@@ -64,7 +64,7 @@ configured `directory_type`.
 - **Built-in password generator** ([`src/modules/ldap/password.rs`](../src/modules/ldap/password.rs)) — 24-char output structurally satisfies the AD complexity rule by seeding one character from each class before filling from the union pool, then shuffling. Operator-supplied generator policies are spec'd as a follow-up; the field is persisted today and ignored at generation time.
 - **Dedicated baseline policies**: `ldap-user` (daily ops without lifecycle authority) and `ldap-admin` (full mount management) ship by default.
 - **15 unit tests pass** — config validation including the TLS opt-in matrix, policy serde + library invariants, password-generator class invariants over 1000 generations, AD `unicodePwd` MSDN byte sequence, OpenLDAP / AD modify-op shape.
-- **Phase 5 (identity-aware affinity)** is an independent stretch follow-up; everything else in the spec is in.
+- **Phase 5 — identity-aware check-out affinity — shipped.** New `affinity_ttl` field on `LibrarySet` (default `Duration::ZERO` = off). When set, the engine writes an `AffinityRecord` keyed by `(set, hex(entity_id))` after every successful check-in; the next check-out from the same entity within the window prefers the previously-held account when it's currently available. Lazy expiration on read; graceful fallback to first-available when the affinity record is stale or its account is in use. Affinity records are swept on `delete_set` so a re-create doesn't inherit stale per-entity hints. Surfaced in the GUI Library editor as "Affinity TTL (s)" with a `0 = off` hint.
 - **Auto-rotation scheduler shipped** ([`src/modules/ldap/scheduler.rs`](../src/modules/ldap/scheduler.rs)) — single tokio task started from `Core::post_unseal`, ticks every 60 s, walks every `openldap` mount, finds static-roles whose `last_vault_rotation_unix + rotation_period.as_secs() <= now`, and rotates them. **One bind per mount per tick** when at least one role is due (mounts with no due roles never open a connection that tick); directory-write-before-storage-write atomicity preserved. Roles with `rotation_period = 0` are skipped (manual rotation only). Self-skips when sealed; single-process scheduler today, HA leader gating a follow-up alongside the same gap in `pki/auto-tidy` + `scheduled_exports`.
 - The barrier (ChaCha20-Poly1305 in
   [crates/bv_crypto](../crates/bv_crypto/src/aead)) handles at-rest
@@ -311,7 +311,7 @@ guards the tick so two nodes don't both rotate.
 | `gui/src/routes/LdapPage.tsx` | Three-tab page: **Connection** (config + bind probe + rotate-root), **Static Roles** (CRUD + read-current-password with masked-value reveal + force-rotate + countdown to next auto-rotation), **Library** (set CRUD + per-account status table with check-out / check-in buttons + per-mount audit timeline). |
 | `gui/src/components/LdapStatusBadge.tsx` | "Connection OK / Bind failed / TLS error" indicator surfaced on the connection card and as a header chip on every page tab. |
 
-### Phase 5 -- Identity-Aware Check-Out Affinity (Stretch) — **Pending**
+### Phase 5 -- Identity-Aware Check-Out Affinity (Stretch) — **Done**
 
 When the same entity checks out from the same set repeatedly within
 a short window, hand back the same account (still rotated). Reduces

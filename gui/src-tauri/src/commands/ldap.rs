@@ -366,6 +366,9 @@ pub struct LdapLibrarySet {
     pub ttl: u64,
     pub max_ttl: u64,
     pub disable_check_in_enforcement: bool,
+    /// Phase 5 affinity window. 0 = affinity off (default).
+    #[serde(default)]
+    pub affinity_ttl: u64,
 }
 
 #[tauri::command]
@@ -408,6 +411,7 @@ pub async fn ldap_read_library(
         ttl: val_u64(&map, "ttl"),
         max_ttl: val_u64(&map, "max_ttl"),
         disable_check_in_enforcement: val_bool(&map, "disable_check_in_enforcement"),
+        affinity_ttl: val_u64(&map, "affinity_ttl"),
     }))
 }
 
@@ -429,6 +433,10 @@ pub async fn ldap_write_library(
     body.insert(
         "disable_check_in_enforcement".into(),
         Value::Bool(config.disable_check_in_enforcement),
+    );
+    body.insert(
+        "affinity_ttl".into(),
+        Value::Number(config.affinity_ttl.into()),
     );
     make_request(&state, Operation::Write, path, Some(body)).await?;
     Ok(())
