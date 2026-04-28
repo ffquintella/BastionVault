@@ -181,6 +181,10 @@ pub struct NonceRing {
     pub nonces: Vec<String>,
 }
 
+/// PEM-encoded leaf chain produced on `finalize`. Stored at
+/// `acme/orders/<id>/cert` and reachable via `acme/cert/<id>`.
+pub const ORDER_CERT_SUFFIX: &str = "/cert";
+
 impl NonceRing {
     pub fn push(&mut self, nonce: String) {
         if self.nonces.len() >= NONCE_RING_CAP {

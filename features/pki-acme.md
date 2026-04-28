@@ -8,7 +8,7 @@ This is a **separate feature** from the core PKI engine ([features/pki-secret-en
 
 ## Status
 
-**Phase 6.1 foundation shipped** — JWS auth surface + directory + new-nonce + new-account + account/<id>. The full Phase 6.1 (order / authz / chall state machine + HTTP-01 validator + `finalize` → `pki/sign/<role>` shim + `cert/<id>` retrieval + account-update) is split out as **Phase 6.1.5** and tracked as the next sub-thread. Phase 6.2 (DNS-01, EAB, revoke-cert) and Phase 6.3 (key-change, expiry sweep, rate limiting) follow.
+**Phase 6.1 + 6.1.5 shipped** — full RFC 8555 server surface for HTTP-01 issuance: JWS auth, directory + new-nonce, new-account + account/<id> (with contact / deactivate update), new-order + order/<id> + order/<id>/finalize, authz/<id> + chall/<id> with the HTTP-01 validator, and cert/<id> retrieval. `finalize` shims into the existing `pki/sign/<role>` builder using the per-mount `default_role` + `default_issuer_ref`. Phase 6.2 (DNS-01, EAB, revoke-cert) and Phase 6.3 (key-change, expiry sweep, rate limiting) follow.
 
 ## Motivation
 
@@ -44,7 +44,7 @@ This is a **separate feature** from the core PKI engine ([features/pki-secret-en
 
 ## Phases
 
-### Phase 6.1 — Read-only flow + HTTP-01 — **Foundation done; order/authz/finalize tracked as 6.1.5**
+### Phase 6.1 — Read-only flow + HTTP-01 — **Done (6.1 foundation + 6.1.5 lifecycle)**
 
 **Done in this cut** (`src/modules/pki/acme/{jws,storage,path_config,directory,account}.rs`):
 - JWS verification (RS256 / ES256 / EdDSA) with RFC 7638 thumbprints.
@@ -55,13 +55,14 @@ This is a **separate feature** from the core PKI engine ([features/pki-secret-en
 - ACME endpoints registered as `unauth_paths`; JWS is the auth.
 - `Replay-Nonce` + `Cache-Control: no-store` + `Link: <directory>;rel="index"` headers on every protocol response.
 
-**Outstanding (Phase 6.1.5 sub-thread)** — the order/cert lifecycle:
+**Phase 6.1.5 shipped** (`src/modules/pki/acme/{order,authz}.rs`):
 - `acme/new-order`, `acme/order/<id>`, `acme/order/<id>/finalize`.
 - `acme/authz/<id>`, `acme/chall/<id>`.
-- HTTP-01 validator (engine fetches `http://<domain>/.well-known/acme-challenge/<token>`).
-- `acme/cert/<id>` retrieval.
-- `finalize` → existing `pki/sign/<role>` shim using the configured `default_role` + `default_issuer_ref`.
-- Account-update (contact / deactivate).
+- HTTP-01 validator (engine fetches `http://<domain>/.well-known/acme-challenge/<token>` via `ureq` with 5 s connect / 10 s global timeout, no redirects, 4 KiB body cap).
+- `acme/cert/<id>` retrieval (returns `application/pem-certificate-chain` of leaf + issuer).
+- `finalize` → existing `build_leaf_from_spki` path using `default_role` + `default_issuer_ref`; identifiers re-checked against the order, mixed classical/PQC chains rejected.
+- Account-update (contact list + `status = "deactivated"`).
+- Per-leaf cert recorded in the engine's normal `certs/<serial>` index so revoke + CRL flows pick it up.
 
 ### Original Phase 6.1 (full) — **Foundation done**
 

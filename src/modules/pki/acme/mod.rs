@@ -18,8 +18,10 @@
 //! (it's the operator's per-mount setup, not an ACME-protocol endpoint).
 
 pub mod account;
+pub mod authz;
 pub mod directory;
 pub mod jws;
+pub mod order;
 pub mod path_config;
 pub mod storage;
 
@@ -31,6 +33,11 @@ pub const UNAUTH_PATHS: &[&str] = &[
     "acme/new-nonce",
     "acme/new-account",
     "acme/account/*",
+    "acme/new-order",
+    "acme/order/*",
+    "acme/authz/*",
+    "acme/chall/*",
+    "acme/cert/*",
 ];
 
 /// Mint a fresh URL-safe identifier for an ACME object (account,

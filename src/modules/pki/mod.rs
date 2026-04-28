@@ -94,12 +94,18 @@ impl PkiBackend {
             self.config_ca_path(),
             self.config_urls_path(),
             self.config_crl_path(),
-            // ── ACME server endpoints (Phase 6.1 foundation) ──
+            // ── ACME server endpoints (Phase 6.1 + 6.1.5) ──
             self.acme_config_path(),
             self.acme_directory_path(),
             self.acme_new_nonce_path(),
             self.acme_new_account_path(),
             self.acme_account_path(),
+            self.acme_new_order_path(),
+            self.acme_order_path(),
+            self.acme_finalize_path(),
+            self.acme_authz_path(),
+            self.acme_chall_path(),
+            self.acme_cert_path(),
         ];
 
         // The `new_logical_backend!` macro takes a literal path-list. We build

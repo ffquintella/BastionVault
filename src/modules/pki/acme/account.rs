@@ -204,22 +204,32 @@ impl PkiBackendInner {
         }
 
         // POST-as-GET (empty payload) → return current state.
-        // Otherwise we'd interpret the payload as an update; we
-        // skip account-update support in the foundation cut and
-        // surface a clear error, since the only allowed updates per
-        // RFC 8555 §7.3.2 are `contact` and `status =
-        // "deactivated"` — both of which are deliberate operator
-        // ergonomics that benefit from explicit handling rather than
-        // a permissive shim.
+        // Otherwise interpret as an update. RFC 8555 §7.3.2 allows
+        // updating `contact` and setting `status = "deactivated"`;
+        // anything else is rejected.
+        let mut updated = account;
         if !verified.payload.is_empty() && verified.payload != b"{}" {
-            return Err(RvError::ErrString(
-                "acme: account-update (contact / deactivate) not implemented in Phase 6.1; \
-                 tracked as Phase 6.1.5 alongside the order/finalize state machine"
-                    .into(),
-            ));
+            let update: Value = serde_json::from_slice(&verified.payload)
+                .map_err(|e| RvError::ErrString(format!("acme: update payload not JSON: {e}")))?;
+            if let Some(contact) = update.get("contact").and_then(|v| v.as_array()) {
+                updated.contact = contact
+                    .iter()
+                    .filter_map(|c| c.as_str().map(String::from))
+                    .collect();
+            }
+            if let Some(status) = update.get("status").and_then(|v| v.as_str()) {
+                if status == "deactivated" {
+                    updated.status = "deactivated".to_string();
+                } else if status != updated.status {
+                    return Err(RvError::ErrString(format!(
+                        "acme: account status `{status}` not settable (only `deactivated` is allowed)"
+                    )));
+                }
+            }
+            self.save_account(req, &id, &updated).await?;
         }
 
-        self.respond_account(req, &id, &account, false).await
+        self.respond_account(req, &id, &updated, false).await
     }
 
     // ── Helpers ──────────────────────────────────────────────────
