@@ -98,9 +98,40 @@ pub struct DynamicCredential {
 
 `DynamicCtx` carries a *handle to* the storage view, the audit broadcaster, and the connection pool — never the underlying objects directly, so the plugin can't bypass capability gating. It's the per-call equivalent of the static engines' `Request`.
 
+### Reuse of the existing plugin engine
+
+**This feature MUST NOT introduce a second plugin runtime.** Dynamic-secret engines run on the same plugin engine that already ships ([features/plugin-system.md](plugin-system.md), Phases 1–5). Concretely, every component listed below is reused as-is — this feature only *extends* the plugin engine with a small set of dynamic-shaped host capabilities and one new plugin `kind`. Building a separate dynamic-only loader, manifest format, signing chain, supervisor, or sandbox would duplicate code, double the operator's mental model, and split the trust surface in two.
+
+| Existing plugin-engine component | What dynamic-secret engines reuse it for |
+|---|---|
+| [`src/plugins/runtime.rs`](../src/plugins/runtime.rs) — WASM runtime (`wasmtime`) | Loads `runtime = "wasm"` dynamic plugins (lighter footprint; suitable for engines whose target driver compiles to `wasm32-wasip1`). |
+| [`src/plugins/process_runtime.rs`](../src/plugins/process_runtime.rs) — out-of-process runtime (line-delimited JSON-RPC) | Loads `runtime = "process"` dynamic plugins (most database / cloud engines; their drivers don't compile to WASM today). |
+| [`src/plugins/process_supervisor.rs`](../src/plugins/process_supervisor.rs) — process supervisor | Owns the lifecycle of every process-runtime dynamic plugin: spawn, health-check, crash-restart, graceful shutdown. A plugin crash never takes down the host. |
+| [`src/plugins/manifest.rs`](../src/plugins/manifest.rs) — manifest schema + parser | Parses the `[plugin]` and `[capabilities]` sections of every dynamic plugin's manifest. Dynamic plugins use `kind = "secret/dynamic"` (a new value); everything else in the manifest schema is unchanged. |
+| [`src/plugins/verifier.rs`](../src/plugins/verifier.rs) — publisher signature verification | Same gate, same keys, same operator opt-in for `unsigned` development. A dynamic-secret plugin without a signed manifest is refused load by the existing code path. |
+| [`src/plugins/catalog.rs`](../src/plugins/catalog.rs) — plugin catalog (`/v1/sys/plugins/catalog/...`) | The same catalog endpoints register / list / remove dynamic plugins. Filtering by kind (`?kind=secret/dynamic`) is a small additive surface; everything else is unchanged. |
+| [`src/plugins/quarantine.rs`](../src/plugins/quarantine.rs) — quarantine on misbehaviour | A dynamic plugin that exceeds capability budget, panics repeatedly, or fails health checks is quarantined by the existing logic — no engine-specific quarantine. |
+| [`src/plugins/reload_lock.rs`](../src/plugins/reload_lock.rs) — hot-reload lock | Used unmodified to safely swap a dynamic plugin's binary while leases are live: the lock blocks new `generate` calls during the swap; in-flight `renew`/`revoke` complete against the old instance, then traffic resumes against the new one. |
+| [`src/plugins/metrics.rs`](../src/plugins/metrics.rs) — plugin metrics | Dynamic plugins inherit the per-plugin call-count / error-rate / latency metrics for free. The framework adds engine-shaped metrics (lease lifetime, pool wait time) on top — those live in `src/modules/dynamic/`. |
+| [`src/plugins/module_cache.rs`](../src/plugins/module_cache.rs) — compiled-WASM module cache | Reused as-is for WASM dynamic plugins. |
+| [`src/plugins/logical_backend.rs`](../src/plugins/logical_backend.rs) — generic logical-backend bridge | The dynamic-secret plugin host (`src/modules/dynamic/plugin_host.rs`) is a *thin specialisation* of this bridge, not a parallel implementation. Where `logical_backend.rs` routes generic CRUD to a plugin, `plugin_host.rs` routes the dynamic-shaped RPC verbs (`generate`, `renew`, `revoke`, `rotate_root`) to the same plugin process / module. |
+
+What this feature **adds** to the plugin engine is exactly:
+
+1. **One new plugin kind**: `secret/dynamic`. Recognised by the existing manifest parser; routed to the dynamic-secret host instead of the generic logical-backend bridge.
+2. **Three new host capabilities** surfaced through the existing capability-gating layer:
+   - `dynamic_lease_register` — the plugin asks the host to register a generated credential as a lease.
+   - `dynamic_audit_emit` — the plugin emits a structured `dynamic_secret` audit event.
+   - `dynamic_pool_checkout` — the plugin checks out a pooled connection from the host's connection pool.
+
+   These follow the **existing capability ABI** (typed request, typed response, capability name in the manifest, refusal for out-of-manifest calls). No new gating logic, no new permission model.
+3. **One new SDK crate**, `bastion-plugin-dynamic-sdk`, that depends on the existing `bastion-plugin-sdk` and re-exports its primitives. Plugin authors continue to use the same SDK conventions they already know from `plugins-ext/`.
+
+Out-of-tree plugin authors writing a dynamic engine **should not need to learn anything new about the plugin engine itself** — manifest schema, signing flow, runtime selection, capability declaration, supervisor behaviour, and the catalog API are identical to what they've already used. The only delta is the SDK trait they implement (`DynamicCredentialBackend` instead of the generic logical-backend trait) and the three additional capabilities they declare.
+
 ### Plugin host integration
 
-The framework registers a new plugin **kind**: `secret/dynamic`. A manifest looks like:
+The framework registers a new plugin **kind** with the existing plugin engine: `secret/dynamic`. The manifest schema, signing requirement, runtime choice, capability declaration, and catalog endpoints are all the existing plugin-engine surface (see the table above) — only the `kind` value and the three dynamic-shaped capabilities are new. A manifest looks like:
 
 ```toml
 [plugin]
@@ -267,7 +298,7 @@ Each plugin is its own crate, its own binary (process runtime) or WASM module, i
 |---|---|
 | `src/modules/dynamic/*`           | Framework as above. |
 | `src/sys/leases.rs` (extension)   | Hook `dynamic` event-type into the lease manager dispatch. |
-| Plugin host capability set        | New `dynamic_lease_register`, `dynamic_audit_emit`, `dynamic_pool_checkout` capabilities surfaced through the existing plugin runtime ([src/plugins/runtime.rs](../src/plugins/runtime.rs)). |
+| Plugin host capability set        | New `dynamic_lease_register`, `dynamic_audit_emit`, `dynamic_pool_checkout` capabilities surfaced through the existing plugin runtimes ([src/plugins/runtime.rs](../src/plugins/runtime.rs) for WASM, [src/plugins/process_runtime.rs](../src/plugins/process_runtime.rs) for process). New plugin kind `secret/dynamic` recognised by the existing manifest parser ([src/plugins/manifest.rs](../src/plugins/manifest.rs)). **No new runtime, supervisor, sandbox, signing chain, catalog, or quarantine logic** — the framework reuses every component listed in the "Reuse of the existing plugin engine" section above. |
 | `dynamic-engine-plugins/bastion-plugin-dynamic-sdk` | The SDK crate. |
 | `dynamic-engine-plugins/bastion-plugin-postgres`    | First reference engine. Migrated from `plugins-ext/bastion-plugin-postgres`, rebased on the dynamic SDK. |
 
