@@ -1265,6 +1265,15 @@ export const ldapWriteConfig = (request: LdapWriteConfigRequest) =>
   invoke<void>("ldap_write_config", { request });
 export const ldapDeleteConfig = (mount: string) =>
   invoke<void>("ldap_delete_config", { mount });
+export type LdapCheckConnectionResult = {
+  ok: boolean;
+  url: string;
+  binddn: string;
+  latency_ms: number;
+  error?: string;
+};
+export const ldapCheckConnection = (mount: string) =>
+  invoke<LdapCheckConnectionResult>("ldap_check_connection", { mount });
 export const ldapRotateRoot = (mount: string) =>
   invoke<void>("ldap_rotate_root", { mount });
 

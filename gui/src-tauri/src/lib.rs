@@ -329,6 +329,7 @@ pub fn run() {
             commands::ldap::ldap_write_config,
             commands::ldap::ldap_delete_config,
             commands::ldap::ldap_rotate_root,
+            commands::ldap::ldap_check_connection,
             commands::ldap::ldap_list_static_roles,
             commands::ldap::ldap_read_static_role,
             commands::ldap::ldap_write_static_role,

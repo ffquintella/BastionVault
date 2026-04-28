@@ -87,6 +87,7 @@ impl LdapBackend {
         let paths: Vec<Path> = vec![
             self.config_path(),
             self.rotate_root_path(),
+            self.check_connection_path(),
             self.static_role_path(),
             self.static_role_list_path(),
             self.static_cred_path(),

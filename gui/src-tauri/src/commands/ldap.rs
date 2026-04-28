@@ -222,6 +222,34 @@ pub async fn ldap_rotate_root(state: State<'_, AppState>, mount: String) -> CmdR
     Ok(())
 }
 
+#[derive(Serialize, Deserialize, Default, Clone)]
+pub struct LdapCheckConnectionResult {
+    pub ok: bool,
+    pub url: String,
+    pub binddn: String,
+    pub latency_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+pub async fn ldap_check_connection(
+    state: State<'_, AppState>,
+    mount: String,
+) -> CmdResult<LdapCheckConnectionResult> {
+    let path = format!("{}/check-connection", mount_prefix(&mount));
+    let resp = make_request(&state, Operation::Read, path, None).await?;
+    let map = data_to_map(resp);
+    let error = map.get("error").and_then(|v| v.as_str()).map(String::from);
+    Ok(LdapCheckConnectionResult {
+        ok: val_bool(&map, "ok"),
+        url: val_str(&map, "url"),
+        binddn: val_str(&map, "binddn"),
+        latency_ms: val_u64(&map, "latency_ms"),
+        error,
+    })
+}
+
 // ── Static roles ─────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Default, Clone)]

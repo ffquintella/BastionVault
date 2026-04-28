@@ -72,6 +72,15 @@ impl LdapBackend {
             help: ROTATE_ROOT_HELP
         })
     }
+
+    pub fn check_connection_path(&self) -> Path {
+        let h = self.inner.clone();
+        new_path!({
+            pattern: r"check-connection",
+            operations: [{op: Operation::Read, handler: h.handle_check_connection}],
+            help: "Probe the configured directory: connect, bind, unbind. Returns latency_ms and an error message on failure. Does not modify any directory state."
+        })
+    }
 }
 
 #[maybe_async::maybe_async]
@@ -215,6 +224,49 @@ impl LdapBackendInner {
         self.save_config(req, &cfg).await?;
         let _ = ldap.unbind().await;
         Ok(None)
+    }
+
+    pub async fn handle_check_connection(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let cfg = match self.load_config(req).await? {
+            Some(c) => c,
+            None => {
+                let mut data = Map::new();
+                data.insert("ok".into(), Value::Bool(false));
+                data.insert(
+                    "error".into(),
+                    Value::String("ldap engine not configured".into()),
+                );
+                return Ok(Some(Response::data_response(Some(data))));
+            }
+        };
+
+        // Time the connect+bind round-trip. Use a separate timer
+        // for the bind step so a slow TLS handshake vs. a slow
+        // bind can be told apart in the operator-facing message.
+        let start = std::time::Instant::now();
+        let mut data = Map::new();
+        data.insert("url".into(), Value::String(cfg.url.clone()));
+        data.insert("binddn".into(), Value::String(cfg.binddn.clone()));
+
+        match client::bind(&cfg).await {
+            Ok(mut ldap) => {
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                let _ = ldap.unbind().await;
+                data.insert("ok".into(), Value::Bool(true));
+                data.insert("latency_ms".into(), Value::Number(elapsed_ms.into()));
+            }
+            Err(e) => {
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                data.insert("ok".into(), Value::Bool(false));
+                data.insert("latency_ms".into(), Value::Number(elapsed_ms.into()));
+                data.insert("error".into(), Value::String(format!("{e}")));
+            }
+        }
+        Ok(Some(Response::data_response(Some(data))))
     }
 }
 

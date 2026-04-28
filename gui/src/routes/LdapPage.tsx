@@ -158,6 +158,8 @@ function ConnectionTab({ mount }: { mount: string }) {
   const [showEdit, setShowEdit] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmRotateRoot, setConfirmRotateRoot] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [checkResult, setCheckResult] = useState<api.LdapCheckConnectionResult | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -184,6 +186,24 @@ function ConnectionTab({ mount }: { mount: string }) {
       toast("success", "Connection deleted");
     } catch (err) {
       toast("error", extractError(err));
+    }
+  };
+
+  const onTestConnection = async () => {
+    setChecking(true);
+    setCheckResult(null);
+    try {
+      const r = await api.ldapCheckConnection(mount);
+      setCheckResult(r);
+      if (r.ok) {
+        toast("success", `Connection OK (${r.latency_ms} ms)`);
+      } else {
+        toast("error", r.error || "Connection failed");
+      }
+    } catch (err) {
+      toast("error", extractError(err));
+    } finally {
+      setChecking(false);
     }
   };
 
@@ -222,6 +242,9 @@ function ConnectionTab({ mount }: { mount: string }) {
                 <Button variant="ghost" onClick={() => setShowEdit(true)}>
                   Edit
                 </Button>
+                <Button variant="ghost" onClick={onTestConnection} disabled={checking}>
+                  {checking ? "Testing…" : "Test connection"}
+                </Button>
                 <Button onClick={() => setConfirmRotateRoot(true)}>
                   Rotate bind password
                 </Button>
@@ -249,6 +272,29 @@ function ConnectionTab({ mount }: { mount: string }) {
               Use <strong>Rotate bind password</strong> to mint a fresh value
               for the engine's own service account.
             </p>
+            {checkResult && (
+              <div
+                className={
+                  "rounded border px-3 py-2 text-sm " +
+                  (checkResult.ok
+                    ? "border-green-700 bg-green-950/40 text-green-200"
+                    : "border-red-700 bg-red-950/40 text-red-200")
+                }
+              >
+                {checkResult.ok ? (
+                  <span>
+                    <strong>Connection OK</strong> — bound as{" "}
+                    <span className="font-mono">{checkResult.binddn}</span> in{" "}
+                    {checkResult.latency_ms} ms.
+                  </span>
+                ) : (
+                  <span>
+                    <strong>Connection failed</strong> ({checkResult.latency_ms} ms):{" "}
+                    <span className="font-mono break-all">{checkResult.error}</span>
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         ) : (
           <EmptyState
