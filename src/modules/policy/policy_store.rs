@@ -468,6 +468,76 @@ path "cubbyhole/*" {
 }
 "#;
 
+/// Transit user baseline. Grants the day-to-day operations of a
+/// Transit engine consumer — encrypt, decrypt, rewrap, sign, verify,
+/// HMAC, datakey, random, hash — while withholding key creation,
+/// rotation, configuration, and deletion. Read of key metadata is
+/// granted (callers need the public key for asymmetric verify
+/// flows); read of secret material via `/export` is **not**.
+///
+/// Path scoping uses the conventional `transit/` mount.
+static TRANSIT_USER_POLICY_NAME: &str = "transit-user";
+static TRANSIT_USER_POLICY: &str = r#"
+# --- Self service ---
+path "auth/token/lookup-self" { capabilities = ["read"] }
+path "auth/token/renew-self"  { capabilities = ["update"] }
+path "auth/token/revoke-self" { capabilities = ["update"] }
+path "sys/capabilities-self"  { capabilities = ["update"] }
+path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
+
+# --- Transit: list + read public metadata (public keys, version table) ---
+path "transit/keys"   { capabilities = ["list"] }
+path "transit/keys/*" { capabilities = ["read"] }
+
+# --- Transit: cryptographic operations (no key lifecycle) ---
+path "transit/encrypt/*"        { capabilities = ["create", "update"] }
+path "transit/decrypt/*"        { capabilities = ["create", "update"] }
+path "transit/rewrap/*"         { capabilities = ["create", "update"] }
+path "transit/sign/*"           { capabilities = ["create", "update"] }
+path "transit/verify/*"         { capabilities = ["create", "update"] }
+path "transit/hmac/*"           { capabilities = ["create", "update"] }
+path "transit/datakey/*"        { capabilities = ["create", "update"] }
+path "transit/random"           { capabilities = ["create", "update"] }
+path "transit/random/*"         { capabilities = ["create", "update"] }
+path "transit/hash"             { capabilities = ["create", "update"] }
+path "transit/hash/*"           { capabilities = ["create", "update"] }
+
+# --- Private workspace ---
+path "cubbyhole/*" {
+    capabilities = ["create", "read", "update", "delete", "list"]
+}
+"#;
+
+/// Transit administrator baseline. Grants full management of a
+/// Transit mount: create + rotate + config + trim + delete keys,
+/// plus every operation `transit-user` grants. The engine itself
+/// refuses to flip `exportable` to true after creation, so even an
+/// admin token cannot retroactively unlock seed export — that
+/// stickiness is enforced server-side regardless of policy.
+static TRANSIT_ADMIN_POLICY_NAME: &str = "transit-admin";
+static TRANSIT_ADMIN_POLICY: &str = r#"
+# --- Self service ---
+path "auth/token/lookup-self" { capabilities = ["read"] }
+path "auth/token/renew-self"  { capabilities = ["update"] }
+path "auth/token/revoke-self" { capabilities = ["update"] }
+path "sys/capabilities-self"  { capabilities = ["update"] }
+path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
+
+# --- Mount discovery (Transit admin needs to see Transit mounts) ---
+path "sys/mounts"   { capabilities = ["read", "list"] }
+path "sys/mounts/*" { capabilities = ["read"] }
+
+# --- Transit: full management ---
+path "transit/*" {
+    capabilities = ["create", "read", "update", "delete", "list"]
+}
+
+# --- Private workspace ---
+path "cubbyhole/*" {
+    capabilities = ["create", "read", "update", "delete", "list"]
+}
+"#;
+
 static _POLICY_STORE_HELP: &str = r#"
 TODO
 "#;
@@ -807,6 +877,13 @@ impl PolicyStore {
         // See `features/totp-secret-engine.md`.
         self.load_acl_policy(TOTP_USER_POLICY_NAME, TOTP_USER_POLICY).await?;
         self.load_acl_policy(TOTP_ADMIN_POLICY_NAME, TOTP_ADMIN_POLICY).await?;
+        // Transit delegated baselines. `transit-user` grants crypto
+        // operations (encrypt / decrypt / sign / verify / hmac /
+        // datakey / random / hash) without key lifecycle authority;
+        // `transit-admin` grants full mount management.
+        // See `features/transit-secret-engine.md`.
+        self.load_acl_policy(TRANSIT_USER_POLICY_NAME, TRANSIT_USER_POLICY).await?;
+        self.load_acl_policy(TRANSIT_ADMIN_POLICY_NAME, TRANSIT_ADMIN_POLICY).await?;
         Ok(())
     }
 

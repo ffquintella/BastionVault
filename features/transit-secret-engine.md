@@ -17,14 +17,14 @@ This is a new feature; there is no legacy Transit module to displace.
 
 ## Current State
 
-- No Transit engine exists. The `crypto` module under `src/modules/crypto/mod.rs` is now a doc-comment-only placeholder noting that all crypto lives in `crates/bv_crypto`.
-- `bv_crypto` provides the building blocks already:
-  - `bv_crypto::aead` -- ChaCha20-Poly1305 (production default), AES-GCM available.
-  - `bv_crypto::kem` -- ML-KEM-768 via the `ml-kem` crate.
-  - `bv_crypto::signature` -- ML-DSA-65 via `fips204`.
-  - `bv_crypto::envelope` -- hybrid envelope encryption helpers (KEM-wraps-AEAD-key).
-  - `bv_crypto::error` -- shared error type.
-- The barrier, seal, and (planned) PKI engine all consume `bv_crypto`. Transit is the first engine that *exposes* `bv_crypto` to external callers.
+- **Phases 1–3 implemented.** The engine ships at [`src/modules/transit/`](../src/modules/transit/) with the full Vault-compatible `/v1/transit/*` HTTP surface (keys CRUD + rotate + config + trim, encrypt/decrypt/rewrap, sign/verify, hmac/verify-hmac, datakey/{plaintext,wrapped,unwrap}, random, hash). `TransitModule` is registered in [`src/module_manager.rs`](../src/module_manager.rs) so operators mount via `POST /v1/sys/mounts/transit type=transit`.
+- **Key types shipped today**: `chacha20-poly1305` (symmetric AEAD), `hmac` (MAC only), `ed25519` (classical signing), `ml-kem-768` (PQC KEM for datakey wrap), `ml-dsa-44/65/87` (PQC signing). Capability matrix at [`keytype.rs`](../src/modules/transit/keytype.rs) structurally enforces "no key supports both sign and encrypt" — refused at the path layer before any crypto runs.
+- **Pure-Rust crypto stack**: `bv_crypto` for AEAD + ML-KEM + ML-DSA, `ed25519-dalek` 2.x for Ed25519, `hmac` 0.13 + `sha2` 0.11 for HMAC + hashing, `subtle` 2.6 for constant-time compare, `hkdf` 0.13 for the KEM→datakey derivation. No OpenSSL, no `aws-lc-sys`.
+- **Wire framing**: `bvault:vN[:pqc:<algo>]:<base64>`. The algorithm tag is mandatory for every PQC payload — a signature or wrapped datakey presented with the wrong algorithm tag is refused before any cryptographic operation runs.
+- **Dedicated baseline policies**: `transit-user` (crypto operations + key metadata read, no key lifecycle) and `transit-admin` (full mount management) ship by default — both registered in [`src/modules/policy/policy_store.rs`](../src/modules/policy/policy_store.rs).
+- **Phase 4 implemented** — derived + convergent encryption (always-on, HKDF subkey via `bvault-transit-derive\0 || context`, domain-separated deterministic nonce via `HMAC(parent || "bvault-transit-conv-nonce", len(context) || context || plaintext)[..12]`); **BYOK import** behind `transit_byok` cargo feature (`/wrapping_key`, `/keys/:name/import`, `/keys/:name/import_version` — per-mount ML-KEM-768 wrapping key, lazily generated, private half stays in the barrier); **hybrid composite signing** `hybrid-ed25519+ml-dsa-65` + **hybrid KEM** `hybrid-x25519+ml-kem-768` behind `transit_pqc_hybrid` (KEM combiner concatenates the X25519 + ML-KEM shared secrets and feeds HKDF-SHA-256). Pulls one new optional dep — `x25519-dalek = "2"` (gated by `transit_pqc_hybrid`).
+- **RSA + ECDSA classical types remain deferred**: not blocking the PQC story; they need direct `rsa` / `p256` / `p384` deps and a separate set of capability-matrix entries. Tracked as the only outstanding Phase 2 work.
+- **GUI page deferred**: the engine is fully usable from the API and any Vault-compatible CLI today; a Transit tab on the desktop GUI is tracked separately.
 
 ## Design
 
@@ -222,7 +222,7 @@ Transit fits the standard engine model documented in [docs/secret-engines.md](..
 
 ## Implementation Scope
 
-### Phase 1 -- Symmetric Engine + Vault Parity
+### Phase 1 -- Symmetric Engine + Vault Parity — **Done**
 
 | File | Purpose |
 |---|---|
@@ -239,7 +239,7 @@ Transit fits the standard engine model documented in [docs/secret-engines.md](..
 
 Dependencies (already in `bv_crypto` via the workspace): `chacha20poly1305`, `aes-gcm`, `hmac`, `sha2`, `sha3`, `hkdf`, `subtle`. No new top-level deps required.
 
-### Phase 2 -- Asymmetric (Classical) Encryption + Signing
+### Phase 2 -- Asymmetric (Classical) Encryption + Signing — **Partially done (Ed25519 only)**
 
 | File | Purpose |
 |---|---|
@@ -252,7 +252,7 @@ Dependencies (already in `bv_crypto` via the workspace): `chacha20poly1305`, `ae
 
 Re-uses the same RustCrypto deps as the PKI feature ([features/pki-secret-engine.md](pki-secret-engine.md)) -- if PKI Phase 1 lands first, those Cargo entries already exist.
 
-### Phase 3 -- PQC Key Types
+### Phase 3 -- PQC Key Types — **Done**
 
 | File | Purpose |
 |---|---|
@@ -264,7 +264,7 @@ Re-uses the same RustCrypto deps as the PKI feature ([features/pki-secret-engine
 
 No new external crates -- `bv_crypto` already has the primitives.
 
-### Phase 4 -- Hybrid (Composite) Modes, BYOK Import, Convergent Mode
+### Phase 4 -- Hybrid (Composite) Modes, BYOK Import, Convergent Mode — **Done**
 
 Feature flags: `transit_pqc_hybrid`, `transit_byok`.
 

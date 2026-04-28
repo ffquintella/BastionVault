@@ -210,6 +210,18 @@ base32 = "0.5"
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
 image  = { version = "0.25", default-features = false, features = ["png"] }
 subtle = "2.6"
+# Transit Secret Engine. Promotes ed25519-dalek + hkdf to direct deps;
+# both were already in the transitive tree (ed25519-dalek via ssh-key,
+# hkdf via the rsa stack) so the marginal cost is zero. The PQC bits
+# (ml-kem-768 / ml-dsa-44/65/87) come through bv_crypto.
+ed25519-dalek = "2"
+hkdf = "0.13"
+# X25519 for the optional `hybrid-x25519+ml-kem-768` Transit key type
+# (Phase 4, behind the `transit_pqc_hybrid` feature flag). `static_secrets`
+# lets us hold the secret half across requests; `zeroize` is on by
+# default. Pure-Rust on top of curve25519-dalek (already transitive
+# via ed25519-dalek), so the marginal dep cost is the wrapper crate.
+x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
 
 [build-dependencies]
 toml = "1.1.2"
@@ -267,6 +279,32 @@ cloud_targets = ["cloud_s3", "cloud_onedrive", "cloud_gdrive", "cloud_dropbox", 
 # an opt-in preview rather than a stable interop guarantee. See
 # `features/pki-secret-engine.md`.
 pki_pqc_composite = []
+
+# Transit Secret Engine — Phase 4 follow-ups, both off by default.
+#
+# `transit_pqc_hybrid` enables the two composite key types:
+#   * `hybrid-ed25519+ml-dsa-65` — composite signature, both halves
+#     produced over the same domain-prefixed message; verifier needs
+#     both to validate. Pulls no new external deps (the components
+#     are already in tree).
+#   * `hybrid-x25519+ml-kem-768` — KEM combiner per draft-ietf-lamps;
+#     the X25519 + ML-KEM shared secrets are concatenated and fed
+#     through HKDF-SHA-256 to derive a 32-byte AES-shaped key.
+#     Pulls `x25519-dalek` (gated by the same feature).
+# Off by default because the IETF lamps `draft-ietf-lamps-pq-composite-{sigs,kem}`
+# specs are still moving on the prehash domain + KEM-combiner shape;
+# operators who want them today opt in explicitly.
+transit_pqc_hybrid = ["dep:x25519-dalek"]
+# `transit_byok` enables the BYOK import flow:
+#   * `POST /v1/transit/wrapping_key` — engine returns a per-mount
+#     ML-KEM-768 public key.
+#   * `POST /v1/transit/keys/:name/import_version` — accepts the
+#     wrapped 32-byte symmetric key blob, decapsulates with the
+#     mount's private wrapping key, and stores the recovered key
+#     bytes as a fresh version of the named symmetric key.
+# Off by default so the wrapping-key derivation stays inert on
+# deployments that don't import key material from outside.
+transit_byok = []
 
 # SSH Phase 3 — post-quantum SSH certificates (ML-DSA-65). Off by
 # default because OpenSSH does not yet ship native support for

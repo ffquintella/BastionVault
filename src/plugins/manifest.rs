@@ -134,6 +134,20 @@ pub struct PluginManifest {
     /// cleanly thanks to `serde(default)`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_schema: Vec<ConfigField>,
+    /// Phase 5.2: ML-DSA-65 signature over `binary || canonical_manifest_json`,
+    /// hex-encoded. Empty when the plugin is unsigned (only loadable
+    /// when `accept_unsigned = true` is configured on the plugin
+    /// engine; logged at WARN). The catalog verifies the signature
+    /// against `signing_key` at registration *and* every load.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub signature: String,
+    /// Phase 5.2: name of the publisher key that signed this plugin.
+    /// Must appear in the operator-configured publisher allowlist.
+    /// Stored as a free-form identifier (typically the publisher's
+    /// short name like `"acme-corp"`); the allowlist maps it to the
+    /// hex-encoded ML-DSA-65 public-key bytes.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub signing_key: String,
 }
 
 fn default_abi_version() -> String {
@@ -192,6 +206,8 @@ mod tests {
             capabilities: Capabilities::default(),
             description: "TOTP secret engine".to_string(),
             config_schema: vec![],
+            signature: String::new(),
+            signing_key: String::new(),
         }
     }
 

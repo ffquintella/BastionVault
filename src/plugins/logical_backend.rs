@@ -108,6 +108,26 @@ impl Backend for PluginLogicalBackend {
 
     async fn handle_request(&self, req: &mut Request) -> Result<Option<Response>, RvError> {
         let storage = self.core.barrier.as_storage();
+
+        // Phase 5.7: a deleted plugin's mount surfaces a clear
+        // "quarantined" error rather than a generic "unknown plugin"
+        // — the data prefix is preserved and the operator can recover
+        // by re-registering the same plugin name.
+        if let Ok(Some(rec)) = super::quarantine::lookup(storage, &self.plugin_name).await {
+            return Err(RvError::ErrOther(::anyhow::anyhow!(
+                "plugin `{}` is quarantined (deleted at unix-secs {}; last active version `{}`); \
+                 re-register the plugin to recover the preserved data prefix",
+                self.plugin_name,
+                rec.quarantined_at_unix_secs,
+                rec.last_active_version,
+            )));
+        }
+
+        // Phase 5.6: read-side gate against in-flight reloads. The
+        // guard is held for the duration of the invoke; a reload's
+        // write-side acquire blocks until every read drops.
+        let _invoke_guard = super::reload_lock::acquire_invoke(&self.plugin_name).await;
+
         let catalog = PluginCatalog::new();
         let record: PluginRecord = catalog
             .get(storage, &self.plugin_name)
@@ -133,7 +153,10 @@ impl Backend for PluginLogicalBackend {
             RvError::ErrOther(::anyhow::anyhow!("envelope serialise failed: {e}"))
         })?;
 
-        let output = match manifest.runtime {
+        // Phase 5.10: per-plugin metrics — duration + outcome + fuel.
+        let started = std::time::Instant::now();
+        let runtime_kind = manifest.runtime;
+        let result = match runtime_kind {
             RuntimeKind::Wasm => {
                 let runtime = WasmRuntime::new().map_err(|e| {
                     RvError::ErrOther(::anyhow::anyhow!("wasm runtime: {e:?}"))
@@ -152,7 +175,7 @@ impl Backend for PluginLogicalBackend {
                             "plugin {} (wasm) invoke failed: {e:?}",
                             self.plugin_name,
                         ))
-                    })?
+                    })
             }
             RuntimeKind::Process => {
                 let runtime = ProcessRuntime::new();
@@ -170,9 +193,27 @@ impl Backend for PluginLogicalBackend {
                             "plugin {} (process) invoke failed: {e:?}",
                             self.plugin_name,
                         ))
-                    })?
+                    })
             }
         };
+        let elapsed = started.elapsed().as_secs_f64();
+        let output = match result {
+            Ok(o) => o,
+            Err(e) => {
+                super::metrics::record_invoke(&self.plugin_name, "runtime_error", elapsed, 0);
+                return Err(e);
+            }
+        };
+        let outcome_label = match output.outcome {
+            super::runtime::InvokeOutcome::Success => "success",
+            super::runtime::InvokeOutcome::PluginError(_) => "plugin_error",
+        };
+        super::metrics::record_invoke(
+            &self.plugin_name,
+            outcome_label,
+            elapsed,
+            output.fuel_consumed,
+        );
 
         translate_response(&self.plugin_name, &manifest, &output)
     }
@@ -249,9 +290,43 @@ fn translate_response(
         .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
 
+    // Phase 5.8: surface a plugin-issued lease so the existing lease
+    // manager can drive renew/revoke against the plugin. Plugins
+    // express a lease as `{"secret": {"lease_id": "...", "ttl_secs":
+    // <int>, "renewable": <bool>, "internal_data": {...}}}` in the
+    // response. Renew + revoke ops were already routed to the plugin
+    // via `build_envelope`; the host now records the lease so those
+    // calls happen on schedule rather than only on caller demand.
+    let secret = parsed.get("secret").and_then(|v| v.as_object()).map(|m| {
+        let lease_id = m
+            .get("lease_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let ttl_secs = m.get("ttl_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+        let renewable = m
+            .get("renewable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let internal_data = m
+            .get("internal_data")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let mut lease = crate::logical::lease::Lease::default();
+        lease.ttl = std::time::Duration::from_secs(ttl_secs);
+        lease.renewable = renewable;
+        crate::logical::secret::SecretData {
+            lease,
+            lease_id,
+            internal_data,
+        }
+    });
+
     Ok(Some(Response {
         data,
         warnings,
+        secret,
         ..Default::default()
     }))
 }
@@ -294,6 +369,8 @@ mod tests {
             capabilities: Capabilities::default(),
             description: String::new(),
             config_schema: vec![],
+            signature: String::new(),
+            signing_key: String::new(),
         }
     }
 

@@ -25,9 +25,13 @@ pub mod catalog;
 pub mod config;
 pub mod logical_backend;
 pub mod manifest;
+pub mod metrics;
 pub mod module_cache;
 pub mod process_runtime;
+pub mod quarantine;
+pub mod reload_lock;
 pub mod runtime;
+pub mod verifier;
 
 pub use catalog::{PluginCatalog, PluginRecord, PLUGIN_PREFIX};
 pub use config::ConfigStore;

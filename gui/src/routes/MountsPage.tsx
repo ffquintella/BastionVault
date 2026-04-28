@@ -87,6 +87,14 @@ const DEFAULT_ENGINE_SPECS: DefaultEngineSpec[] = [
     gates: "TOTP nav (also requires totp-user / totp-admin policy)",
   },
   {
+    path: "transit/",
+    label: "Transit",
+    logicalType: "transit",
+    description:
+      "Encryption-as-a-service. ChaCha20-Poly1305 + Ed25519 + ML-KEM-768 + ML-DSA-44/65/87. Versioned keys, rotate, datakey wrap/unwrap.",
+    gates: "Requires transit-user / transit-admin policy. No GUI page yet — drive via API or CLI.",
+  },
+  {
     path: "identity/",
     label: "Identity",
     logicalType: "identity",

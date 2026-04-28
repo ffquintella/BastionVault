@@ -65,12 +65,12 @@ mod test {
         #[cfg(windows)]
         assert_eq!(
             ret.unwrap(),
-            "default    \r\npki-admin    \r\npki-user    \r\nsecret-author    \r\nstandard-user    \r\nstandard-user-readonly    \r\ntotp-admin    \r\ntotp-user    \r\nroot    \r\n",
+            "default    \r\npki-admin    \r\npki-user    \r\nsecret-author    \r\nstandard-user    \r\nstandard-user-readonly    \r\ntotp-admin    \r\ntotp-user    \r\ntransit-admin    \r\ntransit-user    \r\nroot    \r\n",
         );
         #[cfg(not(windows))]
         assert_eq!(
             ret.unwrap(),
-            "default    \npki-admin    \npki-user    \nsecret-author    \nstandard-user    \nstandard-user-readonly    \ntotp-admin    \ntotp-user    \nroot    \n",
+            "default    \npki-admin    \npki-user    \nsecret-author    \nstandard-user    \nstandard-user-readonly    \ntotp-admin    \ntotp-user    \ntransit-admin    \ntransit-user    \nroot    \n",
         );
 
         // write a test policy
@@ -85,12 +85,12 @@ mod test {
         #[cfg(windows)]
         assert_eq!(
             ret.unwrap(),
-            "default    \r\nmy-policy    \r\npki-admin    \r\npki-user    \r\nsecret-author    \r\nstandard-user    \r\nstandard-user-readonly    \r\ntotp-admin    \r\ntotp-user    \r\nroot    \r\n",
+            "default    \r\nmy-policy    \r\npki-admin    \r\npki-user    \r\nsecret-author    \r\nstandard-user    \r\nstandard-user-readonly    \r\ntotp-admin    \r\ntotp-user    \r\ntransit-admin    \r\ntransit-user    \r\nroot    \r\n",
         );
         #[cfg(not(windows))]
         assert_eq!(
             ret.unwrap(),
-            "default    \nmy-policy    \npki-admin    \npki-user    \nsecret-author    \nstandard-user    \nstandard-user-readonly    \ntotp-admin    \ntotp-user    \nroot    \n",
+            "default    \nmy-policy    \npki-admin    \npki-user    \nsecret-author    \nstandard-user    \nstandard-user-readonly    \ntotp-admin    \ntotp-user    \ntransit-admin    \ntransit-user    \nroot    \n",
         );
 
         // list policy with table format
@@ -99,12 +99,12 @@ mod test {
         #[cfg(windows)]
         assert_eq!(
             ret.unwrap(),
-            "default    \r\nmy-policy    \r\npki-admin    \r\npki-user    \r\nsecret-author    \r\nstandard-user    \r\nstandard-user-readonly    \r\ntotp-admin    \r\ntotp-user    \r\nroot    \r\n",
+            "default    \r\nmy-policy    \r\npki-admin    \r\npki-user    \r\nsecret-author    \r\nstandard-user    \r\nstandard-user-readonly    \r\ntotp-admin    \r\ntotp-user    \r\ntransit-admin    \r\ntransit-user    \r\nroot    \r\n",
         );
         #[cfg(not(windows))]
         assert_eq!(
             ret.unwrap(),
-            "default    \nmy-policy    \npki-admin    \npki-user    \nsecret-author    \nstandard-user    \nstandard-user-readonly    \ntotp-admin    \ntotp-user    \nroot    \n",
+            "default    \nmy-policy    \npki-admin    \npki-user    \nsecret-author    \nstandard-user    \nstandard-user-readonly    \ntotp-admin    \ntotp-user    \ntransit-admin    \ntransit-user    \nroot    \n",
         );
 
         // list policy with json format
@@ -112,7 +112,7 @@ mod test {
         assert!(ret.is_ok());
         assert_eq!(
             ret.unwrap(),
-            "[\n  \"default\",\n  \"my-policy\",\n  \"pki-admin\",\n  \"pki-user\",\n  \"secret-author\",\n  \"standard-user\",\n  \"standard-user-readonly\",\n  \"totp-admin\",\n  \"totp-user\",\n  \"root\"\n]\n",
+            "[\n  \"default\",\n  \"my-policy\",\n  \"pki-admin\",\n  \"pki-user\",\n  \"secret-author\",\n  \"standard-user\",\n  \"standard-user-readonly\",\n  \"totp-admin\",\n  \"totp-user\",\n  \"transit-admin\",\n  \"transit-user\",\n  \"root\"\n]\n",
         );
 
         // list policy with yaml format
@@ -120,7 +120,7 @@ mod test {
         assert!(ret.is_ok());
         assert_eq!(
             ret.unwrap(),
-            "- default\n- my-policy\n- pki-admin\n- pki-user\n- secret-author\n- standard-user\n- standard-user-readonly\n- totp-admin\n- totp-user\n- root\n",
+            "- default\n- my-policy\n- pki-admin\n- pki-user\n- secret-author\n- standard-user\n- standard-user-readonly\n- totp-admin\n- totp-user\n- transit-admin\n- transit-user\n- root\n",
         );
     }
 }

@@ -738,6 +738,8 @@ mod tests {
             capabilities: Capabilities { log_emit: true, ..Default::default() },
             description: String::new(),
             config_schema: vec![],
+            signature: String::new(),
+            signing_key: String::new(),
         }
     }
 

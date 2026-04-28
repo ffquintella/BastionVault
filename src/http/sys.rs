@@ -1327,6 +1327,20 @@ async fn sys_plugins_reload_handler(
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}/reload");
     let result: Result<HttpResponse, RvError> = (async move {
+        // Phase 5.6: drain-and-swap. Acquire the per-plugin reload
+        // gate's *write* side, which blocks on every in-flight
+        // invocation completing. Default drain timeout: 10s.
+        let drain_timeout = std::time::Duration::from_secs(10);
+        let _reload_guard = match crate::plugins::reload_lock::acquire_reload(&name, drain_timeout).await {
+            Ok(g) => g,
+            Err(e) => {
+                return Ok(response_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &format!("plugin_reloading: {e}"),
+                ));
+            }
+        };
+
         // Re-fetch the active record + verify its sha256 against the
         // stored binary. This catches storage-side tampering before
         // the next invocation. After verification we drop the cached
@@ -1338,6 +1352,8 @@ async fn sys_plugins_reload_handler(
         };
         let cache = crate::plugins::ModuleCache::shared().map_err(|_| RvError::ErrUnknown)?;
         let evicted = cache.invalidate(&name);
+        // The reload guard drops here; queued invocations resume
+        // against the freshly-compiled module on next call.
         Ok(response_json_ok(
             None,
             json!({
@@ -1345,6 +1361,7 @@ async fn sys_plugins_reload_handler(
                 "active_version": record.manifest.version,
                 "sha256": record.manifest.sha256,
                 "cache_entries_evicted": evicted,
+                "drained_via": "reload_lock::acquire_reload (10s drain)",
             }),
         ))
     })
@@ -1418,6 +1435,119 @@ async fn sys_plugins_config_put_handler(
     })
     .await;
     audit.finish(&result, &audit_path, Operation::Write).await;
+    result
+}
+
+// ── Phase 5.2: publisher allowlist + accept_unsigned engine flag ──
+
+#[derive(Debug, Deserialize)]
+struct PublishersPutRequest {
+    /// Map from publisher identifier → hex-encoded ML-DSA-65 public key.
+    keys: std::collections::BTreeMap<String, String>,
+}
+
+async fn sys_plugins_publishers_get_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit_path = "sys/plugins/publishers".to_string();
+    let result: Result<HttpResponse, RvError> = (async move {
+        let allow =
+            crate::plugins::verifier::PublisherAllowlist::load(core.barrier.as_storage()).await?;
+        let unsigned =
+            crate::plugins::verifier::read_accept_unsigned(core.barrier.as_storage()).await?;
+        Ok(response_json_ok(
+            None,
+            json!({
+                "publishers": allow.keys,
+                "accept_unsigned": unsigned,
+            }),
+        ))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Read).await;
+    result
+}
+
+async fn sys_plugins_publishers_put_handler(
+    req: HttpRequest,
+    body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new(&req, &body, &core);
+    let audit_path = "sys/plugins/publishers".to_string();
+    let result: Result<HttpResponse, RvError> = (async move {
+        let payload: PublishersPutRequest =
+            serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+        let allow = crate::plugins::verifier::PublisherAllowlist {
+            keys: payload.keys,
+        };
+        allow.save(core.barrier.as_storage()).await?;
+        Ok(response_json_ok(None, json!({ "ok": true })))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Write).await;
+    result
+}
+
+#[derive(Debug, Deserialize)]
+struct AcceptUnsignedPutRequest {
+    accept_unsigned: bool,
+}
+
+async fn sys_plugins_accept_unsigned_put_handler(
+    req: HttpRequest,
+    body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new(&req, &body, &core);
+    let audit_path = "sys/plugins/accept_unsigned".to_string();
+    let result: Result<HttpResponse, RvError> = (async move {
+        let payload: AcceptUnsignedPutRequest =
+            serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+        crate::plugins::verifier::write_accept_unsigned(
+            core.barrier.as_storage(),
+            payload.accept_unsigned,
+        )
+        .await?;
+        if payload.accept_unsigned {
+            log::warn!(
+                "sys/plugins/accept_unsigned set to true — unsigned plugins will load (development mode)"
+            );
+        }
+        Ok(response_json_ok(
+            None,
+            json!({ "accept_unsigned": payload.accept_unsigned }),
+        ))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Write).await;
+    result
+}
+
+// ── Phase 5.7: list quarantined plugins (recovery aid) ──
+
+async fn sys_plugins_quarantine_list_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit_path = "sys/plugins/quarantine".to_string();
+    let result: Result<HttpResponse, RvError> = (async move {
+        let names = crate::plugins::quarantine::list(core.barrier.as_storage()).await?;
+        let mut entries = serde_json::Map::new();
+        for name in names {
+            if let Some(rec) =
+                crate::plugins::quarantine::lookup(core.barrier.as_storage(), &name).await?
+            {
+                entries.insert(name, serde_json::to_value(rec).unwrap_or(serde_json::Value::Null));
+            }
+        }
+        Ok(response_json_ok(None, json!({ "quarantined": entries })))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Read).await;
     result
 }
 
@@ -1898,6 +2028,19 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
         .service(
             web::resource("/plugins/{name}/versions/{version}")
                 .route(web::delete().to(sys_plugins_versions_delete_handler)),
+        )
+        .service(
+            web::resource("/plugins/publishers")
+                .route(web::get().to(sys_plugins_publishers_get_handler))
+                .route(web::put().to(sys_plugins_publishers_put_handler)),
+        )
+        .service(
+            web::resource("/plugins/accept_unsigned")
+                .route(web::put().to(sys_plugins_accept_unsigned_put_handler)),
+        )
+        .service(
+            web::resource("/plugins/quarantine")
+                .route(web::get().to(sys_plugins_quarantine_list_handler)),
         )
         .service(
             web::resource("/seal")

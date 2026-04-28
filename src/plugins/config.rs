@@ -225,6 +225,8 @@ mod tests {
                     options: vec![],
                 },
             ],
+            signature: String::new(),
+            signing_key: String::new(),
         }
     }
 

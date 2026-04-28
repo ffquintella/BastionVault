@@ -47,14 +47,14 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | **Secret Engines** | |
 | Secret Engine: PKI (pure-Rust, PQC-capable -- [spec](features/pki-secret-engine.md)) | Done (Phases 1–5.2) — pure-Rust X.509 + CRL on `rcgen` 0.14 + RustCrypto, ML-DSA-44/65/87 PQC roles via `fips204` + `x509-cert` (no `openssl-sys` / `aws-lc-sys`), composite ECDSA-P256+ML-DSA-65 signatures behind `pki_pqc_composite` feature, full Vault-shape surface — `roles` + `root/generate` + `intermediate/{generate,set-signed}` + `root/sign-intermediate` + `issue/:role` + `sign/:role` + `sign-verbatim` + `revoke` + `tidy` + `crl` + `config/{ca,crl,urls,issuers,auto-tidy}` + multi-issuer registry (`issuers/*` with rename/delete + role-level pinning + per-issuer CRL) + on-demand `pki/tidy` + auto-tidy scheduler. 12 integration tests + 1 feature-gated composite test, all green. See "Completed Initiatives". |
 | PKI: ACME server endpoints ([spec](features/pki-acme.md)) | Todo |
-| Secret Engine: Transit ([spec](features/transit-secret-engine.md)) | Todo |
+| Secret Engine: Transit ([spec](features/transit-secret-engine.md)) | Done (Phases 1-4: symmetric AEAD `chacha20-poly1305` + HMAC + random/hash + `ed25519` sign/verify + PQC `ml-kem-768` datakey wrap/unwrap + PQC `ml-dsa-44/65/87` sign/verify, versioned keys with rotate / config / trim, `bvault:vN[:pqc:<algo>]:<b64>` framing, `transit-user` / `transit-admin` baseline policies, **derived + convergent encryption** (HKDF subkey + domain-separated deterministic nonce), **BYOK import** behind `transit_byok` feature (per-mount ML-KEM-768 wrapping key + `/import` + `/import_version`), **hybrid composite signing** `hybrid-ed25519+ml-dsa-65` + **hybrid KEM** `hybrid-x25519+ml-kem-768` behind `transit_pqc_hybrid` feature. RSA / ECDSA classical types remain a separate follow-up.) |
 | Secret Engine: TOTP ([spec](features/totp-secret-engine.md)) | Done (Phases 1-4: HOTP/TOTP RFC 4226/6238, generate + provider modes, replay protection, QR PNG, GUI `/totp` page with live-code widget + validator, `totp-user` / `totp-admin` baseline policies; pure-Rust `hmac` + `sha1`/`sha2` + `subtle` + `qrcode`/`image`.) |
 | Secret Engine: SSH ([spec](features/ssh-secret-engine.md)) | Done (Phases 1-4: CA Ed25519 + OTP + ML-DSA-65 PQC + GUI) |
 | Secret Engine: OpenLDAP / AD password-rotation ([spec](features/ldap-secret-engine.md)) | Todo |
 | Dynamic Secrets ([spec](features/dynamic-secrets.md)) | Todo |
 | **Infrastructure** | |
 | High Availability (Raft consensus via Hiqlite) | Done |
-| Plugin System (dynamic loading) ([spec](features/plugin-system.md)) | Todo |
+| Plugin System (dynamic loading) ([spec](features/plugin-system.md)) | Partial — Phase 1 done (WASM runtime + capability-gated host imports + catalog with sha256 integrity + per-plugin config + LogicalBackend mount wiring + `bastion-plugin-sdk` + `bv-plugin-pack` + GUI). Phase 4 done (reference `bastion-plugin-totp` + `bastion-plugin-postgres` in `plugins-ext/`). **Phase 5 mostly done** — 5.1 `bv.crypto_*` host caps backed by Transit, 5.2 ML-DSA-65 publisher signature verification + allowlist, 5.5 net allowlist registration check, 5.6 reload drain-and-swap, 5.7 quarantined-mount state on delete (preserves data prefix), 5.8 plugin-issued lease pass-through to the lease manager, 5.9 capability-widening guard, 5.10 per-plugin Prometheus metrics. **Outstanding** (deferred): 5.3 long-lived supervised process runtime over `tonic`/UDS with restart-with-backoff + bootstrap token (single-shot subprocess works today), 5.4 shared `PluginService` `.proto` that unifies WASM + process wire schemas, 5.11 reference-plugin integration tests against the main suite, GUI per-plugin metrics. |
 | Namespaces / Multi-tenancy ([spec](features/namespaces-multitenancy.md)) | Partial |
 | Kubernetes Integration ([spec](features/kubernetes-integration.md)) | Todo |
 | Web UI / Desktop GUI (Tauri) | Done (all 9 phases) |
@@ -105,9 +105,11 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 No active initiatives — all previously-active items have closed out.
 Next up are the items tracked under `Todo` in the Feature Status
 table (Secret Versioning & Soft-Delete, PKI ACME server endpoints,
-Transit secret engine, OpenLDAP / AD password-rotation engine,
-Dynamic Secrets, HSM Support, Kubernetes Integration, Compliance
-Reporting, Plugin System).
+OpenLDAP / AD password-rotation engine, Dynamic Secrets, HSM Support,
+Kubernetes Integration, Compliance Reporting). The **Plugin System
+Phase 5 gap-list** in `features/plugin-system.md` is also queue-ready
+now that the Transit engine has shipped — `bv.crypto_*` and ML-DSA-65
+publisher signature verification are unblocked.
 
 ## Deferred sub-initiatives
 

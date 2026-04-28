@@ -182,6 +182,22 @@ impl PluginCatalog {
     ) -> Result<(), RvError> {
         manifest.validate().map_err(|_| RvError::ErrRequestInvalid)?;
         Self::verify_integrity(manifest, binary)?;
+        // Phase 5.5: net allowlist sanity.
+        Self::validate_net_allowlist(manifest)?;
+        // Phase 5.2: publisher signature verification (or
+        // accept_unsigned engine flag).
+        super::verifier::verify(storage, manifest, binary).await?;
+        // Phase 5.9: refuse capability widening against the currently-
+        // active version. Operators who actually want broader caps
+        // must DELETE + re-register.
+        if let Some(active_version) = self.read_active(storage, &manifest.name).await? {
+            if let Some(prev) = self
+                .read_versioned_manifest(storage, &manifest.name, &active_version)
+                .await?
+            {
+                Self::check_capability_widening(&prev, manifest)?;
+            }
+        }
         // Write binary first so a half-failed registration doesn't
         // leave a manifest pointing at nothing.
         storage
@@ -202,6 +218,100 @@ impl PluginCatalog {
         // pointer yet).
         if self.read_active(storage, &manifest.name).await?.is_none() {
             self.set_active(storage, &manifest.name, &manifest.version).await?;
+        }
+        // Phase 5.7: clear any quarantine marker — the data prefix
+        // preserved by the previous delete is now reachable through
+        // the freshly-active version.
+        let _ = super::quarantine::clear(storage, &manifest.name).await;
+        Ok(())
+    }
+
+    /// Phase 5.5 — refuse `allowed_hosts` patterns that defeat the
+    /// allowlist. Bare `"*"` is rejected; embedded `*` is allowed only
+    /// in the *leading* label (`"*.example.com"` is fine,
+    /// `"foo.*.com"` is not). Any host with a `:` is rejected — port
+    /// scoping is a separate field that the supervised process runtime
+    /// will surface in Phase 5.3.
+    fn validate_net_allowlist(manifest: &PluginManifest) -> Result<(), RvError> {
+        for h in &manifest.capabilities.allowed_hosts {
+            let trimmed = h.trim();
+            if trimmed.is_empty() {
+                return Err(RvError::ErrString(
+                    "allowed_hosts entries must not be empty".into(),
+                ));
+            }
+            if trimmed == "*" {
+                return Err(RvError::ErrString(
+                    "wildcard `*` is refused in allowed_hosts; require an explicit allowlist".into(),
+                ));
+            }
+            if trimmed.contains(':') {
+                return Err(RvError::ErrString(format!(
+                    "allowed_hosts entry `{trimmed}` must not include a port",
+                )));
+            }
+            // `*` is allowed only as the entire first label.
+            if trimmed.contains('*') {
+                let leading_only = trimmed.starts_with("*.")
+                    && !trimmed[2..].contains('*');
+                if !leading_only {
+                    return Err(RvError::ErrString(format!(
+                        "allowed_hosts entry `{trimmed}` may only use `*` as the leading label (`*.example.com`)",
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Phase 5.9 — refuse capability widening on re-registration.
+    /// "Widening" means: enabling `audit_emit` when the previous
+    /// version had it off; declaring a `storage_prefix` when the
+    /// previous one had none, or moving to a strictly-broader prefix;
+    /// adding any `allowed_keys` or `allowed_hosts` entry that wasn't
+    /// in the previous set.
+    fn check_capability_widening(
+        prev: &PluginManifest,
+        new: &PluginManifest,
+    ) -> Result<(), RvError> {
+        let p = &prev.capabilities;
+        let n = &new.capabilities;
+
+        if !p.audit_emit && n.audit_emit {
+            return Err(RvError::ErrString(
+                "capability widening: audit_emit cannot be enabled on re-register; DELETE + re-register"
+                    .into(),
+            ));
+        }
+        match (&p.storage_prefix, &n.storage_prefix) {
+            (None, Some(_)) => {
+                return Err(RvError::ErrString(
+                    "capability widening: storage_prefix cannot be added on re-register; DELETE + re-register"
+                        .into(),
+                ));
+            }
+            (Some(old), Some(new_prefix)) if !new_prefix.starts_with(old.as_str()) => {
+                return Err(RvError::ErrString(format!(
+                    "capability widening: storage_prefix `{new_prefix}` is not a sub-prefix of the existing `{old}`",
+                )));
+            }
+            _ => {}
+        }
+        let prev_keys: std::collections::BTreeSet<&String> = p.allowed_keys.iter().collect();
+        for k in &n.allowed_keys {
+            if !prev_keys.contains(k) {
+                return Err(RvError::ErrString(format!(
+                    "capability widening: allowed_keys gained `{k}`; DELETE + re-register",
+                )));
+            }
+        }
+        let prev_hosts: std::collections::BTreeSet<&String> = p.allowed_hosts.iter().collect();
+        for h in &n.allowed_hosts {
+            if !prev_hosts.contains(h) {
+                return Err(RvError::ErrString(format!(
+                    "capability widening: allowed_hosts gained `{h}`; DELETE + re-register",
+                )));
+            }
         }
         Ok(())
     }
@@ -248,7 +358,18 @@ impl PluginCatalog {
     /// (active pointer, config). Mirrors the pre-Phase-3 catalog
     /// `delete` semantics so the existing HTTP + GUI delete path
     /// keeps working.
+    ///
+    /// Phase 5.7: the per-plugin **data prefix**
+    /// (`core/plugins/<name>/data/`) is intentionally preserved — a
+    /// quarantine marker is written at `core/plugins/engine/quarantine/<name>`
+    /// so a re-register of the same name re-attaches to its data.
+    /// Mounts that still reference the deleted plugin surface a
+    /// "quarantined" error from `PluginLogicalBackend::handle_request`.
     pub async fn delete(&self, storage: &dyn Storage, name: &str) -> Result<(), RvError> {
+        // Capture the last-active version *before* deleting the
+        // active pointer, so the quarantine record can carry it.
+        let last_active = self.read_active(storage, name).await?.unwrap_or_default();
+
         // Drop every versioned record.
         let prefix = format!("{}{}/versions/", PLUGIN_PREFIX, name);
         if let Ok(entries) = storage.list(&prefix).await {
@@ -265,6 +386,10 @@ impl PluginCatalog {
         // Config (per-name; ConfigStore.delete is the canonical path
         // but that's a separate module — replicate the prefix here).
         let _ = storage.delete(&format!("{}{}{}", PLUGIN_PREFIX, name, "/config")).await;
+        // Note: we deliberately do NOT touch the data prefix
+        // `core/plugins/<name>/data/` — that's the operator's secret
+        // material and the whole point of the quarantine model.
+        let _ = super::quarantine::quarantine(storage, name, "", &last_active).await;
         Ok(())
     }
 
@@ -409,6 +534,8 @@ mod tests {
             capabilities: Capabilities::default(),
             description: String::new(),
             config_schema: vec![],
+            signature: String::new(),
+            signing_key: String::new(),
         }
     }
 
@@ -473,9 +600,17 @@ mod tests {
         }
     }
 
+    /// Enable the `accept_unsigned` engine flag on `s` so the
+    /// existing tests (which pre-date Phase 5.2 publisher signatures)
+    /// can keep registering unsigned plugins.
+    async fn enable_unsigned(s: &MemStorage) {
+        super::super::verifier::write_accept_unsigned(s, true).await.unwrap();
+    }
+
     #[tokio::test]
     async fn put_then_get_uses_versioned_layout_and_activates() {
         let s = MemStorage::default();
+        enable_unsigned(&s).await;
         let cat = PluginCatalog::new();
         let bin = b"v1-bytes".to_vec();
         let m = manifest_with("p", "0.1.0", &bin);
@@ -493,6 +628,7 @@ mod tests {
     #[tokio::test]
     async fn second_version_does_not_auto_activate() {
         let s = MemStorage::default();
+        enable_unsigned(&s).await;
         let cat = PluginCatalog::new();
         let v1 = b"v1".to_vec();
         let v2 = b"v2-different".to_vec();
@@ -514,6 +650,7 @@ mod tests {
     #[tokio::test]
     async fn cannot_delete_active_version() {
         let s = MemStorage::default();
+        enable_unsigned(&s).await;
         let cat = PluginCatalog::new();
         let bin = b"v1".to_vec();
         cat.put(&s, &manifest_with("p", "0.1.0", &bin), &bin).await.unwrap();
@@ -559,6 +696,7 @@ mod tests {
     #[tokio::test]
     async fn delete_clears_versions_and_per_name_records() {
         let s = MemStorage::default();
+        enable_unsigned(&s).await;
         let cat = PluginCatalog::new();
         let v1 = b"v1".to_vec();
         let v2 = b"v2-different".to_vec();
@@ -568,5 +706,55 @@ mod tests {
         assert!(cat.get(&s, "p").await.unwrap().is_none());
         assert!(cat.list_versions(&s, "p").await.unwrap().is_empty());
         assert!(cat.get_active_version(&s, "p").await.unwrap().is_none());
+    }
+
+    /// Phase 5.7 — `delete` writes a quarantine marker.
+    #[tokio::test]
+    async fn delete_writes_quarantine_marker() {
+        let s = MemStorage::default();
+        enable_unsigned(&s).await;
+        let cat = PluginCatalog::new();
+        let bin = b"quarantine-test".to_vec();
+        cat.put(&s, &manifest_with("q", "0.1.0", &bin), &bin).await.unwrap();
+        cat.delete(&s, "q").await.unwrap();
+        let rec = super::super::quarantine::lookup(&s, "q").await.unwrap();
+        let rec = rec.expect("delete should leave a quarantine marker");
+        assert_eq!(rec.last_active_version, "0.1.0");
+        // Re-registering the same name clears the marker (data prefix
+        // remains intact upstream of the catalog — verified by the
+        // logical-backend test).
+        cat.put(&s, &manifest_with("q", "0.2.0", b"new"), b"new").await.unwrap();
+        assert!(super::super::quarantine::lookup(&s, "q").await.unwrap().is_none());
+    }
+
+    /// Phase 5.9 — re-registering with a broader `audit_emit` is refused.
+    #[tokio::test]
+    async fn cap_widening_refused_on_reregister() {
+        let s = MemStorage::default();
+        enable_unsigned(&s).await;
+        let cat = PluginCatalog::new();
+        let bin = b"cap-widen".to_vec();
+        let mut m = manifest_with("w", "0.1.0", &bin);
+        m.capabilities.audit_emit = false;
+        cat.put(&s, &m, &bin).await.unwrap();
+        // Try to re-register with audit_emit = true.
+        let bin2 = b"cap-widen-2".to_vec();
+        let mut m2 = manifest_with("w", "0.2.0", &bin2);
+        m2.capabilities.audit_emit = true;
+        let err = cat.put(&s, &m2, &bin2).await.unwrap_err();
+        assert!(format!("{err:?}").contains("capability widening"));
+    }
+
+    /// Phase 5.5 — wildcard hosts are refused at registration.
+    #[tokio::test]
+    async fn wildcard_host_refused_at_registration() {
+        let s = MemStorage::default();
+        enable_unsigned(&s).await;
+        let cat = PluginCatalog::new();
+        let bin = b"net-wild".to_vec();
+        let mut m = manifest_with("n", "0.1.0", &bin);
+        m.capabilities.allowed_hosts = vec!["*".to_string()];
+        let err = cat.put(&s, &m, &bin).await.unwrap_err();
+        assert!(format!("{err:?}").contains("wildcard"));
     }
 }

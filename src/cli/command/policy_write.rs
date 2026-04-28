@@ -108,12 +108,12 @@ mod test {
         #[cfg(windows)]
         assert_eq!(
             ret.unwrap(),
-            "default    \r\nmy-policy    \r\npki-admin    \r\npki-user    \r\nsecret-author    \r\nstandard-user    \r\nstandard-user-readonly    \r\ntotp-admin    \r\ntotp-user    \r\nroot    \r\n",
+            "default    \r\nmy-policy    \r\npki-admin    \r\npki-user    \r\nsecret-author    \r\nstandard-user    \r\nstandard-user-readonly    \r\ntotp-admin    \r\ntotp-user    \r\ntransit-admin    \r\ntransit-user    \r\nroot    \r\n",
         );
         #[cfg(not(windows))]
         assert_eq!(
             ret.unwrap(),
-            "default    \nmy-policy    \npki-admin    \npki-user    \nsecret-author    \nstandard-user    \nstandard-user-readonly    \ntotp-admin    \ntotp-user    \nroot    \n",
+            "default    \nmy-policy    \npki-admin    \npki-user    \nsecret-author    \nstandard-user    \nstandard-user-readonly    \ntotp-admin    \ntotp-user    \ntransit-admin    \ntransit-user    \nroot    \n",
         );
 
         // read my-policy with table format

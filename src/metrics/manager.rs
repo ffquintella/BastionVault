@@ -24,6 +24,8 @@ impl MetricsManager {
         // its own clone of the Family, all sharing the same counter
         // storage via Arc.
         cache_metrics().register(&mut registry.lock().unwrap());
+        // Phase 5.10: per-plugin counters. Same singleton pattern.
+        crate::plugins::metrics::register(&mut registry.lock().unwrap());
         MetricsManager { registry, system_metrics, http_metrics }
     }
 }

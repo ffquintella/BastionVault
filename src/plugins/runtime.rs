@@ -85,6 +85,13 @@ const STORAGE_FORBIDDEN: i32 = -2;
 const STORAGE_BUFFER_TOO_SMALL: i32 = -3;
 const STORAGE_INTERNAL_ERROR: i32 = -4;
 const AUDIT_FORBIDDEN: i32 = -2;
+/// Returned by `bv.crypto_*` when the plugin requested an operation
+/// against a Transit key that isn't in `manifest.capabilities.allowed_keys`.
+const CRYPTO_FORBIDDEN: i32 = -2;
+/// Returned by `bv.crypto_*` when the underlying Transit operation
+/// failed (mount missing, key missing, framing mismatch). The plugin
+/// gets a single error code; the host log carries the detail.
+const CRYPTO_BACKEND_ERROR: i32 = -5;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
@@ -140,6 +147,12 @@ struct PluginCtx {
     /// `core/plugins/<name>/config` via `crate::plugins::ConfigStore`).
     /// Empty when the plugin declares no config_schema.
     config: std::collections::BTreeMap<String, String>,
+    /// Phase 5.1: Transit-key allowlist for `bv.crypto_*` host imports.
+    /// Each entry is a Transit key path *relative to the engine root*,
+    /// e.g. `"transit/keys/wrap-prod"`. The host matches the plugin-
+    /// supplied `key_handle` literally against this set before
+    /// dispatching to the Transit backend.
+    allowed_keys: std::collections::BTreeSet<String>,
 }
 
 impl PluginCtx {
@@ -248,6 +261,12 @@ impl WasmRuntime {
             limits,
             core,
             config,
+            allowed_keys: manifest
+                .capabilities
+                .allowed_keys
+                .iter()
+                .cloned()
+                .collect(),
         };
 
         let mut store: Store<PluginCtx> = Store::new(self.cache.engine(), ctx);
@@ -480,10 +499,245 @@ fn register_host_imports(
         )
         .map_err(|e| RuntimeError::Engine(e.to_string()))?;
 
+    // bv.crypto_random — sync. Pulls random bytes from OsRng. Not
+    // capability-gated: the host RNG is not a secret. Returns the
+    // length written, or STORAGE_BUFFER_TOO_SMALL.
+    linker
+        .func_wrap(
+            "bv",
+            "crypto_random",
+            |mut caller: Caller<'_, PluginCtx>, n_bytes: i32, out_ptr: i32, out_max: i32| -> i32 {
+                if n_bytes < 0 || n_bytes > 4096 {
+                    return STORAGE_INTERNAL_ERROR;
+                }
+                if n_bytes > out_max {
+                    return STORAGE_BUFFER_TOO_SMALL;
+                }
+                use rand::RngExt;
+                let mut buf = vec![0u8; n_bytes as usize];
+                rand::rng().fill(&mut buf[..]);
+                write_to_buffer(&mut caller, &buf, out_ptr, out_max)
+            },
+        )
+        .map_err(|e| RuntimeError::Engine(e.to_string()))?;
+
+    // bv.crypto_encrypt / decrypt / sign / verify / hmac.
+    //
+    // Each takes `(key_ptr, key_len, in_ptr, in_len, out_ptr, out_max)`
+    // where `key` is the Transit key path (e.g. `"transit/keys/wrap-prod"`)
+    // and `in` is the input bytes (plaintext for encrypt; bvault-framed
+    // ciphertext for decrypt; message for sign / verify / hmac).
+    //
+    // Response shape:
+    //   * encrypt: `bvault:vN:...` ciphertext bytes (UTF-8) → out
+    //   * decrypt: plaintext bytes → out
+    //   * sign:    `bvault:vN:[pqc:<algo>:]<b64>` signature → out
+    //   * verify:  single byte (0 = invalid, 1 = valid) → out_ptr[0]
+    //   * hmac:    `bvault:vN:<b64>` MAC → out
+    //
+    // Capability-gated: `key` must appear literally in the manifest's
+    // `allowed_keys`. Unauthorised keys return CRYPTO_FORBIDDEN
+    // before the Transit backend ever sees the request.
+    linker
+        .func_wrap_async(
+            "bv",
+            "crypto_encrypt",
+            |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32, i32, i32)| {
+                let (kp, kl, ip, il, op, om) = args;
+                Box::new(async move { crypto_op_impl(&mut caller, "encrypt", kp, kl, ip, il, op, om).await })
+            },
+        )
+        .map_err(|e| RuntimeError::Engine(e.to_string()))?;
+    linker
+        .func_wrap_async(
+            "bv",
+            "crypto_decrypt",
+            |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32, i32, i32)| {
+                let (kp, kl, ip, il, op, om) = args;
+                Box::new(async move { crypto_op_impl(&mut caller, "decrypt", kp, kl, ip, il, op, om).await })
+            },
+        )
+        .map_err(|e| RuntimeError::Engine(e.to_string()))?;
+    linker
+        .func_wrap_async(
+            "bv",
+            "crypto_sign",
+            |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32, i32, i32)| {
+                let (kp, kl, ip, il, op, om) = args;
+                Box::new(async move { crypto_op_impl(&mut caller, "sign", kp, kl, ip, il, op, om).await })
+            },
+        )
+        .map_err(|e| RuntimeError::Engine(e.to_string()))?;
+    linker
+        .func_wrap_async(
+            "bv",
+            "crypto_verify",
+            |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32, i32, i32)| {
+                let (kp, kl, ip, il, op, om) = args;
+                Box::new(async move { crypto_op_impl(&mut caller, "verify", kp, kl, ip, il, op, om).await })
+            },
+        )
+        .map_err(|e| RuntimeError::Engine(e.to_string()))?;
+    linker
+        .func_wrap_async(
+            "bv",
+            "crypto_hmac",
+            |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32, i32, i32)| {
+                let (kp, kl, ip, il, op, om) = args;
+                Box::new(async move { crypto_op_impl(&mut caller, "hmac", kp, kl, ip, il, op, om).await })
+            },
+        )
+        .map_err(|e| RuntimeError::Engine(e.to_string()))?;
+
     // Suppress unused-variable warning when the manifest is not consulted
     // here yet — kept for future selective-registration logic.
     let _ = manifest;
     Ok(())
+}
+
+/// Common crypto-op dispatcher. The plugin sends:
+///   * `key`: Transit key path (`"transit/keys/<name>"`)
+///   * `in_bytes`: operation-specific input
+/// The host validates the key against the allowlist, base64-encodes
+/// the input as needed, calls the Transit backend through `Core`,
+/// pulls the relevant field out of the response, and writes the
+/// result into the plugin's output buffer.
+///
+/// For `verify`, the input is `signature_len_be:u16 || signature || message`
+/// — the plugin supplies both halves in one buffer to avoid a second
+/// host call.
+async fn crypto_op_impl(
+    caller: &mut Caller<'_, PluginCtx>,
+    op: &str,
+    key_ptr: i32,
+    key_len: i32,
+    in_ptr: i32,
+    in_len: i32,
+    out_ptr: i32,
+    out_max: i32,
+) -> i32 {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+    let key = match read_string(caller, key_ptr, key_len) {
+        Some(s) => s,
+        None => return STORAGE_INTERNAL_ERROR,
+    };
+    let input = match read_bytes(caller, in_ptr, in_len) {
+        Some(b) => b,
+        None => return STORAGE_INTERNAL_ERROR,
+    };
+
+    if !caller.data().allowed_keys.contains(&key) {
+        log::warn!(
+            target: "plugin",
+            "[{}] denied crypto.{op} on `{key}` (not in manifest.allowed_keys)",
+            caller.data().plugin_name
+        );
+        return CRYPTO_FORBIDDEN;
+    }
+    let core = match caller.data().core.clone() {
+        Some(c) => c,
+        None => return CRYPTO_BACKEND_ERROR,
+    };
+
+    // Decompose the Transit key path so we can target the right route.
+    // Convention: `<mount>/keys/<name>` — anything else is rejected.
+    let (mount, key_name) = match key.split_once("/keys/") {
+        Some((m, n)) if !m.is_empty() && !n.is_empty() => (m.to_string(), n.to_string()),
+        _ => {
+            log::warn!(target: "plugin", "[{}] malformed crypto key path `{key}`", caller.data().plugin_name);
+            return CRYPTO_BACKEND_ERROR;
+        }
+    };
+
+    let response_bytes = match op {
+        "encrypt" => {
+            let body = serde_json::json!({ "plaintext": B64.encode(&input) });
+            match transit_call(&core, &format!("{mount}/encrypt/{key_name}"), body).await {
+                Ok(map) => map.get("ciphertext").and_then(|v| v.as_str()).unwrap_or("").as_bytes().to_vec(),
+                Err(()) => return CRYPTO_BACKEND_ERROR,
+            }
+        }
+        "decrypt" => {
+            let ct = String::from_utf8_lossy(&input).into_owned();
+            let body = serde_json::json!({ "ciphertext": ct });
+            match transit_call(&core, &format!("{mount}/decrypt/{key_name}"), body).await {
+                Ok(map) => match map.get("plaintext").and_then(|v| v.as_str()) {
+                    Some(b64) => match B64.decode(b64.as_bytes()) {
+                        Ok(bytes) => bytes,
+                        Err(_) => return CRYPTO_BACKEND_ERROR,
+                    },
+                    None => return CRYPTO_BACKEND_ERROR,
+                },
+                Err(()) => return CRYPTO_BACKEND_ERROR,
+            }
+        }
+        "sign" => {
+            let body = serde_json::json!({ "input": B64.encode(&input) });
+            match transit_call(&core, &format!("{mount}/sign/{key_name}"), body).await {
+                Ok(map) => map.get("signature").and_then(|v| v.as_str()).unwrap_or("").as_bytes().to_vec(),
+                Err(()) => return CRYPTO_BACKEND_ERROR,
+            }
+        }
+        "hmac" => {
+            let body = serde_json::json!({ "input": B64.encode(&input) });
+            match transit_call(&core, &format!("{mount}/hmac/{key_name}"), body).await {
+                Ok(map) => map.get("hmac").and_then(|v| v.as_str()).unwrap_or("").as_bytes().to_vec(),
+                Err(()) => return CRYPTO_BACKEND_ERROR,
+            }
+        }
+        "verify" => {
+            // Input layout: u16-be(sig_len) || sig_bytes || message_bytes
+            if input.len() < 2 {
+                return CRYPTO_BACKEND_ERROR;
+            }
+            let sig_len = u16::from_be_bytes([input[0], input[1]]) as usize;
+            if input.len() < 2 + sig_len {
+                return CRYPTO_BACKEND_ERROR;
+            }
+            let sig = &input[2..2 + sig_len];
+            let message = &input[2 + sig_len..];
+            let body = serde_json::json!({
+                "input":     B64.encode(message),
+                "signature": String::from_utf8_lossy(sig).into_owned(),
+            });
+            match transit_call(&core, &format!("{mount}/verify/{key_name}"), body).await {
+                Ok(map) => {
+                    let valid = map.get("valid").and_then(|v| v.as_bool()).unwrap_or(false);
+                    vec![if valid { 1 } else { 0 }]
+                }
+                Err(()) => return CRYPTO_BACKEND_ERROR,
+            }
+        }
+        _ => return CRYPTO_BACKEND_ERROR,
+    };
+
+    write_to_buffer(caller, &response_bytes, out_ptr, out_max)
+}
+
+/// Run a Transit POST through the core router and pull the response
+/// data map out. Tagged `Result<_, ()>` because the plugin only sees
+/// a single error code; any logging happens host-side.
+async fn transit_call(
+    core: &Arc<Core>,
+    path: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Map<String, serde_json::Value>, ()> {
+    use crate::logical::{Operation, Request};
+    let mut req = Request::default();
+    req.operation = Operation::Write;
+    req.path = path.to_string();
+    if let serde_json::Value::Object(m) = body {
+        req.body = Some(m);
+    }
+    match core.handle_request(&mut req).await {
+        Ok(Some(resp)) => Ok(resp.data.unwrap_or_default()),
+        Ok(None) => Ok(serde_json::Map::new()),
+        Err(e) => {
+            log::warn!(target: "plugin", "transit call to {path} failed: {e:?}");
+            Err(())
+        }
+    }
 }
 
 async fn storage_get_impl(
@@ -719,6 +973,8 @@ mod tests {
             capabilities: Capabilities { log_emit: false, ..Default::default() },
             description: String::new(),
             config_schema: vec![],
+            signature: String::new(),
+            signing_key: String::new(),
         }
     }
 

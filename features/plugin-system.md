@@ -21,10 +21,38 @@ The plugin system is a substrate, not an engine. Concrete out-of-tree plugins (e
 
 ## Current State
 
-- **No plugin loader exists.** All engines and auth backends are compiled into `bastion-vault` from `src/modules/*` and registered statically by `Core::new`.
-- **The `Module` trait** ([src/modules/mod.rs:26](../src/modules/mod.rs:26)) and the `LogicalBackend` machinery (`new_logical_backend!`) are *almost* the right shape for plugins — they already abstract a backend's surface as `(paths, fields, operations, secrets)`. The plugin protocol re-uses this shape over the wire so a plugin author writes the same kind of code they'd write for a built-in engine.
-- **No process-supervision code exists.** The current binary doesn't manage subprocesses, so the out-of-process backend brings new infrastructure (graceful shutdown, restart-on-crash with backoff, log forwarding, health checks).
-- **`wasmtime` is not yet a dependency.** Adding it (≈3 MB compiled, pure Rust + the WASM JIT) is a real cost; it's justified by the security model and by the fact that we need *some* sandbox primitive eventually anyway (e.g. for the deferred policy engine if we ever ship CEL/Lua/Rego).
+**Phase 1 substrate is shipped; Phases 2–4 are partial.** Concretely:
+
+### Shipped
+
+- **WASM runtime** ([src/plugins/runtime.rs](../src/plugins/runtime.rs)) — `wasmtime`-backed, fuel + memory caps per-invocation, no fs / no net / no env / no clocks beyond monotonic. Module-cache layer ([src/plugins/module_cache.rs](../src/plugins/module_cache.rs)) keeps compiled `wasmtime::Module` instances for repeat invokes; invalidated on activate/reload.
+- **Capability-gated host imports** — `bv.log`, `bv.set_response`, `bv.now_unix_ms`, `bv.config_get`, `bv.storage_{get,put,delete,list}` (gated on `manifest.capabilities.storage_prefix`), `bv.audit_emit` (gated on `audit_emit`). Storage view is rooted at the plugin's per-mount UUID prefix; out-of-prefix reads are refused before touching the barrier.
+- **Catalog + manifest** ([src/plugins/catalog.rs](../src/plugins/catalog.rs), [src/plugins/manifest.rs](../src/plugins/manifest.rs)) — sha256 integrity enforced on write *and* on every load; per-name version history + `set_active` + `delete_version`; manifest declares capability footprint and operator-supplied config schema (`ConfigField` / `ConfigFieldKind`).
+- **Operator-supplied config** ([src/plugins/config.rs](../src/plugins/config.rs)) — `PUT /v1/sys/plugins/<name>/config` populates a barrier-stored map that the plugin reads via `bv.config_get`.
+- **HTTP surface** ([src/http/sys.rs](../src/http/sys.rs)) — `POST/GET/DELETE /v1/sys/plugins`, version list/activate/delete, `POST /v1/sys/plugins/<name>/reload`, invoke endpoint.
+- **LogicalBackend mount wiring** ([src/plugins/logical_backend.rs](../src/plugins/logical_backend.rs)) — `mount type=plugin:<name>` dispatches to the runtime; the same `Request`/`Response` shape the built-in engines use flows through.
+- **`bastion-plugin-sdk` crate** ([crates/bastion-plugin-sdk](../crates/bastion-plugin-sdk)) — `Plugin` trait, `Host` capability handle, `register!` macro emits the WASM ABI exports (`bv_run` + `bv_alloc` + linear `memory`).
+- **`bv-plugin-pack` packer CLI** ([crates/bv-plugin-pack](../crates/bv-plugin-pack)) — bundles `plugin.toml` + `.wasm` into a `.bvplugin` artefact the GUI can self-configure on upload.
+- **Reference plugins out-of-tree** ([plugins-ext/](../plugins-ext/) git submodule) — `bastion-plugin-totp` (full WASM port of the TOTP engine) and `bastion-plugin-postgres` (process-runtime dynamic-secrets PoC).
+- **GUI** ([gui/src/routes/PluginsPage.tsx](../gui/src/routes/PluginsPage.tsx)) — register modal with manifest preview, list/delete/invoke, version activation, error surfacing.
+- **Process runtime as single-shot spawn-per-invoke** ([src/plugins/process_runtime.rs](../src/plugins/process_runtime.rs)) — host writes the binary to a temp file, spawns it, exchanges request/response over stdin/stdout, kills on timeout. Useful for "I need real network access *for one call*" cases; **not** the long-lived supervised gRPC subprocess the spec calls for.
+
+### Outstanding gaps (in priority order)
+
+1. **`bv.crypto_*` host capability — biggest functional gap.** Plugins cannot sign / encrypt / decrypt under a Transit key without seeing the bytes. `manifest.capabilities.allowed_keys` is declared but unenforced. Now unblocked by the Transit engine landing (Phases 1–4); concrete wiring is `bv.crypto_encrypt(key_handle, plaintext) → ciphertext`, `bv.crypto_sign(key_handle, message) → sig`, `bv.crypto_decrypt`, `bv.crypto_verify`, `bv.crypto_random(n)`. Allow-list is the manifest's `allowed_keys` matched against the operator-mounted Transit path.
+2. **ML-DSA-65 publisher signature verification.** Catalog enforces sha256 only. Spec calls for plugins signed by a publisher key (a Transit ML-DSA-65 key role), an operator-configured publisher allowlist, and `accept_unsigned = true` development opt-in (logged at WARN). Now unblocked by Transit shipping ML-DSA-65.
+3. **Long-lived supervised process runtime.** Replace the current spawn-per-invoke with: subprocess launched with a single-use 60 s bootstrap token over a UDS / Windows named pipe, `tonic`/`prost` `PluginService` RPCs over the socket, health checks, restart-with-exponential-backoff, log-line forwarding tagged with `plugin=<name>`, optional Linux `process_user` for per-plugin OS-level uid drop.
+4. **Versioned `PluginService` `.proto` shared across runtimes.** Today WASM uses a custom byte-shovel ABI and process uses raw stdin/stdout; the spec's central design point — that both runtimes share one wire schema with a major.minor version check — is not yet expressed as a `.proto` + `tonic-build`. Adding it makes the WASM ABI and process gRPC literally the same codegen output.
+5. **Net allowlist enforcement** — `allowed_hosts` declared in the manifest but no `host/net.rs` gate. Process plugins inherit unconstrained OS network access today. The wildcard-host rejection (`allowed_hosts = ["*"]` refused at registration) also needs to be added.
+6. **Hot-reload drain-and-swap.** `POST /v1/sys/plugins/<name>/reload` exists but only invalidates the module cache. Spec wants: write-lock the mount instances, drain in-flight (configurable, default 10s), queue-during-swap, return `plugin_reloading` after queue timeout, audit the swap with `(old_version, new_version, in_flight_count, actor_entity_id)`.
+7. **Quarantined-mount state on plugin delete.** Deleting a plugin today removes the catalog record; mounts that pointed at it now fail. Spec wants the storage prefix preserved + a `quarantined` mount state so an accidental delete is reversible by re-registering the same plugin.
+8. **Lease / renew / revoke plumbing.** LogicalBackend dispatches `Read`/`Write`/`Delete`/`List` to the plugin; the `operation="renew"` / `"revoke"` cases that let a plugin-issued lease drive its own lifecycle through the existing lease manager are missing. Required for any dynamic-secrets plugin (the Postgres reference plugin works around this today by being out-of-process and managing its own state).
+9. **Capability-widening guard.** Re-registering a plugin with broader capabilities should require the full signature ceremony, not just an `accept_unsigned` re-upload. Today it appears to silently accept the new manifest.
+10. **`PluginService` ABI version check** — the `manifest.abi_version` field is parsed but not compared against a host-side compatible-major set; mismatches silently pass.
+11. **Per-plugin metrics on the GUI** — Phase 3 deliverable; today the GUI shows catalog state but no per-plugin invoke counts / latency / fuel-consumed.
+12. **End-to-end integration tests for the reference plugins inside the main test suite** — the `plugins-ext/*` submodule plugins exist but are not exercised from `bastion_vault`'s integration tests.
+
+The core substrate is solid enough for early adopters writing internal plugins; the four gaps that block "production-grade" use are #1 (no crypto host), #2 (no signature verification), #3 (no real process supervisor), and #6 (reload is too coarse for live operations).
 
 ## Design
 
@@ -230,7 +258,7 @@ Tonic / prost build glue lives in `build.rs` so the `.proto` is the single sourc
 
 ## Implementation Scope
 
-### Phase 1 — Catalog + Manifest + WASM Runtime
+### Phase 1 — Catalog + Manifest + WASM Runtime — **Done**
 
 | File | Purpose |
 |---|---|
@@ -255,7 +283,7 @@ tonic            = { version = "0.12", default-features = false, features = ["co
 tonic-build      = "0.12"
 ```
 
-### Phase 2 — Out-of-Process Runtime + Supervisor
+### Phase 2 — Out-of-Process Runtime + Supervisor — **Partial (single-shot only; net allowlist registration check now in place per Phase 5.5; supervisor + tonic still outstanding)**
 
 | File | Purpose |
 |---|---|
@@ -271,7 +299,7 @@ nix          = { version = "0.29", optional = true }   # POSIX signal handling f
 windows-sys  = { version = "0.59", optional = true }   # Windows job objects for child cleanup
 ```
 
-### Phase 3 — Hot Reload, Versioning, GUI
+### Phase 3 — Hot Reload, Versioning, GUI — **Done (drain-and-swap reload via Phase 5.6, signature verification via Phase 5.2, per-plugin Prometheus metrics via Phase 5.10; GUI metrics pivot is Phase 5.12)**
 
 | File | Purpose |
 |---|---|
@@ -279,7 +307,7 @@ windows-sys  = { version = "0.59", optional = true }   # Windows job objects for
 | `gui/src/routes/PluginsPage.tsx` | New page: catalog + register modal + reload button + per-plugin metrics. |
 | `gui/src/components/PluginRegisterModal.tsx` | Upload wasm/binary + manifest + signature; preview the manifest before commit. |
 
-### Phase 4 — Reference Plugins
+### Phase 4 — Reference Plugins — **Done (out-of-tree in `plugins-ext/`); integration tests against the main suite still pending**
 
 To exercise the SDK and the runtime, ship two reference plugins **out-of-tree** (their own repos):
 
@@ -287,6 +315,23 @@ To exercise the SDK and the runtime, ship two reference plugins **out-of-tree** 
 - `bastion-plugin-totp` — a re-implementation of [features/totp-secret-engine.md](totp-secret-engine.md) as a WASM plugin. Demonstrates the WASM runtime. Useful as a porting template.
 
 These prove the protocol is implementable from outside the BastionVault tree.
+
+### Phase 5 — Production-grade gaps — **Mostly done**
+
+| Thread | Status | Scope |
+|---|---|---|
+| **5.1 Crypto host capability** | **Done** | `bv.crypto_{random,encrypt,decrypt,sign,verify,hmac}` host imports in [`src/plugins/runtime.rs`](../src/plugins/runtime.rs), backed by Transit. `manifest.capabilities.allowed_keys` is enforced literally against the plugin-supplied `transit/keys/<name>` path. Unauthorised keys return `CRYPTO_FORBIDDEN`. The plugin never sees key bytes — the host base64-encodes inputs and decodes outputs around the Transit call. |
+| **5.2 ML-DSA-65 publisher signature verification** | **Done** | New [`src/plugins/verifier.rs`](../src/plugins/verifier.rs) verifies on registration *and* every load. Manifest gains `signature` + `signing_key`. Operator-pinned publisher allowlist at `core/plugins/engine/publishers` (HTTP `GET/PUT /v1/sys/plugins/publishers`); engine `accept_unsigned` flag at `core/plugins/engine/accept_unsigned` (HTTP `PUT /v1/sys/plugins/accept_unsigned`; logged at WARN). Canonical signing message: `sha256(binary) || canonical_manifest_json_with_signature_field_stripped`. |
+| **5.3 Long-lived supervised process runtime** | **Pending (deferred)** | Replace single-shot `process_runtime` with a long-lived subprocess speaking `PluginService` over UDS / Windows named pipes via `tonic`/`prost`. Single-use 60 s bootstrap token, restart-with-exponential-backoff, log forwarding tagged `plugin=<name>`, health checks. Optional Linux `process_user` for per-plugin uid drop. The current spawn-per-invoke continues to work for "I need real network for one call" cases. |
+| **5.4 `PluginService` `.proto` (versioned, shared)** | **Pending (deferred)** | Promote the protocol to a `tonic-build` `.proto` so the WASM ABI and process-runtime gRPC are the same codegen output. Adds host-side `abi_version` major check. |
+| **5.5 Net allowlist registration check** | **Done** | `PluginCatalog::validate_net_allowlist` refuses bare `"*"`, port-bearing entries, and `*` outside the leading-label position. (Per-connection enforcement waits on 5.3.) |
+| **5.6 Reload drain-and-swap** | **Done** | Per-plugin `tokio::sync::RwLock` in [`src/plugins/reload_lock.rs`](../src/plugins/reload_lock.rs); every invoke takes the read, the reload HTTP handler takes the write with a 10 s drain timeout. On drain timeout the response is `503 plugin_reloading`. Reload swap is audited via the existing `audit.finish` path. |
+| **5.7 Quarantined-mount state on plugin delete** | **Done** | New [`src/plugins/quarantine.rs`](../src/plugins/quarantine.rs); `delete` writes a marker at `core/plugins/engine/quarantine/<name>` (timestamp + last-active version) and **preserves** `core/plugins/<name>/data/`. Mounts surface a clear "quarantined: re-register to recover" error. Re-register auto-clears the marker. Operators audit via `GET /v1/sys/plugins/quarantine`. |
+| **5.8 Lease renew/revoke plumbing** | **Done** | `translate_response` now parses `secret { lease_id, ttl_secs, renewable, internal_data }` from the plugin's response into `Response.secret: Option<SecretData>` so plugin-issued leases drive the existing lease manager. Renew/revoke dispatch back to the plugin via `build_envelope` was already wired. |
+| **5.9 Capability-widening guard** | **Done** | `PluginCatalog::check_capability_widening` refuses any new version that flips `audit_emit` on, adds or moves `storage_prefix` to a non-sub-prefix, or gains an `allowed_keys` / `allowed_hosts` entry. Operators must DELETE + re-register to widen — which audits the change and goes through the quarantine flow. |
+| **5.10 Per-plugin Prometheus metrics** | **Done** | New [`src/plugins/metrics.rs`](../src/plugins/metrics.rs) registers `bvault_plugin_invokes_total{plugin, outcome}`, `bvault_plugin_fuel_consumed_total{plugin}`, `bvault_plugin_invoke_duration_seconds{plugin}` with the existing `MetricsManager`. Recorded around every invoke in `PluginLogicalBackend`. GUI-side per-plugin pivot is the remaining sub-thread. |
+| **5.11 Reference-plugin integration tests against the main suite** | **Pending** | Exercise `plugins-ext/bastion-plugin-totp` and `bastion-plugin-postgres` from `bastion_vault`'s integration tests (Postgres via `testcontainers`). |
+| **5.12 GUI per-plugin metrics surface** | **Pending** | Pivot the new metrics counters into Tauri commands + the existing Plugins page. |
 
 ### Not In Scope
 

@@ -23,6 +23,7 @@ pub mod resource_group;
 pub mod ssh;
 pub mod system;
 pub mod totp;
+pub mod transit;
 
 #[maybe_async::maybe_async]
 pub trait Module: Any + Send + Sync {
