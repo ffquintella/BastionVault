@@ -31,10 +31,19 @@ pub enum KeyAlgorithm {
     MlDsa44,
     MlDsa65,
     MlDsa87,
-    /// Composite ECDSA-P256 + ML-DSA-65. Phase 3 preview, gated behind the
-    /// `pki_pqc_composite` feature.
+    /// Composite ECDSA-P256 + ML-DSA-44 (`id-MLDSA44-ECDSA-P256-SHA256`).
+    /// Phase 3 preview, gated behind the `pki_pqc_composite` feature.
+    #[cfg(feature = "pki_pqc_composite")]
+    CompositeEcdsaP256MlDsa44,
+    /// Composite ECDSA-P256 + ML-DSA-65 (`id-MLDSA65-ECDSA-P256-SHA512`).
+    /// The original Phase 3 ship — see [`super::composite`].
     #[cfg(feature = "pki_pqc_composite")]
     CompositeEcdsaP256MlDsa65,
+    /// Composite ECDSA-P384 + ML-DSA-87 (`id-MLDSA87-ECDSA-P384-SHA512`).
+    /// Highest classical/PQ security level on offer; matches the
+    /// "top-of-the-line" tier in the IETF lamps draft.
+    #[cfg(feature = "pki_pqc_composite")]
+    CompositeEcdsaP384MlDsa87,
 }
 
 /// Coarse partition used by the PKI engine to enforce "no mixed chains by
@@ -74,9 +83,16 @@ impl KeyAlgorithm {
             ("ml-dsa-44" | "ml-dsa-65" | "ml-dsa-87", _) => Err(RvError::ErrPkiKeyBitsInvalid),
             // Composite roles — same `key_bits = 0` rule as PQC.
             #[cfg(feature = "pki_pqc_composite")]
+            ("ecdsa-p256+ml-dsa-44", 0) => Ok(Self::CompositeEcdsaP256MlDsa44),
+            #[cfg(feature = "pki_pqc_composite")]
             ("ecdsa-p256+ml-dsa-65", 0) => Ok(Self::CompositeEcdsaP256MlDsa65),
             #[cfg(feature = "pki_pqc_composite")]
-            ("ecdsa-p256+ml-dsa-65", _) => Err(RvError::ErrPkiKeyBitsInvalid),
+            ("ecdsa-p384+ml-dsa-87", 0) => Ok(Self::CompositeEcdsaP384MlDsa87),
+            #[cfg(feature = "pki_pqc_composite")]
+            (
+                "ecdsa-p256+ml-dsa-44" | "ecdsa-p256+ml-dsa-65" | "ecdsa-p384+ml-dsa-87",
+                _,
+            ) => Err(RvError::ErrPkiKeyBitsInvalid),
             ("rsa", _) => Err(RvError::ErrPkiKeyBitsInvalid),
             ("ec", _) => Err(RvError::ErrPkiKeyBitsInvalid),
             _ => Err(RvError::ErrPkiKeyTypeInvalid),
@@ -87,7 +103,9 @@ impl KeyAlgorithm {
         match self {
             Self::MlDsa44 | Self::MlDsa65 | Self::MlDsa87 => AlgorithmClass::Pqc,
             #[cfg(feature = "pki_pqc_composite")]
-            Self::CompositeEcdsaP256MlDsa65 => AlgorithmClass::Composite,
+            Self::CompositeEcdsaP256MlDsa44
+            | Self::CompositeEcdsaP256MlDsa65
+            | Self::CompositeEcdsaP384MlDsa87 => AlgorithmClass::Composite,
             _ => AlgorithmClass::Classical,
         }
     }
@@ -110,7 +128,11 @@ impl KeyAlgorithm {
             Self::MlDsa65 => "ml-dsa-65",
             Self::MlDsa87 => "ml-dsa-87",
             #[cfg(feature = "pki_pqc_composite")]
+            Self::CompositeEcdsaP256MlDsa44 => "ecdsa-p256+ml-dsa-44",
+            #[cfg(feature = "pki_pqc_composite")]
             Self::CompositeEcdsaP256MlDsa65 => "ecdsa-p256+ml-dsa-65",
+            #[cfg(feature = "pki_pqc_composite")]
+            Self::CompositeEcdsaP384MlDsa87 => "ecdsa-p384+ml-dsa-87",
         }
     }
 
@@ -123,7 +145,9 @@ impl KeyAlgorithm {
             Self::EcdsaP384 => 384,
             Self::Ed25519 | Self::MlDsa44 | Self::MlDsa65 | Self::MlDsa87 => 0,
             #[cfg(feature = "pki_pqc_composite")]
-            Self::CompositeEcdsaP256MlDsa65 => 0,
+            Self::CompositeEcdsaP256MlDsa44
+            | Self::CompositeEcdsaP256MlDsa65
+            | Self::CompositeEcdsaP384MlDsa87 => 0,
         }
     }
 
@@ -140,7 +164,9 @@ impl KeyAlgorithm {
             // PQC algorithms are not driven through rcgen — see [`super::x509_pqc`].
             Self::MlDsa44 | Self::MlDsa65 | Self::MlDsa87 => return Err(RvError::ErrPkiKeyTypeInvalid),
             #[cfg(feature = "pki_pqc_composite")]
-            Self::CompositeEcdsaP256MlDsa65 => return Err(RvError::ErrPkiKeyTypeInvalid),
+            Self::CompositeEcdsaP256MlDsa44
+            | Self::CompositeEcdsaP256MlDsa65
+            | Self::CompositeEcdsaP384MlDsa87 => return Err(RvError::ErrPkiKeyTypeInvalid),
         })
     }
 }
@@ -313,8 +339,13 @@ pub enum Signer {
 impl Signer {
     pub fn generate(alg: KeyAlgorithm) -> Result<Self, RvError> {
         #[cfg(feature = "pki_pqc_composite")]
-        if matches!(alg, KeyAlgorithm::CompositeEcdsaP256MlDsa65) {
-            return Ok(Self::Composite(CompositeSigner::generate()?));
+        if matches!(
+            alg,
+            KeyAlgorithm::CompositeEcdsaP256MlDsa44
+                | KeyAlgorithm::CompositeEcdsaP256MlDsa65
+                | KeyAlgorithm::CompositeEcdsaP384MlDsa87
+        ) {
+            return Ok(Self::Composite(CompositeSigner::generate(alg)?));
         }
         match alg.ml_dsa_level() {
             Some(level) => Ok(Self::MlDsa(MlDsaSigner::generate(level)?)),
@@ -331,7 +362,7 @@ impl Signer {
                 MlDsaLevel::L87 => KeyAlgorithm::MlDsa87,
             },
             #[cfg(feature = "pki_pqc_composite")]
-            Self::Composite(_) => KeyAlgorithm::CompositeEcdsaP256MlDsa65,
+            Self::Composite(s) => s.algorithm(),
         }
     }
 

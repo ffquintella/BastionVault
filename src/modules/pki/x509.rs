@@ -357,7 +357,9 @@ fn classical_signature_alg_id(
             return Err(RvError::ErrPkiKeyTypeInvalid);
         }
         #[cfg(feature = "pki_pqc_composite")]
-        KeyAlgorithm::CompositeEcdsaP256MlDsa65 => return Err(RvError::ErrPkiKeyTypeInvalid),
+        KeyAlgorithm::CompositeEcdsaP256MlDsa44
+        | KeyAlgorithm::CompositeEcdsaP256MlDsa65
+        | KeyAlgorithm::CompositeEcdsaP384MlDsa87 => return Err(RvError::ErrPkiKeyTypeInvalid),
     };
     Ok(x509_cert::spki::AlgorithmIdentifierOwned { oid, parameters })
 }

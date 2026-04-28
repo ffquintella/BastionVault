@@ -31,7 +31,7 @@ use x509_cert::{
 };
 
 use super::{
-    composite::{CompositeSigner, OID_COMPOSITE_MLDSA65_ECDSAP256},
+    composite::CompositeSigner,
     path_roles::RoleEntry,
     x509::{RevokedEntry, SubjectInput},
     x509_pqc,
@@ -40,14 +40,17 @@ use crate::errors::RvError;
 
 const CRL_NUMBER_OID: const_oid::ObjectIdentifier = const_oid::ObjectIdentifier::new_unwrap("2.5.29.20");
 
-fn composite_alg_id() -> AlgorithmIdentifierOwned {
-    AlgorithmIdentifierOwned { oid: OID_COMPOSITE_MLDSA65_ECDSAP256, parameters: None }
+/// AlgorithmIdentifier for the cert / CRL signature. Reads the OID off
+/// the signer so multi-variant deployments (P256+L44, P256+L65,
+/// P384+L87) emit the right `signatureAlgorithm` for each pairing.
+fn composite_alg_id(signer: &CompositeSigner) -> AlgorithmIdentifierOwned {
+    AlgorithmIdentifierOwned { oid: signer.oid(), parameters: None }
 }
 
 fn composite_spki(signer: &CompositeSigner) -> Result<SubjectPublicKeyInfoOwned, RvError> {
     let pk_der = signer.composite_public_key_der()?;
     Ok(SubjectPublicKeyInfoOwned {
-        algorithm: composite_alg_id(),
+        algorithm: composite_alg_id(signer),
         subject_public_key: BitString::from_bytes(&pk_der).map_err(x509_pqc::der_err)?,
     })
 }
@@ -65,7 +68,7 @@ pub fn build_root_ca(
     ttl: Duration,
     signer: &CompositeSigner,
 ) -> Result<(String, Vec<u8>), RvError> {
-    let alg_id = composite_alg_id();
+    let alg_id = composite_alg_id(signer);
     let spki = composite_spki(signer)?;
 
     let dn = x509_pqc::build_dn_cn_o(common_name, organization)?;
@@ -113,7 +116,11 @@ pub fn build_leaf(
     ca_signer: &CompositeSigner,
     ca_cert_pem: &str,
 ) -> Result<(String, Vec<u8>), RvError> {
-    let alg_id = composite_alg_id();
+    // `signatureAlgorithm` reflects the *CA*'s algorithm — it's the OID
+    // operators verify against. The leaf's SPKI carries its own (which
+    // may legitimately differ when an operator mixes variants on
+    // purpose, even though the path-issue gate today refuses that).
+    let alg_id = composite_alg_id(ca_signer);
     let leaf_spki = composite_spki(leaf_signer)?;
 
     let ca_cert = parse_cert_pem(ca_cert_pem)?;
@@ -172,7 +179,7 @@ pub fn build_crl(
     ca_signer: &CompositeSigner,
     ca_cert_pem: &str,
 ) -> Result<String, RvError> {
-    let alg_id = composite_alg_id();
+    let alg_id = composite_alg_id(ca_signer);
     let ca_cert = parse_cert_pem(ca_cert_pem)?;
     let issuer = ca_cert.tbs_certificate.subject.clone();
 
