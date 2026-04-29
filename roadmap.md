@@ -97,6 +97,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Plugin System ([spec](features/plugin-system.md)) | Done — WASM + supervised long-lived process runtime, signed manifests, per-plugin metrics, GUI |
 | Namespaces / Multi-tenancy ([spec](features/namespaces-multitenancy.md)) | Partial |
 | Kubernetes Integration ([spec](features/kubernetes-integration.md)) | Todo |
+| Rustion Bastion Integration ([spec](features/rustion-integration.md)) | Todo — spec drafted; mediates Resource Connect through a PQC bastion with master-cert trust anchor, signed/encrypted session-grant envelopes, TTL+renewal, recording delegated to Rustion |
 | Web UI / Desktop GUI (Tauri) | Done — all 9 phases |
 | Compliance Reporting ([spec](features/compliance-reporting.md)) | Todo |
 
@@ -110,6 +111,7 @@ None — all previously-active items have closed out. Next up are the `Todo` row
 - HSM Support
 - Kubernetes Integration
 - Compliance Reporting
+- Rustion Bastion Integration (delegated PAM transport + recording)
 
 ## Completed Initiatives
 

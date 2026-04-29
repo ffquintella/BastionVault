@@ -47,6 +47,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Rustion Bastion Integration — spec drafted
+
+- **New feature spec** ([`features/rustion-integration.md`](features/rustion-integration.md)) — design for delegating Resource Connect sessions through a [Rustion](/Users/felipe/Dev/Rustion) bastion. Master signing certificate (hybrid Ed25519 + ML-DSA-65) held in BastionVault, public half enrolled once on Rustion as a trusted authority. Sessions open via a BVRG-v1 envelope: CBOR payload (target + credential + TTL + recording policy + operator identity) ML-KEM-768-encrypted to Rustion's pubkey, hybrid-signed by the master cert. Rustion verifies, decrypts, materialises a single-use IP-bound ticket, and proxies SSH/RDP to the target while recording natively (asciicast v3 / `.rdp-rec`). Renewals re-sign with the same master identity up to `max_renewals`; force-terminate via signed `kill` envelope; recordings exposed in BastionVault's audit timeline as signed-URL pointers (bytes never traverse BastionVault). **Three-tier `connect.transport` policy** (`direct | rustion | rustion-required`) evaluated most-restrictive-wins across global (`sys/config/rustion`, **root-only**, with a `transport_lock` that pins every resource regardless of lower tiers), per-resource-type (`ResourceTypeDef`, **admin-only**, with its own type-level lock), and per-resource (resource-owner, only writable when no upstream tier is locked); GUI shows the effective value and the tier it came from, locked tiers render the field read-only. Seven planned phases: master cert + target registry → envelope + control-plane scaffold → SSH ticketed proxy → RDP → renewal/terminate → recording handoff → policy + rotation. Symmetric work in the Rustion repo (new `rustion-control-plane` crate + `authorities/<name>.yaml` store).
+- **Roadmap entry** added under Infrastructure.
+
 #### Resource Connect — Phase 7 (polish: per-type Connect policy, recently-connected list, ⌘K palette)
 
 The final polish slice of the Resource Connect feature. Three operator-facing improvements layered on top of the now-complete launch matrix from Phase 6.5; no transport / credential changes.
