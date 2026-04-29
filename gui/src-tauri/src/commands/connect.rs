@@ -318,7 +318,7 @@ pub async fn session_open_rdp(
             host,
             port,
             username,
-            password: resolved.password,
+            credential: resolved.credential,
             domain: resolved.domain,
             label: label.clone(),
             on_close,
@@ -434,7 +434,7 @@ pub async fn session_input_rdp_key(
 }
 
 struct ResolvedRdpCredential {
-    password: Zeroizing<String>,
+    credential: session::rdp::RdpCredential,
     /// LDAP bind modes return the canonical username; the caller
     /// swaps it in over the profile's username field.
     effective_username: Option<String>,
@@ -478,7 +478,7 @@ async fn resolve_rdp_credential(
                 )));
             }
             Ok(ResolvedRdpCredential {
-                password: Zeroizing::new(password),
+                credential: session::rdp::RdpCredential::Password(Zeroizing::new(password)),
                 effective_username: data
                     .get("username")
                     .and_then(|v| v.as_str())
@@ -511,7 +511,7 @@ async fn resolve_rdp_credential(
                     let (effective_user, domain) = split_domain_user(&oc.username);
                     let _ = ldap_mount;
                     Ok(ResolvedRdpCredential {
-                        password: Zeroizing::new(oc.password.clone()),
+                        credential: session::rdp::RdpCredential::Password(Zeroizing::new(oc.password.clone())),
                         effective_username: Some(effective_user),
                         domain,
                         on_close: None,
@@ -549,7 +549,7 @@ async fn resolve_rdp_credential(
                         .to_string();
                     let (effective_user, domain) = split_domain_user(&username);
                     Ok(ResolvedRdpCredential {
-                        password: Zeroizing::new(password),
+                        credential: session::rdp::RdpCredential::Password(Zeroizing::new(password)),
                         effective_username: Some(effective_user),
                         domain,
                         on_close: None,
@@ -594,7 +594,7 @@ async fn resolve_rdp_credential(
                         .to_string();
                     let (effective_user, domain) = split_domain_user(&username);
                     Ok(ResolvedRdpCredential {
-                        password: Zeroizing::new(password),
+                        credential: session::rdp::RdpCredential::Password(Zeroizing::new(password)),
                         effective_username: Some(effective_user),
                         domain,
                         on_close: Some(crate::session::SessionCleanup {
@@ -612,21 +612,34 @@ async fn resolve_rdp_credential(
             }
         }
         "pki" => {
-            // We can issue the cert today — but feeding it to RDP
-            // requires CredSSP smartcard wiring (sspi-rs's `scard`
-            // backend), which isn't shipped yet. Issue first so the
-            // operator gets a clear "credential resolves but
-            // transport doesn't accept it" signal at connect time
-            // rather than a confusing later error.
-            let _issued = issue_pki_credential(state, resource_name, cs).await?;
-            Err(CommandError::from(
-                "RDP + PKI client cert (CredSSP smartcard) is not yet wired. The PKI \
-                 cert was issued successfully, but plumbing it into the RDP CredSSP \
-                 path requires sspi-rs's smartcard backend. Tracked as a Phase 6 \
-                 follow-up alongside the broader CredSSP / NLA enablement deferred \
-                 in Phase 4."
-                    .to_string(),
-            ))
+            let issued = issue_pki_credential(state, resource_name, cs).await?;
+            let certificate_der = pem_body_to_der(&issued.certificate, "CERTIFICATE")?;
+            let private_key_der =
+                pem_body_to_der(&issued.private_key, "PRIVATE KEY")
+                    // RSA private keys often come in PEM-wrapped
+                    // PKCS#1 form (`-----BEGIN RSA PRIVATE KEY-----`)
+                    // — accept both forms and let the IronRDP
+                    // connector's PKCS#8/PKCS#1 fallback sort it out.
+                    .or_else(|_| pem_body_to_der(&issued.private_key, "RSA PRIVATE KEY"))?;
+            log::info!(
+                "resource-connect/rdp: pki/issue produced cert (serial {}) — wiring as CredSSP smartcard",
+                issued.serial_number
+            );
+            Ok(ResolvedRdpCredential {
+                credential: session::rdp::RdpCredential::SmartCard(
+                    session::rdp::SmartCardCredential {
+                        certificate_der,
+                        private_key_der,
+                        // Synthetic PIN — the PIV emulator inside
+                        // sspi-rs accepts any non-empty value
+                        // since there's no hardware to enforce it.
+                        pin: "0000".to_string(),
+                    },
+                ),
+                effective_username: None, // smart-card cred carries the UPN itself
+                domain: None,
+                on_close: None,
+            })
         }
         other => Err(CommandError::from(format!(
             "credential source `{other}` lands in a later phase"
@@ -924,6 +937,34 @@ async fn issue_pki_credential(
         issuing_ca,
         serial_number,
     })
+}
+
+/// Decode a PEM block into the underlying DER bytes. We don't
+/// pull in a full PEM crate for this; the format is trivial and
+/// we already control both producers (the in-tree PKI engine).
+/// Returns `Err` if the expected `BEGIN <label>` marker isn't
+/// found or the base64 body fails to decode.
+fn pem_body_to_der(pem: &str, label: &str) -> Result<Vec<u8>, CommandError> {
+    let begin = format!("-----BEGIN {label}-----");
+    let end = format!("-----END {label}-----");
+    let start = pem
+        .find(&begin)
+        .ok_or_else(|| CommandError::from(format!("pem: missing `{begin}`")))?
+        + begin.len();
+    let stop = pem
+        .find(&end)
+        .ok_or_else(|| CommandError::from(format!("pem: missing `{end}`")))?;
+    if stop <= start {
+        return Err(CommandError::from(format!("pem: malformed `{label}`")));
+    }
+    let body: String = pem[start..stop]
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    STANDARD
+        .decode(body.as_bytes())
+        .map_err(|e| CommandError::from(format!("pem: base64 decode `{label}`: {e}")))
 }
 
 fn pki_mount_prefix(cs: &Value) -> Result<String, CommandError> {

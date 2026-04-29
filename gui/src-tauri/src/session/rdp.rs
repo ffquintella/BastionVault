@@ -38,6 +38,7 @@ use std::time::Duration;
 
 use ironrdp::connector::{
     ClientConnector, Config as ConnectorConfig, ConnectionResult, Credentials, DesktopSize,
+    SmartCardIdentity,
 };
 use ironrdp::pdu::gcc::KeyboardType;
 use ironrdp::pdu::input::fast_path::{FastPathInput, FastPathInputEvent, KeyboardFlags};
@@ -63,12 +64,33 @@ pub struct RdpOpenArgs {
     pub host: String,
     pub port: u16,
     pub username: String,
-    pub password: Zeroizing<String>,
+    pub credential: RdpCredential,
     pub domain: Option<String>,
     pub label: String,
     /// Mirror of `SshOpenArgs::on_close` — runs when the session
     /// closes. Only LDAP library check-in uses it today.
     pub on_close: Option<SessionCleanup>,
+}
+
+/// What kind of credential the operator picked for this session.
+/// Phase 4 ships `Password` (RDP Standard Security or NLA with
+/// password). The CredSSP smartcard wiring (Phase 6) adds
+/// `SmartCard`, which feeds a synthetic PIV credential built from
+/// a vault-issued PKI cert + PKCS#8 private key.
+pub enum RdpCredential {
+    Password(Zeroizing<String>),
+    SmartCard(SmartCardCredential),
+}
+
+pub struct SmartCardCredential {
+    /// DER-encoded X509 cert (PEM-decoded body).
+    pub certificate_der: Vec<u8>,
+    /// DER-encoded PKCS#8 private key (PEM-decoded body).
+    pub private_key_der: Vec<u8>,
+    /// Synthetic PIN. The PIV emulator inside sspi-rs accepts any
+    /// non-empty PIN since there's no hardware to enforce it; we
+    /// pass a fixed value for log clarity.
+    pub pin: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -177,7 +199,7 @@ pub async fn open_rdp_session(
     // Stage 4: ironrdp connector — phase two. CredSSP is OFF in
     // build_connector_config so the network client is never invoked
     // (we still pass a stub to satisfy the trait bound).
-    let mut net = StubNetworkClient;
+    let mut net = CredSspNetworkClient::new();
     let connection_result = ironrdp_async::connect_finalize(
         upgraded_marker,
         connector,
@@ -232,17 +254,42 @@ pub async fn open_rdp_session(
 }
 
 fn build_connector_config(args: &RdpOpenArgs) -> ConnectorConfig {
+    // Smartcard auth requires CredSSP — there's no Standard
+    // Security analogue. Password auth still uses Standard
+    // Security so the Phase-4 flow against NLA-disabled hosts
+    // keeps working unchanged.
+    let (credentials, enable_credssp) = match &args.credential {
+        RdpCredential::Password(pw) => (
+            Credentials::UsernamePassword {
+                username: args.username.clone(),
+                password: pw.as_str().to_owned(),
+            },
+            false,
+        ),
+        RdpCredential::SmartCard(sc) => (
+            Credentials::SmartCard {
+                pin: sc.pin.clone(),
+                config: Some(SmartCardIdentity {
+                    certificate: sc.certificate_der.clone(),
+                    // Synthetic reader / container / CSP names —
+                    // the AD-side checks the cert itself, not the
+                    // reader, so any plausible label works. We
+                    // surface "BastionVault" so server-side audit
+                    // logs name what minted the credential.
+                    reader_name: "BastionVault Virtual SmartCard".to_owned(),
+                    container_name: "bv-rdp".to_owned(),
+                    csp_name: "Microsoft Base Smart Card Crypto Provider".to_owned(),
+                    private_key: sc.private_key_der.clone(),
+                }),
+            },
+            true,
+        ),
+    };
     ConnectorConfig {
-        credentials: Credentials::UsernamePassword {
-            username: args.username.clone(),
-            password: args.password.as_str().to_owned(),
-        },
+        credentials,
         domain: args.domain.clone(),
-        // RDP Standard Security — TLS but no CredSSP. NLA is the
-        // follow-up; standard works against most homelab + Win
-        // servers with NLA disabled.
         enable_tls: true,
-        enable_credssp: false,
+        enable_credssp,
         keyboard_type: KeyboardType::IbmEnhanced,
         keyboard_subtype: 0,
         keyboard_layout: 0,
@@ -282,22 +329,51 @@ fn build_connector_config(args: &RdpOpenArgs) -> ConnectorConfig {
     }
 }
 
-/// Stub `NetworkClient` — only invoked during the CredSSP/Kerberos
-/// flow, which is disabled in `build_connector_config`. Kept because
-/// the trait bound on `connect_finalize` still requires *some*
-/// implementation.
-struct StubNetworkClient;
-impl NetworkClient for StubNetworkClient {
+/// Async `NetworkClient` wrapper over sspi's blocking
+/// `ReqwestNetworkClient`. CredSSP smartcard auth (Kerberos
+/// PKINIT) suspends the connector to discover the realm's KDC
+/// over the network; that's when this trait gets invoked. Each
+/// call delegates to sspi's blocking client via
+/// `tokio::task::spawn_blocking` so we don't park the runtime —
+/// the network round-trip is short, but blocking on it from the
+/// pump task would still freeze the spawned WebviewWindow.
+struct CredSspNetworkClient {
+    inner: sspi::network_client::reqwest_network_client::ReqwestNetworkClient,
+}
+
+impl CredSspNetworkClient {
+    fn new() -> Self {
+        Self {
+            inner: sspi::network_client::reqwest_network_client::ReqwestNetworkClient,
+        }
+    }
+}
+
+impl NetworkClient for CredSspNetworkClient {
     fn send(
         &mut self,
-        _request: &ironrdp::connector::sspi::generator::NetworkRequest,
-    ) -> impl std::future::Future<
-        Output = ironrdp::connector::ConnectorResult<Vec<u8>>,
-    > {
-        async {
-            Err(ironrdp::connector::general_err!(
-                "rdp: NetworkClient stub — CredSSP / NLA not implemented in Phase 4"
-            ))
+        request: &ironrdp::connector::sspi::generator::NetworkRequest,
+    ) -> impl std::future::Future<Output = ironrdp::connector::ConnectorResult<Vec<u8>>>
+    {
+        // Clone the request so the task closure owns it; the
+        // borrow lives only as long as `send`.
+        let req = request.clone();
+        let client = self.inner.clone();
+        async move {
+            let result = tokio::task::spawn_blocking(move || {
+                sspi::network_client::NetworkClient::send(&client, &req)
+            })
+            .await
+            .map_err(|e| {
+                let msg = format!("rdp: network task: {e}");
+                log::error!("{msg}");
+                ironrdp::connector::general_err!("rdp: network task")
+            })?;
+            result.map_err(|e| {
+                let msg = format!("rdp: network: {e}");
+                log::error!("{msg}");
+                ironrdp::connector::general_err!("rdp: network")
+            })
         }
     }
 }

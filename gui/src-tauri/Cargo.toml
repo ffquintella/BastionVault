@@ -95,6 +95,12 @@ ironrdp-tls = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-de
 ironrdp-core = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps" }
 ironrdp-pdu = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps" }
 ironrdp-tokio = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps" }
+# Direct dep on sspi so we can pull `ReqwestNetworkClient` for the
+# CredSSP smartcard path. The transitive sspi via ironrdp-connector
+# would compile without the `network_client` feature here, so we
+# pin it explicitly. Same git pin as the IronRDP `[patch.crates-io]`
+# uses — Cargo's git deps unify on rev.
+sspi = { git = "https://github.com/Devolutions/sspi-rs", rev = "26765bbe1f57f490ba1c37703eda8267c3b2dfb6", default-features = false, features = ["network_client", "aws-lc-rs"] }
 
 [target.'cfg(windows)'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }

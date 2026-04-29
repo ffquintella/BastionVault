@@ -654,9 +654,10 @@ function ConnectionProfilesPanel({
     switch (p.credential_source.kind) {
       case "secret":
       case "ldap":
-        return true;
       case "pki":
-        return p.protocol === "ssh";
+        // SSH+PKI: russh publickey via the PKI-issued key.
+        // RDP+PKI: CredSSP smartcard via sspi-rs's PIV emulator.
+        return true;
       case "ssh-engine":
         return false;
     }
@@ -798,11 +799,13 @@ function ConnectionProfilesPanel({
                     onClick={() => handleConnect(p)}
                     disabled={connecting !== null}
                     title={
-                      p.protocol === "rdp"
-                        ? "Phase 4 RDP — Standard Security (no NLA / CredSSP). Most homelab + Win servers with NLA disabled."
+                      p.credential_source.kind === "pki" && p.protocol === "rdp"
+                        ? "PKI + RDP: vault-issued cert wraps as a synthetic PIV smartcard for CredSSP / NLA negotiation."
                         : p.credential_source.kind === "pki"
-                          ? "PKI: a fresh leaf cert is issued per session. SSH uses the private_key as a russh credential."
-                          : undefined
+                          ? "PKI + SSH: fresh leaf cert issued per session; SSH uses the private_key as a russh credential."
+                          : p.protocol === "rdp"
+                            ? "RDP: Standard Security with password, or NLA / CredSSP smartcard with PKI."
+                            : undefined
                     }
                   >
                     {connecting === p.id ? "Connecting…" : "Connect"}
@@ -811,11 +814,7 @@ function ConnectionProfilesPanel({
                   <Button
                     size="sm"
                     disabled
-                    title={
-                      p.protocol === "rdp" && p.credential_source.kind === "pki"
-                        ? "RDP + PKI requires CredSSP smartcard wiring — pending."
-                        : "Connect for this combination ships in a later phase"
-                    }
+                    title="Connect for this combination ships in a later phase"
                   >
                     Connect
                   </Button>
@@ -839,11 +838,12 @@ function ConnectionProfilesPanel({
           </p>
         )}
         <p className="text-xs text-[var(--color-text-muted)]">
-          Connect launches an in-app session window for SSH+Secret /
-          SSH+LDAP / SSH+PKI (xterm.js + russh) and RDP+Secret /
-          RDP+LDAP (canvas + ironrdp, RDP Standard Security only).
-          RDP+PKI is pending CredSSP smartcard wiring; the SSH
-          secret-engine source is pending its own follow-up phase.
+          Connect launches an in-app session window for SSH × {"{"}
+          Secret, LDAP, PKI{"}"} (xterm.js + russh) and RDP × {"{"}
+          Secret, LDAP, PKI{"}"} (canvas + ironrdp). RDP+PKI
+          negotiates CredSSP smartcard auth via sspi-rs's PIV
+          emulator using the vault-issued cert + key. The SSH
+          secret-engine source remains pending its own follow-up.
         </p>
       </div>
 
@@ -1163,7 +1163,7 @@ function ConnectionProfileEditor({
             { value: "secret", label: "Resource secret" },
             { value: "ldap", label: "LDAP / Active Directory" },
             { value: "ssh-engine", label: "SSH secret engine (later phase)" },
-            { value: "pki", label: "PKI client cert (SSH today; RDP CredSSP pending)" },
+            { value: "pki", label: "PKI client cert (SSH publickey / RDP CredSSP smartcard)" },
           ]}
         />
 
@@ -1458,14 +1458,14 @@ function PkiCredentialEditor({
         hint="Optional override; clamped to the role's max_ttl by the engine."
       />
       {protocol === "rdp" && (
-        <div className="rounded border border-yellow-700 bg-yellow-950/40 px-3 py-2 text-xs text-yellow-200">
-          <strong>RDP + PKI is not wired yet.</strong> The cert
-          issues fine, but plumbing it into the RDP CredSSP
-          smartcard path requires the sspi-rs scard backend.
-          Tracked alongside the broader CredSSP / NLA enablement
-          deferred in Phase 4. The operator-bind LDAP source or a
-          Secret credential are the supported RDP paths today.
-        </div>
+        <p className="text-xs text-[var(--color-text-muted)]">
+          RDP wraps the issued cert as a synthetic PIV smartcard
+          via sspi-rs's emulated scard backend, then negotiates
+          CredSSP / NLA. The Windows server must have the cert's
+          issuing CA enrolled (typically via AD smartcard logon
+          policy). The PKI role's <code>max_ttl</code> caps how
+          long the per-session cert is valid.
+        </p>
       )}
       {protocol === "ssh" && (
         <p className="text-xs text-[var(--color-text-muted)]">

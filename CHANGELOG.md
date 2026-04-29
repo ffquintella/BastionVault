@@ -47,6 +47,31 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Resource Connect — Phase 6.5 (RDP CredSSP smartcard wiring)
+
+The RDP+PKI gap closed. Vault-issued client certs now drive **CredSSP / NLA smartcard auth** against AD-enrolled Windows servers via `sspi-rs`'s emulated PIV backend — no hardware smartcard, no extra OS configuration, just a PEM cert + PKCS#8 key from the in-tree PKI engine.
+
+**IronRDP fork** ([`fix-deps` branch](https://github.com/ffquintella/IronRDP/tree/fix-deps), commit `ab745f1d`):
+- `ironrdp-connector/src/credssp.rs` — accept private keys in either **PKCS#8** or PKCS#1 DER. Tries PKCS#8 first (which modern PKI engines emit, including BastionVault's own), falls back to PKCS#1 for legacy callers. Non-smartcard CredSSP flows are unaffected.
+- `ironrdp-connector/Cargo.toml` + `ironrdp/Cargo.toml` — enable `sspi`'s `network_client` (KDC discovery via reqwest) and `dns_resolver` (DNS-based KDC lookup) features. Required at runtime so the Kerberos PKINIT flow that backs smartcard auth can resolve the realm's KDC. Dormant when CredSSP is disabled.
+
+**BastionVault GUI** ([`gui/src-tauri/src/session/rdp.rs`](gui/src-tauri/src/session/rdp.rs), [`gui/src-tauri/src/commands/connect.rs`](gui/src-tauri/src/commands/connect.rs)):
+- New `RdpCredential` enum on `RdpOpenArgs`: `Password(Zeroizing<String>)` (the existing path) and `SmartCard(SmartCardCredential)` — `{ certificate_der, private_key_der, pin }`. `build_connector_config` dispatches: password → Standard Security; smartcard → `Credentials::SmartCard { pin, config: Some(SmartCardIdentity { certificate, reader_name = "BastionVault Virtual SmartCard", container_name = "bv-rdp", csp_name = "Microsoft Base Smart Card Crypto Provider", private_key }) }` + `enable_credssp = true`.
+- **`CredSspNetworkClient`** replaces the previous `StubNetworkClient`. Wraps sspi's blocking `ReqwestNetworkClient` in `tokio::task::spawn_blocking` so KDC discovery during PKINIT doesn't park the runtime. Direct dep on `sspi` from the GUI crate (same git pin as the IronRDP `[patch.crates-io]`) so the `network_client` / `aws-lc-rs` features are unambiguously enabled.
+- **RDP+PKI resolver wired** ([`commands/connect.rs`](gui/src-tauri/src/commands/connect.rs)) — the previous "transport pending" stub replaced with a real builder: `issue_pki_credential` runs first, the returned PEM cert + private key are decoded to DER via a new `pem_body_to_der` helper (handles `-----BEGIN CERTIFICATE-----`, `-----BEGIN PRIVATE KEY-----`, and `-----BEGIN RSA PRIVATE KEY-----` with a fallback chain so PKCS#1 RSA round-trips work too), and the result lands in `RdpCredential::SmartCard`. Synthetic PIN `0000` — the PIV emulator inside sspi-rs accepts any non-empty value since there's no hardware to enforce it.
+- **Frontend** — `PkiCredentialEditor`'s previous yellow "RDP+PKI is not wired yet" banner replaced with positive copy explaining the CredSSP + AD smartcard-logon prerequisites. `launchableProfiles` now includes RDP+PKI; the per-button tooltip carries a short technical note. `ssh-engine` is the only remaining stub source.
+
+**Launch matrix today** — every PKI-relevant cell ✅:
+
+| protocol | Secret | LDAP | PKI | SSH-engine |
+|---|---|---|---|---|
+| SSH | ✅ Phase 3 | ✅ Phase 5 | ✅ Phase 6 | pending |
+| RDP | ✅ Phase 4 | ✅ Phase 5 | ✅ Phase 6.5 (CredSSP smartcard) | n/a |
+
+`cargo check --workspace` clean. `tsc` clean. **102/102** vitest pass.
+
+Server-side prerequisite for RDP+PKI: the issuing CA must be enrolled on the Windows side via the standard AD smartcard-logon GPO (`Computer Configuration → Policies → Windows Settings → Security Settings → Public Key Policies → Trusted Root Certification Authorities` or via `certutil -dspublish -f <CA.cer> NTAuthCA`). The cert's UPN extension or SAN must match an AD account.
+
 #### Resource Connect — Phase 6 (PKI credential source — SSH; RDP CredSSP pending)
 
 The Connect button now supports the **PKI client cert** credential source for SSH. At connect time the host calls `pki/issue/<role>` against the bound PKI mount with the resource hostname as the requested CN, gets back a fresh leaf cert + private key + chain, and feeds the private key to russh as a publickey credential. Operators get the **short-lived-cert lifecycle** for free — every session issues a new key bounded by the role's `max_ttl`.
