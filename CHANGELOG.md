@@ -47,6 +47,31 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Resource Connect — Phase 5 (LDAP credential source)
+
+The Connect button now supports the **LDAP / Active Directory** credential source on top of the existing Secret source. The LDAP profile binds to an operator-configured LDAP secret-engine mount (e.g. `openldap/`) and runs in one of three sub-modes; the SSH and RDP transports both ship today.
+
+**Three bind modes**:
+- **`operator`** — operator-supplied bind. Frontend pops a small modal collecting `username` / `password` (accepts plain `user`, `DOMAIN\user`, or `user@realm`). The host forwards them straight to the SSH/RDP transport. Credentials never persist — the typed password lives only as long as the open request. RDP path parses out the `\`/`@` separator so the CredSSP-shaped domain slot lands correctly when the connector wants it.
+- **`static_role`** — vault-managed account. At connect time the host issues an internal `READ <ldap_mount>/static-cred/<role>` and feeds the returned `username` + `password` to the transport. The same code path the LDAP secret engine's `/v1/<mount>/static-cred/<role>` endpoint normally answers.
+- **`library_set`** — vault-managed pool with check-out semantics. Connect issues `WRITE <ldap_mount>/library/<set>/check-out`, captures the returned `lease_id`, and **registers a session-close hook** that runs the matching `check-in` when the WebviewWindow closes (or `session_close` is called explicitly). The same per-set Mutex the LDAP engine uses today guarantees no parallel session double-uses the same account.
+
+**Session-close cleanup** ([`gui/src-tauri/src/session/mod.rs`](gui/src-tauri/src/session/mod.rs)) — new `SessionCleanup` enum captured at open time on both `SshSessionState` and `RdpSessionState`. Variants today: `LdapLibraryCheckIn { ldap_mount, library_set, lease_id }`. `drop_session` returns the captured hook so `session_close` (and the `WindowEvent::CloseRequested` handlers spawned by the open commands) can fire it. A failed check-in logs at WARN and swallows the error — the alternative would be to fail the close and leave a dangling session record, which is worse.
+
+**Unified credential resolver** ([`gui/src-tauri/src/commands/connect.rs`](gui/src-tauri/src/commands/connect.rs)) — replaced the per-protocol `resolve_secret_credential_*` helpers with `resolve_ssh_credential` / `resolve_rdp_credential`. Both dispatch on `credential_source.kind` (`secret` / `ldap`), return a `(credential, optional_effective_username, optional_on_close)` tuple, and let the caller swap in the canonical username when the LDAP resolver knows it. SSH-engine and PKI sources are still stubbed pending Phase 6 / its follow-ups.
+
+**Frontend**:
+- New `LdapCredentialEditor` component on the Connection-tab profile editor with three sub-mode selectors. The editor shows mount-path + role / set fields conditional on the bind mode; the operator-mode case carries inline copy explaining that the prompt fires at connect time.
+- `OperatorBindPrompt` modal — pops on Connect for LDAP+operator profiles, collects user/password, forwards to the open request via the new optional `operator_credential` field.
+- `runConnect` helper centralises the open-request shape; the kind-based branching (SSH vs RDP) and the operator-bind branch share it.
+- Connect button now enables for SSH/RDP × Secret/LDAP combos. The "later phase" stub label kept on the SSH-engine + PKI sources.
+
+**Username handling** — both protocols' open commands now allow an empty `profile.username` and re-validate after credential resolution so LDAP `static_role` / `library_set` modes can supply the canonical service-account username from the cred response.
+
+`cargo check --workspace` clean. `tsc` clean. **102/102** vitest pass.
+
+Phase 6 (PKI client cert / CredSSP smartcard) and Phase 7 (polish + per-type Connect policy + recently-connected list) follow.
+
 #### Resource Connect — Phase 4 (RDP session window, Secret source)
 
 The Connect button now opens an in-app RDP session window for Windows server resources. Canvas-based bitmap rendering driven by `ironrdp` 0.14 over a tokio TCP+TLS framed stream. Credential bytes never reach the JS layer.

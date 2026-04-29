@@ -1267,9 +1267,18 @@ export const ldapDeleteConfig = (mount: string) =>
   invoke<void>("ldap_delete_config", { mount });
 // ── Resource Connect — SSH session window ──────────────────────────
 
+export type OperatorCredential = {
+  username: string;
+  password: string;
+};
+
 export type SessionOpenSshRequest = {
   resource_name: string;
   profile_id: string;
+  /** Required only for `LdapBindMode::Operator` profiles. The
+   *  Connection panel pops a small modal that collects these and
+   *  forwards them through this field. */
+  operator_credential?: OperatorCredential;
 };
 
 export type SessionOpenSshResponse = {
@@ -1285,6 +1294,7 @@ export const sessionOpenSsh = (request: SessionOpenSshRequest) =>
 export type SessionOpenRdpRequest = {
   resource_name: string;
   profile_id: string;
+  operator_credential?: OperatorCredential;
 };
 
 export type SessionOpenRdpResponse = {

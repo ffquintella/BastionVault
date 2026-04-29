@@ -35,6 +35,18 @@ pub struct SshOpenRequest {
     /// source. The host re-reads the profile from the resource
     /// rather than trusting any client-side copy of it.
     pub profile_id: String,
+    /// Optional operator-supplied credential payload. Required
+    /// only for `LdapBindMode::Operator` profiles, where the
+    /// frontend pops a prompt before calling open and forwards
+    /// the typed username/password through this field.
+    #[serde(default)]
+    pub operator_credential: Option<OperatorCredential>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct OperatorCredential {
+    pub username: String,
+    pub password: String,
 }
 
 #[derive(Serialize)]
@@ -68,20 +80,40 @@ pub async fn session_open_ssh(
     })?;
     let port = profile_port(&profile);
     let username = profile_username(&profile);
-    if username.is_empty() {
-        return Err(CommandError::from(
-            "profile.username is required for SSH (no operator default)".to_string(),
-        ));
-    }
+    // Allow empty here; LDAP sources can supply the username via
+    // `effective_username`. We re-validate after resolution.
     let host_key_fingerprint = profile
         .get("host_key_pin")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let label = format!("ssh {username}@{host}:{port}");
 
-    // Resolve the credential source. Phase 3 = Secret only.
-    let credential = resolve_secret_credential(&state, &request.resource_name, &profile).await?;
+    // Resolve the credential source. Phases 3 + 5 ship: Secret +
+    // LDAP (operator-bind / static-role / library set).
+    let resolved = resolve_ssh_credential(
+        &state,
+        &request.resource_name,
+        &profile,
+        request.operator_credential.as_ref(),
+    )
+    .await?;
+    let credential = resolved.credential;
+    // LDAP profiles can override the profile's username with the
+    // one the cred resolver returned (static_role/library set
+    // returns the canonical service-account username).
+    let username = if let Some(u) = resolved.effective_username {
+        u
+    } else {
+        username
+    };
+    if username.is_empty() {
+        return Err(CommandError::from(
+            "SSH profile has no username (set profile.username or use an LDAP credential source)"
+                .to_string(),
+        ));
+    }
+    let label = format!("ssh {username}@{host}:{port}");
+    let on_close = resolved.on_close;
 
     // Run the connect with a hard timeout so a wedged DNS/TCP/TLS
     // doesn't lock the calling Tauri command.
@@ -97,6 +129,7 @@ pub async fn session_open_ssh(
                 credential,
                 host_key_fingerprint,
                 label: label.clone(),
+                on_close,
             },
         ),
     )
@@ -138,7 +171,11 @@ pub async fn session_open_ssh(
             tauri::async_runtime::spawn(async move {
                 let s = app.state::<AppState>();
                 let _ = session::ssh::send_control(&s, &token, SshControl::Close).await;
-                session::ssh::drop_session(&s, &token).await;
+                let cleanup = session::ssh::drop_session(&s, &token).await;
+                if let Some(c) = cleanup {
+                    let s2 = app.state::<AppState>();
+                    run_cleanup(&s2, c).await;
+                }
                 log::info!("resource-connect/ssh: window-close → session drop {token}");
             });
         }
@@ -203,6 +240,11 @@ pub async fn session_resize(
 pub struct RdpOpenRequest {
     pub resource_name: String,
     pub profile_id: String,
+    /// Same operator-bind credential channel as
+    /// `SshOpenRequest::operator_credential`. Required for
+    /// `LdapBindMode::Operator` profiles only.
+    #[serde(default)]
+    pub operator_credential: Option<OperatorCredential>,
 }
 
 #[derive(Serialize)]
@@ -246,14 +288,27 @@ pub async fn session_open_rdp(
         .and_then(|n| u16::try_from(n).ok())
         .unwrap_or(3389);
     let username = profile_username(&profile);
+    // For RDP we don't fail when the profile username is empty
+    // — LDAP credential sources supply it. The check after
+    // resolution catches the case where every source path is also
+    // empty.
+
+    let resolved = resolve_rdp_credential(
+        &state,
+        &request.resource_name,
+        &profile,
+        request.operator_credential.as_ref(),
+    )
+    .await?;
+    let username = resolved.effective_username.unwrap_or(username);
     if username.is_empty() {
         return Err(CommandError::from(
-            "profile.username is required for RDP".to_string(),
+            "RDP profile has no username (set profile.username, supply via the LDAP credential source, or use a Secret with a `username` field)"
+                .to_string(),
         ));
     }
     let label = format!("rdp {username}@{host}:{port}");
-
-    let password = resolve_secret_credential_for_rdp(&state, &request.resource_name, &profile).await?;
+    let on_close = resolved.on_close;
 
     // Open the real RDP transport.
     let outcome = session::rdp::open_rdp_session(
@@ -263,9 +318,10 @@ pub async fn session_open_rdp(
             host,
             port,
             username,
-            password,
-            domain: None,
+            password: resolved.password,
+            domain: resolved.domain,
             label: label.clone(),
+            on_close,
         },
     )
     .await
@@ -296,7 +352,11 @@ pub async fn session_open_rdp(
             tauri::async_runtime::spawn(async move {
                 let s = app.state::<AppState>();
                 let _ = session::rdp::send_control(&s, &token, session::rdp::RdpControl::Close).await;
-                session::rdp::drop_session(&s, &token).await;
+                let cleanup = session::rdp::drop_session(&s, &token).await;
+                if let Some(c) = cleanup {
+                    let s2 = app.state::<AppState>();
+                    run_cleanup(&s2, c).await;
+                }
             });
         }
     });
@@ -373,41 +433,206 @@ pub async fn session_input_rdp_key(
     .map_err(CommandError::from)
 }
 
-async fn resolve_secret_credential_for_rdp(
+struct ResolvedRdpCredential {
+    password: Zeroizing<String>,
+    /// LDAP bind modes return the canonical username; the caller
+    /// swaps it in over the profile's username field.
+    effective_username: Option<String>,
+    /// LDAP operator-bind can encode `DOMAIN\username` or
+    /// `user@realm` — we surface the parsed domain part here so
+    /// the RDP connector can put it in the right slot.
+    domain: Option<String>,
+    on_close: Option<crate::session::SessionCleanup>,
+}
+
+async fn resolve_rdp_credential(
     state: &State<'_, AppState>,
     resource_name: &str,
     profile: &Value,
-) -> Result<zeroize::Zeroizing<String>, CommandError> {
+    operator_credential: Option<&OperatorCredential>,
+) -> Result<ResolvedRdpCredential, CommandError> {
     let cs = profile.get("credential_source").ok_or_else(|| {
         CommandError::from("profile is missing credential_source".to_string())
     })?;
     let kind = cs.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-    if kind != "secret" {
-        return Err(CommandError::from(format!(
-            "credential source `{kind}` is not implemented yet — Phase 4 supports `secret` only"
-        )));
+    match kind {
+        "secret" => {
+            let secret_id = cs
+                .get("secret_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| CommandError::from("credential_source.secret_id is required"))?;
+            let path = format!("{RESOURCE_MOUNT}secrets/{resource_name}/{secret_id}");
+            let resp = make_request(state, Operation::Read, path, None).await?;
+            let data: HashMap<String, Value> = resp
+                .and_then(|r| r.data)
+                .map(|m| m.into_iter().collect())
+                .unwrap_or_default();
+            let password = data
+                .get("password")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_default();
+            if password.is_empty() {
+                return Err(CommandError::from(format!(
+                    "secret `{secret_id}` carries no `password` field — RDP CredSSP requires a password"
+                )));
+            }
+            Ok(ResolvedRdpCredential {
+                password: Zeroizing::new(password),
+                effective_username: data
+                    .get("username")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .filter(|s| !s.is_empty()),
+                domain: None,
+                on_close: None,
+            })
+        }
+        "ldap" => {
+            let ldap_mount = ldap_mount_prefix(cs)?;
+            let bind_mode = cs
+                .get("bind_mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("operator");
+            match bind_mode {
+                "operator" => {
+                    let oc = operator_credential.ok_or_else(|| {
+                        CommandError::from(
+                            "ldap bind_mode = operator requires operator_credential on the open request"
+                                .to_string(),
+                        )
+                    })?;
+                    if oc.username.is_empty() || oc.password.is_empty() {
+                        return Err(CommandError::from(
+                            "operator-supplied LDAP credential must carry both username and password"
+                                .to_string(),
+                        ));
+                    }
+                    let (effective_user, domain) = split_domain_user(&oc.username);
+                    let _ = ldap_mount;
+                    Ok(ResolvedRdpCredential {
+                        password: Zeroizing::new(oc.password.clone()),
+                        effective_username: Some(effective_user),
+                        domain,
+                        on_close: None,
+                    })
+                }
+                "static_role" => {
+                    let role = cs
+                        .get("static_role")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            CommandError::from(
+                                "ldap bind_mode = static_role requires credential_source.static_role"
+                                    .to_string(),
+                            )
+                        })?;
+                    let path = format!("{ldap_mount}static-cred/{role}");
+                    let resp = make_request(state, Operation::Read, path, None).await?;
+                    let data: HashMap<String, Value> = resp
+                        .and_then(|r| r.data)
+                        .map(|m| m.into_iter().collect())
+                        .unwrap_or_default();
+                    let username = data
+                        .get("username")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| CommandError::from(format!(
+                            "ldap static-cred/{role} missing `username`"
+                        )))?
+                        .to_string();
+                    let password = data
+                        .get("password")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| CommandError::from(format!(
+                            "ldap static-cred/{role} missing `password`"
+                        )))?
+                        .to_string();
+                    let (effective_user, domain) = split_domain_user(&username);
+                    Ok(ResolvedRdpCredential {
+                        password: Zeroizing::new(password),
+                        effective_username: Some(effective_user),
+                        domain,
+                        on_close: None,
+                    })
+                }
+                "library_set" => {
+                    let set = cs
+                        .get("library_set")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            CommandError::from(
+                                "ldap bind_mode = library_set requires credential_source.library_set"
+                                    .to_string(),
+                            )
+                        })?;
+                    let path = format!("{ldap_mount}library/{set}/check-out");
+                    let resp = make_request(state, Operation::Write, path, None).await?;
+                    let data: HashMap<String, Value> = resp
+                        .and_then(|r| r.data)
+                        .map(|m| m.into_iter().collect())
+                        .unwrap_or_default();
+                    let username = data
+                        .get("username")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| CommandError::from(format!(
+                            "ldap library/{set}/check-out missing `username`"
+                        )))?
+                        .to_string();
+                    let password = data
+                        .get("password")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| CommandError::from(format!(
+                            "ldap library/{set}/check-out missing `password`"
+                        )))?
+                        .to_string();
+                    let lease_id = data
+                        .get("lease_id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| CommandError::from(format!(
+                            "ldap library/{set}/check-out missing `lease_id`"
+                        )))?
+                        .to_string();
+                    let (effective_user, domain) = split_domain_user(&username);
+                    Ok(ResolvedRdpCredential {
+                        password: Zeroizing::new(password),
+                        effective_username: Some(effective_user),
+                        domain,
+                        on_close: Some(crate::session::SessionCleanup {
+                            kind: crate::session::SessionCleanupKind::LdapLibraryCheckIn {
+                                ldap_mount: ldap_mount.trim_end_matches('/').to_string(),
+                                library_set: set.to_string(),
+                                lease_id,
+                            },
+                        }),
+                    })
+                }
+                other => Err(CommandError::from(format!(
+                    "unknown ldap bind_mode `{other}`"
+                ))),
+            }
+        }
+        other => Err(CommandError::from(format!(
+            "credential source `{other}` lands in a later phase"
+        ))),
     }
-    let secret_id = cs
-        .get("secret_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| CommandError::from("credential_source.secret_id is required"))?;
-    let path = format!("{RESOURCE_MOUNT}secrets/{resource_name}/{secret_id}");
-    let resp = make_request(state, Operation::Read, path, None).await?;
-    let data: HashMap<String, Value> = resp
-        .and_then(|r| r.data)
-        .map(|m| m.into_iter().collect())
-        .unwrap_or_default();
-    let password = data
-        .get("password")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .unwrap_or_default();
-    if password.is_empty() {
-        return Err(CommandError::from(format!(
-            "secret `{secret_id}` carries no `password` field — RDP CredSSP requires a password"
-        )));
+}
+
+/// Split `DOMAIN\\user` or `user@realm` into `(user, Some(domain))`,
+/// otherwise return `(input, None)`. RDP CredSSP wants domain in
+/// its own field, even though most servers tolerate the combined
+/// form.
+fn split_domain_user(input: &str) -> (String, Option<String>) {
+    if let Some((domain, user)) = input.split_once('\\') {
+        if !domain.is_empty() && !user.is_empty() {
+            return (user.to_string(), Some(domain.to_string()));
+        }
     }
-    Ok(zeroize::Zeroizing::new(password))
+    if let Some((user, realm)) = input.rsplit_once('@') {
+        if !user.is_empty() && !realm.is_empty() {
+            return (user.to_string(), Some(realm.to_string()));
+        }
+    }
+    (input.to_string(), None)
 }
 
 #[derive(Deserialize)]
@@ -422,7 +647,8 @@ pub async fn session_close(
 ) -> CmdResult<()> {
     // Best-effort fan-out: we don't know whether the token names
     // an SSH or RDP session, so try both. The mismatched one
-    // returns an error we ignore. drop_session removes either kind.
+    // returns an error we ignore. drop_session removes either kind
+    // and yields any captured cleanup hook.
     let _ = session::ssh::send_control(&state, &request.token, SshControl::Close).await;
     let _ = session::rdp::send_control(
         &state,
@@ -430,9 +656,38 @@ pub async fn session_close(
         session::rdp::RdpControl::Close,
     )
     .await;
-    session::ssh::drop_session(&state, &request.token).await;
-    session::rdp::drop_session(&state, &request.token).await;
+    let cleanup_ssh = session::ssh::drop_session(&state, &request.token).await;
+    let cleanup_rdp = session::rdp::drop_session(&state, &request.token).await;
+    if let Some(c) = cleanup_ssh.or(cleanup_rdp) {
+        run_cleanup(&state, c).await;
+    }
     Ok(())
+}
+
+/// Execute a session-close cleanup hook. LDAP library check-in is
+/// the only kind today; failures log a warning and swallow the
+/// error — the alternative would be to fail the close and leave
+/// the session record dangling, which is worse.
+async fn run_cleanup(state: &State<'_, AppState>, cleanup: crate::session::SessionCleanup) {
+    match cleanup.kind {
+        crate::session::SessionCleanupKind::LdapLibraryCheckIn {
+            ldap_mount,
+            library_set,
+            lease_id,
+        } => {
+            let path = format!("{ldap_mount}/library/{library_set}/check-in");
+            let mut body = Map::new();
+            body.insert("lease_id".into(), Value::String(lease_id.clone()));
+            match make_request(state, Operation::Write, path, Some(body)).await {
+                Ok(_) => log::info!(
+                    "resource-connect: ldap library check-in ok (mount={ldap_mount} set={library_set} lease={lease_id})"
+                ),
+                Err(e) => log::warn!(
+                    "resource-connect: ldap library check-in failed (mount={ldap_mount} set={library_set} lease={lease_id}): {e:?}"
+                ),
+            }
+        }
+    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -502,20 +757,44 @@ fn profile_username(profile: &Value) -> String {
         .to_string()
 }
 
-async fn resolve_secret_credential(
+struct ResolvedSshCredential {
+    credential: SshCredential,
+    /// When the resolver knows the canonical username (e.g.
+    /// LDAP static-role / library check-out returns one), the
+    /// caller swaps it in over the profile's username.
+    effective_username: Option<String>,
+    /// LDAP library check-out registers a cleanup hook here so
+    /// `session_close` can return the account to the pool.
+    on_close: Option<crate::session::SessionCleanup>,
+}
+
+async fn resolve_ssh_credential(
     state: &State<'_, AppState>,
     resource_name: &str,
     profile: &Value,
-) -> Result<SshCredential, CommandError> {
+    operator_credential: Option<&OperatorCredential>,
+) -> Result<ResolvedSshCredential, CommandError> {
     let cs = profile.get("credential_source").ok_or_else(|| {
         CommandError::from("profile is missing credential_source".to_string())
     })?;
     let kind = cs.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-    if kind != "secret" {
-        return Err(CommandError::from(format!(
-            "credential source `{kind}` is not implemented yet — Phase 3 supports `secret` only"
-        )));
+    match kind {
+        "secret" => resolve_secret_ssh(state, resource_name, cs).await,
+        "ldap" => resolve_ldap_ssh(state, cs, operator_credential).await,
+        "ssh-engine" | "pki" => Err(CommandError::from(format!(
+            "credential source `{kind}` lands in a later phase"
+        ))),
+        other => Err(CommandError::from(format!(
+            "unknown credential source `{other}`"
+        ))),
     }
+}
+
+async fn resolve_secret_ssh(
+    state: &State<'_, AppState>,
+    resource_name: &str,
+    cs: &Value,
+) -> Result<ResolvedSshCredential, CommandError> {
     let secret_id = cs
         .get("secret_id")
         .and_then(|v| v.as_str())
@@ -543,20 +822,200 @@ async fn resolve_secret_credential(
         .map(String::from)
         .unwrap_or_default();
 
-    if !private_key.is_empty() {
-        Ok(SshCredential::PrivateKey {
+    let credential = if !private_key.is_empty() {
+        SshCredential::PrivateKey {
             pem: Zeroizing::new(private_key),
             passphrase: if passphrase.is_empty() {
                 None
             } else {
                 Some(Zeroizing::new(passphrase))
             },
-        })
+        }
     } else if !password.is_empty() {
-        Ok(SshCredential::Password(Zeroizing::new(password)))
+        SshCredential::Password(Zeroizing::new(password))
     } else {
-        Err(CommandError::from(format!(
+        return Err(CommandError::from(format!(
             "secret `{secret_id}` carries no `password` or `private_key` field — Connect can't authenticate"
-        )))
+        )));
+    };
+    Ok(ResolvedSshCredential {
+        credential,
+        effective_username: data
+            .get("username")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .filter(|s| !s.is_empty()),
+        on_close: None,
+    })
+}
+
+/// Resolve an LDAP-source profile to an SSH-shaped credential.
+///
+/// Three sub-modes:
+///   - `operator` — operator types user+password into a frontend
+///     prompt; we forward verbatim. (We don't run an extra
+///     simple-bind validation here; the SSH server itself will
+///     bounce bad creds back to the operator.)
+///   - `static_role` — internal request to the bound LDAP mount's
+///     `/static-cred/<role>` endpoint pulls the vault-managed
+///     username + password.
+///   - `library_set` — internal request to
+///     `/library/<set>/check-out`; we register a session-close
+///     hook that calls `/library/<set>/check-in` with the
+///     captured `lease_id`.
+async fn resolve_ldap_ssh(
+    state: &State<'_, AppState>,
+    cs: &Value,
+    operator_credential: Option<&OperatorCredential>,
+) -> Result<ResolvedSshCredential, CommandError> {
+    let ldap_mount = ldap_mount_prefix(cs)?;
+    let bind_mode = cs
+        .get("bind_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("operator");
+    match bind_mode {
+        "operator" => {
+            let oc = operator_credential.ok_or_else(|| {
+                CommandError::from(
+                    "ldap bind_mode = operator requires operator_credential on the open request"
+                        .to_string(),
+                )
+            })?;
+            if oc.username.is_empty() || oc.password.is_empty() {
+                return Err(CommandError::from(
+                    "operator-supplied LDAP credential must carry both username and password"
+                        .to_string(),
+                ));
+            }
+            // We don't run an extra LDAP simple-bind validation
+            // here — adding one would double the round-trip on
+            // every connect and the SSH server validates these
+            // against AD anyway. If operator demand calls for an
+            // explicit pre-flight, it's a one-line addition that
+            // hits the existing `ldap/check-connection` style
+            // path on the bound mount.
+            let _ = ldap_mount;
+            Ok(ResolvedSshCredential {
+                credential: SshCredential::Password(Zeroizing::new(oc.password.clone())),
+                effective_username: Some(oc.username.clone()),
+                on_close: None,
+            })
+        }
+        "static_role" => {
+            let role = cs
+                .get("static_role")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    CommandError::from(
+                        "ldap bind_mode = static_role requires credential_source.static_role"
+                            .to_string(),
+                    )
+                })?;
+            let path = format!("{ldap_mount}static-cred/{role}");
+            let resp = make_request(state, Operation::Read, path, None).await?;
+            let data: HashMap<String, Value> = resp
+                .and_then(|r| r.data)
+                .map(|m| m.into_iter().collect())
+                .unwrap_or_default();
+            let username = data
+                .get("username")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    CommandError::from(format!(
+                        "ldap static-cred/{role} missing `username`"
+                    ))
+                })?
+                .to_string();
+            let password = data
+                .get("password")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    CommandError::from(format!(
+                        "ldap static-cred/{role} missing `password`"
+                    ))
+                })?
+                .to_string();
+            Ok(ResolvedSshCredential {
+                credential: SshCredential::Password(Zeroizing::new(password)),
+                effective_username: Some(username),
+                on_close: None,
+            })
+        }
+        "library_set" => {
+            let set = cs
+                .get("library_set")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    CommandError::from(
+                        "ldap bind_mode = library_set requires credential_source.library_set"
+                            .to_string(),
+                    )
+                })?;
+            let path = format!("{ldap_mount}library/{set}/check-out");
+            let resp = make_request(state, Operation::Write, path, None).await?;
+            let data: HashMap<String, Value> = resp
+                .and_then(|r| r.data)
+                .map(|m| m.into_iter().collect())
+                .unwrap_or_default();
+            let username = data
+                .get("username")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    CommandError::from(format!(
+                        "ldap library/{set}/check-out missing `username`"
+                    ))
+                })?
+                .to_string();
+            let password = data
+                .get("password")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    CommandError::from(format!(
+                        "ldap library/{set}/check-out missing `password`"
+                    ))
+                })?
+                .to_string();
+            let lease_id = data
+                .get("lease_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    CommandError::from(format!(
+                        "ldap library/{set}/check-out missing `lease_id`"
+                    ))
+                })?
+                .to_string();
+            Ok(ResolvedSshCredential {
+                credential: SshCredential::Password(Zeroizing::new(password)),
+                effective_username: Some(username),
+                on_close: Some(crate::session::SessionCleanup {
+                    kind: crate::session::SessionCleanupKind::LdapLibraryCheckIn {
+                        ldap_mount: ldap_mount.trim_end_matches('/').to_string(),
+                        library_set: set.to_string(),
+                        lease_id,
+                    },
+                }),
+            })
+        }
+        other => Err(CommandError::from(format!(
+            "unknown ldap bind_mode `{other}` (expected operator / static_role / library_set)"
+        ))),
     }
+}
+
+/// Mount-path prefix for an LDAP credential source. Always ends
+/// with `/`. The profile field is operator-typed, so we trim
+/// stray whitespace and ensure exactly one trailing slash.
+fn ldap_mount_prefix(cs: &Value) -> Result<String, CommandError> {
+    let raw = cs
+        .get("ldap_mount")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .ok_or_else(|| CommandError::from("credential_source.ldap_mount is required"))?;
+    if raw.is_empty() {
+        return Err(CommandError::from(
+            "credential_source.ldap_mount must not be empty".to_string(),
+        ));
+    }
+    let trimmed = raw.trim_end_matches('/');
+    Ok(format!("{trimmed}/"))
 }

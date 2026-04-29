@@ -39,6 +39,9 @@ pub struct RdpSessionState {
     /// payload.
     #[allow(dead_code)]
     pub label: String,
+    /// Mirror of `SshSessionState::on_close` — see that field for
+    /// the full rationale.
+    pub on_close: Option<SessionCleanup>,
 }
 
 pub struct SshSessionState {
@@ -51,6 +54,28 @@ pub struct SshSessionState {
     /// dead_code until that lands.
     #[allow(dead_code)]
     pub label: String,
+    /// Optional cleanup task to run on session-close. Used by
+    /// the LDAP library credential source to check the account
+    /// back into its set so the next operator can claim it.
+    pub on_close: Option<SessionCleanup>,
+}
+
+/// Library check-in payload — captured at connect time, executed
+/// from `session_close` (or the WebviewWindow close hook). Keeps
+/// the `(mount, set, lease_id)` tuple needed to call
+/// `<mount>/library/<set>/check-in`.
+#[derive(Clone, Debug)]
+pub struct SessionCleanup {
+    pub kind: SessionCleanupKind,
+}
+
+#[derive(Clone, Debug)]
+pub enum SessionCleanupKind {
+    LdapLibraryCheckIn {
+        ldap_mount: String,
+        library_set: String,
+        lease_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]

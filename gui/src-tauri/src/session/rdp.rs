@@ -55,7 +55,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
-use super::{RdpSessionState, SessionState};
+use super::{RdpSessionState, SessionCleanup, SessionState};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -66,6 +66,9 @@ pub struct RdpOpenArgs {
     pub password: Zeroizing<String>,
     pub domain: Option<String>,
     pub label: String,
+    /// Mirror of `SshOpenArgs::on_close` — runs when the session
+    /// closes. Only LDAP library check-in uses it today.
+    pub on_close: Option<SessionCleanup>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -210,6 +213,7 @@ pub async fn open_rdp_session(
             SessionState::Rdp(RdpSessionState {
                 input_tx: tx,
                 label: args.label.clone(),
+                on_close: args.on_close.clone(),
             }),
         );
     }
@@ -577,10 +581,23 @@ pub async fn send_control(
     }
 }
 
-pub async fn drop_session(state: &crate::state::AppState, token: &str) {
+pub async fn drop_session(
+    state: &crate::state::AppState,
+    token: &str,
+) -> Option<SessionCleanup> {
     let mut sessions = state.connect_sessions.lock().await;
-    if sessions.remove(token).is_some() {
-        log::info!("resource-connect/rdp: closed session token={token}");
+    let removed = sessions.remove(token);
+    drop(sessions);
+    match removed {
+        Some(SessionState::Rdp(s)) => {
+            log::info!("resource-connect/rdp: closed session token={token}");
+            s.on_close
+        }
+        Some(SessionState::Ssh(s)) => {
+            log::info!("resource-connect/rdp: dropped (was SSH) token={token}");
+            s.on_close
+        }
+        None => None,
     }
 }
 

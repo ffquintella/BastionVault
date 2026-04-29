@@ -641,29 +641,49 @@ function ConnectionProfilesPanel({
   const [confirmDelete, setConfirmDelete] = useState<ConnectionProfile | null>(null);
   const [connecting, setConnecting] = useState<string | null>(null);
 
-  // SSH+Secret + RDP+Secret both spawn a session window. RDP ships
-  // the surface today (window + canvas + input capture); the
-  // underlying ironrdp transport is pending an upstream picky /
-  // crypto-common alignment. The window surfaces a clear
-  // dep-blocker banner when that's the case.
+  // SSH and RDP both ship for Secret + LDAP (operator / static /
+  // library) credential sources today.
   const launchableProfiles = profiles.filter(
     (p) =>
       (p.protocol === "ssh" || p.protocol === "rdp") &&
-      p.credential_source.kind === "secret",
+      (p.credential_source.kind === "secret" ||
+        p.credential_source.kind === "ldap"),
   );
 
+  // LDAP operator-bind mode requires a credential prompt before
+  // the open call. We surface it as a tiny inline modal; on
+  // submit it forwards the typed user/password through the open
+  // request's `operator_credential` field.
+  const [operatorPrompt, setOperatorPrompt] = useState<ConnectionProfile | null>(null);
+
   async function handleConnect(profile: ConnectionProfile) {
+    if (
+      profile.credential_source.kind === "ldap" &&
+      profile.credential_source.bind_mode === "operator"
+    ) {
+      setOperatorPrompt(profile);
+      return;
+    }
+    await runConnect(profile, undefined);
+  }
+
+  async function runConnect(
+    profile: ConnectionProfile,
+    operatorCredential: { username: string; password: string } | undefined,
+  ) {
     setConnecting(profile.id);
     try {
       if (profile.protocol === "ssh") {
         await api.sessionOpenSsh({
           resource_name: String(resource.name),
           profile_id: profile.id,
+          operator_credential: operatorCredential,
         });
       } else {
         await api.sessionOpenRdp({
           resource_name: String(resource.name),
           profile_id: profile.id,
+          operator_credential: operatorCredential,
         });
       }
     } catch (e: unknown) {
@@ -829,7 +849,92 @@ function ConnectionProfilesPanel({
         message={`Delete profile "${confirmDelete?.name}"? Resource secrets and the resource itself stay intact.`}
         variant="danger"
       />
+
+      {operatorPrompt && (
+        <OperatorBindPrompt
+          profile={operatorPrompt}
+          onCancel={() => setOperatorPrompt(null)}
+          onSubmit={async (oc) => {
+            const p = operatorPrompt;
+            setOperatorPrompt(null);
+            await runConnect(p, oc);
+          }}
+        />
+      )}
     </Card>
+  );
+}
+
+/**
+ * Inline modal for the LDAP operator-bind credential source. The
+ * operator types user + password; we forward both to the host's
+ * session-open command. Credentials never persist anywhere — the
+ * modal closes on submit and the typed password lives only as
+ * long as the request to the host.
+ */
+function OperatorBindPrompt({
+  profile,
+  onCancel,
+  onSubmit,
+}: {
+  profile: ConnectionProfile;
+  onCancel: () => void;
+  onSubmit: (oc: { username: string; password: string }) => Promise<void>;
+}) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function handleSubmit() {
+    if (!username || !password || submitting) return;
+    setSubmitting(true);
+    try {
+      await onSubmit({ username, password });
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Modal
+      open
+      onClose={onCancel}
+      title={`LDAP credentials · ${profile.name}`}
+      size="sm"
+      actions={
+        <>
+          <Button variant="ghost" onClick={onCancel} disabled={submitting}>
+            Cancel
+          </Button>
+          <Button onClick={handleSubmit} disabled={!username || !password || submitting}>
+            {submitting ? "Connecting…" : "Connect"}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <p className="text-xs text-[var(--color-text-muted)]">
+          Enter the LDAP / Active Directory credentials to bind with
+          for this session. Accepts plain <code>user</code>,{" "}
+          <code>DOMAIN\\user</code>, or <code>user@realm</code> — the
+          host parses the domain part for the RDP CredSSP slot.
+          Credentials are not persisted on this profile.
+        </p>
+        <Input
+          label="Username"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          placeholder="DOMAIN\\alice"
+          autoFocus
+        />
+        <Input
+          label="Password"
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+      </div>
+    </Modal>
   );
 }
 
@@ -1036,8 +1141,8 @@ function ConnectionProfileEditor({
           }
           options={[
             { value: "secret", label: "Resource secret" },
-            { value: "ldap", label: "LDAP / Active Directory (Phase 5)" },
-            { value: "ssh-engine", label: "SSH secret engine (Phase 3)" },
+            { value: "ldap", label: "LDAP / Active Directory" },
+            { value: "ssh-engine", label: "SSH secret engine (later phase)" },
             { value: "pki", label: "PKI client cert (Phase 6)" },
           ]}
         />
@@ -1071,6 +1176,11 @@ function ConnectionProfileEditor({
               />
             ) : null}
           </div>
+        ) : profile.credential_source.kind === "ldap" ? (
+          <LdapCredentialEditor
+            cs={profile.credential_source}
+            onChange={updateCredentialSource}
+          />
         ) : (
           <CredentialSourceStub
             kind={profile.credential_source.kind}
@@ -1186,11 +1296,93 @@ function CredentialSecretInspector({
   );
 }
 
+/**
+ * Editor for LDAP credential sources. Three sub-modes:
+ *   - operator: operator types user+password into a small prompt
+ *     at connect time. Profile only stores the mount path.
+ *   - static_role: profile points at an LDAP static-role; host
+ *     pulls username + password from `ldap/static-cred/<role>` at
+ *     connect time.
+ *   - library_set: profile points at an LDAP library set; host
+ *     calls `library/<set>/check-out` and registers a session-
+ *     close hook that runs `library/<set>/check-in`.
+ */
+function LdapCredentialEditor({
+  cs,
+  onChange,
+}: {
+  cs: Extract<CredentialSource, { kind: "ldap" }>;
+  onChange: (s: CredentialSource) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 gap-3">
+        <Input
+          label="LDAP mount path"
+          value={cs.ldap_mount}
+          onChange={(e) =>
+            onChange({ ...cs, ldap_mount: e.target.value })
+          }
+          placeholder="openldap/"
+          hint="Mount path of the OpenLDAP / AD secret engine on this vault (e.g. `openldap/`)."
+        />
+        <Select
+          label="Bind mode"
+          value={cs.bind_mode}
+          onChange={(e) =>
+            onChange({
+              ...cs,
+              bind_mode: e.target.value as
+                | "operator"
+                | "static_role"
+                | "library_set",
+            })
+          }
+          options={[
+            { value: "operator", label: "Operator-supplied (prompt at connect)" },
+            { value: "static_role", label: "Vault-managed (static role)" },
+            { value: "library_set", label: "Vault-managed (library check-out)" },
+          ]}
+        />
+      </div>
+      {cs.bind_mode === "static_role" && (
+        <Input
+          label="Static role name"
+          value={cs.static_role ?? ""}
+          onChange={(e) =>
+            onChange({ ...cs, static_role: e.target.value || undefined })
+          }
+          placeholder="db-admin"
+          hint="Name of the LDAP static role configured on the bound mount. Connect reads `<mount>/static-cred/<role>` at session-open time."
+        />
+      )}
+      {cs.bind_mode === "library_set" && (
+        <Input
+          label="Library set name"
+          value={cs.library_set ?? ""}
+          onChange={(e) =>
+            onChange({ ...cs, library_set: e.target.value || undefined })
+          }
+          placeholder="db-admins"
+          hint="Name of the LDAP library set on the bound mount. Connect calls `library/<set>/check-out`; session close runs the matching `check-in`."
+        />
+      )}
+      {cs.bind_mode === "operator" && (
+        <p className="text-xs text-[var(--color-text-muted)]">
+          The session window will prompt for username + password
+          before opening. Credentials are passed straight to the
+          SSH/RDP transport — never persisted on this resource.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function CredentialSourceStub({ kind }: { kind: CredentialSource["kind"] }) {
   const labels: Record<CredentialSource["kind"], string> = {
     secret: "",
-    ldap: "LDAP / Active Directory — ships in Phase 5",
-    "ssh-engine": "SSH secret engine — ships in Phase 3",
+    ldap: "",
+    "ssh-engine": "SSH secret engine — vault-issued cert/OTP/PQC, ships in a later phase",
     pki: "PKI client cert (CredSSP smartcard) — ships in Phase 6",
   };
   return (

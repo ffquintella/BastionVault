@@ -29,7 +29,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
-use super::{SessionState, SshControl, SshSessionState};
+use super::{SessionCleanup, SessionState, SshControl, SshSessionState};
 
 /// What the caller needs to give us to drive a Phase-3 SSH
 /// session. The credential bytes are wrapped in `Zeroizing` so
@@ -46,6 +46,11 @@ pub struct SshOpenArgs {
     /// The label rendered in the Tauri WebviewWindow title bar +
     /// emitted on the audit event. Format: `ssh user@host:port`.
     pub label: String,
+    /// Optional cleanup task to run when the session closes
+    /// (LDAP library check-in is the only kind today). Stored on
+    /// the session record so `session_close` + the
+    /// WindowEvent::CloseRequested hook can both fire it.
+    pub on_close: Option<SessionCleanup>,
 }
 
 pub enum SshCredential {
@@ -255,6 +260,7 @@ pub async fn open_ssh_session(
             SessionState::Ssh(SshSessionState {
                 input_tx: tx,
                 label: args.label.clone(),
+                on_close: args.on_close.clone(),
             }),
         );
     }
@@ -351,10 +357,27 @@ pub async fn send_control(
 /// Drop a session from AppState. Called on `session_close` and on
 /// the `session-closed` event the worker emits when the remote
 /// PTY hangs up.
-pub async fn drop_session(state: &crate::state::AppState, token: &str) {
+/// Drop a session from `connect_sessions` and fire any cleanup
+/// hook captured at open time. Returns the captured hook (if any)
+/// so the caller can run it through the appropriate context (the
+/// LDAP library check-in needs the AppHandle + token).
+pub async fn drop_session(
+    state: &crate::state::AppState,
+    token: &str,
+) -> Option<SessionCleanup> {
     let mut sessions = state.connect_sessions.lock().await;
-    if let Some(_old) = sessions.remove(token) {
-        log::info!("resource-connect/ssh: closed session token={token}");
+    let removed = sessions.remove(token);
+    drop(sessions);
+    match removed {
+        Some(SessionState::Ssh(s)) => {
+            log::info!("resource-connect/ssh: closed session token={token}");
+            s.on_close
+        }
+        Some(SessionState::Rdp(s)) => {
+            log::info!("resource-connect/ssh: dropped (was RDP) token={token}");
+            s.on_close
+        }
+        None => None,
     }
 }
 

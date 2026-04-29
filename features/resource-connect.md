@@ -464,7 +464,7 @@ No backend changes — resource fields are already a flexible `Map<String, Value
 | TOFU cert-pin UI shared with SSH known_hosts | `gui/src/components/` |
 | Integration test against a Windows Server 2019 / 2022 RDP server (manual; no testcontainer for Windows) | docs |
 
-### Phase 5 — `ldap` credential source (operator-bind + LDAP-engine static / library)
+### Phase 5 — `ldap` credential source (operator-bind + LDAP-engine static / library) — **Done**
 
 | Deliverable | Location |
 |---|---|
