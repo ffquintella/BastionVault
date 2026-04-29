@@ -25,3 +25,4 @@ Cargo.lock
 
 # Claude Code local settings (machine-local)
 .claude/
+.DS_Store
