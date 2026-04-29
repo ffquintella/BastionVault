@@ -47,6 +47,26 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Resource Connect — Phase 6 (PKI credential source — SSH; RDP CredSSP pending)
+
+The Connect button now supports the **PKI client cert** credential source for SSH. At connect time the host calls `pki/issue/<role>` against the bound PKI mount with the resource hostname as the requested CN, gets back a fresh leaf cert + private key + chain, and feeds the private key to russh as a publickey credential. Operators get the **short-lived-cert lifecycle** for free — every session issues a new key bounded by the role's `max_ttl`.
+
+- **`resolve_pki_ssh`** ([`gui/src-tauri/src/commands/connect.rs`](gui/src-tauri/src/commands/connect.rs)) — pulls the resource metadata for the default CN (hostname → ip_address → resource name fallback), POSTs to `<pki_mount>/issue/<role>` with optional `ttl` override, captures `private_key` / `certificate` / `issuing_ca` / `serial_number` from the response, and feeds the private key to `SshCredential::PrivateKey` wrapped in `Zeroizing`. The cert is delivered alongside (operators using x509-cert-auth servers like Tectia drop it on the host; everyone else relies on the public key being in `authorized_keys`).
+- **Shared `issue_pki_credential` helper** carries the four-field `PkiIssued` struct so the eventual RDP CredSSP wiring lands by replacing the error path with a smartcard-wrap step — no second issue call.
+- **RDP + PKI: scaffolded but stubbed.** The cert issues fine (`issue_pki_credential` runs first), but feeding it to RDP requires sspi-rs's `scard` smartcard backend wired through ironrdp's CredSSP path. Tracked alongside the broader CredSSP / NLA enablement deferred in Phase 4. The frontend renders a yellow banner explaining the gap and the operator-bind LDAP / Secret paths as the supported RDP routes today.
+- **Frontend** — new `PkiCredentialEditor` component (mount + role + optional cert TTL) on the profile editor. Drops the "Phase 6" stub label. Connect-button gating extended to enable SSH+PKI but keep RDP+PKI disabled with a tooltip pointing at the CredSSP follow-up.
+
+The launchable matrix now reads:
+
+| protocol | Secret | LDAP | PKI | SSH-engine |
+|---|---|---|---|---|
+| SSH | ✅ Phase 3 | ✅ Phase 5 | ✅ Phase 6 | pending |
+| RDP | ✅ Phase 4 | ✅ Phase 5 | pending (CredSSP) | n/a |
+
+`cargo check --workspace` clean. `tsc` clean. **102/102** vitest pass.
+
+Phase 7 (polish + per-resource-type Connect policy + recently-connected list + ⌘K palette) follows.
+
 #### Resource Connect — Phase 5 (LDAP credential source)
 
 The Connect button now supports the **LDAP / Active Directory** credential source on top of the existing Secret source. The LDAP profile binds to an operator-configured LDAP secret-engine mount (e.g. `openldap/`) and runs in one of three sub-modes; the SSH and RDP transports both ship today.

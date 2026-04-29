@@ -474,7 +474,7 @@ No backend changes — resource fields are already a flexible `Map<String, Value
 | Library check-in tied to session close; double-use guard via the LDAP engine's existing per-set Mutex | host |
 | Integration tests: bind succeeds → SSH/RDP succeeds; bind fails → no session opened, audit shows `open_failed`; library check-out + session-close → check-in observed in LDAP audit | `gui/src-tauri/tests/` |
 
-### Phase 6 — `pki` credential source (AD smartcard-style RDP)
+### Phase 6 — `pki` credential source (AD smartcard-style RDP) — **Partial** (SSH+PKI done; RDP+PKI scaffolded, CredSSP smartcard wiring pending)
 
 | Deliverable | Location |
 |---|---|

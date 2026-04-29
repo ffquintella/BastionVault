@@ -641,14 +641,26 @@ function ConnectionProfilesPanel({
   const [confirmDelete, setConfirmDelete] = useState<ConnectionProfile | null>(null);
   const [connecting, setConnecting] = useState<string | null>(null);
 
-  // SSH and RDP both ship for Secret + LDAP (operator / static /
-  // library) credential sources today.
-  const launchableProfiles = profiles.filter(
-    (p) =>
-      (p.protocol === "ssh" || p.protocol === "rdp") &&
-      (p.credential_source.kind === "secret" ||
-        p.credential_source.kind === "ldap"),
-  );
+  // What ships today by (protocol, source) combo:
+  //   - SSH+Secret: Phase 3
+  //   - RDP+Secret: Phase 4 (Standard Security; no NLA)
+  //   - SSH+LDAP / RDP+LDAP: Phase 5 (operator / static / library)
+  //   - SSH+PKI: Phase 6 (issued cert's private_key as a russh
+  //     publickey credential)
+  //   - RDP+PKI: pending CredSSP smartcard wiring
+  //   - SSH-engine: pending
+  const launchableProfiles = profiles.filter((p) => {
+    if (p.protocol !== "ssh" && p.protocol !== "rdp") return false;
+    switch (p.credential_source.kind) {
+      case "secret":
+      case "ldap":
+        return true;
+      case "pki":
+        return p.protocol === "ssh";
+      case "ssh-engine":
+        return false;
+    }
+  });
 
   // LDAP operator-bind mode requires a credential prompt before
   // the open call. We surface it as a tiny inline modal; on
@@ -780,8 +792,7 @@ function ConnectionProfilesPanel({
                 </dl>
               </div>
               <div className="flex flex-col gap-1 shrink-0">
-                {(p.protocol === "ssh" || p.protocol === "rdp") &&
-                p.credential_source.kind === "secret" ? (
+                {launchableProfiles.some((lp) => lp.id === p.id) ? (
                   <Button
                     size="sm"
                     onClick={() => handleConnect(p)}
@@ -789,13 +800,23 @@ function ConnectionProfilesPanel({
                     title={
                       p.protocol === "rdp"
                         ? "Phase 4 RDP — Standard Security (no NLA / CredSSP). Most homelab + Win servers with NLA disabled."
-                        : undefined
+                        : p.credential_source.kind === "pki"
+                          ? "PKI: a fresh leaf cert is issued per session. SSH uses the private_key as a russh credential."
+                          : undefined
                     }
                   >
                     {connecting === p.id ? "Connecting…" : "Connect"}
                   </Button>
                 ) : (
-                  <Button size="sm" disabled title="Connect for this combination ships in a later phase">
+                  <Button
+                    size="sm"
+                    disabled
+                    title={
+                      p.protocol === "rdp" && p.credential_source.kind === "pki"
+                        ? "RDP + PKI requires CredSSP smartcard wiring — pending."
+                        : "Connect for this combination ships in a later phase"
+                    }
+                  >
                     Connect
                   </Button>
                 )}
@@ -818,12 +839,11 @@ function ConnectionProfilesPanel({
           </p>
         )}
         <p className="text-xs text-[var(--color-text-muted)]">
-          Connect launches an in-app session window for SSH+Secret
-          (xterm.js + russh) and RDP+Secret (canvas + ironrdp,
-          transport pending an upstream dep alignment — see banner
-          in the spawned window). LDAP / SSH-engine / PKI credential
-          sources land in Phases 5–6 — the editor lets you pre-stage
-          profiles for those today.
+          Connect launches an in-app session window for SSH+Secret /
+          SSH+LDAP / SSH+PKI (xterm.js + russh) and RDP+Secret /
+          RDP+LDAP (canvas + ironrdp, RDP Standard Security only).
+          RDP+PKI is pending CredSSP smartcard wiring; the SSH
+          secret-engine source is pending its own follow-up phase.
         </p>
       </div>
 
@@ -1143,7 +1163,7 @@ function ConnectionProfileEditor({
             { value: "secret", label: "Resource secret" },
             { value: "ldap", label: "LDAP / Active Directory" },
             { value: "ssh-engine", label: "SSH secret engine (later phase)" },
-            { value: "pki", label: "PKI client cert (Phase 6)" },
+            { value: "pki", label: "PKI client cert (SSH today; RDP CredSSP pending)" },
           ]}
         />
 
@@ -1180,6 +1200,12 @@ function ConnectionProfileEditor({
           <LdapCredentialEditor
             cs={profile.credential_source}
             onChange={updateCredentialSource}
+          />
+        ) : profile.credential_source.kind === "pki" ? (
+          <PkiCredentialEditor
+            cs={profile.credential_source}
+            onChange={updateCredentialSource}
+            protocol={profile.protocol}
           />
         ) : (
           <CredentialSourceStub
@@ -1378,12 +1404,89 @@ function LdapCredentialEditor({
   );
 }
 
+/**
+ * Editor for the PKI credential source. Issues a fresh client
+ * cert from the bound PKI mount at connect time. SSH uses the
+ * issued private_key directly; RDP requires the CredSSP smartcard
+ * wiring which is still pending — we surface a banner so the
+ * operator can pre-stage the profile but not be surprised at
+ * connect time.
+ */
+function PkiCredentialEditor({
+  cs,
+  onChange,
+  protocol,
+}: {
+  cs: Extract<CredentialSource, { kind: "pki" }>;
+  onChange: (s: CredentialSource) => void;
+  protocol: SessionProtocol;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 gap-3">
+        <Input
+          label="PKI mount path"
+          value={cs.pki_mount}
+          onChange={(e) =>
+            onChange({ ...cs, pki_mount: e.target.value })
+          }
+          placeholder="pki/"
+          hint="Mount path of the PKI engine on this vault (e.g. `pki/`). Connect issues a fresh leaf cert per session via `<mount>/issue/<role>`."
+        />
+        <Input
+          label="PKI role"
+          value={cs.pki_role}
+          onChange={(e) =>
+            onChange({ ...cs, pki_role: e.target.value })
+          }
+          placeholder="server-auth"
+          hint="Role configured on the bound PKI mount. Role TTL caps the per-session cert lifetime."
+        />
+      </div>
+      <Input
+        label="Cert TTL (seconds, optional)"
+        type="number"
+        value={cs.cert_ttl_secs?.toString() ?? ""}
+        onChange={(e) => {
+          const n = parseInt(e.target.value, 10);
+          onChange({
+            ...cs,
+            cert_ttl_secs: Number.isFinite(n) && n > 0 ? n : undefined,
+          });
+        }}
+        placeholder="(role default)"
+        hint="Optional override; clamped to the role's max_ttl by the engine."
+      />
+      {protocol === "rdp" && (
+        <div className="rounded border border-yellow-700 bg-yellow-950/40 px-3 py-2 text-xs text-yellow-200">
+          <strong>RDP + PKI is not wired yet.</strong> The cert
+          issues fine, but plumbing it into the RDP CredSSP
+          smartcard path requires the sspi-rs scard backend.
+          Tracked alongside the broader CredSSP / NLA enablement
+          deferred in Phase 4. The operator-bind LDAP source or a
+          Secret credential are the supported RDP paths today.
+        </div>
+      )}
+      {protocol === "ssh" && (
+        <p className="text-xs text-[var(--color-text-muted)]">
+          SSH uses the issued <code>private_key</code> directly.
+          The cert is delivered alongside (operators using
+          x509-cert-auth servers like Tectia drop it on the host;
+          everyone else relies on the public key being in
+          <code> authorized_keys</code>). Operators get the
+          short-lived-cert lifecycle benefit either way.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function CredentialSourceStub({ kind }: { kind: CredentialSource["kind"] }) {
   const labels: Record<CredentialSource["kind"], string> = {
     secret: "",
     ldap: "",
     "ssh-engine": "SSH secret engine — vault-issued cert/OTP/PQC, ships in a later phase",
-    pki: "PKI client cert (CredSSP smartcard) — ships in Phase 6",
+    pki: "",
   };
   return (
     <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-text-muted)]">

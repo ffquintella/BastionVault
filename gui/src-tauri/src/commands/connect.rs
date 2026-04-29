@@ -611,6 +611,23 @@ async fn resolve_rdp_credential(
                 ))),
             }
         }
+        "pki" => {
+            // We can issue the cert today — but feeding it to RDP
+            // requires CredSSP smartcard wiring (sspi-rs's `scard`
+            // backend), which isn't shipped yet. Issue first so the
+            // operator gets a clear "credential resolves but
+            // transport doesn't accept it" signal at connect time
+            // rather than a confusing later error.
+            let _issued = issue_pki_credential(state, resource_name, cs).await?;
+            Err(CommandError::from(
+                "RDP + PKI client cert (CredSSP smartcard) is not yet wired. The PKI \
+                 cert was issued successfully, but plumbing it into the RDP CredSSP \
+                 path requires sspi-rs's smartcard backend. Tracked as a Phase 6 \
+                 follow-up alongside the broader CredSSP / NLA enablement deferred \
+                 in Phase 4."
+                    .to_string(),
+            ))
+        }
         other => Err(CommandError::from(format!(
             "credential source `{other}` lands in a later phase"
         ))),
@@ -781,13 +798,147 @@ async fn resolve_ssh_credential(
     match kind {
         "secret" => resolve_secret_ssh(state, resource_name, cs).await,
         "ldap" => resolve_ldap_ssh(state, cs, operator_credential).await,
-        "ssh-engine" | "pki" => Err(CommandError::from(format!(
-            "credential source `{kind}` lands in a later phase"
-        ))),
+        "pki" => resolve_pki_ssh(state, resource_name, cs).await,
+        "ssh-engine" => Err(CommandError::from(
+            "credential source `ssh-engine` lands in a later phase".to_string(),
+        )),
         other => Err(CommandError::from(format!(
             "unknown credential source `{other}`"
         ))),
     }
+}
+
+/// Resolve a PKI-source profile for SSH: call `pki/issue/<role>`
+/// against the bound PKI mount with the resource hostname as the
+/// requested CN, then feed the returned `private_key` PEM to
+/// russh as a publickey credential. The cert itself is delivered
+/// alongside (operators using x509-cert-auth servers like Tectia
+/// drop it on the host; everyone else relies on the public key
+/// being in `authorized_keys`).
+///
+/// The cert is **short-lived** by virtue of the PKI role's
+/// `max_ttl` — operators get the lifecycle benefit (auto-rotation
+/// per session) even when the SSH server treats the credential
+/// as a plain key.
+async fn resolve_pki_ssh(
+    state: &State<'_, AppState>,
+    resource_name: &str,
+    cs: &Value,
+) -> Result<ResolvedSshCredential, CommandError> {
+    let issued = issue_pki_credential(state, resource_name, cs).await?;
+    Ok(ResolvedSshCredential {
+        credential: SshCredential::PrivateKey {
+            pem: Zeroizing::new(issued.private_key),
+            passphrase: None,
+        },
+        // Don't override the profile.username — the PKI cert's CN
+        // is the hostname, not the OS user the operator wants to
+        // log in as. Profile.username stays authoritative.
+        effective_username: None,
+        on_close: None,
+    })
+}
+
+/// Pulled out so the SSH and RDP paths share the issue-call
+/// shape. `certificate` / `issuing_ca` / `serial_number` are kept
+/// alongside `private_key` so the future RDP CredSSP smartcard
+/// path can wrap them as a synthetic PIV credential without
+/// re-issuing.
+#[allow(dead_code)]
+struct PkiIssued {
+    certificate: String,
+    private_key: String,
+    issuing_ca: String,
+    serial_number: String,
+}
+
+async fn issue_pki_credential(
+    state: &State<'_, AppState>,
+    resource_name: &str,
+    cs: &Value,
+) -> Result<PkiIssued, CommandError> {
+    let pki_mount = pki_mount_prefix(cs)?;
+    let pki_role = cs
+        .get("pki_role")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| CommandError::from("credential_source.pki_role is required"))?;
+    // Default CN: the resource's hostname (or ip_address fallback).
+    // Operators with non-DNS subjects can override via the role's
+    // CSR / template.
+    let meta = read_resource_meta(state, resource_name).await?;
+    let cn = meta
+        .get("hostname")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| meta.get("ip_address").and_then(|v| v.as_str()).filter(|s| !s.is_empty()))
+        .map(String::from)
+        .unwrap_or_else(|| resource_name.to_string());
+
+    let mut body = Map::new();
+    body.insert("common_name".into(), Value::String(cn));
+    if let Some(alt) = cs.get("alt_names").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        body.insert("alt_names".into(), Value::String(alt.to_string()));
+    }
+    if let Some(ttl) = cs
+        .get("cert_ttl_secs")
+        .and_then(|v| v.as_u64())
+        .filter(|n| *n > 0)
+    {
+        body.insert("ttl".into(), Value::String(format!("{ttl}s")));
+    }
+
+    let path = format!("{pki_mount}issue/{pki_role}");
+    let resp = make_request(state, Operation::Write, path, Some(body)).await?;
+    let data: HashMap<String, Value> = resp
+        .and_then(|r| r.data)
+        .map(|m| m.into_iter().collect())
+        .unwrap_or_default();
+    let private_key = data
+        .get("private_key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CommandError::from(format!(
+            "pki/{pki_role} issue response missing `private_key`"
+        )))?
+        .to_string();
+    let certificate = data
+        .get("certificate")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CommandError::from(format!(
+            "pki/{pki_role} issue response missing `certificate`"
+        )))?
+        .to_string();
+    let issuing_ca = data
+        .get("issuing_ca")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_default();
+    let serial_number = data
+        .get("serial_number")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_default();
+    Ok(PkiIssued {
+        certificate,
+        private_key,
+        issuing_ca,
+        serial_number,
+    })
+}
+
+fn pki_mount_prefix(cs: &Value) -> Result<String, CommandError> {
+    let raw = cs
+        .get("pki_mount")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .ok_or_else(|| CommandError::from("credential_source.pki_mount is required"))?;
+    if raw.is_empty() {
+        return Err(CommandError::from(
+            "credential_source.pki_mount must not be empty".to_string(),
+        ));
+    }
+    let trimmed = raw.trim_end_matches('/');
+    Ok(format!("{trimmed}/"))
 }
 
 async fn resolve_secret_ssh(
