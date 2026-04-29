@@ -125,10 +125,21 @@ export function SessionSshWindow() {
       term.write("\r\n\x1b[33m[connection closed by remote host]\x1b[0m\r\n");
     });
 
-    // Initial fit sets the right cols/rows on the host side.
-    void invoke("session_resize", {
-      request: { token, cols: term.cols, rows: term.rows },
-    }).catch(() => undefined);
+    // Initial resize doubles as the "frontend listener is live"
+    // handshake the host's pump task waits on before draining the
+    // early-bytes buffer (the prompt + MOTD that arrived between
+    // `request_shell` and the React effect mounting). It's
+    // critical that the listen() subscription is fully registered
+    // BEFORE we invoke session_resize — otherwise the host
+    // flushes its buffer into a void and the operator sees an
+    // empty terminal until the first keystroke wakes the shell.
+    // listen() returns a Promise that resolves once Tauri has
+    // installed the subscription; await both before resizing.
+    void Promise.all([unlistenStdout, unlistenClosed]).then(() => {
+      void invoke("session_resize", {
+        request: { token, cols: term.cols, rows: term.rows },
+      }).catch(() => undefined);
+    });
 
     // Auto-fit on window resize.
     const onWindowResize = () => {
