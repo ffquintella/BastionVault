@@ -81,6 +81,13 @@ pub struct AppState {
     /// different state (cloud-target = OAuth to a provider, OIDC =
     /// auth via the vault's `oidc` backend).
     pub oidc_sessions: std::sync::Mutex<HashMap<String, OidcLoginSession>>,
+    /// Live Resource-Connect SSH/RDP sessions, keyed by the
+    /// per-session token returned to the spawned WebviewWindow.
+    /// Each entry owns the russh client + a control channel the
+    /// session_input / session_resize / session_close commands
+    /// use to drive the remote PTY.
+    pub connect_sessions:
+        tokio::sync::Mutex<HashMap<String, crate::session::SessionState>>,
 }
 
 impl AppState {
@@ -94,6 +101,7 @@ impl AppState {
             pin_sender: std::sync::Mutex::new(None),
             cloud_sessions: std::sync::Mutex::new(HashMap::new()),
             oidc_sessions: std::sync::Mutex::new(HashMap::new()),
+            connect_sessions: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
 }

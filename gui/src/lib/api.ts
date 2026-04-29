@@ -1265,6 +1265,23 @@ export const ldapWriteConfig = (request: LdapWriteConfigRequest) =>
   invoke<void>("ldap_write_config", { request });
 export const ldapDeleteConfig = (mount: string) =>
   invoke<void>("ldap_delete_config", { mount });
+// ── Resource Connect — SSH session window ──────────────────────────
+
+export type SessionOpenSshRequest = {
+  resource_name: string;
+  profile_id: string;
+};
+
+export type SessionOpenSshResponse = {
+  token: string;
+  stdout_event: string;
+  closed_event: string;
+  window_label: string;
+};
+
+export const sessionOpenSsh = (request: SessionOpenSshRequest) =>
+  invoke<SessionOpenSshResponse>("session_open_ssh", { request });
+
 export type LdapCheckConnectionResult = {
   ok: boolean;
   url: string;

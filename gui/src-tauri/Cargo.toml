@@ -65,6 +65,16 @@ x509-cert = { version = "0.2", features = ["builder"] }
 # operator input before persisting the schedule.
 cron = "0.16"
 uuid = { version = "1", features = ["v4"] }
+# Pure-Rust SSH client for the Resource Connect SSH session window.
+# Same crate the host's files_ssh_sync feature uses for SFTP/SCP
+# pushes — no `libssh2-sys` C dep, no OpenSSL footprint.
+russh = { version = "0.45", default-features = true }
+russh-keys = "0.45"
+async-trait = "0.1"
+futures-util = "0.3"
+log = "0.4"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+urlencoding = "2"
 
 [target.'cfg(windows)'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }

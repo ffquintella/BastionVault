@@ -639,6 +639,29 @@ function ConnectionProfilesPanel({
   const [editTarget, setEditTarget] = useState<ConnectionProfile | null>(null);
   const [creating, setCreating] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<ConnectionProfile | null>(null);
+  const [connecting, setConnecting] = useState<string | null>(null);
+
+  // The Connect button only fires for SSH this cut (Phase 3); RDP
+  // ships in Phase 4. Filter the launchable set so the button is
+  // disabled when no profile matches.
+  const launchableProfiles = profiles.filter(
+    (p) => p.protocol === "ssh" && p.credential_source.kind === "secret",
+  );
+
+  async function handleConnect(profileId: string) {
+    setConnecting(profileId);
+    try {
+      await api.sessionOpenSsh({
+        resource_name: String(resource.name),
+        profile_id: profileId,
+      });
+      // Window opens itself; nothing else to do here.
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    } finally {
+      setConnecting(null);
+    }
+  }
 
   async function persist(next: ConnectionProfile[]) {
     try {
@@ -727,6 +750,19 @@ function ConnectionProfilesPanel({
                 </dl>
               </div>
               <div className="flex flex-col gap-1 shrink-0">
+                {p.protocol === "ssh" && p.credential_source.kind === "secret" ? (
+                  <Button
+                    size="sm"
+                    onClick={() => handleConnect(p.id)}
+                    disabled={connecting !== null}
+                  >
+                    {connecting === p.id ? "Connecting…" : "Connect"}
+                  </Button>
+                ) : (
+                  <Button size="sm" disabled title="Connect for this combination ships in a later phase">
+                    Connect
+                  </Button>
+                )}
                 <Button size="sm" variant="ghost" onClick={() => setEditTarget(p)}>
                   Edit
                 </Button>
@@ -738,12 +774,19 @@ function ConnectionProfilesPanel({
           ))}
         </div>
 
+        {launchableProfiles.length === 0 && profiles.length > 0 && (
+          <p className="text-xs text-[var(--color-text-muted)]">
+            Phase 3 ships Connect for SSH profiles using the
+            <strong> Secret</strong> credential source. The other
+            combinations (RDP, LDAP / SSH-engine / PKI sources)
+            land in subsequent phases.
+          </p>
+        )}
         <p className="text-xs text-[var(--color-text-muted)]">
-          Phase 2 ships only the <strong>Secret</strong> credential
-          source (a credential-shaped resource secret with{" "}
-          <code>username</code> + <code>password</code> /{" "}
-          <code>private_key</code>). LDAP / SSH-engine / PKI sources
-          land in Phases 5–6.
+          Connect launches an in-app SSH terminal for SSH+Secret
+          profiles. RDP and the LDAP / SSH-engine / PKI credential
+          sources land in subsequent phases — the editor lets you
+          pre-stage profiles for those today.
         </p>
       </div>
 

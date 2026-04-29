@@ -6,6 +6,7 @@ mod local_keystore;
 mod secure_store;
 mod yubikey_bridge;
 mod state;
+mod session;
 
 use state::AppState;
 
@@ -340,6 +341,10 @@ pub fn run() {
             commands::ldap::ldap_delete_config,
             commands::ldap::ldap_rotate_root,
             commands::ldap::ldap_check_connection,
+            commands::connect::session_open_ssh,
+            commands::connect::session_input,
+            commands::connect::session_resize,
+            commands::connect::session_close,
             commands::ldap::ldap_list_static_roles,
             commands::ldap::ldap_read_static_role,
             commands::ldap::ldap_write_static_role,

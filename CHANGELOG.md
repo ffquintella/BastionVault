@@ -47,6 +47,26 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Resource Connect — Phase 3 (SSH session window, Secret source)
+
+The Connect button is live. Clicking it on a server resource with an SSH+Secret profile opens a fresh Tauri WebviewWindow carrying an in-app xterm.js terminal driven by `russh` 0.45 over the secret's credentials. The credential bytes never reach the JS layer or the OS clipboard.
+
+- **`gui/src-tauri/src/session/{mod,ssh}.rs`** — per-session state on `AppState::connect_sessions`, keyed by an opaque token. The pump loop runs in a tokio task: bytes from russh's `ChannelMsg::Data` get base64-emitted on a per-session Tauri event the spawned window subscribes to; control messages from the frontend (input bytes, window-size changes, close) flow back through an `mpsc::Sender<SshControl>` into the russh channel. Stderr from the remote PTY is folded onto the same stdout event so escape sequences line up. TOFU host-key handling identical to the SFTP/SCP transport: optional `host_key_pin` on the profile in OpenSSH `SHA256:<base64>` format; empty pin accepts first connect and logs the observed fingerprint at WARN.
+- **Four new Tauri commands** in [`gui/src-tauri/src/commands/connect.rs`](gui/src-tauri/src/commands/connect.rs):
+  - `session_open_ssh` — pulls the resource metadata + the credential secret server-side, resolves the credential into `SshCredential::Password` / `SshCredential::PrivateKey` (wrapped in `Zeroizing` for the brief window russh holds them), opens the connection with a 30 s hard timeout, requests an `xterm-256color` PTY + interactive shell, spawns the pump task, and finally calls `WebviewWindowBuilder` to launch the session window. The window's `WindowEvent::CloseRequested` hook tears the SSH session down so an operator x'ing the window cleans up the remote side.
+  - `session_input` — frontend posts `{token, bytes_b64}`; the host base64-decodes and pushes a `SshControl::Data` into the per-session channel.
+  - `session_resize` — frontend posts `{token, cols, rows}`; the host issues `channel.window_change(...)` so xterm + remote agree on terminal size.
+  - `session_close` — explicit teardown the frontend calls on Disconnect or unmount.
+- **Credential resolver** for the **Secret** source: reads the resource secret at `v2/resources/secrets/<name>/<id>`, looks for `private_key` first (with optional `passphrase`) then falls back to `password`. Plain key/value secrets are accepted as long as one of those keys is present.
+- **`SessionSshWindow.tsx`** route — fresh React component loaded into the spawned WebviewWindow at `index.html#/session/ssh?token=…&stdout=…&closed=…&label=…`. Mounts an xterm.js terminal with a fit-addon, subscribes to the per-session stdout event, forwards keystrokes via `session_input`, and propagates resize via `session_resize`. The route is **not** auth-gated — the host already authenticated the credential and registered the session before the window opened, so the JS layer just owns the terminal UI. A status pill (`connecting` / `open` / `closed` / `error`) and a Disconnect button live in a thin chrome bar above the terminal.
+- **Connect button on the Connection tab** — appears on each profile row alongside Edit/Delete. Phase 3 enables it for SSH+Secret profiles only; RDP and the LDAP/SSH-engine/PKI sources show a disabled button with a "ships in a later phase" tooltip.
+- **`@xterm/xterm@5.5` + `@xterm/addon-fit@0.10`** added to `gui/package.json`. **`russh@0.45` + `russh-keys@0.45`** added directly to `gui/src-tauri/Cargo.toml` (the same crate pair the host's `files_ssh_sync` feature uses for SFTP/SCP pushes — same TOFU posture, same OpenSSH fingerprint helper).
+- **No backend changes to the host crate** — the Connect surface lives entirely on the GUI side. The resource module's metadata bag carries the profile config it needs (Phase 2), and the existing `v2/resources/secrets/<name>/<id>` read path supplies the credential.
+
+`cargo check --workspace` clean. `tsc` clean. **102/102** vitest pass (no new tests this phase — the SSH path is wire-protocol-driven and integration-tested manually against an OpenSSH container; an automated end-to-end `russh`-against-`testcontainers` test is tracked as test infrastructure).
+
+Phases 4 (RDP window with `ironrdp`), 5 (LDAP source), 6 (PKI source), 7 (polish + per-type Connect policy) follow in subsequent cuts.
+
 #### Resource Connect — Phase 2 (Connection profiles + Secret source)
 
 Adds the per-resource Connection profile shape that the future Connect button dispatches on. No new backend code — the resource record's metadata bag is already a flexible `Map<String, Value>`, so `connection_profiles` slots in as a JSON array key alongside the existing `hostname` / `os_type` / `notes` / etc. The whole feature ships GUI-side.

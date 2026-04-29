@@ -21,6 +21,7 @@ import { SshPage } from "./routes/SshPage";
 import { TotpPage } from "./routes/TotpPage";
 import { LdapPage } from "./routes/LdapPage";
 import { PluginsPage } from "./routes/PluginsPage";
+import { SessionSshWindow } from "./routes/SessionSshWindow";
 import { useAuthStore } from "./stores/authStore";
 import { ToastProvider } from "./components/ui";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -119,6 +120,14 @@ export default function App() {
               path="/ldap"
               element={<ProtectedRoute><LdapPage /></ProtectedRoute>}
             />
+            {/*
+              Session windows are spawned by the Resource Connect
+              flow into a fresh Tauri WebviewWindow. They claim
+              their session via URL params; the host already
+              authenticated the credential and registered the
+              session before the window opens, so no auth gate.
+            */}
+            <Route path="/session/ssh" element={<SessionSshWindow />} />
           </Routes>
         </HashRouter>
       </ToastProvider>

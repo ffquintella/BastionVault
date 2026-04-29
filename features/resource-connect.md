@@ -438,7 +438,7 @@ No backend changes — resource fields are already a flexible `Map<String, Value
 | Profile validation on save (mount + role reachable under operator's policies) | host + GUI |
 | Vitest coverage for the profile editor and the secret-shape detection | `gui/src/test/` |
 
-### Phase 3 — SSH session window + `secret` & `ssh-engine` sources
+### Phase 3 — SSH session window + `secret` source — **Done** (`ssh-engine` source deferred to a follow-up alongside Phases 5/6)
 
 | Deliverable | Location |
 |---|---|
