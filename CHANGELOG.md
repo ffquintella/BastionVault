@@ -47,6 +47,26 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### File Resources — Periodic re-sync + sync-on-write (Phase 7)
+
+Closes the last deferred slice of File Resources. Sync targets can now opt into two automatic-push modes alongside the existing on-demand `POST /sync/<name>/push`:
+
+- **`auto_sync_interval_seconds`** on each target (`u64`; `0` = disabled, the existing on-demand-only behaviour). When non-zero, the periodic scheduler runs a push when both `now - state.last_attempt_at_unix >= interval` AND `state.next_retry_at_unix <= now` (the latter implements exponential backoff after consecutive failures).
+- **`sync_on_write = true`** on each target. The file-content write handler runs an inline push to every target whose flag is set, as part of the same request. Per-target outcomes are returned in a new `sync_on_write[]` array on the write response so the caller knows whether the inline push succeeded without a separate poll. Failure does **not** roll back the file write — the bytes are already persisted; the failure lands on the target's `FileSyncState` and the next periodic tick retries.
+
+**Internal scheduler vs. external-tick decision**: the deferred-roadmap entry called out both paths. We ship **both**:
+
+- **Internal scheduler** ([`src/modules/files/scheduler.rs`](src/modules/files/scheduler.rs)) — single tokio task started from [`Core::post_unseal`](src/core.rs), tick every 60s, walks every `files`-typed mount, runs the sweep through the same shared [`run_sync_tick_for_storage`](src/modules/files/mod.rs) free function the manual endpoint uses. Mirrors the LDAP / PKI auto-tidy schedulers' single-process posture: no HA leader gating yet — every node in a Hiqlite cluster runs its own scheduler. The sync push is **idempotent** (the tmp+rename pattern every transport uses produces the same final result regardless of how many nodes pushed), so a double-push is wasteful but not incorrect. HA leader gating via `hiqlite::dlock` tracks as a single cross-cutting follow-up alongside the same gap in `pki/auto-tidy` and `ldap/auto-rotate`.
+- **External-tick endpoint** — new `POST /v1/<mount>/sync-tick` runs the same sweep on demand. The per-mount [`FilesSyncConfig`](src/modules/files/scheduler.rs) record (defaults: `enabled = true`, `max_concurrent_pushes = 8`) lets an operator who prefers external scheduling flip the internal scheduler off and drive the sweep from `cron` against this endpoint instead. Returns per-tick `attempted` / `succeeded` / `failed` / `skipped` counters for operator visibility.
+
+Two new state fields on [`FileSyncState`](src/modules/files/mod.rs) drive the scheduler decisions: `last_attempt_at_unix` (for the cadence window check), `next_retry_at_unix` + `consecutive_failures` (for exponential backoff: `min(2^failures, 15min)`), `last_attempt_source` (`"manual"` / `"on_write"` / `"scheduler"` for triage of flapping targets). All five state fields surface in the existing `GET /sync` list response.
+
+Refactor: extracted the per-target push logic out of `handle_sync_push` into a reusable `FilesBackendInner::run_sync_push(req, id, name, source)` method + a `dispatch_push` free function. The manual `/sync/<name>/push` endpoint, the inline `sync_on_write` path, and the periodic scheduler all funnel through the same code, so they share the same atomicity guarantees, the same audit footprint, and the same backoff semantics.
+
+8 new unit tests in [`scheduler.rs`](src/modules/files/scheduler.rs) cover the due/not-due/in-backoff state machine + the config defaults. 2 new integration tests in `mod.rs`: `test_sync_on_write_inline_push` (file write fires inline push, target file lands with new bytes, response carries the per-target outcome) and `test_manual_sync_tick_endpoint` (sync-tick attempts the auto-flagged target and skips the manual-only target).
+
+**File Resources is now feature-complete** — every previously deferred sub-initiative has shipped. `cargo check --workspace` clean. `cargo test --features "files_smb files_ssh_sync" modules::files` clean (48 tests).
+
 #### File Resources — SFTP + SCP sync transports (Phase 6)
 
 Closes the SSH slice of the File Resources deferred roadmap. `FileSyncTarget { kind = "sftp" }` and `kind = "scp"` are now valid sync-target shapes; both push the file's bytes over an SSH session built with [`russh`](https://crates.io/crates/russh) `0.45` (pure-Rust SSH client; no `libssh2-sys` C dep). SFTP layers [`russh-sftp`](https://crates.io/crates/russh-sftp) over an SSH `sftp` subsystem channel; SCP runs `scp -t <path>` on an SSH exec channel and pipes the OpenSSH SCP framing.

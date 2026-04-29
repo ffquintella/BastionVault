@@ -610,6 +610,17 @@ impl Core {
             let _ = crate::modules::ldap::scheduler::start_ldap_rotation_scheduler(core_arc);
         }
 
+        // Boot the File Resources periodic sync scheduler. Same
+        // single-process posture as the LDAP / PKI schedulers — every
+        // node in a Hiqlite cluster runs its own; the sync push
+        // itself is idempotent (tmp+rename), so a double-push is
+        // wasteful but not incorrect. Per-mount config can disable
+        // the sweep so an operator who prefers external scheduling
+        // can drive `POST /v1/<mount>/sync-tick` from cron instead.
+        if let Some(core_arc) = self.self_ptr.upgrade() {
+            let _ = crate::modules::files::scheduler::start_files_sync_scheduler(core_arc);
+        }
+
         Ok(())
     }
 

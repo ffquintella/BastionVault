@@ -56,7 +56,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Feature | Status |
 |---|---|
 | Resource Management (inventory + grouped secrets) | Done |
-| File Resources (binary blobs + local-FS sync) | Done — Phases 1–6 + 8 (local-FS, SMB, SFTP, SCP); periodic re-sync deferred |
+| File Resources (binary blobs + local-FS sync) | Done — all 8 phases (local-FS, SMB, SFTP, SCP, periodic re-sync, sync-on-write) |
 | Resource Connect — in-app SSH / RDP for server resources ([spec](features/resource-connect.md)) | Todo — `os_type` field + Connect button + Tauri WebviewWindow per session (xterm.js + `russh` for SSH, `<canvas>` + `ironrdp` for RDP). Per-resource Connection profiles bind protocol + target + credential source. Four credential sources: **Secret**, **LDAP**, **SSH-engine**, **PKI** (CredSSP smartcard). Eight phases. |
 
 ### Networking & TLS
@@ -133,9 +133,6 @@ Each entry below has a dedicated spec / roadmap document with full phase notes.
 ## Deferred sub-initiatives
 
 Self-contained follow-ups with no current blocker on the parent feature. Each can graduate to Active when operator demand + a specific implementation choice are confirmed.
-
-**File Resources**
-- Periodic re-sync — internal scheduler vs. external tick endpoint; cluster coordination via `hiqlite::dlock`. Unblocked now that SMB / SFTP / SCP all ship — operator demand confirms which schedule shape lands first.
 
 **Cloud Storage Targets**
 - Rekey CLI for the obfuscation salt — library pieces present (`ObfuscatingTarget::with_salt`); orchestrator not shipped.

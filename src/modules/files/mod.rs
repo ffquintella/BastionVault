@@ -57,6 +57,7 @@ use crate::{
 };
 
 pub mod files_audit_store;
+pub mod scheduler;
 #[cfg(feature = "files_smb")]
 pub mod smb;
 #[cfg(feature = "files_ssh_sync")]
@@ -75,13 +76,13 @@ secrets manager from being repurposed as a general-purpose blob store.
 "#;
 
 // Storage key prefixes within this mount's barrier view.
-const META_PREFIX: &str = "meta/";
-const BLOB_PREFIX: &str = "blob/";
-const HIST_PREFIX: &str = "hist/";
-const SYNC_PREFIX: &str = "sync/";
-const SYNC_STATE_PREFIX: &str = "sync-state/";
-const VMETA_PREFIX: &str = "vmeta/";
-const VBLOB_PREFIX: &str = "vblob/";
+pub(crate) const META_PREFIX: &str = "meta/";
+pub(crate) const BLOB_PREFIX: &str = "blob/";
+pub(crate) const HIST_PREFIX: &str = "hist/";
+pub(crate) const SYNC_PREFIX: &str = "sync/";
+pub(crate) const SYNC_STATE_PREFIX: &str = "sync-state/";
+pub(crate) const VMETA_PREFIX: &str = "vmeta/";
+pub(crate) const VBLOB_PREFIX: &str = "vblob/";
 
 /// How many previous content versions to retain per file. On each
 /// write, the pre-write blob is snapshotted; when the retained-version
@@ -194,11 +195,21 @@ pub struct FileSyncTarget {
     /// the observed fingerprint at WARN.
     #[serde(default)]
     pub ssh_host_key_fingerprint: String,
-    /// Not yet honored — on-write auto-sync is a later slice. Present
-    /// in the schema so config callers can opt in now without breaking
-    /// the wire format later.
+    /// When true, every successful file-content write fires an
+    /// immediate push to this target as part of the same request.
+    /// Failure of the inline push does not roll back the content
+    /// write — the failure is recorded on the target's `FileSyncState`
+    /// and the next periodic tick (or manual push) retries.
     #[serde(default)]
     pub sync_on_write: bool,
+    /// Periodic re-sync cadence in seconds. `0` (default) means the
+    /// target is push-on-demand only — the scheduler skips it.
+    /// Otherwise the scheduler runs a push when
+    /// `now - state.last_attempt_at >= auto_sync_interval_seconds`
+    /// and `now >= state.next_retry_at` (the latter implements
+    /// exponential-backoff after consecutive failures).
+    #[serde(default)]
+    pub auto_sync_interval_seconds: u64,
     #[serde(default)]
     pub created_at: String,
     #[serde(default)]
@@ -220,6 +231,27 @@ pub struct FileSyncState {
     pub last_failure_at: String,
     #[serde(default)]
     pub last_error: String,
+    /// Unix-second timestamp of the most recent attempt (success or
+    /// failure). The scheduler uses this to decide whether the
+    /// target's `auto_sync_interval_seconds` window has elapsed.
+    /// Zero means "never attempted."
+    #[serde(default)]
+    pub last_attempt_at_unix: u64,
+    /// Earliest unix-second timestamp at which the scheduler is
+    /// allowed to retry this target after a failure. Set by the
+    /// exponential-backoff logic; zero means "no backoff in effect."
+    #[serde(default)]
+    pub next_retry_at_unix: u64,
+    /// Number of consecutive failed pushes since the last success.
+    /// Drives the exponential backoff: backoff seconds =
+    /// `min(2 ** consecutive_failures, MAX_BACKOFF_SECS)`.
+    #[serde(default)]
+    pub consecutive_failures: u32,
+    /// Source of the most recent attempt: `"manual"`, `"on_write"`,
+    /// or `"scheduler"`. Useful for an operator triaging a flapping
+    /// target.
+    #[serde(default)]
+    pub last_attempt_source: String,
 }
 
 /// Per-version metadata for a historical snapshot of a file's
@@ -299,6 +331,7 @@ impl FilesBackend {
         let h_sync_write = self.inner.clone();
         let h_sync_delete = self.inner.clone();
         let h_sync_push = self.inner.clone();
+        let h_sync_tick = self.inner.clone();
         let h_versions_list = self.inner.clone();
         let h_version_read = self.inner.clone();
         let h_version_content = self.inner.clone();
@@ -491,6 +524,19 @@ impl FilesBackend {
                     help: "Push the file's current content to the named sync target. Fails the request only on transport error; the target's sync-state record is updated either way."
                 },
                 {
+                    // Mount-wide manual scheduler tick. Runs the same
+                    // sweep the periodic scheduler runs every 60 s,
+                    // but on demand. Operators that disable the
+                    // internal scheduler (acme/config-style master
+                    // switch) drive the sweep externally via cron
+                    // hitting this endpoint.
+                    pattern: r"sync-tick$",
+                    operations: [
+                        {op: Operation::Write, handler: h_sync_tick.handle_sync_tick}
+                    ],
+                    help: "Run the periodic sync sweep across this mount on demand."
+                },
+                {
                     // CRUD a single sync target attached to a file.
                     pattern: r"files/(?P<id>[^/]+)/sync/(?P<name>[^/]+)$",
                     fields: {
@@ -519,7 +565,12 @@ impl FilesBackend {
                         "sync_on_write": {
                             field_type: FieldType::Bool,
                             default: false,
-                            description: "Reserved. On-write auto-sync is a later slice."
+                            description: "Push to this target as part of every successful file content write. Failure does not roll back the write."
+                        },
+                        "auto_sync_interval_seconds": {
+                            field_type: FieldType::Int,
+                            default: 0,
+                            description: "Periodic re-sync cadence in seconds. 0 = push-on-demand only (scheduler skips this target)."
                         },
                         "smb_username": {
                             field_type: FieldType::Str,
@@ -749,6 +800,175 @@ fn get_str(req: &Request, key: &str) -> String {
 ///
 /// Creates parent directories as needed so operators don't need to
 /// pre-create the directory structure. Writes atomically via a
+/// Outcome of a successful sync push. The error case carries an
+/// `RvError` directly via the `Result`, which is why this struct
+/// only describes the success shape.
+pub struct SyncPushOutcome {
+    pub sha256: String,
+}
+
+/// Per-mount tick report. Surfaced to operators via the manual
+/// `sync-tick` endpoint and to logs by the periodic scheduler.
+#[derive(Debug, Clone, Default)]
+pub struct SyncTickReport {
+    pub attempted: u64,
+    pub succeeded: u64,
+    pub failed: u64,
+    /// Targets considered by the sweep but not pushed this tick
+    /// (auto_sync_interval_seconds == 0, or window not elapsed, or
+    /// in backoff).
+    pub skipped: u64,
+}
+
+/// Run one mount-wide sweep using the storage view bound to `req`.
+/// Walks every file id, every sync target, and pushes each that is
+/// due (`auto_sync_interval_seconds > 0` AND the window has elapsed
+/// AND any backoff has cleared). Used by both the manual
+/// `sync-tick` endpoint and the periodic scheduler — keeping a
+/// single implementation guarantees the operator-driven and
+/// scheduler-driven sweeps behave identically.
+pub async fn run_sync_tick_for_storage(
+    inner: &FilesBackendInner,
+    req: &mut Request,
+) -> Result<SyncTickReport, RvError> {
+    let mut report = SyncTickReport::default();
+    let now = unix_now();
+    let file_ids = req.storage_list(META_PREFIX).await.unwrap_or_default();
+    for id in file_ids {
+        let target_prefix = format!("{SYNC_PREFIX}{id}/");
+        let target_names = req.storage_list(&target_prefix).await.unwrap_or_default();
+        for name in target_names {
+            let cfg_key = format!("{SYNC_PREFIX}{id}/{name}");
+            let target: FileSyncTarget = match req.storage_get(&cfg_key).await? {
+                Some(e) => match serde_json::from_slice(&e.value) {
+                    Ok(t) => t,
+                    Err(_) => {
+                        report.skipped += 1;
+                        continue;
+                    }
+                },
+                None => {
+                    report.skipped += 1;
+                    continue;
+                }
+            };
+            if target.auto_sync_interval_seconds == 0 {
+                report.skipped += 1;
+                continue;
+            }
+            let state_key = format!("{SYNC_STATE_PREFIX}{id}/{name}");
+            let state: FileSyncState = match req.storage_get(&state_key).await? {
+                Some(e) => serde_json::from_slice(&e.value).unwrap_or_default(),
+                None => FileSyncState::default(),
+            };
+            if !sync_target_due(now, target.auto_sync_interval_seconds, &state) {
+                report.skipped += 1;
+                continue;
+            }
+            report.attempted += 1;
+            match inner.run_sync_push(req, &id, &name, "scheduler").await {
+                Ok(_) => report.succeeded += 1,
+                Err(e) => {
+                    report.failed += 1;
+                    log::warn!("files/sync: tick push {id}/{name} failed: {e:?}");
+                }
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// True when the scheduler should fire this target on the current
+/// tick: cadence window elapsed AND any exponential-backoff window
+/// has cleared. Pure function so the scheduler tests can drive it
+/// without a mount.
+pub fn sync_target_due(now: u64, interval_secs: u64, state: &FileSyncState) -> bool {
+    if state.next_retry_at_unix > now {
+        return false;
+    }
+    if state.last_attempt_at_unix == 0 {
+        return true;
+    }
+    now.saturating_sub(state.last_attempt_at_unix) >= interval_secs
+}
+
+/// Dispatch a push by transport kind. Single source of truth shared
+/// by the manual handler, the `sync_on_write` inline-push path, and
+/// the periodic scheduler.
+fn dispatch_push(target: &FileSyncTarget, bytes: &[u8]) -> Result<(), RvError> {
+    match target.kind.as_str() {
+        "local-fs" => push_local_fs(target, bytes),
+        "smb" => {
+            #[cfg(feature = "files_smb")]
+            {
+                crate::modules::files::smb::push_smb(target, bytes)
+            }
+            #[cfg(not(feature = "files_smb"))]
+            {
+                Err(RvError::ErrString(
+                    "sync target kind `smb` requires building with --features files_smb".into(),
+                ))
+            }
+        }
+        "sftp" => {
+            #[cfg(feature = "files_ssh_sync")]
+            {
+                crate::modules::files::ssh_sync::push_sftp(target, bytes)
+            }
+            #[cfg(not(feature = "files_ssh_sync"))]
+            {
+                Err(RvError::ErrString(
+                    "sync target kind `sftp` requires building with --features files_ssh_sync"
+                        .into(),
+                ))
+            }
+        }
+        "scp" => {
+            #[cfg(feature = "files_ssh_sync")]
+            {
+                crate::modules::files::ssh_sync::push_scp(target, bytes)
+            }
+            #[cfg(not(feature = "files_ssh_sync"))]
+            {
+                Err(RvError::ErrString(
+                    "sync target kind `scp` requires building with --features files_ssh_sync"
+                        .into(),
+                ))
+            }
+        }
+        other => Err(RvError::ErrString(format!(
+            "sync target kind `{other}` is not supported yet"
+        ))),
+    }
+}
+
+/// Maximum backoff after a streak of failed pushes — 15 minutes.
+/// Picked so a target that's been broken for hours isn't slamming
+/// the network every tick, while still recovering reasonably quickly
+/// once the underlying issue is fixed.
+const MAX_BACKOFF_SECS: u64 = 15 * 60;
+
+/// Exponential backoff: `2^failures` seconds, capped at
+/// `MAX_BACKOFF_SECS`. First failure waits 2s before the next
+/// scheduler-driven retry; tenth failure caps at 15 minutes.
+pub fn backoff_secs(consecutive_failures: u32) -> u64 {
+    if consecutive_failures == 0 {
+        return 0;
+    }
+    let shift = consecutive_failures.min(20); // u64 wraparound guard
+    let candidate = 1u64
+        .checked_shl(shift)
+        .unwrap_or(MAX_BACKOFF_SECS);
+    candidate.min(MAX_BACKOFF_SECS)
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// `<path>.<pid>.tmp` + rename so a concurrent reader of the target
 /// never sees a partially-written file.
 fn push_local_fs(target: &FileSyncTarget, bytes: &[u8]) -> Result<(), RvError> {
@@ -1049,11 +1269,76 @@ impl FilesBackendInner {
             }
         }
 
+        // sync_on_write: fire an inline push to every target whose
+        // flag is set. Failure does NOT roll back the content write
+        // (the bytes are already persisted) — the failure lands on
+        // the target's FileSyncState and the next periodic tick
+        // retries with backoff. We surface the per-target outcome
+        // in the response so an operator-driven write knows whether
+        // the inline push succeeded without a separate poll.
+        let inline_pushes = self.run_sync_on_write(req, &id).await;
+
         let mut data = Map::new();
         data.insert("id".into(), Value::String(id));
         data.insert("size_bytes".into(), Value::from(entry.size_bytes));
         data.insert("sha256".into(), Value::String(entry.sha256));
+        if !inline_pushes.is_empty() {
+            data.insert(
+                "sync_on_write".into(),
+                Value::Array(
+                    inline_pushes
+                        .into_iter()
+                        .map(|(name, ok, err)| {
+                            let mut o = Map::new();
+                            o.insert("name".into(), Value::String(name));
+                            o.insert("ok".into(), Value::Bool(ok));
+                            if let Some(e) = err {
+                                o.insert("error".into(), Value::String(e));
+                            }
+                            Value::Object(o)
+                        })
+                        .collect(),
+                ),
+            );
+        }
         Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// Run the inline `sync_on_write` push for every target on this
+    /// file that has the flag set. Returns one tuple per target:
+    /// `(name, ok, optional_error_message)`. Never errors — the
+    /// caller carries the report into the response so the operator
+    /// sees per-target outcomes, but no individual transport failure
+    /// rolls back the file write that just happened.
+    pub async fn run_sync_on_write(
+        &self,
+        req: &mut Request,
+        id: &str,
+    ) -> Vec<(String, bool, Option<String>)> {
+        let mut out: Vec<(String, bool, Option<String>)> = Vec::new();
+        let prefix = format!("{SYNC_PREFIX}{id}/");
+        let names = match req.storage_list(&prefix).await {
+            Ok(v) => v,
+            Err(_) => return out,
+        };
+        for name in names {
+            let cfg_key = format!("{SYNC_PREFIX}{id}/{name}");
+            let target: FileSyncTarget = match req.storage_get(&cfg_key).await {
+                Ok(Some(e)) => match serde_json::from_slice(&e.value) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                },
+                _ => continue,
+            };
+            if !target.sync_on_write {
+                continue;
+            }
+            match self.run_sync_push(req, id, &name, "on_write").await {
+                Ok(_) => out.push((name, true, None)),
+                Err(e) => out.push((name, false, Some(format!("{e}")))),
+            }
+        }
+        out
     }
 
     pub async fn handle_delete(
@@ -1239,6 +1524,11 @@ impl FilesBackendInner {
             .ok()
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let auto_sync_interval_seconds = req
+            .get_data("auto_sync_interval_seconds")
+            .ok()
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let smb_username = get_str(req, "smb_username");
         let smb_password = get_str(req, "smb_password");
         let smb_domain = get_str(req, "smb_domain");
@@ -1372,6 +1662,7 @@ impl FilesBackendInner {
             name: name.clone(),
             kind,
             target_path,
+            auto_sync_interval_seconds,
             smb_username,
             smb_password,
             smb_domain,
@@ -1407,6 +1698,23 @@ impl FilesBackendInner {
         Ok(None)
     }
 
+    /// Manual scheduler tick. Same sweep the periodic scheduler
+    /// runs, but on demand. Returns the count of pushes attempted /
+    /// succeeded / failed for operator visibility.
+    pub async fn handle_sync_tick(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let report = run_sync_tick_for_storage(self, req).await?;
+        let mut data = Map::new();
+        data.insert("attempted".into(), Value::Number(report.attempted.into()));
+        data.insert("succeeded".into(), Value::Number(report.succeeded.into()));
+        data.insert("failed".into(), Value::Number(report.failed.into()));
+        data.insert("skipped".into(), Value::Number(report.skipped.into()));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
     pub async fn handle_sync_push(
         &self,
         _backend: &dyn Backend,
@@ -1417,8 +1725,27 @@ impl FilesBackendInner {
         if id.trim().is_empty() || name.trim().is_empty() {
             return Err(RvError::ErrString("id and name are required".into()));
         }
+        let outcome = self.run_sync_push(req, &id, &name, "manual").await?;
+        let mut data = Map::new();
+        data.insert("id".into(), Value::String(id));
+        data.insert("name".into(), Value::String(name));
+        data.insert("status".into(), Value::String("pushed".into()));
+        data.insert("sha256".into(), Value::String(outcome.sha256));
+        Ok(Some(Response::data_response(Some(data))))
+    }
 
-        // Load the sync-target config.
+    /// Reusable push-and-update-state helper. Used by the manual
+    /// `POST /sync/<name>/push` endpoint, by the `sync_on_write`
+    /// inline-push path on file content updates, and by the periodic
+    /// scheduler tick. `source` is recorded on the state record so an
+    /// operator can tell which path produced the most recent attempt.
+    pub async fn run_sync_push(
+        &self,
+        req: &mut Request,
+        id: &str,
+        name: &str,
+        source: &str,
+    ) -> Result<SyncPushOutcome, RvError> {
         let cfg_key = format!("{SYNC_PREFIX}{id}/{name}");
         let Some(cfg_raw) = req.storage_get(&cfg_key).await? else {
             return Err(RvError::ErrString(format!(
@@ -1427,9 +1754,8 @@ impl FilesBackendInner {
         };
         let target: FileSyncTarget = serde_json::from_slice(&cfg_raw.value)?;
 
-        // Load current content.
         let entry = self
-            .load_entry(req, &id)
+            .load_entry(req, id)
             .await?
             .ok_or_else(|| RvError::ErrString(format!("file {id} not found")))?;
         let blob = req
@@ -1437,87 +1763,47 @@ impl FilesBackendInner {
             .await?
             .ok_or_else(|| RvError::ErrString("file content missing".into()))?;
 
-        // Perform the push. Only local-fs today.
         let state_key = format!("{SYNC_STATE_PREFIX}{id}/{name}");
         let mut state: FileSyncState = match req.storage_get(&state_key).await? {
             Some(ss) => serde_json::from_slice(&ss.value).unwrap_or_default(),
             None => FileSyncState::default(),
         };
 
-        let push_result = match target.kind.as_str() {
-            "local-fs" => push_local_fs(&target, &blob.value),
-            "smb" => {
-                #[cfg(feature = "files_smb")]
-                {
-                    crate::modules::files::smb::push_smb(&target, &blob.value)
-                }
-                #[cfg(not(feature = "files_smb"))]
-                {
-                    Err(RvError::ErrString(
-                        "sync target kind `smb` requires building with --features files_smb"
-                            .into(),
-                    ))
-                }
-            }
-            "sftp" => {
-                #[cfg(feature = "files_ssh_sync")]
-                {
-                    crate::modules::files::ssh_sync::push_sftp(&target, &blob.value)
-                }
-                #[cfg(not(feature = "files_ssh_sync"))]
-                {
-                    Err(RvError::ErrString(
-                        "sync target kind `sftp` requires building with --features files_ssh_sync"
-                            .into(),
-                    ))
-                }
-            }
-            "scp" => {
-                #[cfg(feature = "files_ssh_sync")]
-                {
-                    crate::modules::files::ssh_sync::push_scp(&target, &blob.value)
-                }
-                #[cfg(not(feature = "files_ssh_sync"))]
-                {
-                    Err(RvError::ErrString(
-                        "sync target kind `scp` requires building with --features files_ssh_sync"
-                            .into(),
-                    ))
-                }
-            }
-            other => Err(RvError::ErrString(format!(
-                "sync target kind `{other}` is not supported yet"
-            ))),
-        };
-        let now = now_rfc3339();
+        let push_result = dispatch_push(&target, &blob.value);
+        let now_rfc = now_rfc3339();
+        let now_unix = unix_now();
+        state.last_attempt_at_unix = now_unix;
+        state.last_attempt_source = source.to_string();
         match push_result {
             Ok(()) => {
-                state.last_success_at = now;
+                state.last_success_at = now_rfc;
                 state.last_success_sha256 = entry.sha256.clone();
                 state.last_error.clear();
                 state.last_failure_at.clear();
+                state.consecutive_failures = 0;
+                state.next_retry_at_unix = 0;
                 let ss = StorageEntry {
                     key: state_key,
                     value: serde_json::to_vec(&state)?,
                 };
                 req.storage_put(&ss).await?;
-                let mut data = Map::new();
-                data.insert("id".into(), Value::String(id));
-                data.insert("name".into(), Value::String(name));
-                data.insert("status".into(), Value::String("pushed".into()));
-                data.insert("sha256".into(), Value::String(entry.sha256));
-                Ok(Some(Response::data_response(Some(data))))
+                Ok(SyncPushOutcome {
+                    sha256: entry.sha256,
+                })
             }
             Err(e) => {
-                state.last_failure_at = now;
+                state.last_failure_at = now_rfc;
                 state.last_error = e.to_string();
+                state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+                state.next_retry_at_unix =
+                    now_unix.saturating_add(backoff_secs(state.consecutive_failures));
                 let ss = StorageEntry {
                     key: state_key,
                     value: serde_json::to_vec(&state)?,
                 };
-                // Record the failure state *before* surfacing the
-                // error, so the GUI's Sync tab can show why the push
-                // failed on the next read.
+                // Record failure state before surfacing the error so
+                // the GUI's Sync tab + the scheduler's next decision
+                // both see the latest attempt outcome.
                 let _ = req.storage_put(&ss).await;
                 Err(e)
             }
@@ -2531,6 +2817,189 @@ mod integration_tests {
             state.get("last_success_sha256").and_then(|v| v.as_str()),
             Some(super::sha256_hex(content).as_str())
         );
+
+        let _ = fs::remove_file(&tmp);
+    }
+
+    /// `sync_on_write = true` causes the file-content write to push
+    /// the bytes to the target inline, without a separate `push`
+    /// call. The response carries a `sync_on_write` array with one
+    /// entry per target attempted.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_sync_on_write_inline_push() {
+        use std::fs;
+        let (_bv, core, root_token) =
+            new_unseal_test_bastion_vault("test_sync_on_write_inline").await;
+        let engine = base64::engine::general_purpose::STANDARD;
+
+        // Create the file.
+        let v1 = b"v1-content";
+        let body = json!({
+            "name": "config.yaml",
+            "content_base64": engine.encode(v1),
+        })
+        .as_object()
+        .cloned();
+        let resp = crate::test_utils::test_write_api(&core, &root_token, "files/files", true, body)
+            .await
+            .unwrap()
+            .unwrap();
+        let id = resp
+            .data
+            .unwrap()
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+
+        // Configure a local-fs sync target with sync_on_write = true.
+        let tmp = std::env::temp_dir().join(format!("bvault-sow-{id}/config.yaml"));
+        let _ = fs::remove_file(&tmp);
+        let cfg = json!({
+            "kind": "local-fs",
+            "target_path": tmp.to_string_lossy(),
+            "sync_on_write": true,
+        })
+        .as_object()
+        .cloned();
+        let _ = crate::test_utils::test_write_api(
+            &core,
+            &root_token,
+            &format!("files/files/{id}/sync/primary"),
+            true,
+            cfg,
+        )
+        .await
+        .unwrap();
+
+        // Update the file content. The write handler should fire
+        // an inline push to the target.
+        let v2 = b"v2-content-with-sync-on-write";
+        let body = json!({
+            "name": "config.yaml",
+            "content_base64": engine.encode(v2),
+        })
+        .as_object()
+        .cloned();
+        let resp = crate::test_utils::test_write_api(
+            &core,
+            &root_token,
+            &format!("files/files/{id}"),
+            true,
+            body,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let data = resp.data.unwrap();
+        let pushes = data
+            .get("sync_on_write")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(pushes.len(), 1, "exactly one target should have fired");
+        assert_eq!(pushes[0].get("name").and_then(|v| v.as_str()), Some("primary"));
+        assert_eq!(pushes[0].get("ok").and_then(|v| v.as_bool()), Some(true));
+
+        // Target file must carry the v2 bytes — proves the inline
+        // push ran as part of the write handler.
+        let got = fs::read(&tmp).expect("sync_on_write must produce the target file");
+        assert_eq!(got, v2);
+
+        let _ = fs::remove_file(&tmp);
+    }
+
+    /// The manual `POST /v1/<mount>/sync-tick` endpoint runs the
+    /// scheduler sweep on demand. Targets without
+    /// `auto_sync_interval_seconds` are skipped; targets with it set
+    /// are pushed (and their `last_attempt_source = "scheduler"`).
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_manual_sync_tick_endpoint() {
+        use std::fs;
+        let (_bv, core, root_token) =
+            new_unseal_test_bastion_vault("test_manual_sync_tick").await;
+        let engine = base64::engine::general_purpose::STANDARD;
+
+        let body = json!({
+            "name": "deploy.cfg",
+            "content_base64": engine.encode(b"deploy-bytes"),
+        })
+        .as_object()
+        .cloned();
+        let resp = crate::test_utils::test_write_api(&core, &root_token, "files/files", true, body)
+            .await
+            .unwrap()
+            .unwrap();
+        let id = resp
+            .data
+            .unwrap()
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+
+        let tmp = std::env::temp_dir().join(format!("bvault-tick-{id}/deploy.cfg"));
+        let _ = fs::remove_file(&tmp);
+
+        // Configure two targets: one with auto_sync, one without.
+        let cfg_auto = json!({
+            "kind": "local-fs",
+            "target_path": tmp.to_string_lossy(),
+            "auto_sync_interval_seconds": 60u64,
+        })
+        .as_object()
+        .cloned();
+        let _ = crate::test_utils::test_write_api(
+            &core,
+            &root_token,
+            &format!("files/files/{id}/sync/auto"),
+            true,
+            cfg_auto,
+        )
+        .await
+        .unwrap();
+        let tmp2 = std::env::temp_dir().join(format!("bvault-tick-{id}/manual.cfg"));
+        let cfg_manual = json!({
+            "kind": "local-fs",
+            "target_path": tmp2.to_string_lossy(),
+            // auto_sync_interval_seconds omitted = 0 = scheduler skips
+        })
+        .as_object()
+        .cloned();
+        let _ = crate::test_utils::test_write_api(
+            &core,
+            &root_token,
+            &format!("files/files/{id}/sync/manual"),
+            true,
+            cfg_manual,
+        )
+        .await
+        .unwrap();
+
+        // Trigger the tick.
+        let resp = crate::test_utils::test_write_api(
+            &core,
+            &root_token,
+            "files/sync-tick",
+            true,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let data = resp.data.unwrap();
+        let attempted = data.get("attempted").and_then(|v| v.as_u64()).unwrap_or(0);
+        let succeeded = data.get("succeeded").and_then(|v| v.as_u64()).unwrap_or(0);
+        let skipped = data.get("skipped").and_then(|v| v.as_u64()).unwrap_or(0);
+        assert_eq!(attempted, 1, "exactly the auto target should have been attempted");
+        assert_eq!(succeeded, 1, "the local-fs auto push should succeed");
+        assert!(skipped >= 1, "the manual target should be skipped");
+
+        // The auto target should have produced the file. The manual
+        // target should not have been touched.
+        let got = fs::read(&tmp).expect("auto target must be written by the tick");
+        assert_eq!(got, b"deploy-bytes");
+        assert!(!tmp2.exists(), "manual-only target must not be written by the tick");
 
         let _ = fs::remove_file(&tmp);
     }
