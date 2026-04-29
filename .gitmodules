@@ -1,3 +1,6 @@
 [submodule "plugins-ext"]
 	path = plugins-ext
 	url = https://github.com/ffquintella/BastionVault-Plugins.git
+[submodule "IronRDP"]
+	path = IronRDP
+	url = https://github.com/ffquintella/IronRDP.git
