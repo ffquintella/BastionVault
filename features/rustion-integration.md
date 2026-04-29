@@ -36,14 +36,20 @@ Net result: operators get the same one-click Connect UX as today, but every sess
 ### In scope (BastionVault side)
 
 - **Master Operator certificate** — a long-lived (default 5y) signing cert held in a new `rustion/master` slot under the PKI engine. Hybrid by default (Ed25519 + ML-DSA-65). Public half exported for one-shot enrolment in Rustion.
-- **Rustion target registry** — a new top-level `rustion/` mount: each entry stores `name`, `endpoint` (host:port for the control plane), `public_key` (Rustion's hybrid pubkey, pinned), `default_recording_dir` pointer, `enabled`, `tags`. Multi-tenant: a deployment can connect to several Rustion instances.
+- **Rustion target registry** — a new top-level `rustion/` mount: each entry stores `id`, `name`, `endpoint` (host:port for the control plane), `public_key` (Rustion's hybrid pubkey, pinned), `default_recording_dir` pointer, `enabled`, `tags`, `health` (see below). **Multi-instance by design** — a deployment registers as many Rustion instances as it has bastions (per-region, per-environment, DR pair, …) and BastionVault treats them as a pool.
+- **Health monitoring** — a background task pings every enabled Rustion target on a configurable interval (default 30s) and stores `health = { status: "up" | "degraded" | "down" | "unknown", last_ok_at, last_error, latency_ms_p50, consecutive_failures }`. The probe is a cheap signed `GET /v1/health` envelope-light request — no full BVRG-v1 envelope, just a master-signed nonce so Rustion can reject anonymous probes — that returns Rustion version + uptime + active session count. Three consecutive failures flip a target to `down`; one success flips it back to `up`. Status changes emit `rustion.target.health.changed` audit events. The GUI surfaces a status dot per target (Settings → Rustion bastions) and on the Connection tab, and the dispatcher (below) skips any target not in `up` status when picking an instance.
+- **Bastion selection on a resource** — a `rustion` connection profile carries a `bastions` field which is **either**:
+  - **A non-empty ordered list** of Rustion target ids — BastionVault tries them **in declared order**, opens the session on the first one whose `health.status = "up"` and which accepts the envelope. Failures (network error, control-plane 5xx, `down` health) advance to the next entry; an explicit `403 / 401` from a reachable Rustion does **not** fall through (a permission denial is final and surfaces to the operator). This is how an operator pins primary + DR, or "regional first, fall back to corporate."
+  - **Empty / unset** — the dispatcher draws **uniformly at random** from the pool of all globally-enabled targets whose `health.status = "up"`. Random (rather than round-robin) is intentional: it spreads load without requiring shared state across BastionVault HA replicas, and the operator's individual session isn't a hot path that benefits from stickiness. The chosen target is recorded on the `session.open` event so audit replay is unambiguous.
+  
+  In both modes, if every candidate is unhealthy or rejects, the Connect attempt fails with `bastion_unavailable` and the operator sees the per-target error list. The GUI Connection tab shows a live preview of the dispatcher's choice ("Will try: rustion-eu-west-1 → rustion-eu-west-2") that updates as health changes.
 - **Session-grant envelope** — a versioned binary format (BVRG-v1) that bundles `{target, credential_material, operator_identity, ttl_seconds, max_renewals, recording_policy, audit_correlation_id}` and travels as `sign(master_priv, encrypt(rustion_pub, cbor(payload)))`. Reuses the existing crypto crate (ChaCha20-Poly1305 + ML-KEM-768 + ML-DSA-65 stack).
-- **New connection-profile kind: `rustion`** — alongside the existing `direct` profiles on each server resource, a profile may declare `kind: "rustion"` with a `bastion: <rustion-target-id>` reference and an optional `recording_policy` override. The credential source resolution stays identical (Secret / LDAP / SSH-engine / PKI); only the *transport* changes.
+- **New connection-profile kind: `rustion`** — alongside the existing `direct` profiles on each server resource, a profile may declare `kind: "rustion"` with a `bastions: <ordered list of rustion-target-ids>` field (empty/unset = pick at random from the global pool, see *Bastion selection* above) and an optional `recording_policy` override. The credential source resolution stays identical (Secret / LDAP / SSH-engine / PKI); only the *transport* changes.
 - **Session ticket UX** — the existing SSH / RDP session windows take a new `transport: "rustion"` mode and connect to `rustion-host:rustion-port` with the one-shot ticket as a SASL-style credential. xterm.js + ironrdp surfaces are unchanged; only the dialler swaps.
 - **Renewal API** — `POST /v1/rustion/sessions/{sid}/renew` re-signs a grant with the master cert if policy allows and the original session is still active. The GUI fires renewal at `ttl - 60s` with exponential backoff. Limited by `max_renewals` from the original grant.
 - **Forced revocation** — `DELETE /v1/rustion/sessions/{sid}` issues a signed `kill` envelope; Rustion drops the session immediately. Surfaced as a "Terminate" button on the active-sessions panel.
 - **Recording pointer** — Rustion returns `{recording_id, started_at, finished_at, sha256, format, location}` on session close. BastionVault stores it on the `session.close` audit event and exposes a "Open recording" link in the audit timeline that streams the file from Rustion (signed-URL style; the bytes never sit in BastionVault).
-- **Audit events** — `rustion.target.enrol`, `rustion.target.rotate`, `rustion.master.rotate`, `session.open` (extended with `transport: "rustion" | "direct"`, `bastion_id`, `rustion_session_id`), `session.renew`, `session.terminate`, `recording.linked`.
+- **Audit events** — `rustion.target.enrol`, `rustion.target.rotate`, `rustion.target.health.changed`, `rustion.master.rotate`, `session.open` (extended with `transport: "rustion" | "direct"`, `bastion_id`, `bastion_selection: "pinned" | "ordered-fallback" | "random-pool"`, `bastion_candidates_tried`, `rustion_session_id`), `session.renew`, `session.terminate`, `recording.linked`.
 - **Three-tier transport policy** — a new `connect.transport` field with the same value space (`direct | rustion | rustion-required`) applied at three levels, evaluated **most-restrictive-wins**:
   1. **Global default** — a deployment-wide setting in `sys/config/rustion` (`transport_default` + `transport_lock`). When `transport_lock = true`, the global value pins every resource and per-type / per-resource overrides are ignored. This is how an admin says *"all Connect, everywhere, must go through a bastion."*
   2. **Per-resource-type** — `connect.transport` on `ResourceTypeDef`, overrides the global default for resources of that type *only if `transport_lock = false`*.
@@ -62,6 +68,7 @@ Net result: operators get the same one-click Connect UX as today, but every sess
   - `POST /v1/sessions/{sid}/renew` — extends TTL on a re-signed envelope.
   - `DELETE /v1/sessions/{sid}` — terminates on a signed kill envelope.
   - `GET /v1/recordings/{rid}` — returns a short-lived signed URL the operator can stream from. Optional, can be off in air-gapped deployments.
+  - `GET /v1/health` — cheap health probe: accepts a master-signed nonce (lightweight, not a full BVRG-v1 envelope), returns `{version, uptime_secs, active_sessions, build_sha}`. Rate-limited per source IP and per authority so a misconfigured pinger can't flood it.
 - **Session ticket protocol** — when the operator's client connects to the SSH or RDP listener, the first thing it presents is `ticket@<session_id>`. Rustion looks up the materialised session, binds the socket to it, and proxies to the target with the decrypted credential. Tickets are single-use, IP-bound, and expire on first connect or after 30s, whichever comes first.
 - **Recording handoff** — on session close, Rustion writes a JSON sidecar with `{recording_id, sha256, format, started_at, finished_at, target, authority}` to a directory the BastionVault control plane can poll, and emits an outbound `recording.ready` webhook (signed) to a configurable URL.
 - **External-authority audit** — every action driven by a verified BVRG-v1 envelope is logged in Rustion's hash chain with the authority name + envelope fingerprint, so Rustion's own audit log is a tamper-proof witness independent of BastionVault's.
@@ -151,8 +158,12 @@ Extends the connection profiles introduced in Resource Connect Phase 2. A profil
 ```ts
 type ConnectionProfile =
   | { id: string; name: string; kind: "direct"; credential_source: ...; }
-  | { id: string; name: string; kind: "rustion"; bastion: string;
-      credential_source: ...; recording?: "always" | "off" | "input-redacted"; };
+  | { id: string; name: string; kind: "rustion";
+      /** Ordered preference list. Empty/unset = pick at random from the global pool
+       *  of healthy enabled targets. Tried in order until one accepts. */
+      bastions: string[];
+      credential_source: ...;
+      recording?: "always" | "off" | "input-redacted"; };
 ```
 
 The credential-source resolver is unchanged (Secret / LDAP / SSH-engine / PKI). The only difference is what happens *after* resolution: a `direct` profile hands the credential to the local SSH/RDP dialler, a `rustion` profile hands the credential to the envelope builder.
@@ -162,6 +173,8 @@ The credential-source resolver is unchanged (Secret / LDAP / SSH-engine / PKI). 
 - `rustion_target_list() -> Vec<RustionTarget>`
 - `rustion_target_upsert(target: RustionTargetInput) -> RustionTarget`
 - `rustion_target_test(id: String) -> { latency_ms, version, fingerprint }`
+- `rustion_target_health(id: Option<String>) -> Vec<{ id, status, last_ok_at, latency_ms_p50, consecutive_failures }>` (omit id = all targets)
+- `rustion_dispatcher_preview(resource_id, profile_id) -> { mode: "pinned" | "ordered-fallback" | "random-pool", candidates: [{ id, name, status }] }`
 - `rustion_master_pubkey_export() -> { pem, fingerprint, algs }`
 - `rustion_session_open(resource_id, profile_id) -> { sid, host, port, ticket, expires_at }`
 - `rustion_session_renew(sid: String) -> { new_expires_at }`
@@ -178,7 +191,8 @@ The existing `ssh_session_open` / `rdp_session_open` commands take a new optiona
 | `POST` | `/v1/rustion/targets` | Register a new Rustion bastion (paste pubkey) |
 | `PUT` | `/v1/rustion/targets/{id}` | Update endpoint / pubkey |
 | `DELETE` | `/v1/rustion/targets/{id}` | Remove (refuses if active sessions exist) |
-| `POST` | `/v1/rustion/targets/{id}/test` | Liveness + version probe |
+| `POST` | `/v1/rustion/targets/{id}/test` | Liveness + version probe (synchronous, on-demand) |
+| `GET` | `/v1/rustion/targets/health` | Cached health for every enrolled target (background-poller view) |
 | `GET` | `/v1/rustion/master/pubkey` | Export master pub (one-shot enrol step) |
 | `POST` | `/v1/rustion/master/rotate` | Rotate master cert (co-signed envelope to all enrolled bastions) |
 | `POST` | `/v1/rustion/sessions` | Open a new session (consumed by GUI / CLI) |
@@ -200,6 +214,8 @@ src/modules/rustion/
   config.rs                   // RustionTarget, RustionMaster
   envelope.rs                 // BVRG-v1 build / verify
   client.rs                   // HTTP/2 client to Rustion control plane
+  health.rs                   // background pinger + status cache + state-change events
+  dispatcher.rs               // bastion selection: ordered-fallback or random-pool
   master.rs                   // master cert lifecycle (issue, rotate, export)
   session.rs                  // session open / renew / terminate state machine
   recording.rs                // recording-pointer storage + signed-URL fetch
@@ -244,7 +260,9 @@ crates/rustion-server/         // wires the new crate into the main binary
 
 | Failure | Behaviour |
 |---|---|
-| Rustion control plane unreachable | Connect button shows error; if `connect.transport=rustion-required` the user cannot fall back to direct. |
+| Rustion control plane unreachable | Dispatcher walks to the next candidate (pinned-list mode) or picks a different healthy target (random-pool mode); the failed target is marked `down` after three strikes and excluded from selection until a probe succeeds again. If every candidate is unhealthy or rejects, Connect fails with `bastion_unavailable` and the per-target error list is surfaced. If `connect.transport=rustion-required` the user cannot fall back to direct. |
+| All bastions in a resource's pinned list are `down` | Connect fails with `bastion_unavailable`; the GUI suggests "remove the pin to fall back to the global pool" only if the resource owner has permission to edit the profile. |
+| Bastion goes `down` mid-session | The in-flight session drops on its own (TCP close); the session window shows "bastion lost" and offers Reconnect, which re-runs the dispatcher and may land on a different instance. |
 | Master cert rotated but not yet enrolled on a Rustion | Rustion rejects with `unknown_authority`; GUI surfaces "re-enrol pending" and points to the rotation step. |
 | Envelope replay (nonce seen) | Rustion logs `EnvelopeReplay` and rejects. BastionVault retries with a fresh nonce on transport-level errors only. |
 | Recording webhook lost | BastionVault polls `GET /v1/sessions/{sid}/recording` for 24h after close; webhook is best-effort, polling is authoritative. |
@@ -253,14 +271,15 @@ crates/rustion-server/         // wires the new crate into the main binary
 
 ## Phases
 
-### Phase 1 — Master cert + Rustion target registry — **Todo**
+### Phase 1 — Master cert + Rustion target registry + health monitoring — **Todo**
 
 - PKI slot for the master cert (issue, store, export pub).
-- `rustion/` mount + `RustionTarget` CRUD on the API and GUI.
-- Settings → Rustion Bastions section with one-shot enrolment wizard.
-- CLI: `bastionvault rustion target add|list|test`, `bastionvault rustion master export`.
-- Audit: `rustion.target.enrol`, `rustion.master.issue`.
-- No session traffic yet; this phase is plumbing + a green "connection ok" probe.
+- `rustion/` mount + `RustionTarget` CRUD on the API and GUI, supporting **multiple enrolled instances**.
+- Settings → Rustion Bastions section with one-shot enrolment wizard and a per-row health dot.
+- Rustion `GET /v1/health` endpoint + BastionVault background pinger (configurable interval, default 30s) with status cache, three-strikes-down / one-success-up debouncing, and `rustion.target.health.changed` audit events.
+- CLI: `bastionvault rustion target add|list|test|health`, `bastionvault rustion master export`.
+- Audit: `rustion.target.enrol`, `rustion.target.health.changed`, `rustion.master.issue`.
+- No session traffic yet; this phase is plumbing + a green/red status indicator the dispatcher will key off in Phase 3.
 
 ### Phase 2 — BVRG-v1 envelope + Rustion control-plane scaffold — **Todo**
 
@@ -268,13 +287,15 @@ crates/rustion-server/         // wires the new crate into the main binary
 - New `rustion-control-plane` crate in `/Users/felipe/Dev/Rustion`. Authority YAML store + hot reload + `/v1/sessions` skeleton that verifies envelopes and returns canned `not_implemented`.
 - Round-trip test from BastionVault → Rustion that a syntactically-correct envelope verifies and decrypts; no real session opens yet.
 
-### Phase 3 — Session open + ticketed SSH proxy — **Todo**
+### Phase 3 — Session open + ticketed SSH proxy + dispatcher — **Todo**
 
 - Rustion `/v1/sessions` materialises a session, mints a ticket, returns connection coordinates.
 - Rustion SSH listener accepts `ticket@<sid>` as the first auth step and proxies to the target with the decrypted credential.
 - BastionVault's SSH session window takes `transport: rustion` and dials the bastion.
-- `session.open` + `session.close` events on both sides; recording on but pointer not yet fetched.
-- End-to-end: Linux target reachable through Rustion, terminal works, session shows in both audit logs.
+- **Dispatcher** (`src/modules/rustion/dispatcher.rs`): given a resource + profile, returns the candidate list — pinned ordered list from the profile, or a uniform random shuffle of all healthy enabled targets when the list is empty. Skips targets where `health.status != "up"`. Walks the list on transport / 5xx failures, surfaces per-target errors, and stops on auth failures (4xx).
+- GUI Connection tab shows a live "Will try: …" preview that updates as health changes.
+- `session.open` + `session.close` events on both sides include `bastion_selection` + `bastion_candidates_tried`; recording on but pointer not yet fetched.
+- End-to-end: Linux target reachable through Rustion with multiple instances enrolled — random selection works in the empty-list case, ordered fallback works when one instance is down.
 
 ### Phase 4 — RDP through Rustion — **Todo**
 
