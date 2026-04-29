@@ -36,7 +36,7 @@ import type {
   OwnerInfo,
   FileMeta,
 } from "../lib/types";
-import { DEFAULT_RESOURCE_TYPES, mergeTypeConfig, getTypeDef } from "../lib/resourceTypes";
+import { DEFAULT_RESOURCE_TYPES, mergeTypeConfig, getTypeDef, inferOsType } from "../lib/resourceTypes";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 import { useAuthStore } from "../stores/authStore";
@@ -336,7 +336,23 @@ function ResourceInfoCard({ resource, typeDef, onUpdate, onDelete, toast }: {
   const [form, setForm] = useState<Record<string, unknown>>({ ...resource });
 
   function updateField(key: string, value: unknown) {
-    setForm((prev) => ({ ...prev, [key]: value }));
+    setForm((prev) => {
+      const next = { ...prev, [key]: value };
+      // Same migration heuristic as the create modal — when editing
+      // a server resource that pre-dates the os_type field, typing
+      // into the free-form `os` field auto-fills os_type if the
+      // operator hasn't already picked one.
+      if (
+        String(prev["type"] ?? "") === "server" &&
+        key === "os" &&
+        typeof value === "string" &&
+        !String(prev["os_type"] ?? "").trim()
+      ) {
+        const inferred = inferOsType(value);
+        if (inferred) next["os_type"] = inferred;
+      }
+      return next;
+    });
   }
 
   async function handleSave() {
@@ -449,14 +465,23 @@ function DynamicFieldsForm({ fields, values, onChange, showErrors }: {
         const error = showErrors ? validateField(f.type, val) : null;
         return (
           <div key={f.key}>
-            <Input
-              label={f.label}
-              type={f.type === "number" ? "number" : "text"}
-              value={val}
-              onChange={(e) => onChange(f.key, f.type === "number" ? (parseInt(e.target.value) || 0) : e.target.value)}
-              placeholder={f.placeholder}
-              hint={f.type === "ip" ? "IPv4 or IPv6" : f.type === "fqdn" ? "Fully qualified domain name" : undefined}
-            />
+            {f.type === "select" ? (
+              <Select
+                label={f.label}
+                value={val}
+                onChange={(e) => onChange(f.key, e.target.value)}
+                options={f.options ?? []}
+              />
+            ) : (
+              <Input
+                label={f.label}
+                type={f.type === "number" ? "number" : "text"}
+                value={val}
+                onChange={(e) => onChange(f.key, f.type === "number" ? (parseInt(e.target.value) || 0) : e.target.value)}
+                placeholder={f.placeholder}
+                hint={f.type === "ip" ? "IPv4 or IPv6" : f.type === "fqdn" ? "Fully qualified domain name" : undefined}
+              />
+            )}
             {error && <p className="text-xs text-[var(--color-danger)] mt-0.5">{error}</p>}
           </div>
         );
@@ -493,7 +518,23 @@ function CreateResourceModal({ open, onClose, typeConfig, onCreated, toast }: {
   const typeDef = typeId === "_custom" ? null : getTypeDef(typeConfig, typeId);
 
   function updateField(key: string, value: unknown) {
-    setFields((prev) => ({ ...prev, [key]: value }));
+    setFields((prev) => {
+      const next = { ...prev, [key]: value };
+      // Migration heuristic: when the operator types into the
+      // free-form `os` field on a server resource and `os_type`
+      // is still unset, infer it. Operator can override via the
+      // dropdown; we never overwrite a user-set value.
+      if (
+        typeId === "server" &&
+        key === "os" &&
+        typeof value === "string" &&
+        !String(prev["os_type"] ?? "").trim()
+      ) {
+        const inferred = inferOsType(value);
+        if (inferred) next["os_type"] = inferred;
+      }
+      return next;
+    });
   }
 
   async function handleCreate() {

@@ -1093,7 +1093,28 @@ const FIELD_TYPE_OPTIONS = [
   { value: "url", label: "URL" },
   { value: "ip", label: "IP Address" },
   { value: "fqdn", label: "FQDN" },
+  { value: "select", label: "Select (enum)" },
 ];
+
+/**
+ * Parse the operator-typed `value=label, value=label` shorthand for
+ * select-field options. Tolerates extra whitespace and trailing
+ * commas; entries without an `=` use the same string for both
+ * value and label so a quick `linux, windows, macos` works too.
+ */
+function parseSelectOptions(input: string): { value: string; label: string }[] {
+  return input
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+    .map((part) => {
+      const eq = part.indexOf("=");
+      if (eq < 0) return { value: part, label: part };
+      const value = part.slice(0, eq).trim();
+      const label = part.slice(eq + 1).trim();
+      return { value, label: label || value };
+    });
+}
 
 function TypeEditorModal({ typeDef, onSave, onClose }: {
   typeDef: ResourceTypeDef | null;
@@ -1158,23 +1179,38 @@ function TypeEditorModal({ typeDef, onSave, onClose }: {
           </div>
           <div className="space-y-2">
             {fields.map((f, i) => (
-              <div key={i} className="flex gap-2 items-end">
-                <Input label={i === 0 ? "Key" : undefined} value={f.key}
-                  onChange={(e) => updateFieldDef(i, { key: e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "_") })}
-                  placeholder="field_key" />
-                <Input label={i === 0 ? "Label" : undefined} value={f.label}
-                  onChange={(e) => updateFieldDef(i, { label: e.target.value })}
-                  placeholder="Field Label" />
-                <div className="w-28 shrink-0">
-                  <Select label={i === 0 ? "Type" : undefined} value={f.type}
-                    onChange={(e) => updateFieldDef(i, { type: e.target.value as ResourceFieldDef["type"] })}
-                    options={FIELD_TYPE_OPTIONS} />
+              <div key={i} className="space-y-1">
+                <div className="flex gap-2 items-end">
+                  <Input label={i === 0 ? "Key" : undefined} value={f.key}
+                    onChange={(e) => updateFieldDef(i, { key: e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "_") })}
+                    placeholder="field_key" />
+                  <Input label={i === 0 ? "Label" : undefined} value={f.label}
+                    onChange={(e) => updateFieldDef(i, { label: e.target.value })}
+                    placeholder="Field Label" />
+                  <div className="w-28 shrink-0">
+                    <Select label={i === 0 ? "Type" : undefined} value={f.type}
+                      onChange={(e) => updateFieldDef(i, { type: e.target.value as ResourceFieldDef["type"] })}
+                      options={FIELD_TYPE_OPTIONS} />
+                  </div>
+                  {f.type === "select" ? (
+                    <Input
+                      label={i === 0 ? "Options (value=label, comma-sep)" : undefined}
+                      value={(f.options ?? []).map((o) => `${o.value}=${o.label}`).join(", ")}
+                      onChange={(e) =>
+                        updateFieldDef(i, {
+                          options: parseSelectOptions(e.target.value),
+                        })
+                      }
+                      placeholder="linux=Linux, windows=Windows"
+                    />
+                  ) : (
+                    <Input label={i === 0 ? "Placeholder" : undefined} value={f.placeholder ?? ""}
+                      onChange={(e) => updateFieldDef(i, { placeholder: e.target.value })}
+                      placeholder="Hint text" />
+                  )}
+                  <button onClick={() => removeField(i)}
+                    className="text-[var(--color-danger)] hover:text-red-400 text-lg pb-1 shrink-0">&times;</button>
                 </div>
-                <Input label={i === 0 ? "Placeholder" : undefined} value={f.placeholder ?? ""}
-                  onChange={(e) => updateFieldDef(i, { placeholder: e.target.value })}
-                  placeholder="Hint text" />
-                <button onClick={() => removeField(i)}
-                  className="text-[var(--color-danger)] hover:text-red-400 text-lg pb-1 shrink-0">&times;</button>
               </div>
             ))}
             {fields.length === 0 && (

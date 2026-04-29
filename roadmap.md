@@ -57,7 +57,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 |---|---|
 | Resource Management (inventory + grouped secrets) | Done |
 | File Resources (binary blobs + local-FS sync) | Done — all 8 phases (local-FS, SMB, SFTP, SCP, periodic re-sync, sync-on-write) |
-| Resource Connect — in-app SSH / RDP for server resources ([spec](features/resource-connect.md)) | Todo — `os_type` field + Connect button + Tauri WebviewWindow per session (xterm.js + `russh` for SSH, `<canvas>` + `ironrdp` for RDP). Per-resource Connection profiles bind protocol + target + credential source. Four credential sources: **Secret**, **LDAP**, **SSH-engine**, **PKI** (CredSSP smartcard). Eight phases. |
+| Resource Connect — in-app SSH / RDP for server resources ([spec](features/resource-connect.md)) | Partial — Phase 1 done (structured `os_type` select on the `server` resource type + `select` field type added to `ResourceFieldDef` so other types can use enums; migration heuristic pre-fills `os_type` from the existing free-form `os` field; Settings page extended with a select-options editor). Phases 2–8 (Connection profiles, SSH window, RDP window, the four credential sources — Secret / LDAP / SSH-engine / PKI — and polish) follow in subsequent cuts. |
 
 ### Networking & TLS
 

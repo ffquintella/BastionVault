@@ -162,8 +162,10 @@ export interface ResourceMetadata {
 export interface ResourceFieldDef {
   key: string;
   label: string;
-  type: "text" | "number" | "url" | "ip" | "fqdn";
+  type: "text" | "number" | "url" | "ip" | "fqdn" | "select";
   placeholder?: string;
+  /** Required when `type === "select"`; ignored otherwise. */
+  options?: { value: string; label: string }[];
 }
 
 export interface ResourceTypeDef {

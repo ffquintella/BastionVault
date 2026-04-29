@@ -47,6 +47,21 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Resource Connect — Phase 1 (`os_type` field + select schema)
+
+Lands the GUI-only schema slice that unblocks the rest of the Resource Connect feature ([`features/resource-connect.md`](features/resource-connect.md)) — no implementation commitment to the SSH/RDP windows yet, just the structured field the Connect button will dispatch on.
+
+- **`select` field type** added to [`ResourceFieldDef`](gui/src/lib/types.ts) — `{ type: "select"; options: { value, label }[] }`. Open to any resource-type definition; not server-specific.
+- **`os_type` select on the `server` resource type** ([`gui/src/lib/resourceTypes.ts`](gui/src/lib/resourceTypes.ts)) — values: `linux`, `windows`, `macos`, `bsd`, `unix`, `other`, plus an explicit empty placeholder. The free-form `os` text field stays alongside it for the human-readable distro/version (`Ubuntu 24.04`, `Windows Server 2022`).
+- **`DynamicFieldsForm` renders `select`** ([`gui/src/routes/ResourcesPage.tsx`](gui/src/routes/ResourcesPage.tsx)) as a `<Select>` element with the options from the field def. All other field types unchanged.
+- **Migration heuristic** in both create and edit modals: when an operator types into the free-form `os` field on a server resource and `os_type` is still unset, the GUI infers it from common substrings (`Ubuntu` / `Debian` / `RHEL` / `AlmaLinux` → `linux`, `Windows Server 2022` / `Win 10` → `windows`, `macOS` / `Darwin` / `OSX` → `macos`, `FreeBSD` → `bsd`, `Solaris` / `AIX` / `HP-UX` → `unix`). Operator can always override via the dropdown; a value the operator has already picked is never overwritten. The substring-match list deliberately keeps `\bserver\b` alone (without a trailing year) out of the Windows match because too many non-Windows things are called "server."
+- **Settings page type editor** extended with a select-options editor: when an operator picks `Select (enum)` for a custom-type field, an inline `value=label, value=label` shorthand appears in place of the placeholder field. Empty entries and trailing commas are tolerated; bare `linux, windows, macos` works too (value and label become the same).
+- **9 new vitest tests** ([`gui/src/test/resourceTypes.test.ts`](gui/src/test/resourceTypes.test.ts)) covering the server type carrying `os_type`, every Connect-button-relevant value being present in the options list, the migration heuristic recognising Linux / Windows / macOS / BSD / legacy-Unix variants, and the empty-on-no-match safeguard.
+
+`cargo check --workspace` clean. `tsc` clean. 75/75 vitest pass (66 existing + 9 new).
+
+Phases 2–8 (Connection profiles, SSH window, RDP window, the four credential sources, polish) ship in subsequent cuts. The schema landing first lets operators populate `os_type` ahead of the actual Connect button arriving — by the time Phase 7 lands, deployments will already have the data.
+
 #### Cloud Storage — obfuscation salt rekey CLI + server-mode bootstrap
 
 Closes both deferred Cloud Storage Targets sub-initiatives in one cut.

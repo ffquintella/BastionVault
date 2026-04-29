@@ -413,7 +413,7 @@ gui/src/lib/sessionApi.ts                -- thin wrappers around the new Tauri c
 
 ## Phases
 
-### Phase 1 — `os_type` field + schema plumbing
+### Phase 1 — `os_type` field + schema plumbing — **Done**
 
 | Deliverable | Location |
 |---|---|
