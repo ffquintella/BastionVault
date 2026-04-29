@@ -341,6 +341,9 @@ pub async fn send_control(
             .send(ctl)
             .await
             .map_err(|_| "session control channel closed".to_string()),
+        Some(_) => Err(format!(
+            "session `{token}` is not an SSH session (cannot route SSH control message)"
+        )),
         None => Err(format!("session token `{token}` not found")),
     }
 }

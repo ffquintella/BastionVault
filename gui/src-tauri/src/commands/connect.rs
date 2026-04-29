@@ -200,6 +200,217 @@ pub async fn session_resize(
 }
 
 #[derive(Deserialize)]
+pub struct RdpOpenRequest {
+    pub resource_name: String,
+    pub profile_id: String,
+}
+
+#[derive(Serialize)]
+pub struct RdpOpenResponse {
+    pub token: String,
+    pub frame_event: String,
+    pub closed_event: String,
+    pub window_label: String,
+    pub width: u16,
+    pub height: u16,
+}
+
+/// Open an RDP session window. Phase 4 ships the surface; the
+/// transport itself is stubbed pending an `ironrdp` upstream that
+/// stops pinning `=crypto-common 0.2.0-rc.4` against our existing
+/// `digest 0.11` stack. The window opens regardless so an operator
+/// can see exactly what's in flight; the body shows the dep-blocker
+/// banner with a link to the spec.
+#[tauri::command]
+pub async fn session_open_rdp(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    request: RdpOpenRequest,
+) -> CmdResult<RdpOpenResponse> {
+    let meta = read_resource_meta(&state, &request.resource_name).await?;
+    let profile = find_profile(&meta, &request.profile_id).ok_or_else(|| {
+        CommandError::from(format!(
+            "profile `{}` not found on resource `{}`",
+            request.profile_id, request.resource_name
+        ))
+    })?;
+    let host = profile_host(&profile, &meta).ok_or_else(|| {
+        CommandError::from(
+            "resource has no hostname or ip_address; set one or override target_host on the profile"
+                .to_string(),
+        )
+    })?;
+    let port = profile
+        .get("target_port")
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u16::try_from(n).ok())
+        .unwrap_or(3389);
+    let username = profile_username(&profile);
+    if username.is_empty() {
+        return Err(CommandError::from(
+            "profile.username is required for RDP".to_string(),
+        ));
+    }
+    let label = format!("rdp {username}@{host}:{port}");
+
+    let password = resolve_secret_credential_for_rdp(&state, &request.resource_name, &profile).await?;
+
+    // Open the real RDP transport.
+    let outcome = session::rdp::open_rdp_session(
+        app.clone(),
+        &state,
+        session::rdp::RdpOpenArgs {
+            host,
+            port,
+            username,
+            password,
+            domain: None,
+            label: label.clone(),
+        },
+    )
+    .await
+    .map_err(CommandError::from)?;
+
+    let window_label = format!("rdp-{}", outcome.token);
+    let url = format!(
+        "index.html#/session/rdp?token={}&frame={}&closed={}&label={}&w={}&h={}",
+        urlencoding::encode(&outcome.token),
+        urlencoding::encode(&outcome.frame_event),
+        urlencoding::encode(&outcome.closed_event),
+        urlencoding::encode(&label),
+        outcome.width,
+        outcome.height,
+    );
+    let win = WebviewWindowBuilder::new(&app, &window_label, WebviewUrl::App(url.into()))
+        .title(format!("BastionVault — {label}"))
+        .inner_size((outcome.width as f64) + 8.0, (outcome.height as f64) + 50.0)
+        .resizable(true)
+        .build()
+        .map_err(|e| CommandError::from(format!("spawn window: {e}")))?;
+    let token_for_close = outcome.token.clone();
+    let app_for_close = app.clone();
+    win.on_window_event(move |ev| {
+        if let tauri::WindowEvent::CloseRequested { .. } = ev {
+            let token = token_for_close.clone();
+            let app = app_for_close.clone();
+            tauri::async_runtime::spawn(async move {
+                let s = app.state::<AppState>();
+                let _ = session::rdp::send_control(&s, &token, session::rdp::RdpControl::Close).await;
+                session::rdp::drop_session(&s, &token).await;
+            });
+        }
+    });
+
+    Ok(RdpOpenResponse {
+        token: outcome.token,
+        frame_event: outcome.frame_event,
+        closed_event: outcome.closed_event,
+        window_label,
+        width: outcome.width,
+        height: outcome.height,
+    })
+}
+
+#[derive(Deserialize)]
+pub struct RdpInputMouseRequest {
+    pub token: String,
+    pub x: u16,
+    pub y: u16,
+    /// Empty for moves; "down" / "up" for clicks.
+    pub button: Option<String>,
+    pub button_index: Option<u8>,
+}
+
+#[tauri::command]
+pub async fn session_input_rdp_mouse(
+    state: State<'_, AppState>,
+    request: RdpInputMouseRequest,
+) -> CmdResult<()> {
+    let ctl = match (request.button.as_deref(), request.button_index) {
+        (Some("down"), Some(idx)) => session::rdp::RdpControl::PointerButton {
+            button_index: idx,
+            pressed: true,
+            x: request.x,
+            y: request.y,
+        },
+        (Some("up"), Some(idx)) => session::rdp::RdpControl::PointerButton {
+            button_index: idx,
+            pressed: false,
+            x: request.x,
+            y: request.y,
+        },
+        _ => session::rdp::RdpControl::PointerMove {
+            x: request.x,
+            y: request.y,
+        },
+    };
+    session::rdp::send_control(&state, &request.token, ctl)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[derive(Deserialize)]
+pub struct RdpInputKeyRequest {
+    pub token: String,
+    pub js_code: String,
+    pub pressed: bool,
+}
+
+#[tauri::command]
+pub async fn session_input_rdp_key(
+    state: State<'_, AppState>,
+    request: RdpInputKeyRequest,
+) -> CmdResult<()> {
+    session::rdp::send_control(
+        &state,
+        &request.token,
+        session::rdp::RdpControl::Key {
+            js_code: request.js_code,
+            pressed: request.pressed,
+        },
+    )
+    .await
+    .map_err(CommandError::from)
+}
+
+async fn resolve_secret_credential_for_rdp(
+    state: &State<'_, AppState>,
+    resource_name: &str,
+    profile: &Value,
+) -> Result<zeroize::Zeroizing<String>, CommandError> {
+    let cs = profile.get("credential_source").ok_or_else(|| {
+        CommandError::from("profile is missing credential_source".to_string())
+    })?;
+    let kind = cs.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    if kind != "secret" {
+        return Err(CommandError::from(format!(
+            "credential source `{kind}` is not implemented yet — Phase 4 supports `secret` only"
+        )));
+    }
+    let secret_id = cs
+        .get("secret_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CommandError::from("credential_source.secret_id is required"))?;
+    let path = format!("{RESOURCE_MOUNT}secrets/{resource_name}/{secret_id}");
+    let resp = make_request(state, Operation::Read, path, None).await?;
+    let data: HashMap<String, Value> = resp
+        .and_then(|r| r.data)
+        .map(|m| m.into_iter().collect())
+        .unwrap_or_default();
+    let password = data
+        .get("password")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_default();
+    if password.is_empty() {
+        return Err(CommandError::from(format!(
+            "secret `{secret_id}` carries no `password` field — RDP CredSSP requires a password"
+        )));
+    }
+    Ok(zeroize::Zeroizing::new(password))
+}
+
+#[derive(Deserialize)]
 pub struct SshCloseRequest {
     pub token: String,
 }
@@ -209,13 +420,18 @@ pub async fn session_close(
     state: State<'_, AppState>,
     request: SshCloseRequest,
 ) -> CmdResult<()> {
-    let _ = session::ssh::send_control(
+    // Best-effort fan-out: we don't know whether the token names
+    // an SSH or RDP session, so try both. The mismatched one
+    // returns an error we ignore. drop_session removes either kind.
+    let _ = session::ssh::send_control(&state, &request.token, SshControl::Close).await;
+    let _ = session::rdp::send_control(
         &state,
         &request.token,
-        SshControl::Close,
+        session::rdp::RdpControl::Close,
     )
     .await;
     session::ssh::drop_session(&state, &request.token).await;
+    session::rdp::drop_session(&state, &request.token).await;
     Ok(())
 }
 

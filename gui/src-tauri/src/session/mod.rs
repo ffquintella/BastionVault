@@ -10,6 +10,7 @@
 //! RDP (`ironrdp` + `<canvas>`) is Phase 4; LDAP / SSH-engine / PKI
 //! credential sources land in Phases 5–6.
 
+pub mod rdp;
 pub mod ssh;
 
 use tokio::sync::mpsc;
@@ -22,6 +23,22 @@ pub enum SessionState {
     /// the spawned task) and a tx channel the per-keystroke
     /// `session_input` command pumps into.
     Ssh(SshSessionState),
+    /// RDP session — owns the active-stage pump task's tx side.
+    /// The pump translates control messages into fast-path PDUs
+    /// and forwards bitmap updates back to the WebviewWindow as
+    /// per-session Tauri events.
+    Rdp(RdpSessionState),
+}
+
+pub struct RdpSessionState {
+    /// Tx side of the input channel. Frontend `session_input_rdp_*`
+    /// commands push control messages here; the spawned task awaits
+    /// on the rx side and translates to fast-path PDUs.
+    pub input_tx: tokio::sync::mpsc::Sender<rdp::RdpControl>,
+    /// Operator-visible window title + future audit close-event
+    /// payload.
+    #[allow(dead_code)]
+    pub label: String,
 }
 
 pub struct SshSessionState {

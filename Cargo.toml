@@ -33,7 +33,7 @@ members = [
 # separately — its build artefacts shouldn't pollute the host's
 # `target/`, and its release-profile (panic=abort, opt=s) shouldn't
 # leak into our normal builds.
-exclude = ["plugins-ext"]
+exclude = ["plugins-ext", "IronRDP"]
 resolver = "2"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -128,7 +128,7 @@ ipnetwork = { version = "0.21", features = ["serde"] }
 blake2b_simd = "1.0"
 derive_more = "2.1.1"
 dashmap = "6.1"
-tokio = { version = "1.51", features = ["rt-multi-thread", "macros", "process", "time", "io-util"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "process", "time", "io-util"] }
 ctor = "0.9.1"
 better_default = "1.0.5"
 prometheus-client = "0.24.1"
@@ -411,3 +411,14 @@ path = "tests/test_default_logical.rs"
 name = "cucumber_hiqlite"
 harness = false
 path = "tests/cucumber_hiqlite.rs"
+
+# Resource Connect Phase 4 — same `[patch.crates-io]` entry the
+# `IronRDP/` submodule's `fix-deps` branch carries. We mirror it
+# here because the GUI crate (a member of THIS workspace) pulls
+# `ironrdp` as a path-dep into the IronRDP submodule, but Cargo's
+# `[patch]` is workspace-scoped — the submodule's patch doesn't
+# apply when the IronRDP crates are being built as path-deps from
+# this workspace's perspective. Keep both in sync until sspi cuts
+# a release with the picky-rc.23 + stable RustCrypto chain.
+[patch.crates-io]
+sspi = { git = "https://github.com/Devolutions/sspi-rs", rev = "26765bbe1f57f490ba1c37703eda8267c3b2dfb6" }

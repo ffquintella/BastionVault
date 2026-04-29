@@ -4,3 +4,4 @@
 [submodule "IronRDP"]
 	path = IronRDP
 	url = https://github.com/ffquintella/IronRDP.git
+	branch = fix-deps

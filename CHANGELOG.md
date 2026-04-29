@@ -47,6 +47,35 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Resource Connect — Phase 4 (RDP session window, Secret source)
+
+The Connect button now opens an in-app RDP session window for Windows server resources. Canvas-based bitmap rendering driven by `ironrdp` 0.14 over a tokio TCP+TLS framed stream. Credential bytes never reach the JS layer.
+
+**Dep-conflict resolution.** ironrdp's `picky 7.0.0-rc.22` chain pinned `=crypto-common 0.2.0-rc.4`, conflicting with the host's `digest 0.11` stack via `hmac 0.13`. Three alternative pure-Rust RDP crates surveyed (`rdp-rs`, `lamco-rdp`, `smb`-style fork) and rejected — all required either OpenSSL/native-tls or had blocking dep conflicts of their own. **Resolution:** the [`IronRDP/`](IronRDP/) git submodule on the [`fix-deps`](https://github.com/ffquintella/IronRDP/tree/fix-deps) branch carries:
+- `ironrdp-connector`: `picky =rc.22` → `=rc.23` (rc.23 picks up stable `crypto-common 0.2.x`).
+- `ironrdp-connector` / `ironrdp` / `ffi`: `sspi 0.19` → `0.20`.
+- workspace `[patch.crates-io]`: `sspi 0.20.0` redirected to its `main` SHA `26765bb`, which already bumped to picky-rc.23 + the stable RustCrypto chain. The same patch lives in the host workspace `Cargo.toml` so the GUI inherits it for the path-to-git-dep IronRDP crates.
+
+Net effect: ironrdp's transitive `crypto-common` resolves to `0.2.1`, matching the host stack. Five IronRDP crates pulled directly into the GUI as git deps: `ironrdp`, `ironrdp-async`, `ironrdp-tls` (rustls feature), `ironrdp-core`, `ironrdp-pdu`, `ironrdp-tokio`. Host-crate `tokio` requirement bumped `1.51` → `1.52` to satisfy `ironrdp-tls`.
+
+**Implementation** ([`gui/src-tauri/src/session/rdp.rs`](gui/src-tauri/src/session/rdp.rs)):
+- `open_rdp_session` walks the connector handshake: TCP connect → ironrdp `connect_begin` → TLS upgrade (rustls) → `connect_finalize` → channel open. 30 s hard timeout on the whole connect+auth phase.
+- A tokio task drives the active-stage loop: `framed.read_pdu()` → `ActiveStage::process(...)` → forward `ResponseFrame` PDUs back to the server, emit `GraphicsUpdate` batches as full-frame RGBA snapshots over a per-session Tauri event the WebviewWindow subscribes to. `Terminate` fires the `closed` event.
+- Input: `mpsc::Sender<RdpControl>` accepts `PointerMove`, `PointerButton`, `Key` from the frontend; the pump translates each into a fast-path `MousePdu` / `KeyboardEvent`-flagged scancode and writes through the framed stream.
+- Three new Tauri commands: `session_open_rdp`, `session_input_rdp_mouse`, `session_input_rdp_key`. `session_close` extended to fan-out to either the SSH or RDP variant of `SessionState`.
+- Conservative JS `KeyboardEvent.code` → PS/2 set-1 scancode table covers printable ASCII + common modifiers + arrows + function keys + Enter/Escape/Backspace/Tab. Unmapped keys drop on the floor (international + media keys are Phase 7 polish).
+
+**Frontend** ([`gui/src/routes/SessionRdpWindow.tsx`](gui/src/routes/SessionRdpWindow.tsx)):
+- Fresh React route loaded into the spawned Tauri WebviewWindow. Subscribes to the per-session frame event, decodes the b64 RGBA payload, paints it onto a `<canvas>` via `putImageData`. Mouse + keyboard events forward via the new Tauri commands. Status pill (`connecting` / `open` / `closed` / `error`) + Disconnect button in a thin chrome bar.
+- `MouseEvent.button` (0=left, 1=middle, 2=right) maps directly to the host-side button index. Canvas-relative coordinates account for any inner-window scaling.
+- Phase 4 limitations called out in the spec but not in the UI banner (since the path now actually works): **no NLA / CredSSP** (operators with NLA-enforcing servers see an explicit "transport stub" auth error), **full-frame snapshots, not dirty-rect deltas**, **no clipboard / audio / smart-card redirection**.
+
+**Connect button** on the Connection tab now enables for both SSH+Secret and RDP+Secret profile combos. The same `handleConnect` hop branches on `profile.protocol`.
+
+`cargo check --workspace` clean. `tsc` clean. **102/102** vitest pass.
+
+Phase 5 (LDAP credential source) and Phase 6 (PKI / CredSSP) follow.
+
 #### Resource Connect — Phase 3 (SSH session window, Secret source)
 
 The Connect button is live. Clicking it on a server resource with an SSH+Secret profile opens a fresh Tauri WebviewWindow carrying an in-app xterm.js terminal driven by `russh` 0.45 over the secret's credentials. The credential bytes never reach the JS layer or the OS clipboard.

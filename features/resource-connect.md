@@ -452,7 +452,7 @@ No backend changes — resource fields are already a flexible `Map<String, Value
 | `session.open` / `session.close` audit events with `credential_source` | `gui/src-tauri/src/session/audit.rs` |
 | Integration test against an OpenSSH server in Docker (testcontainers): one round-trip per source kind (`secret/password`, `secret/private_key`, `ssh-engine/ca`, `ssh-engine/otp`) | `gui/src-tauri/tests/` |
 
-### Phase 4 — RDP session window + `secret` source
+### Phase 4 — RDP session window + `secret` source — **Done** (Standard Security; NLA / CredSSP deferred to Phase 6)
 
 | Deliverable | Location |
 |---|---|

@@ -1282,6 +1282,23 @@ export type SessionOpenSshResponse = {
 export const sessionOpenSsh = (request: SessionOpenSshRequest) =>
   invoke<SessionOpenSshResponse>("session_open_ssh", { request });
 
+export type SessionOpenRdpRequest = {
+  resource_name: string;
+  profile_id: string;
+};
+
+export type SessionOpenRdpResponse = {
+  token: string;
+  frame_event: string;
+  closed_event: string;
+  window_label: string;
+  width: number;
+  height: number;
+};
+
+export const sessionOpenRdp = (request: SessionOpenRdpRequest) =>
+  invoke<SessionOpenRdpResponse>("session_open_rdp", { request });
+
 export type LdapCheckConnectionResult = {
   ok: boolean;
   url: string;

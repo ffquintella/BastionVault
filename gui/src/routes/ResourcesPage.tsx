@@ -641,21 +641,31 @@ function ConnectionProfilesPanel({
   const [confirmDelete, setConfirmDelete] = useState<ConnectionProfile | null>(null);
   const [connecting, setConnecting] = useState<string | null>(null);
 
-  // The Connect button only fires for SSH this cut (Phase 3); RDP
-  // ships in Phase 4. Filter the launchable set so the button is
-  // disabled when no profile matches.
+  // SSH+Secret + RDP+Secret both spawn a session window. RDP ships
+  // the surface today (window + canvas + input capture); the
+  // underlying ironrdp transport is pending an upstream picky /
+  // crypto-common alignment. The window surfaces a clear
+  // dep-blocker banner when that's the case.
   const launchableProfiles = profiles.filter(
-    (p) => p.protocol === "ssh" && p.credential_source.kind === "secret",
+    (p) =>
+      (p.protocol === "ssh" || p.protocol === "rdp") &&
+      p.credential_source.kind === "secret",
   );
 
-  async function handleConnect(profileId: string) {
-    setConnecting(profileId);
+  async function handleConnect(profile: ConnectionProfile) {
+    setConnecting(profile.id);
     try {
-      await api.sessionOpenSsh({
-        resource_name: String(resource.name),
-        profile_id: profileId,
-      });
-      // Window opens itself; nothing else to do here.
+      if (profile.protocol === "ssh") {
+        await api.sessionOpenSsh({
+          resource_name: String(resource.name),
+          profile_id: profile.id,
+        });
+      } else {
+        await api.sessionOpenRdp({
+          resource_name: String(resource.name),
+          profile_id: profile.id,
+        });
+      }
     } catch (e: unknown) {
       toast("error", extractError(e));
     } finally {
@@ -750,11 +760,17 @@ function ConnectionProfilesPanel({
                 </dl>
               </div>
               <div className="flex flex-col gap-1 shrink-0">
-                {p.protocol === "ssh" && p.credential_source.kind === "secret" ? (
+                {(p.protocol === "ssh" || p.protocol === "rdp") &&
+                p.credential_source.kind === "secret" ? (
                   <Button
                     size="sm"
-                    onClick={() => handleConnect(p.id)}
+                    onClick={() => handleConnect(p)}
                     disabled={connecting !== null}
+                    title={
+                      p.protocol === "rdp"
+                        ? "Phase 4 RDP — Standard Security (no NLA / CredSSP). Most homelab + Win servers with NLA disabled."
+                        : undefined
+                    }
                   >
                     {connecting === p.id ? "Connecting…" : "Connect"}
                   </Button>
@@ -776,17 +792,18 @@ function ConnectionProfilesPanel({
 
         {launchableProfiles.length === 0 && profiles.length > 0 && (
           <p className="text-xs text-[var(--color-text-muted)]">
-            Phase 3 ships Connect for SSH profiles using the
-            <strong> Secret</strong> credential source. The other
-            combinations (RDP, LDAP / SSH-engine / PKI sources)
-            land in subsequent phases.
+            Connect launches today for SSH+Secret and RDP+Secret
+            profiles. LDAP / SSH-engine / PKI credential sources
+            land in Phases 5–6.
           </p>
         )}
         <p className="text-xs text-[var(--color-text-muted)]">
-          Connect launches an in-app SSH terminal for SSH+Secret
-          profiles. RDP and the LDAP / SSH-engine / PKI credential
-          sources land in subsequent phases — the editor lets you
-          pre-stage profiles for those today.
+          Connect launches an in-app session window for SSH+Secret
+          (xterm.js + russh) and RDP+Secret (canvas + ironrdp,
+          transport pending an upstream dep alignment — see banner
+          in the spawned window). LDAP / SSH-engine / PKI credential
+          sources land in Phases 5–6 — the editor lets you pre-stage
+          profiles for those today.
         </p>
       </div>
 

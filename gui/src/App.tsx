@@ -22,6 +22,7 @@ import { TotpPage } from "./routes/TotpPage";
 import { LdapPage } from "./routes/LdapPage";
 import { PluginsPage } from "./routes/PluginsPage";
 import { SessionSshWindow } from "./routes/SessionSshWindow";
+import { SessionRdpWindow } from "./routes/SessionRdpWindow";
 import { useAuthStore } from "./stores/authStore";
 import { ToastProvider } from "./components/ui";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -128,6 +129,7 @@ export default function App() {
               session before the window opens, so no auth gate.
             */}
             <Route path="/session/ssh" element={<SessionSshWindow />} />
+            <Route path="/session/rdp" element={<SessionRdpWindow />} />
           </Routes>
         </HashRouter>
       </ToastProvider>

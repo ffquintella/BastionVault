@@ -75,6 +75,26 @@ futures-util = "0.3"
 log = "0.4"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 urlencoding = "2"
+# Resource Connect RDP transport (Phase 4) — IronRDP via the
+# `IronRDP/` git submodule, which is excluded from the host
+# workspace and lives on its own `fix-deps` branch. The fork:
+#
+#   - bumps `picky` from rc.22 to rc.23 in `ironrdp-connector`
+#   - bumps `sspi` 0.19 → 0.20 across the workspace
+#   - patches `sspi 0.20.0` to its `main` branch SHA so it picks
+#     up the picky-rc.23 + stable RustCrypto chain
+#
+# Net effect: ironrdp's transitive `crypto-common` resolves to
+# `0.2.1`, matching the host crate's `digest 0.11` stack via
+# `hmac 0.13`. See `IronRDP/Cargo.toml` `[patch.crates-io]`
+# section + `crates/ironrdp-connector/Cargo.toml` for the pinned
+# rationale.
+ironrdp = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps", default-features = false, features = ["connector", "session", "graphics", "input", "pdu", "core"] }
+ironrdp-async = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps" }
+ironrdp-tls = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps", features = ["rustls"] }
+ironrdp-core = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps" }
+ironrdp-pdu = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps" }
+ironrdp-tokio = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps" }
 
 [target.'cfg(windows)'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }
