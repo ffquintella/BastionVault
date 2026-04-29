@@ -24,7 +24,13 @@ use crate::session::{
 };
 use crate::state::AppState;
 
-const RESOURCE_MOUNT: &str = "v2/resources/";
+// Resource module is mounted at `resources/`; the engine itself
+// nests records under `resources/resources/<name>` and secrets
+// under `resources/secrets/<name>/<key>`. We carry only the mount
+// prefix here so each call site can pick the right sub-path —
+// matches the convention in `commands/resources.rs` (which uses
+// the same `RESOURCE_MOUNT = "resources/"`).
+const RESOURCE_MOUNT: &str = "resources/";
 
 #[derive(Deserialize)]
 pub struct SshOpenRequest {
@@ -762,7 +768,7 @@ async fn read_resource_meta(
     state: &State<'_, AppState>,
     name: &str,
 ) -> Result<Map<String, Value>, CommandError> {
-    let path = format!("{RESOURCE_MOUNT}{name}");
+    let path = format!("{RESOURCE_MOUNT}resources/{name}");
     let resp = make_request(state, Operation::Read, path, None).await?;
     Ok(resp.and_then(|r| r.data).unwrap_or_default())
 }
@@ -1281,7 +1287,7 @@ async fn record_recent_session(
         recent.truncate(RECENT_SESSIONS_CAP);
     }
     meta.insert("recent_sessions".into(), Value::Array(recent));
-    let path = format!("{RESOURCE_MOUNT}{resource_name}");
+    let path = format!("{RESOURCE_MOUNT}resources/{resource_name}");
     let _ = make_request(state, Operation::Write, path, Some(meta))
         .await
         .map_err(|e| {

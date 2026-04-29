@@ -22,6 +22,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { extractError } from "../lib/error";
 
 interface StdoutPayload {
   bytes_b64: string;
@@ -92,8 +93,11 @@ export function SessionSshWindow() {
         request: { token, bytes_b64: bytesToB64(bytes) },
       }).catch((e) => {
         // Connection lost mid-write — reflect it in the status bar.
+        // Tauri serialises CommandError as `{ message: ... }`, so a
+        // raw `String(e)` would render "[object Object]"; the
+        // shared `extractError` helper unwraps the message field.
         setStatus("error");
-        setErrorMessage(String(e));
+        setErrorMessage(extractError(e));
       });
     });
     const onResizeDispose = term.onResize(({ cols, rows }) => {
