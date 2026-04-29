@@ -6,7 +6,7 @@ A new resource kind that stores **files** — arbitrary binary blobs with filena
 
 ## Status
 
-**Done (core feature) + Phase 5 (SMB) shipped.** Phases 1–4 + 5 + 8 shipped and in production use. **Phase 5 SMB sync transport** lands behind the `files_smb` Cargo feature using `smolder-smb-core` (pure-Rust SMB2/3 + NTLM, no `libsmbclient` C dep). Phases 6 (SFTP / SCP) and 7 (periodic re-sync) remain deferred — see "Deferred sub-initiatives" at the bottom of this file.
+**Done — Phases 1–6 + 8 shipped.** Phase 5 (SMB) lands behind the `files_smb` Cargo feature using `smolder-smb-core` (pure-Rust SMB2/3 + NTLM, no `libsmbclient` C dep). Phase 6 (SFTP + SCP) lands behind the `files_ssh_sync` Cargo feature using `russh` 0.45 + `russh-sftp` 2 (pure-Rust SSH client; same dep tree the planned Resource Connect SSH window will reuse). Phase 7 (periodic re-sync) remains deferred — see "Deferred sub-initiatives" at the bottom of this file.
 
 ## Motivation
 
@@ -33,7 +33,9 @@ Non-goals:
 
 **Phase 5 (SMB) shipped** (`src/modules/files/smb.rs`, behind `files_smb` Cargo feature). `FileSyncTarget { kind = "smb" }` is now a valid sync target whose `target_path` is `smb://server[:port]/share/path/to/file` (or a backslash UNC `\\server\share\path`). NTLM auth via `smb_username` / `smb_password` / optional `smb_domain` fields on the target record (password barrier-encrypted at rest, redacted on read with a `smb_password_set` boolean surfaced instead). Atomic-ish push via tmp-then-rename in the same directory (matches the local-fs semantics). Driven by [`smolder-smb-core`](https://crates.io/crates/smolder-smb-core) — pure-Rust SMB2/3 + NTLM, no `libsmbclient` / `libsmb2` C dep, no Windows-only restriction. 9 unit tests (URL parser shapes, tmp-path same-directory invariant) + 2 new save-time validation assertions. Live-network integration tests against a Samba container are tracked as test infrastructure.
 
-**Phases 6 (SFTP / SCP) and 7 (periodic re-sync) deferred as separate follow-up initiatives.** They're additive sync transports rather than gaps in the core model — every file-resource feature works today against the local-FS or SMB sync targets. See "Deferred sub-initiatives" below for scope.
+**Phase 6 (SFTP + SCP) shipped** (`src/modules/files/ssh_sync.rs`, behind `files_ssh_sync` Cargo feature). `FileSyncTarget { kind = "sftp" }` / `kind = "scp"` are now valid sync targets whose `target_path` is `sftp://[user@]host[:port]/path/to/file` / `scp://[user@]host[:port]/path/to/file`. SSH session built with [`russh`](https://crates.io/crates/russh) 0.45 (pure-Rust); SFTP uses [`russh-sftp`](https://crates.io/crates/russh-sftp) 2 over an SSH `sftp` subsystem channel; SCP uses an SSH exec channel running `scp -t <path>` with the OpenSSH SCP framing. Auth: inline `ssh_password` and/or `ssh_private_key` (with optional `ssh_passphrase`); key-then-password fallback. TOFU host-key handling with optional `ssh_host_key_fingerprint` pin in OpenSSH `SHA256:<base64>` format. Atomic-ish push via tmp-then-rename (SFTP's native `rename` for the SFTP transport; an exec-channel `mv` for SCP). 9 unit tests + 2 new save-time validation assertions. The `russh` dep tree pre-stages the planned Resource Connect SSH window. **Bootstrap-ordering decision**: credentials live inline on the target record (barrier-encrypted at rest) — the vault is already unsealed by the time a sync push runs, so there's no circular dependency on the vault to resolve a credential reference. Phase 7 (periodic re-sync) remains deferred.
+
+**Phase 7 (periodic re-sync) deferred as a separate follow-up initiative.** Every file-resource feature works today against any combination of the local-FS / SMB / SFTP / SCP sync targets. See "Deferred sub-initiatives" below for scope.
 
 Shipped in Phase 1 (`src/modules/files/mod.rs`):
 

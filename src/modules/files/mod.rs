@@ -59,6 +59,8 @@ use crate::{
 pub mod files_audit_store;
 #[cfg(feature = "files_smb")]
 pub mod smb;
+#[cfg(feature = "files_ssh_sync")]
+pub mod ssh_sync;
 use files_audit_store::{FileAuditEntry, FileAuditStore};
 
 static FILES_BACKEND_HELP: &str = r#"
@@ -167,6 +169,31 @@ pub struct FileSyncTarget {
     /// domain-qualified logon.
     #[serde(default)]
     pub smb_domain: String,
+    // ── SSH (sftp / scp) credentials ─────────────────────────────
+    // Stored barrier-encrypted at rest like everything else. Either
+    // password or private_key (or both) must be set; the credential
+    // resolver tries the key first and falls back to the password.
+    #[serde(default)]
+    pub ssh_username: String,
+    /// Password for password-auth. Write-only on read; redacted.
+    #[serde(default)]
+    pub ssh_password: String,
+    /// PEM-encoded SSH private key. OpenSSH / PKCS#8 / RFC 8410 /
+    /// legacy RSA all parsed by `russh-keys::decode_secret_key`.
+    /// Write-only on read; redacted with a `_set` boolean.
+    #[serde(default)]
+    pub ssh_private_key: String,
+    /// Optional passphrase if the private key is encrypted.
+    /// Write-only on read; redacted with a `_set` boolean.
+    #[serde(default)]
+    pub ssh_passphrase: String,
+    /// Optional pinned host-key fingerprint in OpenSSH `SHA256:<b64>`
+    /// format. When set, the connection refuses any server key
+    /// whose fingerprint doesn't match. When empty, accepts any
+    /// server key on first connect (TOFU-without-pinning) and logs
+    /// the observed fingerprint at WARN.
+    #[serde(default)]
+    pub ssh_host_key_fingerprint: String,
     /// Not yet honored — on-write auto-sync is a later slice. Present
     /// in the schema so config callers can opt in now without breaking
     /// the wire format later.
@@ -505,6 +532,26 @@ impl FilesBackend {
                         "smb_domain": {
                             field_type: FieldType::Str,
                             description: "Optional NetBIOS / AD domain for NTLM bind (smb only)."
+                        },
+                        "ssh_username": {
+                            field_type: FieldType::Str,
+                            description: "Username for SSH auth (sftp / scp). Alternative: `user@` in target_path."
+                        },
+                        "ssh_password": {
+                            field_type: FieldType::Str,
+                            description: "Password for SSH password-auth. Write-only on read."
+                        },
+                        "ssh_private_key": {
+                            field_type: FieldType::Str,
+                            description: "PEM-encoded SSH private key (OpenSSH / PKCS#8 / RFC 8410 / legacy RSA). Write-only on read."
+                        },
+                        "ssh_passphrase": {
+                            field_type: FieldType::Str,
+                            description: "Optional passphrase for an encrypted private key. Write-only on read."
+                        },
+                        "ssh_host_key_fingerprint": {
+                            field_type: FieldType::Str,
+                            description: "Pinned host-key fingerprint, OpenSSH SHA256:<base64> form. Empty = TOFU on first connect."
                         }
                     },
                     operations: [
@@ -1132,14 +1179,23 @@ impl FilesBackendInner {
                 if let Ok(t) = serde_json::from_slice::<FileSyncTarget>(&se.value) {
                     let mut entry =
                         serde_json::to_value(&t)?.as_object().cloned().unwrap_or_default();
-                    // Never re-disclose the smb password; surface a
-                    // boolean so the GUI can show "set / not set"
+                    // Never re-disclose secret-shaped fields; surface
+                    // booleans so the GUI can show "set / not set"
                     // without round-tripping the secret.
-                    let has_pw = !t.smb_password.is_empty();
+                    let smb_pw_set = !t.smb_password.is_empty();
+                    let ssh_pw_set = !t.ssh_password.is_empty();
+                    let ssh_key_set = !t.ssh_private_key.is_empty();
+                    let ssh_passphrase_set = !t.ssh_passphrase.is_empty();
                     entry.remove("smb_password");
+                    entry.remove("ssh_password");
+                    entry.remove("ssh_private_key");
+                    entry.remove("ssh_passphrase");
+                    entry.insert("smb_password_set".into(), Value::Bool(smb_pw_set));
+                    entry.insert("ssh_password_set".into(), Value::Bool(ssh_pw_set));
+                    entry.insert("ssh_private_key_set".into(), Value::Bool(ssh_key_set));
                     entry.insert(
-                        "smb_password_set".into(),
-                        Value::Bool(has_pw),
+                        "ssh_passphrase_set".into(),
+                        Value::Bool(ssh_passphrase_set),
                     );
                     // Attach state so the GUI doesn't need a second call.
                     let state_key = format!("{SYNC_STATE_PREFIX}{id}/{n}");
@@ -1186,6 +1242,11 @@ impl FilesBackendInner {
         let smb_username = get_str(req, "smb_username");
         let smb_password = get_str(req, "smb_password");
         let smb_domain = get_str(req, "smb_domain");
+        let ssh_username = get_str(req, "ssh_username");
+        let ssh_password = get_str(req, "ssh_password");
+        let ssh_private_key = get_str(req, "ssh_private_key");
+        let ssh_passphrase = get_str(req, "ssh_passphrase");
+        let ssh_host_key_fingerprint = get_str(req, "ssh_host_key_fingerprint");
 
         if kind.is_empty() || target_path.is_empty() {
             return Err(RvError::ErrString(
@@ -1220,9 +1281,32 @@ impl FilesBackendInner {
                 // across builds with different feature sets — the
                 // push handler emits the not-compiled-in error.
             }
+            "sftp" | "scp" => {
+                if ssh_username.trim().is_empty() && !target_path.contains('@') {
+                    return Err(RvError::ErrString(format!(
+                        "{kind}: ssh_username (or user@ in URL) is required"
+                    )));
+                }
+                if ssh_password.is_empty() && ssh_private_key.is_empty() {
+                    return Err(RvError::ErrString(format!(
+                        "{kind}: at least one of ssh_password / ssh_private_key is required"
+                    )));
+                }
+                #[cfg(feature = "files_ssh_sync")]
+                {
+                    if kind == "sftp" {
+                        super::files::ssh_sync::validate_target_path_sftp(&target_path)?;
+                    } else {
+                        super::files::ssh_sync::validate_target_path_scp(&target_path)?;
+                    }
+                }
+                // Same pattern as smb: configs round-trip across
+                // builds; the push handler emits the not-compiled-in
+                // error if the feature is off.
+            }
             other => {
                 return Err(RvError::ErrString(format!(
-                    "sync target kind `{other}` is not supported yet; available: local-fs, smb"
+                    "sync target kind `{other}` is not supported yet; available: local-fs, smb, sftp, scp"
                 )));
             }
         }
@@ -1241,18 +1325,47 @@ impl FilesBackendInner {
             None => now.clone(),
         };
 
-        // Preserve the existing smb_password if the operator did not
-        // supply a new one — same write-only-on-update pattern the
-        // LDAP engine uses for `bindpass`.
-        let smb_password = if smb_password.is_empty() && !kind.is_empty() {
-            match req.storage_get(&existing_key).await? {
-                Some(se) => serde_json::from_slice::<FileSyncTarget>(&se.value)
-                    .map(|t| t.smb_password)
-                    .unwrap_or_default(),
-                None => String::new(),
-            }
+        // Preserve the existing barrier-encrypted secret fields if
+        // the operator did not supply new values — same
+        // write-only-on-update pattern the LDAP engine uses for
+        // `bindpass`. We do this for every secret-shaped field
+        // across every transport in one pass so the read API can
+        // safely redact the lot.
+        let existing_target: Option<FileSyncTarget> = req
+            .storage_get(&existing_key)
+            .await?
+            .and_then(|se| serde_json::from_slice::<FileSyncTarget>(&se.value).ok());
+        let smb_password = if smb_password.is_empty() {
+            existing_target
+                .as_ref()
+                .map(|t| t.smb_password.clone())
+                .unwrap_or_default()
         } else {
             smb_password
+        };
+        let ssh_password = if ssh_password.is_empty() {
+            existing_target
+                .as_ref()
+                .map(|t| t.ssh_password.clone())
+                .unwrap_or_default()
+        } else {
+            ssh_password
+        };
+        let ssh_private_key = if ssh_private_key.is_empty() {
+            existing_target
+                .as_ref()
+                .map(|t| t.ssh_private_key.clone())
+                .unwrap_or_default()
+        } else {
+            ssh_private_key
+        };
+        let ssh_passphrase = if ssh_passphrase.is_empty() {
+            existing_target
+                .as_ref()
+                .map(|t| t.ssh_passphrase.clone())
+                .unwrap_or_default()
+        } else {
+            ssh_passphrase
         };
 
         let target = FileSyncTarget {
@@ -1262,6 +1375,11 @@ impl FilesBackendInner {
             smb_username,
             smb_password,
             smb_domain,
+            ssh_username,
+            ssh_password,
+            ssh_private_key,
+            ssh_passphrase,
+            ssh_host_key_fingerprint,
             mode,
             sync_on_write,
             created_at,
@@ -1337,6 +1455,32 @@ impl FilesBackendInner {
                 {
                     Err(RvError::ErrString(
                         "sync target kind `smb` requires building with --features files_smb"
+                            .into(),
+                    ))
+                }
+            }
+            "sftp" => {
+                #[cfg(feature = "files_ssh_sync")]
+                {
+                    crate::modules::files::ssh_sync::push_sftp(&target, &blob.value)
+                }
+                #[cfg(not(feature = "files_ssh_sync"))]
+                {
+                    Err(RvError::ErrString(
+                        "sync target kind `sftp` requires building with --features files_ssh_sync"
+                            .into(),
+                    ))
+                }
+            }
+            "scp" => {
+                #[cfg(feature = "files_ssh_sync")]
+                {
+                    crate::modules::files::ssh_sync::push_scp(&target, &blob.value)
+                }
+                #[cfg(not(feature = "files_ssh_sync"))]
+                {
+                    Err(RvError::ErrString(
+                        "sync target kind `scp` requires building with --features files_ssh_sync"
                             .into(),
                     ))
                 }
@@ -2454,6 +2598,41 @@ mod integration_tests {
             "target_path": "not-a-smb-url",
             "smb_username": "user",
             "smb_password": "pw",
+        })
+        .as_object()
+        .cloned();
+        let _ = crate::test_utils::test_write_api(
+            &core,
+            &root_token,
+            &format!("files/files/{id}/sync/primary"),
+            false, // expect error
+            cfg,
+        )
+        .await;
+
+        // sftp without credentials: rejected at save time.
+        let cfg = json!({
+            "kind": "sftp",
+            "target_path": "sftp://server/srv/x.txt",
+            "ssh_username": "alice",
+        })
+        .as_object()
+        .cloned();
+        let _ = crate::test_utils::test_write_api(
+            &core,
+            &root_token,
+            &format!("files/files/{id}/sync/primary"),
+            false, // expect error: at least one of ssh_password / ssh_private_key required
+            cfg,
+        )
+        .await;
+
+        // scp with malformed URL: rejected at save time.
+        let cfg = json!({
+            "kind": "scp",
+            "target_path": "scp://no-path-here",
+            "ssh_username": "alice",
+            "ssh_password": "pw",
         })
         .as_object()
         .cloned();

@@ -110,6 +110,14 @@ hickory-resolver = { version = "0.24", default-features = false, features = ["sy
 # covers the corporate Samba / Windows Server use cases this transport
 # targets in v1.
 smolder-smb-core = { version = "0.3", optional = true }
+# Pure-Rust SSH client (`russh`) + SFTP layer (`russh-sftp`). Optional —
+# enabled by `files_ssh_sync` to gate the SFTP / SCP file sync
+# transports. No `libssh2-sys` C dep, no OpenSSL. The same crate
+# pair will be reused by the planned Resource Connect SSH window
+# (see `features/resource-connect.md`); shipping it here first
+# pre-stages that infrastructure.
+russh = { version = "0.45", optional = true, default-features = true }
+russh-sftp = { version = "2", optional = true }
 http = "1"
 rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
 rustls-pemfile = "2.2"
@@ -312,6 +320,15 @@ pki_pqc_composite = []
 # whose `target_path` is parsed as `smb://[user@]host[:port]/share/path`.
 # See `features/file-resources.md` § "Phase 5 — SMB sync transport".
 files_smb = ["smolder-smb-core"]
+# File Resources — SFTP + SCP sync transports. Off by default for the
+# same reason as files_smb: the SSH stack is multi-MiB of compiled
+# code that operators not pushing files over SSH don't need to pay
+# for. Enabling adds `kind = "sftp"` and `kind = "scp"` shapes whose
+# `target_path` is `sftp://[user@]host[:port]/path` /
+# `scp://[user@]host[:port]/path`. Shares the same russh dep tree
+# the planned Resource Connect SSH window will use.
+# See `features/file-resources.md` § "Phase 6 — SFTP / SCP sync".
+files_ssh_sync = ["russh", "russh-sftp"]
 
 # Transit Secret Engine — Phase 4 follow-ups, both off by default.
 #
