@@ -184,6 +184,18 @@ pub async fn open_ssh_session(
     let closed_event_for_task = closed_event.clone();
 
     tokio::spawn(async move {
+        // The WebviewWindow takes a non-trivial amount of wall-time
+        // to load + register its `listen()` handler for stdout
+        // events — by the time the React effect runs, the remote
+        // shell may have already printed its prompt + MOTD into a
+        // void. We buffer all PTY bytes that arrive before the
+        // window signals readiness, then flush them once the first
+        // Resize control message arrives (the React effect always
+        // fires a resize immediately after registering the
+        // listener, which makes it a reliable "ready" handshake).
+        let mut early_buf: Vec<u8> = Vec::new();
+        let mut ready = false;
+
         // Pump loop: select between (1) bytes from russh (forward
         // to the WebviewWindow as a Tauri event) and (2) control
         // messages from the frontend (write to russh / resize / close).
@@ -192,17 +204,25 @@ pub async fn open_ssh_session(
                 msg = channel.wait() => {
                     match msg {
                         Some(ChannelMsg::Data { data }) => {
-                            let _ = app_for_task.emit(
-                                &stdout_event_for_task,
-                                ChunkPayload { bytes_b64: encode_b64(&data) },
-                            );
+                            if ready {
+                                let _ = app_for_task.emit(
+                                    &stdout_event_for_task,
+                                    ChunkPayload { bytes_b64: encode_b64(&data) },
+                                );
+                            } else {
+                                early_buf.extend_from_slice(&data);
+                            }
                         }
                         Some(ChannelMsg::ExtendedData { data, .. }) => {
                             // stderr — surface it on the same channel.
-                            let _ = app_for_task.emit(
-                                &stdout_event_for_task,
-                                ChunkPayload { bytes_b64: encode_b64(&data) },
-                            );
+                            if ready {
+                                let _ = app_for_task.emit(
+                                    &stdout_event_for_task,
+                                    ChunkPayload { bytes_b64: encode_b64(&data) },
+                                );
+                            } else {
+                                early_buf.extend_from_slice(&data);
+                            }
                         }
                         Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
                             break;
@@ -233,6 +253,23 @@ pub async fn open_ssh_session(
                                 log::warn!(
                                     "resource-connect/ssh: window_change failed: {e:?}"
                                 );
+                            }
+                            // First Resize doubles as the "frontend
+                            // listener is live" signal: drain the
+                            // early-bytes buffer in one emit and
+                            // flip to live mode.
+                            if !ready {
+                                ready = true;
+                                if !early_buf.is_empty() {
+                                    let _ = app_for_task.emit(
+                                        &stdout_event_for_task,
+                                        ChunkPayload {
+                                            bytes_b64: encode_b64(&early_buf),
+                                        },
+                                    );
+                                    early_buf.clear();
+                                    early_buf.shrink_to_fit();
+                                }
                             }
                         }
                         Some(SshControl::Close) | None => {
