@@ -6,7 +6,9 @@ use super::{
     operator_unseal,
 };
 #[cfg(not(feature = "sync_handler"))]
-use super::{operator_backup, operator_migrate, operator_restore};
+use super::{
+    operator_backup, operator_cloud_target_rekey, operator_migrate, operator_restore,
+};
 use crate::{cli::command::CommandExecutor, EXIT_CODE_INSUFFICIENT_PARAMS};
 
 #[derive(Parser)]
@@ -70,6 +72,10 @@ pub struct CloudTarget {
 #[derive(Subcommand)]
 pub enum CloudTargetCommands {
     Connect(operator_cloud_target_connect::CloudTargetConnect),
+    /// Rotate the per-target obfuscation salt. Vault must be sealed
+    /// during the rekey. See `operator cloud-target rekey-salt --help`.
+    #[cfg(not(feature = "sync_handler"))]
+    RekeySalt(operator_cloud_target_rekey::CloudTargetRekey),
 }
 
 impl CloudTarget {
@@ -77,6 +83,8 @@ impl CloudTarget {
     pub fn execute(&mut self) -> ExitCode {
         match &mut self.command {
             CloudTargetCommands::Connect(c) => c.execute(),
+            #[cfg(not(feature = "sync_handler"))]
+            CloudTargetCommands::RekeySalt(c) => c.execute(),
         }
     }
 }

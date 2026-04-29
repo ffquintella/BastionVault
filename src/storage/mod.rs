@@ -92,6 +92,11 @@ pub struct BackendEntry {
 }
 
 /// this is a generic function that instantiates different storage backends.
+///
+/// **Note**: the sync constructor cannot honour `obfuscate_keys = true`
+/// for the `file` backend — the salt bootstrap requires async I/O
+/// against the wrapped target. Callers that need obfuscation should
+/// reach for [`new_backend_async`] instead.
 pub fn new_backend(t: &str, conf: &HashMap<String, Value>) -> Result<Arc<dyn Backend>, RvError> {
     match t {
         "file" => {
@@ -110,6 +115,24 @@ pub fn new_backend(t: &str, conf: &HashMap<String, Value>) -> Result<Arc<dyn Bac
         }
         "mock" => Ok(Arc::new(physical::mock::MockBackend::new())),
         _ => Err(RvError::ErrPhysicalTypeInvalid),
+    }
+}
+
+/// Async sibling of [`new_backend`]. Routes the `file` backend
+/// through [`physical::file::FileBackend::new_maybe_obfuscated`] so
+/// the salt bootstrap for `obfuscate_keys = true` runs before the
+/// backend is handed back. Other backends use the sync constructor
+/// unchanged — they don't have an obfuscation layer.
+pub async fn new_backend_async(
+    t: &str,
+    conf: &HashMap<String, Value>,
+) -> Result<Arc<dyn Backend>, RvError> {
+    match t {
+        "file" => {
+            let backend = physical::file::FileBackend::new_maybe_obfuscated(conf).await?;
+            Ok(Arc::new(backend))
+        }
+        _ => new_backend(t, conf),
     }
 }
 

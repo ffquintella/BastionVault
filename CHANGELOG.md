@@ -47,6 +47,26 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Cloud Storage — obfuscation salt rekey CLI + server-mode bootstrap
+
+Closes both deferred Cloud Storage Targets sub-initiatives in one cut.
+
+- **Server-mode obfuscation bootstrap** ([`src/storage/mod.rs`](src/storage/mod.rs), [`src/cli/command/server.rs`](src/cli/command/server.rs)) — new `storage::new_backend_async` constructor routes the `file` backend through `FileBackend::new_maybe_obfuscated` so the salt bootstrap for `obfuscate_keys = true` runs against the wrapped target. The `bvault server` entry point now spins up a small current-thread tokio runtime to drive the async backend init before handing it to the actix system below. Result: a server-mode boot honours `obfuscate_keys = true` the same way the Tauri desktop bootstrap already did. The previous warning at `FileBackend::new` is retained but reworded — it now fires only on `operator backup`/`restore`/`migrate`, which intentionally see the underlying hashed keys (those tools already work flat against the obfuscated bucket and don't need the obfuscation layer).
+- **Plaintext-key manifest in `ObfuscatingTarget`** ([`src/storage/physical/file/obfuscate.rs`](src/storage/physical/file/obfuscate.rs)) — every write/delete now maintains a newline-delimited manifest at `_bvault_manifest` alongside the existing `_bvault_salt`. The manifest is what makes salt rotation possible: HMAC alone can't be inverted, so without an out-of-band record of original keys, rekey would be impossible. Cost: one extra small read+write per vault op (load → dedupe → save). Failures on the manifest update log a warning but do **not** roll back the data write — losing manifest entries makes future rekeys incomplete, but losing data is worse.
+- **`bvault operator cloud-target rekey-salt` CLI** ([`src/cli/command/operator_cloud_target_rekey.rs`](src/cli/command/operator_cloud_target_rekey.rs)) — orchestrates the in-place salt rotation. Operator seals the vault, runs the CLI with the same `--target-config` keys they'd hand to `operator backup`, and unseals. Steps:
+  1. Load `_bvault_salt` (old) + `_bvault_manifest` (plaintext key set) from the underlying provider.
+  2. Mint a fresh 32-byte salt.
+  3. For each plaintext key in the manifest: re-write its ciphertext blob from `HMAC(old_salt, key)` to `HMAC(new_salt, key)`.
+  4. Atomically swap `_bvault_salt` to the new value + persist the manifest under the new layout.
+  5. Best-effort cleanup of the orphan blobs at the old hash positions.
+
+  Crash-safe: an interruption between steps 3 and 4 leaves the old salt in place so the vault can still boot against the old positions. After step 4 the new positions are authoritative; step 5 cleanup is safe to re-run via another rekey pass.
+
+  `--dry-run` reports the manifest size + intended action without touching any data. `--confirm` is required for any non-dry-run pass — the gate keeps an accidental run from clobbering a live vault.
+- **5 new unit tests** in `obfuscate.rs` covering manifest add/remove/dedupe/round-trip + the marker-key list filter; **3 new end-to-end tests** in the rekey CLI module covering round-trip against a local-fs target, dry-run no-op, and refusal-on-unobfuscated-target. The existing two obfuscation tests that asserted "exactly 1 underlying entry per write" updated to expect "1 data entry + 1 manifest marker" now that every write maintains the manifest.
+
+`cargo check --workspace` clean. `cargo test --features "files_smb files_ssh_sync" storage::physical::file` clean (75 tests). Cloud Storage Targets has no remaining deferred sub-initiatives.
+
 #### File Resources — Periodic re-sync + sync-on-write (Phase 7)
 
 Closes the last deferred slice of File Resources. Sync targets can now opt into two automatic-push modes alongside the existing on-demand `POST /sync/<name>/push`:

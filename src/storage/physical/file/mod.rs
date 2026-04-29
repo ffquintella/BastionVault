@@ -126,8 +126,16 @@ impl FileBackend {
 
         // Loud warning when `obfuscate_keys` is set through the
         // sync path — the salt bootstrap needs async I/O, so this
-        // code path can't honour the flag. Callers who need
-        // obfuscation use `new_maybe_obfuscated` from async context.
+        // code path can't honour the flag. The `storage::new_backend_async`
+        // entry point + `FileBackend::new_maybe_obfuscated` are the
+        // supported async route; both the desktop bootstrap (Tauri)
+        // and the server-mode bootstrap (`cli::command::server`) go
+        // through them. A warning here means the caller is
+        // constructing the backend through a sync path that's not
+        // expected to honour obfuscation (typically `operator
+        // backup` / `operator restore` / `operator migrate`, which
+        // intentionally treat the cloud bucket as a flat
+        // hashed-key store at the underlying-target level).
         if conf
             .get("obfuscate_keys")
             .and_then(|v| v.as_bool())
@@ -135,8 +143,10 @@ impl FileBackend {
         {
             log::warn!(
                 "file backend: `obfuscate_keys = true` is set but this construction path \
-                 cannot honor it. Use the async `new_maybe_obfuscated` constructor (or ensure \
-                 your bootstrap chain routes through it) to enable key obfuscation."
+                 cannot honor it. The server + desktop bootstraps now route through \
+                 `new_backend_async` / `new_maybe_obfuscated` automatically; this warning \
+                 fires for `operator backup`/`restore`/`migrate` — they intentionally \
+                 see the underlying hashed keys."
             );
         }
 
@@ -208,6 +218,13 @@ impl FileBackend {
     /// phases that construct their targets out-of-band.
     pub fn from_target(target: Arc<dyn FileTarget>) -> Self {
         Self { target }
+    }
+
+    /// Borrow the wrapped target as an `Arc`. Used by the rekey
+    /// CLI to talk to the underlying provider directly without
+    /// going through the obfuscating decorator twice.
+    pub fn target_arc(&self) -> Arc<dyn FileTarget> {
+        self.target.clone()
     }
 
     /// Async convenience constructor that wraps the base target

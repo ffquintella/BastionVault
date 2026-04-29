@@ -134,10 +134,6 @@ Each entry below has a dedicated spec / roadmap document with full phase notes.
 
 Self-contained follow-ups with no current blocker on the parent feature. Each can graduate to Active when operator demand + a specific implementation choice are confirmed.
 
-**Cloud Storage Targets**
-- Rekey CLI for the obfuscation salt — library pieces present (`ObfuscatingTarget::with_salt`); orchestrator not shipped.
-- Server-mode obfuscation bootstrap — desktop honours `obfuscate_keys`; server-mode `storage::new_backend` logs a warning. Needs async bootstrap propagation through the storage chain.
-
 **PKI**
 - `--allow-mixed-chain` opt-in — guard is fail-closed today; trivial to add as a flag for migration windows.
 - AIA / CRL Distribution Points / Name Constraints extensions in issued certs — `pki/config/urls` round-trips the URLs; cert builders don't emit the extensions yet.

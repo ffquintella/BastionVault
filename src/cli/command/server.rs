@@ -167,7 +167,22 @@ impl Server {
             );
         }
 
-        let backend = storage::new_backend(storage.stype.as_str(), &storage.config).unwrap();
+        // Use the async backend constructor so `obfuscate_keys = true`
+        // on a `file` target can bootstrap its salt against the
+        // wrapped provider. Sync `new_backend` would silently drop
+        // the flag with a warning. Run on a small current-thread
+        // runtime — the async work is one storage round-trip; the
+        // long-lived runtime is the actix system below.
+        let backend = {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime for backend bootstrap");
+            rt.block_on(async {
+                storage::new_backend_async(storage.stype.as_str(), &storage.config).await
+            })
+            .expect("backend init")
+        };
 
         let metrics_manager = Arc::new(RwLock::new(MetricsManager::new(config.collection_interval)));
         let system_metrics = metrics_manager.read().unwrap().system_metrics.clone();

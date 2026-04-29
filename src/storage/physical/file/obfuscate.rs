@@ -72,10 +72,24 @@ type HmacSha256 = Hmac<Sha256>;
 /// vault data, and to be recognisably a BastionVault marker.
 pub const SALT_KEY: &str = "_bvault_salt";
 
+/// Storage key where the plaintext-key manifest lives. Newline-
+/// delimited list of every plaintext vault key currently stored
+/// under the target. Maintained on every `write` / `delete` so the
+/// rekey CLI can enumerate the original keys without needing to
+/// invert the HMAC.
+///
+/// Without this manifest, salt rotation would be impossible — the
+/// hash alone doesn't reveal the original key. Two writes' worth of
+/// extra round-trip per vault op (load + save) is the cost we
+/// accept to make rekey actually work; the alternative was a
+/// "wipe and restore from .bvbk" workflow that's much worse for
+/// availability. See `cli::command::operator_cloud_rekey`.
+pub const MANIFEST_KEY: &str = "_bvault_manifest";
+
 /// Size of the salt. 32 bytes is more than enough to make
 /// pre-computation infeasible, matches SHA-256's block size, and is
 /// small enough to keep the bootstrap read cheap.
-const SALT_BYTES: usize = 32;
+pub(crate) const SALT_BYTES: usize = 32;
 
 #[derive(Debug)]
 pub struct ObfuscatingTarget {
@@ -124,13 +138,82 @@ impl ObfuscatingTarget {
     /// HMAC-SHA256 the raw vault key with the target salt; return
     /// hex-encoded so the output is safe to use as a filesystem
     /// path or an S3 object name.
-    fn obfuscate(&self, raw: &str) -> String {
+    pub fn obfuscate(&self, raw: &str) -> String {
         let mut mac = HmacSha256::new_from_slice(&self.salt)
             .expect("HMAC accepts any key length");
         mac.update(raw.as_bytes());
         let tag = mac.finalize().into_bytes();
         hex_encode(&tag)
     }
+
+    /// Borrow the wrapped underlying target. Used by the rekey
+    /// CLI to issue raw reads/writes/deletes against hashed keys
+    /// without going through the obfuscation layer twice.
+    pub fn inner(&self) -> &Arc<dyn FileTarget> {
+        &self.inner
+    }
+
+    /// Borrow the salt bytes. Used by the rekey CLI to swap salts
+    /// atomically at the end of the rekey pass.
+    pub fn salt_bytes(&self) -> &[u8; SALT_BYTES] {
+        &self.salt
+    }
+
+    /// Read the plaintext-key manifest. Returns the in-memory set
+    /// of vault keys currently tracked under this target. Empty on
+    /// a fresh target (no writes yet).
+    pub async fn read_manifest(&self) -> Result<Vec<String>, RvError> {
+        match self.inner.read(MANIFEST_KEY).await? {
+            Some(bytes) => Ok(decode_manifest(&bytes)),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    async fn write_manifest(&self, keys: &[String]) -> Result<(), RvError> {
+        let encoded = encode_manifest(keys);
+        self.inner.write(MANIFEST_KEY, &encoded).await
+    }
+
+    async fn manifest_add(&self, key: &str) -> Result<(), RvError> {
+        let _guard = self.inner.lock(MANIFEST_KEY).await?;
+        let mut keys = self.read_manifest().await?;
+        if !keys.iter().any(|k| k == key) {
+            keys.push(key.to_string());
+            keys.sort();
+            self.write_manifest(&keys).await?;
+        }
+        Ok(())
+    }
+
+    async fn manifest_remove(&self, key: &str) -> Result<(), RvError> {
+        let _guard = self.inner.lock(MANIFEST_KEY).await?;
+        let mut keys = self.read_manifest().await?;
+        let before = keys.len();
+        keys.retain(|k| k != key);
+        if keys.len() != before {
+            self.write_manifest(&keys).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Newline-delimited UTF-8 encoding. Empty lines are tolerated and
+/// dropped on read so a stray file edit doesn't break the manifest.
+pub(crate) fn encode_manifest(keys: &[String]) -> Vec<u8> {
+    let mut out = String::with_capacity(keys.iter().map(|k| k.len() + 1).sum());
+    for k in keys {
+        out.push_str(k);
+        out.push('\n');
+    }
+    out.into_bytes()
+}
+
+pub(crate) fn decode_manifest(bytes: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect()
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -145,10 +228,11 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[maybe_async::maybe_async]
 impl FileTarget for ObfuscatingTarget {
     async fn read(&self, key: &str) -> Result<Option<Vec<u8>>, RvError> {
-        // Salt lookups pass through unobfuscated so the bootstrap
-        // path can find the salt. No other key starts with a `_` in
-        // vault use; collisions would surface as a clear error here.
-        if key == SALT_KEY {
+        // Salt + manifest lookups pass through unobfuscated so the
+        // bootstrap path and the rekey CLI can find them. No other
+        // key starts with `_bvault_` in vault use; collisions would
+        // surface as a clear error here.
+        if key == SALT_KEY || key == MANIFEST_KEY {
             return self.inner.read(key).await;
         }
         let hashed = self.obfuscate(key);
@@ -156,29 +240,46 @@ impl FileTarget for ObfuscatingTarget {
     }
 
     async fn write(&self, key: &str, value: &[u8]) -> Result<(), RvError> {
-        if key == SALT_KEY {
+        if key == SALT_KEY || key == MANIFEST_KEY {
             return self.inner.write(key, value).await;
         }
         let hashed = self.obfuscate(key);
-        self.inner.write(&hashed, value).await
+        self.inner.write(&hashed, value).await?;
+        // Maintain the plaintext-key manifest so the rekey CLI can
+        // enumerate vault keys later without inverting the HMAC.
+        // Best-effort: a failed manifest update logs a warning but
+        // does NOT roll back the data write — losing manifest
+        // entries makes future rekeys incomplete, but losing data
+        // is worse.
+        if let Err(e) = self.manifest_add(key).await {
+            log::warn!("obfuscate: manifest_add({key}) failed: {e:?}");
+        }
+        Ok(())
     }
 
     async fn delete(&self, key: &str) -> Result<(), RvError> {
-        if key == SALT_KEY {
+        if key == SALT_KEY || key == MANIFEST_KEY {
             return self.inner.delete(key).await;
         }
         let hashed = self.obfuscate(key);
-        self.inner.delete(&hashed).await
+        self.inner.delete(&hashed).await?;
+        if let Err(e) = self.manifest_remove(key).await {
+            log::warn!("obfuscate: manifest_remove({key}) failed: {e:?}");
+        }
+        Ok(())
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>, RvError> {
         if prefix.is_empty() {
             // Full enumeration: return raw hashed keys as stored in
             // the underlying target. Useful for the rekey workflow.
-            // The salt marker is filtered out so it isn't mistaken
-            // for a vault value by iterating callers.
+            // Both BastionVault marker keys are filtered out so they
+            // aren't mistaken for vault values by iterating callers.
             let mut keys = self.inner.list("").await?;
-            keys.retain(|k| k.trim_end_matches('/') != SALT_KEY);
+            keys.retain(|k| {
+                let trimmed = k.trim_end_matches('/');
+                trimmed != SALT_KEY && trimmed != MANIFEST_KEY
+            });
             return Ok(keys);
         }
         Err(RvError::ErrString(format!(
@@ -193,7 +294,7 @@ impl FileTarget for ObfuscatingTarget {
         // Lock names get the same hashing treatment so two concurrent
         // writers of `sys/policy/admin` serialize through the same
         // per-key mutex on the underlying target.
-        if lock_name == SALT_KEY {
+        if lock_name == SALT_KEY || lock_name == MANIFEST_KEY {
             return self.inner.lock(lock_name).await;
         }
         let hashed = self.obfuscate(lock_name);
@@ -271,11 +372,20 @@ mod tests {
         t.write("sys/policy/admin", b"ciphertext").await.unwrap();
 
         let stored = inner.list("").await.unwrap();
-        // Exactly one entry in the underlying target, and it is
-        // NOT the plaintext key.
-        assert_eq!(stored.len(), 1);
-        assert_ne!(stored[0], "sys/policy/admin");
-        assert_eq!(stored[0].len(), 64, "hex-encoded SHA-256 is 64 chars");
+        // Two entries: the hashed data + the manifest marker. The
+        // hashed data is 64-char hex; the manifest is at MANIFEST_KEY.
+        assert_eq!(stored.len(), 2);
+        let data_keys: Vec<&String> = stored
+            .iter()
+            .filter(|k| *k != MANIFEST_KEY && *k != SALT_KEY)
+            .collect();
+        assert_eq!(data_keys.len(), 1);
+        assert_ne!(data_keys[0], "sys/policy/admin");
+        assert_eq!(
+            data_keys[0].len(),
+            64,
+            "hex-encoded SHA-256 is 64 chars"
+        );
     }
 
     #[tokio::test]
@@ -305,9 +415,13 @@ mod tests {
         let inner: Arc<dyn FileTarget> = Arc::new(RecordingTarget::default());
         let t = ObfuscatingTarget::with_salt(inner.clone(), [7u8; SALT_BYTES]);
         t.write("k", b"v").await.unwrap();
-        assert_eq!(inner.list("").await.unwrap().len(), 1);
+        // After write: 1 hashed data entry + 1 manifest marker.
+        assert_eq!(inner.list("").await.unwrap().len(), 2);
         t.delete("k").await.unwrap();
-        assert_eq!(inner.list("").await.unwrap().len(), 0);
+        // After delete: only the manifest marker remains (now empty).
+        let after = inner.list("").await.unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0], MANIFEST_KEY);
     }
 
     #[tokio::test]
@@ -347,6 +461,68 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("not supported"), "got: {msg}");
         assert!(msg.contains("obfuscate_keys"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn manifest_tracks_writes_and_deletes() {
+        let inner: Arc<dyn FileTarget> = Arc::new(RecordingTarget::default());
+        let t = ObfuscatingTarget::with_salt(inner.clone(), [11u8; SALT_BYTES]);
+        t.write("kv/a", b"x").await.unwrap();
+        t.write("kv/b", b"y").await.unwrap();
+        t.write("sys/policy/admin", b"z").await.unwrap();
+        let mut got = t.read_manifest().await.unwrap();
+        got.sort();
+        assert_eq!(got, vec!["kv/a", "kv/b", "sys/policy/admin"]);
+
+        t.delete("kv/a").await.unwrap();
+        let mut got = t.read_manifest().await.unwrap();
+        got.sort();
+        assert_eq!(got, vec!["kv/b", "sys/policy/admin"]);
+    }
+
+    #[tokio::test]
+    async fn manifest_is_deduped_across_repeated_writes() {
+        let inner: Arc<dyn FileTarget> = Arc::new(RecordingTarget::default());
+        let t = ObfuscatingTarget::with_salt(inner.clone(), [12u8; SALT_BYTES]);
+        for _ in 0..5 {
+            t.write("kv/k", b"v").await.unwrap();
+        }
+        let got = t.read_manifest().await.unwrap();
+        assert_eq!(got, vec!["kv/k"]);
+    }
+
+    #[tokio::test]
+    async fn manifest_round_trip_via_encode_decode() {
+        let original = vec![
+            "kv/a".to_string(),
+            "sys/policy/admin".to_string(),
+            "with/slashes/and-dashes_underscores.dots".to_string(),
+        ];
+        let bytes = encode_manifest(&original);
+        let got = decode_manifest(&bytes);
+        assert_eq!(got, original);
+    }
+
+    #[tokio::test]
+    async fn manifest_decode_drops_blank_lines() {
+        let bytes = b"a\n\nb\n\n\nc\n";
+        let got = decode_manifest(bytes);
+        assert_eq!(got, vec!["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn list_filters_out_both_marker_keys() {
+        let inner: Arc<dyn FileTarget> = Arc::new(RecordingTarget::default());
+        let t = ObfuscatingTarget::with_salt(inner.clone(), [13u8; SALT_BYTES]);
+        t.write("real-key-1", b"v1").await.unwrap();
+        t.write("real-key-2", b"v2").await.unwrap();
+        let listed = t.list("").await.unwrap();
+        // Two real keys (hashed) — salt + manifest markers stripped.
+        assert_eq!(listed.len(), 2);
+        for k in &listed {
+            assert_ne!(k, SALT_KEY);
+            assert_ne!(k, MANIFEST_KEY);
+        }
     }
 
     #[tokio::test]
