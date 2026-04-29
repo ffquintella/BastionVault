@@ -47,6 +47,22 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Resource Connect — Phase 2 (Connection profiles + Secret source)
+
+Adds the per-resource Connection profile shape that the future Connect button dispatches on. No new backend code — the resource record's metadata bag is already a flexible `Map<String, Value>`, so `connection_profiles` slots in as a JSON array key alongside the existing `hostname` / `os_type` / `notes` / etc. The whole feature ships GUI-side.
+
+- **`ConnectionProfile` + `CredentialSource` TypeScript types** ([`gui/src/lib/types.ts`](gui/src/lib/types.ts)) — discriminated union over the four credential kinds (Secret, LDAP, SSH-engine, PKI). Phase 2 wires the **Secret** source end-to-end; the other three are part of the type union so an operator can pre-stage a profile, with editor stubs that point at the spec until their phases land.
+- **Profile helpers** ([`gui/src/lib/connectionProfiles.ts`](gui/src/lib/connectionProfiles.ts)) — `protocolForOsType` (the os_type → ssh/rdp dispatcher the Connect button will use), `defaultPort`, `newProfileId` (16 hex chars from `crypto.getRandomValues`, unique per resource), `detectSecretShape` (credential-shaped vs. kv-shaped detection: `username` + at least one of `password` / `private_key`), `readProfiles` (tolerant parser that drops malformed entries), `blankProfile`, `validateProfile` (per-source save-time validation), `profilesForOsType` (filter to the protocol Connect would dispatch).
+- **Connection tab on the resource detail view** ([`gui/src/routes/ResourcesPage.tsx`](gui/src/routes/ResourcesPage.tsx)) — visible only on `type === "server"`. Lists every profile with target/user/credential summary chips; supports Add / Edit / Delete with a confirmation modal on delete. When `os_type` is unset the panel shows a yellow banner pointing the operator at the Info tab to set it; when `os_type` is `other` it surfaces a similar note that Connect is disabled.
+- **`ConnectionProfileEditor` modal** — name + protocol + target host/port overrides + username + credential source picker + optional TOFU host-key pin. Save is gated on `validateProfile`. The protocol field is editable (so an operator with a mixed-protocol host can override the os_type default) and surfaces an inline note when the chosen protocol diverges from the os_type's default mapping.
+- **Secret source editor** — dropdown of every secret on the resource (loaded once per modal open via `listResourceSecrets`). On selection an inspector reads the secret and reports green ("credential-shaped: `username = …; password + private_key`") or yellow ("generic key/value secret — Connect will look for `username` + `password`/`private_key` at runtime"). Plain key/value secrets are still accepted for forward-compat with operators who already store credentials as flat blobs.
+- **Stub editors** for LDAP, SSH-engine, and PKI sources — the modal lets the operator pick those kinds (so the type union round-trips through save → load) but renders a "ships in Phase N" banner with a pointer to the spec. The profile saves with whatever fields the operator filled in; Connect refuses to launch against a stub source until that phase ships.
+- **27 new vitest tests** in [`gui/src/test/connectionProfiles.test.ts`](gui/src/test/connectionProfiles.test.ts) covering every helper: every os_type → protocol mapping, default port, id shape + uniqueness, secret-shape detection (credential / private-key-only / kv / username-only / empty-string), tolerant `readProfiles`, blank-profile defaults per os_type, every validateProfile branch (clean, missing name, out-of-range port, every credential-source kind's required-field check), and `profilesForOsType` filtering.
+
+`cargo check --workspace` clean. `tsc` clean. **102/102** vitest pass (75 prior + 27 new).
+
+The Connect button itself ships in Phase 7 alongside the polish slice — by then operators will have populated `os_type` (Phase 1) and Connection profiles (this phase) on existing resources, so the button arrives against pre-stocked data rather than against a forced configure-everything-now flow.
+
 #### Resource Connect — Phase 1 (`os_type` field + select schema)
 
 Lands the GUI-only schema slice that unblocks the rest of the Resource Connect feature ([`features/resource-connect.md`](features/resource-connect.md)) — no implementation commitment to the SSH/RDP windows yet, just the structured field the Connect button will dispatch on.

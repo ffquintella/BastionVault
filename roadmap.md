@@ -57,7 +57,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 |---|---|
 | Resource Management (inventory + grouped secrets) | Done |
 | File Resources (binary blobs + local-FS sync) | Done — all 8 phases (local-FS, SMB, SFTP, SCP, periodic re-sync, sync-on-write) |
-| Resource Connect — in-app SSH / RDP for server resources ([spec](features/resource-connect.md)) | Partial — Phase 1 done (structured `os_type` select on the `server` resource type + `select` field type added to `ResourceFieldDef` so other types can use enums; migration heuristic pre-fills `os_type` from the existing free-form `os` field; Settings page extended with a select-options editor). Phases 2–8 (Connection profiles, SSH window, RDP window, the four credential sources — Secret / LDAP / SSH-engine / PKI — and polish) follow in subsequent cuts. |
+| Resource Connect — in-app SSH / RDP for server resources ([spec](features/resource-connect.md)) | Partial — Phases 1 + 2 done. Phase 1: structured `os_type` select on the `server` resource type + `select` field type added to `ResourceFieldDef`; migration heuristic from free-form `os`; Settings page select-options editor. Phase 2: per-resource **Connection profiles** persisted as a JSON array on the resource record (no backend schema change), Connection tab on the resource detail view with list/add/edit/delete, `ConnectionProfileEditor` modal with the **Secret** credential source wired end-to-end (credential-shape detection + inspector); LDAP / SSH-engine / PKI sources stubbed in the editor pending their phases. Phases 3–8 (SSH window, RDP window, LDAP / SSH-engine / PKI sources, polish) follow in subsequent cuts. |
 
 ### Networking & TLS
 

@@ -35,8 +35,19 @@ import type {
   ShareEntry,
   OwnerInfo,
   FileMeta,
+  ConnectionProfile,
+  CredentialSource,
+  SessionProtocol,
 } from "../lib/types";
 import { DEFAULT_RESOURCE_TYPES, mergeTypeConfig, getTypeDef, inferOsType } from "../lib/resourceTypes";
+import {
+  blankProfile,
+  defaultPort,
+  detectSecretShape,
+  protocolForOsType,
+  readProfiles,
+  validateProfile,
+} from "../lib/connectionProfiles";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 import { useAuthStore } from "../stores/authStore";
@@ -57,7 +68,7 @@ export function ResourcesPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<
-    "info" | "secrets" | "files" | "sharing" | "history"
+    "info" | "secrets" | "files" | "connection" | "sharing" | "history"
   >("info");
   const [filterType, setFilterType] = useState("");
   const [filterGroup, setFilterGroup] = useState("");
@@ -171,13 +182,19 @@ export function ResourcesPage() {
                 { id: "info", label: "Info" },
                 { id: "secrets", label: "Secrets" },
                 { id: "files", label: "Files" },
+                // Connection tab is server-only — the Connect button
+                // dispatches on os_type, which only exists on the
+                // server resource type.
+                ...(String(resourceInfo.type || "") === "server"
+                  ? [{ id: "connection", label: "Connection" }]
+                  : []),
                 { id: "sharing", label: "Sharing" },
                 { id: "history", label: "History" },
               ]}
               active={detailTab}
               onChange={(t) =>
                 setDetailTab(
-                  t as "info" | "secrets" | "files" | "sharing" | "history",
+                  t as "info" | "secrets" | "files" | "connection" | "sharing" | "history",
                 )
               }
             />
@@ -199,6 +216,14 @@ export function ResourcesPage() {
 
           {detailTab === "files" && (
             <ResourceFilesPanel resourceName={String(resourceInfo.name)} toast={toast} />
+          )}
+
+          {detailTab === "connection" && (
+            <ConnectionProfilesPanel
+              resource={resourceInfo}
+              onUpdated={() => selectResource(selected)}
+              toast={toast}
+            />
           )}
 
           {detailTab === "sharing" && (
@@ -583,6 +608,538 @@ function CreateResourceModal({ open, onClose, typeConfig, onCreated, toast }: {
           placeholder="Additional information..." />
       </div>
     </Modal>
+  );
+}
+
+// ── Connection Profiles (Phase 2 — Secret source) ─────────────────
+
+/**
+ * Lists every ConnectionProfile on the resource, lets the operator
+ * add / edit / delete them. Profiles persist as a key inside the
+ * resource's flexible metadata bag — no backend schema change.
+ *
+ * Phase 2 ships the **Secret** credential source (a credential-shaped
+ * resource secret with username + password / private_key). The
+ * other three sources (LDAP, SSH-engine, PKI) are stubbed in the
+ * editor and surface a "ships in Phase N" hint until those phases
+ * land.
+ */
+function ConnectionProfilesPanel({
+  resource,
+  onUpdated,
+  toast,
+}: {
+  resource: ResourceMetadata;
+  onUpdated: () => void;
+  toast: (type: "success" | "error" | "info", msg: string) => void;
+}) {
+  const profiles = readProfiles(resource as Record<string, unknown>);
+  const osType = String(resource["os_type"] ?? "");
+  const osTypeProtocol = protocolForOsType(osType);
+  const [editTarget, setEditTarget] = useState<ConnectionProfile | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<ConnectionProfile | null>(null);
+
+  async function persist(next: ConnectionProfile[]) {
+    try {
+      const updated: ResourceMetadata = {
+        ...(resource as ResourceMetadata),
+        connection_profiles: next as unknown as ResourceMetadata["connection_profiles"],
+      };
+      await api.writeResource(String(resource.name), updated);
+      onUpdated();
+      toast("success", "Connection profiles saved");
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
+  }
+
+  async function handleSaveProfile(p: ConnectionProfile) {
+    const idx = profiles.findIndex((x) => x.id === p.id);
+    const next = idx >= 0 ? [...profiles] : [...profiles, p];
+    if (idx >= 0) next[idx] = p;
+    await persist(next);
+    setEditTarget(null);
+    setCreating(false);
+  }
+
+  async function handleDeleteProfile(p: ConnectionProfile) {
+    const next = profiles.filter((x) => x.id !== p.id);
+    await persist(next);
+    setConfirmDelete(null);
+  }
+
+  return (
+    <Card>
+      <div className="space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <h2 className="text-lg font-medium">Connection profiles</h2>
+            <p className="text-xs text-[var(--color-text-muted)]">
+              Bind a (protocol, target, credential) combination so the
+              Connect button can launch a session in one click.
+            </p>
+          </div>
+          <Button onClick={() => setCreating(true)}>+ Add profile</Button>
+        </div>
+
+        {!osType && (
+          <div className="rounded border border-yellow-700 bg-yellow-950/40 text-yellow-200 px-3 py-2 text-sm">
+            Set <strong>OS Type</strong> on this resource (Info tab) so
+            the Connect button knows which protocol to dispatch.
+          </div>
+        )}
+        {osType && !osTypeProtocol && (
+          <div className="rounded border border-yellow-700 bg-yellow-950/40 text-yellow-200 px-3 py-2 text-sm">
+            <code>os_type = {osType}</code> — Connect is disabled for
+            this OS type. Profiles can still be saved for future use.
+          </div>
+        )}
+
+        {profiles.length === 0 && (
+          <p className="text-sm text-[var(--color-text-muted)]">
+            No profiles configured yet.
+          </p>
+        )}
+
+        <div className="space-y-2">
+          {profiles.map((p) => (
+            <div
+              key={p.id}
+              className="flex items-start justify-between gap-3 rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <strong className="truncate">{p.name}</strong>
+                  <Badge label={p.protocol.toUpperCase()} />
+                </div>
+                <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5 text-xs text-[var(--color-text-muted)] mt-1">
+                  <dt>target</dt>
+                  <dd className="font-mono break-all">
+                    {p.target_host || (resource["hostname"] as string) || (resource["ip_address"] as string) || "—"}
+                    :
+                    {p.target_port ?? defaultPort(p.protocol)}
+                  </dd>
+                  <dt>user</dt>
+                  <dd className="font-mono">{p.username || "(default)"}</dd>
+                  <dt>cred</dt>
+                  <dd className="font-mono">{describeCredentialSource(p.credential_source)}</dd>
+                </dl>
+              </div>
+              <div className="flex flex-col gap-1 shrink-0">
+                <Button size="sm" variant="ghost" onClick={() => setEditTarget(p)}>
+                  Edit
+                </Button>
+                <Button size="sm" variant="danger" onClick={() => setConfirmDelete(p)}>
+                  Delete
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <p className="text-xs text-[var(--color-text-muted)]">
+          Phase 2 ships only the <strong>Secret</strong> credential
+          source (a credential-shaped resource secret with{" "}
+          <code>username</code> + <code>password</code> /{" "}
+          <code>private_key</code>). LDAP / SSH-engine / PKI sources
+          land in Phases 5–6.
+        </p>
+      </div>
+
+      {(creating || editTarget) && (
+        <ConnectionProfileEditor
+          open
+          resource={resource}
+          existing={editTarget}
+          onClose={() => {
+            setCreating(false);
+            setEditTarget(null);
+          }}
+          onSave={handleSaveProfile}
+          toast={toast}
+        />
+      )}
+
+      <ConfirmModal
+        open={confirmDelete !== null}
+        onClose={() => setConfirmDelete(null)}
+        onConfirm={() => confirmDelete && handleDeleteProfile(confirmDelete)}
+        title="Delete connection profile"
+        message={`Delete profile "${confirmDelete?.name}"? Resource secrets and the resource itself stay intact.`}
+        variant="danger"
+      />
+    </Card>
+  );
+}
+
+function describeCredentialSource(c: CredentialSource): string {
+  switch (c.kind) {
+    case "secret":
+      return c.secret_id ? `secret • ${c.secret_id}` : "secret • (not set)";
+    case "ldap":
+      return `ldap • ${c.ldap_mount} (${c.bind_mode})`;
+    case "ssh-engine":
+      return `ssh-engine • ${c.ssh_mount}role=${c.ssh_role} (${c.mode})`;
+    case "pki":
+      return `pki • ${c.pki_mount} role=${c.pki_role}`;
+  }
+}
+
+/**
+ * Profile editor modal. Phase 2 implements the **Secret** source
+ * fully; the other three sources show a stub panel pointing at the
+ * spec until their phases ship.
+ */
+function ConnectionProfileEditor({
+  open,
+  resource,
+  existing,
+  onClose,
+  onSave,
+  toast,
+}: {
+  open: boolean;
+  resource: ResourceMetadata;
+  existing: ConnectionProfile | null;
+  onClose: () => void;
+  onSave: (p: ConnectionProfile) => Promise<void>;
+  toast: (type: "success" | "error" | "info", msg: string) => void;
+}) {
+  const osType = String(resource["os_type"] ?? "");
+  const fallbackProtocol = protocolForOsType(osType) ?? "ssh";
+  const [profile, setProfile] = useState<ConnectionProfile>(
+    existing ?? blankProfile(osType),
+  );
+  const [secretCandidates, setSecretCandidates] = useState<Array<{
+    value: string;
+    label: string;
+  }>>([]);
+  const [loadingSecrets, setLoadingSecrets] = useState(false);
+
+  // Reload the candidate list of credential-shaped resource secrets
+  // every time the editor opens. We don't try to filter to "only
+  // credential-shaped" client-side — the read+detect would require
+  // a fetch per secret. Instead the dropdown lists every secret;
+  // the operator picks one and the runtime path validates the
+  // shape on the actual connect.
+  useEffect(() => {
+    if (!open) return;
+    let cancel = false;
+    setLoadingSecrets(true);
+    (async () => {
+      try {
+        const out = await api.listResourceSecrets(String(resource.name));
+        if (cancel) return;
+        const cands = (out.keys ?? []).map((k) => ({ value: k, label: k }));
+        setSecretCandidates(cands);
+      } catch (e: unknown) {
+        if (!cancel) toast("error", extractError(e));
+      } finally {
+        if (!cancel) setLoadingSecrets(false);
+      }
+    })();
+    return () => {
+      cancel = true;
+    };
+  }, [open, resource.name, toast]);
+
+  function update<K extends keyof ConnectionProfile>(k: K, v: ConnectionProfile[K]) {
+    setProfile((p) => ({ ...p, [k]: v }));
+  }
+
+  function updateCredentialSource(s: CredentialSource) {
+    setProfile((p) => ({ ...p, credential_source: s }));
+  }
+
+  function handleCredKindChange(kind: CredentialSource["kind"]) {
+    switch (kind) {
+      case "secret":
+        updateCredentialSource({ kind: "secret", secret_id: "" });
+        break;
+      case "ldap":
+        updateCredentialSource({
+          kind: "ldap",
+          ldap_mount: "",
+          bind_mode: "operator",
+        });
+        break;
+      case "ssh-engine":
+        updateCredentialSource({
+          kind: "ssh-engine",
+          ssh_mount: "",
+          ssh_role: "",
+          mode: "ca",
+        });
+        break;
+      case "pki":
+        updateCredentialSource({
+          kind: "pki",
+          pki_mount: "",
+          pki_role: "",
+        });
+        break;
+    }
+  }
+
+  const validationError = validateProfile(profile);
+  const canSave = validationError === null;
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={existing ? `Edit profile · ${existing.name}` : "Add connection profile"}
+      size="lg"
+      actions={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button disabled={!canSave} onClick={() => onSave(profile)}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 gap-3">
+          <Input
+            label="Profile name"
+            value={profile.name}
+            onChange={(e) => update("name", e.target.value)}
+            placeholder="Default"
+          />
+          <Select
+            label="Protocol"
+            value={profile.protocol}
+            onChange={(e) =>
+              update("protocol", e.target.value as SessionProtocol)
+            }
+            options={[
+              { value: "ssh", label: "SSH" },
+              { value: "rdp", label: "RDP" },
+            ]}
+          />
+        </div>
+        {osType && profile.protocol !== fallbackProtocol && (
+          <p className="text-xs text-[var(--color-text-muted)]">
+            os_type = {osType} normally maps to{" "}
+            {fallbackProtocol.toUpperCase()}.
+          </p>
+        )}
+
+        <div className="grid grid-cols-2 gap-3">
+          <Input
+            label="Target host (override)"
+            value={profile.target_host ?? ""}
+            onChange={(e) =>
+              update("target_host", e.target.value || undefined)
+            }
+            placeholder={
+              (resource["hostname"] as string) ||
+              (resource["ip_address"] as string) ||
+              "from resource"
+            }
+          />
+          <Input
+            label="Target port (override)"
+            type="number"
+            value={profile.target_port?.toString() ?? ""}
+            onChange={(e) => {
+              const n = parseInt(e.target.value, 10);
+              update(
+                "target_port",
+                Number.isFinite(n) && n > 0 ? n : undefined,
+              );
+            }}
+            placeholder={defaultPort(profile.protocol).toString()}
+          />
+        </div>
+
+        <Input
+          label="Username"
+          value={profile.username ?? ""}
+          onChange={(e) => update("username", e.target.value || undefined)}
+          placeholder={
+            profile.protocol === "rdp" ? "Administrator" : "felipe"
+          }
+        />
+
+        <hr className="border-[var(--color-border)]" />
+
+        <Select
+          label="Credential source"
+          value={profile.credential_source.kind}
+          onChange={(e) =>
+            handleCredKindChange(e.target.value as CredentialSource["kind"])
+          }
+          options={[
+            { value: "secret", label: "Resource secret" },
+            { value: "ldap", label: "LDAP / Active Directory (Phase 5)" },
+            { value: "ssh-engine", label: "SSH secret engine (Phase 3)" },
+            { value: "pki", label: "PKI client cert (Phase 6)" },
+          ]}
+        />
+
+        {profile.credential_source.kind === "secret" ? (
+          <div className="space-y-2">
+            <Select
+              label="Resource secret"
+              value={profile.credential_source.secret_id}
+              onChange={(e) =>
+                updateCredentialSource({
+                  kind: "secret",
+                  secret_id: e.target.value,
+                })
+              }
+              options={[
+                { value: "", label: loadingSecrets ? "Loading…" : "(pick a secret)" },
+                ...secretCandidates,
+              ]}
+            />
+            <p className="text-xs text-[var(--color-text-muted)]">
+              Pick a credential-shaped secret (<code>username</code> +{" "}
+              <code>password</code> and/or <code>private_key</code>). Plain
+              key/value secrets work too — extra fields are ignored at
+              connect time.
+            </p>
+            {profile.credential_source.secret_id ? (
+              <CredentialSecretInspector
+                resourceName={String(resource.name)}
+                secretId={profile.credential_source.secret_id}
+              />
+            ) : null}
+          </div>
+        ) : (
+          <CredentialSourceStub
+            kind={profile.credential_source.kind}
+          />
+        )}
+
+        {validationError && (
+          <p className="text-xs text-[var(--color-danger)]">{validationError}</p>
+        )}
+
+        <hr className="border-[var(--color-border)]" />
+
+        <Input
+          label="Host-key pin (optional)"
+          value={profile.host_key_pin ?? ""}
+          onChange={(e) =>
+            update("host_key_pin", e.target.value || undefined)
+          }
+          placeholder={
+            profile.protocol === "ssh"
+              ? "SHA256:abc123…"
+              : "RDP cert thumbprint"
+          }
+          hint="Leave empty for TOFU on first connect. The session window will surface the observed fingerprint so you can pin it on the next save."
+        />
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * Inspector that reads the chosen secret and reports whether it
+ * looks credential-shaped. Surfaces a friendly "this secret looks
+ * like a credential" / "this secret doesn't look like a credential"
+ * line so the operator gets immediate feedback before saving.
+ */
+function CredentialSecretInspector({
+  resourceName,
+  secretId,
+}: {
+  resourceName: string;
+  secretId: string;
+}) {
+  const [shape, setShape] = useState<"loading" | "credential" | "kv" | "error">(
+    "loading",
+  );
+  const [detail, setDetail] = useState<string>("");
+
+  useEffect(() => {
+    let cancel = false;
+    setShape("loading");
+    (async () => {
+      try {
+        const out = await api.readResourceSecret(resourceName, secretId);
+        if (cancel) return;
+        const s = detectSecretShape(
+          (out.data ?? {}) as Record<string, unknown>,
+        );
+        if (s.kind === "credential") {
+          setShape("credential");
+          setDetail(
+            `username = ${s.username || "(empty)"}; ` +
+              [
+                s.has_password ? "password" : null,
+                s.has_private_key ? "private_key" : null,
+              ]
+                .filter((x) => x !== null)
+                .join(" + "),
+          );
+        } else {
+          setShape("kv");
+          setDetail(
+            s.keys.length
+              ? `keys: ${s.keys.join(", ")}`
+              : "(no keys)",
+          );
+        }
+      } catch (e: unknown) {
+        if (!cancel) {
+          setShape("error");
+          setDetail(extractError(e));
+        }
+      }
+    })();
+    return () => {
+      cancel = true;
+    };
+  }, [resourceName, secretId]);
+
+  if (shape === "loading") {
+    return <p className="text-xs text-[var(--color-text-muted)]">Inspecting secret…</p>;
+  }
+  if (shape === "error") {
+    return (
+      <p className="text-xs text-[var(--color-danger)]">
+        Couldn't read the secret: {detail}
+      </p>
+    );
+  }
+  if (shape === "credential") {
+    return (
+      <div className="rounded border border-green-700 bg-green-950/40 px-3 py-2 text-xs text-green-200">
+        Credential-shaped. <span className="font-mono">{detail}</span>
+      </div>
+    );
+  }
+  return (
+    <div className="rounded border border-yellow-700 bg-yellow-950/40 px-3 py-2 text-xs text-yellow-200">
+      Generic key/value secret — Connect will look for{" "}
+      <code>username</code> + <code>password</code> /{" "}
+      <code>private_key</code> at runtime. {detail}
+    </div>
+  );
+}
+
+function CredentialSourceStub({ kind }: { kind: CredentialSource["kind"] }) {
+  const labels: Record<CredentialSource["kind"], string> = {
+    secret: "",
+    ldap: "LDAP / Active Directory — ships in Phase 5",
+    "ssh-engine": "SSH secret engine — ships in Phase 3",
+    pki: "PKI client cert (CredSSP smartcard) — ships in Phase 6",
+  };
+  return (
+    <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-text-muted)]">
+      {labels[kind]}. The profile editor remembers your selection so
+      you can pre-stage a profile, but Connect will refuse to
+      launch until the implementation lands. See{" "}
+      <code>features/resource-connect.md</code>.
+    </div>
   );
 }
 

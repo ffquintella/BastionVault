@@ -426,7 +426,7 @@ gui/src/lib/sessionApi.ts                -- thin wrappers around the new Tauri c
 
 No backend changes — resource fields are already a flexible `Map<String, Value>` on the storage record. Phase 1 is GUI-only and ships first because it unlocks everything else without committing to the session implementation.
 
-### Phase 2 — Connection profiles + Connection tab + `secret` credential source
+### Phase 2 — Connection profiles + Connection tab + `secret` credential source — **Done**
 
 | Deliverable | Location |
 |---|---|

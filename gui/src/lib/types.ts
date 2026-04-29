@@ -177,6 +177,72 @@ export interface ResourceTypeDef {
 
 export type ResourceTypeConfig = Record<string, ResourceTypeDef>;
 
+// ── Resource Connect — Connection profiles ─────────────────────────
+// See features/resource-connect.md. Each server resource carries
+// zero or more profiles binding (protocol, target, credential source)
+// the Connect button uses. Stored as a flexible JSON array on the
+// resource record; the resource module accepts it without any
+// backend schema change.
+
+export type SessionProtocol = "ssh" | "rdp";
+
+export type CredentialSource =
+  | { kind: "secret"; secret_id: string }
+  | {
+      kind: "ldap";
+      ldap_mount: string;
+      bind_mode: "operator" | "static_role" | "library_set";
+      static_role?: string;
+      library_set?: string;
+    }
+  | {
+      kind: "ssh-engine";
+      ssh_mount: string;
+      ssh_role: string;
+      mode: "ca" | "otp" | "pqc";
+    }
+  | {
+      kind: "pki";
+      pki_mount: string;
+      pki_role: string;
+      cert_ttl_secs?: number;
+    };
+
+export interface ConnectionProfile {
+  /** Stable per-resource id, generated client-side on create. */
+  id: string;
+  /** Operator-visible label (e.g. "Default", "Break-glass"). */
+  name: string;
+  protocol: SessionProtocol;
+  /** Overrides the resource's hostname/ip when set. */
+  target_host?: string;
+  /** Overrides the resource's port / protocol default. */
+  target_port?: number;
+  /** SSH user / RDP user; some sources supply their own. */
+  username?: string;
+  credential_source: CredentialSource;
+  /** TOFU pin: SSH host-key fingerprint or RDP cert thumbprint. */
+  host_key_pin?: string;
+  /** Opt-in for legacy auth modes; logged at WARN every connect. */
+  allow_legacy_auth?: boolean;
+}
+
+/**
+ * GUI-side detection of credential-shaped resource secrets vs.
+ * generic kv secrets. A secret whose JSON carries a `username` field
+ * is rendered with the dedicated credential editor (split-input
+ * + masked password + paste-PEM private key) instead of the
+ * generic key/value editor.
+ */
+export type ResourceSecretShape =
+  | {
+      kind: "credential";
+      username: string;
+      has_password: boolean;
+      has_private_key: boolean;
+    }
+  | { kind: "kv"; keys: string[] };
+
 export interface ResourceListResult {
   resources: string[];
 }
