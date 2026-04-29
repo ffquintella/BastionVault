@@ -38,6 +38,7 @@ import type {
   ConnectionProfile,
   CredentialSource,
   SessionProtocol,
+  RecentSession,
 } from "../lib/types";
 import { DEFAULT_RESOURCE_TYPES, mergeTypeConfig, getTypeDef, inferOsType } from "../lib/resourceTypes";
 import {
@@ -184,8 +185,11 @@ export function ResourcesPage() {
                 { id: "files", label: "Files" },
                 // Connection tab is server-only — the Connect button
                 // dispatches on os_type, which only exists on the
-                // server resource type.
-                ...(String(resourceInfo.type || "") === "server"
+                // server resource type. Also hidden when the
+                // operator disabled Connect for this type via
+                // Settings (Phase 7 per-type policy).
+                ...(String(resourceInfo.type || "") === "server" &&
+                typeDef.connect?.enabled !== false
                   ? [{ id: "connection", label: "Connection" }]
                   : []),
                 { id: "sharing", label: "Sharing" },
@@ -837,6 +841,9 @@ function ConnectionProfilesPanel({
             land in Phases 5–6.
           </p>
         )}
+
+        <RecentSessionsList resource={resource} />
+
         <p className="text-xs text-[var(--color-text-muted)]">
           Connect launches an in-app session window for SSH × {"{"}
           Secret, LDAP, PKI{"}"} (xterm.js + russh) and RDP × {"{"}
@@ -955,6 +962,51 @@ function OperatorBindPrompt({
         />
       </div>
     </Modal>
+  );
+}
+
+/**
+ * Last 10 sessions on this resource. Persisted in the resource's
+ * `recent_sessions` field by the host's `record_recent_session`
+ * helper after every successful `session_open_*`. Read-only here
+ * — the operator's primary use case is "connect to the same one
+ * again" via the profile button list above.
+ */
+function RecentSessionsList({ resource }: { resource: ResourceMetadata }) {
+  const raw = (resource as Record<string, unknown>)["recent_sessions"];
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return null;
+  }
+  const entries: RecentSession[] = (raw as unknown[])
+    .filter(
+      (e): e is RecentSession =>
+        typeof e === "object" &&
+        e !== null &&
+        typeof (e as RecentSession).ts === "string" &&
+        typeof (e as RecentSession).profile_name === "string",
+    );
+  if (entries.length === 0) return null;
+  return (
+    <details className="text-xs">
+      <summary className="cursor-pointer text-[var(--color-text-muted)] select-none">
+        Recently connected ({entries.length})
+      </summary>
+      <ul className="mt-2 space-y-1">
+        {entries.map((e, i) => (
+          <li
+            key={`${e.ts}-${i}`}
+            className="flex items-center gap-2 text-[var(--color-text-muted)]"
+          >
+            <span className="font-mono">{e.ts.replace("T", " ").replace("Z", "")}</span>
+            <Badge label={e.protocol.toUpperCase()} />
+            <span>via</span>
+            <strong className="text-[var(--color-text)]">{e.profile_name}</strong>
+            <span>by</span>
+            <span className="font-mono">{e.actor}</span>
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }
 

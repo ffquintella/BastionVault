@@ -185,6 +185,14 @@ pub async fn session_open_ssh(
         "resource-connect/ssh: spawned window {window_label} for {label}"
     );
 
+    let _ = record_recent_session(
+        &state,
+        &request.resource_name,
+        &profile,
+        SessionProtocolTag::Ssh,
+    )
+    .await;
+
     Ok(SshOpenResponse {
         token: outcome.token,
         stdout_event: outcome.stdout_event,
@@ -360,6 +368,14 @@ pub async fn session_open_rdp(
             });
         }
     });
+
+    let _ = record_recent_session(
+        &state,
+        &request.resource_name,
+        &profile,
+        SessionProtocolTag::Rdp,
+    )
+    .await;
 
     Ok(RdpOpenResponse {
         token: outcome.token,
@@ -1210,4 +1226,154 @@ fn ldap_mount_prefix(cs: &Value) -> Result<String, CommandError> {
     }
     let trimmed = raw.trim_end_matches('/');
     Ok(format!("{trimmed}/"))
+}
+
+// ── Recently-connected list (Phase 7) ──────────────────────────────
+
+/// Cap on the persisted recently-connected list. Keeps the
+/// resource record bounded — every operator who clicks Connect
+/// appends one entry, so without a cap a long-lived production
+/// host's metadata would grow without bound.
+const RECENT_SESSIONS_CAP: usize = 10;
+
+#[derive(Copy, Clone)]
+enum SessionProtocolTag {
+    Ssh,
+    Rdp,
+}
+
+impl SessionProtocolTag {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ssh => "ssh",
+            Self::Rdp => "rdp",
+        }
+    }
+}
+
+/// Append a recently-connected entry on the resource's metadata
+/// record. Best-effort: a failed write logs at WARN and is
+/// otherwise swallowed — losing a recently-connected entry is
+/// far less bad than failing the actual session-open after the
+/// transport is already up.
+async fn record_recent_session(
+    state: &State<'_, AppState>,
+    resource_name: &str,
+    profile: &Value,
+    protocol: SessionProtocolTag,
+) -> Result<(), CommandError> {
+    let mut meta = read_resource_meta(state, resource_name).await?;
+    let mut recent: Vec<Value> = meta
+        .get("recent_sessions")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let actor = caller_display(state).await;
+    let entry = serde_json::json!({
+        "ts": now_rfc3339(),
+        "profile_id": profile.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+        "profile_name": profile.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+        "actor": actor,
+        "protocol": protocol.as_str(),
+    });
+    recent.insert(0, entry); // newest first
+    if recent.len() > RECENT_SESSIONS_CAP {
+        recent.truncate(RECENT_SESSIONS_CAP);
+    }
+    meta.insert("recent_sessions".into(), Value::Array(recent));
+    let path = format!("{RESOURCE_MOUNT}{resource_name}");
+    let _ = make_request(state, Operation::Write, path, Some(meta))
+        .await
+        .map_err(|e| {
+            log::warn!(
+                "resource-connect: record_recent_session for `{resource_name}` failed: {e:?}"
+            );
+            e
+        });
+    Ok(())
+}
+
+fn now_rfc3339() -> String {
+    use std::time::SystemTime;
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64;
+    let tm = libc_time_breakdown(secs);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        tm.year, tm.mon, tm.mday, tm.hour, tm.minute, tm.second
+    )
+}
+
+struct BrokenDownTime {
+    year: i32,
+    mon: u32,
+    mday: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+}
+
+/// Tiny gmtime breakdown so we don't pull `time` / `chrono` for
+/// one timestamp formatter. Good enough for the year range we
+/// care about (1970..2099). Mirrors the same approach the
+/// resource module uses in its history-log path.
+fn libc_time_breakdown(unix: i64) -> BrokenDownTime {
+    let mut secs = unix.max(0) as u64;
+    let second = (secs % 60) as u32;
+    secs /= 60;
+    let minute = (secs % 60) as u32;
+    secs /= 60;
+    let hour = (secs % 24) as u32;
+    let mut days = secs / 24;
+    let mut year = 1970i32;
+    loop {
+        let dy = if is_leap(year) { 366 } else { 365 };
+        if days < dy {
+            break;
+        }
+        days -= dy;
+        year += 1;
+    }
+    let months = [
+        31u64,
+        if is_leap(year) { 29 } else { 28 },
+        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+    ];
+    let mut mon = 1u32;
+    for &dm in &months {
+        if days < dm {
+            break;
+        }
+        days -= dm;
+        mon += 1;
+    }
+    BrokenDownTime {
+        year,
+        mon,
+        mday: days as u32 + 1,
+        hour,
+        minute,
+        second,
+    }
+}
+
+fn is_leap(y: i32) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+async fn caller_display(state: &State<'_, AppState>) -> String {
+    match make_request(state, Operation::Read, "auth/token/lookup-self".to_string(), None).await {
+        Ok(Some(resp)) => {
+            let data = resp.data.unwrap_or_default();
+            data.get("display_name")
+                .and_then(|v| v.as_str())
+                .or_else(|| data.get("entity_id").and_then(|v| v.as_str()))
+                .or_else(|| data.get("id").and_then(|v| v.as_str()))
+                .unwrap_or("unknown")
+                .to_string()
+        }
+        _ => "unknown".to_string(),
+    }
 }

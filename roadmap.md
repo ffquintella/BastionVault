@@ -57,7 +57,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 |---|---|
 | Resource Management (inventory + grouped secrets) | Done |
 | File Resources (binary blobs + local-FS sync) | Done — all 8 phases (local-FS, SMB, SFTP, SCP, periodic re-sync, sync-on-write) |
-| Resource Connect — in-app SSH / RDP for server resources ([spec](features/resource-connect.md)) | Partial — Phases 1–6 + 6.5 done. **CredSSP smartcard wiring landed (Phase 6.5)** — vault-issued PKI client certs now drive AD smartcard auth against NLA-enforcing Windows servers via sspi-rs's PIV emulator. IronRDP fix-deps branch updated to accept PKCS#8 keys + enable sspi's network_client / dns_resolver features. Launch matrix: SSH × {Secret, LDAP, PKI} ✅, RDP × {Secret, LDAP, PKI (CredSSP smartcard)} ✅. Only `ssh-engine` source remains pending. Phase 7 (polish + per-type policy + recently-connected) is the last cut. |
+| Resource Connect — in-app SSH / RDP for server resources ([spec](features/resource-connect.md)) | Done — Phases 1–7 shipped. Launch matrix: SSH × {Secret, LDAP, PKI} ✅, RDP × {Secret, LDAP, PKI (CredSSP smartcard via sspi-rs's PIV emulator)} ✅. Phase 7 polish landed: per-resource-type Connect policy on `ResourceTypeDef`, recently-connected list (last 10) on every resource, ⌘K global Connect palette with fuzzy resource × profile picker. Only the `ssh-engine` credential source remains as a deferred follow-up. |
 
 ### Networking & TLS
 

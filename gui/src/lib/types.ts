@@ -173,6 +173,17 @@ export interface ResourceTypeDef {
   label: string;
   color: "info" | "success" | "warning" | "error" | "neutral";
   fields: ResourceFieldDef[];
+  /** Per-type Resource-Connect policy (Phase 7). Optional —
+   *  omitted = enabled. When `enabled = false`, the Connect
+   *  button + the Connection tab are hidden for every resource
+   *  of this type. The default-ports / default-users blocks are
+   *  forward-compat for a future "smart defaults" pass; today
+   *  the protocol's standard port (22 / 3389) is used. */
+  connect?: {
+    enabled?: boolean;
+    default_ports?: { ssh?: number; rdp?: number };
+    default_users?: { linux?: string; macos?: string; windows?: string };
+  };
 }
 
 export type ResourceTypeConfig = Record<string, ResourceTypeDef>;
@@ -225,6 +236,28 @@ export interface ConnectionProfile {
   host_key_pin?: string;
   /** Opt-in for legacy auth modes; logged at WARN every connect. */
   allow_legacy_auth?: boolean;
+}
+
+/**
+ * One recently-opened session. Persisted on the resource record's
+ * `recent_sessions` array; the host appends an entry on every
+ * successful `session_open_*` call and trims to a fixed cap so
+ * the resource record doesn't grow without bound. Surfaced on
+ * the Connection tab for quick "open the same one again" clicks.
+ */
+export interface RecentSession {
+  /** RFC3339 UTC timestamp of when the session opened. */
+  ts: string;
+  /** Profile id used to launch. */
+  profile_id: string;
+  /** Profile name at the time of launch (cached because the
+   *  profile may have been renamed since). */
+  profile_name: string;
+  /** Operator who opened it. Display name when known, else the
+   *  vault entity id, else "unknown". */
+  actor: string;
+  /** Effective protocol of the session (`ssh` / `rdp`). */
+  protocol: SessionProtocol;
 }
 
 /**

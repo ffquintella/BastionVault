@@ -484,14 +484,16 @@ No backend changes — resource fields are already a flexible `Map<String, Value
 | Cert zeroized on session close (`Zeroizing<Vec<u8>>`); manual revoke via existing `pki/revoke` if the operator wants it on the CRL | host |
 | Manual integration test against an AD-joined Windows Server with a CA template-mapped issuer | docs |
 
-### Phase 7 — Polish & per-type policy
+### Phase 7 — Polish & per-type policy — **Done**
 
-| Deliverable | Location |
-|---|---|
-| `connect` block on `ResourceTypeDef` | [gui/src/lib/types.ts](../gui/src/lib/types.ts) |
-| Settings page toggle: enable/disable Connect per resource type | [gui/src/routes/SettingsPage.tsx](../gui/src/routes/SettingsPage.tsx) |
-| Recently-connected list per resource (last 10 sessions, op + timestamp) | resource detail page |
-| Hot-key (`⌘K`) "Connect to…" command palette | new component |
+| Deliverable | Location | Status |
+|---|---|---|
+| `connect` block on `ResourceTypeDef` | [gui/src/lib/types.ts](../gui/src/lib/types.ts) | ✅ |
+| Settings page toggle: enable/disable Connect per resource type | [gui/src/routes/SettingsPage.tsx](../gui/src/routes/SettingsPage.tsx) | ✅ |
+| Recently-connected list per resource (last 10 sessions, op + timestamp) | [gui/src-tauri/src/commands/connect.rs](../gui/src-tauri/src/commands/connect.rs) (host-side append) + [gui/src/routes/ResourcesPage.tsx](../gui/src/routes/ResourcesPage.tsx) (Connection-tab `<RecentSessionsList>`) | ✅ |
+| Hot-key (`⌘K`) "Connect to…" command palette | [gui/src/components/ConnectPalette.tsx](../gui/src/components/ConnectPalette.tsx) (mounted at app root in [gui/src/App.tsx](../gui/src/App.tsx)) | ✅ |
+
+**Current state.** Resource-type editor in Settings carries a "Resource Connect enabled" checkbox; when off, the Connection tab is hidden for every resource of that type and the ⌘K palette filters the type out. Successful `session_open_*` calls append a `RecentSession` entry (capped at 10, oldest evicted) to the resource record's `recent_sessions` array; the Connection tab renders these in a collapsible `<details>` block. `caller_display` resolves the actor via `auth/token/lookup-self`. ⌘K palette opens globally (post-auth), fuzzy-matches across `{resource_name, profile_name, protocol, host, port, username, kind, tags}`, navigates with arrows, launches with Enter — sharing the same `session_open_ssh` / `session_open_rdp` path the per-resource Connect button uses. LDAP operator-bind profiles are listed but defer to the Resources page for the typed-credential prompt rather than embedding it in the palette.
 
 ### Phase 8 — Future / deferred
 

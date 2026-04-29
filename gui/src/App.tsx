@@ -26,6 +26,7 @@ import { SessionRdpWindow } from "./routes/SessionRdpWindow";
 import { useAuthStore } from "./stores/authStore";
 import { ToastProvider } from "./components/ui";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { ConnectPalette } from "./components/ConnectPalette";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
@@ -131,6 +132,9 @@ export default function App() {
             <Route path="/session/ssh" element={<SessionSshWindow />} />
             <Route path="/session/rdp" element={<SessionRdpWindow />} />
           </Routes>
+          {/* Phase 7 — global ⌘K Connect palette. Sits above the
+              router so the shortcut is armed everywhere post-auth. */}
+          <ConnectPalette />
         </HashRouter>
       </ToastProvider>
     </ErrorBoundary>

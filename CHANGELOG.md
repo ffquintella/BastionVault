@@ -47,6 +47,20 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Resource Connect — Phase 7 (polish: per-type Connect policy, recently-connected list, ⌘K palette)
+
+The final polish slice of the Resource Connect feature. Three operator-facing improvements layered on top of the now-complete launch matrix from Phase 6.5; no transport / credential changes.
+
+- **Per-resource-type Connect policy** ([`gui/src/lib/types.ts`](gui/src/lib/types.ts), [`gui/src/routes/SettingsPage.tsx`](gui/src/routes/SettingsPage.tsx), [`gui/src/routes/ResourcesPage.tsx`](gui/src/routes/ResourcesPage.tsx)) — `ResourceTypeDef` carries an optional `connect: { enabled?, default_ports?, default_users? }` block. Settings → resource types editor exposes a "Resource Connect enabled" checkbox. When unchecked, the Connection tab is hidden for every resource of that type and the ⌘K palette filters the type out. Default ports / users are forward-compat for a future smart-defaults pass; today the protocol's standard port (22 / 3389) wins.
+
+- **Recently-connected list** ([`gui/src-tauri/src/commands/connect.rs`](gui/src-tauri/src/commands/connect.rs), [`gui/src/routes/ResourcesPage.tsx`](gui/src/routes/ResourcesPage.tsx)) — every successful `session_open_*` appends a `RecentSession { ts, profile_id, profile_name, actor, protocol }` entry to the resource record's `recent_sessions` array (capped at 10, oldest evicted). Surfaced as a collapsible "Recently connected" `<details>` block under the profile list on the Connection tab. The host's `caller_display` helper resolves the actor via `auth/token/lookup-self` (display_name → entity_id → "unknown"). Recent-session writes are best-effort: a failure logs at WARN rather than failing the connect call after the transport is already up. Timestamps formatted via a hand-rolled gmtime breakdown (`libc_time_breakdown` + `is_leap`) so the GUI doesn't need to drag in chrono / time.
+
+- **⌘K Connect palette** ([`gui/src/components/ConnectPalette.tsx`](gui/src/components/ConnectPalette.tsx), [`gui/src/App.tsx`](gui/src/App.tsx)) — global hotkey ⌘K (Ctrl+K on Linux/Windows) opens a fuzzy-searchable picker of every launchable {resource × profile} pair. Filters on the same rules the Connection tab uses (type's `connect.enabled !== false`, `os_type` resolves to a protocol, credential source is one we actually launch — Secret / LDAP / PKI; SSH-engine still TODO). Multi-term substring scoring against `{resource_name, profile_name, protocol, host, port, username, kind, tags}`. Arrow keys + Enter to launch; Escape closes. LDAP operator-bind profiles are listed but defer back to the Resources page's inline credential prompt — the palette stays single-keystroke.
+
+The Resource Connect feature is now operationally complete modulo the deferred SSH-engine credential source. Tracking `features/resource-connect.md` updated; all Phases 1–7 marked **Done**.
+
+`cargo check --workspace` clean. `tsc` clean. **102/102** vitest pass.
+
 #### Resource Connect — Phase 6.5 (RDP CredSSP smartcard wiring)
 
 The RDP+PKI gap closed. Vault-issued client certs now drive **CredSSP / NLA smartcard auth** against AD-enrolled Windows servers via `sspi-rs`'s emulated PIV backend — no hardware smartcard, no extra OS configuration, just a PEM cert + PKCS#8 key from the in-tree PKI engine.

@@ -1126,6 +1126,11 @@ function TypeEditorModal({ typeDef, onSave, onClose }: {
   const [label, setLabel] = useState(typeDef?.label ?? "");
   const [color, setColor] = useState<string>(typeDef?.color ?? "info");
   const [fields, setFields] = useState<ResourceFieldDef[]>(typeDef?.fields ?? []);
+  // Phase 7 — per-type Resource-Connect policy. Persisted on the
+  // type record's `connect` block; missing record == enabled.
+  const [connectEnabled, setConnectEnabled] = useState<boolean>(
+    typeDef?.connect?.enabled ?? true,
+  );
 
   function addField() {
     setFields([...fields, { key: "", label: "", type: "text", placeholder: "" }]);
@@ -1141,11 +1146,19 @@ function TypeEditorModal({ typeDef, onSave, onClose }: {
 
   function handleSave() {
     const resolvedId = isNew ? id.toLowerCase().replace(/[^a-z0-9_]/g, "_") : id;
+    // Only emit a `connect` block if the operator changed the
+    // default — keeps the persisted shape minimal so a
+    // round-trip through save → load doesn't bloat existing
+    // type records that never opted in.
+    const connect: ResourceTypeDef["connect"] = connectEnabled
+      ? typeDef?.connect
+      : { ...(typeDef?.connect ?? {}), enabled: false };
     onSave({
       id: resolvedId,
       label: label || resolvedId,
       color: color as ResourceTypeDef["color"],
       fields: fields.filter((f) => f.key),
+      ...(connect ? { connect } : {}),
     });
   }
 
@@ -1170,6 +1183,25 @@ function TypeEditorModal({ typeDef, onSave, onClose }: {
             placeholder="My Device" />
           <Select label="Color" value={color} onChange={(e) => setColor(e.target.value)}
             options={COLOR_OPTIONS} />
+        </div>
+
+        <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={connectEnabled}
+              onChange={(e) => setConnectEnabled(e.target.checked)}
+            />
+            <span>
+              <strong>Resource Connect enabled</strong> for this type
+            </span>
+          </label>
+          <p className="text-xs text-[var(--color-text-muted)] mt-1 pl-6">
+            When unchecked, the Connect button + the Connection tab
+            are hidden for every resource of this type. Useful for
+            regulated environments that ship the metadata layer but
+            force operators through an existing PAM tool.
+          </p>
         </div>
 
         <div>
