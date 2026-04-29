@@ -301,12 +301,20 @@ export function ResourcesPage() {
             {filteredMeta.map((meta) => {
               const td = getTypeDef(typeConfig, String(meta.type));
               const groups = assetGroups.map.byResource[String(meta.name)] || [];
+              const quickProfile = pickQuickLaunchProfile(meta, td);
               return (
                 <button key={String(meta.name)} onClick={() => selectResource(String(meta.name))}
                   className="p-4 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-xl text-left hover:border-[var(--color-primary)] transition-colors">
                   <div className="flex items-center gap-2 mb-2">
-                    <span className="font-medium truncate">{String(meta.name)}</span>
+                    <span className="font-medium truncate flex-1 min-w-0">{String(meta.name)}</span>
                     <Badge label={td.label} variant={td.color} />
+                    {quickProfile && (
+                      <ConnectQuickButton
+                        resource={meta}
+                        profile={quickProfile}
+                        toast={toast}
+                      />
+                    )}
                   </div>
                   {meta.hostname ? <p className="text-xs text-[var(--color-text-muted)] truncate">{String(meta.hostname)}{meta.ip_address ? ` (${String(meta.ip_address)})` : ""}</p> : null}
                   {groups.length > 0 && (
@@ -1007,6 +1015,112 @@ function RecentSessionsList({ resource }: { resource: ResourceMetadata }) {
         ))}
       </ul>
     </details>
+  );
+}
+
+/**
+ * Find the profile we'd launch for a one-click "Connect" without
+ * any operator prompt. Returns null if none qualifies — used by
+ * the inline card-level quick-connect button + the ⌘K palette.
+ *
+ * Eligibility (mirrors `ConnectionProfilesPanel.launchableProfiles`
+ * + the palette's filter, minus LDAP operator-bind which would
+ * need a credential prompt the card can't surface inline):
+ *   - resource type's Connect policy not disabled
+ *   - resource has a usable os_type → protocol mapping
+ *   - profile.protocol matches that protocol
+ *   - credential_source kind is one we launch today
+ *     (Secret / LDAP non-operator-bind / PKI)
+ */
+function pickQuickLaunchProfile(
+  resource: ResourceMetadata,
+  typeDef: ResourceTypeDef,
+): ConnectionProfile | null {
+  if (typeDef.connect?.enabled === false) return null;
+  const protocol = protocolForOsType(String(resource["os_type"] ?? ""));
+  if (!protocol) return null;
+  const profiles = readProfiles(resource as Record<string, unknown>);
+  for (const p of profiles) {
+    if (p.protocol !== protocol) continue;
+    const k = p.credential_source.kind;
+    if (k === "ssh-engine") continue;
+    if (
+      k === "ldap" &&
+      "bind_mode" in p.credential_source &&
+      p.credential_source.bind_mode === "operator"
+    ) {
+      // Operator-bind needs a typed credential — handled by the
+      // Connection tab's inline modal, not the card-level button.
+      continue;
+    }
+    return p;
+  }
+  return null;
+}
+
+/**
+ * Tiny one-click Connect button rendered on the resource list
+ * card. Visible only when `pickQuickLaunchProfile` finds an
+ * eligible profile. Click stops propagation so it doesn't also
+ * fire the card's `selectResource` navigation. The host enforces
+ * the actual permission check; on rejection we surface the error
+ * via toast and stay on the list page.
+ */
+function ConnectQuickButton({
+  resource,
+  profile,
+  toast,
+}: {
+  resource: ResourceMetadata;
+  profile: ConnectionProfile;
+  toast: (type: "success" | "error" | "info", msg: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  async function handleClick(ev: React.MouseEvent<HTMLButtonElement>) {
+    ev.stopPropagation();
+    if (busy) return;
+    setBusy(true);
+    try {
+      const req = {
+        resource_name: String(resource.name),
+        profile_id: profile.id,
+        operator_credential: undefined,
+      };
+      if (profile.protocol === "ssh") {
+        await api.sessionOpenSsh(req);
+      } else {
+        await api.sessionOpenRdp(req);
+      }
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      disabled={busy}
+      title={`Connect (${profile.protocol.toUpperCase()} · ${profile.name})`}
+      aria-label="Connect"
+      className="shrink-0 inline-flex items-center justify-center w-7 h-7 rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] text-[var(--color-text-muted)] hover:text-[var(--color-primary)] hover:border-[var(--color-primary)] disabled:opacity-50 transition-colors"
+    >
+      {/* Inline SVG — terminal-prompt glyph for SSH, monitor for RDP.
+          Stays crisp at the 14px size and avoids pulling an icon font. */}
+      {profile.protocol === "ssh" ? (
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <polyline points="4 17 10 11 4 5" />
+          <line x1="12" y1="19" x2="20" y2="19" />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="2" y="4" width="20" height="14" rx="2" ry="2" />
+          <line x1="8" y1="21" x2="16" y2="21" />
+          <line x1="12" y1="17" x2="12" y2="21" />
+        </svg>
+      )}
+    </button>
   );
 }
 
