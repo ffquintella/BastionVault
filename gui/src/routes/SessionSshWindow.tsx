@@ -146,10 +146,15 @@ export function SessionSshWindow() {
       onResizeDispose.dispose();
       void unlistenStdout.then((u) => u());
       void unlistenClosed.then((u) => u());
-      // Best-effort host-side teardown. The window-close hook on
-      // the Rust side also triggers this, so a double-close is
-      // expected; it's idempotent.
-      void invoke("session_close", { request: { token } }).catch(() => undefined);
+      // Host-side teardown is owned by the Tauri WindowEvent::
+      // CloseRequested hook (see commands/connect.rs); it fires
+      // when the actual WebviewWindow closes. We deliberately do
+      // NOT call session_close here — React StrictMode runs effect
+      // cleanup on every dev re-mount, which would otherwise drop
+      // the host's session entry while the window is still open
+      // and leave the second mount with an unknown token. The
+      // Disconnect button calls session_close explicitly, which
+      // covers the user-driven close path.
       term.dispose();
       termRef.current = null;
       fitRef.current = null;

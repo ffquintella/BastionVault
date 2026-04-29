@@ -143,7 +143,12 @@ export function SessionRdpWindow() {
       window.removeEventListener("keyup", onKeyUp);
       void unlistenFrame.then((u) => u());
       void unlistenClosed.then((u) => u());
-      void invoke("session_close", { request: { token } }).catch(() => undefined);
+      // Host-side teardown is owned by the Tauri WindowEvent::
+      // CloseRequested hook on the Rust side. Do NOT call
+      // session_close here — React StrictMode would drop the host
+      // session entry on the dev double-mount while the actual
+      // WebviewWindow is still open. The Disconnect button covers
+      // the user-driven close path explicitly.
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, frameEvent, closedEvent]);
