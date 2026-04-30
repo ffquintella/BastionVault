@@ -305,6 +305,39 @@ function ImportTab({ toast }: { toast: ToastFn }) {
     }
   }
 
+  // One-click flow: Preview + Apply in a single click using the
+  // currently-selected conflict policy. Skips the review-table step
+  // for operators who already trust the file. The button is disabled
+  // while a preview is showing — they can hit "Apply import" there.
+  async function handleImportDirect() {
+    if (!fileB64) {
+      toast("error", "Pick a file first.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const previewResult = await api.exchangePreview(
+        fileB64,
+        format,
+        format === "bvx" ? password : undefined,
+        format === "json" ? allowPlaintext : false,
+      );
+      const result = await api.exchangeApply(previewResult.token, conflictPolicy);
+      toast(
+        "success",
+        `Imported: ${result.written} written, ${result.unchanged} unchanged, ${result.skipped} skipped, ${result.renamed} renamed.`,
+      );
+      setPreview(null);
+      setFileB64("");
+      setFileName("");
+      setPassword("");
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <Card title="Import">
       <div className="space-y-4">
@@ -351,9 +384,32 @@ function ImportTab({ toast }: { toast: ToastFn }) {
           )}
         </div>
 
+        {!preview && (
+          <Select
+            label="Conflict policy"
+            value={conflictPolicy}
+            onChange={(e) =>
+              setConflictPolicy(e.target.value as "skip" | "overwrite" | "rename")
+            }
+            options={[
+              { value: "skip", label: "Skip (keep existing)" },
+              { value: "overwrite", label: "Overwrite" },
+              { value: "rename", label: "Rename (write to <path>.imported.<timestamp>)" },
+            ]}
+          />
+        )}
+
         <div className="flex gap-2">
           <Button onClick={handlePreview} loading={busy && !preview} disabled={!fileB64}>
             Preview
+          </Button>
+          <Button
+            onClick={handleImportDirect}
+            loading={busy && !preview}
+            disabled={!fileB64 || !!preview}
+            variant="secondary"
+          >
+            Import
           </Button>
           {preview && (
             <Button onClick={() => { setPreview(null); }} variant="secondary">

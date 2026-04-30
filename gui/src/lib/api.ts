@@ -1037,6 +1037,23 @@ export interface PluginInvokeResult {
 export const pluginsList = () =>
   invoke<{ plugins: PluginManifest[] }>("plugins_list").then((r) => r.plugins);
 
+export const pluginsGetAcceptUnsigned = () =>
+  invoke<boolean>("plugins_get_accept_unsigned");
+
+export const pluginsSetAcceptUnsigned = (on: boolean) =>
+  invoke<boolean>("plugins_set_accept_unsigned", { on });
+
+/**
+ * Map from publisher identifier → hex-encoded ML-DSA-65 public key.
+ * The host validates length + hex on `plugins_set_publishers`, so the
+ * GUI just round-trips strings.
+ */
+export const pluginsGetPublishers = () =>
+  invoke<Record<string, string>>("plugins_get_publishers");
+
+export const pluginsSetPublishers = (publishers: Record<string, string>) =>
+  invoke<void>("plugins_set_publishers", { publishers });
+
 export const pluginsGet = (name: string) =>
   invoke<PluginManifest | null>("plugins_get", { name });
 

@@ -26,7 +26,7 @@ import type {
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 
-type TabId = "issuers" | "roles" | "issue" | "certs" | "tidy";
+type TabId = "issuers" | "roles" | "issue" | "certs" | "tidy" | "xca";
 
 const KEY_TYPE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "ec", label: "ECDSA P-256 (default)" },
@@ -112,6 +112,25 @@ export function PkiPage() {
   const [showEnable, setShowEnable] = useState(false);
   const [newMountPath, setNewMountPath] = useState("pki/");
   const [enabling, setEnabling] = useState(false);
+  // The XCA importer ships as an external plugin; the tab only appears
+  // when the plugin (named `xca-import`) is registered on this vault.
+  const [xcaPluginPresent, setXcaPluginPresent] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await api.pluginsList();
+        if (!cancelled) {
+          setXcaPluginPresent(list.some((p) => p.name === "xca-import"));
+        }
+      } catch {
+        /* plugin admin may be gated; treat as absent */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const refreshMounts = useCallback(async () => {
     try {
@@ -199,6 +218,9 @@ export function PkiPage() {
                   { id: "issue", label: "Issue" },
                   { id: "certs", label: "Certificates" },
                   { id: "tidy", label: "Tidy" },
+                  ...(xcaPluginPresent
+                    ? [{ id: "xca", label: "Import XCA" }]
+                    : []),
                 ]}
                 active={tab}
                 onChange={(t) => setTab(t as TabId)}
@@ -210,6 +232,9 @@ export function PkiPage() {
             {tab === "issue" && <IssueTab mount={activeMount} />}
             {tab === "certs" && <CertsTab mount={activeMount} />}
             {tab === "tidy" && <TidyTab mount={activeMount} />}
+            {tab === "xca" && xcaPluginPresent && (
+              <XcaImportTab mount={activeMount} />
+            )}
           </>
         )}
       </div>
@@ -1602,6 +1627,372 @@ function TidyTab({ mount }: { mount: string }) {
 }
 
 // ── Shared atom ───────────────────────────────────────────────────
+
+// ── Import XCA Tab (gated on the `xca-import` plugin being registered) ──
+
+interface XcaPreviewItem {
+  meta: {
+    id: number;
+    item_type:
+      | "private_key"
+      | "cert"
+      | "request"
+      | "crl"
+      | "template"
+      | "public_key"
+      | "authority"
+      | "other";
+    parent: number;
+    name: string;
+    comment: string;
+  };
+  pem: string | null;
+  subject?: string;
+  serial_hex?: string;
+  not_after_unix?: number | null;
+  decrypt:
+    | "not_encrypted"
+    | "ok"
+    | "missing_password"
+    | "wrong_password"
+    | "unsupported";
+  has_own_pass: boolean;
+}
+
+interface XcaPreview {
+  summary: {
+    format_version: string;
+    issuer_count: number;
+    leaf_count: number;
+    csr_count: number;
+    crl_count: number;
+    template_count: number;
+    key_count: number;
+    skipped: string[];
+  };
+  items: XcaPreviewItem[];
+  decryption_failures: Array<{ name: string; reason: string }>;
+  ownpass_keys: string[];
+}
+
+function XcaImportTab({ mount }: { mount: string }) {
+  const { toast } = useToast();
+  const [filePath, setFilePath] = useState<string>("");
+  const [password, setPassword] = useState<string>("");
+  const [preview, setPreview] = useState<XcaPreview | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [selected, setSelected] = useState<Record<number, boolean>>({});
+
+  function decode(b64: string): string {
+    // base64 → utf-8 string
+    return new TextDecoder().decode(
+      Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)),
+    );
+  }
+  function encode(s: string): string {
+    // utf-8 string → base64
+    const bytes = new TextEncoder().encode(s);
+    let bin = "";
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
+  }
+
+  async function pickFile() {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const picked = await open({
+        title: "Select XCA database",
+        multiple: false,
+        directory: false,
+        filters: [
+          { name: "XCA database", extensions: ["xdb"] },
+          { name: "All files", extensions: ["*"] },
+        ],
+      });
+      if (typeof picked === "string" && picked.length > 0) {
+        setFilePath(picked);
+        setPreview(null);
+      }
+    } catch (e) {
+      toast("error", extractError(e));
+    }
+  }
+
+  async function invokeXca(input: object): Promise<unknown> {
+    const inputB64 = encode(JSON.stringify(input));
+    const result = await api.pluginsInvoke("xca-import", inputB64);
+    if (result.status !== "success") {
+      throw new Error(
+        `xca-import plugin returned status ${result.status} (code ${result.plugin_status_code})`,
+      );
+    }
+    const text = decode(result.response_b64);
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === "object" && "error" in parsed) {
+      throw new Error(String((parsed as { error: unknown }).error));
+    }
+    return parsed;
+  }
+
+  async function handlePreview() {
+    if (!filePath) {
+      toast("error", "Pick an XCA file first.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const out = (await invokeXca({
+        op: "preview",
+        file_path: filePath,
+        master_password: password || undefined,
+      })) as XcaPreview;
+      setPreview(out);
+      // Default-select every item that has usable content. The
+      // operator can deselect anything they don't want imported.
+      const next: Record<number, boolean> = {};
+      for (const it of out.items) {
+        next[it.meta.id] =
+          it.pem !== null &&
+          (it.meta.item_type === "cert" ||
+            it.meta.item_type === "private_key");
+      }
+      setSelected(next);
+      if (out.decryption_failures.length > 0) {
+        toast(
+          "info",
+          `${out.decryption_failures.length} key(s) couldn't be decrypted — supply the password and re-preview.`,
+        );
+      }
+    } catch (e) {
+      toast("error", extractError(e));
+      setPreview(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Pair every selected CA cert with its `parent` private key and
+   * import as a CA bundle. Leaf certs / CSRs / CRLs / templates are
+   * v2 work — for now they're listed but skipped on Apply. */
+  async function handleApply() {
+    if (!preview) return;
+    if (!mount) {
+      toast("error", "No PKI mount selected.");
+      return;
+    }
+    setBusy(true);
+    let imported = 0;
+    let skipped = 0;
+    const errors: string[] = [];
+    try {
+      const byId = new Map(preview.items.map((it) => [it.meta.id, it]));
+      for (const item of preview.items) {
+        if (!selected[item.meta.id]) continue;
+        if (item.meta.item_type === "cert") {
+          if (!item.pem) {
+            skipped++;
+            continue;
+          }
+          // Find a sibling private key whose parent points at this cert
+          // (XCA's `parent` field on private_keys references the cert).
+          let keyPem: string | null = null;
+          for (const cand of preview.items) {
+            if (
+              cand.meta.item_type === "private_key" &&
+              cand.meta.parent === item.meta.id &&
+              cand.pem
+            ) {
+              keyPem = cand.pem;
+              break;
+            }
+          }
+          // Or — more commonly in XCA — the cert's own `parent` points
+          // at its private key.
+          if (!keyPem) {
+            const parentKey = byId.get(item.meta.parent);
+            if (
+              parentKey &&
+              parentKey.meta.item_type === "private_key" &&
+              parentKey.pem
+            ) {
+              keyPem = parentKey.pem;
+            }
+          }
+          if (!keyPem) {
+            skipped++;
+            continue;
+          }
+          const bundle = `${keyPem.trim()}\n${item.pem.trim()}\n`;
+          try {
+            await api.pkiImportCaBundle({
+              mount,
+              pem_bundle: bundle,
+              issuer_name: item.meta.name || undefined,
+            });
+            imported++;
+          } catch (e) {
+            errors.push(`${item.meta.name}: ${extractError(e)}`);
+            skipped++;
+          }
+        } else {
+          // Leaf certs / CSRs / CRLs / templates / standalone keys land
+          // in v2; selecting them today is informational only.
+          skipped++;
+        }
+      }
+      if (errors.length > 0) {
+        toast(
+          "error",
+          `Imported ${imported} CA(s); ${errors.length} failed:\n` +
+            errors.join("\n"),
+        );
+      } else {
+        toast(
+          "success",
+          `Imported ${imported} issuer(s). ${skipped} item(s) skipped (out of v1 scope or no matching key).`,
+        );
+      }
+      setPreview(null);
+      setSelected({});
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <Card title="Import XCA database">
+        <p className="text-sm text-[var(--color-text-muted)] mb-3">
+          Reads an XCA <code className="font-mono">.xdb</code> file via the{" "}
+          <code className="font-mono">xca-import</code> plugin and imports
+          selected CA + key pairs as PKI issuers on{" "}
+          <code className="font-mono">{mount || "(no mount)"}</code>. Leaf
+          certs, CSRs, CRLs, and templates are listed but not yet imported in
+          v1.
+        </p>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div className="col-span-2 flex items-end gap-2">
+            <Input
+              label="XCA file"
+              value={filePath}
+              onChange={(e) => setFilePath(e.target.value)}
+              placeholder="Click Browse…"
+              readOnly
+            />
+            <Button onClick={pickFile} variant="secondary" disabled={busy}>
+              Browse…
+            </Button>
+          </div>
+          <Input
+            label="Master password (optional)"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            hint="Leave blank for unencrypted databases."
+          />
+        </div>
+
+        <div className="flex gap-2 mt-3">
+          <Button onClick={handlePreview} loading={busy && !preview} disabled={!filePath}>
+            Preview
+          </Button>
+          {preview && (
+            <Button
+              onClick={() => {
+                setPreview(null);
+                setSelected({});
+              }}
+              variant="secondary"
+              disabled={busy}
+            >
+              Cancel preview
+            </Button>
+          )}
+        </div>
+      </Card>
+
+      {preview && (
+        <Card title="Preview">
+          <div className="text-sm mb-3">
+            <strong>Format:</strong> {preview.summary.format_version} —{" "}
+            <span className="text-emerald-500">
+              {preview.summary.issuer_count} CA(s)
+            </span>{" "}
+            /{" "}
+            <span className="text-[var(--color-text-muted)]">
+              {preview.summary.leaf_count} leaf
+            </span>{" "}
+            / {preview.summary.csr_count} CSR / {preview.summary.crl_count} CRL
+            / {preview.summary.template_count} template /{" "}
+            {preview.summary.key_count} key
+          </div>
+
+          {preview.decryption_failures.length > 0 && (
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs mb-3">
+              <strong>Decryption failures:</strong>
+              <ul className="mt-1 ml-4 list-disc">
+                {preview.decryption_failures.map((f, i) => (
+                  <li key={i}>
+                    {f.name}: {f.reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <Table
+            columns={[
+              {
+                key: "select",
+                header: "",
+                render: (it: XcaPreviewItem) => (
+                  <input
+                    type="checkbox"
+                    checked={!!selected[it.meta.id]}
+                    onChange={(e) =>
+                      setSelected((s) => ({
+                        ...s,
+                        [it.meta.id]: e.target.checked,
+                      }))
+                    }
+                  />
+                ),
+              },
+              { key: "name", header: "Name", render: (it) => it.meta.name },
+              {
+                key: "type",
+                header: "Type",
+                render: (it) => it.meta.item_type,
+              },
+              {
+                key: "subject",
+                header: "Subject / detail",
+                render: (it) =>
+                  it.subject || it.meta.comment || "—",
+              },
+              { key: "decrypt", header: "Decrypt", render: (it) => it.decrypt },
+            ]}
+            data={preview.items}
+            rowKey={(it) => String(it.meta.id)}
+          />
+
+          <div className="flex justify-end mt-3">
+            <Button
+              onClick={handleApply}
+              loading={busy}
+              disabled={!Object.values(selected).some(Boolean)}
+            >
+              Import selected
+            </Button>
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
 
 function Field({
   label,

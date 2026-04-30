@@ -27,6 +27,102 @@ pub struct PluginListResult {
     pub plugins: Vec<PluginManifest>,
 }
 
+/// Read the publisher allowlist. Returns `name → hex(public_key)`.
+#[tauri::command]
+pub async fn plugins_get_publishers(
+    state: State<'_, AppState>,
+) -> CmdResult<BTreeMap<String, String>> {
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let allow =
+        bastion_vault::plugins::verifier::PublisherAllowlist::load(core.barrier.as_storage())
+            .await
+            .map_err(CommandError::from)?;
+    Ok(allow.keys.into_iter().collect())
+}
+
+/// Replace the publisher allowlist. Takes the full map; the caller
+/// (GUI) reads the current map, applies its add/remove, and submits
+/// the result. Mirrors the PUT /v1/sys/plugins/publishers shape.
+#[tauri::command]
+pub async fn plugins_set_publishers(
+    state: State<'_, AppState>,
+    publishers: BTreeMap<String, String>,
+) -> CmdResult<()> {
+    // Validate hex + length up front so a typo doesn't break verify
+    // later. ML-DSA-65 PK is 1952 bytes / 3904 hex chars.
+    for (name, pk_hex) in &publishers {
+        if name.is_empty() {
+            return Err("publisher name cannot be empty".into());
+        }
+        let bytes = hex_decode(pk_hex).ok_or_else(|| {
+            CommandError::from(format!("publisher `{name}` public key is not valid hex"))
+        })?;
+        // ML_DSA_65_PUBLIC_KEY_LEN re-export from bv_crypto.
+        if bytes.len() != bv_crypto::ML_DSA_65_PUBLIC_KEY_LEN {
+            return Err(CommandError::from(format!(
+                "publisher `{name}` public key must be {} bytes, got {}",
+                bv_crypto::ML_DSA_65_PUBLIC_KEY_LEN,
+                bytes.len()
+            )));
+        }
+    }
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let allow = bastion_vault::plugins::verifier::PublisherAllowlist {
+        keys: publishers.into_iter().collect(),
+    };
+    allow
+        .save(core.barrier.as_storage())
+        .await
+        .map_err(CommandError::from)?;
+    Ok(())
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    for chunk in s.as_bytes().chunks(2) {
+        let hi = (chunk[0] as char).to_digit(16)?;
+        let lo = (chunk[1] as char).to_digit(16)?;
+        out.push(((hi as u8) << 4) | lo as u8);
+    }
+    Some(out)
+}
+
+/// Read the engine's `accept_unsigned` flag. Default-closed when the
+/// key is missing, matching `verifier::read_accept_unsigned`.
+#[tauri::command]
+pub async fn plugins_get_accept_unsigned(state: State<'_, AppState>) -> CmdResult<bool> {
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    bastion_vault::plugins::verifier::read_accept_unsigned(core.barrier.as_storage())
+        .await
+        .map_err(CommandError::from)
+}
+
+/// Flip the `accept_unsigned` flag. Logged at WARN by the verifier
+/// when set to `true`. Embedded-mode only (matches the rest of the
+/// admin Plugins page).
+#[tauri::command]
+pub async fn plugins_set_accept_unsigned(
+    state: State<'_, AppState>,
+    on: bool,
+) -> CmdResult<bool> {
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    bastion_vault::plugins::verifier::write_accept_unsigned(core.barrier.as_storage(), on)
+        .await
+        .map_err(CommandError::from)?;
+    Ok(on)
+}
+
 #[tauri::command]
 pub async fn plugins_list(state: State<'_, AppState>) -> CmdResult<PluginListResult> {
     let vault_guard = state.vault.lock().await;

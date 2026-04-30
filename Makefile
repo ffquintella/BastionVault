@@ -22,7 +22,7 @@ OPENSSL_SRC_PERL ?= C:/Strawberry/perl/bin/perl.exe
 export OPENSSL_SRC_PERL
 endif
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -203,6 +203,12 @@ win-bootstrap: ## Install Windows build deps (Perl, NASM, Node) via winget and a
 PLUGINS_DIR := plugins-ext
 PLUGINS_WASM_TARGET := wasm32-wasip1
 PLUGINS_OUT := $(PLUGINS_DIR)/dist
+# Where the dev signing key lives. The seed file is the secret half;
+# the .pub file is what you register on the host as the publisher's
+# allowlist entry. Override on the command line for CI / production
+# (e.g. `make plugins-pack PLUGINS_SIGNING_KEY=keys/release`).
+PLUGINS_SIGNING_KEY ?= $(PLUGINS_OUT)/dev-signing-key
+PLUGINS_SIGNING_KEY_NAME ?= bastionvault-dev
 
 plugins-init: ## Initialise the BastionVault-Plugins submodule (first-time setup)
 	@if [ ! -f "$(PLUGINS_DIR)/Cargo.toml" ]; then \
@@ -249,6 +255,50 @@ plugins-pack: plugins-wasm plugins-process plugins-pack-build ## Pack each plugi
 		--out      $(PLUGINS_OUT)/bastion-plugin-xca.bvplugin
 	@echo ""
 	@echo "==> Bundles ready in $(PLUGINS_OUT)/"
+	@ls -lh $(PLUGINS_OUT)/*.bvplugin 2>/dev/null || true
+
+plugins-keygen: plugins-pack-build ## Mint a fresh ML-DSA-65 dev signing keypair under $(PLUGINS_SIGNING_KEY)
+	@mkdir -p $(dir $(PLUGINS_SIGNING_KEY))
+	@if [ -f $(PLUGINS_SIGNING_KEY).seed ]; then \
+		echo "==> $(PLUGINS_SIGNING_KEY).seed already exists; refusing to overwrite"; \
+		echo "    Delete it first if you really want a new key."; \
+		exit 1; \
+	fi
+	./target/release/bv-plugin-pack$(if $(filter Windows_NT,$(OS)),.exe,) \
+		keygen --out $(PLUGINS_SIGNING_KEY)
+	@echo ""
+	@echo "==> register $(PLUGINS_SIGNING_KEY).pub on the host as publisher"
+	@echo "    name=$(PLUGINS_SIGNING_KEY_NAME) so signed bundles validate."
+
+plugins-sign: plugins-wasm plugins-process plugins-pack-build ## Repack each plugin with an ML-DSA-65 signature using $(PLUGINS_SIGNING_KEY).seed
+	@if [ ! -f $(PLUGINS_SIGNING_KEY).seed ]; then \
+		echo "==> $(PLUGINS_SIGNING_KEY).seed missing — run \`make plugins-keygen\` first"; \
+		exit 1; \
+	fi
+	@echo "==> signing bastion-plugin-totp (wasm)"
+	./target/release/bv-plugin-pack$(if $(filter Windows_NT,$(OS)),.exe,) \
+		--manifest          $(PLUGINS_DIR)/bastion-plugin-totp/plugin.toml \
+		--binary            $(PLUGINS_OUT)/bastion_plugin_totp.wasm \
+		--out               $(PLUGINS_OUT)/bastion-plugin-totp.bvplugin \
+		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
+		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
+	@echo "==> signing bastion-plugin-postgres (process)"
+	./target/release/bv-plugin-pack$(if $(filter Windows_NT,$(OS)),.exe,) \
+		--manifest          $(PLUGINS_DIR)/bastion-plugin-postgres/plugin.toml \
+		--binary            $(PLUGINS_OUT)/bastion-plugin-postgres$(if $(filter Windows_NT,$(OS)),.exe,) \
+		--out               $(PLUGINS_OUT)/bastion-plugin-postgres.bvplugin \
+		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
+		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
+	@echo "==> signing bastion-plugin-xca (process)"
+	./target/release/bv-plugin-pack$(if $(filter Windows_NT,$(OS)),.exe,) \
+		--manifest          $(PLUGINS_DIR)/bastion-plugin-xca/plugin.toml \
+		--binary            $(PLUGINS_OUT)/bastion-plugin-xca$(if $(filter Windows_NT,$(OS)),.exe,) \
+		--out               $(PLUGINS_OUT)/bastion-plugin-xca.bvplugin \
+		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
+		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
+	@echo ""
+	@echo "==> Signed bundles ready in $(PLUGINS_OUT)/"
+	@echo "    Publisher pubkey to register on the host: $(PLUGINS_SIGNING_KEY).pub"
 	@ls -lh $(PLUGINS_OUT)/*.bvplugin 2>/dev/null || true
 
 plugins-process: plugins-init ## Compile the process-runtime reference plugins (release, native target)

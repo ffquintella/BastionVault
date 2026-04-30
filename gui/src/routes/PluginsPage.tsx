@@ -30,6 +30,13 @@ export function PluginsPage() {
   const [configuring, setConfiguring] = useState<PluginManifest | null>(null);
   const [versioning, setVersioning] = useState<PluginManifest | null>(null);
   const [reloading, setReloading] = useState<string | null>(null);
+  const [acceptUnsigned, setAcceptUnsigned] = useState<boolean | null>(null);
+  const [acceptUnsignedBusy, setAcceptUnsignedBusy] = useState(false);
+  const [publishers, setPublishers] = useState<Record<string, string> | null>(
+    null,
+  );
+  const [pubBusy, setPubBusy] = useState(false);
+  const [showAddPub, setShowAddPub] = useState(false);
 
   async function refresh() {
     setLoading(true);
@@ -41,8 +48,84 @@ export function PluginsPage() {
       setLoading(false);
     }
   }
+  async function refreshAcceptUnsigned() {
+    try {
+      setAcceptUnsigned(await api.pluginsGetAcceptUnsigned());
+    } catch (e) {
+      toast("error", extractError(e));
+    }
+  }
+  async function refreshPublishers() {
+    try {
+      setPublishers(await api.pluginsGetPublishers());
+    } catch (e) {
+      toast("error", extractError(e));
+    }
+  }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    refresh();
+    refreshAcceptUnsigned();
+    refreshPublishers();
+  }, []);
+
+  async function addPublisher(name: string, pubkeyHex: string) {
+    if (!name.trim() || !pubkeyHex.trim()) {
+      toast("error", "Both name and public key are required.");
+      return;
+    }
+    if (publishers && publishers[name.trim()] !== undefined) {
+      toast("error", `Publisher "${name.trim()}" already exists. Remove it first.`);
+      return;
+    }
+    setPubBusy(true);
+    try {
+      const next = { ...(publishers ?? {}), [name.trim()]: pubkeyHex.trim() };
+      await api.pluginsSetPublishers(next);
+      setPublishers(next);
+      setShowAddPub(false);
+      toast("success", `Publisher "${name.trim()}" added.`);
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setPubBusy(false);
+    }
+  }
+  async function removePublisher(name: string) {
+    if (!publishers) return;
+    setPubBusy(true);
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { [name]: _drop, ...rest } = publishers;
+      await api.pluginsSetPublishers(rest);
+      setPublishers(rest);
+      toast("success", `Publisher "${name}" removed.`);
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setPubBusy(false);
+    }
+  }
+
+  async function toggleAcceptUnsigned() {
+    if (acceptUnsigned === null) return;
+    setAcceptUnsignedBusy(true);
+    try {
+      const next = !acceptUnsigned;
+      const v = await api.pluginsSetAcceptUnsigned(next);
+      setAcceptUnsigned(v);
+      toast(
+        next ? "info" : "success",
+        next
+          ? "accept_unsigned enabled — unsigned plugins will load (development only)."
+          : "accept_unsigned disabled — unsigned plugins will be rejected.",
+      );
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setAcceptUnsignedBusy(false);
+    }
+  }
 
   async function handleDelete() {
     if (!deletingName) return;
@@ -70,6 +153,111 @@ export function PluginsPage() {
           <code className="font-mono text-xs">crate::plugins</code> module
           for the ABI.
         </p>
+
+        <Card title="Engine settings">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <div className="text-sm font-medium">
+                Accept unsigned plugins
+              </div>
+              <div className="text-xs text-[var(--color-text-muted)] mt-1">
+                Development-only. When on, plugins without an ML-DSA-65
+                publisher signature load with a WARN line in the audit log.
+                Off in production: ship plugins through{" "}
+                <code className="font-mono">make plugins-sign</code> and
+                register the publisher's public key in the allowlist.
+              </div>
+            </div>
+            <div className="flex items-center gap-3 shrink-0">
+              <Badge
+                variant={
+                  acceptUnsigned === null
+                    ? "neutral"
+                    : acceptUnsigned
+                      ? "warning"
+                      : "success"
+                }
+                label={
+                  acceptUnsigned === null
+                    ? "loading"
+                    : acceptUnsigned
+                      ? "ON (dev)"
+                      : "OFF"
+                }
+              />
+              <Button
+                variant="secondary"
+                onClick={toggleAcceptUnsigned}
+                disabled={acceptUnsigned === null || acceptUnsignedBusy}
+              >
+                {acceptUnsignedBusy
+                  ? "Working…"
+                  : acceptUnsigned
+                    ? "Disable"
+                    : "Enable"}
+              </Button>
+            </div>
+          </div>
+
+          <hr className="my-4 border-[var(--color-border)]" />
+
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <div className="text-sm font-medium">Publisher allowlist</div>
+              <div className="text-xs text-[var(--color-text-muted)] mt-1">
+                ML-DSA-65 public keys trusted to sign plugins. Generate a
+                keypair with{" "}
+                <code className="font-mono">make plugins-keygen</code> and
+                paste the contents of{" "}
+                <code className="font-mono">*.pub</code> below.
+              </div>
+            </div>
+            <Button
+              variant="secondary"
+              onClick={() => setShowAddPub(true)}
+              disabled={pubBusy}
+            >
+              + Add publisher
+            </Button>
+          </div>
+
+          <div className="mt-3">
+            {publishers === null ? (
+              <p className="text-xs text-[var(--color-text-muted)]">Loading…</p>
+            ) : Object.keys(publishers).length === 0 ? (
+              <p className="text-xs text-[var(--color-text-muted)]">
+                No publishers registered. Signed plugins will fail to load until
+                their publisher is added.
+              </p>
+            ) : (
+              <ul className="space-y-1">
+                {Object.entries(publishers).map(([name, pk]) => (
+                  <li
+                    key={name}
+                    className="flex items-center justify-between gap-3 rounded-md border border-[var(--color-border)] px-3 py-2 text-sm"
+                  >
+                    <div className="min-w-0">
+                      <div className="font-medium">{name}</div>
+                      <div
+                        className="text-xs text-[var(--color-text-muted)] font-mono truncate"
+                        title={pk}
+                      >
+                        {pk.slice(0, 24)}…{pk.slice(-12)} ({pk.length / 2} bytes)
+                      </div>
+                    </div>
+                    <Button
+                      variant="danger"
+                      onClick={() => removePublisher(name)}
+                      disabled={pubBusy}
+                    >
+                      Remove
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </Card>
 
         <Card title="Registered plugins">
           {loading ? (
@@ -117,6 +305,14 @@ export function PluginsPage() {
         <RegisterModal
           onClose={() => setShowRegister(false)}
           onRegistered={() => { setShowRegister(false); refresh(); }}
+        />
+      )}
+
+      {showAddPub && (
+        <AddPublisherModal
+          onClose={() => setShowAddPub(false)}
+          onAdd={addPublisher}
+          busy={pubBusy}
         />
       )}
 
@@ -1051,5 +1247,76 @@ function PluginMetricsPanel() {
         <code className="font-mono">/sys/metrics</code>.
       </p>
     </Card>
+  );
+}
+
+function AddPublisherModal({
+  onClose,
+  onAdd,
+  busy,
+}: {
+  onClose: () => void;
+  onAdd: (name: string, pubkeyHex: string) => Promise<void>;
+  busy: boolean;
+}) {
+  const [name, setName] = useState("");
+  const [pubkey, setPubkey] = useState("");
+
+  // Drop optional whitespace + an optional `0x` prefix so paste from
+  // hex tools / shell output works without the operator hand-cleaning.
+  function normalizeHex(input: string): string {
+    let s = input.trim().replace(/\s+/g, "");
+    if (s.startsWith("0x") || s.startsWith("0X")) s = s.slice(2);
+    return s.toLowerCase();
+  }
+
+  return (
+    <Modal
+      open
+      onClose={busy ? () => undefined : onClose}
+      title="Add publisher"
+      size="md"
+      actions={
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={busy}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => onAdd(name, normalizeHex(pubkey))}
+            disabled={busy || !name.trim() || !pubkey.trim()}
+          >
+            {busy ? "Working…" : "Add"}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <Input
+          label="Name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="e.g. bastionvault-dev"
+          hint="Free-form identifier; must match the plugin's `signing_key` field."
+        />
+        <div>
+          <label className="text-sm font-medium block mb-1">
+            Public key (hex)
+          </label>
+          <textarea
+            value={pubkey}
+            onChange={(e) => setPubkey(e.target.value)}
+            rows={6}
+            className="w-full font-mono text-xs rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5"
+            placeholder="Paste the contents of <signing-key>.pub (3904 hex chars)…"
+          />
+          <p className="text-xs text-[var(--color-text-muted)] mt-1">
+            Generated by{" "}
+            <code className="font-mono">make plugins-keygen</code> — the file
+            with the <code className="font-mono">.pub</code> extension. Whitespace
+            and a leading <code className="font-mono">0x</code> are stripped.
+          </p>
+        </div>
+      </div>
+    </Modal>
   );
 }

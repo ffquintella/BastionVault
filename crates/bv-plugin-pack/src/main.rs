@@ -29,7 +29,8 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-use clap::Parser;
+use bv_crypto::MlDsa65Provider;
+use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -38,18 +39,61 @@ const FORMAT_VERSION: u8 = 1;
 
 #[derive(Parser, Debug)]
 #[command(name = "bv-plugin-pack", version, about, long_about = None)]
-struct Args {
-    /// Path to the source manifest (TOML).
-    #[arg(long)]
-    manifest: PathBuf,
+struct Cli {
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
 
-    /// Path to the compiled `.wasm` binary.
+    // ── default-mode (pack) flags, kept top-level for backward compatibility ──
     #[arg(long)]
-    binary: PathBuf,
+    manifest: Option<PathBuf>,
 
-    /// Output path. Defaults to `<binary stem>.bvplugin` next to `--binary`.
+    #[arg(long)]
+    binary: Option<PathBuf>,
+
     #[arg(long)]
     out: Option<PathBuf>,
+
+    /// Hex-encoded ML-DSA-65 secret seed (32 bytes / 64 hex chars).
+    /// When supplied, the packer signs the manifest+binary and bakes
+    /// the signature + `signing_key` name into the embedded manifest.
+    /// Pair with `--signing-key-name`.
+    #[arg(long)]
+    signing_seed_hex: Option<String>,
+
+    /// Path to a file containing the hex-encoded seed (alternative to
+    /// `--signing-seed-hex` so secrets don't end up in shell history).
+    #[arg(long)]
+    signing_seed_file: Option<PathBuf>,
+
+    /// Publisher name to record on the manifest. Must match the
+    /// allowlist entry registered on the host via
+    /// `POST /v1/sys/plugins/publishers`.
+    #[arg(long)]
+    signing_key_name: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// Generate a fresh ML-DSA-65 keypair for plugin signing. Writes
+    /// `<out>.seed` (hex secret seed) and `<out>.pub` (hex public key).
+    /// The seed file is the one to feed back into `--signing-seed-file`;
+    /// the pub file is what you register as the publisher's allowlist
+    /// entry.
+    Keygen {
+        /// Output path prefix. The tool writes `<out>.seed` + `<out>.pub`.
+        #[arg(long)]
+        out: PathBuf,
+    },
+}
+
+#[derive(Debug)]
+struct PackArgs {
+    manifest: PathBuf,
+    binary: PathBuf,
+    out: Option<PathBuf>,
+    signing_seed_hex: Option<String>,
+    signing_seed_file: Option<PathBuf>,
+    signing_key_name: Option<String>,
 }
 
 /// Mirrors `bastion_vault::plugins::manifest::ConfigField` exactly,
@@ -101,17 +145,42 @@ struct Manifest {
     capabilities: Capabilities,
     #[serde(default)]
     config_schema: Vec<ConfigField>,
+    /// ML-DSA-65 signature over `sha256(binary) || canonical_manifest_json_without_signature`,
+    /// hex-encoded. Filled in only when `--signing-seed-hex` /
+    /// `--signing-seed-file` is supplied.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    signature: String,
+    /// Publisher identifier, must match the host's allowlist entry.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    signing_key: String,
 }
 
 fn main() {
-    let args = Args::parse();
-    if let Err(e) = run(args) {
+    let cli = Cli::parse();
+    let result = match cli.cmd {
+        Some(Cmd::Keygen { out }) => keygen(out),
+        None => {
+            let manifest = cli.manifest.expect(
+                "--manifest is required when no subcommand is given (use `keygen` to mint signing keys)",
+            );
+            let binary = cli.binary.expect("--binary is required");
+            run(PackArgs {
+                manifest,
+                binary,
+                out: cli.out,
+                signing_seed_hex: cli.signing_seed_hex,
+                signing_seed_file: cli.signing_seed_file,
+                signing_key_name: cli.signing_key_name,
+            })
+        }
+    };
+    if let Err(e) = result {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
 }
 
-fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+fn run(args: PackArgs) -> Result<(), Box<dyn std::error::Error>> {
     let toml_text = fs::read_to_string(&args.manifest)
         .map_err(|e| format!("reading manifest {}: {e}", args.manifest.display()))?;
     let mut manifest: Manifest = toml::from_str(&toml_text)
@@ -139,6 +208,30 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     manifest.sha256 = sha256;
     manifest.size = binary.len() as u64;
 
+    // Optional signing pass — runs *after* sha256/size are stamped so
+    // the canonical message the host re-derives matches byte-for-byte.
+    let seed = resolve_signing_seed(&args)?;
+    if let Some(seed_bytes) = seed {
+        let key_name = args
+            .signing_key_name
+            .clone()
+            .ok_or("`--signing-key-name` is required when signing")?;
+        manifest.signing_key = key_name;
+        manifest.signature.clear();
+        // Canonical message must match `verifier::signing_message`:
+        //   sha256(binary) || canonical_manifest_json_without_signature
+        let bin_digest = hasher_digest(&binary);
+        let canonical = serde_json::to_vec(&manifest)?;
+        let mut message = Vec::with_capacity(bin_digest.len() + canonical.len());
+        message.extend_from_slice(&bin_digest);
+        message.extend_from_slice(&canonical);
+        let provider = MlDsa65Provider;
+        let sig_bytes = provider
+            .sign(&seed_bytes, &message, &[])
+            .map_err(|e| format!("ml-dsa-65 sign: {e:?}"))?;
+        manifest.signature = hex::encode(&sig_bytes);
+    }
+
     let manifest_json = serde_json::to_vec(&manifest)?;
     let manifest_len = u32::try_from(manifest_json.len())
         .map_err(|_| "manifest larger than 4 GiB — not supported")?;
@@ -159,13 +252,87 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     f.sync_all()?;
 
     println!(
-        "wrote {} ({} byte header + {} byte manifest + {} byte binary)",
+        "wrote {} ({} byte header + {} byte manifest + {} byte binary){}",
         out.display(),
         12,
         manifest_json.len(),
         binary.len(),
+        if manifest.signature.is_empty() {
+            ""
+        } else {
+            " — signed"
+        },
     );
     Ok(())
+}
+
+fn hasher_digest(binary: &[u8]) -> Vec<u8> {
+    let mut h = Sha256::new();
+    h.update(binary);
+    h.finalize().to_vec()
+}
+
+/// Resolve an ML-DSA-65 secret seed from one of the two CLI flags
+/// (`--signing-seed-hex` or `--signing-seed-file`). Returns `Ok(None)`
+/// when neither is supplied — the caller treats that as "skip the
+/// signing step".
+fn resolve_signing_seed(args: &PackArgs) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+    let raw = match (&args.signing_seed_hex, &args.signing_seed_file) {
+        (Some(_), Some(_)) => {
+            return Err("supply --signing-seed-hex OR --signing-seed-file, not both".into())
+        }
+        (Some(s), None) => s.trim().to_string(),
+        (None, Some(p)) => fs::read_to_string(p)
+            .map_err(|e| format!("reading {}: {e}", p.display()))?
+            .trim()
+            .to_string(),
+        (None, None) => return Ok(None),
+    };
+    let seed = hex::decode(&raw).map_err(|e| format!("seed must be hex: {e}"))?;
+    if seed.len() != 32 {
+        return Err(format!(
+            "ML-DSA-65 seed must be 32 bytes (64 hex chars); got {} bytes",
+            seed.len()
+        )
+        .into());
+    }
+    Ok(Some(seed))
+}
+
+fn keygen(out: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let provider = MlDsa65Provider;
+    let kp = provider
+        .generate_keypair()
+        .map_err(|e| format!("keygen: {e:?}"))?;
+    let seed_path = with_ext(&out, "seed");
+    let pub_path = with_ext(&out, "pub");
+    if let Some(parent) = seed_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = fs::create_dir_all(parent);
+        }
+    }
+    fs::write(&seed_path, hex::encode(kp.secret_seed()))
+        .map_err(|e| format!("writing {}: {e}", seed_path.display()))?;
+    fs::write(&pub_path, hex::encode(kp.public_key()))
+        .map_err(|e| format!("writing {}: {e}", pub_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&seed_path, fs::Permissions::from_mode(0o600));
+    }
+    println!(
+        "wrote {} (seed, keep secret) and {} (publisher pubkey, register on host)",
+        seed_path.display(),
+        pub_path.display()
+    );
+    Ok(())
+}
+
+fn with_ext(p: &std::path::Path, ext: &str) -> PathBuf {
+    let mut s = p.as_os_str().to_owned();
+    s.push(".");
+    s.push(ext);
+    PathBuf::from(s)
 }
 
 fn is_placeholder_sha(s: &str) -> bool {
@@ -216,10 +383,13 @@ default = "6"
         .unwrap();
         fs::write(&binary_path, b"\x00asm\x01\x00\x00\x00").unwrap();
 
-        run(Args {
+        run(PackArgs {
             manifest: manifest_path,
             binary: binary_path,
             out: Some(out_path.clone()),
+            signing_seed_hex: None,
+            signing_seed_file: None,
+            signing_key_name: None,
         })
         .unwrap();
 
