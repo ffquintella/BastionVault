@@ -1,6 +1,7 @@
 mod commands;
 mod embedded;
 mod error;
+mod menu;
 mod preferences;
 mod local_keystore;
 mod secure_store;
@@ -98,18 +99,33 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
         .setup(|app| {
+            use tauri::Manager;
+            // Native menu (File / Application / About) — attached to
+            // the main window only. Session windows (SSH/RDP) are
+            // spawned separately and inherit no menu, which is what
+            // we want.
+            if let Some(window) = app.get_webview_window("main") {
+                match menu::build_main_menu(app.handle()) {
+                    Ok(m) => {
+                        if let Err(e) = window.set_menu(m) {
+                            eprintln!("set main menu: {e}");
+                        }
+                        let app_for_evt = app.handle().clone();
+                        window.on_menu_event(move |_w, ev| {
+                            menu::handle_menu_event(&app_for_evt, ev.id().as_ref());
+                        });
+                    }
+                    Err(e) => eprintln!("build main menu: {e}"),
+                }
+            }
+
             #[cfg(target_os = "windows")]
             {
-                use tauri::Manager;
                 if let Some(window) = app.get_webview_window("main") {
                     if let Err(e) = harden_webview_autofill(&window) {
                         eprintln!("WebView2 autofill hardening failed: {e}");
                     }
                 }
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                let _ = app;
             }
             Ok(())
         })
@@ -188,6 +204,9 @@ pub fn run() {
             commands::auth::login_userpass,
             commands::auth::get_current_token,
             commands::auth::logout,
+            // Full-vault password-encrypted backup / restore
+            commands::backup::backup_export,
+            commands::backup::backup_restore,
             // Exchange (import / export module)
             commands::exchange::exchange_export,
             commands::exchange::exchange_preview,

@@ -18,7 +18,7 @@ use super::format::{self, BackupHeader};
 pub async fn create_backup(
     backend: &dyn Backend,
     hmac_key: &[u8],
-    writer: &mut dyn Write,
+    writer: &mut (dyn Write + Send),
     compressed: bool,
 ) -> Result<u64, RvError> {
     // First pass: collect all keys and count entries.

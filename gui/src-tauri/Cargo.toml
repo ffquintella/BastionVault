@@ -26,7 +26,10 @@ bastion_vault = { path = "../..", default-features = false }
 rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
+# Argon2id KDF used by the password-encrypted backup envelope
+# (`commands/backup.rs`). Mirrors the host crate's argon2 pin.
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "std"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 chrono = "0.4"
 dirs = "6"

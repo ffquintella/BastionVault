@@ -1,8 +1,10 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
+import { listen } from "@tauri-apps/api/event";
 import { useVaultStore } from "../stores/vaultStore";
 import { useAuthStore } from "../stores/authStore";
 import { StatusBadge } from "./StatusBadge";
+import { BackupModal } from "./BackupModal";
 import * as api from "../lib/api";
 
 // localStorage key for the persisted expanded/collapsed state of the
@@ -220,6 +222,38 @@ export function Layout({ children }: LayoutProps) {
     navigate("/connect");
   }
 
+  // The native File menu's "Sign Out" item routes here so the
+  // operator gets the same auth + navigation reset whether they
+  // click the sidebar button or the menu entry.
+  useEffect(() => {
+    const unlisten = listen("menu:sign-out", () => {
+      handleSignOut();
+    });
+    return () => {
+      void unlisten.then((u) => u());
+    };
+    // handleSignOut closes over stable store actions — re-binding
+    // on every render would just churn the event listener.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Backup menu items open the same modal in different modes.
+  const [backupMode, setBackupMode] = useState<"export" | "restore" | null>(
+    null,
+  );
+  useEffect(() => {
+    const unlistenExport = listen("menu:backup-export", () => {
+      setBackupMode("export");
+    });
+    const unlistenRestore = listen("menu:backup-restore", () => {
+      setBackupMode("restore");
+    });
+    return () => {
+      void unlistenExport.then((u) => u());
+      void unlistenRestore.then((u) => u());
+    };
+  }, []);
+
   /**
    * Jump to the vault chooser on the Connect page.
    *
@@ -365,6 +399,9 @@ export function Layout({ children }: LayoutProps) {
 
       {/* Main content */}
       <main className="flex-1 overflow-auto p-6">{children}</main>
+
+      {/* Backup modal — driven by the File → Backup menu items */}
+      <BackupModal mode={backupMode} onClose={() => setBackupMode(null)} />
     </div>
   );
 }

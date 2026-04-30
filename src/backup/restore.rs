@@ -16,7 +16,7 @@ use super::format;
 pub async fn restore_backup(
     backend: &dyn Backend,
     hmac_key: &[u8],
-    reader: &mut dyn Read,
+    reader: &mut (dyn Read + Send),
 ) -> Result<u64, RvError> {
     // Read entire file into memory for HMAC verification.
     let mut data = Vec::new();
