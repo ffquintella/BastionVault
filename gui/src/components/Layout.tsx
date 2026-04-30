@@ -1,10 +1,11 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { listen } from "@tauri-apps/api/event";
 import { useVaultStore } from "../stores/vaultStore";
 import { useAuthStore } from "../stores/authStore";
 import { StatusBadge } from "./StatusBadge";
 import { BackupModal } from "./BackupModal";
+import { TitleBar } from "./TitleBar";
+import { AboutModal } from "./AboutModal";
 import * as api from "../lib/api";
 
 // localStorage key for the persisted expanded/collapsed state of the
@@ -222,37 +223,13 @@ export function Layout({ children }: LayoutProps) {
     navigate("/connect");
   }
 
-  // The native File menu's "Sign Out" item routes here so the
-  // operator gets the same auth + navigation reset whether they
-  // click the sidebar button or the menu entry.
-  useEffect(() => {
-    const unlisten = listen("menu:sign-out", () => {
-      handleSignOut();
-    });
-    return () => {
-      void unlisten.then((u) => u());
-    };
-    // handleSignOut closes over stable store actions — re-binding
-    // on every render would just churn the event listener.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Backup menu items open the same modal in different modes.
+  // Backup modal mode + About modal flag are owned by Layout so the
+  // hamburger menu (top-left of the sidebar) and any other future
+  // trigger can drive them through the same state.
   const [backupMode, setBackupMode] = useState<"export" | "restore" | null>(
     null,
   );
-  useEffect(() => {
-    const unlistenExport = listen("menu:backup-export", () => {
-      setBackupMode("export");
-    });
-    const unlistenRestore = listen("menu:backup-restore", () => {
-      setBackupMode("restore");
-    });
-    return () => {
-      void unlistenExport.then((u) => u());
-      void unlistenRestore.then((u) => u());
-    };
-  }, []);
+  const [aboutOpen, setAboutOpen] = useState(false);
 
   /**
    * Jump to the vault chooser on the Connect page.
@@ -275,17 +252,29 @@ export function Layout({ children }: LayoutProps) {
     navigate("/connect?choose=1");
   }
 
+  const subtitle =
+    mode === "Remote" && remoteProfile
+      ? remoteProfile.name || remoteProfile.address
+      : "Desktop";
+
   return (
-    <div className="flex h-screen">
+    <div className="flex flex-col h-screen">
+      {/* Custom title bar (replaces the OS chrome). Hamburger menu
+          lives at the far left of it. */}
+      <TitleBar
+        onSignOut={handleSignOut}
+        onBackupExport={() => setBackupMode("export")}
+        onBackupRestore={() => setBackupMode("restore")}
+        onAbout={() => setAboutOpen(true)}
+        title={`BastionVault — ${subtitle}`}
+      />
+
+      <div className="flex flex-1 min-h-0">
       {/* Sidebar */}
       <aside className="w-56 bg-[var(--color-surface)] border-r border-[var(--color-border)] flex flex-col">
         <div className="p-4 border-b border-[var(--color-border)]">
           <h1 className="text-lg font-bold">BastionVault</h1>
-          <p className="text-xs text-[var(--color-text-muted)]">
-            {mode === "Remote" && remoteProfile
-              ? remoteProfile.name || remoteProfile.address
-              : "Desktop"}
-          </p>
+          <p className="text-xs text-[var(--color-text-muted)]">{subtitle}</p>
         </div>
 
         <nav className="flex-1 p-2 space-y-0.5 overflow-y-auto">
@@ -399,9 +388,13 @@ export function Layout({ children }: LayoutProps) {
 
       {/* Main content */}
       <main className="flex-1 overflow-auto p-6">{children}</main>
+      </div>
 
-      {/* Backup modal — driven by the File → Backup menu items */}
+      {/* Backup modal — driven by the hamburger menu's Backup items */}
       <BackupModal mode={backupMode} onClose={() => setBackupMode(null)} />
+
+      {/* About modal — driven by the hamburger menu's About entry */}
+      <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} />
     </div>
   );
 }
