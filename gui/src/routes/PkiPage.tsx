@@ -1721,15 +1721,21 @@ function XcaImportTab({ mount }: { mount: string }) {
   async function invokeXca(input: object): Promise<unknown> {
     const inputB64 = encode(JSON.stringify(input));
     const result = await api.pluginsInvoke("xca-import", inputB64);
+    let parsed: unknown = null;
+    if (result.response_b64) {
+      try {
+        parsed = JSON.parse(decode(result.response_b64));
+      } catch {
+        // fall through — we'll surface the raw status below
+      }
+    }
+    if (parsed && typeof parsed === "object" && "error" in parsed) {
+      throw new Error(String((parsed as { error: unknown }).error));
+    }
     if (result.status !== "success") {
       throw new Error(
         `xca-import plugin returned status ${result.status} (code ${result.plugin_status_code})`,
       );
-    }
-    const text = decode(result.response_b64);
-    const parsed = JSON.parse(text);
-    if (parsed && typeof parsed === "object" && "error" in parsed) {
-      throw new Error(String((parsed as { error: unknown }).error));
     }
     return parsed;
   }
