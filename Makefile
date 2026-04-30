@@ -22,7 +22,7 @@ OPENSSL_SRC_PERL ?= C:/Strawberry/perl/bin/perl.exe
 export OPENSSL_SRC_PERL
 endif
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugin-bump
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -318,6 +318,28 @@ plugins: plugins-pack plugins-process ## Build every reference plugin (WASM + .b
 	@echo "==> All reference plugins built. Upload the artefacts via the GUI"
 	@echo "   Plugins page (Admin → Plugins → Register plugin → Select file…),"
 	@echo "   alongside the matching plugin.toml from $(PLUGINS_DIR)/<plugin>/."
+
+# `plugin-bump` bumps each reference plugin's version in lockstep across
+# both `plugins-ext/<plugin>/Cargo.toml` and `plugins-ext/<plugin>/plugin.toml`.
+# Override the bump kind on the command line: `make plugin-bump type=minor`
+# (defaults to patch). Each plugin's current version is read from its own
+# Cargo.toml so plugins that have drifted out of lockstep stay independent.
+PLUGIN_NAMES := bastion-plugin-totp bastion-plugin-postgres bastion-plugin-xca
+type ?= patch
+
+plugin-bump: ## Bump plugin versions across plugins-ext (type=major|minor|patch, default patch)
+	@case "$(type)" in major|minor|patch) ;; *) echo "Invalid type=$(type) (use major|minor|patch)"; exit 1;; esac; \
+	for p in $(PLUGIN_NAMES); do \
+		CUR=$$(grep '^version' $(PLUGINS_DIR)/$$p/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/'); \
+		case "$(type)" in \
+			major) NEW=$$(echo $$CUR | awk -F. '{printf "%d.0.0", $$1+1}');; \
+			minor) NEW=$$(echo $$CUR | awk -F. '{printf "%d.%d.0", $$1, $$2+1}');; \
+			patch) NEW=$$(echo $$CUR | awk -F. '{printf "%d.%d.%d", $$1, $$2, $$3+1}');; \
+		esac; \
+		sed -i '' "s/^version = \"$$CUR\"/version = \"$$NEW\"/" $(PLUGINS_DIR)/$$p/Cargo.toml; \
+		sed -i '' "s/^version     = \"$$CUR\"/version     = \"$$NEW\"/" $(PLUGINS_DIR)/$$p/plugin.toml; \
+		echo "Bumped $$p: $$CUR -> $$NEW"; \
+	done
 
 plugins-clean: ## Remove plugins-ext build artefacts
 	@rm -rf $(PLUGINS_DIR)/target $(PLUGINS_OUT)
