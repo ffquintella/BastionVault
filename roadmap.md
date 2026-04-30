@@ -76,6 +76,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Auth: OIDC | Done — server module + login + provider admin lifecycle |
 | Auth: SAML 2.0 | Done — pure-Rust SP-initiated SSO, no libxml2 / xmlsec |
 | Auth: FIDO2 / WebAuthn / YubiKey | Done |
+| Auth: Machine Authentication ([spec](features/machine-authentication.md)) | Todo — composite-key (random part + host-hardware fingerprint of CPU id, RAM, SMBIOS UUID, disk serial, NIC MAC, …) auth for headless clients on client-server installs. Random part is bound to the physical machine that enrolled — copying `machine.random` to another host fails login. Admin-approval gate via CLI (`bvault machine-auth approve`) and GUI (Settings → Auth → Machines). Optional TPM 2.0 backend behind a build feature for hardware-rooted non-export. |
 
 ### Secret Engines
 
@@ -112,6 +113,7 @@ None — all previously-active items have closed out. Next up are the `Todo` row
 - Kubernetes Integration
 - Compliance Reporting
 - Rustion Bastion Integration (delegated PAM transport + recording)
+- Machine Authentication (composite-key auth for headless clients, admin-approval gated)
 
 ## Completed Initiatives
 

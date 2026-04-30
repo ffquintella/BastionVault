@@ -81,9 +81,10 @@ pub async fn session_open_ssh(
 
     // Compute the effective target, user, port from the profile +
     // resource metadata defaults.
-    let host = profile_host(&profile, &meta).ok_or_else(|| {
-        CommandError::from("resource has no hostname or ip_address; set one or override target_host on the profile".to_string())
-    })?;
+    let host_candidates = profile_host_candidates(&profile, &meta);
+    if host_candidates.is_empty() {
+        return Err(CommandError::from("resource has no hostname or ip_address; set one or override target_host on the profile".to_string()));
+    }
     let port = profile_port(&profile);
     let username = profile_username(&profile);
     // Allow empty here; LDAP sources can supply the username via
@@ -118,32 +119,69 @@ pub async fn session_open_ssh(
                 .to_string(),
         ));
     }
-    let label = format!("ssh {username}@{host}:{port}");
+    // Walk the host candidates in order (IP before hostname when
+    // both are set on the resource). Fall back to the next candidate
+    // only on network-layer failures — auth rejections short-circuit
+    // so we don't burn auth attempts on every candidate.
     let on_close = resolved.on_close;
-
-    // Run the connect with a hard timeout so a wedged DNS/TCP/TLS
-    // doesn't lock the calling Tauri command.
-    let outcome: SshOpenOutcome = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        open_ssh_session(
-            app.clone(),
-            &state,
-            SshOpenArgs {
-                host,
-                port,
-                username: username.clone(),
-                credential,
-                host_key_fingerprint,
-                label: label.clone(),
-                on_close,
-            },
-        ),
-    )
-    .await
-    .map_err(|_| CommandError::from(format!(
-        "ssh: connect+auth timed out after {}s", CONNECT_TIMEOUT.as_secs()
-    )))?
-    .map_err(|e| CommandError::from(e))?;
+    let (chosen_host, outcome): (String, SshOpenOutcome) = {
+        let mut last_err: Option<String> = None;
+        let mut found: Option<(String, SshOpenOutcome)> = None;
+        for (idx, host) in host_candidates.iter().enumerate() {
+            let is_last = idx + 1 == host_candidates.len();
+            let label = format!("ssh {username}@{host}:{port}");
+            let res = tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                open_ssh_session(
+                    app.clone(),
+                    &state,
+                    SshOpenArgs {
+                        host: host.clone(),
+                        port,
+                        username: username.clone(),
+                        credential: credential.clone(),
+                        host_key_fingerprint: host_key_fingerprint.clone(),
+                        label: label.clone(),
+                        on_close: on_close.clone(),
+                    },
+                ),
+            )
+            .await;
+            match res {
+                Ok(Ok(o)) => {
+                    found = Some((host.clone(), o));
+                    break;
+                }
+                Ok(Err(e)) => {
+                    if !is_last && is_connect_layer_error(&e) {
+                        log::warn!(
+                            "resource-connect/ssh: candidate {host}:{port} failed at network layer ({e}); trying next"
+                        );
+                        last_err = Some(e);
+                        continue;
+                    }
+                    return Err(CommandError::from(e));
+                }
+                Err(_) => {
+                    let msg = format!(
+                        "ssh: connect+auth to {host}:{port} timed out after {}s",
+                        CONNECT_TIMEOUT.as_secs()
+                    );
+                    if !is_last {
+                        log::warn!("resource-connect/ssh: {msg}; trying next candidate");
+                        last_err = Some(msg);
+                        continue;
+                    }
+                    return Err(CommandError::from(msg));
+                }
+            }
+        }
+        found.ok_or_else(|| CommandError::from(
+            last_err.unwrap_or_else(|| "ssh: no host candidates succeeded".into())
+        ))?
+    };
+    let host = chosen_host;
+    let label = format!("ssh {username}@{host}:{port}");
 
     // Spawn the SessionSshWindow into a new WebviewWindow. The
     // window's React route claims the session via the token + the
@@ -290,12 +328,13 @@ pub async fn session_open_rdp(
             request.profile_id, request.resource_name
         ))
     })?;
-    let host = profile_host(&profile, &meta).ok_or_else(|| {
-        CommandError::from(
+    let host_candidates = profile_host_candidates(&profile, &meta);
+    if host_candidates.is_empty() {
+        return Err(CommandError::from(
             "resource has no hostname or ip_address; set one or override target_host on the profile"
                 .to_string(),
-        )
-    })?;
+        ));
+    }
     let port = profile
         .get("target_port")
         .and_then(|v| v.as_u64())
@@ -321,25 +360,55 @@ pub async fn session_open_rdp(
                 .to_string(),
         ));
     }
-    let label = format!("rdp {username}@{host}:{port}");
     let on_close = resolved.on_close;
+    let credential = resolved.credential;
+    let domain = resolved.domain;
 
-    // Open the real RDP transport.
-    let outcome = session::rdp::open_rdp_session(
-        app.clone(),
-        &state,
-        session::rdp::RdpOpenArgs {
-            host,
-            port,
-            username,
-            credential: resolved.credential,
-            domain: resolved.domain,
-            label: label.clone(),
-            on_close,
-        },
-    )
-    .await
-    .map_err(CommandError::from)?;
+    // Walk the host candidates in order — IP first when present,
+    // hostname as fallback. Only network-layer failures fall through
+    // to the next candidate.
+    let (host, outcome) = {
+        let mut last_err: Option<String> = None;
+        let mut found: Option<(String, session::rdp::RdpOpenOutcome)> = None;
+        for (idx, host) in host_candidates.iter().enumerate() {
+            let is_last = idx + 1 == host_candidates.len();
+            let label = format!("rdp {username}@{host}:{port}");
+            let res = session::rdp::open_rdp_session(
+                app.clone(),
+                &state,
+                session::rdp::RdpOpenArgs {
+                    host: host.clone(),
+                    port,
+                    username: username.clone(),
+                    credential: credential.clone(),
+                    domain: domain.clone(),
+                    label,
+                    on_close: on_close.clone(),
+                },
+            )
+            .await;
+            match res {
+                Ok(o) => {
+                    found = Some((host.clone(), o));
+                    break;
+                }
+                Err(e) => {
+                    if !is_last && is_connect_layer_error(&e) {
+                        log::warn!(
+                            "resource-connect/rdp: candidate {host}:{port} failed at network layer ({e}); trying next"
+                        );
+                        last_err = Some(e);
+                        continue;
+                    }
+                    return Err(CommandError::from(e));
+                }
+            }
+        }
+        found.ok_or_else(|| CommandError::from(
+            last_err.unwrap_or_else(|| "rdp: no host candidates succeeded".into())
+        ))?
+    };
+    let label = format!("rdp {username}@{host}:{port}");
 
     let window_label = format!("rdp-{}", outcome.token);
     let url = format!(
@@ -783,14 +852,46 @@ fn find_profile(meta: &Map<String, Value>, profile_id: &str) -> Option<Value> {
         })
 }
 
-fn profile_host(profile: &Value, meta: &Map<String, Value>) -> Option<String> {
-    profile
-        .get("target_host")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .or_else(|| meta.get("hostname").and_then(|v| v.as_str()).filter(|s| !s.is_empty()))
-        .or_else(|| meta.get("ip_address").and_then(|v| v.as_str()).filter(|s| !s.is_empty()))
-        .map(|s| s.to_string())
+/// Ordered list of host candidates to try when opening a session.
+///
+/// Preference order:
+///   1. Profile `target_host` override (operator-set; trumps everything).
+///   2. Resource `ip_address` (avoids DNS, fastest path).
+///   3. Resource `hostname` (DNS fallback).
+///
+/// Duplicates are dropped so a profile that pins `target_host` to
+/// the same value as the resource's IP doesn't double-try.
+fn profile_host_candidates(profile: &Value, meta: &Map<String, Value>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |s: &str| {
+        if !s.is_empty() && !out.iter().any(|h| h == s) {
+            out.push(s.to_string());
+        }
+    };
+    if let Some(s) = profile.get("target_host").and_then(|v| v.as_str()) {
+        push(s);
+    }
+    if let Some(s) = meta.get("ip_address").and_then(|v| v.as_str()) {
+        push(s);
+    }
+    if let Some(s) = meta.get("hostname").and_then(|v| v.as_str()) {
+        push(s);
+    }
+    out
+}
+
+/// Heuristic: did the open fail at the network layer (DNS / TCP / TLS)
+/// rather than at auth / protocol layer? Only network failures justify
+/// falling back to the next host candidate — re-trying after an auth
+/// rejection would just lock the account on the next host.
+fn is_connect_layer_error(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.starts_with("connect ")
+        || e.contains("tcp connect")
+        || e.contains("parse/resolve")
+        || e.contains("dns lookup")
+        || e.contains("tls upgrade")
+        || e.contains("connect_begin")
 }
 
 fn profile_port(profile: &Value) -> u16 {

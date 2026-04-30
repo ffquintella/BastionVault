@@ -5,7 +5,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 
 use super::storage::{AcmeConfig, CONFIG_KEY};
 use crate::{

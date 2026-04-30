@@ -46,7 +46,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 use super::config::ConfigStore;
 use super::manifest::{PluginManifest, RuntimeKind};

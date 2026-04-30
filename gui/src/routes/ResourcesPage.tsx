@@ -1313,7 +1313,14 @@ function ConnectionProfileEditor({
           value={profile.username ?? ""}
           onChange={(e) => update("username", e.target.value || undefined)}
           placeholder={
-            profile.protocol === "rdp" ? "Administrator" : "felipe"
+            profile.protocol === "rdp" ? "Administrator" : "root"
+          }
+          hint={
+            profile.credential_source.kind === "secret"
+              ? "Optional — used only as a fallback if the chosen secret has no `username` field. When the secret carries a username it wins."
+              : profile.credential_source.kind === "ldap"
+                ? "Ignored for LDAP — the credential source supplies the username (operator-typed, static-role, or checked-out account)."
+                : "Used as the SSH/RDP login user. PKI client certs don't carry the OS user, so this field is required."
           }
         />
 

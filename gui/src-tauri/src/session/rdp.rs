@@ -77,11 +77,13 @@ pub struct RdpOpenArgs {
 /// password). The CredSSP smartcard wiring (Phase 6) adds
 /// `SmartCard`, which feeds a synthetic PIV credential built from
 /// a vault-issued PKI cert + PKCS#8 private key.
+#[derive(Clone)]
 pub enum RdpCredential {
     Password(Zeroizing<String>),
     SmartCard(SmartCardCredential),
 }
 
+#[derive(Clone)]
 pub struct SmartCardCredential {
     /// DER-encoded X509 cert (PEM-decoded body).
     pub certificate_der: Vec<u8>,
@@ -156,18 +158,29 @@ pub async fn open_rdp_session(
     let frame_event = frame_event_name(&token);
     let closed_event = closed_event_name(&token);
 
-    // Stage 1: TCP connect.
-    let target: SocketAddr = format!("{}:{}", args.host, args.port)
-        .parse()
-        .or_else(|_| {
-            // Fall back to DNS resolution.
-            tokio::net::lookup_host(format!("{}:{}", args.host, args.port))
-                .now_or_never()
-                .and_then(|r| r.ok())
-                .and_then(|mut iter| iter.next())
-                .ok_or_else(|| "dns lookup returned no addresses".to_string())
-        })
-        .map_err(|e: String| format!("rdp: parse/resolve {}:{}: {e}", args.host, args.port))?;
+    // Stage 1: resolve + TCP connect. We need a concrete `SocketAddr`
+    // for the ironrdp connector (it stamps the local addr into the
+    // PDU stream), so resolve here rather than letting `TcpStream`
+    // do it implicitly.
+    let host_port = format!("{}:{}", args.host, args.port);
+    let target: SocketAddr = if let Ok(sa) = host_port.parse::<SocketAddr>() {
+        sa
+    } else {
+        // Real async DNS — earlier code used `now_or_never()` which
+        // returned `None` for every non-trivial lookup and surfaced
+        // as a spurious "dns lookup returned no addresses".
+        let resolved = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            tokio::net::lookup_host(host_port.clone()),
+        )
+        .await
+        .map_err(|_| format!("rdp: DNS lookup for {} timed out", args.host))?
+        .map_err(|e| format!("rdp: parse/resolve {}: {e}", host_port))?;
+        resolved
+            .into_iter()
+            .next()
+            .ok_or_else(|| format!("rdp: DNS lookup for {} returned no addresses", args.host))?
+    };
     let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(target))
         .await
         .map_err(|_| format!("rdp: TCP connect to {target} timed out"))?
@@ -677,22 +690,3 @@ pub async fn drop_session(
     }
 }
 
-// `now_or_never` would be nice but we don't depend on `futures` as
-// a direct dep. Inline what we need.
-trait FutureExt: std::future::Future + Sized {
-    fn now_or_never(self) -> Option<Self::Output>;
-}
-impl<F: std::future::Future + Sized> FutureExt for F {
-    fn now_or_never(self) -> Option<Self::Output> {
-        use std::future::Future;
-        use std::pin::Pin;
-        use std::task::{Context, Poll, Waker};
-        let waker = Waker::noop();
-        let mut cx = Context::from_waker(waker);
-        let mut pinned = Box::pin(self);
-        match Pin::new(&mut pinned).poll(&mut cx) {
-            Poll::Ready(v) => Some(v),
-            Poll::Pending => None,
-        }
-    }
-}

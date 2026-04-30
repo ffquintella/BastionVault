@@ -53,6 +53,7 @@ pub struct SshOpenArgs {
     pub on_close: Option<SessionCleanup>,
 }
 
+#[derive(Clone)]
 pub enum SshCredential {
     Password(Zeroizing<String>),
     PrivateKey {
