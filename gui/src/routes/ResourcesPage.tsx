@@ -1405,6 +1405,30 @@ function ConnectionProfileEditor({
           }
           hint="Leave empty for TOFU on first connect. The session window will surface the observed fingerprint so you can pin it on the next save."
         />
+
+        {profile.protocol === "rdp" && (
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={profile.rdp_aggressive_performance ?? false}
+              onChange={(e) =>
+                update(
+                  "rdp_aggressive_performance",
+                  e.target.checked ? true : undefined,
+                )
+              }
+            />
+            <span>
+              <span className="font-medium">Aggressive performance flags</span>
+              <span className="block text-xs text-[var(--color-text-muted)]">
+                Tells the server to disable wallpaper, theming, cursor shadow,
+                and animated cursors. Cuts repaint bandwidth substantially on
+                slow links; the remote desktop looks blander. Off by default.
+              </span>
+            </span>
+          </label>
+        )}
       </div>
     </Modal>
   );

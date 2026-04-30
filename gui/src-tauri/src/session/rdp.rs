@@ -21,12 +21,13 @@
 //!     mode. Modern Windows servers refuse this by default;
 //!     operators with NLA-enforcing servers see an explicit error
 //!     pointing at the sspi/picky integration follow-up.
-//!   - **Full-frame snapshots, not dirty-rect deltas**: every
-//!     batch of graphics updates emits the full DecodedImage as
-//!     RGBA-b64 to the WebviewWindow. Bandwidth-heavy on slow
-//!     LAN links; the dirty-rect coordinates are already in the
-//!     `ActiveStageOutput::GraphicsUpdate(InclusiveRectangle)`
-//!     payload for the future incremental wiring.
+//!   - **Coalesced dirty-rect emission**: each server PDU's
+//!     `GraphicsUpdate` rects are unioned into a single bounding
+//!     box; we pack only those pixels (row-stride respected) and
+//!     emit one canvas event per server frame. Per-rect emission
+//!     would shave more bytes off scattered updates but multiplies
+//!     the Tauri-event count; the bounding-box compromise wins on
+//!     typical RDP traffic where updates cluster.
 //!   - **Fast-path keyboard scancode mapping is conservative**:
 //!     the JS-side `KeyboardEvent.code` → PS/2 set 1 scancode
 //!     table covers the printable ASCII set + the common
@@ -41,6 +42,7 @@ use ironrdp::connector::{
     SmartCardIdentity,
 };
 use ironrdp::pdu::gcc::KeyboardType;
+use ironrdp::pdu::geometry::InclusiveRectangle;
 use ironrdp::pdu::input::fast_path::{FastPathInput, FastPathInputEvent, KeyboardFlags};
 use ironrdp::pdu::input::mouse::{MousePdu, PointerFlags};
 use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
@@ -70,6 +72,11 @@ pub struct RdpOpenArgs {
     /// Mirror of `SshOpenArgs::on_close` — runs when the session
     /// closes. Only LDAP library check-in uses it today.
     pub on_close: Option<SessionCleanup>,
+    /// Opt-in aggressive perf-flag set (disable wallpaper / theming /
+    /// cursor shadow / cursor settings on top of the ironrdp default).
+    /// `false` keeps the visual fidelity defaults; `true` trades a
+    /// blander desktop for less repaint bandwidth.
+    pub aggressive_performance: bool,
 }
 
 /// What kind of credential the operator picked for this session.
@@ -334,7 +341,22 @@ fn build_connector_config(args: &RdpOpenArgs) -> ConnectorConfig {
         autologon: false,
         enable_audio_playback: false,
         pointer_software_rendering: true,
-        performance_flags: PerformanceFlags::default(),
+        // Default off: ironrdp's default already disables full-
+        // window-drag + menu animations and enables font smoothing.
+        // Operators can opt in per-profile to *also* disable
+        // wallpaper / theming / cursor shadow / cursor settings,
+        // trading a blander desktop for less repaint bandwidth.
+        performance_flags: if args.aggressive_performance {
+            PerformanceFlags::DISABLE_WALLPAPER
+                | PerformanceFlags::DISABLE_FULLWINDOWDRAG
+                | PerformanceFlags::DISABLE_MENUANIMATIONS
+                | PerformanceFlags::DISABLE_THEMING
+                | PerformanceFlags::DISABLE_CURSOR_SHADOW
+                | PerformanceFlags::DISABLE_CURSORSETTINGS
+                | PerformanceFlags::ENABLE_FONT_SMOOTHING
+        } else {
+            PerformanceFlags::default()
+        },
         desktop_scale_factor: 0,
         hardware_id: None,
         license_cache: None,
@@ -448,12 +470,27 @@ async fn active_stage_loop<S>(
                         break;
                     }
                 };
-                let mut updated = false;
+                // Coalesce every GraphicsUpdate from this PDU into a
+                // single bounding rect so we send exactly one canvas
+                // event per server frame, sized to the actually-
+                // changed region rather than the full desktop. For a
+                // typical RDP stream where the cursor + a small text
+                // area update, this drops the per-frame payload from
+                // ~width*height*4 RGBA bytes to a tiny strip.
+                let mut dirty: Option<InclusiveRectangle> = None;
                 let mut response_frames: Vec<Vec<u8>> = Vec::new();
                 for out in outputs {
                     match out {
-                        ActiveStageOutput::GraphicsUpdate(_rect) => {
-                            updated = true;
+                        ActiveStageOutput::GraphicsUpdate(rect) => {
+                            dirty = Some(match dirty {
+                                None => rect,
+                                Some(d) => InclusiveRectangle {
+                                    left: d.left.min(rect.left),
+                                    top: d.top.min(rect.top),
+                                    right: d.right.max(rect.right),
+                                    bottom: d.bottom.max(rect.bottom),
+                                },
+                            });
                         }
                         ActiveStageOutput::ResponseFrame(frame) => response_frames.push(frame),
                         ActiveStageOutput::Terminate(_) => {
@@ -473,18 +510,31 @@ async fn active_stage_loop<S>(
                         break;
                     }
                 }
-                if updated {
-                    encode_full_frame(&image, width, height, &mut emit_buf);
-                    let _ = app.emit(
-                        &frame_event,
-                        FramePayload {
-                            x: 0,
-                            y: 0,
-                            width,
-                            height,
-                            bytes_b64: encode_b64(&emit_buf),
-                        },
-                    );
+                if let Some(rect) = dirty {
+                    // Clamp to the desktop in case a server reports a
+                    // rect outside the negotiated DesktopSize (some
+                    // implementations do for cursor sprites).
+                    let max_x = width.saturating_sub(1);
+                    let max_y = height.saturating_sub(1);
+                    let left = rect.left.min(max_x);
+                    let top = rect.top.min(max_y);
+                    let right = rect.right.min(max_x);
+                    let bottom = rect.bottom.min(max_y);
+                    if right >= left && bottom >= top {
+                        let rw = right - left + 1;
+                        let rh = bottom - top + 1;
+                        pack_subrect(&image, left, top, rw, rh, &mut emit_buf);
+                        let _ = app.emit(
+                            &frame_event,
+                            FramePayload {
+                                x: left,
+                                y: top,
+                                width: rw,
+                                height: rh,
+                                bytes_b64: encode_b64(&emit_buf),
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -492,13 +542,34 @@ async fn active_stage_loop<S>(
     let _ = app.emit(&closed_event, ());
 }
 
-/// Pack the full DecodedImage as RGBA bytes. Skips the alpha
-/// channel? No — keeps RGBA so the canvas's `ImageData` constructor
-/// doesn't need an alpha-fill pass.
-fn encode_full_frame(image: &DecodedImage, width: u16, height: u16, out: &mut Vec<u8>) {
-    let _ = (width, height);
+/// Pack a sub-rectangle of the framebuffer into a row-packed RGBA
+/// buffer suitable for `new ImageData(bytes, w, h)` on the JS side.
+/// The framebuffer is stored row-strided at `image.width()`; the
+/// caller's rect is usually smaller, so we walk row-by-row and copy
+/// only the spanned columns.
+fn pack_subrect(
+    image: &DecodedImage,
+    x: u16,
+    y: u16,
+    w: u16,
+    h: u16,
+    out: &mut Vec<u8>,
+) {
+    let bpp = image.bytes_per_pixel();
+    let stride = usize::from(image.width()) * bpp;
+    let row_bytes = usize::from(w) * bpp;
+    let total = row_bytes * usize::from(h);
     out.clear();
-    out.extend_from_slice(image.data());
+    out.reserve(total);
+    let data = image.data();
+    let start_row = usize::from(y);
+    let end_row = start_row + usize::from(h);
+    let col_start = usize::from(x) * bpp;
+    let col_end = col_start + row_bytes;
+    for row in start_row..end_row {
+        let row_off = row * stride;
+        out.extend_from_slice(&data[row_off + col_start..row_off + col_end]);
+    }
 }
 
 fn encode_b64(bytes: &[u8]) -> String {

@@ -236,6 +236,14 @@ export interface ConnectionProfile {
   host_key_pin?: string;
   /** Opt-in for legacy auth modes; logged at WARN every connect. */
   allow_legacy_auth?: boolean;
+  /**
+   * RDP only — opt-in to aggressive performance flags (disable
+   * wallpaper / theming / cursor shadow / cursor settings on top of
+   * the ironrdp defaults). Off by default; enabling trades a more
+   * basic-looking remote desktop for substantially less repaint
+   * traffic. Has no effect for SSH profiles.
+   */
+  rdp_aggressive_performance?: boolean;
 }
 
 /**

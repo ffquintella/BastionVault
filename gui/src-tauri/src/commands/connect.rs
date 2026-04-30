@@ -363,6 +363,10 @@ pub async fn session_open_rdp(
     let on_close = resolved.on_close;
     let credential = resolved.credential;
     let domain = resolved.domain;
+    let aggressive_performance = profile
+        .get("rdp_aggressive_performance")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // Walk the host candidates in order — IP first when present,
     // hostname as fallback. Only network-layer failures fall through
@@ -384,6 +388,7 @@ pub async fn session_open_rdp(
                     domain: domain.clone(),
                     label,
                     on_close: on_close.clone(),
+                    aggressive_performance,
                 },
             )
             .await;
