@@ -89,6 +89,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | SSH ([spec](features/ssh-secret-engine.md)) | Done — Phases 1–4: CA Ed25519 + OTP + ML-DSA-65 PQC + GUI |
 | OpenLDAP / AD password-rotation ([spec](features/ldap-secret-engine.md)) | Done — all 5 phases incl. identity-aware check-out affinity |
 | Dynamic Secrets framework ([spec](features/dynamic-secrets.md)) | Todo — host ships only the framework; concrete engines (Postgres, MySQL, AWS, …) ship as plugins under [`dynamic-engine-plugins/`](dynamic-engine-plugins/), loaded on demand |
+| XCA database import ([spec](features/xca-import.md)) | Todo — **external plugin** under `plugins-ext/bastion-plugin-xca` (process runtime). Reads XCA `.xdb` SQLite databases, decrypts with the master password (EVP_BytesToKey + PBKDF2 paths), returns a plan the GUI walks via existing PKI / KV routes. **Zero host-crate code**: rides on the plugin substrate alongside `bastion-plugin-postgres`. |
 
 ### Infrastructure
 

@@ -47,6 +47,17 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### XCA Import — spec drafted (external plugin)
+
+- **New feature spec** ([`features/xca-import.md`](features/xca-import.md)) — design for importing [XCA](https://hohnstaedt.de/xca/) `.xdb` databases (SQLite) into the PKI engine. **Implemented as an external plugin** under [`plugins-ext/bastion-plugin-xca`](plugins-ext) alongside the existing `bastion-plugin-totp` / `bastion-plugin-postgres` reference plugins, **not** compiled into the host. Operators who don't need XCA migration never compile or ship the importer — the host crate gains zero code, zero dep, zero feature flag.
+- **Process runtime** chosen over WASM: `rusqlite` + AES-CBC + PBKDF2 are clean natively but awkward in WASI; the plugin's manifest declares `runtime = "process"` and rides on the same supervisor that already runs `bastion-plugin-postgres`.
+- **Plugin protocol** (line-delimited JSON over stdin/stdout, plugin-defined op names): `validate` (cheap version sniff, lists `ownPass` keys), `preview` (parses + decrypts, returns the structured item list with `decryption_failures` rows), `import` (returns the same payload as `preview` plus a `plan` hint — the GUI then walks the plan and issues PKI / KV writes via existing routes). The plugin **never** mutates vault state directly; all writes flow through the host's regular policy-checked / audited route surface, so the security model stays the same.
+- **XCA item type mapping**: CA cert + matching key → `pki/config/ca/import-bundle`; leaf cert → `pki/cert/<serial>`; standalone key / CSR / template → KV under `secret/xca-import/<batch-id>/...`; CRL → `pki/issuer/<id>/crl`. No new PKI routes added.
+- **Encryption** — plugin sniffs the magic and dispatches to one of two key-derivation paths: EVP_BytesToKey (XCA ≤ 2.0, OpenSSL `Salted__` + MD5 + 1 iter) or PBKDF2-HMAC-SHA512 (XCA ≥ 2.4, header-prefixed with iter + salt + IV). Per-key `ownPass` overrides the database master password.
+- **GUI wizard** — `Settings → PKI → Import XCA`, three steps (pick file + password → review tree → run). The menu entry is gated on the plugin being registered; uninstalling the plugin hides the entry, reinstalling brings it back without restart.
+- **Five planned phases, all inside the plugin repo**: reader skeleton + manifest + invoke wiring → decryption (both formats) → GUI wizard → XCA v1 + smart-card surfacing → hardening + docs + fixture matrix (XCA 1.4 / 2.2 / 2.5).
+- **Roadmap entry** added under Secret Engines, marked as an external plugin.
+
 #### Machine Authentication — spec drafted
 
 - **New feature spec** ([`features/machine-authentication.md`](features/machine-authentication.md)) — design for a new auth method targeting **client → remote-server** deployments where a long-lived headless client (CI runner, host agent, service account) needs to authenticate as a *machine*. Each client is identified by a **composite key**: a 32-byte random part generated and stored locally (`~/.config/bvault/<server-name>/machine.random`, mode `0600`) plus a **host-hardware fingerprint** derived from the physical machine's stable identifiers (CPU model + family/model/stepping, total RAM rounded to GiB, SMBIOS system UUID, motherboard serial, primary boot-disk serial, primary physical-NIC MAC, OS architecture, canonical hostname). The random part is **bound to that specific host** — a stolen `machine.random` copied to a different machine recomputes a different fingerprint and login fails.
