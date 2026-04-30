@@ -242,6 +242,11 @@ plugins-pack: plugins-wasm plugins-process plugins-pack-build ## Pack each plugi
 		--manifest $(PLUGINS_DIR)/bastion-plugin-postgres/plugin.toml \
 		--binary   $(PLUGINS_OUT)/bastion-plugin-postgres$(if $(filter Windows_NT,$(OS)),.exe,) \
 		--out      $(PLUGINS_OUT)/bastion-plugin-postgres.bvplugin
+	@echo "==> packing bastion-plugin-xca (process) into .bvplugin"
+	./target/release/bv-plugin-pack$(if $(filter Windows_NT,$(OS)),.exe,) \
+		--manifest $(PLUGINS_DIR)/bastion-plugin-xca/plugin.toml \
+		--binary   $(PLUGINS_OUT)/bastion-plugin-xca$(if $(filter Windows_NT,$(OS)),.exe,) \
+		--out      $(PLUGINS_OUT)/bastion-plugin-xca.bvplugin
 	@echo ""
 	@echo "==> Bundles ready in $(PLUGINS_OUT)/"
 	@ls -lh $(PLUGINS_OUT)/*.bvplugin 2>/dev/null || true
@@ -249,11 +254,14 @@ plugins-pack: plugins-wasm plugins-process plugins-pack-build ## Pack each plugi
 plugins-process: plugins-init ## Compile the process-runtime reference plugins (release, native target)
 	@echo "==> building bastion-plugin-postgres (native)"
 	cd $(PLUGINS_DIR) && cargo build --release -p bastion-plugin-postgres
+	@echo "==> building bastion-plugin-xca (native)"
+	cd $(PLUGINS_DIR) && cargo build --release -p bastion-plugin-xca
 	@mkdir -p $(PLUGINS_OUT)
 	@cp $(PLUGINS_DIR)/target/release/bastion-plugin-postgres$(if $(filter Windows_NT,$(OS)),.exe,) $(PLUGINS_OUT)/
+	@cp $(PLUGINS_DIR)/target/release/bastion-plugin-xca$(if $(filter Windows_NT,$(OS)),.exe,) $(PLUGINS_OUT)/
 	@echo ""
 	@echo "==> Process plugins ready in $(PLUGINS_OUT)/"
-	@ls -lh $(PLUGINS_OUT)/bastion-plugin-postgres* 2>/dev/null || true
+	@ls -lh $(PLUGINS_OUT)/bastion-plugin-postgres* $(PLUGINS_OUT)/bastion-plugin-xca* 2>/dev/null || true
 
 plugins: plugins-pack plugins-process ## Build every reference plugin (WASM + .bvplugin bundle + process)
 	@echo ""
