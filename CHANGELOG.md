@@ -56,6 +56,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+#### PKI — duplicate-issuer-name error reported as "ca is not config"
+- [`src/modules/pki/issuers.rs`](src/modules/pki/issuers.rs) — `add_issuer` returned the generic `ErrPkiCaNotConfig` ("PKI ca is not config") when the requested issuer name collided with an existing one. The error masked the actual cause (a name collision) and made the XCA import flow look broken whenever the .xdb contained renewals (same logical CA across multiple cert generations) or when the operator re-ran Apply after a partial success. The error now reports `issuer name `<name>` already exists at this mount` so the GUI can detect the collision and recover.
+- [`gui/src/routes/PkiPage.tsx`](gui/src/routes/PkiPage.tsx) — XCA Apply auto-suffixes `_2`, `_3`, … when a CA-bundle import fails because the issuer name already exists. Operators get every distinct cert imported on a single Apply pass and can prune duplicates afterward, instead of having to manually rename each colliding row.
+
 #### XCA Import — leaf cert routing + drop name-stem pairing fallback (xca-import v0.1.7)
 - [`plugins-ext/bastion-plugin-xca/src/xca.rs`](plugins-ext/bastion-plugin-xca/src/xca.rs) — `PreviewItem` now carries an `is_ca` flag derived from the cert's BasicConstraints extension (or XCA's `certs.ca` column when present). Without this signal the GUI couldn't distinguish CA certs from leaf certs and shipped every selected cert through `pki/config/ca`, where leaf certs come back as "PKI ca is not config" / "PKI internal error".
 - [`gui/src/routes/PkiPage.tsx`](gui/src/routes/PkiPage.tsx) — Apply now skips non-CA certs with a clear "leaf cert(s) skipped" message instead of trying to import them as issuers; preview default-selection no longer ticks leaf certs; preview Type column shows `cert (CA)` / `cert (leaf)` so the operator can tell at a glance.

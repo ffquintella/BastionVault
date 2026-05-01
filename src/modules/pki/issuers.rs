@@ -143,8 +143,13 @@ pub async fn add_issuer(
     let mut index: IssuersIndex = storage::get_json(req, KEY_ISSUERS_INDEX).await?.unwrap_or_default();
     if index.name_to_id(name).is_some() {
         // Reject duplicate names so operators can refer to issuers by name
-        // later without ambiguity.
-        return Err(RvError::ErrPkiCaNotConfig);
+        // later without ambiguity. This used to share the generic
+        // `ErrPkiCaNotConfig` ("PKI ca is not config"), which made the
+        // import flows look broken when the real cause was a name
+        // collision; surface the actual reason now.
+        return Err(RvError::ErrString(format!(
+            "issuer name `{name}` already exists at this mount"
+        )));
     }
     let id = Uuid::new_v4().to_string();
     let now = std::time::SystemTime::now()

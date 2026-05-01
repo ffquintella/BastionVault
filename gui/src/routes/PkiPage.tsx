@@ -1864,17 +1864,31 @@ function XcaImportTab({
         if (importedPairs.has(pairKey)) return;
         importedPairs.add(pairKey);
         const bundle = `${key.pem!.trim()}\n${cert.pem!.trim()}\n`;
-        try {
-          await api.pkiImportCaBundle({
-            mount,
-            pem_bundle: bundle,
-            issuer_name: cert.meta.name || undefined,
-          });
-          imported++;
-        } catch (e) {
-          errors.push(`${cert.meta.name}: ${extractError(e)}`);
-          skipped++;
+        const baseName = cert.meta.name || "imported-ca";
+        // .xdb files often contain the same logical CA across renewals
+        // (same name, different cert), and re-running Apply attempts
+        // the same names again. Auto-suffix `_2`, `_3`, … on name
+        // collision so the operator gets every cert imported and can
+        // sort out which to keep afterward.
+        const MAX_ATTEMPTS = 50;
+        let lastErr: unknown = null;
+        for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+          const name = attempt === 0 ? baseName : `${baseName}_${attempt + 1}`;
+          try {
+            await api.pkiImportCaBundle({
+              mount,
+              pem_bundle: bundle,
+              issuer_name: name,
+            });
+            imported++;
+            return;
+          } catch (e) {
+            lastErr = e;
+            if (!/already exists/i.test(extractError(e))) break;
+          }
         }
+        errors.push(`${cert.meta.name}: ${extractError(lastErr)}`);
+        skipped++;
       };
       // Leaf certs land in the orphan-cert index via `pki/certs/import`
       // — they get listed in the Certificates tab without being treated
