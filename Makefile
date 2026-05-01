@@ -20,6 +20,18 @@ VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/'
 ifeq ($(OS),Windows_NT)
 OPENSSL_SRC_PERL ?= C:/Strawberry/perl/bin/perl.exe
 export OPENSSL_SRC_PERL
+
+# Belt-and-braces: older `openssl-src` releases ignore
+# `OPENSSL_SRC_PERL` and just call `Command::new("perl")`, which under
+# Git-Bash resolves to the MSYS perl that lacks
+# `Locale::Maketext::Simple`. Prepend Strawberry to PATH so the
+# bare `perl` lookup hits the right interpreter regardless of which
+# `openssl-src` version cargo picks. Override the locations on the
+# command line if your Strawberry install is elsewhere:
+#   `make STRAWBERRY_PERL_BIN=D:/perl/bin run-dev-gui`
+STRAWBERRY_PERL_BIN ?= /c/Strawberry/perl/bin
+STRAWBERRY_C_BIN    ?= /c/Strawberry/c/bin
+export PATH := $(STRAWBERRY_PERL_BIN):$(STRAWBERRY_C_BIN):$(PATH)
 endif
 
 .PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugin-bump
