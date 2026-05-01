@@ -101,8 +101,11 @@ export function TitleBar({
       </div>
 
       {/* Window controls (minimize / maximize / close). Custom-drawn
-          because `decorations: false` removed the OS-supplied ones. */}
-      <div className="flex items-stretch shrink-0">
+          because `decorations: false` removed the OS-supplied ones.
+          `self-stretch` so each button fills the full titlebar height —
+          otherwise the hover highlight only covers the icon's bounding
+          box and looks pinched compared to native chrome. */}
+      <div className="flex self-stretch shrink-0">
         <button
           type="button"
           aria-label="Minimize"

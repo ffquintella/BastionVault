@@ -115,13 +115,16 @@ export function PkiPage() {
   // The XCA importer ships as an external plugin; the tab only appears
   // when the plugin (named `xca-import`) is registered on this vault.
   const [xcaPluginPresent, setXcaPluginPresent] = useState(false);
+  const [xcaPluginVersion, setXcaPluginVersion] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const list = await api.pluginsList();
         if (!cancelled) {
-          setXcaPluginPresent(list.some((p) => p.name === "xca-import"));
+          const found = list.find((p) => p.name === "xca-import");
+          setXcaPluginPresent(!!found);
+          setXcaPluginVersion(found?.version ?? null);
         }
       } catch {
         /* plugin admin may be gated; treat as absent */
@@ -233,7 +236,7 @@ export function PkiPage() {
             {tab === "certs" && <CertsTab mount={activeMount} />}
             {tab === "tidy" && <TidyTab mount={activeMount} />}
             {tab === "xca" && xcaPluginPresent && (
-              <XcaImportTab mount={activeMount} />
+              <XcaImportTab mount={activeMount} pluginVersion={xcaPluginVersion} />
             )}
           </>
         )}
@@ -1675,7 +1678,13 @@ interface XcaPreview {
   ownpass_keys: string[];
 }
 
-function XcaImportTab({ mount }: { mount: string }) {
+function XcaImportTab({
+  mount,
+  pluginVersion,
+}: {
+  mount: string;
+  pluginVersion: string | null;
+}) {
   const { toast } = useToast();
   const [filePath, setFilePath] = useState<string>("");
   const [password, setPassword] = useState<string>("");
@@ -1869,7 +1878,14 @@ function XcaImportTab({ mount }: { mount: string }) {
 
   return (
     <div className="space-y-3">
-      <Card title="Import XCA database">
+      <Card
+        title="Import XCA database"
+        actions={
+          pluginVersion ? (
+            <Badge label={`xca-import v${pluginVersion}`} variant="info" />
+          ) : null
+        }
+      >
         <p className="text-sm text-[var(--color-text-muted)] mb-3">
           Reads an XCA <code className="font-mono">.xdb</code> file via the{" "}
           <code className="font-mono">xca-import</code> plugin and imports
