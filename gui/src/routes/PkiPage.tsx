@@ -1676,6 +1676,10 @@ interface XcaPreviewItem {
   /** `items.id` of the cert/key counterpart matched by the plugin
    * via public-key fingerprint. Plugin v0.1.5+. */
   paired_item_id?: number | null;
+  /** Cert only: BasicConstraints `cA=true` (or XCA's `certs.ca` flag).
+   * Plugin v0.1.7+; absent on older plugins, in which case the GUI
+   * treats the cert as a CA candidate to preserve old behavior. */
+  is_ca?: boolean;
 }
 
 interface XcaPreview {
@@ -1778,14 +1782,25 @@ function XcaImportTab({
         master_password: password || undefined,
       })) as XcaPreview;
       setPreview(out);
-      // Default-select every item that has usable content. The
-      // operator can deselect anything they don't want imported.
+      // Default-select every item that has usable content AND can
+      // actually be imported by the host's PKI engine. Leaf certs are
+      // not auto-selected because `config/ca` only accepts CA bundles
+      // (the operator can still tick them manually if a future build
+      // adds leaf-cert storage). On older plugins `is_ca` is absent
+      // for every cert, so we keep the old behavior and select all.
       const next: Record<number, boolean> = {};
       for (const it of out.items) {
-        next[it.meta.id] =
-          it.pem !== null &&
-          (it.meta.item_type === "cert" ||
-            it.meta.item_type === "private_key");
+        if (it.pem === null) {
+          next[it.meta.id] = false;
+          continue;
+        }
+        if (it.meta.item_type === "cert") {
+          next[it.meta.id] = it.is_ca !== false;
+        } else if (it.meta.item_type === "private_key") {
+          next[it.meta.id] = true;
+        } else {
+          next[it.meta.id] = false;
+        }
       }
       setSelected(next);
       if (out.decryption_failures.length > 0) {
@@ -1814,71 +1829,29 @@ function XcaImportTab({
     setBusy(true);
     let imported = 0;
     let skipped = 0;
+    let skippedLeaf = 0;
     const errors: string[] = [];
     try {
       const byId = new Map(preview.items.map((it) => [it.meta.id, it]));
-      // XCA does NOT store an explicit cert↔key linkage — `items.pid`
-      // tracks the issuer chain, not the cert/key pair. XCA matches
-      // cert and key at runtime by comparing public keys. We don't
-      // have a public-key extractor in the GUI, so we fall back to
-      // name matching: stems are compared case-insensitively after
-      // stripping the conventional `_key` / `_priv` suffixes XCA
-      // appends when a cert and its key would otherwise collide on
-      // name. The optional `parent` link is still tried first in case
-      // a fork of XCA does record it.
-      const stem = (name: string): string =>
-        name
-          .toLowerCase()
-          .replace(/[_-](key|priv|privkey|privatekey)$/i, "");
-      // Plugin v0.1.5+ does the authoritative cert↔key match by
+      // Plugin v0.1.5+ does the authoritative cert↔key pairing by
       // public-key fingerprint and returns it as `paired_item_id`.
-      // We honor that first; the parent/name heuristics below only
-      // fire on older plugins, on algorithms whose private-key DER
-      // doesn't carry the public half (Ed25519 v1 PKCS#8), or on
-      // keys we couldn't decrypt.
+      // We trust ONLY that signal: name-stem heuristics produced wrong
+      // pairs (the host's PKI engine then rejected them with
+      // "public key of certificate does not match private key").
+      // If the plugin couldn't fingerprint a key (decryption failed,
+      // unsupported algorithm), we'd rather skip the row with a clear
+      // message than guess wrong.
       const findCertForKey = (key: XcaPreviewItem): XcaPreviewItem | null => {
-        if (key.paired_item_id != null) {
-          const paired = byId.get(key.paired_item_id);
-          if (paired && paired.meta.item_type === "cert" && paired.pem) {
-            return paired;
-          }
-        }
-        const keyStem = stem(key.meta.name);
-        let byParent: XcaPreviewItem | null = null;
-        let byName: XcaPreviewItem | null = null;
-        for (const cand of preview.items) {
-          if (cand.meta.item_type !== "cert" || !cand.pem) continue;
-          if (cand.meta.parent === key.meta.id) byParent = byParent ?? cand;
-          if (stem(cand.meta.name) === keyStem) byName = byName ?? cand;
-        }
-        if (byParent) return byParent;
-        const parent = byId.get(key.meta.parent);
-        if (parent && parent.meta.item_type === "cert" && parent.pem) {
-          return parent;
-        }
-        return byName;
+        if (key.paired_item_id == null) return null;
+        const paired = byId.get(key.paired_item_id);
+        if (paired && paired.meta.item_type === "cert" && paired.pem) return paired;
+        return null;
       };
       const findKeyForCert = (cert: XcaPreviewItem): XcaPreviewItem | null => {
-        if (cert.paired_item_id != null) {
-          const paired = byId.get(cert.paired_item_id);
-          if (paired && paired.meta.item_type === "private_key" && paired.pem) {
-            return paired;
-          }
-        }
-        const certStem = stem(cert.meta.name);
-        let byParent: XcaPreviewItem | null = null;
-        let byName: XcaPreviewItem | null = null;
-        for (const cand of preview.items) {
-          if (cand.meta.item_type !== "private_key" || !cand.pem) continue;
-          if (cand.meta.parent === cert.meta.id) byParent = byParent ?? cand;
-          if (stem(cand.meta.name) === certStem) byName = byName ?? cand;
-        }
-        if (byParent) return byParent;
-        const parent = byId.get(cert.meta.parent);
-        if (parent && parent.meta.item_type === "private_key" && parent.pem) {
-          return parent;
-        }
-        return byName;
+        if (cert.paired_item_id == null) return null;
+        const paired = byId.get(cert.paired_item_id);
+        if (paired && paired.meta.item_type === "private_key" && paired.pem) return paired;
+        return null;
       };
       // Track imported pairs so a selected cert + its selected key only
       // result in a single import.
@@ -1910,6 +1883,15 @@ function XcaImportTab({
             skipped++;
             continue;
           }
+          // The host's PKI `config/ca` endpoint only accepts CA certs;
+          // a leaf cert there comes back as "ca is not config" / "PKI
+          // internal error". Plugin v0.1.7+ exposes `is_ca`; on older
+          // plugins (`is_ca === undefined`) we keep the old behavior
+          // and let the server validate.
+          if (item.is_ca === false) {
+            skippedLeaf++;
+            continue;
+          }
           const key = findKeyForCert(item);
           if (!key) {
             skipped++;
@@ -1926,6 +1908,12 @@ function XcaImportTab({
             skipped++;
             continue;
           }
+          // Same gate on the key-driven side: the paired cert must be
+          // a CA, otherwise the import would fail server-side.
+          if (cert.is_ca === false) {
+            skippedLeaf++;
+            continue;
+          }
           await importBundle(cert, item);
         } else {
           // CSRs / CRLs / templates land in v2; selecting them today is
@@ -1933,16 +1921,21 @@ function XcaImportTab({
           skipped++;
         }
       }
+      const leafNote =
+        skippedLeaf > 0
+          ? ` ${skippedLeaf} leaf cert(s) skipped (PKI engine only accepts CA certs as issuers; leaf-cert storage is not supported in v1).`
+          : "";
       if (errors.length > 0) {
         toast(
           "error",
           `Imported ${imported} CA(s); ${errors.length} failed:\n` +
-            errors.join("\n"),
+            errors.join("\n") +
+            leafNote,
         );
       } else {
         toast(
           "success",
-          `Imported ${imported} issuer(s). ${skipped} item(s) skipped (out of v1 scope or no matching key).`,
+          `Imported ${imported} issuer(s). ${skipped} item(s) skipped (out of v1 scope or no matching key).${leafNote}`,
         );
       }
       setPreview(null);
@@ -2065,7 +2058,14 @@ function XcaImportTab({
               {
                 key: "type",
                 header: "Type",
-                render: (it) => it.meta.item_type,
+                render: (it) =>
+                  it.meta.item_type === "cert"
+                    ? it.is_ca === false
+                      ? "cert (leaf)"
+                      : it.is_ca === true
+                        ? "cert (CA)"
+                        : "cert"
+                    : it.meta.item_type,
               },
               {
                 key: "subject",
