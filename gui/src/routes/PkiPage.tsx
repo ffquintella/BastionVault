@@ -1386,7 +1386,7 @@ function CertsTab({ mount }: { mount: string }) {
               columns={[
                 {
                   key: "serial",
-                  header: "Serial / CN",
+                  header: "Serial",
                   render: (s) => (
                     <button
                       onClick={() => selectSerial(s.serial)}
@@ -1397,10 +1397,23 @@ function CertsTab({ mount }: { mount: string }) {
                       }`}
                     >
                       <div className="font-mono text-xs truncate">{s.serial}</div>
-                      <div
-                        className="text-xs text-[var(--color-text-muted)] truncate"
-                        title={s.common_name}
-                      >
+                    </button>
+                  ),
+                },
+                {
+                  key: "common_name",
+                  header: "Common Name",
+                  render: (s) => (
+                    <button
+                      onClick={() => selectSerial(s.serial)}
+                      className={`text-left w-full min-w-0 ${
+                        selected === s.serial
+                          ? "font-semibold text-[var(--color-primary)]"
+                          : ""
+                      }`}
+                      title={s.common_name}
+                    >
+                      <div className="text-xs truncate">
                         {s.common_name || "—"}
                       </div>
                     </button>
@@ -1801,6 +1814,64 @@ function XcaImportTab({
     const errors: string[] = [];
     try {
       const byId = new Map(preview.items.map((it) => [it.meta.id, it]));
+      // Find the cert paired with a given private key. XCA links the
+      // pair in either direction: the cert's `parent` may point at the
+      // key, or the key's `parent` may point at the cert.
+      const findCertForKey = (key: XcaPreviewItem): XcaPreviewItem | null => {
+        for (const cand of preview.items) {
+          if (
+            cand.meta.item_type === "cert" &&
+            cand.meta.parent === key.meta.id &&
+            cand.pem
+          ) {
+            return cand;
+          }
+        }
+        const parent = byId.get(key.meta.parent);
+        if (parent && parent.meta.item_type === "cert" && parent.pem) {
+          return parent;
+        }
+        return null;
+      };
+      const findKeyForCert = (cert: XcaPreviewItem): XcaPreviewItem | null => {
+        for (const cand of preview.items) {
+          if (
+            cand.meta.item_type === "private_key" &&
+            cand.meta.parent === cert.meta.id &&
+            cand.pem
+          ) {
+            return cand;
+          }
+        }
+        const parent = byId.get(cert.meta.parent);
+        if (parent && parent.meta.item_type === "private_key" && parent.pem) {
+          return parent;
+        }
+        return null;
+      };
+      // Track imported pairs so a selected cert + its selected key only
+      // result in a single import.
+      const importedPairs = new Set<string>();
+      const importBundle = async (
+        cert: XcaPreviewItem,
+        key: XcaPreviewItem,
+      ) => {
+        const pairKey = `${cert.meta.id}:${key.meta.id}`;
+        if (importedPairs.has(pairKey)) return;
+        importedPairs.add(pairKey);
+        const bundle = `${key.pem!.trim()}\n${cert.pem!.trim()}\n`;
+        try {
+          await api.pkiImportCaBundle({
+            mount,
+            pem_bundle: bundle,
+            issuer_name: cert.meta.name || undefined,
+          });
+          imported++;
+        } catch (e) {
+          errors.push(`${cert.meta.name}: ${extractError(e)}`);
+          skipped++;
+        }
+      };
       for (const item of preview.items) {
         if (!selected[item.meta.id]) continue;
         if (item.meta.item_type === "cert") {
@@ -1808,50 +1879,26 @@ function XcaImportTab({
             skipped++;
             continue;
           }
-          // Find a sibling private key whose parent points at this cert
-          // (XCA's `parent` field on private_keys references the cert).
-          let keyPem: string | null = null;
-          for (const cand of preview.items) {
-            if (
-              cand.meta.item_type === "private_key" &&
-              cand.meta.parent === item.meta.id &&
-              cand.pem
-            ) {
-              keyPem = cand.pem;
-              break;
-            }
-          }
-          // Or — more commonly in XCA — the cert's own `parent` points
-          // at its private key.
-          if (!keyPem) {
-            const parentKey = byId.get(item.meta.parent);
-            if (
-              parentKey &&
-              parentKey.meta.item_type === "private_key" &&
-              parentKey.pem
-            ) {
-              keyPem = parentKey.pem;
-            }
-          }
-          if (!keyPem) {
+          const key = findKeyForCert(item);
+          if (!key) {
             skipped++;
             continue;
           }
-          const bundle = `${keyPem.trim()}\n${item.pem.trim()}\n`;
-          try {
-            await api.pkiImportCaBundle({
-              mount,
-              pem_bundle: bundle,
-              issuer_name: item.meta.name || undefined,
-            });
-            imported++;
-          } catch (e) {
-            errors.push(`${item.meta.name}: ${extractError(e)}`);
+          await importBundle(item, key);
+        } else if (item.meta.item_type === "private_key") {
+          if (!item.pem) {
             skipped++;
+            continue;
           }
+          const cert = findCertForKey(item);
+          if (!cert) {
+            skipped++;
+            continue;
+          }
+          await importBundle(cert, item);
         } else {
-          // Leaf certs / CSRs / CRLs / templates / standalone keys land
-          // in v2; selecting them today is informational only.
+          // CSRs / CRLs / templates land in v2; selecting them today is
+          // informational only.
           skipped++;
         }
       }

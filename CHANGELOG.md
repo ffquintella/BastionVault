@@ -45,6 +45,13 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+
+#### XCA Import — PBKDF2 envelope parser missed the PBES2 wrapper (xca-import v0.1.4)
+- [`plugins-ext/bastion-plugin-xca/src/crypto.rs`](plugins-ext/bastion-plugin-xca/src/crypto.rs) — `parse_pbkdf2_envelope` assumed the outer SEQUENCE began with the PBKDF2 KDF SEQUENCE directly, but XCA writes encrypted private keys as standard PKCS#8 `EncryptedPrivateKeyInfo` (RFC 5208 / 5958) using PBES2 (RFC 8018). The PBES2 OID + params SEQUENCE wraps the KDF SEQUENCE, so every key in real XCA databases failed with "malformed PBKDF2 envelope". The parser now walks the EncryptedPrivateKeyInfo / PBES2 layers, accepts AES-128/192/256-CBC, accepts the optional PBKDF2 PRF SEQUENCE (defaults to hmacWithSHA1 per RFC 8018), and falls back to the older shorthand layout for compatibility.
+- **GUI Apply** ([`gui/src/routes/PkiPage.tsx`](gui/src/routes/PkiPage.tsx)) — selecting only the private-key row of a CA pair (without the cert) silently skipped every selection. The pair-up logic now resolves the matching cert when a key is selected (mirroring the existing cert→key path), de-duplicates pairs when both halves are selected, and imports the bundle once.
+- **GUI Certificates table** ([`gui/src/routes/PkiPage.tsx`](gui/src/routes/PkiPage.tsx)) — split the stacked "Serial / CN" column into separate Serial and Common Name columns so the CN is scannable without hover.
+
 ### Added
 
 #### XCA Import — spec drafted (external plugin)
