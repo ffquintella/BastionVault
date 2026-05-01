@@ -1673,6 +1673,9 @@ interface XcaPreviewItem {
     | "wrong_password"
     | "unsupported";
   has_own_pass: boolean;
+  /** `items.id` of the cert/key counterpart matched by the plugin
+   * via public-key fingerprint. Plugin v0.1.5+. */
+  paired_item_id?: number | null;
 }
 
 interface XcaPreview {
@@ -1814,40 +1817,68 @@ function XcaImportTab({
     const errors: string[] = [];
     try {
       const byId = new Map(preview.items.map((it) => [it.meta.id, it]));
-      // Find the cert paired with a given private key. XCA links the
-      // pair in either direction: the cert's `parent` may point at the
-      // key, or the key's `parent` may point at the cert.
+      // XCA does NOT store an explicit cert↔key linkage — `items.pid`
+      // tracks the issuer chain, not the cert/key pair. XCA matches
+      // cert and key at runtime by comparing public keys. We don't
+      // have a public-key extractor in the GUI, so we fall back to
+      // name matching: stems are compared case-insensitively after
+      // stripping the conventional `_key` / `_priv` suffixes XCA
+      // appends when a cert and its key would otherwise collide on
+      // name. The optional `parent` link is still tried first in case
+      // a fork of XCA does record it.
+      const stem = (name: string): string =>
+        name
+          .toLowerCase()
+          .replace(/[_-](key|priv|privkey|privatekey)$/i, "");
+      // Plugin v0.1.5+ does the authoritative cert↔key match by
+      // public-key fingerprint and returns it as `paired_item_id`.
+      // We honor that first; the parent/name heuristics below only
+      // fire on older plugins, on algorithms whose private-key DER
+      // doesn't carry the public half (Ed25519 v1 PKCS#8), or on
+      // keys we couldn't decrypt.
       const findCertForKey = (key: XcaPreviewItem): XcaPreviewItem | null => {
-        for (const cand of preview.items) {
-          if (
-            cand.meta.item_type === "cert" &&
-            cand.meta.parent === key.meta.id &&
-            cand.pem
-          ) {
-            return cand;
+        if (key.paired_item_id != null) {
+          const paired = byId.get(key.paired_item_id);
+          if (paired && paired.meta.item_type === "cert" && paired.pem) {
+            return paired;
           }
         }
+        const keyStem = stem(key.meta.name);
+        let byParent: XcaPreviewItem | null = null;
+        let byName: XcaPreviewItem | null = null;
+        for (const cand of preview.items) {
+          if (cand.meta.item_type !== "cert" || !cand.pem) continue;
+          if (cand.meta.parent === key.meta.id) byParent = byParent ?? cand;
+          if (stem(cand.meta.name) === keyStem) byName = byName ?? cand;
+        }
+        if (byParent) return byParent;
         const parent = byId.get(key.meta.parent);
         if (parent && parent.meta.item_type === "cert" && parent.pem) {
           return parent;
         }
-        return null;
+        return byName;
       };
       const findKeyForCert = (cert: XcaPreviewItem): XcaPreviewItem | null => {
-        for (const cand of preview.items) {
-          if (
-            cand.meta.item_type === "private_key" &&
-            cand.meta.parent === cert.meta.id &&
-            cand.pem
-          ) {
-            return cand;
+        if (cert.paired_item_id != null) {
+          const paired = byId.get(cert.paired_item_id);
+          if (paired && paired.meta.item_type === "private_key" && paired.pem) {
+            return paired;
           }
         }
+        const certStem = stem(cert.meta.name);
+        let byParent: XcaPreviewItem | null = null;
+        let byName: XcaPreviewItem | null = null;
+        for (const cand of preview.items) {
+          if (cand.meta.item_type !== "private_key" || !cand.pem) continue;
+          if (cand.meta.parent === cert.meta.id) byParent = byParent ?? cand;
+          if (stem(cand.meta.name) === certStem) byName = byName ?? cand;
+        }
+        if (byParent) return byParent;
         const parent = byId.get(cert.meta.parent);
         if (parent && parent.meta.item_type === "private_key" && parent.pem) {
           return parent;
         }
-        return null;
+        return byName;
       };
       // Track imported pairs so a selected cert + its selected key only
       // result in a single import.
