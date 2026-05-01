@@ -1252,6 +1252,8 @@ interface CertSummary {
   common_name: string;
   not_after: number;
   revoked_at: number | null;
+  is_orphaned: boolean;
+  source: string;
 }
 
 function CertsTab({ mount }: { mount: string }) {
@@ -1285,12 +1287,14 @@ function CertsTab({ mount }: { mount: string }) {
               common_name: c.common_name || "",
               not_after: c.not_after || 0,
               revoked_at: c.revoked_at ?? null,
+              is_orphaned: c.is_orphaned ?? false,
+              source: c.source ?? "",
             } satisfies CertSummary;
           } catch {
             // A single read failure shouldn't blank the whole list —
             // surface the serial with empty meta so the operator can
             // still drill in to investigate.
-            return { serial: s, common_name: "", not_after: 0, revoked_at: null };
+            return { serial: s, common_name: "", not_after: 0, revoked_at: null, is_orphaned: false, source: "" };
           }
         }),
       );
@@ -1411,10 +1415,17 @@ function CertsTab({ mount }: { mount: string }) {
                           ? "font-semibold text-[var(--color-primary)]"
                           : ""
                       }`}
-                      title={s.common_name}
+                      title={
+                        s.is_orphaned
+                          ? `${s.common_name || "—"}\nOrphan cert${s.source ? ` (source: ${s.source})` : ""}`
+                          : s.common_name
+                      }
                     >
-                      <div className="text-xs truncate">
-                        {s.common_name || "—"}
+                      <div className="text-xs truncate flex items-center gap-1">
+                        <span className="truncate">{s.common_name || "—"}</span>
+                        {s.is_orphaned && (
+                          <Badge variant="warning" label="orphan" />
+                        )}
                       </div>
                     </button>
                   ),
@@ -1782,25 +1793,15 @@ function XcaImportTab({
         master_password: password || undefined,
       })) as XcaPreview;
       setPreview(out);
-      // Default-select every item that has usable content AND can
-      // actually be imported by the host's PKI engine. Leaf certs are
-      // not auto-selected because `config/ca` only accepts CA bundles
-      // (the operator can still tick them manually if a future build
-      // adds leaf-cert storage). On older plugins `is_ca` is absent
-      // for every cert, so we keep the old behavior and select all.
+      // Default-select every item that has usable content. CA certs
+      // get imported as issuers (with their paired key); leaf certs
+      // get indexed via `pki/certs/import` as orphan certs.
       const next: Record<number, boolean> = {};
       for (const it of out.items) {
-        if (it.pem === null) {
-          next[it.meta.id] = false;
-          continue;
-        }
-        if (it.meta.item_type === "cert") {
-          next[it.meta.id] = it.is_ca !== false;
-        } else if (it.meta.item_type === "private_key") {
-          next[it.meta.id] = true;
-        } else {
-          next[it.meta.id] = false;
-        }
+        next[it.meta.id] =
+          it.pem !== null &&
+          (it.meta.item_type === "cert" ||
+            it.meta.item_type === "private_key");
       }
       setSelected(next);
       if (out.decryption_failures.length > 0) {
@@ -1829,7 +1830,6 @@ function XcaImportTab({
     setBusy(true);
     let imported = 0;
     let skipped = 0;
-    let skippedLeaf = 0;
     const errors: string[] = [];
     try {
       const byId = new Map(preview.items.map((it) => [it.meta.id, it]));
@@ -1876,6 +1876,33 @@ function XcaImportTab({
           skipped++;
         }
       };
+      // Leaf certs land in the orphan-cert index via `pki/certs/import`
+      // — they get listed in the Certificates tab without being treated
+      // as issuers (no key, no CRL participation). Track the imported
+      // serials so a leaf that's also reachable via its paired key
+      // doesn't get imported twice.
+      const importedLeafSerials = new Set<string>();
+      const importLeaf = async (cert: XcaPreviewItem) => {
+        try {
+          const result = await api.pkiImportCert({
+            mount,
+            certificate: cert.pem!,
+            source: "xca-import",
+          });
+          importedLeafSerials.add(result.serial_number);
+          imported++;
+        } catch (e) {
+          const msg = extractError(e);
+          // A second import attempt for a serial we already wrote in
+          // this same Apply pass shouldn't surface as a failure.
+          if (/already indexed/i.test(msg)) {
+            return;
+          }
+          errors.push(`${cert.meta.name}: ${msg}`);
+          skipped++;
+        }
+      };
+
       for (const item of preview.items) {
         if (!selected[item.meta.id]) continue;
         if (item.meta.item_type === "cert") {
@@ -1883,13 +1910,12 @@ function XcaImportTab({
             skipped++;
             continue;
           }
-          // The host's PKI `config/ca` endpoint only accepts CA certs;
-          // a leaf cert there comes back as "ca is not config" / "PKI
-          // internal error". Plugin v0.1.7+ exposes `is_ca`; on older
-          // plugins (`is_ca === undefined`) we keep the old behavior
-          // and let the server validate.
+          // Leaf cert → orphan-cert index (no issuer link, no key).
+          // Plugin v0.1.7+ exposes `is_ca`; on older plugins
+          // (`is_ca === undefined`) we keep the old issuer-import
+          // behavior so existing flows don't regress.
           if (item.is_ca === false) {
-            skippedLeaf++;
+            await importLeaf(item);
             continue;
           }
           const key = findKeyForCert(item);
@@ -1908,10 +1934,10 @@ function XcaImportTab({
             skipped++;
             continue;
           }
-          // Same gate on the key-driven side: the paired cert must be
-          // a CA, otherwise the import would fail server-side.
+          // If the paired cert is a leaf, route it to the orphan-cert
+          // index (the key has no home — orphan certs carry no key).
           if (cert.is_ca === false) {
-            skippedLeaf++;
+            await importLeaf(cert);
             continue;
           }
           await importBundle(cert, item);
@@ -1921,21 +1947,16 @@ function XcaImportTab({
           skipped++;
         }
       }
-      const leafNote =
-        skippedLeaf > 0
-          ? ` ${skippedLeaf} leaf cert(s) skipped (PKI engine only accepts CA certs as issuers; leaf-cert storage is not supported in v1).`
-          : "";
       if (errors.length > 0) {
         toast(
           "error",
-          `Imported ${imported} CA(s); ${errors.length} failed:\n` +
-            errors.join("\n") +
-            leafNote,
+          `Imported ${imported} cert(s); ${errors.length} failed:\n` +
+            errors.join("\n"),
         );
       } else {
         toast(
           "success",
-          `Imported ${imported} issuer(s). ${skipped} item(s) skipped (out of v1 scope or no matching key).${leafNote}`,
+          `Imported ${imported} cert(s). ${skipped} item(s) skipped (out of v1 scope or no matching key).`,
         );
       }
       setPreview(null);

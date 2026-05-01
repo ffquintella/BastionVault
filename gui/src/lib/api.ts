@@ -69,6 +69,8 @@ import type {
   PkiSignIntermediateRequest,
   PkiSignIntermediateResult,
   PkiImportCaBundleRequest,
+  PkiImportCertRequest,
+  PkiImportCertResult,
   PkiRoleConfig,
   PkiIssueRequest,
   PkiIssueResult,
@@ -1194,6 +1196,8 @@ export const pkiSignVerbatim = (request: PkiSignVerbatimRequest) =>
 export const pkiListCerts = (mount: string) => invoke<string[]>("pki_list_certs", { mount });
 export const pkiReadCert = (mount: string, serial: string) =>
   invoke<PkiCertRecord>("pki_read_cert", { mount, serial });
+export const pkiImportCert = (request: PkiImportCertRequest) =>
+  invoke<PkiImportCertResult>("pki_import_cert", { request });
 export const pkiRevokeCert = (mount: string, serial: string) =>
   invoke<PkiRevokeResult>("pki_revoke_cert", { mount, serial });
 export const pkiReadCa = (mount: string) => invoke<PkiCaResult>("pki_read_ca", { mount });

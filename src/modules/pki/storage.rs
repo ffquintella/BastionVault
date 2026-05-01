@@ -212,6 +212,19 @@ pub struct CertRecord {
     /// by issuer when the mount has more than one.
     #[serde(default)]
     pub issuer_id: String,
+    /// True when the cert was *imported* (not issued by this engine) and
+    /// has no matching issuer in this mount. Used by the import-cert
+    /// endpoint so the operator can index externally-managed certs (e.g.
+    /// migrated from XCA) without confusing them with engine-issued
+    /// certs. Orphaned records carry no `issuer_id` and are skipped by
+    /// the CRL builder. `#[serde(default)]` keeps pre-5.5 records
+    /// deserializable.
+    #[serde(default)]
+    pub is_orphaned: bool,
+    /// Free-form provenance label set at import time (e.g. `"xca-import"`,
+    /// `"manual"`). Empty for engine-issued records.
+    #[serde(default)]
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

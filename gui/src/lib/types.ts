@@ -817,6 +817,24 @@ export interface PkiCertRecord {
   /** Unix-seconds NotAfter from the cert's validity. `0` when the
    *  PEM failed to parse — render "—" rather than a wrong date. */
   not_after: number;
+  /** True when indexed via `pki/certs/import` rather than issued by
+   *  this engine. Carries no key, no issuer; CRL builder skips it. */
+  is_orphaned?: boolean;
+  /** Provenance label set at import time (e.g. `xca-import`). */
+  source?: string;
+}
+
+export interface PkiImportCertRequest {
+  mount: string;
+  certificate: string;
+  source?: string;
+}
+
+export interface PkiImportCertResult {
+  serial_number: string;
+  not_after: number;
+  is_orphaned: boolean;
+  source: string;
 }
 
 export interface PkiRevokeResult {

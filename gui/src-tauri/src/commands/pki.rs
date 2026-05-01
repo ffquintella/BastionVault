@@ -794,6 +794,15 @@ pub struct PkiCertRecord {
     /// case rather than a wrong date.
     #[serde(default)]
     pub not_after: u64,
+    /// True when the cert was indexed via `pki/certs/import` rather
+    /// than issued by this engine — has no matching key, no issuer,
+    /// CRL builder skips it.
+    #[serde(default)]
+    pub is_orphaned: bool,
+    /// Provenance label set at import time (e.g. `xca-import`). Empty
+    /// for engine-issued certs.
+    #[serde(default)]
+    pub source: String,
 }
 
 /// Parse `(common_name, not_after_unix)` out of a PEM-encoded
@@ -864,6 +873,48 @@ pub async fn pki_read_cert(
         revoked_at: map.get("revoked_at").and_then(|v| v.as_u64()),
         common_name,
         not_after,
+        is_orphaned: map.get("is_orphaned").and_then(|v| v.as_bool()).unwrap_or(false),
+        source: val_str(&map, "source"),
+    })
+}
+
+#[derive(Deserialize)]
+pub struct PkiImportCertRequest {
+    pub mount: String,
+    pub certificate: String,
+    pub source: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct PkiImportCertResult {
+    pub serial_number: String,
+    pub not_after: u64,
+    pub is_orphaned: bool,
+    pub source: String,
+}
+
+/// Index an externally-issued cert via `pki/certs/import`. The cert is
+/// stored with `is_orphaned = true` and surfaces in `pki_list_certs` /
+/// `pki_read_cert` alongside engine-issued certs. No key is stored;
+/// the CRL builder skips orphaned records.
+#[tauri::command]
+pub async fn pki_import_cert(
+    state: State<'_, AppState>,
+    request: PkiImportCertRequest,
+) -> CmdResult<PkiImportCertResult> {
+    let mount = mount_prefix(&request.mount);
+    let mut body = Map::new();
+    body.insert("certificate".into(), json!(request.certificate));
+    if let Some(s) = request.source {
+        body.insert("source".into(), json!(s));
+    }
+    let resp = make_request(&state, Operation::Write, format!("{mount}/certs/import"), Some(body)).await?;
+    let map = data_to_map(resp);
+    Ok(PkiImportCertResult {
+        serial_number: val_str(&map, "serial_number"),
+        not_after: val_u64(&map, "not_after"),
+        is_orphaned: map.get("is_orphaned").and_then(|v| v.as_bool()).unwrap_or(true),
+        source: val_str(&map, "source"),
     })
 }
 

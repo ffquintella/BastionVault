@@ -45,6 +45,15 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### PKI — orphan cert import endpoint (`pki/certs/import`)
+- [`src/modules/pki/path_fetch.rs`](src/modules/pki/path_fetch.rs) — new `import_cert` handler at `pki/certs/import` (Write). Takes a single PEM `certificate` block plus an optional `source` label; parses the cert to pull serial + NotAfter, and stores a `CertRecord` with `is_orphaned = true`, no `issuer_id`, no key. The serial then shows up in `pki/certs` listings and `pki/cert/<serial>` reads alongside engine-issued certs. Refuses to overwrite an existing serial. The CRL builder skips orphaned records (no issuer to sign under).
+- [`src/modules/pki/storage.rs`](src/modules/pki/storage.rs) — `CertRecord` gains `is_orphaned: bool` and `source: String`. Both `#[serde(default)]` so pre-existing records deserialize cleanly.
+- [`src/modules/pki/path_fetch.rs`](src/modules/pki/path_fetch.rs) — `read_cert` now surfaces `not_after`, `issuer_id`, `is_orphaned`, and `source` when set.
+- [`gui/src-tauri/src/commands/pki.rs`](gui/src-tauri/src/commands/pki.rs) — new `pki_import_cert` Tauri command; `PkiCertRecord` carries `is_orphaned` + `source` through to the GUI.
+- [`gui/src/routes/PkiPage.tsx`](gui/src/routes/PkiPage.tsx) — XCA Apply now routes leaf certs to `pki/certs/import` (with `source = "xca-import"`) instead of skipping them; Certificates tab tags orphan rows with an "orphan" badge so the operator can tell at a glance which certs were imported vs issued.
+
 ### Fixed
 
 #### XCA Import — leaf cert routing + drop name-stem pairing fallback (xca-import v0.1.7)

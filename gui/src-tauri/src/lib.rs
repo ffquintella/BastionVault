@@ -305,6 +305,7 @@ pub fn run() {
             commands::pki::pki_sign_verbatim,
             commands::pki::pki_list_certs,
             commands::pki::pki_read_cert,
+            commands::pki::pki_import_cert,
             commands::pki::pki_revoke_cert,
             commands::pki::pki_read_ca,
             commands::pki::pki_read_crl,

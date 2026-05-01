@@ -178,6 +178,8 @@ impl PkiBackendInner {
                 revoked_at_unix: None,
                 not_after_unix,
                 issuer_id: issuer_id.clone(),
+                is_orphaned: false,
+                source: String::new(),
             };
             storage::put_json(req, &storage::cert_storage_key(&serial_hex), &record).await?;
         }
@@ -295,6 +297,8 @@ impl PkiBackendInner {
                 revoked_at_unix: None,
                 not_after_unix,
                 issuer_id: issuer_id.clone(),
+                is_orphaned: false,
+                source: String::new(),
             };
             storage::put_json(req, &storage::cert_storage_key(&serial_hex), &record).await?;
         }
@@ -404,6 +408,8 @@ impl PkiBackendInner {
             revoked_at_unix: None,
             not_after_unix: (now as i64).saturating_add(ttl.as_secs() as i64),
             issuer_id: issuer_id.clone(),
+            is_orphaned: false,
+            source: String::new(),
         };
         storage::put_json(req, &storage::cert_storage_key(&serial_hex), &record).await?;
 

@@ -84,6 +84,7 @@ impl PkiBackend {
             self.fetch_ca_path(),
             self.fetch_ca_chain_path(),
             self.list_certs_path(),
+            self.import_cert_path(),
             self.revoke_path(),
             self.crl_path(),
             self.crl_rotate_path(),

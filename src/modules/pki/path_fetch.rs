@@ -3,6 +3,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use serde_json::{json, Map, Value};
+use x509_parser::prelude::FromDer;
 
 use super::{
     storage::{self, CertRecord},
@@ -54,6 +55,25 @@ impl PkiBackend {
             help: "List issued certificate serials."
         })
     }
+
+    /// `pki/certs/import` — index an externally-issued certificate so it
+    /// shows up alongside engine-issued certs in `pki/certs` listings and
+    /// the GUI Certificates tab. The cert is stored as *orphaned*:
+    /// it carries no `issuer_id`, isn't tied to any local key, and the
+    /// CRL builder skips it. Useful for migrating cert inventories from
+    /// other tools (e.g. XCA leaf certs) without mounting a fake issuer.
+    pub fn import_cert_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"certs/import$",
+            fields: {
+                "certificate": { field_type: FieldType::Str, required: true, description: "PEM-encoded certificate." },
+                "source": { field_type: FieldType::Str, default: "", description: "Free-form provenance label (e.g. `xca-import`)." }
+            },
+            operations: [{op: Operation::Write, handler: r.import_cert}],
+            help: "Index an externally-issued certificate (no key, no issuer link)."
+        })
+    }
 }
 
 #[maybe_async::maybe_async]
@@ -70,8 +90,89 @@ impl PkiBackendInner {
         data.insert("certificate".into(), json!(record.certificate_pem));
         data.insert("serial_number".into(), json!(record.serial_hex));
         data.insert("issued_at".into(), json!(record.issued_at_unix));
+        if record.not_after_unix > 0 {
+            data.insert("not_after".into(), json!(record.not_after_unix));
+        }
+        if !record.issuer_id.is_empty() {
+            data.insert("issuer_id".into(), json!(record.issuer_id));
+        }
+        if record.is_orphaned {
+            data.insert("is_orphaned".into(), json!(true));
+        }
+        if !record.source.is_empty() {
+            data.insert("source".into(), json!(record.source));
+        }
         if let Some(t) = record.revoked_at_unix {
             data.insert("revoked_at".into(), json!(t));
+        }
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn import_cert(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let pem_in = req.get_data("certificate")?
+            .as_str()
+            .ok_or(RvError::ErrRequestFieldInvalid)?
+            .trim()
+            .to_string();
+        if pem_in.is_empty() {
+            return Err(RvError::ErrRequestFieldInvalid);
+        }
+        let source = req.get_data_or_default("source")?
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        // Parse the PEM → DER → x509 to pull serial + NotAfter. We only
+        // accept a single CERTIFICATE block; chains belong on the issuer
+        // import path.
+        let parsed_pem = pem::parse(pem_in.as_bytes())
+            .map_err(|e| RvError::ErrString(format!("import_cert: PEM parse failed: {e}")))?;
+        if parsed_pem.tag() != "CERTIFICATE" {
+            return Err(RvError::ErrString(format!(
+                "import_cert: expected `CERTIFICATE` PEM block, got `{}`",
+                parsed_pem.tag()
+            )));
+        }
+        let der = parsed_pem.contents();
+        let (_, parsed) = x509_parser::certificate::X509Certificate::from_der(der)
+            .map_err(|_| RvError::ErrString("import_cert: certificate not parseable".into()))?;
+        let serial_bytes = parsed.tbs_certificate.serial.to_bytes_be();
+        let serial_hex = storage::serial_to_hex(&serial_bytes);
+        let not_after_unix = parsed.tbs_certificate.validity.not_after.timestamp();
+
+        let key = storage::cert_storage_key(&serial_hex);
+        if let Some(_existing) = req.storage_get(&key).await? {
+            return Err(RvError::ErrString(format!(
+                "import_cert: serial `{serial_hex}` already indexed at this mount"
+            )));
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let record = CertRecord {
+            serial_hex: serial_hex.clone(),
+            // Re-emit canonical PEM (single-block, normalized line endings)
+            // so `read_cert` round-trips cleanly regardless of how the
+            // input was wrapped.
+            certificate_pem: pem::encode(&pem::Pem::new("CERTIFICATE", der.to_vec())),
+            issued_at_unix: now,
+            revoked_at_unix: None,
+            not_after_unix,
+            issuer_id: String::new(),
+            is_orphaned: true,
+            source,
+        };
+        storage::put_json(req, &key, &record).await?;
+
+        let mut data: Map<String, Value> = Map::new();
+        data.insert("serial_number".into(), json!(serial_hex));
+        data.insert("not_after".into(), json!(not_after_unix));
+        data.insert("is_orphaned".into(), json!(true));
+        if !record.source.is_empty() {
+            data.insert("source".into(), json!(record.source));
         }
         Ok(Some(Response::data_response(Some(data))))
     }
