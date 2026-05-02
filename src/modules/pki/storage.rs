@@ -192,6 +192,14 @@ pub struct PendingIntermediate {
     pub key_bits: u32,
     pub common_name: String,
     pub created_at_unix: u64,
+    /// Phase L3: when the operator chose to back the intermediate with
+    /// an existing managed key via `key_ref`, the key's UUID is stashed
+    /// here so `set-signed` can record the issuer→key binding once the
+    /// signed cert lands. Empty for the legacy "engine generated a
+    /// fresh keypair" flow. `#[serde(default)]` keeps pre-L3 pending
+    /// records readable across restarts.
+    #[serde(default)]
+    pub key_id: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -225,6 +233,15 @@ pub struct CertRecord {
     /// `"manual"`). Empty for engine-issued records.
     #[serde(default)]
     pub source: String,
+    /// Phase L3: when this cert was issued against a managed key (via
+    /// `key_ref` on `pki/issue/:role` or `pki/sign/:role`), the
+    /// managed-key UUID is recorded here so `pki/revoke` can clean up
+    /// the corresponding entry in `KeyRefs.cert_serials`. Empty for
+    /// certs issued from a freshly-generated keypair (the legacy
+    /// path) and for imported / orphaned records. `#[serde(default)]`
+    /// keeps pre-L3 records deserializable.
+    #[serde(default)]
+    pub key_id: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

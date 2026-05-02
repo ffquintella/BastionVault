@@ -122,6 +122,21 @@ impl PkiBackendInner {
             return Err(RvError::ErrString("acme: not enabled on this mount".into()));
         }
 
+        // Phase L4: per-role kill-switch. Resolved up front so a
+        // `new-order` against a role with `acme_enabled=false` fails
+        // before the engine spins up authorizations and challenges
+        // (cheaper, and the client sees the error early).
+        if !cfg.default_role.is_empty() {
+            if let Some(role) = self.get_role(req, &cfg.default_role).await? {
+                if !role.acme_enabled {
+                    return Err(RvError::ErrString(format!(
+                        "acme: role `{}` has acme_enabled=false; new-order refused",
+                        cfg.default_role
+                    )));
+                }
+            }
+        }
+
         let envelope = parse_envelope(req)?;
         let (account_id, payload) = self.verify_kid_jws(req, &envelope, "new-order").await?;
 
@@ -350,10 +365,23 @@ impl PkiBackendInner {
             super::super::issuers::load_default_issuer(req).await?
         };
         super::super::issuers::require_issuing(&issuer)?;
+        // Phase L4: clamp leaf TTL to the issuer's remaining lifetime.
+        // Snapshotted here while we still own the full handle.
+        let (ttl, _was_clamped) =
+            super::super::issuers::clamp_ttl_to_issuer(&issuer, role.effective_ttl(None))?;
         let ca_cert_pem = issuer.cert_pem.clone();
         let ca_signer = issuer.signer;
         let issuer_id = issuer.id.clone();
 
+        // Phase L4: per-role ACME kill-switch. Even with `acme/config`
+        // enabled and this role pinned as the default, the role must
+        // opt in to ACME. Defaults to `true` for pre-L4 roles.
+        if !role.acme_enabled {
+            return Err(RvError::ErrString(format!(
+                "acme: role `{}` has acme_enabled=false; finalize refused",
+                cfg.default_role
+            )));
+        }
         let common_name = parsed
             .common_name
             .clone()
@@ -361,13 +389,16 @@ impl PkiBackendInner {
             .ok_or_else(|| RvError::ErrString("acme: badCSR — no common name".into()))?;
         x509::validate_common_name(&role, &common_name)?;
         let mut alt_dns = csr_dns.clone();
+        // Phase L4: walk every DNS SAN through the role's emission policy.
+        for dns in &alt_dns {
+            x509::validate_dns_name(&role, dns)?;
+        }
         alt_dns.retain(|d| d != &common_name);
         let subject = x509::SubjectInput {
             common_name: common_name.clone(),
             alt_names: alt_dns,
             ip_sans: parsed.requested_ip_sans.clone(),
         };
-        let ttl = role.effective_ttl(None);
 
         // Same dispatch as `sign_csr_role`. Mixed-class chains rejected.
         let (cert_pem, serial_bytes) = match (&parsed.algorithm_class, &ca_signer) {
@@ -401,6 +432,7 @@ impl PkiBackendInner {
             issuer_id: issuer_id.clone(),
             is_orphaned: false,
             source: String::new(),
+            key_id: String::new(),
         };
         pki_storage::put_json(req, &pki_storage::cert_storage_key(&serial_hex), &record).await?;
 

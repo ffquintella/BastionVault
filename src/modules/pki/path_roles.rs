@@ -69,6 +69,48 @@ pub struct RoleEntry {
     /// keeps roles persisted before 5.2 readable.
     #[serde(default)]
     pub issuer_ref: String,
+    /// Phase L2: opt-in to private-key reuse on issuance. When `false`
+    /// (the default), `pki/issue/:role` and `pki/sign/:role` reject any
+    /// `key_ref` request body. When `true`, callers may pin to a managed
+    /// key from `pki/keys/*` so renewals carry the same private key.
+    /// Pinning extends the exposure window of a key — leave this off
+    /// unless the operational tradeoff is understood.
+    #[serde(default)]
+    pub allow_key_reuse: bool,
+    /// Phase L2: optional allow-list of managed keys this role may pin
+    /// to. Each entry is a key ID or name. Empty list with
+    /// `allow_key_reuse = true` means "any managed key on this mount is
+    /// acceptable". `#[serde(default)]` keeps pre-L2 roles readable.
+    #[serde(default)]
+    pub allowed_key_refs: Vec<String>,
+    /// Phase L4: list of parent domains this role may issue under. Used
+    /// in conjunction with `allow_subdomains`, `allow_bare_domains`,
+    /// and `allow_glob_domains` to constrain CN + DNS SANs. Ignored
+    /// when `allow_any_name = true` (the legacy fully-permissive
+    /// mode). Empty list with `allow_any_name = false` means "no DNS
+    /// names accepted at all" — combined with `allow_localhost` /
+    /// `allow_ip_sans` for fully locked-down service-mesh roles.
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    /// Phase L4: when `true`, entries in `allowed_domains` may contain
+    /// `*` glob patterns matching one or more characters within a
+    /// single label. E.g. `*-prod.example.com` accepts
+    /// `web-prod.example.com`. Default `false` (literal match plus
+    /// `allow_subdomains`-controlled child labels).
+    #[serde(default)]
+    pub allow_glob_domains: bool,
+    /// Phase L4: per-role kill-switch for the ACME server endpoints.
+    /// When `false`, `pki/acme/new-order` against this role rejects
+    /// regardless of `acme/config`. Defaults to `true` for backwards
+    /// compatibility — pre-L4 roles deserialise to `acme_enabled =
+    /// true` via the serde + `better_default` defaults.
+    #[serde(default = "default_acme_enabled")]
+    #[default(true)]
+    pub acme_enabled: bool,
+}
+
+fn default_acme_enabled() -> bool {
+    true
 }
 
 impl RoleEntry {
@@ -119,7 +161,12 @@ impl PkiBackend {
                 "no_store": { field_type: FieldType::Bool, default: false, description: "Skip persisting issued certs." },
                 "generate_lease": { field_type: FieldType::Bool, default: false, description: "Attach a Vault lease to issued certs." },
                 "not_before_duration": { field_type: FieldType::Int, default: 30, description: "Backdate seconds for NotBefore." },
-                "issuer_ref": { field_type: FieldType::Str, default: "", description: "Pin issuance to a specific issuer (ID or name). Empty = mount default." }
+                "issuer_ref": { field_type: FieldType::Str, default: "", description: "Pin issuance to a specific issuer (ID or name). Empty = mount default." },
+                "allow_key_reuse": { field_type: FieldType::Bool, default: false, description: "Allow callers to pin a managed key via key_ref on issue/sign (Phase L2). Default false (closed)." },
+                "allowed_key_refs": { field_type: FieldType::CommaStringSlice, default: "", description: "Allow-list of managed key IDs/names this role may pin to. Empty + allow_key_reuse=true means any." },
+                "allowed_domains": { field_type: FieldType::CommaStringSlice, default: "", description: "Phase L4: allowed parent domains for CN / DNS SANs (used with allow_subdomains / allow_bare_domains / allow_glob_domains). Ignored when allow_any_name=true." },
+                "allow_glob_domains": { field_type: FieldType::Bool, default: false, description: "Phase L4: entries in allowed_domains may contain `*` glob patterns within a label." },
+                "acme_enabled": { field_type: FieldType::Bool, default: true, description: "Phase L4: per-role ACME kill-switch. Default true." }
             },
             operations: [
                 {op: Operation::Read, handler: r1.read_role},
@@ -206,6 +253,17 @@ impl PkiBackendInner {
             no_store: bool_or(req, "no_store", false)?,
             generate_lease: bool_or(req, "generate_lease", false)?,
             issuer_ref: str_or(req, "issuer_ref")?,
+            allow_key_reuse: bool_or(req, "allow_key_reuse", false)?,
+            allowed_key_refs: req
+                .get_data_or_default("allowed_key_refs")?
+                .as_comma_string_slice()
+                .unwrap_or_default(),
+            allowed_domains: req
+                .get_data_or_default("allowed_domains")?
+                .as_comma_string_slice()
+                .unwrap_or_default(),
+            allow_glob_domains: bool_or(req, "allow_glob_domains", false)?,
+            acme_enabled: bool_or(req, "acme_enabled", true)?,
         };
 
         let entry = StorageEntry::new(format!("role/{name}").as_str(), &role)?;

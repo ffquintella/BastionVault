@@ -84,6 +84,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 |---|---|
 | PKI ([spec](features/pki-secret-engine.md)) | Done — Phases 1–5.2; classical + ML-DSA PQC + composite, multi-issuer, on-demand + auto tidy |
 | PKI: ACME server endpoints ([spec](features/pki-acme.md)) | Done — Phases 6.1 + 6.1.5 + 6.2 + 6.3, feature-complete on RFC 8555 (HTTP-01 + DNS-01, EAB, key-change, revoke, rate limit, expiry sweep) |
+| PKI: Key Management + Cert Lifecycle ([spec](features/pki-key-management-and-lifecycle.md)) | In Progress — Phases L1–L4 done (managed key store; key reuse on issue/sign; issuer-bound keys; chain endpoint + `ca_chain` on responses; emission controls — `allowed_domains` / `allow_glob_domains` / `allow_subdomains` / `allow_bare_domains` matrix on CN + DNS SANs, per-role `acme_enabled` kill-switch, leaf TTL clamped to issuer NotAfter, `pathLenConstraint` clamp on `sign-intermediate`). L5–L7 (cert-lifecycle module) pending. |
 | Transit ([spec](features/transit-secret-engine.md)) | Done — Phases 1–4: AEAD + HMAC + sign/verify + ML-KEM datakey + ML-DSA + derived/convergent + BYOK + hybrid composite |
 | TOTP ([spec](features/totp-secret-engine.md)) | Done — Phases 1–4: HOTP/TOTP + GUI |
 | SSH ([spec](features/ssh-secret-engine.md)) | Done — Phases 1–4: CA Ed25519 + OTP + ML-DSA-65 PQC + GUI |

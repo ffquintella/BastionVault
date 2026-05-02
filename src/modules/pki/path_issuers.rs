@@ -50,6 +50,18 @@ impl PkiBackend {
         })
     }
 
+    pub fn issuer_chain_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"issuer/(?P<ref>[\w\-]+)/chain$",
+            fields: {
+                "ref": { field_type: FieldType::Str, required: true, description: "Issuer ID (UUID) or name." }
+            },
+            operations: [{op: Operation::Read, handler: r.read_issuer_chain}],
+            help: "Read the issuer chain (leaf-issuer → root) for the named issuer."
+        })
+    }
+
     pub fn config_issuers_path(&self) -> Path {
         let rr = self.inner.clone();
         let rw = self.inner.clone();
@@ -83,6 +95,27 @@ impl PkiBackendInner {
         let mut data: Map<String, Value> = Map::new();
         data.insert("keys".into(), json!(keys));
         data.insert("key_info".into(), Value::Object(key_info));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn read_issuer_chain(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let reference = req
+            .get_data("ref")?
+            .as_str()
+            .ok_or(RvError::ErrRequestFieldInvalid)?
+            .to_string();
+        let issuer = issuers::load_issuer(req, &reference).await?;
+        let chain = issuers::build_issuer_chain(req, &issuer).await?;
+        let bundle: String = chain.join("");
+        let mut data: Map<String, Value> = Map::new();
+        data.insert("issuer_id".into(), json!(issuer.id));
+        data.insert("issuer_name".into(), json!(issuer.name));
+        data.insert("ca_chain".into(), json!(chain));
+        data.insert("certificate_bundle".into(), json!(bundle));
         Ok(Some(Response::data_response(Some(data))))
     }
 

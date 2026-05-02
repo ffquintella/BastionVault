@@ -59,6 +59,103 @@ pub struct IssuerHandle {
     pub usages: IssuerUsages,
 }
 
+/// Phase L4: clamp a requested leaf TTL so the resulting cert's
+/// `NotAfter` does not exceed the issuer's own `NotAfter`. Returns the
+/// clamped duration (always ≤ `requested`) and a boolean indicating
+/// whether clamping occurred (useful for logging / debugging).
+///
+/// An issuer with `not_after_unix <= now` is considered expired; trying
+/// to issue from it returns `ErrPkiCaNotConfig` so the caller gets a
+/// clear "this CA can't sign" rather than a 0-second TTL.
+pub fn clamp_ttl_to_issuer(
+    issuer: &IssuerHandle,
+    requested: std::time::Duration,
+) -> Result<(std::time::Duration, bool), RvError> {
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    if issuer.meta.not_after_unix <= now_unix {
+        return Err(RvError::ErrPkiCaNotConfig);
+    }
+    let issuer_remaining = (issuer.meta.not_after_unix - now_unix).max(1) as u64;
+    let cap = std::time::Duration::from_secs(issuer_remaining);
+    if requested > cap {
+        Ok((cap, true))
+    } else {
+        Ok((requested, false))
+    }
+}
+
+/// Build the issuer chain (leaf-issuer → … → root) for the given
+/// `IssuerHandle`. Walks the local issuer registry by matching each
+/// cert's `Issuer DN` against another local issuer's `Subject DN`. If
+/// the parent is not on this mount the walk stops with whatever was
+/// found locally. Returns the cert PEMs in order, leaf-issuer first.
+///
+/// Used by [`super::path_issuers::read_issuer_chain`] and by
+/// `pki/issue` / `pki/sign` to surface a `ca_chain` on every response.
+#[maybe_async::maybe_async]
+pub async fn build_issuer_chain(req: &Request, leaf: &IssuerHandle) -> Result<Vec<String>, RvError> {
+    use x509_parser::prelude::FromDer;
+
+    let mut chain: Vec<String> = vec![leaf.cert_pem.clone()];
+    let mut visited: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::from([leaf.id.clone()]);
+
+    // Snapshot the local issuer index once; the walk only needs read
+    // access and the index changes infrequently relative to issuance.
+    let index: IssuersIndex = storage::get_json(req, KEY_ISSUERS_INDEX).await?.unwrap_or_default();
+
+    let mut current_pem = leaf.cert_pem.clone();
+    loop {
+        let der = pem::parse(current_pem.as_bytes())
+            .map_err(|_| RvError::ErrPkiPemBundleInvalid)?
+            .into_contents();
+        let (_, parsed) = x509_parser::certificate::X509Certificate::from_der(&der)
+            .map_err(|_| RvError::ErrPkiPemBundleInvalid)?;
+        let subject_dn = parsed.tbs_certificate.subject.to_string();
+        let issuer_dn = parsed.tbs_certificate.issuer.to_string();
+        if subject_dn == issuer_dn {
+            // Self-signed → we are at the root.
+            break;
+        }
+
+        // Find a local issuer whose Subject DN matches this cert's
+        // Issuer DN. First match wins; ambiguity here would be a
+        // pre-existing data hazard at the mount.
+        let mut next: Option<String> = None;
+        for id in index.by_id.keys() {
+            if visited.contains(id) {
+                continue;
+            }
+            let cand_pem = match storage::get_string(req, &storage::issuer_cert_key(id)).await? {
+                Some(s) => s,
+                None => continue,
+            };
+            let cand_der = match pem::parse(cand_pem.as_bytes()) {
+                Ok(p) => p.into_contents(),
+                Err(_) => continue,
+            };
+            let parsed_cand = match x509_parser::certificate::X509Certificate::from_der(&cand_der) {
+                Ok((_, p)) => p,
+                Err(_) => continue,
+            };
+            if parsed_cand.tbs_certificate.subject.to_string() == issuer_dn {
+                visited.insert(id.clone());
+                chain.push(cand_pem.clone());
+                next = Some(cand_pem);
+                break;
+            }
+        }
+        match next {
+            Some(pem) => current_pem = pem,
+            None => break, // parent is off-mount; stop with what we have
+        }
+    }
+    Ok(chain)
+}
+
 /// Load the mount's default issuer. Performs the lazy lift if needed.
 #[maybe_async::maybe_async]
 pub async fn load_default_issuer(req: &Request) -> Result<IssuerHandle, RvError> {

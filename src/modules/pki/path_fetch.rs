@@ -164,6 +164,7 @@ impl PkiBackendInner {
             issuer_id: String::new(),
             is_orphaned: true,
             source,
+            key_id: String::new(),
         };
         storage::put_json(req, &key, &record).await?;
 

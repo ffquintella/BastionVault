@@ -65,6 +65,23 @@ impl PkiBackendInner {
             record.revoked_at_unix = Some(now);
             storage::put_json(req, &cert_key, &record).await?;
 
+            // Phase L3: if the cert was issued against a managed key,
+            // clear the binding so a follow-up `DELETE pki/key/<id>`
+            // can succeed. Best-effort — failures here don't roll back
+            // the revocation itself; the cert is already revoked from
+            // the verifier's perspective.
+            if !record.key_id.is_empty() {
+                if let Err(e) =
+                    super::keys::remove_cert_ref(req, &record.key_id, &serial_hex).await
+                {
+                    log::warn!(
+                        "pki/revoke: failed to clear key_ref binding for serial {serial_hex} \
+                         on key {}: {e:?}",
+                        record.key_id,
+                    );
+                }
+            }
+
             // Resolve the cert's issuer; pre-5.2 records may have an empty
             // `issuer_id` and route to the mount default.
             let issuer = if record.issuer_id.is_empty() {

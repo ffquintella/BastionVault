@@ -11,7 +11,9 @@ use humantime::parse_duration;
 use serde_json::{json, Map, Value};
 
 use super::{
-    crypto::{AlgorithmClass, Signer},
+    crypto::{AlgorithmClass, KeyAlgorithm, Signer},
+    keys::{self, KeyEntry},
+    path_roles::RoleEntry,
     storage::{self, CertRecord},
     x509::{self, SubjectInput},
     x509_pqc,
@@ -35,7 +37,8 @@ impl PkiBackend {
                 "alt_names": { field_type: FieldType::Str, default: "", description: "Comma-separated DNS / IP SANs." },
                 "ip_sans": { field_type: FieldType::Str, default: "", description: "Comma-separated IP SANs." },
                 "ttl": { field_type: FieldType::Str, default: "", description: "Requested TTL." },
-                "issuer_ref": { field_type: FieldType::Str, default: "", description: "Issuer ID or name to sign with; empty = role pin or mount default." }
+                "issuer_ref": { field_type: FieldType::Str, default: "", description: "Issuer ID or name to sign with; empty = role pin or mount default." },
+                "key_ref": { field_type: FieldType::Str, default: "", description: "Managed key ID or name to pin (Phase L2). Requires role.allow_key_reuse=true." }
             },
             operations: [{op: Operation::Write, handler: r.issue_cert}],
             help: "Issue a certificate against the named role."
@@ -52,7 +55,8 @@ impl PkiBackend {
                 "common_name": { field_type: FieldType::Str, default: "", description: "Override CN if role.use_csr_common_name is false." },
                 "alt_names": { field_type: FieldType::Str, default: "", description: "Override SANs if role.use_csr_sans is false." },
                 "ttl": { field_type: FieldType::Str, default: "", description: "Requested TTL." },
-                "issuer_ref": { field_type: FieldType::Str, default: "", description: "Issuer ID or name to sign with; empty = role pin or mount default." }
+                "issuer_ref": { field_type: FieldType::Str, default: "", description: "Issuer ID or name to sign with; empty = role pin or mount default." },
+                "key_ref": { field_type: FieldType::Str, default: "", description: "Managed key ID or name the CSR's SPKI must match (Phase L2). Requires role.allow_key_reuse=true." }
             },
             operations: [{op: Operation::Write, handler: r.sign_csr_role}],
             help: "Sign a CSR against the named role."
@@ -95,9 +99,14 @@ impl PkiBackendInner {
         if !role.allow_ip_sans && !alt_ips.is_empty() {
             return Err(RvError::ErrPkiDataInvalid);
         }
+        // Phase L4: validate every DNS SAN against the same emission
+        // policy as the CN.
+        for dns in &alt_dns {
+            x509::validate_dns_name(&role, dns)?;
+        }
 
         let requested_ttl = parse_optional_ttl(req, "ttl")?;
-        let ttl = role.effective_ttl(requested_ttl);
+        let mut ttl = role.effective_ttl(requested_ttl);
 
         // Phase 5.2: pick the issuer to sign with, in this priority order:
         //   1. `issuer_ref` from the request body (operator override),
@@ -115,7 +124,14 @@ impl PkiBackendInner {
         // bit so an issuer locked down to CRL-signing-only can't be
         // hijacked into issuing leaves.
         super::issuers::require_issuing(&issuer)?;
+        // Phase L4: clamp leaf TTL to the issuer's remaining lifetime
+        // so the resulting cert's NotAfter never exceeds the chain.
+        let (clamped_ttl, _was_clamped) = super::issuers::clamp_ttl_to_issuer(&issuer, ttl)?;
+        ttl = clamped_ttl;
         let ca_cert_pem = issuer.cert_pem.clone();
+        // Phase L3: snapshot the chain for this issuer so the response
+        // carries `ca_chain` consistently across `issue/sign/ACME`.
+        let ca_chain = super::issuers::build_issuer_chain(req, &issuer).await?;
         let ca_signer = issuer.signer;
         let issuer_id = issuer.id.clone();
 
@@ -130,8 +146,27 @@ impl PkiBackendInner {
             return Err(RvError::ErrPkiKeyTypeInvalid);
         }
 
-        // Generate the leaf keypair using the role's algorithm.
-        let leaf_signer = Signer::generate(role_alg)?;
+        // Phase L2: optional `key_ref` pins the leaf to a managed key
+        // from `pki/keys/*` so renewals can carry the same private key.
+        // Default-secure: roles must opt in via `allow_key_reuse`, and an
+        // optional `allowed_key_refs` allow-list narrows which managed
+        // keys are acceptable. Empty `key_ref` falls through to the
+        // legacy "generate fresh" path.
+        let request_key_ref = req
+            .get_data_or_default("key_ref")?
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let pinned_key: Option<KeyEntry> = if request_key_ref.is_empty() {
+            None
+        } else {
+            Some(resolve_pinned_key(req, &role, &request_key_ref, role_alg).await?)
+        };
+        let leaf_signer = match &pinned_key {
+            Some(entry) => Signer::from_storage_pem(&entry.private_key_pem)?,
+            None => Signer::generate(role_alg)?,
+        };
 
         let subject = SubjectInput { common_name, alt_names: alt_dns, ip_sans: alt_ips };
         let (cert_pem, serial_bytes) = match (role_alg.class(), &ca_signer, &leaf_signer) {
@@ -180,17 +215,31 @@ impl PkiBackendInner {
                 issuer_id: issuer_id.clone(),
                 is_orphaned: false,
                 source: String::new(),
+                key_id: pinned_key.as_ref().map(|e| e.id.clone()).unwrap_or_default(),
             };
             storage::put_json(req, &storage::cert_storage_key(&serial_hex), &record).await?;
+        }
+
+        // Phase L2: if the leaf was bound to a managed key, record the
+        // issued serial in that key's refs file so `delete_key` can
+        // refuse while bindings remain. Done after the cert record is
+        // persisted so the engine never carries a "key references cert
+        // X" link without a corresponding cert record.
+        if let Some(entry) = &pinned_key {
+            keys::add_cert_ref(req, &entry.id, &serial_hex).await?;
         }
 
         let mut data: Map<String, Value> = Map::new();
         data.insert("certificate".into(), json!(cert_pem));
         data.insert("issuing_ca".into(), json!(ca_cert_pem));
+        data.insert("ca_chain".into(), json!(ca_chain));
         data.insert("private_key".into(), json!(leaf_key_pem));
         data.insert("private_key_type".into(), json!(role.algorithm()?.as_str()));
         data.insert("serial_number".into(), json!(serial_hex));
         data.insert("issuer_id".into(), json!(issuer_id));
+        if let Some(entry) = &pinned_key {
+            data.insert("key_id".into(), json!(entry.id));
+        }
         Ok(Some(Response::data_response(Some(data))))
     }
 
@@ -206,6 +255,32 @@ impl PkiBackendInner {
         let csr_input = req.get_data("csr")?.as_str()
             .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         let parsed = super::csr::parse_and_verify(&csr_input)?;
+
+        // Phase L2: optional `key_ref` asserts the CSR's SPKI matches a
+        // managed key on this mount. The cert content is unchanged by
+        // pinning (the public key in the cert still comes from the CSR);
+        // the assertion is what lets the engine record a managed-key
+        // binding for the issued serial. Default-secure: roles must
+        // opt in via `allow_key_reuse`.
+        let request_key_ref = req
+            .get_data_or_default("key_ref")?
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let pinned_key: Option<KeyEntry> = if request_key_ref.is_empty() {
+            None
+        } else {
+            let role_alg = role.algorithm()?;
+            let entry = resolve_pinned_key(req, &role, &request_key_ref, role_alg).await?;
+            let entry_spki = keys::entry_spki_der(&entry)?;
+            if entry_spki != parsed.spki_der {
+                return Err(RvError::ErrString(
+                    "sign_csr: CSR SubjectPublicKeyInfo does not match the pinned managed key".into(),
+                ));
+            }
+            Some(entry)
+        };
 
         // Decide CN + SANs based on role policy. `use_csr_common_name` /
         // `use_csr_sans` are Vault-parity knobs that let an operator force
@@ -230,6 +305,12 @@ impl PkiBackendInner {
         if !role.allow_ip_sans && !alt_ips.is_empty() {
             return Err(RvError::ErrPkiDataInvalid);
         }
+        // Phase L4: validate every DNS SAN against the role policy. The
+        // CN was already checked above. We dedupe the CN out of alt_dns
+        // afterwards so a CN that survives validation is not re-checked.
+        for dns in &alt_dns {
+            x509::validate_dns_name(&role, dns)?;
+        }
         // De-dup CN out of alt_dns (rcgen treats SAN list as authoritative).
         alt_dns.retain(|d| d != &common_name);
         // No-op kept to silence warnings if `alt_ips` ends up unused on a
@@ -237,7 +318,7 @@ impl PkiBackendInner {
         let _ = &mut alt_ips;
 
         let requested_ttl = parse_optional_ttl(req, "ttl")?;
-        let ttl = role.effective_ttl(requested_ttl);
+        let mut ttl = role.effective_ttl(requested_ttl);
 
         // Same issuer-resolution priority as `issue_cert`:
         //   request body > role-level pin > mount default.
@@ -250,7 +331,11 @@ impl PkiBackendInner {
             super::issuers::load_default_issuer(req).await?
         };
         super::issuers::require_issuing(&issuer)?;
+        // Phase L4: clamp leaf TTL to the issuer's remaining lifetime.
+        let (clamped_ttl, _was_clamped) = super::issuers::clamp_ttl_to_issuer(&issuer, ttl)?;
+        ttl = clamped_ttl;
         let ca_cert_pem = issuer.cert_pem.clone();
+        let ca_chain = super::issuers::build_issuer_chain(req, &issuer).await?;
         let ca_signer = issuer.signer;
         let issuer_id = issuer.id.clone();
 
@@ -299,15 +384,25 @@ impl PkiBackendInner {
                 issuer_id: issuer_id.clone(),
                 is_orphaned: false,
                 source: String::new(),
+                key_id: pinned_key.as_ref().map(|e| e.id.clone()).unwrap_or_default(),
             };
             storage::put_json(req, &storage::cert_storage_key(&serial_hex), &record).await?;
+        }
+
+        // Phase L2: record the binding when a managed key was pinned.
+        if let Some(entry) = &pinned_key {
+            keys::add_cert_ref(req, &entry.id, &serial_hex).await?;
         }
 
         let mut data: Map<String, Value> = Map::new();
         data.insert("certificate".into(), json!(cert_pem));
         data.insert("issuing_ca".into(), json!(ca_cert_pem));
+        data.insert("ca_chain".into(), json!(ca_chain));
         data.insert("serial_number".into(), json!(serial_hex));
         data.insert("issuer_id".into(), json!(issuer_id));
+        if let Some(entry) = &pinned_key {
+            data.insert("key_id".into(), json!(entry.id));
+        }
         Ok(Some(Response::data_response(Some(data))))
     }
 
@@ -329,7 +424,7 @@ impl PkiBackendInner {
         // No role: cap at 30 days to match Vault's sign-verbatim default
         // ceiling. Operators who want longer should use `sign/:role`.
         let max = std::time::Duration::from_secs(30 * 24 * 3600);
-        let ttl = match requested_ttl {
+        let mut ttl = match requested_ttl {
             Some(d) if !d.is_zero() => std::cmp::min(d, max),
             _ => max,
         };
@@ -342,7 +437,12 @@ impl PkiBackendInner {
             super::issuers::load_default_issuer(req).await?
         };
         super::issuers::require_issuing(&issuer)?;
+        // Phase L4: clamp TTL to issuer's remaining lifetime even on
+        // sign-verbatim (no role gate, but the chain rule still holds).
+        let (clamped_ttl, _was_clamped) = super::issuers::clamp_ttl_to_issuer(&issuer, ttl)?;
+        ttl = clamped_ttl;
         let ca_cert_pem = issuer.cert_pem.clone();
+        let ca_chain = super::issuers::build_issuer_chain(req, &issuer).await?;
         let ca_signer = issuer.signer;
         let issuer_id = issuer.id.clone();
 
@@ -410,16 +510,64 @@ impl PkiBackendInner {
             issuer_id: issuer_id.clone(),
             is_orphaned: false,
             source: String::new(),
+            key_id: String::new(),
         };
         storage::put_json(req, &storage::cert_storage_key(&serial_hex), &record).await?;
 
         let mut data: Map<String, Value> = Map::new();
         data.insert("certificate".into(), json!(cert_pem));
         data.insert("issuing_ca".into(), json!(ca_cert_pem));
+        data.insert("ca_chain".into(), json!(ca_chain));
         data.insert("serial_number".into(), json!(serial_hex));
         data.insert("issuer_id".into(), json!(issuer_id));
         Ok(Some(Response::data_response(Some(data))))
     }
+}
+
+/// Resolve and authorise an operator-supplied `key_ref` against the role
+/// policy and the managed key store. Used by `pki/issue/:role` and
+/// `pki/sign/:role` for Phase-L2 key reuse.
+///
+/// Errors:
+/// - `ErrPkiKeyOperationInvalid` — role has `allow_key_reuse = false`
+///   or the key isn't on the role's allow-list.
+/// - `ErrPkiKeyTypeInvalid` — the managed key's algorithm doesn't match
+///   the role's algorithm.
+/// - `ErrString("...")` — the key reference doesn't resolve.
+#[maybe_async::maybe_async]
+async fn resolve_pinned_key(
+    req: &Request,
+    role: &RoleEntry,
+    key_ref: &str,
+    role_alg: KeyAlgorithm,
+) -> Result<KeyEntry, RvError> {
+    if !role.allow_key_reuse {
+        return Err(RvError::ErrPkiKeyOperationInvalid);
+    }
+    let entry = keys::load_key(req, key_ref)
+        .await?
+        .ok_or_else(|| RvError::ErrString(format!(
+            "key_ref `{key_ref}` does not resolve to a managed key on this mount"
+        )))?;
+
+    if !role.allowed_key_refs.is_empty() {
+        // Match against either the resolved id or the user-supplied
+        // alias; both are stable identifiers an operator might write
+        // into the allow-list.
+        let allowed = role.allowed_key_refs.iter().any(|allowed_ref| {
+            allowed_ref == &entry.id
+                || (!entry.name.is_empty() && allowed_ref == &entry.name)
+        });
+        if !allowed {
+            return Err(RvError::ErrPkiKeyOperationInvalid);
+        }
+    }
+
+    let entry_alg = entry.algorithm()?;
+    if entry_alg != role_alg {
+        return Err(RvError::ErrPkiKeyTypeInvalid);
+    }
+    Ok(entry)
 }
 
 fn parse_optional_ttl(req: &Request, key: &str) -> Result<Option<Duration>, RvError> {

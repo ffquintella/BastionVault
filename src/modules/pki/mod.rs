@@ -23,7 +23,9 @@ pub mod composite;
 pub mod crypto;
 pub mod csr;
 pub mod issuers;
+pub mod keys;
 pub mod path_config;
+pub mod path_keys;
 pub mod path_intermediate;
 pub mod path_issuers;
 pub mod path_crl;
@@ -85,12 +87,18 @@ impl PkiBackend {
             self.fetch_ca_chain_path(),
             self.list_certs_path(),
             self.import_cert_path(),
+            // ── L1 managed key store ──
+            self.keys_list_path(),
+            self.keys_generate_path(),
+            self.keys_import_path(),
+            self.key_path(),
             self.revoke_path(),
             self.crl_path(),
             self.crl_rotate_path(),
             self.issuer_crl_path(),
             self.issuers_list_path(),
             self.issuer_path(),
+            self.issuer_chain_path(),
             self.config_issuers_path(),
             self.config_ca_path(),
             self.config_urls_path(),

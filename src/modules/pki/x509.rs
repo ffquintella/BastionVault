@@ -379,24 +379,134 @@ pub struct RevokedEntry {
     pub revoked_at_unix: u64,
 }
 
-/// Phase-1 common-name validation.
+/// Validate a DNS-style name (CN or DNS SAN) against the role's
+/// emission-control matrix.
 ///
-/// Implements the most-used Vault knobs (`allow_any_name`, `allow_localhost`).
-/// `allowed_domains` / `allow_glob_domains` / name-constraint chaining are
-/// deferred to a follow-up so role storage stays compatible with the existing
-/// schema until the new fields are explicitly added.
+/// Phase L4 closes the deferred domain-policy gap from Phase 1. The
+/// matrix mirrors Vault's role rules:
+///
+/// - `allow_any_name = true` (Vault default + BastionVault default for
+///   freshly-written roles): everything passes.
+/// - Otherwise the name is accepted only if it is one of:
+///   - `"localhost"` / `"localdomain"` when `allow_localhost = true`,
+///   - present in `allowed_domains` when `allow_bare_domains = true`,
+///   - a strict subdomain of an entry in `allowed_domains` when
+///     `allow_subdomains = true`,
+///   - a glob match against an entry in `allowed_domains` when
+///     `allow_glob_domains = true`.
+///
+/// `allowed_domains` is the conjunctive root of the rules — empty
+/// `allowed_domains` with `allow_any_name = false` means "no DNS names
+/// accepted" (combine with `allow_ip_sans` for IP-only mTLS).
 pub fn validate_common_name(role: &RoleEntry, cn: &str) -> Result<(), RvError> {
     if cn.is_empty() {
+        return Err(RvError::ErrPkiDataInvalid);
+    }
+    validate_dns_name(role, cn)
+}
+
+/// Apply the role's domain-policy matrix to a single DNS-style name.
+/// Used by [`validate_common_name`] and by the issue/sign handlers when
+/// they walk DNS SANs.
+pub fn validate_dns_name(role: &RoleEntry, name: &str) -> Result<(), RvError> {
+    if name.is_empty() {
         return Err(RvError::ErrPkiDataInvalid);
     }
     if role.allow_any_name {
         return Ok(());
     }
-    if role.allow_localhost && (cn == "localhost" || cn == "localdomain") {
+    if role.allow_localhost && (name == "localhost" || name == "localdomain") {
         return Ok(());
     }
-    let _ = (role.allow_subdomains, role.allow_bare_domains);
-    Ok(())
+
+    let candidate = name.to_ascii_lowercase();
+    for raw in &role.allowed_domains {
+        let allowed = raw.trim().to_ascii_lowercase();
+        if allowed.is_empty() {
+            continue;
+        }
+        if role.allow_bare_domains && candidate == allowed {
+            return Ok(());
+        }
+        if role.allow_subdomains && is_strict_subdomain(&candidate, &allowed) {
+            return Ok(());
+        }
+        if role.allow_glob_domains && glob_match(&allowed, &candidate) {
+            return Ok(());
+        }
+    }
+    Err(RvError::ErrString(format!(
+        "name `{name}` is not permitted by the role's emission policy"
+    )))
+}
+
+/// `child` is a strict subdomain of `parent` when it ends with
+/// `.<parent>` and the prefix carries at least one label. Equality
+/// alone does not count — that's `allow_bare_domains`'s job.
+fn is_strict_subdomain(child: &str, parent: &str) -> bool {
+    if child.len() <= parent.len() + 1 {
+        return false;
+    }
+    let suffix_start = child.len() - parent.len();
+    if &child[suffix_start..] != parent {
+        return false;
+    }
+    // The character right before `parent` must be `.`, and the prefix
+    // must be a non-empty label sequence.
+    child.as_bytes()[suffix_start - 1] == b'.' && !child[..suffix_start - 1].is_empty()
+}
+
+/// Single-label glob match: `*` in `pattern` matches one or more
+/// characters within the same label. `*` does NOT span dots — wildcard
+/// subdomains require a separate `allow_subdomains` rule.
+fn glob_match(pattern: &str, name: &str) -> bool {
+    // Patterns and names are split into label vectors; each label is
+    // matched independently with the `*` rule above. This keeps the
+    // semantics close to Vault's documentation:
+    // `*-prod.example.com` matches `web-prod.example.com` but NOT
+    // `web.prod.example.com`.
+    let p_labels: Vec<&str> = pattern.split('.').collect();
+    let n_labels: Vec<&str> = name.split('.').collect();
+    if p_labels.len() != n_labels.len() {
+        return false;
+    }
+    p_labels.iter().zip(n_labels.iter()).all(|(p, n)| label_glob(p, n))
+}
+
+fn label_glob(pattern: &str, label: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern == label;
+    }
+    // Split pattern on `*`; each part must occur in order in `label`.
+    // Anchored at start (first part) and end (last part) so leading
+    // and trailing literal text is enforced.
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let mut cursor = 0usize;
+    for (i, part) in parts.iter().enumerate() {
+        if i == 0 {
+            if !label[cursor..].starts_with(part) {
+                return false;
+            }
+            cursor += part.len();
+        } else if i == parts.len() - 1 {
+            if !label[cursor..].ends_with(part) {
+                return false;
+            }
+            // Make sure the suffix doesn't overlap material we already
+            // consumed (e.g. pattern `**` against an empty middle).
+            if label.len() < cursor + part.len() {
+                return false;
+            }
+        } else {
+            match label[cursor..].find(part) {
+                Some(idx) => cursor += idx + part.len(),
+                None => return false,
+            }
+        }
+    }
+    // `*` requires at least one character of replacement — empty `*`
+    // matches are not allowed (Vault parity).
+    !label.is_empty()
 }
 
 /// Parse a comma-separated alt_names string into DNS labels + IP SANs.

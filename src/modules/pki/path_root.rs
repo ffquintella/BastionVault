@@ -37,7 +37,8 @@ impl PkiBackend {
                 "key_type": { field_type: FieldType::Str, default: "ec", description: "rsa | ec | ed25519 | ml-dsa-44 | ml-dsa-65 | ml-dsa-87." },
                 "key_bits": { field_type: FieldType::Int, default: 0, description: "Key size (0 = default)." },
                 "ttl": { field_type: FieldType::Str, default: "", description: "Validity duration (e.g. 8760h)." },
-                "issuer_name": { field_type: FieldType::Str, default: "", description: "Name to register this issuer under (Phase 5.2). Defaults to `default` for the first issuer, `issuer-N` for subsequent ones." }
+                "issuer_name": { field_type: FieldType::Str, default: "", description: "Name to register this issuer under (Phase 5.2). Defaults to `default` for the first issuer, `issuer-N` for subsequent ones." },
+                "key_ref": { field_type: FieldType::Str, default: "", description: "Promote a managed key (by ID or name) to issuer instead of generating fresh material (Phase L3). Algorithm must match `key_type` / `key_bits`." }
             },
             operations: [{op: Operation::Write, handler: r.generate_root}],
             help: "Generate a self-signed root CA."
@@ -75,7 +76,34 @@ impl PkiBackendInner {
         // in `x509_pqc`; composite (Phase 3 preview) through `x509_composite`.
         // Either way the result is the same shape: (PEM cert, serial bytes,
         // PEM private key).
-        let signer = Signer::generate(alg)?;
+        //
+        // Phase L3: optional `key_ref` promotes a managed key from
+        // `pki/keys/*` to issuer status. The signer is reconstructed
+        // from the stored material and the binding gets recorded in
+        // the key's refs file after `add_issuer` succeeds.
+        let request_key_ref = req
+            .get_data_or_default("key_ref")?
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let pinned_key = if request_key_ref.is_empty() {
+            None
+        } else {
+            let entry = super::keys::load_key(req, &request_key_ref).await?.ok_or_else(|| {
+                RvError::ErrString(format!(
+                    "key_ref `{request_key_ref}` does not resolve to a managed key on this mount"
+                ))
+            })?;
+            if entry.algorithm()? != alg {
+                return Err(RvError::ErrPkiKeyTypeInvalid);
+            }
+            Some(entry)
+        };
+        let signer = match &pinned_key {
+            Some(entry) => Signer::from_storage_pem(&entry.private_key_pem)?,
+            None => Signer::generate(alg)?,
+        };
         let (cert_pem, serial_bytes) = match &signer {
             Signer::Classical(cs) => {
                 let (cert, serial) = x509::build_root_ca(&common_name, &organization, ttl, cs)?;
@@ -116,6 +144,13 @@ impl PkiBackendInner {
         )
         .await?;
 
+        // Phase L3: if a managed key was promoted to issuer, record the
+        // binding so `delete_key` refuses while the issuer still uses
+        // this key.
+        if let Some(entry) = &pinned_key {
+            super::keys::add_issuer_ref(req, &entry.id, &issuer_id).await?;
+        }
+
         // CRL config is mount-wide; seed it once if absent.
         if storage::get_json::<CrlConfig>(req, KEY_CONFIG_CRL).await?.is_none() {
             storage::put_json(req, KEY_CONFIG_CRL, &CrlConfig::default()).await?;
@@ -127,14 +162,23 @@ impl PkiBackendInner {
         data.insert("issuer_id".into(), json!(issuer_id));
         data.insert("issuer_name".into(), json!(issuer_name));
         data.insert("expiration".into(), json!(not_after_unix));
-        if exported == "exported" {
+        if exported == "exported" && pinned_key.is_none() {
             // Caller-facing PKCS#8 (Phase 5.3) for both classical and PQC
             // roots. The engine's own copy of the key is held inside the
             // multi-issuer registry by `add_issuer` above, in the storage
             // envelope form — this is purely the operator's hand-off copy.
+            //
+            // Phase L3: when `key_ref` is used the operator already
+            // owns a copy of the material (or chose to leave it
+            // internal at key-store creation time). Don't echo the
+            // private key again here; the route still records the
+            // managed-key binding.
             let pkcs8 = signer.to_pkcs8_pem()?;
             data.insert("private_key".into(), json!(pkcs8));
             data.insert("private_key_type".into(), json!(alg.as_str()));
+        }
+        if let Some(entry) = &pinned_key {
+            data.insert("key_id".into(), json!(entry.id));
         }
         // Reference the legacy storage-key constants so unused-import lints
         // don't fire on them while the migration shim keeps owning them.

@@ -41,6 +41,31 @@ use crate::{
 
 const DEFAULT_INTERMEDIATE_TTL: Duration = Duration::from_secs(5 * 365 * 24 * 3600); // ~5y
 
+/// Read the `pathLenConstraint` from an issuer cert's `BasicConstraints`
+/// extension. Returns `Ok(None)` when BasicConstraints is absent or the
+/// constraint is unspecified (unconstrained CA), `Ok(Some(n))` when
+/// BasicConstraints carries `pathLenConstraint = n`. Used by L4's
+/// path-length clamp on `sign-intermediate`.
+fn issuer_path_len(cert_pem: &str) -> Result<Option<u8>, RvError> {
+    use x509_parser::extensions::ParsedExtension;
+    use x509_parser::prelude::FromDer;
+
+    let der = pem::parse(cert_pem.as_bytes())
+        .map_err(|_| RvError::ErrPkiPemBundleInvalid)?
+        .into_contents();
+    let (_, parsed) = x509_parser::certificate::X509Certificate::from_der(&der)
+        .map_err(|_| RvError::ErrPkiPemBundleInvalid)?;
+    for ext in parsed.tbs_certificate.extensions() {
+        if let ParsedExtension::BasicConstraints(bc) = ext.parsed_extension() {
+            if !bc.ca {
+                return Err(RvError::ErrPkiCertIsNotCA);
+            }
+            return Ok(bc.path_len_constraint.map(|n| n.min(255) as u8));
+        }
+    }
+    Ok(None)
+}
+
 impl PkiBackend {
     pub fn intermediate_generate_path(&self) -> Path {
         let r = self.inner.clone();
@@ -51,7 +76,8 @@ impl PkiBackend {
                 "common_name": { field_type: FieldType::Str, required: true, description: "Subject CN for the intermediate." },
                 "organization": { field_type: FieldType::Str, default: "", description: "Subject Organization." },
                 "key_type": { field_type: FieldType::Str, default: "ec", description: "rsa | ec | ed25519." },
-                "key_bits": { field_type: FieldType::Int, default: 0, description: "Key size (0 = default)." }
+                "key_bits": { field_type: FieldType::Int, default: 0, description: "Key size (0 = default)." },
+                "key_ref": { field_type: FieldType::Str, default: "", description: "Promote a managed key (by ID or name) to back this intermediate instead of generating fresh material (Phase L3)." }
             },
             operations: [{op: Operation::Write, handler: r.generate_intermediate}],
             help: "Generate an intermediate-CA keypair and emit its CSR for signing by an upstream root."
@@ -110,7 +136,34 @@ impl PkiBackendInner {
         let key_bits = req.get_data_or_default("key_bits")?.as_u64().unwrap_or(0) as u32;
         let alg = KeyAlgorithm::from_role(&key_type, key_bits)?;
 
-        let signer = Signer::generate(alg)?;
+        // Phase L3: optional `key_ref` backs the pending intermediate
+        // with an existing managed key. The signer is reconstructed
+        // from the stored material; the key_id is stashed in
+        // `PendingIntermediate` so `set-signed` can record the binding
+        // once the signed cert installs the issuer.
+        let request_key_ref = req
+            .get_data_or_default("key_ref")?
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let pinned_key = if request_key_ref.is_empty() {
+            None
+        } else {
+            let entry = super::keys::load_key(req, &request_key_ref).await?.ok_or_else(|| {
+                RvError::ErrString(format!(
+                    "key_ref `{request_key_ref}` does not resolve to a managed key on this mount"
+                ))
+            })?;
+            if entry.algorithm()? != alg {
+                return Err(RvError::ErrPkiKeyTypeInvalid);
+            }
+            Some(entry)
+        };
+        let signer = match &pinned_key {
+            Some(entry) => Signer::from_storage_pem(&entry.private_key_pem)?,
+            None => Signer::generate(alg)?,
+        };
         // Phase 5 limits intermediate generation to classical algorithms,
         // matching the sign-handler limitation. PQC intermediates land
         // alongside PQC CSR support.
@@ -136,13 +189,17 @@ impl PkiBackendInner {
                 key_bits: alg.key_bits(),
                 common_name: common_name.clone(),
                 created_at_unix: now,
+                key_id: pinned_key.as_ref().map(|e| e.id.clone()).unwrap_or_default(),
             },
         )
         .await?;
 
         let mut data: Map<String, Value> = Map::new();
         data.insert("csr".into(), json!(csr_pem));
-        if exported == "exported" {
+        if let Some(entry) = &pinned_key {
+            data.insert("key_id".into(), json!(entry.id));
+        }
+        if exported == "exported" && pinned_key.is_none() {
             // Caller-facing PKCS#8 (Phase 5.3). The engine retains the
             // engine-internal storage envelope at `KEY_CA_PENDING_KEY` for
             // when `set-signed` later promotes the pending intermediate to
@@ -221,6 +278,12 @@ impl PkiBackendInner {
         )
         .await?;
 
+        // Phase L3: complete the managed-key→issuer binding when the
+        // intermediate was generated against `key_ref`.
+        if !pending_meta.key_id.is_empty() {
+            super::keys::add_issuer_ref(req, &pending_meta.key_id, &issuer_id).await?;
+        }
+
         if storage::get_json::<CrlConfig>(req, KEY_CONFIG_CRL).await?.is_none() {
             storage::put_json(req, KEY_CONFIG_CRL, &CrlConfig::default()).await?;
         }
@@ -262,7 +325,7 @@ impl PkiBackendInner {
         };
 
         let max_path_length = req.get_data_or_default("max_path_length")?.as_i64().unwrap_or(-1);
-        let path_len: Option<u8> = if max_path_length < 0 { None } else { Some(max_path_length.min(255) as u8) };
+        let mut path_len: Option<u8> = if max_path_length < 0 { None } else { Some(max_path_length.min(255) as u8) };
 
         let request_issuer_ref = req.get_data_or_default("issuer_ref")?.as_str().unwrap_or("").to_string();
         let issuer = if !request_issuer_ref.is_empty() {
@@ -271,6 +334,35 @@ impl PkiBackendInner {
             super::issuers::load_default_issuer(req).await?
         };
         super::issuers::require_issuing(&issuer)?;
+        // Phase L4: clamp the new intermediate's lifetime + path-length
+        // to the signing issuer's own constraints. RFC 5280: a CA's
+        // pathLenConstraint applies to the maximum number of
+        // *non-self-issued* intermediate CAs that may follow it; signing
+        // an intermediate with `path_len = N` requires the parent to
+        // permit at least `N+1`. We read the parent's pathLenConstraint
+        // from its cert and clamp accordingly.
+        let (ttl, _was_clamped) = super::issuers::clamp_ttl_to_issuer(&issuer, ttl)?;
+        let parent_path_len = issuer_path_len(&issuer.cert_pem)?;
+        if let Some(parent_max) = parent_path_len {
+            // Parent allows at most `parent_max` more intermediates
+            // beneath it. The intermediate we're about to sign would
+            // be one of them, so its own pathLenConstraint must be at
+            // most `parent_max - 1`. parent_max=0 → child must be a
+            // leaf-issuing CA only (path_len=0 enforced).
+            let child_cap: i32 = (parent_max as i32) - 1;
+            if child_cap < 0 {
+                return Err(RvError::ErrString(format!(
+                    "sign-intermediate: parent issuer `{}` has pathLenConstraint=0; \
+                     it cannot sign another intermediate CA",
+                    issuer.name,
+                )));
+            }
+            let cap_u8 = child_cap.min(255) as u8;
+            path_len = Some(match path_len {
+                Some(req) => req.min(cap_u8),
+                None => cap_u8,
+            });
+        }
         let ca_cert_pem = issuer.cert_pem.clone();
         let ca_signer = issuer.signer;
         let Signer::Classical(ca_classical) = &ca_signer else {
