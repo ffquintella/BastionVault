@@ -17,6 +17,7 @@ import { MountsPage } from "./routes/MountsPage";
 import { SettingsPage } from "./routes/SettingsPage";
 import { ExchangePage } from "./routes/ExchangePage";
 import { PkiPage } from "./routes/PkiPage";
+import { CertLifecyclePage } from "./routes/CertLifecyclePage";
 import { SshPage } from "./routes/SshPage";
 import { TotpPage } from "./routes/TotpPage";
 import { LdapPage } from "./routes/LdapPage";
@@ -109,6 +110,10 @@ export default function App() {
             <Route
               path="/pki"
               element={<ProtectedRoute><PkiPage /></ProtectedRoute>}
+            />
+            <Route
+              path="/cert-lifecycle"
+              element={<ProtectedRoute><CertLifecyclePage /></ProtectedRoute>}
             />
             <Route
               path="/ssh"

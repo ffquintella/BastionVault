@@ -76,7 +76,7 @@ The split is deliberate:
 
 ## Current State
 
-**Phases L1 + L2 + L3 + L4 — Done.**
+**All seven phases (L1 + L2 + L3 + L4 + L5 + L6 + L7) — Done.**
 
 **L1** ships the managed key store at `pki/keys/*` (LIST + generate `internal`/`exported` + import) and `pki/key/<key_ref>` (READ + DELETE). Storage: `keys/<id>` (KeyEntry), `key-names/<name>` (id pointer), `key-refs/<id>` (KeyRefs). Import accepts PKCS#8 RSA / ECDSA / Ed25519, PKCS#8 ML-DSA (lamps-draft layout), and the engine-internal `BV PQC SIGNER` envelope; an explicit RSA-strength gate rejects sub-2048 modulus before reaching the lenient `Signer::from_storage_pem` fallback. Delete refuses while `KeyRefs` is non-empty.
 
@@ -98,13 +98,24 @@ The split is deliberate:
 - New `issuers::clamp_ttl_to_issuer` ensures every leaf's `NotAfter` ≤ issuer's `NotAfter`. Wired into `issue`, `sign/:role`, `sign-verbatim`, and ACME finalize. Already-expired issuers return `ErrPkiCaNotConfig`.
 - `pki/root/sign-intermediate` reads the parent issuer's `BasicConstraints.pathLenConstraint` and clamps the child's pathLen to `parent_max - 1`. Refuses to sign when parent has `pathLenConstraint = 0`.
 
-End-to-end coverage in [tests/test_pki_managed_keys.rs](../tests/test_pki_managed_keys.rs) (L1, 9 cases), [tests/test_pki_key_reuse.rs](../tests/test_pki_key_reuse.rs) (L2, 7 cases), [tests/test_pki_issuer_keys.rs](../tests/test_pki_issuer_keys.rs) (L3, 6 cases), and [tests/test_pki_emission_control.rs](../tests/test_pki_emission_control.rs) (L4, 6 cases).
+**L5** introduces the sibling `cert-lifecycle` module. Mount path: `cert-lifecycle/`. The module *consumes* a PKI mount and holds no CA keys of its own.
+- Storage: `targets/<name>` (Target inventory) and `state/<name>` (TargetState — current_serial / current_not_after / last_renewal / last_attempt / last_error / next_attempt / failure_count).
+- Routes: `LIST cert-lifecycle/targets`, `READ`/`WRITE`/`DELETE cert-lifecycle/targets/<name>`, `READ cert-lifecycle/state/<name>`, `WRITE cert-lifecycle/renew/<name>`.
+- Manual renew dispatches `pki/issue/<role>` via `Core::handle_request` with the caller's token so the same role / issuer / emission-control gates from L1–L4 fire on the sub-call. The response is decoded, NotAfter is parsed from the cert (so state stays self-consistent even when L4's TTL clamp kicks in), and the bundle is atomic-written to the target's `address` (kind=file: writes `cert.pem` / `key.pem` / `chain.pem` via `<file>.tmp` → rename).
+- `key_policy = Reuse` plumbs the target's `key_ref` through to the PKI issue body so renewals share an SPKI. `key_policy = AgentGenerates` is reserved for L7 and rejected at write time today.
+- Required-field validation (`role_ref`, `common_name`, `address` for kind=file, `key_ref` when reuse) rejects malformed targets at write time rather than mid-renew.
+
+**L7** introduces `CertDeliveryPlugin` — a sync trait keyed by `TargetKind::as_str` that the renewer invokes to deliver a `CertBundle` (cert / key / chain / serial). The L5 monolithic file-write code is factored into a `FileDeliverer` impl behind the trait. A new `HttpPushDeliverer` ships as the second built-in: `POST <address>` with a small JSON envelope (`{target, serial, certificate, private_key, ca_chain}`); 2xx is success, non-2xx surfaces the status code as a delivery error; uses `ureq` (already a direct dep). The `DelivererRegistry` lookup table is held on `CertLifecycleBackendInner`, seeded with the built-ins via `with_builtins()` at module construction, and exposes `register()` as the plug point for an L7 follow-up that wires in `plugin-ext` deliverers. New admin route `READ /v1/cert-lifecycle/sys/deliverers` lists the registered plugin names. The renew response now carries `delivery_kind`, `delivered_to`, and `delivery_note` so operators can see which deliverer ran and what receipt it produced.
+
+**L6** adds the periodic renewal scheduler. Single tokio task booted from `Core::post_unseal`, identical lifecycle posture to the existing PKI auto-tidy / LDAP rotation / files-sync schedulers (single-process, self-skip while sealed, no HA leader gating yet). Each `cert-lifecycle` mount opts in via `cert-lifecycle/scheduler/config` — the scheduler is closed by default. Config carries `client_token` (write-only over the API) which the scheduler dispatches PKI calls under, so the operator's ACL boundary applies; there is no scheduler-side bypass. `is_due` decides whether to fire: never-issued targets fire immediately, healthy targets fire when `now >= current_not_after - renew_before`, in-backoff targets are skipped until `next_attempt_unix`. Backoff is `now + min(max_backoff, base_backoff * 2^(failure_count - 1))` after a failure; success sets `next_attempt_unix = current_not_after - renew_before`. `run_cert_lifecycle_pass` is the public no-wait entry point used by integration tests and reserved for a future `sys/cert-lifecycle/run-now` admin endpoint.
+
+End-to-end coverage in [tests/test_pki_managed_keys.rs](../tests/test_pki_managed_keys.rs) (L1, 9 cases), [tests/test_pki_key_reuse.rs](../tests/test_pki_key_reuse.rs) (L2, 7 cases), [tests/test_pki_issuer_keys.rs](../tests/test_pki_issuer_keys.rs) (L3, 6 cases), [tests/test_pki_emission_control.rs](../tests/test_pki_emission_control.rs) (L4, 6 cases), [tests/test_cert_lifecycle_basic.rs](../tests/test_cert_lifecycle_basic.rs) (L5, 6 cases), [tests/test_cert_lifecycle_scheduler.rs](../tests/test_cert_lifecycle_scheduler.rs) (L6, 5 cases), and [tests/test_cert_lifecycle_plugin.rs](../tests/test_cert_lifecycle_plugin.rs) (L7, 4 cases including a real `http-push` round-trip against a localhost capture server).
 
 **Implementation notes / deviations:**
 - `key_ref` is honoured on `pki/issue/:role`, `pki/sign/:role`, `pki/root/generate/*`, and `pki/intermediate/generate/*`. `pki/sign-verbatim` is intentionally excluded from leaf reuse — it has no role to gate `allow_key_reuse` against.
 - The chain walk uses textual DN comparison via `x509-parser`'s `to_string()`. Distinct issuers with identical Subject DNs (a pre-existing data hazard at the mount) cause first-match-wins behaviour. Real deployments use unique CA names, so this is acceptable for L3.
 
-L5–L7 (the cert-lifecycle module) are not yet implemented. Roadmap entry tracks the active phase under "PKI: Key Management + Cert Lifecycle" in [roadmap.md](../roadmap.md).
+All seven phases are landed. The only open follow-up is the **`plugin-ext` bridge** that would let third-party Rust binaries register additional `CertDeliveryPlugin` implementations at runtime. The trait + registry surface is stable; the bridge is scoped as a separate effort that touches the existing `plugin-ext` IPC contract rather than this module. Roadmap entry tracks the active phase under "PKI: Key Management + Cert Lifecycle" in [roadmap.md](../roadmap.md).
 
 ## Phases
 

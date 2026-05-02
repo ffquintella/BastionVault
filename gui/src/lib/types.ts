@@ -675,6 +675,9 @@ export interface PkiGenerateRootRequest {
   key_bits?: number;
   ttl?: string;
   issuer_name?: string;
+  /** Phase L3: promote a managed key to root issuer instead of
+   *  generating fresh material. Algorithm must match key_type/key_bits. */
+  key_ref?: string;
 }
 
 export interface PkiRootResult {
@@ -682,9 +685,11 @@ export interface PkiRootResult {
   issuer_id: string;
   issuer_name: string;
   expiration: number;
-  /** Only populated in `exported` mode. */
+  /** Only populated in `exported` mode AND when `key_ref` was not used. */
   private_key?: string;
   private_key_type?: string;
+  /** Phase L3: when `key_ref` was used, the bound managed key UUID. */
+  key_id: string;
 }
 
 export interface PkiGenerateIntermediateRequest {
@@ -694,12 +699,16 @@ export interface PkiGenerateIntermediateRequest {
   organization?: string;
   key_type?: string;
   key_bits?: number;
+  /** Phase L3: back the pending intermediate with a managed key. */
+  key_ref?: string;
 }
 
 export interface PkiIntermediateResult {
   csr: string;
   private_key?: string;
   private_key_type?: string;
+  /** Phase L3: when `key_ref` was used, the bound managed key UUID. */
+  key_id: string;
 }
 
 export interface PkiSetSignedIntermediateRequest {
@@ -760,6 +769,18 @@ export interface PkiRoleConfig {
   generate_lease: boolean;
   /** Pin issuance to a specific issuer (UUID or name). Empty = mount default. */
   issuer_ref: string;
+  /** Phase L2: opt-in to private-key reuse via `key_ref` on issue/sign. */
+  allow_key_reuse: boolean;
+  /** Phase L2: allow-list of managed keys this role may pin to. Empty +
+   *  `allow_key_reuse=true` means any key on this mount is acceptable. */
+  allowed_key_refs: string[];
+  /** Phase L4: parent domains for CN / DNS SAN matching. Combined with
+   *  `allow_subdomains` / `allow_bare_domains` / `allow_glob_domains`. */
+  allowed_domains: string[];
+  /** Phase L4: entries in `allowed_domains` may carry single-label `*` globs. */
+  allow_glob_domains: boolean;
+  /** Phase L4: per-role kill-switch for the ACME server endpoints. */
+  acme_enabled: boolean;
 }
 
 export interface PkiIssueRequest {
@@ -770,6 +791,8 @@ export interface PkiIssueRequest {
   ip_sans?: string;
   ttl?: string;
   issuer_ref?: string;
+  /** Phase L2: pin issuance to a managed key. Requires `role.allow_key_reuse`. */
+  key_ref?: string;
 }
 
 export interface PkiIssueResult {
@@ -779,6 +802,10 @@ export interface PkiIssueResult {
   private_key_type: string;
   serial_number: string;
   issuer_id: string;
+  /** Phase L3: leaf-issuer → root chain. */
+  ca_chain: string[];
+  /** Phase L2: when `key_ref` was used, the resolved managed key UUID. */
+  key_id: string;
 }
 
 export interface PkiSignCsrRequest {
@@ -789,6 +816,8 @@ export interface PkiSignCsrRequest {
   alt_names?: string;
   ttl?: string;
   issuer_ref?: string;
+  /** Phase L2: assert the CSR's SubjectPublicKeyInfo matches a managed key. */
+  key_ref?: string;
 }
 
 export interface PkiSignVerbatimRequest {
@@ -803,6 +832,58 @@ export interface PkiSignResult {
   issuing_ca: string;
   serial_number: string;
   issuer_id: string;
+  ca_chain: string[];
+  key_id: string;
+}
+
+// ── Phase L1 — managed key store ──────────────────────────────────
+
+export interface PkiManagedKey {
+  key_id: string;
+  name: string;
+  key_type: string;
+  key_bits: number;
+  public_key: string;
+  source: string;
+  exported: boolean;
+  created_at: number;
+  issuer_ref_count: number;
+  cert_ref_count: number;
+}
+
+export interface PkiGenerateKeyRequest {
+  mount: string;
+  /** `internal` (private not echoed) or `exported` (private returned once). */
+  mode: "internal" | "exported";
+  key_type: string;
+  key_bits?: number;
+  name?: string;
+}
+
+export interface PkiGenerateKeyResult {
+  key_id: string;
+  key_type: string;
+  source: string;
+  exported: boolean;
+  /** Only populated in `exported` mode. */
+  private_key?: string;
+  public_key: string;
+  name: string;
+}
+
+export interface PkiImportKeyRequest {
+  mount: string;
+  private_key: string;
+  name?: string;
+}
+
+// ── Phase L3 — issuer chain ───────────────────────────────────────
+
+export interface PkiIssuerChain {
+  issuer_id: string;
+  issuer_name: string;
+  ca_chain: string[];
+  certificate_bundle: string;
 }
 
 export interface PkiCertRecord {
@@ -1139,4 +1220,66 @@ export interface LdapLibraryStatusEntry {
 export interface LdapLibraryStatus {
   checked_out: LdapLibraryStatusEntry[];
   available: string[];
+}
+
+// ── Cert-Lifecycle module (Phases L5–L7) ─────────────────────────
+
+export interface CertLifecycleMountInfo {
+  path: string;
+  mount_type: string;
+}
+
+export type CertLifecycleKind = "file" | "http-push";
+export type CertLifecycleKeyPolicy = "rotate" | "reuse" | "agent-generates";
+
+export interface CertLifecycleTarget {
+  name: string;
+  kind: CertLifecycleKind;
+  /** For `file`: absolute directory path. For `http-push`: http(s) URL. */
+  address: string;
+  /** PKI mount the renewer dispatches issuance into. Default `pki`. */
+  pki_mount: string;
+  role_ref: string;
+  common_name: string;
+  alt_names: string[];
+  ip_sans: string[];
+  /** Optional duration string (e.g. `720h`). Empty = role default. */
+  ttl: string;
+  key_policy: CertLifecycleKeyPolicy;
+  /** Required when `key_policy = "reuse"`. */
+  key_ref: string;
+  /** Lead time before NotAfter at which the L6 scheduler renews. */
+  renew_before: string;
+  created_at: number;
+}
+
+export interface CertLifecycleState {
+  name: string;
+  current_serial: string;
+  current_not_after: number;
+  last_renewal: number;
+  last_attempt: number;
+  last_error: string;
+  next_attempt: number;
+  failure_count: number;
+}
+
+export interface CertLifecycleRenewResult {
+  name: string;
+  serial_number: string;
+  not_after: number;
+  delivered_to: string;
+  delivery_kind: string;
+  delivery_note: string;
+}
+
+export interface CertLifecycleSchedulerConfig {
+  enabled: boolean;
+  tick_interval_seconds: number;
+  /** Write-only: present in request bodies, never echoed by reads. */
+  client_token: string;
+  /** Read-side flag from the engine indicating whether a token is set. */
+  client_token_set: boolean;
+  base_backoff_seconds: number;
+  max_backoff_seconds: number;
 }

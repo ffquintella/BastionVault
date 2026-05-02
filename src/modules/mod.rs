@@ -10,6 +10,7 @@ use std::{any::Any, sync::Arc};
 use crate::{core::Core, errors::RvError};
 
 pub mod auth;
+pub mod cert_lifecycle;
 pub mod credential;
 pub mod crypto;
 pub mod files;

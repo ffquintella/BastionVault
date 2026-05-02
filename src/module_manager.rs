@@ -16,10 +16,10 @@ use crate::{
     core::Core,
     errors::RvError,
     modules::{
-        files::FilesModule, identity::IdentityModule, kv::KvModule, kv_v2::KvV2Module,
-        ldap::LdapModule, pki::PkiModule, resource::ResourceModule,
-        resource_group::ResourceGroupModule, ssh::SshModule, system::SystemModule,
-        totp::TotpModule, transit::TransitModule, Module,
+        cert_lifecycle::CertLifecycleModule, files::FilesModule, identity::IdentityModule,
+        kv::KvModule, kv_v2::KvV2Module, ldap::LdapModule, pki::PkiModule,
+        resource::ResourceModule, resource_group::ResourceGroupModule, ssh::SshModule,
+        system::SystemModule, totp::TotpModule, transit::TransitModule, Module,
     },
 };
 
@@ -46,6 +46,7 @@ impl ModuleManager {
             Arc::new(TotpModule::new(core.clone())),
             Arc::new(TransitModule::new(core.clone())),
             Arc::new(LdapModule::new(core.clone())),
+            Arc::new(CertLifecycleModule::new(core.clone())),
             Arc::new(SystemModule::new(core)),
         ];
         self.modules.store(Arc::new(modules));

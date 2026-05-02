@@ -1,6 +1,7 @@
 pub mod approle;
 pub mod asset_groups;
 pub mod backup;
+pub mod cert_lifecycle;
 pub mod cloud_target;
 pub mod connect;
 pub mod oidc;

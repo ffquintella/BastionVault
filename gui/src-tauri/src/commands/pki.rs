@@ -270,6 +270,8 @@ pub struct PkiGenerateRootRequest {
     pub key_bits: Option<u64>,
     pub ttl: Option<String>,
     pub issuer_name: Option<String>,
+    /// Phase L3: promote a managed key (by id or name) to root issuer.
+    pub key_ref: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -278,9 +280,12 @@ pub struct PkiRootResult {
     pub issuer_id: String,
     pub issuer_name: String,
     pub expiration: i64,
-    /// Only populated in `exported` mode.
+    /// Only populated in `exported` mode AND when `key_ref` was not used.
     pub private_key: Option<String>,
     pub private_key_type: Option<String>,
+    /// Phase L3: when `key_ref` was used, the resolved managed key UUID.
+    #[serde(default)]
+    pub key_id: String,
 }
 
 #[tauri::command]
@@ -306,6 +311,9 @@ pub async fn pki_generate_root(
     if let Some(n) = request.issuer_name {
         body.insert("issuer_name".into(), json!(n));
     }
+    if let Some(k) = request.key_ref.filter(|s| !s.is_empty()) {
+        body.insert("key_ref".into(), json!(k));
+    }
     let resp = make_request(
         &state,
         Operation::Write,
@@ -321,6 +329,7 @@ pub async fn pki_generate_root(
         expiration: val_i64(&map, "expiration"),
         private_key: map.get("private_key").and_then(|v| v.as_str()).map(String::from),
         private_key_type: map.get("private_key_type").and_then(|v| v.as_str()).map(String::from),
+        key_id: val_str(&map, "key_id"),
     })
 }
 
@@ -332,6 +341,8 @@ pub struct PkiGenerateIntermediateRequest {
     pub organization: Option<String>,
     pub key_type: Option<String>,
     pub key_bits: Option<u64>,
+    /// Phase L3: back the pending intermediate with a managed key.
+    pub key_ref: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -339,6 +350,9 @@ pub struct PkiIntermediateResult {
     pub csr: String,
     pub private_key: Option<String>,
     pub private_key_type: Option<String>,
+    /// Phase L3: when `key_ref` was used, the resolved managed key UUID.
+    #[serde(default)]
+    pub key_id: String,
 }
 
 #[tauri::command]
@@ -358,6 +372,9 @@ pub async fn pki_generate_intermediate(
     if let Some(b) = request.key_bits {
         body.insert("key_bits".into(), json!(b));
     }
+    if let Some(k) = request.key_ref.filter(|s| !s.is_empty()) {
+        body.insert("key_ref".into(), json!(k));
+    }
     let resp = make_request(
         &state,
         Operation::Write,
@@ -370,6 +387,7 @@ pub async fn pki_generate_intermediate(
         csr: val_str(&map, "csr"),
         private_key: map.get("private_key").and_then(|v| v.as_str()).map(String::from),
         private_key_type: map.get("private_key_type").and_then(|v| v.as_str()).map(String::from),
+        key_id: val_str(&map, "key_id"),
     })
 }
 
@@ -507,6 +525,22 @@ pub struct PkiRoleConfig {
     pub no_store: bool,
     pub generate_lease: bool,
     pub issuer_ref: String,
+    // Phase L2 — key reuse on issue/sign
+    #[serde(default)]
+    pub allow_key_reuse: bool,
+    #[serde(default)]
+    pub allowed_key_refs: Vec<String>,
+    // Phase L4 — emission controls
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    #[serde(default)]
+    pub allow_glob_domains: bool,
+    #[serde(default = "default_acme_enabled")]
+    pub acme_enabled: bool,
+}
+
+fn default_acme_enabled() -> bool {
+    true
 }
 
 impl Default for PkiRoleConfig {
@@ -535,6 +569,11 @@ impl Default for PkiRoleConfig {
             no_store: false,
             generate_lease: false,
             issuer_ref: String::new(),
+            allow_key_reuse: false,
+            allowed_key_refs: Vec::new(),
+            allowed_domains: Vec::new(),
+            allow_glob_domains: false,
+            acme_enabled: true,
         }
     }
 }
@@ -579,6 +618,13 @@ pub async fn pki_read_role(
         no_store: val_bool(&map, "no_store"),
         generate_lease: val_bool(&map, "generate_lease"),
         issuer_ref: val_str(&map, "issuer_ref"),
+        allow_key_reuse: val_bool(&map, "allow_key_reuse"),
+        allowed_key_refs: val_str_array(&map, "allowed_key_refs"),
+        allowed_domains: val_str_array(&map, "allowed_domains"),
+        allow_glob_domains: val_bool(&map, "allow_glob_domains"),
+        // pre-L4 roles deserialise without `acme_enabled` — default true
+        // matches the engine's serde default.
+        acme_enabled: map.get("acme_enabled").and_then(|v| v.as_bool()).unwrap_or(true),
     })
 }
 
@@ -616,6 +662,11 @@ pub async fn pki_write_role(
     if !config.issuer_ref.is_empty() {
         body.insert("issuer_ref".into(), json!(config.issuer_ref));
     }
+    body.insert("allow_key_reuse".into(), json!(config.allow_key_reuse));
+    body.insert("allowed_key_refs".into(), json!(config.allowed_key_refs.join(",")));
+    body.insert("allowed_domains".into(), json!(config.allowed_domains.join(",")));
+    body.insert("allow_glob_domains".into(), json!(config.allow_glob_domains));
+    body.insert("acme_enabled".into(), json!(config.acme_enabled));
     make_request(&state, Operation::Write, format!("{mount}/roles/{name}"), Some(body)).await?;
     Ok(())
 }
@@ -642,6 +693,8 @@ pub struct PkiIssueRequest {
     pub ip_sans: Option<String>,
     pub ttl: Option<String>,
     pub issuer_ref: Option<String>,
+    /// Phase L2: pin issuance to a managed key from `pki/keys/*`.
+    pub key_ref: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -652,6 +705,12 @@ pub struct PkiIssueResult {
     pub private_key_type: String,
     pub serial_number: String,
     pub issuer_id: String,
+    /// Phase L3: leaf-issuer → root chain.
+    #[serde(default)]
+    pub ca_chain: Vec<String>,
+    /// Phase L2: when `key_ref` was used, the resolved managed key UUID.
+    #[serde(default)]
+    pub key_id: String,
 }
 
 #[tauri::command]
@@ -674,6 +733,9 @@ pub async fn pki_issue_cert(
     if let Some(r) = request.issuer_ref {
         body.insert("issuer_ref".into(), json!(r));
     }
+    if let Some(k) = request.key_ref.filter(|s| !s.is_empty()) {
+        body.insert("key_ref".into(), json!(k));
+    }
     let resp =
         make_request(&state, Operation::Write, format!("{mount}/issue/{}", request.role), Some(body)).await?;
     let map = data_to_map(resp);
@@ -684,6 +746,8 @@ pub async fn pki_issue_cert(
         private_key_type: val_str(&map, "private_key_type"),
         serial_number: val_str(&map, "serial_number"),
         issuer_id: val_str(&map, "issuer_id"),
+        ca_chain: val_str_array(&map, "ca_chain"),
+        key_id: val_str(&map, "key_id"),
     })
 }
 
@@ -696,6 +760,8 @@ pub struct PkiSignCsrRequest {
     pub alt_names: Option<String>,
     pub ttl: Option<String>,
     pub issuer_ref: Option<String>,
+    /// Phase L2: assert the CSR's SPKI matches a managed key.
+    pub key_ref: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -704,6 +770,10 @@ pub struct PkiSignResult {
     pub issuing_ca: String,
     pub serial_number: String,
     pub issuer_id: String,
+    #[serde(default)]
+    pub ca_chain: Vec<String>,
+    #[serde(default)]
+    pub key_id: String,
 }
 
 #[tauri::command]
@@ -726,6 +796,9 @@ pub async fn pki_sign_csr(
     if let Some(r) = request.issuer_ref {
         body.insert("issuer_ref".into(), json!(r));
     }
+    if let Some(k) = request.key_ref.filter(|s| !s.is_empty()) {
+        body.insert("key_ref".into(), json!(k));
+    }
     let resp =
         make_request(&state, Operation::Write, format!("{mount}/sign/{}", request.role), Some(body)).await?;
     let map = data_to_map(resp);
@@ -734,6 +807,8 @@ pub async fn pki_sign_csr(
         issuing_ca: val_str(&map, "issuing_ca"),
         serial_number: val_str(&map, "serial_number"),
         issuer_id: val_str(&map, "issuer_id"),
+        ca_chain: val_str_array(&map, "ca_chain"),
+        key_id: val_str(&map, "key_id"),
     })
 }
 
@@ -766,6 +841,8 @@ pub async fn pki_sign_verbatim(
         issuing_ca: val_str(&map, "issuing_ca"),
         serial_number: val_str(&map, "serial_number"),
         issuer_id: val_str(&map, "issuer_id"),
+        ca_chain: val_str_array(&map, "ca_chain"),
+        key_id: val_str(&map, "key_id"),
     })
 }
 
@@ -1190,6 +1267,195 @@ pub async fn pki_write_config_crl(
     body.insert("disable".into(), json!(config.disable));
     make_request(&state, Operation::Write, format!("{mount}/config/crl"), Some(body)).await?;
     Ok(())
+}
+
+// ── Managed key store (Phase L1) ─────────────────────────────────
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct PkiManagedKey {
+    pub key_id: String,
+    #[serde(default)]
+    pub name: String,
+    pub key_type: String,
+    #[serde(default)]
+    pub key_bits: u64,
+    #[serde(default)]
+    pub public_key: String,
+    pub source: String,
+    #[serde(default)]
+    pub exported: bool,
+    #[serde(default)]
+    pub created_at: u64,
+    #[serde(default)]
+    pub issuer_ref_count: u64,
+    #[serde(default)]
+    pub cert_ref_count: u64,
+}
+
+#[tauri::command]
+pub async fn pki_list_keys(state: State<'_, AppState>, mount: String) -> CmdResult<Vec<String>> {
+    let mount = mount_prefix(&mount);
+    let resp = make_request(&state, Operation::List, format!("{mount}/keys"), None).await?;
+    Ok(val_str_array(&data_to_map(resp), "keys"))
+}
+
+#[tauri::command]
+pub async fn pki_read_key(
+    state: State<'_, AppState>,
+    mount: String,
+    key_ref: String,
+) -> CmdResult<PkiManagedKey> {
+    let mount = mount_prefix(&mount);
+    let resp =
+        make_request(&state, Operation::Read, format!("{mount}/key/{key_ref}"), None).await?;
+    let map = data_to_map(resp);
+    Ok(PkiManagedKey {
+        key_id: val_str(&map, "key_id"),
+        name: val_str(&map, "name"),
+        key_type: val_str(&map, "key_type"),
+        key_bits: val_u64(&map, "key_bits"),
+        public_key: val_str(&map, "public_key"),
+        source: val_str(&map, "source"),
+        exported: val_bool(&map, "exported"),
+        created_at: val_u64(&map, "created_at"),
+        issuer_ref_count: val_u64(&map, "issuer_ref_count"),
+        cert_ref_count: val_u64(&map, "cert_ref_count"),
+    })
+}
+
+#[derive(Deserialize)]
+pub struct PkiGenerateKeyRequest {
+    pub mount: String,
+    /// `internal` (private not echoed) or `exported` (private returned once).
+    pub mode: String,
+    pub key_type: String,
+    #[serde(default)]
+    pub key_bits: u64,
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Serialize)]
+pub struct PkiGenerateKeyResult {
+    pub key_id: String,
+    pub key_type: String,
+    pub source: String,
+    pub exported: bool,
+    /// Only populated in `exported` mode.
+    pub private_key: Option<String>,
+    pub public_key: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+#[tauri::command]
+pub async fn pki_generate_key(
+    state: State<'_, AppState>,
+    request: PkiGenerateKeyRequest,
+) -> CmdResult<PkiGenerateKeyResult> {
+    let mount = mount_prefix(&request.mount);
+    let mut body = Map::new();
+    body.insert("key_type".into(), json!(request.key_type));
+    if request.key_bits > 0 {
+        body.insert("key_bits".into(), json!(request.key_bits));
+    }
+    if !request.name.is_empty() {
+        body.insert("name".into(), json!(request.name));
+    }
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{mount}/keys/generate/{}", request.mode),
+        Some(body),
+    )
+    .await?;
+    let map = data_to_map(resp);
+    Ok(PkiGenerateKeyResult {
+        key_id: val_str(&map, "key_id"),
+        key_type: val_str(&map, "key_type"),
+        source: val_str(&map, "source"),
+        exported: val_bool(&map, "exported"),
+        private_key: map.get("private_key").and_then(|v| v.as_str()).map(String::from),
+        public_key: val_str(&map, "public_key"),
+        name: val_str(&map, "name"),
+    })
+}
+
+#[derive(Deserialize)]
+pub struct PkiImportKeyRequest {
+    pub mount: String,
+    pub private_key: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+#[tauri::command]
+pub async fn pki_import_key(
+    state: State<'_, AppState>,
+    request: PkiImportKeyRequest,
+) -> CmdResult<PkiGenerateKeyResult> {
+    let mount = mount_prefix(&request.mount);
+    let mut body = Map::new();
+    body.insert("private_key".into(), json!(request.private_key));
+    if !request.name.is_empty() {
+        body.insert("name".into(), json!(request.name));
+    }
+    let resp =
+        make_request(&state, Operation::Write, format!("{mount}/keys/import"), Some(body)).await?;
+    let map = data_to_map(resp);
+    Ok(PkiGenerateKeyResult {
+        key_id: val_str(&map, "key_id"),
+        key_type: val_str(&map, "key_type"),
+        source: val_str(&map, "source"),
+        exported: val_bool(&map, "exported"),
+        private_key: None,
+        public_key: val_str(&map, "public_key"),
+        name: val_str(&map, "name"),
+    })
+}
+
+#[tauri::command]
+pub async fn pki_delete_key(
+    state: State<'_, AppState>,
+    mount: String,
+    key_ref: String,
+) -> CmdResult<()> {
+    let mount = mount_prefix(&mount);
+    make_request(&state, Operation::Delete, format!("{mount}/key/{key_ref}"), None).await?;
+    Ok(())
+}
+
+// ── Issuer chain (Phase L3) ──────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct PkiIssuerChain {
+    pub issuer_id: String,
+    pub issuer_name: String,
+    pub ca_chain: Vec<String>,
+    pub certificate_bundle: String,
+}
+
+#[tauri::command]
+pub async fn pki_read_issuer_chain(
+    state: State<'_, AppState>,
+    mount: String,
+    issuer_ref: String,
+) -> CmdResult<PkiIssuerChain> {
+    let mount = mount_prefix(&mount);
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("{mount}/issuer/{issuer_ref}/chain"),
+        None,
+    )
+    .await?;
+    let map = data_to_map(resp);
+    Ok(PkiIssuerChain {
+        issuer_id: val_str(&map, "issuer_id"),
+        issuer_name: val_str(&map, "issuer_name"),
+        ca_chain: val_str_array(&map, "ca_chain"),
+        certificate_bundle: val_str(&map, "certificate_bundle"),
+    })
 }
 
 // Avoid unused-import lints when individual command bodies don't use the

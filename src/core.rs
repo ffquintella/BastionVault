@@ -621,6 +621,17 @@ impl Core {
             let _ = crate::modules::files::scheduler::start_files_sync_scheduler(core_arc);
         }
 
+        // Boot the cert-lifecycle renewal scheduler (Phase L6). Same
+        // single-process posture as the schedulers above. Each
+        // cert-lifecycle mount opts in via
+        // `cert-lifecycle/scheduler/config`; un-configured mounts get
+        // skipped on every tick. The renewal call goes through
+        // `Core::handle_request` with the operator-supplied
+        // `client_token` so the existing PKI ACL boundary applies.
+        if let Some(core_arc) = self.self_ptr.upgrade() {
+            let _ = crate::modules::cert_lifecycle::scheduler::start_cert_lifecycle_scheduler(core_arc);
+        }
+
         Ok(())
     }
 

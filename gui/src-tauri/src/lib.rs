@@ -319,6 +319,26 @@ pub fn run() {
             commands::pki::pki_write_config_urls,
             commands::pki::pki_read_config_crl,
             commands::pki::pki_write_config_crl,
+            // PKI managed key store (Phase L1)
+            commands::pki::pki_list_keys,
+            commands::pki::pki_read_key,
+            commands::pki::pki_generate_key,
+            commands::pki::pki_import_key,
+            commands::pki::pki_delete_key,
+            // PKI issuer chain (Phase L3)
+            commands::pki::pki_read_issuer_chain,
+            // Cert-lifecycle module (Phases L5–L7)
+            commands::cert_lifecycle::cert_lifecycle_list_mounts,
+            commands::cert_lifecycle::cert_lifecycle_enable_mount,
+            commands::cert_lifecycle::cert_lifecycle_list_targets,
+            commands::cert_lifecycle::cert_lifecycle_read_target,
+            commands::cert_lifecycle::cert_lifecycle_write_target,
+            commands::cert_lifecycle::cert_lifecycle_delete_target,
+            commands::cert_lifecycle::cert_lifecycle_read_state,
+            commands::cert_lifecycle::cert_lifecycle_renew,
+            commands::cert_lifecycle::cert_lifecycle_read_scheduler_config,
+            commands::cert_lifecycle::cert_lifecycle_write_scheduler_config,
+            commands::cert_lifecycle::cert_lifecycle_list_deliverers,
             // SSH Secret Engine (Phase 4 GUI)
             commands::ssh::ssh_list_mounts,
             commands::ssh::ssh_enable_mount,

@@ -113,6 +113,16 @@ import type {
   LdapLibrarySet,
   LdapCheckOutResult,
   LdapLibraryStatus,
+  PkiManagedKey,
+  PkiGenerateKeyRequest,
+  PkiGenerateKeyResult,
+  PkiImportKeyRequest,
+  PkiIssuerChain,
+  CertLifecycleMountInfo,
+  CertLifecycleTarget,
+  CertLifecycleState,
+  CertLifecycleRenewResult,
+  CertLifecycleSchedulerConfig,
 } from "./types";
 
 // Connection
@@ -1224,6 +1234,50 @@ export const pkiReadConfigCrl = (mount: string) =>
   invoke<PkiCrlConfig>("pki_read_config_crl", { mount });
 export const pkiWriteConfigCrl = (mount: string, config: PkiCrlConfig) =>
   invoke<void>("pki_write_config_crl", { mount, config });
+
+// ── PKI managed key store (Phase L1) ──────────────────────────────
+
+export const pkiListKeys = (mount: string) => invoke<string[]>("pki_list_keys", { mount });
+export const pkiReadKey = (mount: string, keyRef: string) =>
+  invoke<PkiManagedKey>("pki_read_key", { mount, keyRef });
+export const pkiGenerateKey = (request: PkiGenerateKeyRequest) =>
+  invoke<PkiGenerateKeyResult>("pki_generate_key", { request });
+export const pkiImportKey = (request: PkiImportKeyRequest) =>
+  invoke<PkiGenerateKeyResult>("pki_import_key", { request });
+export const pkiDeleteKey = (mount: string, keyRef: string) =>
+  invoke<void>("pki_delete_key", { mount, keyRef });
+
+// ── PKI issuer chain (Phase L3) ───────────────────────────────────
+
+export const pkiReadIssuerChain = (mount: string, issuerRef: string) =>
+  invoke<PkiIssuerChain>("pki_read_issuer_chain", { mount, issuerRef });
+
+// ── Cert-Lifecycle module (Phases L5–L7) ─────────────────────────
+
+export const certLifecycleListMounts = () =>
+  invoke<CertLifecycleMountInfo[]>("cert_lifecycle_list_mounts");
+export const certLifecycleEnableMount = (path: string) =>
+  invoke<void>("cert_lifecycle_enable_mount", { path });
+export const certLifecycleListTargets = (mount: string) =>
+  invoke<string[]>("cert_lifecycle_list_targets", { mount });
+export const certLifecycleReadTarget = (mount: string, name: string) =>
+  invoke<CertLifecycleTarget>("cert_lifecycle_read_target", { mount, name });
+export const certLifecycleWriteTarget = (mount: string, target: CertLifecycleTarget) =>
+  invoke<void>("cert_lifecycle_write_target", { mount, target });
+export const certLifecycleDeleteTarget = (mount: string, name: string) =>
+  invoke<void>("cert_lifecycle_delete_target", { mount, name });
+export const certLifecycleReadState = (mount: string, name: string) =>
+  invoke<CertLifecycleState>("cert_lifecycle_read_state", { mount, name });
+export const certLifecycleRenew = (mount: string, name: string) =>
+  invoke<CertLifecycleRenewResult>("cert_lifecycle_renew", { mount, name });
+export const certLifecycleReadSchedulerConfig = (mount: string) =>
+  invoke<CertLifecycleSchedulerConfig>("cert_lifecycle_read_scheduler_config", { mount });
+export const certLifecycleWriteSchedulerConfig = (
+  mount: string,
+  config: CertLifecycleSchedulerConfig,
+) => invoke<void>("cert_lifecycle_write_scheduler_config", { mount, config });
+export const certLifecycleListDeliverers = (mount: string) =>
+  invoke<string[]>("cert_lifecycle_list_deliverers", { mount });
 
 // ── SSH Secret Engine (Phase 4) ─────────────────────────────────
 

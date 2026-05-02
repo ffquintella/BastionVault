@@ -22,11 +22,12 @@ import type {
   PkiIssueResult,
   PkiTidyStatus,
   PkiAutoTidyConfig,
+  PkiManagedKey,
 } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 
-type TabId = "issuers" | "roles" | "issue" | "certs" | "tidy" | "xca";
+type TabId = "issuers" | "roles" | "keys" | "issue" | "certs" | "tidy" | "xca";
 
 const KEY_TYPE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "ec", label: "ECDSA P-256 (default)" },
@@ -84,6 +85,11 @@ function defaultRoleConfig(): PkiRoleConfig {
     no_store: false,
     generate_lease: false,
     issuer_ref: "",
+    allow_key_reuse: false,
+    allowed_key_refs: [],
+    allowed_domains: [],
+    allow_glob_domains: false,
+    acme_enabled: true,
   };
 }
 
@@ -218,6 +224,7 @@ export function PkiPage() {
                 tabs={[
                   { id: "issuers", label: "Issuers" },
                   { id: "roles", label: "Roles" },
+                  { id: "keys", label: "Keys" },
                   { id: "issue", label: "Issue" },
                   { id: "certs", label: "Certificates" },
                   { id: "tidy", label: "Tidy" },
@@ -232,6 +239,7 @@ export function PkiPage() {
 
             {tab === "issuers" && <IssuersTab mount={activeMount} />}
             {tab === "roles" && <RolesTab mount={activeMount} />}
+            {tab === "keys" && <KeysTab mount={activeMount} />}
             {tab === "issue" && <IssueTab mount={activeMount} />}
             {tab === "certs" && <CertsTab mount={activeMount} />}
             {tab === "tidy" && <TidyTab mount={activeMount} />}
@@ -1031,6 +1039,57 @@ function RoleEditor({
             onChange={(b) => set({ no_store: b })}
             disabled={!editing}
           />
+          <Toggle
+            label="allow_glob_domains"
+            checked={config.allow_glob_domains}
+            onChange={(b) => set({ allow_glob_domains: b })}
+            disabled={!editing}
+          />
+          <Toggle
+            label="acme_enabled"
+            checked={config.acme_enabled}
+            onChange={(b) => set({ acme_enabled: b })}
+            disabled={!editing}
+          />
+          <Toggle
+            label="allow_key_reuse"
+            checked={config.allow_key_reuse}
+            onChange={(b) => set({ allow_key_reuse: b })}
+            disabled={!editing}
+          />
+        </div>
+      )}
+
+      {!compact && (
+        <div className="grid grid-cols-1 gap-3">
+          <Input
+            label="allowed_domains (comma-separated)"
+            value={config.allowed_domains.join(",")}
+            onChange={(e) =>
+              set({
+                allowed_domains: e.target.value
+                  .split(",")
+                  .map((s) => s.trim())
+                  .filter((s) => s.length > 0),
+              })
+            }
+            disabled={!editing}
+            placeholder="example.com,*.svc.cluster.local"
+          />
+          <Input
+            label="allowed_key_refs (comma-separated; needs allow_key_reuse)"
+            value={config.allowed_key_refs.join(",")}
+            onChange={(e) =>
+              set({
+                allowed_key_refs: e.target.value
+                  .split(",")
+                  .map((s) => s.trim())
+                  .filter((s) => s.length > 0),
+              })
+            }
+            disabled={!editing || !config.allow_key_reuse}
+            placeholder="key-name | uuid"
+          />
         </div>
       )}
 
@@ -1085,6 +1144,380 @@ function Toggle({
 
 // ── Issue Tab ────────────────────────────────────────────────────
 
+// ── Keys tab — managed key store (Phase L1 + reuse from L2/L3) ────
+
+function KeysTab({ mount }: { mount: string }) {
+  const { toast } = useToast();
+  const [ids, setIds] = useState<string[]>([]);
+  const [details, setDetails] = useState<Record<string, PkiManagedKey>>({});
+  const [loading, setLoading] = useState(true);
+  const [showCreate, setShowCreate] = useState(false);
+  const [showImport, setShowImport] = useState(false);
+  const [showExportedKey, setShowExportedKey] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    try {
+      const list = await api.pkiListKeys(mount);
+      setIds(list);
+      const map: Record<string, PkiManagedKey> = {};
+      for (const id of list) {
+        try {
+          map[id] = await api.pkiReadKey(mount, id);
+        } catch {
+          /* skip rows that fail to read */
+        }
+      }
+      setDetails(map);
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [mount, toast]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  async function deleteKey(id: string) {
+    try {
+      await api.pkiDeleteKey(mount, id);
+      toast("success", "Key deleted");
+      await reload();
+    } catch (e) {
+      toast("error", extractError(e));
+    }
+  }
+
+  return (
+    <Card title="Managed keys">
+      <div className="flex justify-between items-center mb-3">
+        <div className="text-sm text-[var(--color-text-muted)]">
+          Generate or import private keys, then pin them on root /
+          intermediate generation or on issue / sign with{" "}
+          <code>key_ref</code>.
+        </div>
+        <div className="flex gap-2">
+          <Button variant="ghost" onClick={() => setShowImport(true)}>
+            Import
+          </Button>
+          <Button onClick={() => setShowCreate(true)}>Generate</Button>
+        </div>
+      </div>
+      {loading ? (
+        <div className="text-sm text-[var(--color-text-muted)]">Loading…</div>
+      ) : ids.length === 0 ? (
+        <EmptyState
+          title="No managed keys"
+          description="Generate one or import a PEM-encoded private key."
+        />
+      ) : (
+        <Table<{ id: string }>
+          columns={[
+            {
+              key: "name",
+              header: "Name",
+              render: ({ id }) => (
+                <span className="text-sm">{details[id]?.name || "—"}</span>
+              ),
+            },
+            {
+              key: "id",
+              header: "ID",
+              render: ({ id }) => (
+                <code className="text-xs break-all">{id}</code>
+              ),
+            },
+            {
+              key: "alg",
+              header: "Algorithm",
+              render: ({ id }) => {
+                const k = details[id];
+                return (
+                  <span className="text-sm">
+                    {k
+                      ? `${k.key_type}${k.key_bits > 0 ? `-${k.key_bits}` : ""}`
+                      : "?"}
+                  </span>
+                );
+              },
+            },
+            {
+              key: "source",
+              header: "Source",
+              render: ({ id }) => (
+                <Badge
+                  label={details[id]?.source || "?"}
+                  variant={details[id]?.source === "imported" ? "warning" : "neutral"}
+                />
+              ),
+            },
+            {
+              key: "issuers",
+              header: "Issuers",
+              render: ({ id }) => (
+                <span className="text-sm">
+                  {details[id]?.issuer_ref_count ?? 0}
+                </span>
+              ),
+            },
+            {
+              key: "certs",
+              header: "Certs",
+              render: ({ id }) => (
+                <span className="text-sm">
+                  {details[id]?.cert_ref_count ?? 0}
+                </span>
+              ),
+            },
+            {
+              key: "actions",
+              header: "",
+              render: ({ id }) => {
+                const k = details[id];
+                return (
+                  <Button
+                    variant="ghost"
+                    onClick={() =>
+                      setConfirmDelete({ id, name: k?.name || id })
+                    }
+                    disabled={
+                      !k ||
+                      k.issuer_ref_count > 0 ||
+                      k.cert_ref_count > 0
+                    }
+                  >
+                    Delete
+                  </Button>
+                );
+              },
+            },
+          ]}
+          data={ids.map((id) => ({ id }))}
+          rowKey={(r) => r.id}
+        />
+      )}
+      <GenerateKeyModal
+        open={showCreate}
+        mount={mount}
+        onClose={() => setShowCreate(false)}
+        onGenerated={(pkcs8) => {
+          void reload();
+          if (pkcs8) setShowExportedKey(pkcs8);
+        }}
+      />
+      <ImportKeyModal
+        open={showImport}
+        mount={mount}
+        onClose={() => setShowImport(false)}
+        onImported={() => {
+          setShowImport(false);
+          void reload();
+        }}
+      />
+      {showExportedKey && (
+        <Modal
+          open
+          onClose={() => setShowExportedKey(null)}
+          title="Generated key (exported mode)"
+          size="lg"
+        >
+          <div className="space-y-3">
+            <div className="text-sm text-[var(--color-text-muted)]">
+              The engine returns the PKCS#8 PEM exactly once. Save it
+              now if you need to deliver it to a consumer; the engine
+              keeps a copy under the barrier so future renewals can
+              reuse it via <code>key_ref</code>.
+            </div>
+            <Textarea
+              label="Private key"
+              value={showExportedKey}
+              readOnly
+              rows={14}
+            />
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  navigator.clipboard.writeText(showExportedKey);
+                  toast("success", "Private key copied");
+                }}
+              >
+                Copy
+              </Button>
+              <Button onClick={() => setShowExportedKey(null)}>Close</Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+      <ConfirmModal
+        open={confirmDelete !== null}
+        onClose={() => setConfirmDelete(null)}
+        onConfirm={async () => {
+          if (!confirmDelete) return;
+          const id = confirmDelete.id;
+          setConfirmDelete(null);
+          await deleteKey(id);
+        }}
+        title="Delete managed key"
+        message={
+          confirmDelete
+            ? `Delete key \`${confirmDelete.name}\`? Refused if any issuer or unexpired cert still references the key.`
+            : ""
+        }
+        confirmLabel="Delete"
+        variant="danger"
+      />
+    </Card>
+  );
+}
+
+function GenerateKeyModal({
+  open,
+  mount,
+  onClose,
+  onGenerated,
+}: {
+  open: boolean;
+  mount: string;
+  onClose: () => void;
+  onGenerated: (pkcs8: string | null) => void;
+}) {
+  const { toast } = useToast();
+  const [name, setName] = useState("");
+  const [keyType, setKeyType] = useState("ec");
+  const [keyBits, setKeyBits] = useState(0);
+  const [mode, setMode] = useState<"internal" | "exported">("internal");
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    setBusy(true);
+    try {
+      const r = await api.pkiGenerateKey({
+        mount,
+        mode,
+        key_type: keyType,
+        key_bits: keyBits || undefined,
+        name: name.trim() || undefined,
+      });
+      toast("success", `Key ${r.key_id} generated`);
+      onGenerated(r.private_key ?? null);
+      onClose();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title="Generate managed key" size="md">
+      <div className="grid grid-cols-2 gap-3">
+        <Input
+          label="Name (optional)"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="svc-key"
+        />
+        <Select
+          label="Mode"
+          value={mode}
+          onChange={(e) => setMode(e.target.value as "internal" | "exported")}
+          options={[
+            { value: "internal", label: "internal (private not echoed)" },
+            { value: "exported", label: "exported (PKCS#8 returned once)" },
+          ]}
+        />
+        <Select
+          label="Key type"
+          value={keyType}
+          onChange={(e) => setKeyType(e.target.value)}
+          options={KEY_TYPE_OPTIONS}
+        />
+        <Input
+          label="Key bits (0 = default)"
+          type="number"
+          value={keyBits}
+          onChange={(e) => setKeyBits(Number(e.target.value))}
+        />
+      </div>
+      <div className="mt-4 flex justify-end gap-2">
+        <Button variant="ghost" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button onClick={submit} disabled={busy}>
+          {busy ? "Generating…" : "Generate"}
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
+function ImportKeyModal({
+  open,
+  mount,
+  onClose,
+  onImported,
+}: {
+  open: boolean;
+  mount: string;
+  onClose: () => void;
+  onImported: () => void;
+}) {
+  const { toast } = useToast();
+  const [name, setName] = useState("");
+  const [pem, setPem] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    if (!pem.trim()) return;
+    setBusy(true);
+    try {
+      const r = await api.pkiImportKey({
+        mount,
+        private_key: pem.trim(),
+        name: name.trim() || undefined,
+      });
+      toast("success", `Key ${r.key_id} imported`);
+      onImported();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title="Import managed key" size="lg">
+      <div className="space-y-3">
+        <Input
+          label="Name (optional)"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="svc-key"
+        />
+        <Textarea
+          label="Private key (PEM)"
+          value={pem}
+          onChange={(e) => setPem(e.target.value)}
+          rows={12}
+          placeholder="-----BEGIN PRIVATE KEY-----"
+        />
+      </div>
+      <div className="mt-4 flex justify-end gap-2">
+        <Button variant="ghost" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button onClick={submit} disabled={busy || !pem.trim()}>
+          {busy ? "Importing…" : "Import"}
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
 function IssueTab({ mount }: { mount: string }) {
   const { toast } = useToast();
   const [roles, setRoles] = useState<string[]>([]);
@@ -1094,6 +1527,7 @@ function IssueTab({ mount }: { mount: string }) {
   const [ipSans, setIpSans] = useState("");
   const [ttl, setTtl] = useState("");
   const [issuerRef, setIssuerRef] = useState("");
+  const [keyRef, setKeyRef] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<PkiIssueResult | null>(null);
 
@@ -1120,6 +1554,7 @@ function IssueTab({ mount }: { mount: string }) {
         ip_sans: ipSans.trim() || undefined,
         ttl: ttl.trim() || undefined,
         issuer_ref: issuerRef.trim() || undefined,
+        key_ref: keyRef.trim() || undefined,
       });
       setResult(r);
       toast("success", `Certificate issued (serial ${r.serial_number})`);
@@ -1186,6 +1621,12 @@ function IssueTab({ mount }: { mount: string }) {
           onChange={(e) => setIssuerRef(e.target.value)}
           placeholder="default | uuid"
         />
+        <Input
+          label="Pin managed key (optional, requires role.allow_key_reuse)"
+          value={keyRef}
+          onChange={(e) => setKeyRef(e.target.value)}
+          placeholder="key-name | uuid"
+        />
       </div>
       <div className="mt-4">
         <Button onClick={submit} disabled={busy || !role || !commonName.trim()}>
@@ -1201,6 +1642,16 @@ function IssueTab({ mount }: { mount: string }) {
             <span className="text-xs text-[var(--color-text-muted)]">
               issuer {result.issuer_id}
             </span>
+            {result.key_id && (
+              <span className="text-xs text-[var(--color-text-muted)]">
+                key {result.key_id}
+              </span>
+            )}
+            {result.ca_chain && result.ca_chain.length > 1 && (
+              <span className="text-xs text-[var(--color-text-muted)]">
+                chain depth {result.ca_chain.length}
+              </span>
+            )}
           </div>
           <PemBlock
             label="Certificate"

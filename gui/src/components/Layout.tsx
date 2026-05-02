@@ -82,6 +82,15 @@ const userNav: NavItem[] = [
     requires: ["root", "admin", "ldap-admin", "ldap-user"],
     requiresMountType: "openldap",
   },
+  // Cert-Lifecycle module (Phases L5–L7). Surface alongside PKI when
+  // the operator has mounted the engine. Same policy gate as PKI —
+  // the lifecycle module is just a workflow layer over PKI issuance.
+  {
+    path: "/cert-lifecycle",
+    label: "Cert Lifecycle",
+    requires: ["root", "admin", "pki-admin", "pki-user"],
+    requiresMountType: "cert-lifecycle",
+  },
 ];
 
 // Admin features. The whole section collapses when none of the items
