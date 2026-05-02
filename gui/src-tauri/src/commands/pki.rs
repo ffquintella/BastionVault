@@ -880,19 +880,34 @@ pub struct PkiCertRecord {
     /// for engine-issued certs.
     #[serde(default)]
     pub source: String,
+    /// UUID of the issuer that signed this cert when the engine
+    /// knows. Empty for orphan imports and for pre-Phase-5.2 records
+    /// (the migration shim leaves this absent).
+    #[serde(default)]
+    pub issuer_id: String,
+    /// Issuer DN as text, parsed from the cert PEM. Always populated
+    /// (the cert always has an Issuer field). The GUI's Certificates
+    /// tab uses this as the human-readable Emitter cell, with a
+    /// "owned" / "external" badge derived from `issuer_id` plus the
+    /// mount's issuer registry.
+    #[serde(default)]
+    pub issuer_dn: String,
 }
 
-/// Parse `(common_name, not_after_unix)` out of a PEM-encoded
-/// certificate. Returns empty / 0 on any parse failure so the caller
-/// can render a graceful fallback instead of erroring out the whole
-/// list view.
-fn parse_cert_meta(pem: &str) -> (String, u64) {
+/// Parse `(common_name, not_after_unix, issuer_dn)` out of a PEM-
+/// encoded certificate. Returns empty / 0 on any parse failure so
+/// the caller can render a graceful fallback instead of erroring out
+/// the whole list view. The `issuer_dn` field is the full RFC 4514
+/// distinguished-name string (`x509-cert`'s `Display` impl), used by
+/// the GUI's Emitter column when the cert was orphan-imported and
+/// the engine has no `issuer_id` recorded for it.
+fn parse_cert_meta(pem: &str) -> (String, u64, String) {
     use x509_cert::der::Decode;
     let Ok(der) = bastion_vault::modules::pki::csr::decode_pem_or_der(pem) else {
-        return (String::new(), 0);
+        return (String::new(), 0, String::new());
     };
     let Ok(cert) = x509_cert::Certificate::from_der(&der) else {
-        return (String::new(), 0);
+        return (String::new(), 0, String::new());
     };
 
     // Subject CN: walk the RDN sequence for the OID 2.5.4.3.
@@ -929,7 +944,13 @@ fn parse_cert_meta(pem: &str) -> (String, u64) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    (common_name, not_after)
+    // Issuer DN as RFC 4514 text — `x509-cert`'s `Display` impl on
+    // `Name` walks the RDN sequence and produces e.g.
+    // `CN=Test Root,O=Acme Inc.,C=US`. Empty string when the cert's
+    // Issuer field is empty (rare; only seen on malformed test certs).
+    let issuer_dn = cert.tbs_certificate.issuer.to_string();
+
+    (common_name, not_after, issuer_dn)
 }
 
 #[tauri::command]
@@ -942,7 +963,7 @@ pub async fn pki_read_cert(
     let resp = make_request(&state, Operation::Read, format!("{mount}/cert/{serial}"), None).await?;
     let map = data_to_map(resp);
     let certificate = val_str(&map, "certificate");
-    let (common_name, not_after) = parse_cert_meta(&certificate);
+    let (common_name, not_after, issuer_dn) = parse_cert_meta(&certificate);
     Ok(PkiCertRecord {
         serial_number: val_str(&map, "serial_number"),
         certificate,
@@ -952,6 +973,8 @@ pub async fn pki_read_cert(
         not_after,
         is_orphaned: map.get("is_orphaned").and_then(|v| v.as_bool()).unwrap_or(false),
         source: val_str(&map, "source"),
+        issuer_id: val_str(&map, "issuer_id"),
+        issuer_dn,
     })
 }
 

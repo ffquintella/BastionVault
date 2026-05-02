@@ -149,6 +149,21 @@ impl PkiBackendInner {
             return Err(RvError::ErrPkiCertKeyMismatch);
         }
 
+        // The cert must claim to be a CA. Both roots and intermediates
+        // are accepted (the engine resolves the chain by Subject /
+        // Issuer DN match at read time via `build_issuer_chain`); leaf
+        // certs are rejected here so an operator can't accidentally
+        // promote a leaf to issuer status. Pre-X.509-v3 certs without
+        // BasicConstraints fall through and we treat absent as "not a
+        // CA" — those should land at `pki/certs/import` instead.
+        if !cert_claims_ca(&cert_pem) {
+            return Err(RvError::ErrString(
+                "config/ca: certificate is not a CA (BasicConstraints.cA=true required); \
+                 use pki/certs/import for leaf certs"
+                    .into(),
+            ));
+        }
+
         let serial_hex = storage::serial_to_hex(cert.tbs_certificate.serial_number.as_bytes());
         // The DN's `Display` impl renders `CN=foo,O=bar,...`; pluck CN out.
         let dn_str = cert.tbs_certificate.subject.to_string();
@@ -232,4 +247,28 @@ fn split_pem_bundle(bundle: &str) -> Result<(String, String), RvError> {
         (Some(c), Some(k)) => Ok((c, k)),
         _ => Err(RvError::ErrPkiPemBundleInvalid),
     }
+}
+
+/// Read the cert's `BasicConstraints` extension and return `true` when
+/// `cA = true` is asserted. Used by `pki/config/ca` to refuse a leaf
+/// cert masquerading as an issuer; an intermediate (signed by another
+/// CA) passes this check the same way a self-signed root does, so the
+/// engine accepts both shapes.
+fn cert_claims_ca(cert_pem: &str) -> bool {
+    use x509_parser::extensions::ParsedExtension;
+    use x509_parser::prelude::FromDer;
+    let der = match pem::parse(cert_pem.as_bytes()) {
+        Ok(p) => p.into_contents(),
+        Err(_) => return false,
+    };
+    let parsed = match x509_parser::certificate::X509Certificate::from_der(&der) {
+        Ok((_, p)) => p,
+        Err(_) => return false,
+    };
+    for ext in parsed.tbs_certificate.extensions() {
+        if let ParsedExtension::BasicConstraints(bc) = ext.parsed_extension() {
+            return bc.ca;
+        }
+    }
+    false
 }

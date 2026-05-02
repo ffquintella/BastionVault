@@ -110,6 +110,21 @@ function fmtUnix(t: number | null | undefined): string {
   return new Date(t * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC";
 }
 
+/** Pull the CN attribute out of an RFC 4514-style DN string. Returns
+ *  empty when no CN= component is present so the caller can fall
+ *  back to the full DN. Handles `CN=foo,O=bar` and the variant
+ *  produced by `x509-cert`'s `Display` (which separates RDNs with
+ *  `,` and unescapes nothing). */
+function extractCn(dn: string): string {
+  for (const piece of dn.split(",")) {
+    const t = piece.trim();
+    if (t.toUpperCase().startsWith("CN=")) {
+      return t.slice(3);
+    }
+  }
+  return "";
+}
+
 export function PkiPage() {
   const { toast } = useToast();
   const [mounts, setMounts] = useState<PkiMountInfo[]>([]);
@@ -1705,11 +1720,23 @@ interface CertSummary {
   revoked_at: number | null;
   is_orphaned: boolean;
   source: string;
+  /** UUID of the signing issuer when known (engine-issued certs and
+   *  intermediates imported via `pki/config/ca`). Empty for orphan
+   *  imports — the engine has no record of who signed those. */
+  issuer_id: string;
+  /** Issuer DN parsed from the cert PEM. Always populated; used as
+   *  the Emitter cell text. */
+  issuer_dn: string;
 }
 
 function CertsTab({ mount }: { mount: string }) {
   const { toast } = useToast();
   const [summaries, setSummaries] = useState<CertSummary[]>([]);
+  /** issuer UUID → human-readable name, used for the Emitter column.
+   *  Loaded once per refresh alongside the cert list so the column
+   *  can render names instead of UUIDs (and so an unknown issuer_id
+   *  signals "external" — i.e. an orphan-imported cert). */
+  const [issuerNames, setIssuerNames] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
@@ -1723,7 +1750,20 @@ function CertsTab({ mount }: { mount: string }) {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const list = await api.pkiListCerts(mount);
+      // Load issuers + cert list in parallel. We use the issuers map
+      // to label engine-owned emitters in the table.
+      const [issuers, list] = await Promise.all([
+        api.pkiListIssuers(mount).catch(() => null),
+        api.pkiListCerts(mount),
+      ]);
+      const nameMap: Record<string, string> = {};
+      if (issuers) {
+        for (const it of issuers.issuers ?? []) {
+          nameMap[it.id] = it.name || it.id;
+        }
+      }
+      setIssuerNames(nameMap);
+
       const sorted = [...list].sort();
       // Fetch each cert's metadata in parallel. Each `pkiReadCert`
       // call returns CN + not_after parsed server-side from the PEM,
@@ -1740,12 +1780,23 @@ function CertsTab({ mount }: { mount: string }) {
               revoked_at: c.revoked_at ?? null,
               is_orphaned: c.is_orphaned ?? false,
               source: c.source ?? "",
+              issuer_id: c.issuer_id ?? "",
+              issuer_dn: c.issuer_dn ?? "",
             } satisfies CertSummary;
           } catch {
             // A single read failure shouldn't blank the whole list —
             // surface the serial with empty meta so the operator can
             // still drill in to investigate.
-            return { serial: s, common_name: "", not_after: 0, revoked_at: null, is_orphaned: false, source: "" };
+            return {
+              serial: s,
+              common_name: "",
+              not_after: 0,
+              revoked_at: null,
+              is_orphaned: false,
+              source: "",
+              issuer_id: "",
+              issuer_dn: "",
+            };
           }
         }),
       );
@@ -1880,6 +1931,45 @@ function CertsTab({ mount }: { mount: string }) {
                       </div>
                     </button>
                   ),
+                },
+                {
+                  key: "emitter",
+                  header: "Emitter",
+                  render: (s) => {
+                    // Engine-owned emitter: cert's `issuer_id` resolves
+                    // to a known issuer on this mount → render the
+                    // issuer name and a green "owned" badge with a
+                    // lock glyph. Anything else (orphan import,
+                    // unknown issuer_id, no issuer recorded) is
+                    // surfaced as "external" with the cert's Issuer
+                    // DN as the label.
+                    const ownedName =
+                      s.issuer_id && issuerNames[s.issuer_id];
+                    if (ownedName) {
+                      return (
+                        <div
+                          className="flex items-center gap-1 min-w-0"
+                          title={`Owned issuer (id ${s.issuer_id})\n${s.issuer_dn || ""}`}
+                        >
+                          <span aria-label="owned" title="Owned by this PKI mount">🔒</span>
+                          <span className="text-xs truncate">{ownedName}</span>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div
+                        className="flex items-center gap-1 min-w-0"
+                        title={s.issuer_dn || "External CA"}
+                      >
+                        <span aria-label="external" title="External CA — not on this mount">🌐</span>
+                        <span className="text-xs truncate text-[var(--color-text-muted)]">
+                          {s.issuer_dn
+                            ? extractCn(s.issuer_dn) || s.issuer_dn
+                            : "external"}
+                        </span>
+                      </div>
+                    );
+                  },
                 },
                 {
                   key: "expires",
@@ -2142,6 +2232,21 @@ interface XcaPreviewItem {
    * Plugin v0.1.7+; absent on older plugins, in which case the GUI
    * treats the cert as a CA candidate to preserve old behavior. */
   is_ca?: boolean;
+  /** Cert only (plugin v0.1.9+): true when the cert signed at least
+   *  one *other* cert in the same import set, OR when this is a
+   *  self-signed CA (a stand-alone trust anchor). The GUI's Apply
+   *  step routes by this rather than `is_ca` so CA-flagged certs
+   *  that never actually signed anything in the file land on the
+   *  certificates tab instead of the issuers tab. */
+  signs_others?: boolean;
+  /** Cert only (plugin v0.1.9+): when the cert's parent is also in
+   *  the import set, the parent's `items.id`. Lets the GUI tag the
+   *  cert's emitter as "owned" (parent we're importing) vs
+   *  "external". */
+  signer_item_id?: number | null;
+  /** Cert only (plugin v0.1.9+): the cert's Issuer DN as text.
+   *  Always populated, even when the issuer isn't on the XCA file. */
+  signer_subject?: string;
 }
 
 interface XcaPreview {
@@ -2269,6 +2374,26 @@ function XcaImportTab({
     }
   }
 
+  /** Decide whether a cert preview row should land on the issuers
+   *  tab (returns true) or the certificates tab (returns false).
+   *
+   *  Plugin v0.1.9+ exposes `signs_others`: true iff the cert signed
+   *  at least one other cert in the import set OR is a self-signed
+   *  CA. That's the authoritative routing signal.
+   *
+   *  On older plugins (`signs_others === undefined`) we fall back
+   *  to the v0.1.7+ `is_ca` flag; on plugins older still
+   *  (`is_ca === undefined`) we treat the cert as a CA candidate to
+   *  preserve pre-v0.1.7 behaviour and avoid hard-failing an import
+   *  that worked on the old GUI build.
+   */
+  function isEmitter(item: XcaPreviewItem): boolean {
+    if (item.signs_others === true) return true;
+    if (item.signs_others === false) return false;
+    if (item.is_ca === false) return false;
+    return true;
+  }
+
   /** Pair every selected CA cert with its `parent` private key and
    * import as a CA bundle. Leaf certs / CSRs / CRLs / templates are
    * v2 work — for now they're listed but skipped on Apply. */
@@ -2376,10 +2501,9 @@ function XcaImportTab({
             continue;
           }
           // Leaf cert → orphan-cert index (no issuer link, no key).
-          // Plugin v0.1.7+ exposes `is_ca`; on older plugins
-          // (`is_ca === undefined`) we keep the old issuer-import
-          // behavior so existing flows don't regress.
-          if (item.is_ca === false) {
+          // Plugin v0.1.9+ uses chain-driven `signs_others`; falls
+          // back to `is_ca` for older plugins. See `isEmitter`.
+          if (!isEmitter(item)) {
             await importLeaf(item);
             continue;
           }
@@ -2401,7 +2525,7 @@ function XcaImportTab({
           }
           // If the paired cert is a leaf, route it to the orphan-cert
           // index (the key has no home — orphan certs carry no key).
-          if (cert.is_ca === false) {
+          if (!isEmitter(cert)) {
             await importLeaf(cert);
             continue;
           }
@@ -2546,11 +2670,9 @@ function XcaImportTab({
                 header: "Type",
                 render: (it) =>
                   it.meta.item_type === "cert"
-                    ? it.is_ca === false
-                      ? "cert (leaf)"
-                      : it.is_ca === true
-                        ? "cert (CA)"
-                        : "cert"
+                    ? isEmitter(it)
+                      ? "cert (issuer)"
+                      : "cert (leaf)"
                     : it.meta.item_type,
               },
               {

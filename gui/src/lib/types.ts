@@ -903,6 +903,13 @@ export interface PkiCertRecord {
   is_orphaned?: boolean;
   /** Provenance label set at import time (e.g. `xca-import`). */
   source?: string;
+  /** UUID of the issuer that signed this cert when the engine knows.
+   *  Empty for orphan imports. */
+  issuer_id?: string;
+  /** Issuer DN as RFC 4514 text, parsed from the cert. Always
+   *  populated. The Certificates tab uses this as the Emitter cell
+   *  with an "owned" / "external" badge derived from `issuer_id`. */
+  issuer_dn?: string;
 }
 
 export interface PkiImportCertRequest {
