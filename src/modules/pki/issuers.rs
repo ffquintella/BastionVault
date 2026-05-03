@@ -180,15 +180,60 @@ async fn load_issuer_by_id(req: &Request, id: &str) -> Result<IssuerHandle, RvEr
     let cert_pem = storage::get_string(req, &storage::issuer_cert_key(id))
         .await?
         .ok_or(RvError::ErrPkiCaNotConfig)?;
-    let key_pem = storage::get_string(req, &storage::issuer_key_key(id))
-        .await?
-        .ok_or(RvError::ErrPkiCaKeyNotFound)?;
-    let meta: CaMetadata = storage::get_json(req, &storage::issuer_meta_key(id))
+    let mut meta: CaMetadata = storage::get_json(req, &storage::issuer_meta_key(id))
         .await?
         .ok_or(RvError::ErrPkiCaNotConfig)?;
-    let signer = Signer::from_storage_pem(&key_pem)?;
     let index: IssuersIndex = storage::get_json(req, KEY_ISSUERS_INDEX).await?.unwrap_or_default();
     let name = index.by_id.get(id).cloned().unwrap_or_else(|| "default".to_string());
+
+    // Phase L8: the issuer's signing key now lives only in the
+    // managed-key store. Legacy issuers (created before the
+    // refactor) still have a private key at `issuers/<id>/key` and
+    // an empty `meta.key_id`; lift them on first read so subsequent
+    // calls go through the same path as new issuers.
+    let signer = match meta.key_id.as_str() {
+        "" => {
+            // Legacy path: read + migrate.
+            let legacy_pem = storage::get_string(req, &storage::issuer_key_key(id))
+                .await?
+                .ok_or(RvError::ErrPkiCaKeyNotFound)?;
+            let signer = Signer::from_storage_pem(&legacy_pem)?;
+            let key_name = format!("{name}-key");
+            // Disambiguate if a key with this name already exists
+            // (rare but possible across re-imports).
+            let resolved_name = match super::keys::load_key(req, &key_name).await? {
+                Some(_) => format!("{key_name}-{}", id.split('-').next().unwrap_or(id)),
+                None => key_name,
+            };
+            let entry = super::keys::create_managed_key_from_signer(
+                req,
+                &signer,
+                &resolved_name,
+                super::keys::KeySource::Generated,
+            )
+            .await?;
+            // Record the issuer→key binding + persist the new
+            // `meta.key_id`. Best-effort delete of the legacy
+            // `issuers/<id>/key` once everything else lands; a
+            // failure here doesn't break the load — we'd just
+            // re-migrate redundantly on the next read until the
+            // delete succeeds.
+            super::keys::add_issuer_ref(req, &entry.id, id).await?;
+            meta.key_id = entry.id.clone();
+            storage::put_json(req, &storage::issuer_meta_key(id), &meta).await?;
+            let _ = req.storage_delete(&storage::issuer_key_key(id)).await;
+            signer
+        }
+        key_id => {
+            let entry = super::keys::load_key(req, key_id).await?.ok_or_else(|| {
+                RvError::ErrString(format!(
+                    "issuer `{id}` references managed key `{key_id}` which is missing"
+                ))
+            })?;
+            Signer::from_storage_pem(&entry.private_key_pem)?
+        }
+    };
+
     let usages = index.usages_for(id);
     Ok(IssuerHandle { id: id.to_string(), name, cert_pem, signer, meta, usages })
 }
@@ -221,6 +266,16 @@ pub async fn set_issuer_usages(
 /// — if no default existed before — points the default at this issuer.
 /// Returns the assigned UUID so the caller can persist it on `CertRecord`s
 /// it issues.
+///
+/// `key_id_hint`: the managed-key UUID this issuer's keypair already
+/// lives under in the `pki/keys/*` store, when the operator pre-created
+/// it via `key_ref` on root/intermediate generation. Pass `None` for
+/// the legacy "engine just generated a fresh key" flow — `add_issuer`
+/// then creates a shadow managed-key entry mirroring the signer's
+/// material, names it after the issuer (`<name>-key`), and records
+/// the issuer→key binding so `delete_key` refuses while the issuer is
+/// alive. Either way, `CaMetadata.key_id` ends up set so the issuer
+/// view can show "backed by managed key X" without re-deriving it.
 #[maybe_async::maybe_async]
 pub async fn add_issuer(
     req: &Request,
@@ -231,6 +286,7 @@ pub async fn add_issuer(
     serial_hex: &str,
     not_after_unix: i64,
     ca_kind: CaKind,
+    key_id_hint: Option<String>,
 ) -> Result<String, RvError> {
     if name.is_empty() {
         return Err(RvError::ErrRequestFieldInvalid);
@@ -254,6 +310,35 @@ pub async fn add_issuer(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let alg = signer.algorithm();
+
+    // Resolve the managed-key UUID. If the caller already pinned one
+    // (via `key_ref` on the issuer-generate route), reuse it.
+    // Otherwise, mirror the signer's material into a fresh managed-key
+    // entry named `<issuer-name>-key` so the operator sees the issuer
+    // backing key in the Keys tab. The issuer→key binding is recorded
+    // either way.
+    let managed_key_id = match key_id_hint {
+        Some(id) => id,
+        None => {
+            let proposed = format!("{name}-key");
+            // Avoid duplicate-name collisions on re-imports by
+            // suffixing with the issuer UUID prefix when a key with
+            // the proposed name already exists.
+            let key_name = match super::keys::load_key(req, &proposed).await? {
+                Some(_) => format!("{name}-key-{}", &id.split('-').next().unwrap_or(&id)),
+                None => proposed,
+            };
+            let entry = super::keys::create_managed_key_from_signer(
+                req,
+                signer,
+                &key_name,
+                super::keys::KeySource::Generated,
+            )
+            .await?;
+            entry.id
+        }
+    };
+
     let meta = CaMetadata {
         key_type: alg.as_str().to_string(),
         key_bits: alg.key_bits(),
@@ -262,10 +347,21 @@ pub async fn add_issuer(
         created_at_unix: now,
         not_after_unix,
         ca_kind,
+        key_id: managed_key_id.clone(),
     };
     storage::put_string(req, &storage::issuer_cert_key(&id), cert_pem).await?;
-    storage::put_string(req, &storage::issuer_key_key(&id), &signer.to_storage_pem()).await?;
     storage::put_json(req, &storage::issuer_meta_key(&id), &meta).await?;
+    // The private key lives ONLY in the managed-key store (Phase L8
+    // refactor): no more `issuers/<id>/key`. `load_issuer_by_id`
+    // reads `meta.key_id` and reconstructs the signer from the
+    // managed-key entry. Legacy mounts that still have
+    // `issuers/<id>/key` migrate on first read — see
+    // `load_issuer_by_id`.
+    let _ = signer; // signer's material already landed in the managed-key entry above.
+
+    // Record the issuer→key binding so `delete_key` refuses while
+    // this issuer is live.
+    super::keys::add_issuer_ref(req, &managed_key_id, &id).await?;
     // Each issuer gets its own CRL state seeded.
     if storage::get_json::<CrlState>(req, &storage::issuer_crl_state_key(&id)).await?.is_none() {
         storage::put_json(req, &storage::issuer_crl_state_key(&id), &CrlState::default()).await?;
@@ -339,12 +435,23 @@ async fn migrate_legacy_if_needed(req: &Request) -> Result<(), RvError> {
                 created_at_unix: 0,
                 not_after_unix: 0,
                 ca_kind: CaKind::Root,
+                // Pre-5.2 → L8 path: this lift writes the legacy
+                // private key under `issuers/<id>/key`. The
+                // issuer-load path (`load_issuer_by_id`) then
+                // performs the second-stage migration from
+                // `issuers/<id>/key` → managed key store on first
+                // read, which is when `meta.key_id` gets populated.
+                key_id: String::new(),
             }
         }
     };
 
     let id = Uuid::new_v4().to_string();
     storage::put_string(req, &storage::issuer_cert_key(&id), &legacy_cert).await?;
+    // Two-stage migration (pre-5.2 → 5.2 → L8): write the legacy
+    // key under `issuers/<id>/key` here, then `load_issuer_by_id`
+    // lifts it into the managed-key store + clears this entry on
+    // first read.
     storage::put_string(req, &storage::issuer_key_key(&id), &legacy_key).await?;
     storage::put_json(req, &storage::issuer_meta_key(&id), &legacy_meta).await?;
 
@@ -415,6 +522,29 @@ pub async fn delete_issuer(req: &Request, reference: &str) -> Result<(), RvError
     let cfg: IssuersConfig = storage::get_json(req, KEY_CONFIG_ISSUERS).await?.unwrap_or_default();
     if cfg.default_id == id && index.by_id.len() > 1 {
         return Err(RvError::ErrPkiCaNotConfig);
+    }
+
+    // Pull the issuer→key binding out of the managed-key refs file
+    // *before* nuking the issuer's meta — otherwise a future
+    // `DELETE pki/key/<id>` would refuse forever, citing a phantom
+    // issuer that no longer exists. Best-effort: if meta or refs
+    // can't be read, the issuer delete still proceeds; the worst
+    // case is a stale ref the operator has to clear by re-reading
+    // the key (which surfaces a count) and using `force=true`.
+    if let Ok(Some(meta)) =
+        storage::get_json::<CaMetadata>(req, &storage::issuer_meta_key(&id)).await
+    {
+        if !meta.key_id.is_empty() {
+            let mut refs = super::keys::load_refs(req, &meta.key_id).await.unwrap_or_default();
+            if refs.issuer_ids.remove(&id) {
+                let _ = storage::put_json(
+                    req,
+                    &super::keys::refs_storage_key(&meta.key_id),
+                    &refs,
+                )
+                .await;
+            }
+        }
     }
 
     let _ = req.storage_delete(&storage::issuer_cert_key(&id)).await;

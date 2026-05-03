@@ -163,6 +163,12 @@ pub struct PkiIssuerDetail {
     pub ca_kind: String,
     pub is_default: bool,
     pub usage: Vec<String>,
+    /// Phase L8: managed-key UUID this issuer's keypair lives under
+    /// in the `pki/keys/*` store. Empty for pre-L8 records that
+    /// haven't been re-read (the engine's lazy-migration shim
+    /// populates this on first load).
+    #[serde(default)]
+    pub key_id: String,
 }
 
 #[tauri::command]
@@ -185,6 +191,7 @@ pub async fn pki_read_issuer(
         ca_kind: val_str(&map, "ca_kind"),
         is_default: val_bool(&map, "is_default"),
         usage: val_str_array(&map, "usage"),
+        key_id: val_str(&map, "key_id"),
     })
 }
 
@@ -1442,9 +1449,30 @@ pub async fn pki_delete_key(
     state: State<'_, AppState>,
     mount: String,
     key_ref: String,
+    force: Option<bool>,
 ) -> CmdResult<()> {
     let mount = mount_prefix(&mount);
-    make_request(&state, Operation::Delete, format!("{mount}/key/{key_ref}"), None).await?;
+    let body = json!({"force": force.unwrap_or(false)})
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    make_request(&state, Operation::Delete, format!("{mount}/key/{key_ref}"), Some(body)).await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn pki_delete_cert(
+    state: State<'_, AppState>,
+    mount: String,
+    serial: String,
+    force: Option<bool>,
+) -> CmdResult<()> {
+    let mount = mount_prefix(&mount);
+    let body = json!({"force": force.unwrap_or(false), "serial": serial.clone()})
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    make_request(&state, Operation::Delete, format!("{mount}/cert/{serial}"), Some(body)).await?;
     Ok(())
 }
 

@@ -135,6 +135,13 @@ impl PkiBackendInner {
         // Phase 5.5: surface the effective usages so an operator can
         // confirm what an issuer is allowed to do.
         data.insert("usage".into(), json!(issuer.usages.to_names()));
+        // Phase L8: the managed-key UUID this issuer is backed by.
+        // Empty for an issuer whose meta predates the refactor and
+        // hasn't been re-read since (the lazy-migration shim populates
+        // it on first read).
+        if !issuer.meta.key_id.is_empty() {
+            data.insert("key_id".into(), json!(issuer.meta.key_id));
+        }
         Ok(Some(Response::data_response(Some(data))))
     }
 

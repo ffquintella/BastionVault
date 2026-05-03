@@ -443,6 +443,13 @@ function IssuersTab({ mount }: { mount: string }) {
                 <Field label="Default" value={detail.is_default ? "yes" : "no"} />
                 <Field label="Issuer ID" value={detail.id} mono />
                 <Field label="Usages" value={detail.usage.join(", ") || "(none)"} />
+                {detail.key_id && (
+                  <Field
+                    label="Backing key (managed-key UUID)"
+                    value={detail.key_id}
+                    mono
+                  />
+                )}
               </div>
               <div className="flex gap-2 flex-wrap">
                 {!detail.is_default && (
@@ -1169,7 +1176,12 @@ function KeysTab({ mount }: { mount: string }) {
   const [showCreate, setShowCreate] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showExportedKey, setShowExportedKey] = useState<string | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{
+    id: string;
+    name: string;
+    issuerRefs: number;
+    certRefs: number;
+  } | null>(null);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -1196,10 +1208,10 @@ function KeysTab({ mount }: { mount: string }) {
     void reload();
   }, [reload]);
 
-  async function deleteKey(id: string) {
+  async function deleteKey(id: string, force: boolean) {
     try {
-      await api.pkiDeleteKey(mount, id);
-      toast("success", "Key deleted");
+      await api.pkiDeleteKey(mount, id, force);
+      toast("success", force ? "Key force-deleted" : "Key deleted");
       await reload();
     } catch (e) {
       toast("error", extractError(e));
@@ -1296,13 +1308,14 @@ function KeysTab({ mount }: { mount: string }) {
                   <Button
                     variant="ghost"
                     onClick={() =>
-                      setConfirmDelete({ id, name: k?.name || id })
+                      setConfirmDelete({
+                        id,
+                        name: k?.name || id,
+                        issuerRefs: k?.issuer_ref_count ?? 0,
+                        certRefs: k?.cert_ref_count ?? 0,
+                      })
                     }
-                    disabled={
-                      !k ||
-                      k.issuer_ref_count > 0 ||
-                      k.cert_ref_count > 0
-                    }
+                    disabled={!k}
                   >
                     Delete
                   </Button>
@@ -1372,17 +1385,30 @@ function KeysTab({ mount }: { mount: string }) {
         onClose={() => setConfirmDelete(null)}
         onConfirm={async () => {
           if (!confirmDelete) return;
-          const id = confirmDelete.id;
+          const { id, issuerRefs, certRefs } = confirmDelete;
+          const force = issuerRefs > 0 || certRefs > 0;
           setConfirmDelete(null);
-          await deleteKey(id);
+          await deleteKey(id, force);
         }}
-        title="Delete managed key"
+        title={
+          confirmDelete && (confirmDelete.issuerRefs > 0 || confirmDelete.certRefs > 0)
+            ? "Force-delete managed key"
+            : "Delete managed key"
+        }
         message={
           confirmDelete
-            ? `Delete key \`${confirmDelete.name}\`? Refused if any issuer or unexpired cert still references the key.`
+            ? confirmDelete.issuerRefs > 0 || confirmDelete.certRefs > 0
+              ? `Key \`${confirmDelete.name}\` is bound to ${confirmDelete.issuerRefs} issuer(s) and ${confirmDelete.certRefs} cert(s). ` +
+                `Each bound issuer keeps its own private-key copy at issuers/<id>/key, so the issuer keeps signing — ` +
+                `but the audit trail linking this managed-key entry to those issuers and certs is dropped. Continue?`
+              : `Delete key \`${confirmDelete.name}\`?`
             : ""
         }
-        confirmLabel="Delete"
+        confirmLabel={
+          confirmDelete && (confirmDelete.issuerRefs > 0 || confirmDelete.certRefs > 0)
+            ? "Force delete"
+            : "Delete"
+        }
         variant="danger"
       />
     </Card>
@@ -1746,6 +1772,10 @@ function CertsTab({ mount }: { mount: string }) {
     revoked_at?: number | null;
   } | null>(null);
   const [revokeTarget, setRevokeTarget] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{
+    serial: string;
+    active: boolean;
+  } | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -1840,6 +1870,23 @@ function CertsTab({ mount }: { mount: string }) {
     }
   }
 
+  async function handleDeleteCert() {
+    if (!deleteTarget) return;
+    const { serial, active } = deleteTarget;
+    try {
+      await api.pkiDeleteCert(mount, serial, active);
+      toast("success", `Certificate ${serial} deleted`);
+      setDeleteTarget(null);
+      if (selected === serial) {
+        setSelected(null);
+        setCert(null);
+      }
+      await refresh();
+    } catch (e) {
+      toast("error", extractError(e));
+    }
+  }
+
   async function rotateCrl() {
     try {
       const r = await api.pkiRotateCrl(mount);
@@ -1887,20 +1934,23 @@ function CertsTab({ mount }: { mount: string }) {
         />
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <div className="max-h-96 overflow-auto">
+          <div className="max-h-96 overflow-auto min-w-0">
             <Table<CertSummary>
+              tableClassName="table-fixed"
               columns={[
                 {
                   key: "serial",
                   header: "Serial",
+                  className: "w-[35%]",
                   render: (s) => (
                     <button
                       onClick={() => selectSerial(s.serial)}
-                      className={`text-left w-full ${
+                      className={`text-left w-full block min-w-0 ${
                         selected === s.serial
                           ? "font-semibold text-[var(--color-primary)]"
                           : ""
                       }`}
+                      title={s.serial}
                     >
                       <div className="font-mono text-xs truncate">{s.serial}</div>
                     </button>
@@ -1909,10 +1959,11 @@ function CertsTab({ mount }: { mount: string }) {
                 {
                   key: "common_name",
                   header: "Common Name",
+                  className: "w-[25%]",
                   render: (s) => (
                     <button
                       onClick={() => selectSerial(s.serial)}
-                      className={`text-left w-full min-w-0 ${
+                      className={`text-left w-full block min-w-0 ${
                         selected === s.serial
                           ? "font-semibold text-[var(--color-primary)]"
                           : ""
@@ -1923,8 +1974,8 @@ function CertsTab({ mount }: { mount: string }) {
                           : s.common_name
                       }
                     >
-                      <div className="text-xs truncate flex items-center gap-1">
-                        <span className="truncate">{s.common_name || "—"}</span>
+                      <div className="text-xs truncate flex items-center gap-1 min-w-0">
+                        <span className="truncate min-w-0">{s.common_name || "—"}</span>
                         {s.is_orphaned && (
                           <Badge variant="warning" label="orphan" />
                         )}
@@ -1935,6 +1986,7 @@ function CertsTab({ mount }: { mount: string }) {
                 {
                   key: "emitter",
                   header: "Emitter",
+                  className: "w-[25%]",
                   render: (s) => {
                     // Engine-owned emitter: cert's `issuer_id` resolves
                     // to a known issuer on this mount → render the
@@ -1974,6 +2026,7 @@ function CertsTab({ mount }: { mount: string }) {
                 {
                   key: "expires",
                   header: "Expires",
+                  className: "w-[15%]",
                   render: (s) => {
                     if (s.revoked_at) {
                       return (
@@ -2024,11 +2077,24 @@ function CertsTab({ mount }: { mount: string }) {
                   )
                 }
               />
-              {!cert.revoked_at && (
-                <Button variant="ghost" onClick={() => setRevokeTarget(selected)}>
-                  Revoke
+              <div className="flex items-center gap-2 flex-wrap">
+                {!cert.revoked_at && (
+                  <Button variant="ghost" onClick={() => setRevokeTarget(selected)}>
+                    Revoke
+                  </Button>
+                )}
+                <Button
+                  variant="ghost"
+                  onClick={() =>
+                    setDeleteTarget({
+                      serial: selected,
+                      active: !cert.revoked_at,
+                    })
+                  }
+                >
+                  Delete
                 </Button>
-              )}
+              </div>
             </div>
           )}
         </div>
@@ -2041,6 +2107,25 @@ function CertsTab({ mount }: { mount: string }) {
         title="Revoke certificate?"
         message={`Revoke ${revokeTarget}? The CRL will rebuild immediately.`}
         confirmLabel="Revoke"
+        variant="danger"
+      />
+      <ConfirmModal
+        open={!!deleteTarget}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={handleDeleteCert}
+        title={
+          deleteTarget?.active ? "Force-delete active certificate?" : "Delete certificate?"
+        }
+        message={
+          deleteTarget
+            ? deleteTarget.active
+              ? `Serial ${deleteTarget.serial} is still active (not revoked, not expired). ` +
+                `Deleting drops the cert record from this mount but does NOT revoke it — relying parties may still trust it until it expires. ` +
+                `Prefer Revoke unless you know what you're doing.`
+              : `Delete the cert record for ${deleteTarget.serial}? Any matching CRL entry will be pulled and the CRL rebuilt.`
+            : ""
+        }
+        confirmLabel={deleteTarget?.active ? "Force delete" : "Delete"}
         variant="danger"
       />
     </Card>
@@ -2493,6 +2578,43 @@ function XcaImportTab({
         }
       };
 
+      // Managed-key imports (Phase L8). Standalone private keys and
+      // leaf-cert paired keys both land in `pki/keys/*` so the
+      // operator can pin them via `key_ref` on later issuance.
+      // Tracks already-imported xdb item ids so a leaf and its
+      // paired key — both selected — only result in one key import.
+      const importedKeyIds = new Set<number>();
+      const importStandaloneKey = async (
+        key: XcaPreviewItem,
+        nameHint: string,
+      ): Promise<string | null> => {
+        if (importedKeyIds.has(key.meta.id)) return null;
+        importedKeyIds.add(key.meta.id);
+        const baseName = (nameHint || key.meta.name || "imported-key")
+          .replace(/[^\w-]/g, "-")
+          .slice(0, 60) || "imported-key";
+        const MAX_ATTEMPTS = 50;
+        let lastErr: unknown = null;
+        for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+          const name = attempt === 0 ? baseName : `${baseName}-${attempt + 1}`;
+          try {
+            const r = await api.pkiImportKey({
+              mount,
+              private_key: key.pem!,
+              name,
+            });
+            imported++;
+            return r.key_id;
+          } catch (e) {
+            lastErr = e;
+            if (!/already (exist|registered)/i.test(extractError(e))) break;
+          }
+        }
+        errors.push(`${key.meta.name}: ${extractError(lastErr)}`);
+        skipped++;
+        return null;
+      };
+
       for (const item of preview.items) {
         if (!selected[item.meta.id]) continue;
         if (item.meta.item_type === "cert") {
@@ -2500,10 +2622,17 @@ function XcaImportTab({
             skipped++;
             continue;
           }
-          // Leaf cert → orphan-cert index (no issuer link, no key).
-          // Plugin v0.1.9+ uses chain-driven `signs_others`; falls
-          // back to `is_ca` for older plugins. See `isEmitter`.
+          // Leaf cert → orphan-cert index + paired key (if any) into
+          // the managed key store. Phase L8: leaves with keys no
+          // longer drop the key on the floor — the operator can pin
+          // it later via `key_ref`. Plugin v0.1.9+ uses chain-driven
+          // `signs_others`; older plugins fall back via `isEmitter`.
           if (!isEmitter(item)) {
+            const key = findKeyForCert(item);
+            if (key && key.pem) {
+              const cn = (item.subject || "").split(",").find((p) => p.trim().toUpperCase().startsWith("CN="))?.slice(3).trim();
+              await importStandaloneKey(key, cn || item.meta.name);
+            }
             await importLeaf(item);
             continue;
           }
@@ -2520,12 +2649,18 @@ function XcaImportTab({
           }
           const cert = findCertForKey(item);
           if (!cert) {
-            skipped++;
+            // Phase L8: standalone keys are no longer skipped. They
+            // land in `pki/keys/*` directly so the operator can use
+            // them as `key_ref` on a later issuance call.
+            await importStandaloneKey(item, item.meta.name);
             continue;
           }
-          // If the paired cert is a leaf, route it to the orphan-cert
-          // index (the key has no home — orphan certs carry no key).
+          // Paired cert: route by emitter classification. Leaves
+          // get the key into the managed store + the cert as orphan;
+          // CAs go through `pki/config/ca`.
           if (!isEmitter(cert)) {
+            const cn = (cert.subject || "").split(",").find((p) => p.trim().toUpperCase().startsWith("CN="))?.slice(3).trim();
+            await importStandaloneKey(item, cn || cert.meta.name);
             await importLeaf(cert);
             continue;
           }

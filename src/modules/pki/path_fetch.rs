@@ -6,7 +6,9 @@ use serde_json::{json, Map, Value};
 use x509_parser::prelude::FromDer;
 
 use super::{
-    storage::{self, CertRecord},
+    issuers,
+    path_revoke::rebuild_crl_for_issuer,
+    storage::{self, CertRecord, CrlState},
     PkiBackend, PkiBackendInner,
 };
 use crate::{
@@ -18,14 +20,19 @@ use crate::{
 
 impl PkiBackend {
     pub fn fetch_cert_path(&self) -> Path {
-        let r = self.inner.clone();
+        let rr = self.inner.clone();
+        let rd = self.inner.clone();
         new_path!({
             pattern: r"cert/(?P<serial>[0-9a-fA-F:\-]+)",
             fields: {
-                "serial": { field_type: FieldType::Str, required: true, description: "Cert serial (hex)." }
+                "serial": { field_type: FieldType::Str, required: true, description: "Cert serial (hex)." },
+                "force": { field_type: FieldType::Bool, default: false, description: "Allow deleting an active (non-revoked, non-expired) cert. Required to remove a cert that is still trusted by relying parties." }
             },
-            operations: [{op: Operation::Read, handler: r.read_cert}],
-            help: "Fetch a previously issued certificate by serial."
+            operations: [
+                {op: Operation::Read, handler: rr.read_cert},
+                {op: Operation::Delete, handler: rd.delete_cert}
+            ],
+            help: "Fetch or delete a previously issued certificate by serial."
         })
     }
 
@@ -105,6 +112,91 @@ impl PkiBackendInner {
         if let Some(t) = record.revoked_at_unix {
             data.insert("revoked_at".into(), json!(t));
         }
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// Remove a cert record from this mount's cert store.
+    ///
+    /// An *active* (non-revoked, non-expired) cert can only be deleted
+    /// when the caller passes `force=true` — silently dropping a cert
+    /// that relying parties may still trust without first revoking it
+    /// would weaken the audit trail. Revoked or expired records are
+    /// removable without `force`. When the deleted record was on a
+    /// per-issuer CRL revoked-list, the entry is pulled and the CRL is
+    /// rebuilt so verifiers stop seeing a phantom serial. Managed-key
+    /// bindings recorded in `KeyRefs.cert_serials` are cleared on a
+    /// best-effort basis so a downstream `DELETE pki/key/<id>` can
+    /// succeed once the last referring cert is gone.
+    pub async fn delete_cert(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let serial_raw = req.get_data("serial")?.as_str()
+            .ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let serial_hex = normalize_serial_hex(&serial_raw);
+        let force = req
+            .get_data_or_default("force")
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let cert_key = storage::cert_storage_key(&serial_hex);
+        let record: CertRecord = storage::get_json(req, &cert_key).await?
+            .ok_or(RvError::ErrPkiCertNotFound)?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let expired = record.not_after_unix > 0 && record.not_after_unix <= now;
+        let is_active = record.revoked_at_unix.is_none() && !expired;
+        if is_active && !force {
+            return Err(RvError::ErrString(format!(
+                "delete_cert: serial `{serial_hex}` is still active; revoke it first \
+                 or pass force=true to drop the record without revoking"
+            )));
+        }
+
+        // Pull the serial from the issuer's CRL revoked-list (if any) so
+        // a future verifier doesn't see a CRL entry pointing at a serial
+        // we no longer have a record for. Then rebuild the CRL.
+        if !record.issuer_id.is_empty() || record.revoked_at_unix.is_some() {
+            let issuer_handle = if record.issuer_id.is_empty() {
+                issuers::load_default_issuer(req).await.ok()
+            } else {
+                issuers::load_issuer(req, &record.issuer_id).await.ok()
+            };
+            if let Some(issuer) = issuer_handle {
+                let crl_state_key = storage::issuer_crl_state_key(&issuer.id);
+                let mut state: CrlState = storage::get_json(req, &crl_state_key).await?.unwrap_or_default();
+                let before = state.revoked.len();
+                state.revoked.retain(|e| e.serial_hex != serial_hex);
+                if state.revoked.len() != before {
+                    state.crl_number = state.crl_number.saturating_add(1);
+                    storage::put_json(req, &crl_state_key, &state).await?;
+                    if let Err(e) = rebuild_crl_for_issuer(req, &issuer).await {
+                        log::warn!(
+                            "pki/cert delete: CRL rebuild for issuer {} failed: {e:?}",
+                            issuer.id
+                        );
+                    }
+                }
+            }
+        }
+
+        // Best-effort: clear the cert→managed-key binding so the key
+        // becomes deletable once its last cert is gone.
+        if !record.key_id.is_empty() {
+            if let Err(e) = super::keys::remove_cert_ref(req, &record.key_id, &serial_hex).await {
+                log::warn!(
+                    "pki/cert delete: failed to clear key_ref binding for serial {serial_hex} \
+                     on key {}: {e:?}",
+                    record.key_id,
+                );
+            }
+        }
+
+        req.storage_delete(&cert_key).await?;
+
+        let mut data: Map<String, Value> = Map::new();
+        data.insert("serial_number".into(), json!(serial_hex));
         Ok(Some(Response::data_response(Some(data))))
     }
 

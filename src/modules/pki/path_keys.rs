@@ -70,7 +70,8 @@ impl PkiBackend {
         new_path!({
             pattern: r"key/(?P<key_ref>[\w\-]+)$",
             fields: {
-                "key_ref": { field_type: FieldType::Str, required: true, description: "Managed key ID (UUID) or name." }
+                "key_ref": { field_type: FieldType::Str, required: true, description: "Managed key ID (UUID) or name." },
+                "force": { field_type: FieldType::Bool, default: false, description: "Drop the key even if it has outstanding issuer / cert references. The issuer's own private-key copy is preserved." }
             },
             operations: [
                 {op: Operation::Read, handler: rr.read_key},
@@ -199,7 +200,19 @@ impl PkiBackendInner {
             .as_str()
             .ok_or(RvError::ErrRequestFieldInvalid)?
             .to_string();
-        keys::delete_key(req, &key_ref).await?;
+        // `force` is optional and Delete callers may omit a body entirely;
+        // treat "no body / no field" as `force = false` instead of bubbling
+        // ErrRequestNoData up to the operator.
+        let force = req
+            .get_data_or_default("force")
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if force {
+            keys::force_delete_key(req, &key_ref).await?;
+        } else {
+            keys::delete_key(req, &key_ref).await?;
+        }
         Ok(None)
     }
 }

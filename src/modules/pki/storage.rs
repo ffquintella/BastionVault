@@ -162,6 +162,15 @@ pub struct CaMetadata {
     /// the cert. `#[serde(default)]` keeps Phase 1–4 records readable.
     #[serde(default)]
     pub ca_kind: CaKind,
+    /// Managed-key UUID this issuer's keypair is mirrored under in the
+    /// `pki/keys/*` store. Auto-populated when `add_issuer` creates a
+    /// shadow managed-key entry on issuer generation; matches the
+    /// caller-supplied managed key when `key_ref` was used. Empty for
+    /// pre-shadow records (older mounts) — they continue to work via
+    /// the legacy `issuers/<id>/key` path. `#[serde(default)]` keeps
+    /// pre-existing records deserialisable.
+    #[serde(default)]
+    pub key_id: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

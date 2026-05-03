@@ -1210,6 +1210,8 @@ export const pkiImportCert = (request: PkiImportCertRequest) =>
   invoke<PkiImportCertResult>("pki_import_cert", { request });
 export const pkiRevokeCert = (mount: string, serial: string) =>
   invoke<PkiRevokeResult>("pki_revoke_cert", { mount, serial });
+export const pkiDeleteCert = (mount: string, serial: string, force = false) =>
+  invoke<void>("pki_delete_cert", { mount, serial, force });
 export const pkiReadCa = (mount: string) => invoke<PkiCaResult>("pki_read_ca", { mount });
 export const pkiReadCrl = (mount: string) => invoke<PkiCrlResult>("pki_read_crl", { mount });
 export const pkiReadIssuerCrl = (mount: string, reference: string) =>
@@ -1244,8 +1246,8 @@ export const pkiGenerateKey = (request: PkiGenerateKeyRequest) =>
   invoke<PkiGenerateKeyResult>("pki_generate_key", { request });
 export const pkiImportKey = (request: PkiImportKeyRequest) =>
   invoke<PkiGenerateKeyResult>("pki_import_key", { request });
-export const pkiDeleteKey = (mount: string, keyRef: string) =>
-  invoke<void>("pki_delete_key", { mount, keyRef });
+export const pkiDeleteKey = (mount: string, keyRef: string, force = false) =>
+  invoke<void>("pki_delete_key", { mount, keyRef, force });
 
 // ── PKI issuer chain (Phase L3) ───────────────────────────────────
 

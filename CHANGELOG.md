@@ -45,7 +45,43 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+
+#### PKI — cert/key lifecycle + Certificates tab layout
+
+- [`src/modules/pki/keys.rs`](src/modules/pki/keys.rs) — `force_delete_key` now refuses when the managed key still backs an issuer, regardless of `force=true`. Since the legacy `issuers/<id>/key` migration shim deletes the issuer's own private-key copy after mirroring it into the managed-key store, the managed-key entry is the only signing material the issuer has — force-deleting it silently bricked revoke + CRL rebuild for that issuer. The operator must `DELETE pki/issuer/<ref>` first; `force` continues to bypass *cert*-level bindings (cert reads do not need the signing key).
+- [`src/modules/pki/issuers.rs`](src/modules/pki/issuers.rs) — `delete_issuer` now removes the matching entry from the shadow managed-key's `KeyRefs.issuer_ids` before nuking the issuer's storage. Previously the binding stayed behind, so a follow-up `DELETE pki/key/<id>` refused forever, citing a phantom issuer that no longer existed.
+- [`gui/src/components/ui/Table.tsx`](gui/src/components/ui/Table.tsx), [`gui/src/routes/PkiPage.tsx`](gui/src/routes/PkiPage.tsx) — Certificates tab table no longer overflows horizontally inside the 1/3-width column container. `Table` accepts an optional `tableClassName`; the cert list opts into `table-fixed` with explicit per-column widths so long hex serials, DNs, and the orphan badge truncate cleanly instead of forcing a sideways scrollbar.
+- [`tests/test_pki_cert_key_lifecycle.rs`](tests/test_pki_cert_key_lifecycle.rs) — new integration test covering the full cert↔managed-key CRUD loop: issuer-bound key force-delete is refused, `delete_issuer` clears the issuer→key binding so the key becomes deletable, `key_ref` issuance + revoke + delete round-trips clear `KeyRefs.cert_serials`, and the fresh-key path stays decoupled from L3 binding bookkeeping.
+
 ### Added
+
+#### PKI — managed-key force-delete + cert delete
+
+- [`src/modules/pki/keys.rs`](src/modules/pki/keys.rs), [`src/modules/pki/path_keys.rs`](src/modules/pki/path_keys.rs) — `DELETE /v1/pki/key/<key_ref>` accepts `force=true`. With force the engine drops the managed-key entry even when issuer / cert references remain in `KeyRefs`. The bound issuer's own private-key copy at `issuers/<id>/key` is preserved, so the issuer keeps signing — only the audit-trail link to that managed-key entry is dropped. Default behaviour (force absent or false) still refuses the delete and lists the outstanding bindings, matching pre-existing semantics.
+- [`src/modules/pki/path_fetch.rs`](src/modules/pki/path_fetch.rs) — new `DELETE /v1/pki/cert/<serial>` operation. Removes the cert record from `certs/<serial>`, pulls the serial from the issuer's per-issuer CRL revoked-list (and rebuilds that issuer's CRL) when present, and clears the cert→managed-key binding inside `KeyRefs.cert_serials` on a best-effort basis. Active (non-revoked, non-expired) certs require `force=true`; revoked or expired records delete without force.
+- [`gui/src-tauri/src/commands/pki.rs`](gui/src-tauri/src/commands/pki.rs), [`gui/src-tauri/src/lib.rs`](gui/src-tauri/src/lib.rs), [`gui/src/lib/api.ts`](gui/src/lib/api.ts) — `pki_delete_key` gains an optional `force` argument; new `pki_delete_cert` Tauri command wraps the cert-delete route.
+- [`gui/src/routes/PkiPage.tsx`](gui/src/routes/PkiPage.tsx) — Keys tab Delete button is no longer disabled when the key has issuer / cert references; the confirm modal switches into a force-delete variant that explains the audit-trail tradeoff before sending `force=true`. Certificates tab gains a Delete action (alongside Revoke) with an active-vs-inactive force prompt.
+
+### Changed
+
+#### PKI — issuer keys live in the managed-key store (Phase L8 cleanup)
+- [`src/modules/pki/storage.rs`](src/modules/pki/storage.rs) — `CaMetadata` gains `key_id: String` (`#[serde(default)]`). The issuer's keypair is no longer stored at `issuers/<id>/key` for new issuers; instead `meta.key_id` points at a managed-key entry in `pki/keys/*` that holds the private material as the single source of truth.
+- [`src/modules/pki/issuers.rs`](src/modules/pki/issuers.rs) — `add_issuer` now takes an optional `key_id_hint: Option<String>`. When `Some`, reuses an operator-pre-created managed key (i.e. `key_ref` was supplied at root/intermediate generation). When `None`, mints a shadow managed-key entry mirroring the signer (named `<issuer-name>-key`, with collision-safe disambiguation) so the issuer always shows up in the Keys tab. Records the issuer→key binding inside `add_issuer`, removing the duplicated `add_issuer_ref` follow-up at every caller.
+- [`src/modules/pki/issuers.rs`](src/modules/pki/issuers.rs) — `load_issuer_by_id` reads the signer via `meta.key_id` from the managed-key store. Lazy migration shim handles legacy issuers that still have a private key at `issuers/<id>/key`: on first load it lifts the legacy key into a fresh managed-key entry, sets `meta.key_id`, deletes the legacy storage path, and continues. The two-stage migration (pre-5.2 singleton → 5.2 multi-issuer → L8 managed-key) is idempotent.
+- [`src/modules/pki/keys.rs`](src/modules/pki/keys.rs) — new `create_managed_key_from_signer(req, signer, name, source)` helper used by `add_issuer` + the migration shim to mint shadow entries from an existing signer's PEM.
+- [`src/modules/pki/path_root.rs`](src/modules/pki/path_root.rs), [`src/modules/pki/path_intermediate.rs`](src/modules/pki/path_intermediate.rs), [`src/modules/pki/path_config.rs`](src/modules/pki/path_config.rs) — three `add_issuer` callers updated for the new signature. Issuer-generate responses now surface `key_id` (read back from the freshly-loaded handle) so the GUI can deep-link straight to the Keys tab.
+- [`src/modules/pki/path_issuers.rs`](src/modules/pki/path_issuers.rs) — `pki/issuer/<ref>` read response carries `key_id` when populated.
+
+### Added
+
+#### XCA import — chain-driven issuer / leaf routing fixes (plugin v0.1.10)
+- **Plugin v0.1.10**: dropped `#[serde(default, skip_serializing_if = "std::ops::Not::not")]` on `is_ca` and `signs_others` in `PreviewItem`. Both fields are now always serialised on the wire so the GUI never sees `undefined` and falls through to the legacy "treat as CA" default — this was the root cause of leaf certs being misrouted to `pki/config/ca` and bouncing with `BasicConstraints.cA=true required`.
+- [`gui/src/routes/PkiPage.tsx`](gui/src/routes/PkiPage.tsx) — XCA Apply flow restructured so every selectable item lands somewhere:
+  - **Leaf cert + paired key**: imports the key into the managed key store via `pki/keys/import` (named after the cert's CN), then orphan-imports the cert via `pki/certs/import`. Operators can later pin the key with `key_ref` on issuance.
+  - **Standalone private key** (no paired cert in the file): imported directly into the managed key store. Was previously skipped with no destination.
+  - **CA cert + paired key**: unchanged — bundle goes through `pki/config/ca`. The host engine now auto-mints a shadow managed-key entry alongside the imported issuer so it appears in the Keys tab too.
+- [`gui/src-tauri/src/commands/pki.rs`](gui/src-tauri/src/commands/pki.rs) + [`gui/src/lib/types.ts`](gui/src/lib/types.ts) — `PkiIssuerDetail` carries `key_id` from the engine; the issuer detail panel displays it as "Backing key (managed-key UUID)" so the cert↔key relationship is explicit in the UI.
 
 #### XCA import — chain-driven issuer / leaf routing + Emitter column on Certificates tab
 - [`plugins-ext/bastion-plugin-xca`](plugins-ext/bastion-plugin-xca) bumped to **v0.1.9**. New `chain.rs` module walks the imported cert graph and reports per-cert `signs_others` / `signer_item_id` / `signer_subject`. Linkage uses AKI→SKI when both extensions are present and falls back to Issuer DN → Subject DN. The plugin's `summary.issuer_count` / `leaf_count` are now recomputed from the chain pass so the numbers match what the GUI will route. Three `chain::tests` unit tests cover standalone self-signed CA, CA + leaf in set, and standalone leaf with off-set parent.

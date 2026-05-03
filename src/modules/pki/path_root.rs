@@ -132,6 +132,12 @@ impl PkiBackendInner {
         } else {
             requested_name
         };
+        // Phase L8: when no `key_ref` was supplied, `add_issuer`
+        // mints a shadow managed-key entry mirroring the freshly-
+        // generated signer. Either way the issuer→key binding is
+        // recorded inside `add_issuer`, so callers no longer call
+        // `add_issuer_ref` themselves.
+        let key_id_hint = pinned_key.as_ref().map(|e| e.id.clone());
         let issuer_id = super::issuers::add_issuer(
             req,
             &issuer_name,
@@ -141,15 +147,9 @@ impl PkiBackendInner {
             &serial_hex,
             not_after_unix,
             super::storage::CaKind::Root,
+            key_id_hint,
         )
         .await?;
-
-        // Phase L3: if a managed key was promoted to issuer, record the
-        // binding so `delete_key` refuses while the issuer still uses
-        // this key.
-        if let Some(entry) = &pinned_key {
-            super::keys::add_issuer_ref(req, &entry.id, &issuer_id).await?;
-        }
 
         // CRL config is mount-wide; seed it once if absent.
         if storage::get_json::<CrlConfig>(req, KEY_CONFIG_CRL).await?.is_none() {
@@ -177,7 +177,15 @@ impl PkiBackendInner {
             data.insert("private_key".into(), json!(pkcs8));
             data.insert("private_key_type".into(), json!(alg.as_str()));
         }
-        if let Some(entry) = &pinned_key {
+        // Phase L8: every issuer now has a managed-key binding. Read
+        // it back from the issuer's meta so the caller sees the
+        // shadow key id even when the operator did not supply
+        // `key_ref` themselves.
+        if let Ok(handle) = super::issuers::load_issuer(req, &issuer_id).await {
+            if !handle.meta.key_id.is_empty() {
+                data.insert("key_id".into(), json!(handle.meta.key_id));
+            }
+        } else if let Some(entry) = &pinned_key {
             data.insert("key_id".into(), json!(entry.id));
         }
         // Reference the legacy storage-key constants so unused-import lints

@@ -266,6 +266,17 @@ impl PkiBackendInner {
         } else {
             requested_name
         };
+        // Phase L8: when `key_ref` was used at intermediate-generate
+        // time, `pending_meta.key_id` already points at the managed
+        // key. Otherwise `add_issuer` mints a shadow entry mirroring
+        // the pending keypair. Issuer→key binding is recorded inside
+        // `add_issuer`, so the legacy `add_issuer_ref` follow-up call
+        // here is no longer needed.
+        let key_id_hint = if pending_meta.key_id.is_empty() {
+            None
+        } else {
+            Some(pending_meta.key_id.clone())
+        };
         let issuer_id = super::issuers::add_issuer(
             req,
             &issuer_name,
@@ -275,14 +286,9 @@ impl PkiBackendInner {
             &serial_hex,
             not_after_unix,
             CaKind::Intermediate,
+            key_id_hint,
         )
         .await?;
-
-        // Phase L3: complete the managed-key→issuer binding when the
-        // intermediate was generated against `key_ref`.
-        if !pending_meta.key_id.is_empty() {
-            super::keys::add_issuer_ref(req, &pending_meta.key_id, &issuer_id).await?;
-        }
 
         if storage::get_json::<CrlConfig>(req, KEY_CONFIG_CRL).await?.is_none() {
             storage::put_json(req, KEY_CONFIG_CRL, &CrlConfig::default()).await?;

@@ -122,6 +122,35 @@ impl KeyRefs {
     }
 }
 
+/// Create a managed-key entry mirroring an existing [`Signer`]'s
+/// material. Used by [`super::issuers::add_issuer`] to produce a
+/// shadow entry in the `pki/keys/*` store every time an issuer is
+/// minted, so the operator sees the issuer's backing key in the GUI
+/// Keys tab and can pin it via `key_ref` on subsequent issuance.
+///
+/// The shadow entry stores the *same* PKCS#8 / `BV PQC SIGNER` PEM
+/// the issuer holds at `issuers/<id>/key`. That's a deliberate
+/// duplicate of the private material, both copies barrier-encrypted.
+/// We accept the storage cost for a single source of truth at the
+/// API level; a future refactor can collapse the issuer's key
+/// storage onto the managed-key entry directly.
+///
+/// `name` doesn't have to be unique — the caller decides whether to
+/// disambiguate. The function returns the persisted entry so the
+/// caller can pull `entry.id` out for binding records.
+#[maybe_async::maybe_async]
+pub async fn create_managed_key_from_signer(
+    req: &Request,
+    signer: &Signer,
+    name: &str,
+    source: KeySource,
+) -> Result<KeyEntry, RvError> {
+    if !name.is_empty() {
+        ensure_name_free(req, name).await?;
+    }
+    persist_new_key(req, signer, name, false, source).await
+}
+
 /// Generate a fresh managed key under `alg`, persist it, and return the
 /// stored [`KeyEntry`] alongside the [`Signer`] handle the caller can
 /// use immediately (so `generate/exported` doesn't have to reload from
@@ -279,16 +308,56 @@ pub fn entry_spki_der(entry: &KeyEntry) -> Result<Vec<u8>, RvError> {
 /// the operator must rotate or revoke first.
 #[maybe_async::maybe_async]
 pub async fn delete_key(req: &Request, reference: &str) -> Result<(), RvError> {
+    delete_key_inner(req, reference, false).await
+}
+
+/// Force-delete a managed key, ignoring outstanding *cert* bindings.
+///
+/// Since the legacy `issuers/<id>/key` migration shim
+/// (see [`super::issuers::load_issuer`]) deletes the issuer's own
+/// private-key copy after mirroring it into the managed-key store,
+/// the managed-key entry is the **only** copy of the issuer's signing
+/// material on a migrated mount. Force-deleting a key that still
+/// backs an issuer would silently brick that issuer (no revoke, no
+/// CRL rebuild, no further issuance). To preserve operational
+/// safety, `force_delete_key` continues to **refuse** when
+/// `KeyRefs.issuer_ids` is non-empty — the operator must remove the
+/// referring issuers first via `DELETE pki/issuer/<ref>`. Force only
+/// bypasses cert-level bindings; cert records keep working after the
+/// binding is dropped because cert reads are independent of the
+/// signing key.
+#[maybe_async::maybe_async]
+pub async fn force_delete_key(req: &Request, reference: &str) -> Result<(), RvError> {
+    delete_key_inner(req, reference, true).await
+}
+
+#[maybe_async::maybe_async]
+async fn delete_key_inner(req: &Request, reference: &str, force: bool) -> Result<(), RvError> {
     let entry = load_key(req, reference).await?.ok_or_else(|| {
         RvError::ErrString(format!("delete_key: no managed key found for `{reference}`"))
     })?;
     let refs = load_refs(req, &entry.id).await?;
-    if !refs.is_empty() {
+    // Issuer bindings always block: the managed-key entry is the live
+    // signing material for the bound issuer(s) once the legacy
+    // shim has run. Dropping it here would brick those issuers — refuse
+    // even under `force=true`. Cert bindings are softer: the cert
+    // records survive the binding being dropped, so `force` is allowed
+    // to clear them.
+    if !refs.issuer_ids.is_empty() {
+        let mut ids: Vec<&str> = refs.issuer_ids.iter().map(|s| s.as_str()).collect();
+        ids.sort_unstable();
         return Err(RvError::ErrString(format!(
-            "delete_key: key `{}` is referenced by {} issuer(s) and {} certificate(s); \
-             rotate or revoke before deleting",
+            "delete_key: key `{}` still backs issuer(s) [{}]; remove those issuers first via \
+             DELETE pki/issuer/<ref> before deleting the key",
             entry.id,
-            refs.issuer_ids.len(),
+            ids.join(", ")
+        )));
+    }
+    if !refs.cert_serials.is_empty() && !force {
+        return Err(RvError::ErrString(format!(
+            "delete_key: key `{}` is bound to {} certificate(s); \
+             revoke them first or pass force=true to drop the binding record",
+            entry.id,
             refs.cert_serials.len()
         )));
     }

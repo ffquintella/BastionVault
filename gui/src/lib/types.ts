@@ -656,6 +656,13 @@ export interface PkiIssuerDetail {
   ca_kind: string;
   is_default: boolean;
   usage: string[];
+  /** Phase L8: managed-key UUID this issuer is backed by. The
+   *  issuer's keypair lives in `pki/keys/<key_id>` (single source of
+   *  truth); the GUI surfaces this so an operator can deep-link into
+   *  the Keys tab and so refs / rotations stay traceable. Empty for
+   *  pre-L8 records that haven't been re-read since the migration
+   *  shim ran. */
+  key_id?: string;
 }
 
 export interface PkiDefaultIssuer {

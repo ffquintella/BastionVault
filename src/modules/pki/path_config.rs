@@ -179,6 +179,9 @@ impl PkiBackendInner {
         } else {
             requested_name
         };
+        // Phase L8: `add_issuer` now mints a shadow managed-key
+        // entry mirroring the imported key, so the GUI Keys tab
+        // shows the imported issuer's backing material right away.
         let issuer_id = super::issuers::add_issuer(
             req,
             &issuer_name,
@@ -188,6 +191,7 @@ impl PkiBackendInner {
             &serial_hex,
             not_after_unix,
             CaKind::Imported,
+            None,
         )
         .await?;
 

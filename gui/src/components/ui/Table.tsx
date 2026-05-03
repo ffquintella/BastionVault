@@ -13,6 +13,10 @@ interface TableProps<T> {
   rowKey: (item: T) => string;
   emptyMessage?: string;
   onRowClick?: (item: T) => void;
+  /** Extra classes applied to the underlying `<table>`. Use `"table-fixed"`
+   *  together with explicit `col.className` widths when cell content (long
+   *  hex serials, full DNs) needs to truncate inside narrow containers. */
+  tableClassName?: string;
 }
 
 export function Table<T>({
@@ -21,6 +25,7 @@ export function Table<T>({
   rowKey,
   emptyMessage = "No data",
   onRowClick,
+  tableClassName = "",
 }: TableProps<T>) {
   if (data.length === 0) {
     return (
@@ -31,7 +36,7 @@ export function Table<T>({
   }
 
   return (
-    <table className="w-full text-sm">
+    <table className={`w-full text-sm ${tableClassName}`.trim()}>
       <thead>
         <tr className="text-[var(--color-text-muted)] text-left">
           {columns.map((col) => (
