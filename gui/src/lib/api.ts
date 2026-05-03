@@ -69,6 +69,7 @@ import type {
   PkiSignIntermediateRequest,
   PkiSignIntermediateResult,
   PkiImportCaBundleRequest,
+  PkiImportCaPkcs12Request,
   PkiImportCertRequest,
   PkiImportCertResult,
   PkiRoleConfig,
@@ -1187,6 +1188,8 @@ export const pkiSignIntermediate = (request: PkiSignIntermediateRequest) =>
   invoke<PkiSignIntermediateResult>("pki_sign_intermediate", { request });
 export const pkiImportCaBundle = (request: PkiImportCaBundleRequest) =>
   invoke<PkiSetSignedResult>("pki_import_ca_bundle", { request });
+export const pkiImportCaPkcs12 = (request: PkiImportCaPkcs12Request) =>
+  invoke<PkiSetSignedResult>("pki_import_ca_pkcs12", { request });
 
 export const pkiListRoles = (mount: string) => invoke<string[]>("pki_list_roles", { mount });
 export const pkiReadRole = (mount: string, name: string) =>

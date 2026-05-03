@@ -505,6 +505,102 @@ pub async fn pki_import_ca_bundle(
     Ok(PkiSetSignedResult { issuer_id: val_str(&map, "issuer_id"), issuer_name: val_str(&map, "issuer_name") })
 }
 
+/// Import a CA from a PKCS#12 (`.p12` / `.pfx`) container. The
+/// front-end reads the file as bytes and base64-encodes them; this
+/// command unwraps the bag (with the operator-supplied passphrase),
+/// re-emits the cert + private key as a single PEM bundle, and
+/// hands the bundle to the existing `pki/config/ca` route. The
+/// passphrase never leaves the Tauri process; the bundle PEM is
+/// short-lived in memory and dropped as soon as `pki/config/ca`
+/// returns.
+#[derive(Deserialize)]
+pub struct PkiImportCaPkcs12Request {
+    pub mount: String,
+    /// Base64-encoded PKCS#12 / PFX bytes (DER container).
+    pub pkcs12_b64: String,
+    /// PKCS#12 passphrase. Empty string is allowed (some tools mint
+    /// password-less containers).
+    pub passphrase: String,
+    pub issuer_name: Option<String>,
+}
+
+#[tauri::command]
+pub async fn pki_import_ca_pkcs12(
+    state: State<'_, AppState>,
+    request: PkiImportCaPkcs12Request,
+) -> CmdResult<PkiSetSignedResult> {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
+    use openssl::pkcs12::Pkcs12;
+
+    let der = B64
+        .decode(request.pkcs12_b64.trim())
+        .map_err(|e| format!("pki_import_ca_pkcs12: base64 decode failed: {e}"))?;
+    let p12 = Pkcs12::from_der(&der)
+        .map_err(|e| format!("pki_import_ca_pkcs12: not a valid PKCS#12 container: {e}"))?;
+    let parsed = p12
+        .parse2(&request.passphrase)
+        .map_err(|e| format!("pki_import_ca_pkcs12: passphrase rejected or container malformed: {e}"))?;
+
+    let cert = parsed
+        .cert
+        .ok_or("pki_import_ca_pkcs12: container has no certificate".to_string())?;
+    let pkey = parsed
+        .pkey
+        .ok_or("pki_import_ca_pkcs12: container has no private key".to_string())?;
+
+    let cert_pem = String::from_utf8(
+        cert.to_pem()
+            .map_err(|e| format!("pki_import_ca_pkcs12: cert → PEM failed: {e}"))?,
+    )
+    .map_err(|e| format!("pki_import_ca_pkcs12: cert PEM not UTF-8: {e}"))?;
+    // PKCS#8 (unencrypted) so the engine's `pki/config/ca` PEM-bundle
+    // splitter recognises the `PRIVATE KEY` header. `to_pem_pkcs8` is
+    // the right call regardless of the inner key type (RSA / EC /
+    // Ed25519): it emits the standard PKCS#8 wrapper.
+    let key_pem = String::from_utf8(
+        pkey.private_key_to_pem_pkcs8()
+            .map_err(|e| format!("pki_import_ca_pkcs12: key → PKCS#8 PEM failed: {e}"))?,
+    )
+    .map_err(|e| format!("pki_import_ca_pkcs12: key PEM not UTF-8: {e}"))?;
+
+    // Concat in any order — `split_pem_bundle` recognises both blocks
+    // by tag. Append additional CA chain certs (if any) so an
+    // intermediate-bundled-with-its-root .p12 still imports cleanly.
+    let mut bundle = String::new();
+    bundle.push_str(&cert_pem);
+    if !cert_pem.ends_with('\n') {
+        bundle.push('\n');
+    }
+    if let Some(chain) = parsed.ca {
+        for ca in chain.iter() {
+            if let Ok(pem_bytes) = ca.to_pem() {
+                if let Ok(s) = String::from_utf8(pem_bytes) {
+                    bundle.push_str(&s);
+                    if !s.ends_with('\n') {
+                        bundle.push('\n');
+                    }
+                }
+            }
+        }
+    }
+    bundle.push_str(&key_pem);
+
+    let mount = mount_prefix(&request.mount);
+    let mut body = Map::new();
+    body.insert("pem_bundle".into(), json!(bundle));
+    if let Some(n) = request.issuer_name {
+        body.insert("issuer_name".into(), json!(n));
+    }
+    let resp =
+        make_request(&state, Operation::Write, format!("{mount}/config/ca"), Some(body)).await?;
+    let map = data_to_map(resp);
+    Ok(PkiSetSignedResult {
+        issuer_id: val_str(&map, "issuer_id"),
+        issuer_name: val_str(&map, "issuer_name"),
+    })
+}
+
 // ── Roles ─────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize)]
@@ -899,6 +995,107 @@ pub struct PkiCertRecord {
     /// mount's issuer registry.
     #[serde(default)]
     pub issuer_dn: String,
+    /// Subject Alternative Name entries pulled from the cert's SAN
+    /// extension. Empty when the cert has no SAN. Each list is the
+    /// raw textual form (DNS / IP / email / URI) so the detail panel
+    /// can render them as `<key>: <value>` pairs without re-parsing.
+    #[serde(default)]
+    pub san_dns: Vec<String>,
+    #[serde(default)]
+    pub san_ip: Vec<String>,
+    #[serde(default)]
+    pub san_email: Vec<String>,
+    #[serde(default)]
+    pub san_uri: Vec<String>,
+    /// Key-Usage and Extended-Key-Usage decodes (textual labels like
+    /// `digitalSignature`, `serverAuth`). Empty when the cert omits
+    /// the extension.
+    #[serde(default)]
+    pub key_usages: Vec<String>,
+    #[serde(default)]
+    pub ext_key_usages: Vec<String>,
+}
+
+#[derive(Default)]
+struct CertExtras {
+    san_dns: Vec<String>,
+    san_ip: Vec<String>,
+    san_email: Vec<String>,
+    san_uri: Vec<String>,
+    key_usages: Vec<String>,
+    ext_key_usages: Vec<String>,
+}
+
+/// Parse the cert's SubjectAltName, KeyUsage, and ExtendedKeyUsage
+/// extensions into textual entries. Tolerant of missing / malformed
+/// extensions: any failure returns the partial result accumulated so
+/// far, never panics.
+fn parse_cert_extras(der: &[u8]) -> CertExtras {
+    use x509_parser::extensions::{GeneralName, ParsedExtension};
+    use x509_parser::prelude::*;
+    let mut out = CertExtras::default();
+    let Ok((_, parsed)) = X509Certificate::from_der(der) else {
+        return out;
+    };
+    for ext in parsed.extensions() {
+        match ext.parsed_extension() {
+            ParsedExtension::SubjectAlternativeName(san) => {
+                for gn in &san.general_names {
+                    match gn {
+                        GeneralName::DNSName(s) => out.san_dns.push((*s).to_string()),
+                        GeneralName::IPAddress(bytes) => {
+                            out.san_ip.push(format_ip(bytes));
+                        }
+                        GeneralName::RFC822Name(s) => out.san_email.push((*s).to_string()),
+                        GeneralName::URI(s) => out.san_uri.push((*s).to_string()),
+                        _ => {}
+                    }
+                }
+            }
+            ParsedExtension::KeyUsage(ku) => {
+                if ku.digital_signature() { out.key_usages.push("digitalSignature".into()); }
+                if ku.non_repudiation() { out.key_usages.push("nonRepudiation".into()); }
+                if ku.key_encipherment() { out.key_usages.push("keyEncipherment".into()); }
+                if ku.data_encipherment() { out.key_usages.push("dataEncipherment".into()); }
+                if ku.key_agreement() { out.key_usages.push("keyAgreement".into()); }
+                if ku.key_cert_sign() { out.key_usages.push("keyCertSign".into()); }
+                if ku.crl_sign() { out.key_usages.push("cRLSign".into()); }
+                if ku.encipher_only() { out.key_usages.push("encipherOnly".into()); }
+                if ku.decipher_only() { out.key_usages.push("decipherOnly".into()); }
+            }
+            ParsedExtension::ExtendedKeyUsage(eku) => {
+                if eku.server_auth { out.ext_key_usages.push("serverAuth".into()); }
+                if eku.client_auth { out.ext_key_usages.push("clientAuth".into()); }
+                if eku.code_signing { out.ext_key_usages.push("codeSigning".into()); }
+                if eku.email_protection { out.ext_key_usages.push("emailProtection".into()); }
+                if eku.time_stamping { out.ext_key_usages.push("timeStamping".into()); }
+                if eku.ocsp_signing { out.ext_key_usages.push("OCSPSigning".into()); }
+                for oid in &eku.other {
+                    out.ext_key_usages.push(oid.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn format_ip(bytes: &[u8]) -> String {
+    match bytes.len() {
+        4 => format!("{}.{}.{}.{}", bytes[0], bytes[1], bytes[2], bytes[3]),
+        16 => {
+            let mut groups = [0u16; 8];
+            for (i, g) in groups.iter_mut().enumerate() {
+                *g = ((bytes[i * 2] as u16) << 8) | bytes[i * 2 + 1] as u16;
+            }
+            groups
+                .iter()
+                .map(|g| format!("{g:x}"))
+                .collect::<Vec<_>>()
+                .join(":")
+        }
+        _ => hex::encode(bytes),
+    }
 }
 
 /// Parse `(common_name, not_after_unix, issuer_dn)` out of a PEM-
@@ -971,6 +1168,9 @@ pub async fn pki_read_cert(
     let map = data_to_map(resp);
     let certificate = val_str(&map, "certificate");
     let (common_name, not_after, issuer_dn) = parse_cert_meta(&certificate);
+    let extras = bastion_vault::modules::pki::csr::decode_pem_or_der(&certificate)
+        .map(|der| parse_cert_extras(&der))
+        .unwrap_or_default();
     Ok(PkiCertRecord {
         serial_number: val_str(&map, "serial_number"),
         certificate,
@@ -982,6 +1182,12 @@ pub async fn pki_read_cert(
         source: val_str(&map, "source"),
         issuer_id: val_str(&map, "issuer_id"),
         issuer_dn,
+        san_dns: extras.san_dns,
+        san_ip: extras.san_ip,
+        san_email: extras.san_email,
+        san_uri: extras.san_uri,
+        key_usages: extras.key_usages,
+        ext_key_usages: extras.ext_key_usages,
     })
 }
 

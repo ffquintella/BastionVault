@@ -45,6 +45,16 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### PKI — Import root CA (PEM / PKCS#12) + richer Certificates detail pane
+
+- [`gui/src-tauri/src/commands/pki.rs`](gui/src-tauri/src/commands/pki.rs), [`gui/src-tauri/src/lib.rs`](gui/src-tauri/src/lib.rs), [`gui/src/lib/api.ts`](gui/src/lib/api.ts), [`gui/src/lib/types.ts`](gui/src/lib/types.ts) — new `pki_import_ca_pkcs12` Tauri command. The renderer reads the `.p12` / `.pfx` file, base64-encodes it, and ships it with a passphrase to the Tauri process; `openssl::pkcs12::Pkcs12::parse2` unwraps the bag into a cert + private key, the key is re-emitted as unencrypted PKCS#8, and the assembled PEM bundle is forwarded to the existing `pki/config/ca` route. The passphrase never crosses the network — the unwrap runs entirely on the local Tauri process.
+- [`gui/src/routes/PkiPage.tsx`](gui/src/routes/PkiPage.tsx) — Issuers tab gains an **Import root CA** action (next to *Generate root CA*). The new modal toggles between *PEM bundle* (textarea) and *PKCS#12* (file picker + passphrase). Both modes route through `pki/config/ca` so the imported CA lands as a normal issuer, with the existing shadow-managed-key shim wiring the Keys tab.
+- [`gui/src-tauri/src/commands/pki.rs`](gui/src-tauri/src/commands/pki.rs) — `parse_cert_meta` extended with `parse_cert_extras` (uses `x509-parser`) so `pki_read_cert` now also surfaces SubjectAltName entries (DNS / IP / email / URI), KeyUsage flags, and ExtendedKeyUsage labels.
+- [`gui/src/routes/PkiPage.tsx`](gui/src/routes/PkiPage.tsx) — Certificates tab right-pane is now a structured **CertDetail** component showing CN, Emitter (with owned/external glyph), Issued/Expires, Source for orphan imports, KU and EKU as badge groups, and SANs grouped by kind. The cert PEM stays in a copy-buttoned block underneath. Cert list now occupies 2/3 of the row width and the detail pane 1/3.
+- [`gui/src-tauri/Cargo.toml`](gui/src-tauri/Cargo.toml) — `x509-parser` 0.17 added to mirror the host-crate pin (used for the cert-extension decoding above).
+
 ### Fixed
 
 #### PKI — cert/key lifecycle + Certificates tab layout

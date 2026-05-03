@@ -296,6 +296,7 @@ pub fn run() {
             commands::pki::pki_set_signed_intermediate,
             commands::pki::pki_sign_intermediate,
             commands::pki::pki_import_ca_bundle,
+            commands::pki::pki_import_ca_pkcs12,
             commands::pki::pki_list_roles,
             commands::pki::pki_read_role,
             commands::pki::pki_write_role,

@@ -23,6 +23,7 @@ import type {
   PkiTidyStatus,
   PkiAutoTidyConfig,
   PkiManagedKey,
+  PkiCertRecord,
 } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
@@ -308,6 +309,7 @@ function IssuersTab({ mount }: { mount: string }) {
   const [loading, setLoading] = useState(true);
   const [detail, setDetail] = useState<PkiIssuerDetail | null>(null);
   const [showGenerate, setShowGenerate] = useState(false);
+  const [showImportCa, setShowImportCa] = useState(false);
   const [showRename, setShowRename] = useState(false);
   const [showUsages, setShowUsages] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<PkiIssuerSummary | null>(null);
@@ -399,7 +401,14 @@ function IssuersTab({ mount }: { mount: string }) {
   return (
     <Card
       title="Issuers"
-      actions={<Button onClick={() => setShowGenerate(true)}>+ Generate root CA</Button>}
+      actions={
+        <>
+          <Button variant="ghost" onClick={() => setShowImportCa(true)}>
+            Import root CA
+          </Button>
+          <Button onClick={() => setShowGenerate(true)}>+ Generate root CA</Button>
+        </>
+      }
     >
       {loading ? (
         <p className="text-sm text-[var(--color-text-muted)]">Loading…</p>
@@ -407,7 +416,14 @@ function IssuersTab({ mount }: { mount: string }) {
         <EmptyState
           title="No issuers configured"
           description="Generate a root CA to start issuing certificates. The first issuer becomes the mount default automatically."
-          action={<Button onClick={() => setShowGenerate(true)}>Generate root CA</Button>}
+          action={
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" onClick={() => setShowImportCa(true)}>
+                Import root CA
+              </Button>
+              <Button onClick={() => setShowGenerate(true)}>Generate root CA</Button>
+            </div>
+          }
         />
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -503,6 +519,13 @@ function IssuersTab({ mount }: { mount: string }) {
       <GenerateRootModal
         open={showGenerate}
         onClose={() => setShowGenerate(false)}
+        mount={mount}
+        onSuccess={refresh}
+      />
+
+      <ImportRootCaModal
+        open={showImportCa}
+        onClose={() => setShowImportCa(false)}
         mount={mount}
         onSuccess={refresh}
       />
@@ -742,6 +765,215 @@ function GenerateRootModal({
           </label>
         </div>
       )}
+    </Modal>
+  );
+}
+
+// ── Import root CA Modal ──────────────────────────────────────────
+
+/** Two-mode root CA importer:
+ *  - **PEM bundle**: textarea, accepts a single string with the cert
+ *    PEM block(s) and the unencrypted private-key PEM concatenated.
+ *  - **PKCS#12**: file picker (`.p12` / `.pfx`) + passphrase. The
+ *    file is read in the renderer, base64-encoded, and unwrapped on
+ *    the Tauri side; the passphrase never leaves the local process.
+ *
+ *  Both modes go through `pki/config/ca`, so the freshly imported
+ *  cert + key land as a normal issuer (with a shadow managed-key
+ *  entry so the Keys tab can manage it like any other key). */
+function ImportRootCaModal({
+  open,
+  onClose,
+  mount,
+  onSuccess,
+}: {
+  open: boolean;
+  onClose: () => void;
+  mount: string;
+  onSuccess: () => void;
+}) {
+  const { toast } = useToast();
+  const [mode, setMode] = useState<"pem" | "pkcs12">("pem");
+  const [issuerName, setIssuerName] = useState("");
+  const [pemBundle, setPemBundle] = useState("");
+  const [pkcs12Name, setPkcs12Name] = useState("");
+  const [pkcs12B64, setPkcs12B64] = useState("");
+  const [passphrase, setPassphrase] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  function reset() {
+    setMode("pem");
+    setIssuerName("");
+    setPemBundle("");
+    setPkcs12Name("");
+    setPkcs12B64("");
+    setPassphrase("");
+  }
+
+  function handleClose() {
+    reset();
+    onClose();
+  }
+
+  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setPkcs12Name(file.name);
+    const buf = await file.arrayBuffer();
+    // Encode as base64 — chunked to dodge the call-stack limit on
+    // large containers (>~50 KB) when fanning the byte array into
+    // String.fromCharCode in one shot.
+    const bytes = new Uint8Array(buf);
+    let binary = "";
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    }
+    setPkcs12B64(btoa(binary));
+  }
+
+  async function submit() {
+    setBusy(true);
+    try {
+      if (mode === "pem") {
+        if (!pemBundle.trim()) {
+          toast("error", "Paste a PEM bundle (cert + private key).");
+          return;
+        }
+        const r = await api.pkiImportCaBundle({
+          mount,
+          pem_bundle: pemBundle.trim(),
+          issuer_name: issuerName.trim() || undefined,
+        });
+        toast("success", `Imported as issuer "${r.issuer_name}"`);
+      } else {
+        if (!pkcs12B64) {
+          toast("error", "Select a .p12 / .pfx file first.");
+          return;
+        }
+        const r = await api.pkiImportCaPkcs12({
+          mount,
+          pkcs12_b64: pkcs12B64,
+          passphrase,
+          issuer_name: issuerName.trim() || undefined,
+        });
+        toast("success", `Imported as issuer "${r.issuer_name}"`);
+      }
+      onSuccess();
+      handleClose();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const canSubmit =
+    !busy &&
+    (mode === "pem" ? pemBundle.trim().length > 0 : pkcs12B64.length > 0);
+
+  return (
+    <Modal
+      open={open}
+      onClose={handleClose}
+      title="Import root CA"
+      size="lg"
+      actions={
+        <>
+          <Button variant="ghost" onClick={handleClose}>
+            Cancel
+          </Button>
+          <Button onClick={submit} disabled={!canSubmit}>
+            {busy ? "Importing…" : "Import"}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <div className="flex items-center gap-2 text-sm">
+          <button
+            type="button"
+            className={`px-3 py-1.5 rounded-lg border ${
+              mode === "pem"
+                ? "border-[var(--color-primary)] text-[var(--color-primary)]"
+                : "border-[var(--color-border)] text-[var(--color-text-muted)]"
+            }`}
+            onClick={() => setMode("pem")}
+          >
+            PEM bundle
+          </button>
+          <button
+            type="button"
+            className={`px-3 py-1.5 rounded-lg border ${
+              mode === "pkcs12"
+                ? "border-[var(--color-primary)] text-[var(--color-primary)]"
+                : "border-[var(--color-border)] text-[var(--color-text-muted)]"
+            }`}
+            onClick={() => setMode("pkcs12")}
+          >
+            PKCS#12 (.p12 / .pfx)
+          </button>
+        </div>
+
+        <Input
+          label="Issuer name (optional)"
+          value={issuerName}
+          onChange={(e) => setIssuerName(e.target.value)}
+          placeholder="Defaults to the cert's CN"
+        />
+
+        {mode === "pem" ? (
+          <>
+            <Textarea
+              label="PEM bundle"
+              value={pemBundle}
+              onChange={(e) => setPemBundle(e.target.value)}
+              rows={12}
+              placeholder={
+                "-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----\n" +
+                "-----BEGIN PRIVATE KEY-----\n…\n-----END PRIVATE KEY-----"
+              }
+            />
+            <p className="text-xs text-[var(--color-text-muted)]">
+              Paste the CA certificate and its unencrypted private key
+              (PKCS#8 / RSA / EC) concatenated. Optional intermediate certs
+              may be appended; they go through the same import path.
+            </p>
+          </>
+        ) : (
+          <>
+            <div className="space-y-1">
+              <label className="text-xs text-[var(--color-text-muted)]">
+                PKCS#12 file
+              </label>
+              <input
+                type="file"
+                accept=".p12,.pfx,application/x-pkcs12"
+                onChange={onFile}
+                className="block text-sm w-full"
+              />
+              {pkcs12Name && (
+                <div className="text-xs text-[var(--color-text-muted)]">
+                  Selected: <code>{pkcs12Name}</code>
+                </div>
+              )}
+            </div>
+            <Input
+              label="Passphrase"
+              type="password"
+              value={passphrase}
+              onChange={(e) => setPassphrase(e.target.value)}
+              placeholder="Leave blank for password-less containers"
+            />
+            <p className="text-xs text-[var(--color-text-muted)]">
+              The container is unwrapped locally inside the Tauri process —
+              the passphrase is not sent over the network. Encrypted private
+              keys are re-emitted as unencrypted PKCS#8 before being handed
+              to the engine, which seals them with the mount's barrier.
+            </p>
+          </>
+        )}
+      </div>
     </Modal>
   );
 }
@@ -1755,6 +1987,144 @@ interface CertSummary {
   issuer_dn: string;
 }
 
+/** Right-pane detail view for a selected cert. Renders the structured
+ *  fields the operator needs at a glance (Status / Emitter / Expires /
+ *  Source / Key Usages / EKU / SANs) and keeps the full PEM block in a
+ *  scrollable section below. Designed to fit a 1/3-width column. */
+function CertDetail({
+  serial,
+  cert,
+  summary,
+  issuerName,
+  onRevoke,
+  onDelete,
+  onCopyPem,
+}: {
+  serial: string;
+  cert: PkiCertRecord;
+  summary: CertSummary | null;
+  issuerName: string;
+  onRevoke: () => void;
+  onDelete: () => void;
+  onCopyPem: () => void;
+}) {
+  const expired = cert.not_after > 0 && cert.not_after * 1000 < Date.now();
+  const emitterText = issuerName
+    ? issuerName
+    : summary?.issuer_dn
+      ? extractCn(summary.issuer_dn) || summary.issuer_dn
+      : "external";
+  const emitterIcon = issuerName ? "🔒" : "🌐";
+
+  const sanRows: Array<[string, string[]]> = [
+    ["DNS", cert.san_dns ?? []],
+    ["IP", cert.san_ip ?? []],
+    ["Email", cert.san_email ?? []],
+    ["URI", cert.san_uri ?? []],
+  ].filter(([, v]) => v.length > 0) as Array<[string, string[]]>;
+
+  return (
+    <div className="space-y-3 min-w-0">
+      <div className="flex items-center gap-2 flex-wrap">
+        <code className="text-xs break-all">{serial}</code>
+        {cert.revoked_at ? (
+          <Badge label={`revoked ${fmtUnix(cert.revoked_at)}`} variant="error" />
+        ) : expired ? (
+          <Badge label="expired" variant="warning" />
+        ) : (
+          <Badge label="active" variant="success" />
+        )}
+      </div>
+
+      <Field
+        label="Common Name"
+        value={cert.common_name || "—"}
+      />
+      <div className="space-y-1">
+        <div className="text-xs text-[var(--color-text-muted)]">Emitter</div>
+        <div className="flex items-center gap-1 min-w-0 text-sm" title={summary?.issuer_dn || ""}>
+          <span aria-hidden>{emitterIcon}</span>
+          <span className="truncate">{emitterText}</span>
+        </div>
+      </div>
+      <Field label="Issued at" value={fmtUnix(cert.issued_at)} />
+      <Field
+        label="Expires"
+        value={cert.not_after ? fmtUnix(cert.not_after) : "—"}
+      />
+      {cert.is_orphaned && (
+        <Field
+          label="Source"
+          value={cert.source ? `orphan (${cert.source})` : "orphan"}
+        />
+      )}
+
+      {(cert.key_usages?.length ?? 0) > 0 && (
+        <div className="space-y-1">
+          <div className="text-xs text-[var(--color-text-muted)]">Key usages</div>
+          <div className="flex flex-wrap gap-1">
+            {cert.key_usages!.map((u) => (
+              <Badge key={`ku-${u}`} label={u} variant="neutral" />
+            ))}
+          </div>
+        </div>
+      )}
+      {(cert.ext_key_usages?.length ?? 0) > 0 && (
+        <div className="space-y-1">
+          <div className="text-xs text-[var(--color-text-muted)]">Extended key usages</div>
+          <div className="flex flex-wrap gap-1">
+            {cert.ext_key_usages!.map((u) => (
+              <Badge key={`eku-${u}`} label={u} variant="neutral" />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {sanRows.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-xs text-[var(--color-text-muted)]">
+            Subject alternative names
+          </div>
+          <div className="space-y-1">
+            {sanRows.map(([kind, values]) => (
+              <div key={`san-${kind}`} className="text-xs flex gap-2 min-w-0">
+                <span className="text-[var(--color-text-muted)] w-12 shrink-0">{kind}</span>
+                <div className="flex flex-wrap gap-1 min-w-0">
+                  {values.map((v) => (
+                    <code
+                      key={`${kind}-${v}`}
+                      className="font-mono text-[11px] break-all"
+                      title={v}
+                    >
+                      {v}
+                    </code>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <PemBlock
+        label="Certificate (PEM)"
+        value={cert.certificate}
+        onCopy={onCopyPem}
+      />
+      <div className="flex items-center gap-2 flex-wrap">
+        {!cert.revoked_at && (
+          <Button variant="ghost" onClick={onRevoke}>
+            Revoke
+          </Button>
+        )}
+        <Button variant="ghost" onClick={onDelete}>
+          Delete
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function CertsTab({ mount }: { mount: string }) {
   const { toast } = useToast();
   const [summaries, setSummaries] = useState<CertSummary[]>([]);
@@ -1766,11 +2136,7 @@ function CertsTab({ mount }: { mount: string }) {
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
-  const [cert, setCert] = useState<{
-    certificate: string;
-    issued_at: number;
-    revoked_at?: number | null;
-  } | null>(null);
+  const [cert, setCert] = useState<PkiCertRecord | null>(null);
   const [revokeTarget, setRevokeTarget] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<{
     serial: string;
@@ -1847,11 +2213,7 @@ function CertsTab({ mount }: { mount: string }) {
     try {
       const c = await api.pkiReadCert(mount, serial);
       setSelected(serial);
-      setCert({
-        certificate: c.certificate,
-        issued_at: c.issued_at,
-        revoked_at: c.revoked_at ?? null,
-      });
+      setCert(c);
     } catch (e) {
       toast("error", extractError(e));
     }
@@ -1934,7 +2296,7 @@ function CertsTab({ mount }: { mount: string }) {
         />
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <div className="max-h-96 overflow-auto min-w-0">
+          <div className="lg:col-span-2 max-h-[32rem] overflow-auto min-w-0">
             <Table<CertSummary>
               tableClassName="table-fixed"
               columns={[
@@ -2057,45 +2419,31 @@ function CertsTab({ mount }: { mount: string }) {
             />
           </div>
           {cert && selected && (
-            <div className="lg:col-span-2 space-y-3 min-w-0">
-              <div className="flex items-center gap-2 flex-wrap">
-                <code className="text-sm break-all">{selected}</code>
-                {cert.revoked_at ? (
-                  <Badge label={`revoked ${fmtUnix(cert.revoked_at)}`} variant="error" />
-                ) : (
-                  <Badge label="active" variant="success" />
-                )}
-              </div>
-              <Field label="Issued at" value={fmtUnix(cert.issued_at)} />
-              <PemBlock
-                label="Certificate"
-                value={cert.certificate}
-                onCopy={() =>
-                  navigator.clipboard.writeText(cert.certificate).then(
-                    () => toast("success", "certificate copied"),
-                    () => toast("error", "Failed to copy"),
-                  )
-                }
-              />
-              <div className="flex items-center gap-2 flex-wrap">
-                {!cert.revoked_at && (
-                  <Button variant="ghost" onClick={() => setRevokeTarget(selected)}>
-                    Revoke
-                  </Button>
-                )}
-                <Button
-                  variant="ghost"
-                  onClick={() =>
-                    setDeleteTarget({
-                      serial: selected,
-                      active: !cert.revoked_at,
-                    })
-                  }
-                >
-                  Delete
-                </Button>
-              </div>
-            </div>
+            <CertDetail
+              serial={selected}
+              cert={cert}
+              summary={summaries.find((s) => s.serial === selected) ?? null}
+              issuerName={(() => {
+                const summary = summaries.find((s) => s.serial === selected);
+                if (!summary) return "";
+                return summary.issuer_id && issuerNames[summary.issuer_id]
+                  ? issuerNames[summary.issuer_id]
+                  : "";
+              })()}
+              onRevoke={() => setRevokeTarget(selected)}
+              onDelete={() =>
+                setDeleteTarget({
+                  serial: selected,
+                  active: !cert.revoked_at,
+                })
+              }
+              onCopyPem={() =>
+                navigator.clipboard.writeText(cert.certificate).then(
+                  () => toast("success", "certificate copied"),
+                  () => toast("error", "Failed to copy"),
+                )
+              }
+            />
           )}
         </div>
       )}

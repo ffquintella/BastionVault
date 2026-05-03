@@ -63,6 +63,10 @@ yubikey = "0.8"
 # minted into slot 9a when the operator picks an empty-slot card
 # from the Add-Local-Vault modal).
 x509-cert = { version = "0.2", features = ["builder"] }
+# Cert extension parsing for the Certificates tab detail panel —
+# SubjectAltName (DNS / IP / email / URI), KeyUsage, ExtendedKeyUsage.
+# Mirrors the workspace pin in the host crate.
+x509-parser = { version = "0.17", features = ["verify"] }
 # Cron expression validator for scheduled-exports. Mirrors the dep the
 # core crate uses; pulled directly so the Tauri command can validate
 # operator input before persisting the schedule.

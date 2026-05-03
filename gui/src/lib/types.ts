@@ -917,6 +917,24 @@ export interface PkiCertRecord {
    *  populated. The Certificates tab uses this as the Emitter cell
    *  with an "owned" / "external" badge derived from `issuer_id`. */
   issuer_dn?: string;
+  /** Subject Alternative Name buckets pulled from the cert. */
+  san_dns?: string[];
+  san_ip?: string[];
+  san_email?: string[];
+  san_uri?: string[];
+  /** Decoded KU / EKU bits as textual labels (`digitalSignature`,
+   *  `serverAuth`, …). Empty when the cert omits the extension. */
+  key_usages?: string[];
+  ext_key_usages?: string[];
+}
+
+export interface PkiImportCaPkcs12Request {
+  mount: string;
+  /** Base64-encoded PKCS#12 (.p12 / .pfx) container bytes. */
+  pkcs12_b64: string;
+  /** Container passphrase. Empty string is allowed for password-less files. */
+  passphrase: string;
+  issuer_name?: string;
 }
 
 export interface PkiImportCertRequest {
