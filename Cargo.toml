@@ -412,13 +412,3 @@ name = "cucumber_hiqlite"
 harness = false
 path = "tests/cucumber_hiqlite.rs"
 
-# Resource Connect Phase 4 — same `[patch.crates-io]` entry the
-# `IronRDP/` submodule's `fix-deps` branch carries. We mirror it
-# here because the GUI crate (a member of THIS workspace) pulls
-# `ironrdp` as a path-dep into the IronRDP submodule, but Cargo's
-# `[patch]` is workspace-scoped — the submodule's patch doesn't
-# apply when the IronRDP crates are being built as path-deps from
-# this workspace's perspective. Keep both in sync until sspi cuts
-# a release with the picky-rc.23 + stable RustCrypto chain.
-[patch.crates-io]
-sspi = { git = "https://github.com/Devolutions/sspi-rs", rev = "26765bbe1f57f490ba1c37703eda8267c3b2dfb6" }
