@@ -380,11 +380,92 @@ fn normalise_to_pkcs8_pem(pem: &str) -> String {
         }
     }
 
-    log::info!(
-        "pki: normalise_to_pkcs8_pem — input is neither RSA nor SEC1 EC; passing through (pem_label={:?})",
-        pem_label
-    );
+    // Diagnostic: dump the first 64 bytes of the inner DER (and a
+    // structural sketch) so we can see *what* shape the operator's
+    // failing keys actually carry. Logs to dev console *and* the
+    // returned error string further down picks this up.
+    if let Ok(parsed) = pem::parse(trimmed) {
+        let der = parsed.contents();
+        let head: Vec<String> = der.iter().take(64).map(|b| format!("{b:02x}")).collect();
+        let sketch = sketch_der(der);
+        log::info!(
+            "pki: normalise_to_pkcs8_pem — input is neither RSA nor SEC1 EC; \
+             passing through (pem_label={:?}, len={}, head={}, sketch={})",
+            pem_label,
+            der.len(),
+            head.join(""),
+            sketch
+        );
+    } else {
+        log::info!(
+            "pki: normalise_to_pkcs8_pem — pem parse failed (pem_label={:?})",
+            pem_label
+        );
+    }
     pem.to_string()
+}
+
+/// Walk the outer SEQUENCE of a DER blob and emit a one-line sketch
+/// of its top-level shape: a comma-separated list of `tag(len)`
+/// items. Used in the diagnostic log so we can recognise the
+/// structure (PKCS#8 header / PKCS#1 RSA / SEC1 EC / DSA / Ed25519
+/// raw) without having to inspect the byte dump by hand.
+fn sketch_der(der: &[u8]) -> String {
+    let Some((outer, _)) = take_tlv(der, 0x30) else {
+        return format!("not-a-SEQUENCE(top_byte=0x{:02x})", der.first().copied().unwrap_or(0));
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let mut cursor = outer;
+    let mut count = 0;
+    while !cursor.is_empty() && count < 8 {
+        let tag = cursor[0];
+        // Read length (no recursion — we only want top-level shape).
+        let Some(len_byte) = cursor.get(1) else {
+            parts.push(format!("tag=0x{tag:02x},len-truncated"));
+            break;
+        };
+        let (len, header) = if *len_byte < 0x80 {
+            (*len_byte as usize, 2)
+        } else {
+            let n = (*len_byte & 0x7f) as usize;
+            if n == 0 || n > 4 || cursor.len() < 2 + n {
+                parts.push(format!("tag=0x{tag:02x},bad-len"));
+                break;
+            }
+            let mut len = 0usize;
+            for i in 0..n {
+                len = (len << 8) | cursor[2 + i] as usize;
+            }
+            (len, 2 + n)
+        };
+        let total = header + len;
+        if cursor.len() < total {
+            parts.push(format!("tag=0x{tag:02x},len={len},truncated"));
+            break;
+        }
+        // Pretty tag names for the common cases.
+        let tag_name = match tag {
+            0x02 => "INT",
+            0x03 => "BIT",
+            0x04 => "OCT",
+            0x05 => "NULL",
+            0x06 => "OID",
+            0x30 => "SEQ",
+            0x31 => "SET",
+            0xA0 => "[0]",
+            0xA1 => "[1]",
+            0xA2 => "[2]",
+            _ => "",
+        };
+        if tag_name.is_empty() {
+            parts.push(format!("0x{tag:02x}({len})"));
+        } else {
+            parts.push(format!("{tag_name}({len})"));
+        }
+        cursor = &cursor[total..];
+        count += 1;
+    }
+    parts.join(",")
 }
 
 /// Wrap a bare SEC1 `ECPrivateKey` DER blob in a PKCS#8
@@ -773,10 +854,32 @@ impl Signer {
                         };
                         format!(" (RSA {bits}-bit{exp_note}{size_note})")
                     }
-                    None => " (could not introspect key shape)".to_string(),
+                    None => {
+                        // rsa-0.9 couldn't parse — could be SEC1 EC,
+                        // DSA, encrypted PKCS#8, or some XCA-specific
+                        // shape. Surface a top-level DER sketch +
+                        // first-bytes hex so the operator can ship
+                        // them to a maintainer.
+                        let (sketch, head_hex) = pem::parse(normalised.trim())
+                            .ok()
+                            .map(|p| {
+                                let der = p.contents();
+                                let head: Vec<String> = der
+                                    .iter()
+                                    .take(32)
+                                    .map(|b| format!("{b:02x}"))
+                                    .collect();
+                                (sketch_der(der), head.join(""))
+                            })
+                            .unwrap_or_else(|| ("pem-parse-failed".to_string(), String::new()));
+                        format!(
+                            " (could not introspect key shape; der_sketch=\"{sketch}\", \
+                             head32={head_hex})"
+                        )
+                    }
                 };
                 Err(RvError::ErrString(format!(
-                    "ring rejected RSA key{detail}; bare rcgen error: {e}"
+                    "ring rejected key{detail}; bare rcgen error: {e}"
                 )))
             }
         }
