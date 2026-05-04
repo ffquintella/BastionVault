@@ -289,6 +289,45 @@ impl CertSigner {
     }
 }
 
+/// Re-encode a non-PKCS#8 RSA PEM as PKCS#8. Returns the input
+/// unchanged when it isn't PKCS#1, when it's already valid PKCS#8, or
+/// when re-encoding fails (let the strict downstream parser surface the
+/// real error in that case).
+fn normalise_to_pkcs8_pem(pem: &str) -> String {
+    use rsa::pkcs1::DecodeRsaPrivateKey;
+    use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
+    use rsa::RsaPrivateKey;
+
+    let trimmed = pem.trim();
+
+    // Fast path: if PKCS#8 RSA parsing already works, the body is PKCS#8 —
+    // pass through. (Non-RSA PKCS#8 also passes through here because
+    // `from_pkcs8_pem` for `RsaPrivateKey` rejects the wrong algorithm.)
+    if RsaPrivateKey::from_pkcs8_pem(trimmed).is_ok() {
+        return pem.to_string();
+    }
+
+    // Try PKCS#1 by label (`-----BEGIN RSA PRIVATE KEY-----`, OpenSSL's
+    // pre-PKCS#8 default).
+    if let Ok(k) = RsaPrivateKey::from_pkcs1_pem(trimmed) {
+        if let Ok(p8) = k.to_pkcs8_pem(LineEnding::LF) {
+            return p8.to_string();
+        }
+    }
+
+    // Try parsing the inner DER as PKCS#1 even when the PEM label says
+    // `PRIVATE KEY` (XCA's xca-import plugin emits this shape).
+    if let Ok(parsed) = pem::parse(trimmed) {
+        if let Ok(k) = RsaPrivateKey::from_pkcs1_der(parsed.contents()) {
+            if let Ok(p8) = k.to_pkcs8_pem(LineEnding::LF) {
+                return p8.to_string();
+            }
+        }
+    }
+
+    pem.to_string()
+}
+
 pub(crate) fn rcgen_err(e: rcgen::Error) -> RvError {
     // Surface the rcgen detail through the wire response (it already
     // gets logged here for server-side correlation). The previous shape
@@ -404,7 +443,19 @@ impl Signer {
         if MlDsaSigner::is_pkcs8_pem(pem) {
             return Ok(Self::MlDsa(MlDsaSigner::from_pkcs8_pem(pem)?));
         }
-        Ok(Self::Classical(CertSigner::from_pem(pem)?))
+        // Normalise legacy / mislabelled PEMs to PKCS#8 before handing
+        // off to rcgen. rcgen's `from_pem_and_sign_algo` is PKCS#8-only,
+        // but operators show up with two non-PKCS#8 shapes for RSA:
+        //   1) `-----BEGIN RSA PRIVATE KEY-----` carrying PKCS#1 DER
+        //      (OpenSSL `genrsa` default; XCA pre-2.0 storage).
+        //   2) `-----BEGIN PRIVATE KEY-----` whose body is actually
+        //      PKCS#1 DER, not PrivateKeyInfo (XCA's xca-import plugin
+        //      labels every decrypted blob as PKCS#8 regardless of
+        //      what the inner DER is).
+        // Both round-trip cleanly through rsa 0.9's PKCS#1 decoder +
+        // PKCS#8 re-emit. Non-RSA / actually-PKCS#8 PEMs fall through.
+        let normalised = normalise_to_pkcs8_pem(pem);
+        Ok(Self::Classical(CertSigner::from_pem(&normalised)?))
     }
 
     /// Caller-facing PKCS#8 PEM. This is what the engine returns over the

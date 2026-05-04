@@ -455,13 +455,27 @@ fn ml_dsa_public_pem(signer: &MlDsaSigner) -> Result<String, RvError> {
 /// PEMs (or unparseable input) are passed through — the regular signer
 /// path will produce a clear error for those.
 fn reject_weak_rsa(pem: &str) -> Result<(), RvError> {
+    use rsa::pkcs1::DecodeRsaPrivateKey;
     use rsa::pkcs8::DecodePrivateKey;
     use rsa::traits::PublicKeyParts;
     use rsa::RsaPrivateKey;
 
-    let priv_key = match RsaPrivateKey::from_pkcs8_pem(pem) {
-        Ok(k) => k,
-        Err(_) => return Ok(()),
+    // Try every shape an operator might bring: PKCS#8 PEM, PKCS#1 PEM
+    // (`-----BEGIN RSA PRIVATE KEY-----`), and PKCS#1 DER under a
+    // PKCS#8 label (XCA xca-import wraps every decrypted blob as
+    // PRIVATE KEY regardless of inner format). Whichever parses
+    // first wins; modulus is identical across all three.
+    let priv_key = if let Ok(k) = RsaPrivateKey::from_pkcs8_pem(pem) {
+        k
+    } else if let Ok(k) = RsaPrivateKey::from_pkcs1_pem(pem) {
+        k
+    } else if let Ok(parsed) = pem::parse(pem.trim()) {
+        match RsaPrivateKey::from_pkcs1_der(parsed.contents()) {
+            Ok(k) => k,
+            Err(_) => return Ok(()),
+        }
+    } else {
+        return Ok(());
     };
     let bits = priv_key.size() * 8;
     if bits < 2048 {
