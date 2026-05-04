@@ -318,65 +318,186 @@ fn normalise_to_pkcs8_pem(pem: &str) -> String {
 
     let trimmed = pem.trim();
 
-    // Detect the `[BEGIN ...]` PEM label first — it's a useful
-    // diagnostic when the key turns out to be unparseable by every
-    // path (the operator sees what shape we attempted, not a generic
-    // failure).
     let pem_label = pem::parse(trimmed)
         .ok()
         .map(|p| p.tag().to_string())
         .unwrap_or_default();
 
-    // Try every shape we know to recognise. rsa-0.9 is permissive
-    // enough that any of these succeeding is a hint the input is RSA.
-    let priv_key = if let Ok(k) = RsaPrivateKey::from_pkcs8_pem(trimmed) {
-        k
+    // RSA path: rsa-0.9 is permissive — any of the three shapes
+    // succeeding means the input *is* RSA and the canonical re-emit
+    // below puts it on the wire in the layout ring requires.
+    let rsa_priv = if let Ok(k) = RsaPrivateKey::from_pkcs8_pem(trimmed) {
+        Some(k)
     } else if let Ok(k) = RsaPrivateKey::from_pkcs1_pem(trimmed) {
-        k
+        Some(k)
     } else if let Ok(parsed) = pem::parse(trimmed) {
-        match RsaPrivateKey::from_pkcs1_der(parsed.contents()) {
-            Ok(k) => k,
-            Err(_) => return pem.to_string(),
-        }
+        RsaPrivateKey::from_pkcs1_der(parsed.contents()).ok()
     } else {
-        return pem.to_string();
+        None
     };
+    if let Some(priv_key) = rsa_priv {
+        let bits = priv_key.size() * 8;
+        let e_bytes = priv_key.e().to_bytes_be();
+        let e_display = if e_bytes.len() <= 8 {
+            let mut v: u64 = 0;
+            for &b in &e_bytes {
+                v = (v << 8) | b as u64;
+            }
+            v.to_string()
+        } else {
+            format!("{}-byte big-int", e_bytes.len())
+        };
+        log::info!(
+            "pki: normalising RSA key — pem_label={:?} modulus_bits={} e={}",
+            pem_label,
+            bits,
+            e_display
+        );
+        return match priv_key.to_pkcs8_pem(LineEnding::LF) {
+            Ok(p) => p.to_string(),
+            Err(e) => {
+                log::warn!("pki: RSA key parsed by rsa-0.9 but PKCS#8 re-emit failed: {e}");
+                pem.to_string()
+            }
+        };
+    }
 
-    // Diagnostic: log the RSA key shape so a downstream rcgen / ring
-    // rejection can be correlated with the actual modulus / exponent /
-    // CRT-presence values. Without this, "Could not parse key pair"
-    // is ambiguous — could be wrong OID, non-65537 exponent, missing
-    // CRT, exotic modulus size, etc.
-    let bits = priv_key.size() * 8;
-    let e_bytes = priv_key.e().to_bytes_be();
-    let e_display = if e_bytes.len() <= 8 {
-        let mut v: u64 = 0;
-        for &b in &e_bytes {
-            v = (v << 8) | b as u64;
-        }
-        v.to_string()
-    } else {
-        format!("{}-byte big-int", e_bytes.len())
-    };
-    log::info!(
-        "pki: normalising RSA key — pem_label={:?} modulus_bits={} e={}",
-        pem_label,
-        bits,
-        e_display
-    );
-
-    // Re-emit through rsa-0.9. The encoder ALWAYS produces a
-    // canonical PKCS#8 with `rsaEncryption` OID + full CRT tuple,
-    // regardless of what the input layout was.
-    match priv_key.to_pkcs8_pem(LineEnding::LF) {
-        Ok(p) => p.to_string(),
-        Err(e) => {
-            log::warn!(
-                "pki: RSA key parsed by rsa-0.9 but PKCS#8 re-emit failed: {e}"
+    // SEC1 ECPrivateKey path: XCA pre-2.5 stores EC keys as bare
+    // `i2d_ECPrivateKey` DER (no PKCS#8 wrapper, no AlgorithmIdentifier),
+    // and the xca-import plugin labels every decrypted blob as
+    // `PRIVATE KEY` regardless. ring's PKCS#8 EC parser refuses bare
+    // SEC1 — the input must be wrapped in a `PrivateKeyInfo` carrying
+    // `id-ecPublicKey` (1.2.840.10045.2.1) + the curve OID. Detect
+    // SEC1 by structure (`SEQUENCE { INTEGER 1, OCTET STRING privKey,
+    // [0] curve OID, [1] BIT STRING pub }`) and re-wrap.
+    if let Ok(parsed) = pem::parse(trimmed) {
+        if let Some(wrapped) = wrap_sec1_ec_as_pkcs8(parsed.contents()) {
+            log::info!(
+                "pki: normalising EC key — pem_label={:?} sec1 → PKCS#8 wrap",
+                pem_label
             );
-            pem.to_string()
+            return pem::encode(&pem::Pem::new("PRIVATE KEY", wrapped));
         }
     }
+
+    log::info!(
+        "pki: normalise_to_pkcs8_pem — input is neither RSA nor SEC1 EC; passing through (pem_label={:?})",
+        pem_label
+    );
+    pem.to_string()
+}
+
+/// Wrap a bare SEC1 `ECPrivateKey` DER blob in a PKCS#8
+/// `PrivateKeyInfo` with `id-ecPublicKey` + the curve OID extracted
+/// from the SEC1 `[0] EXPLICIT ECParameters` field. Returns `None` if
+/// the input doesn't look like SEC1 (no version=1 INTEGER + OCTET
+/// STRING + tagged ECParameters).
+fn wrap_sec1_ec_as_pkcs8(sec1_der: &[u8]) -> Option<Vec<u8>> {
+    // Outer SEQUENCE → INTEGER version → OCTET STRING privateKey →
+    // [0] EXPLICIT { OID curve } → [1] EXPLICIT { BIT STRING pub }.
+    let (outer, _) = take_tlv(sec1_der, 0x30)?;
+    let (version_int, after_version) = take_tlv(outer, 0x02)?;
+    // Version must be `01` for ECPrivateKey (RFC 5915).
+    if version_int != [0x01] {
+        return None;
+    }
+    let (_priv_octet, after_priv) = take_tlv(after_version, 0x04)?;
+    // [0] EXPLICIT ECParameters — find it by scanning the remaining
+    // optional fields. Tag = 0xA0 (context-specific, constructed, 0).
+    let mut rest = after_priv;
+    let mut curve_oid: Option<Vec<u8>> = None;
+    while !rest.is_empty() {
+        let tag = rest[0];
+        let (body, next) = take_tlv(rest, tag)?;
+        if tag == 0xA0 {
+            // Inside [0] EXPLICIT is an `ECParameters` CHOICE — for
+            // named curves it's an OID directly.
+            let (oid, _) = take_tlv(body, 0x06)?;
+            curve_oid = Some(oid.to_vec());
+            break;
+        }
+        rest = next;
+    }
+    let curve_oid = curve_oid?;
+
+    // Build PKCS#8.
+    //   PrivateKeyInfo ::= SEQUENCE {
+    //     version           INTEGER (0),
+    //     privateKeyAlg     AlgorithmIdentifier { OID id-ecPublicKey, OID curve },
+    //     privateKey        OCTET STRING (containing original SEC1 DER)
+    //   }
+    const ID_EC_PUBLIC_KEY: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
+
+    let mut alg_inner = Vec::new();
+    alg_inner.push(0x06);
+    push_der_length(&mut alg_inner, ID_EC_PUBLIC_KEY.len());
+    alg_inner.extend_from_slice(ID_EC_PUBLIC_KEY);
+    alg_inner.push(0x06);
+    push_der_length(&mut alg_inner, curve_oid.len());
+    alg_inner.extend_from_slice(&curve_oid);
+    let mut alg_id = Vec::with_capacity(alg_inner.len() + 6);
+    alg_id.push(0x30);
+    push_der_length(&mut alg_id, alg_inner.len());
+    alg_id.extend_from_slice(&alg_inner);
+
+    let mut octet = Vec::with_capacity(sec1_der.len() + 6);
+    octet.push(0x04);
+    push_der_length(&mut octet, sec1_der.len());
+    octet.extend_from_slice(sec1_der);
+
+    let mut inner = Vec::with_capacity(3 + alg_id.len() + octet.len());
+    inner.extend_from_slice(&[0x02, 0x01, 0x00]); // version INTEGER 0
+    inner.extend_from_slice(&alg_id);
+    inner.extend_from_slice(&octet);
+
+    let mut out = Vec::with_capacity(inner.len() + 6);
+    out.push(0x30);
+    push_der_length(&mut out, inner.len());
+    out.extend_from_slice(&inner);
+    Some(out)
+}
+
+fn take_tlv(input: &[u8], expected_tag: u8) -> Option<(&[u8], &[u8])> {
+    if input.first() != Some(&expected_tag) {
+        return None;
+    }
+    let len_byte = *input.get(1)?;
+    let (len, header) = if len_byte < 0x80 {
+        (len_byte as usize, 2)
+    } else {
+        let n = (len_byte & 0x7f) as usize;
+        if n == 0 || n > 4 {
+            return None;
+        }
+        let mut len = 0usize;
+        for i in 0..n {
+            len = (len << 8) | *input.get(2 + i)? as usize;
+        }
+        (len, 2 + n)
+    };
+    let total = header + len;
+    if input.len() < total {
+        return None;
+    }
+    Some((&input[header..total], &input[total..]))
+}
+
+fn push_der_length(out: &mut Vec<u8>, len: usize) {
+    if len < 0x80 {
+        out.push(len as u8);
+        return;
+    }
+    let mut buf = [0u8; 8];
+    let mut n = len;
+    let mut i = buf.len();
+    while n > 0 {
+        i -= 1;
+        buf[i] = (n & 0xff) as u8;
+        n >>= 8;
+    }
+    let bytes = &buf[i..];
+    out.push(0x80 | bytes.len() as u8);
+    out.extend_from_slice(bytes);
 }
 
 /// Parse the modulus length (in bits) and public exponent (decimal
