@@ -34,6 +34,25 @@ STRAWBERRY_C_BIN    ?= /c/Strawberry/c/bin
 export PATH := $(STRAWBERRY_PERL_BIN):$(STRAWBERRY_C_BIN):$(PATH)
 endif
 
+# ── Ensure rustup's toolchain wins over any system Rust (e.g.
+# Homebrew's `rust` on macOS, distro packages on Linux, or a stray
+# MSI on Windows). System Rust packages typically ship only the host
+# std, so `cargo build --target wasm32-wasip1` fails with
+# "can't find crate for `core`" even after `rustup target add` —
+# because the active rustc isn't the rustup one. Prepending rustup's
+# shim dir fixes both `cargo` and `rustc` lookups in one shot.
+#
+# `$(HOME)/.cargo/bin` is the standard rustup location on Unix and on
+# Windows under MSYS/Git-Bash. For native cmd.exe make we fall back to
+# `$(USERPROFILE)/.cargo/bin`. Override with `RUSTUP_CARGO_BIN=...` if
+# yours lives elsewhere.
+ifeq ($(OS),Windows_NT)
+RUSTUP_CARGO_BIN ?= $(if $(HOME),$(HOME)/.cargo/bin,$(USERPROFILE)/.cargo/bin)
+else
+RUSTUP_CARGO_BIN ?= $(HOME)/.cargo/bin
+endif
+export PATH := $(RUSTUP_CARGO_BIN):$(PATH)
+
 .PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugin-bump
 
 # Number of rustc incremental sessions to keep per crate. Anything

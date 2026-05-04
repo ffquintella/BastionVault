@@ -70,7 +70,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use russh::client::{self, Config, Handler};
-use russh::keys::{decode_secret_key, key, PublicKeyBase64};
+use russh::keys::{decode_secret_key, PrivateKeyWithHashAlg, PublicKey, PublicKeyBase64};
 use russh_sftp::client::SftpSession;
 use tokio::io::AsyncWriteExt;
 
@@ -209,21 +209,28 @@ async fn push_ssh_inner(
         .map_err(|e| format!("ssh: connect {}:{}: {e}", target.host, target.port))?;
 
     // Auth: try key first if present, fall back to password.
+    // russh ≥ 0.51 returns `AuthResult` (an enum carrying success +
+    // remaining-method hints) rather than a plain bool, and
+    // `authenticate_publickey` takes `PrivateKeyWithHashAlg` so the
+    // caller can pin the RSA hash algorithm explicitly. We pass `None`
+    // here, which falls back to russh's default per-algorithm choice.
     let mut authed = false;
     if !private_key.is_empty() {
         let key = decode_secret_key(&private_key, passphrase.as_deref())
             .map_err(|e| format!("ssh: parse private key: {e}"))?;
-        let key_arc = Arc::new(key);
+        let key_arg = PrivateKeyWithHashAlg::new(Arc::new(key), None);
         authed = session
-            .authenticate_publickey(&username, key_arc)
+            .authenticate_publickey(&username, key_arg)
             .await
-            .map_err(|e| format!("ssh: publickey auth: {e}"))?;
+            .map_err(|e| format!("ssh: publickey auth: {e}"))?
+            .success();
     }
     if !authed && !password.is_empty() {
         authed = session
             .authenticate_password(&username, &password)
             .await
-            .map_err(|e| format!("ssh: password auth: {e}"))?;
+            .map_err(|e| format!("ssh: password auth: {e}"))?
+            .success();
     }
     if !authed {
         return Err("ssh: authentication rejected (publickey and/or password)".into());
@@ -431,12 +438,15 @@ struct HostKeyHandler {
     observed: Arc<Mutex<String>>,
 }
 
-#[async_trait::async_trait]
+// russh ≥ 0.59 dropped the `#[async_trait]` shape on `Handler` in
+// favour of return-position `impl Future`. Implementations now write
+// regular `fn` returning an `async {}` block; they're no longer trait
+// objects so the dynamic-dispatch friendly attribute isn't needed.
 impl Handler for HostKeyHandler {
     type Error = russh::Error;
     async fn check_server_key(
         &mut self,
-        server_public_key: &key::PublicKey,
+        server_public_key: &PublicKey,
     ) -> Result<bool, Self::Error> {
         let fp = openssh_sha256_fingerprint(server_public_key);
         if let Ok(mut g) = self.observed.lock() {
@@ -452,7 +462,7 @@ impl Handler for HostKeyHandler {
     }
 }
 
-fn openssh_sha256_fingerprint(key: &key::PublicKey) -> String {
+fn openssh_sha256_fingerprint(key: &PublicKey) -> String {
     use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
     use sha2::{Digest, Sha256};
     // PublicKeyBase64 yields the same canonical wire bytes OpenSSH

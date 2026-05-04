@@ -202,7 +202,7 @@ impl CertSigner {
     }
 
     fn generate_rsa(alg: KeyAlgorithm) -> Result<Self, RvError> {
-        use pkcs8::{EncodePrivateKey, LineEnding};
+        use rsa::pkcs8::{EncodePrivateKey, LineEnding};
         use rsa::RsaPrivateKey;
 
         let bits = alg.key_bits() as usize;
@@ -301,7 +301,7 @@ pub(crate) fn rcgen_err(e: rcgen::Error) -> RvError {
 fn sniff_rsa_size(
     pem: &str,
 ) -> Result<Option<(KeyAlgorithm, &'static rcgen::SignatureAlgorithm)>, RvError> {
-    use pkcs8::DecodePrivateKey;
+    use rsa::pkcs8::DecodePrivateKey;
     use rsa::traits::PublicKeyParts;
     use rsa::RsaPrivateKey;
 

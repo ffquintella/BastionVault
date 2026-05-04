@@ -455,7 +455,7 @@ fn ml_dsa_public_pem(signer: &MlDsaSigner) -> Result<String, RvError> {
 /// PEMs (or unparseable input) are passed through — the regular signer
 /// path will produce a clear error for those.
 fn reject_weak_rsa(pem: &str) -> Result<(), RvError> {
-    use pkcs8::DecodePrivateKey;
+    use rsa::pkcs8::DecodePrivateKey;
     use rsa::traits::PublicKeyParts;
     use rsa::RsaPrivateKey;
 

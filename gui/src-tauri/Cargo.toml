@@ -34,7 +34,7 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "linux-
 chrono = "0.4"
 dirs = "6"
 hex = "0.4"
-sha2 = "0.10"
+sha2 = "0.11"
 serde_cbor = "0.11"
 authenticator = { version = "0.5", default-features = false, features = ["crypto_openssl"] }
 webauthn-rs-proto = "0.5"
@@ -47,7 +47,7 @@ base64 = "0.22"
 # retroactively decrypt a captured file even if the symmetric
 # master key were somehow recovered. See docs/security-structure.md.
 chacha20poly1305 = "0.10"
-hkdf = "0.12"
+hkdf = "0.13"
 rand = "0.9"
 # `bv_crypto` re-exports the vault core's PQC stack: ML-KEM-768 for
 # key establishment, a KEM/DEM envelope type, and deterministic
@@ -66,7 +66,7 @@ x509-cert = { version = "0.2", features = ["builder"] }
 # Cert extension parsing for the Certificates tab detail panel —
 # SubjectAltName (DNS / IP / email / URI), KeyUsage, ExtendedKeyUsage.
 # Mirrors the workspace pin in the host crate.
-x509-parser = { version = "0.17", features = ["verify"] }
+x509-parser = { version = "0.18", features = ["verify"] }
 # Cron expression validator for scheduled-exports. Mirrors the dep the
 # core crate uses; pulled directly so the Tauri command can validate
 # operator input before persisting the schedule.
@@ -75,8 +75,7 @@ uuid = { version = "1", features = ["v4"] }
 # Pure-Rust SSH client for the Resource Connect SSH session window.
 # Same crate the host's files_ssh_sync feature uses for SFTP/SCP
 # pushes — no `libssh2-sys` C dep, no OpenSSL footprint.
-russh = { version = "0.45", default-features = true }
-russh-keys = "0.45"
+russh = { version = "0.60", default-features = true }
 async-trait = "0.1"
 futures-util = "0.3"
 log = "0.4"
@@ -107,10 +106,15 @@ ironrdp-tokio = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-
 # would compile without the `network_client` feature here, so we
 # pin it explicitly. Same git pin as the IronRDP `[patch.crates-io]`
 # uses — Cargo's git deps unify on rev.
-sspi = { git = "https://github.com/Devolutions/sspi-rs", rev = "26765bbe1f57f490ba1c37703eda8267c3b2dfb6", default-features = false, features = ["network_client", "aws-lc-rs"] }
+sspi = { version = "0.20.1", default-features = false, features = ["network_client", "aws-lc-rs"] }
+# Used by `commands/pki.rs::pki_import_ca_pkcs12` for PKCS#12 container
+# parsing. Vendored so we don't depend on the host system's OpenSSL ABI;
+# `aws-lc-rs` already covers our TLS needs but doesn't expose PKCS#12.
+# Promoted from a windows-only dep — the import command runs on every
+# desktop platform.
+openssl = { version = "0.10", features = ["vendored"] }
 
 [target.'cfg(windows)'.dependencies]
-openssl = { version = "0.10", features = ["vendored"] }
 # Force winapi's "std" feature so winapi::ctypes::c_void unifies with
 # std::ffi::c_void. Works around authenticator 0.5.0 Windows build error
 # (mismatched types between libc::c_void and winapi::ctypes::c_void).
@@ -119,8 +123,8 @@ winapi = { version = "0.3", features = ["std"] }
 # Used from the Tauri setup hook to disable WebView2 form autofill, which
 # would otherwise persist typed secret values to Chromium's Web Data cache.
 # Version pinned to match the transitive dep pulled in by Tauri/wry.
-webview2-com = "0.38"
-windows = { version = "0.61", features = ["Win32_Foundation"] }
+webview2-com = "0.39"
+windows = { version = "0.62", features = ["Win32_Foundation"] }
 
 [features]
 # Cloud storage targets are on by default in the desktop GUI build so

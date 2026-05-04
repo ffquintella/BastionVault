@@ -70,7 +70,10 @@ impl ModuleCache {
     fn new_engine() -> Result<Self, RuntimeError> {
         let mut config = Config::new();
         config.consume_fuel(true);
-        config.async_support(true);
+        // wasmtime ≥ 33 always builds with async support; the explicit
+        // `async_support(true)` toggle was removed (and made a no-op
+        // deprecation in newer minor releases). The async stack budget
+        // and max wasm stack remain meaningful and stay configurable.
         config.async_stack_size(1 * 1024 * 1024);
         config.max_wasm_stack(1 * 1024 * 1024);
         let engine = Engine::new(&config).map_err(|e| RuntimeError::Engine(e.to_string()))?;

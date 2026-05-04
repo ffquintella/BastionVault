@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use russh::client::{self, Config, Handler};
-use russh::keys::{decode_secret_key, key};
+use russh::keys::{decode_secret_key, PrivateKeyWithHashAlg, PublicKey};
 use russh::ChannelMsg;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -127,7 +127,10 @@ pub async fn open_ssh_session(
             .map_err(|e| format!("connect {}:{}: {e}", args.host, args.port))?;
 
     // Auth — caller already picked one; we just dispatch.
-    let authed = match args.credential {
+    // russh ≥ 0.51 returns `AuthResult` (carrying success +
+    // remaining-method hints) instead of a plain bool, and
+    // `authenticate_publickey` takes a `PrivateKeyWithHashAlg`.
+    let auth_result = match args.credential {
         SshCredential::Password(pw) => session
             .authenticate_password(&args.username, pw.as_str())
             .await
@@ -135,13 +138,14 @@ pub async fn open_ssh_session(
         SshCredential::PrivateKey { pem, passphrase } => {
             let key = decode_secret_key(pem.as_str(), passphrase.as_deref().map(|p| p.as_str()))
                 .map_err(|e| format!("parse private key: {e}"))?;
+            let key_arg = PrivateKeyWithHashAlg::new(Arc::new(key), None);
             session
-                .authenticate_publickey(&args.username, Arc::new(key))
+                .authenticate_publickey(&args.username, key_arg)
                 .await
                 .map_err(|e| format!("publickey auth: {e}"))?
         }
     };
-    if !authed {
+    if !auth_result.success() {
         return Err("ssh: authentication rejected".into());
     }
 
@@ -343,12 +347,14 @@ struct HostKeyHandler {
     observed: Arc<std::sync::Mutex<String>>,
 }
 
-#[async_trait::async_trait]
+// russh ≥ 0.59 dropped `#[async_trait]` on `Handler` in favour of
+// return-position `impl Future`. The async-fn-in-trait sugar makes the
+// implementation read identically to the previous version.
 impl Handler for HostKeyHandler {
     type Error = russh::Error;
     async fn check_server_key(
         &mut self,
-        server_public_key: &key::PublicKey,
+        server_public_key: &PublicKey,
     ) -> Result<bool, Self::Error> {
         let fp = openssh_sha256_fingerprint(server_public_key);
         if let Ok(mut g) = self.observed.lock() {
@@ -361,7 +367,7 @@ impl Handler for HostKeyHandler {
     }
 }
 
-fn openssh_sha256_fingerprint(key: &key::PublicKey) -> String {
+fn openssh_sha256_fingerprint(key: &PublicKey) -> String {
     use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
     use russh::keys::PublicKeyBase64;
     use sha2::{Digest, Sha256};

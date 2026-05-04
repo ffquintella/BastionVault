@@ -372,6 +372,7 @@ mod tests {
     use super::*;
     use crate::logical::Operation;
     use crate::plugins::runtime::{InvokeOutcome, InvokeOutput};
+    use serde_json::Map;
 
     fn manifest_for_test() -> PluginManifest {
         use crate::plugins::manifest::Capabilities;

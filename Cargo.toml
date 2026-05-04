@@ -116,7 +116,7 @@ smolder-smb-core = { version = "0.3", optional = true }
 # pair will be reused by the planned Resource Connect SSH window
 # (see `features/resource-connect.md`); shipping it here first
 # pre-stages that infrastructure.
-russh = { version = "0.45", optional = true, default-features = true }
+russh = { version = "0.60", optional = true, default-features = true }
 russh-sftp = { version = "2", optional = true }
 http = "1"
 rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
@@ -161,7 +161,7 @@ sha2 = "0.11"
 # `digest 0.11` and are incompatible with the `rsa::signature::Verifier`
 # trait bounds. Renaming keeps the two coexistent.
 rsa = "0.9"
-x509-parser = { version = "0.17", features = ["verify"] }
+x509-parser = { version = "0.18", features = ["verify"] }
 flate2 = "1.0"
 sha1-saml = { package = "sha1", version = "0.10", features = ["oid"] }
 sha2-saml = { package = "sha2", version = "0.10", features = ["oid"] }
@@ -186,7 +186,7 @@ uuid = { version = "1", features = ["v4"] }
 # `features/plugin-system.md`. We disable the cranelift parallel feature
 # to keep the dep tree small; cache + pooling-allocator are off until the
 # plugin system actually needs them.
-wasmtime = { version = "27", default-features = false, features = ["cranelift", "runtime", "wat", "async"] }
+wasmtime = { version = "43", default-features = false, features = ["cranelift", "runtime", "wat", "async"] }
 # PKI Secret Engine (Phase 1): pure-Rust X.509 + CRL stack. `rcgen`
 # handles DER encoding for certs / CSRs / CRLs and provides a `SigningKey`
 # trait we plug post-quantum signers into in Phase 2. We use the default
@@ -260,7 +260,7 @@ toml = "1.1.2"
 
 [dev-dependencies]
 serial_test = "3.4"
-cucumber = "0.21"
+cucumber = "0.23"
 # Pulled in for the Phase-3 composite-signature test so we can verify the
 # classical ECDSA-P256 half of the composite signature directly. p256 +
 # sha2 are already in the dep tree transitively; promoting them keeps the

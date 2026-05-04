@@ -45,6 +45,44 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Changed
+
+#### Dependency upgrade sweep — Phases 1, 2, 4, 5 (russh), 6
+
+Bulk dependency upgrade across the workspace (`Cargo.toml`, `crates/bv-plugin-pack/Cargo.toml`, `gui/src-tauri/Cargo.toml`, `IronRDP/Cargo.toml`). All bumps verified with `cargo check --workspace` and the 61-test `plugins::*` suite (61 passed, 0 failed); the 20 preexisting CLI-harness test failures (`cli::command::*`) reproduce on `main` and are unrelated.
+
+**Major bumps**:
+- `wasmtime 27 → 43` ([`src/plugins/module_cache.rs`](src/plugins/module_cache.rs)) — dropped deprecated `Config::async_support(true)` no-op; rest of the host API surface (Engine, Module, Store, Linker, Caller, TypedFunc, Memory, StoreLimits, fuel API) was stable across the 16-major span.
+- `russh 0.45 → 0.60` + dropped separate `russh-keys 0.45` ([`src/modules/files/ssh_sync.rs`](src/modules/files/ssh_sync.rs), [`gui/src-tauri/src/session/ssh.rs`](gui/src-tauri/src/session/ssh.rs)) — `russh::keys::key::PublicKey` → `russh::keys::PublicKey` (re-export from `ssh_key`); `authenticate_publickey` now takes `PrivateKeyWithHashAlg::new(Arc::new(key), None)` instead of `Arc<KeyPair>`; `authenticate_*` returns `AuthResult` (use `.success()`) instead of `bool`; `Handler` lost `#[async_trait]` (russh ≥ 0.59 uses async-fn-in-trait).
+- `sspi git-rev → 0.20.1` (crates.io) ([`gui/src-tauri/Cargo.toml`](gui/src-tauri/Cargo.toml), [`IronRDP/Cargo.toml`](IronRDP/Cargo.toml)) — removed the Devolutions git pin in favour of the published release; deduplicates the `winscard` transitive.
+- `tauri 2.10.3 → 2.11.0` — full family bump (tauri-build, tauri-codegen, tauri-macros, tauri-plugin, tauri-runtime, tauri-runtime-wry, tauri-utils, tauri-winres, tauri-plugin-dialog, tauri-plugin-fs).
+- `webauthn-rs 0.5.4 → 0.5.5` (webauthn-rs, webauthn-rs-core, webauthn-rs-proto, webauthn-attestation-ca).
+- `cucumber 0.21 → 0.23`, `wry 0.54 → 0.55`, `tao 0.34.8 → 0.35`, `tray-icon 0.21 → 0.23`, `wasm-encoder/wasmparser/wast/wat 246 → 248`.
+
+**Format / parser bumps**:
+- `x509-parser 0.17 → 0.18` (parent + gui).
+- `webview2-com 0.38 → 0.39`, `windows 0.61 → 0.62` (gui windows-only deps).
+
+**RustCrypto family** (Phase 2):
+- `sha2 0.10 → 0.11` ([`crates/bv-plugin-pack/Cargo.toml`](crates/bv-plugin-pack/Cargo.toml), [`gui/src-tauri/Cargo.toml`](gui/src-tauri/Cargo.toml)).
+- `hkdf 0.12 → 0.13` ([`gui/src-tauri/Cargo.toml`](gui/src-tauri/Cargo.toml)).
+
+**Patch / minor compatibility bumps** (~50 packages from Phase 1 + Phase 6 `cargo update`): `actix-http`, `aws-lc-rs`, `bitflags`, `blake3`, `cc`, `clap`, `compression-codecs`/`-core`, `crc-catalog`, `data-encoding`, `diesel`, `embed-resource`, `hybrid-array`, `idna_adapter`, `indexmap`, `jiff`, `js-sys`, `libc`, `libredox`, `open`, `openraft` (incl. `openraft-macros`), `openssl`, `openssl-sys`, `pkg-config`, `plist`, `portable-atomic-util`, `reqwest`, `rpassword`, `rustls`, `rustls-pki-types`, `rustls-webpki`, `siphasher`, `serde_with`, `serdect`, `sha3`, `sqlite-wasm-rs`, `typenum`, `uuid`, `wasm-bindgen` family, `web-sys`, `webpki-roots`, `winnow`, `russh-sftp 2.1.1 → 2.1.2`, `web_atoms`, `bytestring`, `base64urlsafedata`. Also pruned dead transitives (phf 0.8/0.10, rand 0.7, string_cache, selectors, servo_arc, tendril, tiny-keccak, proc-macro-hack, wasi 0.9).
+
+**Forward-compatible cleanup**:
+- [`src/modules/pki/keys.rs`](src/modules/pki/keys.rs), [`src/modules/pki/crypto.rs`](src/modules/pki/crypto.rs) — RSA-side `pkcs8` imports switched to `rsa::pkcs8::*` (rsa's own re-export). Decouples our top-level pkcs8 dep from rsa's transitive pkcs8, so a future Phase-3 pkcs8 0.11 bump won't conflict with rsa 0.9's pkcs8 0.10.
+
+### Fixed
+
+#### Preexisting build issues uncovered during the dep sweep
+
+- [`gui/src-tauri/Cargo.toml`](gui/src-tauri/Cargo.toml) — `openssl` moved out of `[target.'cfg(windows)'.dependencies]` to general dependencies. [`commands/pki.rs::pki_import_ca_pkcs12`](gui/src-tauri/src/commands/pki.rs) calls `openssl::pkcs12::Pkcs12::from_der` on every desktop platform; the windows-only gating broke the macOS / Linux gui builds.
+- [`src/plugins/logical_backend.rs`](src/plugins/logical_backend.rs) — added `use serde_json::Map` to the test module so `cargo test --lib` compiles. Was preexisting on `main` and blocked the entire lib-test build.
+
+#### Build tooling
+
+- [`Makefile`](Makefile) — `RUSTUP_CARGO_BIN` (default `$HOME/.cargo/bin`, with `$USERPROFILE` fallback for native Windows) is prepended to `PATH` so rustup's toolchain wins over a system Rust install (Homebrew `rust` on macOS, distro packages on Linux). Symptom previously: `make plugins-wasm` failed with `can't find crate for core` even after `rustup target add wasm32-wasip1`, because Homebrew's rustc only ships the host std and was being picked first.
+
 ### Added
 
 #### PKI — Import root CA (PEM / PKCS#12) + richer Certificates detail pane
