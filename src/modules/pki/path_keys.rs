@@ -44,7 +44,8 @@ impl PkiBackend {
                 "exported": { field_type: FieldType::Str, required: true, description: "internal | exported." },
                 "key_type": { field_type: FieldType::Str, default: "ec", description: "rsa | ec | ed25519 | ml-dsa-44 | ml-dsa-65 | ml-dsa-87." },
                 "key_bits": { field_type: FieldType::Int, default: 0, description: "Key size in bits (0 = default)." },
-                "name": { field_type: FieldType::Str, default: "", description: "Optional human-friendly alias for this key." }
+                "name": { field_type: FieldType::Str, default: "", description: "Optional human-friendly alias for this key." },
+                "exportable": { field_type: FieldType::Bool, default: false, description: "Pin whether this key may be exported via `pki/cert/<serial>/export?include_private_key=true`. Read-only after creation. Default false." }
             },
             operations: [{op: Operation::Write, handler: r.generate_key}],
             help: "Generate and persist a managed private key."
@@ -57,7 +58,8 @@ impl PkiBackend {
             pattern: r"keys/import$",
             fields: {
                 "private_key": { field_type: FieldType::Str, required: true, description: "PEM-encoded private key (PKCS#8 or BV PQC envelope)." },
-                "name": { field_type: FieldType::Str, default: "", description: "Optional human-friendly alias for this key." }
+                "name": { field_type: FieldType::Str, default: "", description: "Optional human-friendly alias for this key." },
+                "exportable": { field_type: FieldType::Bool, default: false, description: "Pin whether this key may be exported via `pki/cert/<serial>/export?include_private_key=true`. Read-only after creation. Default false." }
             },
             operations: [{op: Operation::Write, handler: r.import_key}],
             help: "Import an externally-generated private key into the managed key store."
@@ -126,8 +128,16 @@ impl PkiBackendInner {
             .trim()
             .to_string();
 
+        // `exportable` is pinned at create time. Default `false` —
+        // direct `pki/keys/generate` is a deliberate "I might want
+        // this key extractable later" call; operator opts in
+        // explicitly. Once persisted the flag is read-only.
+        let exportable = req
+            .get_data_or_default("exportable")?
+            .as_bool()
+            .unwrap_or(false);
         let (entry, signer) =
-            keys::generate_managed_key(req, alg, &name, exported_flag).await?;
+            keys::generate_managed_key(req, alg, &name, exported_flag, exportable).await?;
 
         let mut data = entry_to_data(&entry);
         if exported_flag {
@@ -161,7 +171,14 @@ impl PkiBackendInner {
             .trim()
             .to_string();
 
-        let (entry, _signer) = keys::import_managed_key(req, &pem, &name).await?;
+        // Same default as `generate_key` — opt-in `exportable=true`
+        // and stuck at create time.
+        let exportable = req
+            .get_data_or_default("exportable")?
+            .as_bool()
+            .unwrap_or(false);
+        let (entry, _signer) =
+            keys::import_managed_key(req, &pem, &name, exportable).await?;
         Ok(Some(Response::data_response(Some(entry_to_data(&entry)))))
     }
 
@@ -230,6 +247,7 @@ fn entry_to_data(entry: &KeyEntry) -> Map<String, Value> {
     data.insert("public_key".into(), json!(entry.public_key_pem));
     data.insert("source".into(), json!(entry.source.as_str()));
     data.insert("exported".into(), json!(entry.exported));
+    data.insert("exportable".into(), json!(entry.exportable));
     data.insert("created_at".into(), json!(entry.created_at_unix));
     let _ = KeySource::Generated; // keep import alive when source enum gains variants
     data

@@ -323,6 +323,7 @@ function IssuersTab({ mount }: { mount: string }) {
   const [showRename, setShowRename] = useState(false);
   const [showUsages, setShowUsages] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<PkiIssuerSummary | null>(null);
+  const [exportTarget, setExportTarget] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [usageValues, setUsageValues] = useState<string[]>([]);
 
@@ -503,6 +504,12 @@ function IssuersTab({ mount }: { mount: string }) {
                 </Button>
                 <Button
                   variant="ghost"
+                  onClick={() => setExportTarget(detail.id)}
+                >
+                  Export
+                </Button>
+                <Button
+                  variant="ghost"
                   onClick={() =>
                     setDeleteTarget({
                       id: detail.id,
@@ -615,6 +622,13 @@ function IssuersTab({ mount }: { mount: string }) {
         }
         confirmLabel="Delete"
         variant="danger"
+      />
+      <ExportModal
+        open={!!exportTarget}
+        kind="issuer"
+        mount={mount}
+        target={exportTarget ?? ""}
+        onClose={() => setExportTarget(null)}
       />
     </Card>
   );
@@ -2009,6 +2023,7 @@ function CertDetail({
   onRevoke,
   onDelete,
   onCopyPem,
+  onExport,
 }: {
   serial: string;
   cert: PkiCertRecord;
@@ -2017,6 +2032,7 @@ function CertDetail({
   onRevoke: () => void;
   onDelete: () => void;
   onCopyPem: () => void;
+  onExport: () => void;
 }) {
   const expired = cert.not_after > 0 && cert.not_after * 1000 < Date.now();
   const emitterText = issuerName
@@ -2122,6 +2138,9 @@ function CertDetail({
         onCopy={onCopyPem}
       />
       <div className="flex items-center gap-2 flex-wrap">
+        <Button variant="ghost" onClick={onExport}>
+          Export
+        </Button>
         {!cert.revoked_at && (
           <Button variant="ghost" onClick={onRevoke}>
             Revoke
@@ -2151,6 +2170,10 @@ function CertsTab({ mount }: { mount: string }) {
   const [deleteTarget, setDeleteTarget] = useState<{
     serial: string;
     active: boolean;
+  } | null>(null);
+  const [exportTarget, setExportTarget] = useState<{
+    kind: "cert";
+    id: string;
   } | null>(null);
 
   const refresh = useCallback(async () => {
@@ -2453,6 +2476,7 @@ function CertsTab({ mount }: { mount: string }) {
                   () => toast("error", "Failed to copy"),
                 )
               }
+              onExport={() => setExportTarget({ kind: "cert", id: selected })}
             />
           )}
         </div>
@@ -2485,6 +2509,13 @@ function CertsTab({ mount }: { mount: string }) {
         }
         confirmLabel={deleteTarget?.active ? "Force delete" : "Delete"}
         variant="danger"
+      />
+      <ExportModal
+        open={exportTarget?.kind === "cert"}
+        kind="cert"
+        mount={mount}
+        target={exportTarget?.id ?? ""}
+        onClose={() => setExportTarget(null)}
       />
     </Card>
   );
@@ -3589,6 +3620,196 @@ function ExternalCsrTab({ mount }: { mount: string }) {
         onClose={() => setConfirmDelete(null)}
       />
     </div>
+  );
+}
+
+// ── Export modal — used by both Certificates and Issuers tabs ────────
+//
+// Calls the host's `pki/cert/<serial>/export` or
+// `pki/issuer/<ref>/export` route, surfaces the encoded body as a
+// preview block + Save-As button. The host enforces:
+//   * `KeyEntry.exportable=false` refuses `include_private_key` even
+//     for root (read-only flag pinned at create time).
+//   * `pki/issuer/<ref>/export` never emits private keys.
+//   * `mode=backup` bypasses the exportable flag but requires an
+//     encrypted format (PKCS#12 — landing in a follow-up; today the
+//     host returns the gating error and the modal surfaces it).
+
+function ExportModal({
+  open,
+  kind,
+  mount,
+  target,
+  onClose,
+}: {
+  open: boolean;
+  kind: "cert" | "issuer";
+  mount: string;
+  target: string;
+  onClose: () => void;
+}) {
+  const { toast } = useToast();
+  const [format, setFormat] = useState<"pem" | "pkcs7">("pem");
+  const [includeKey, setIncludeKey] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<api.PkiExportResult | null>(null);
+
+  // Reset on open so a previous export doesn't bleed across sessions.
+  useEffect(() => {
+    if (open) {
+      setFormat("pem");
+      setIncludeKey(false);
+      setResult(null);
+    }
+  }, [open]);
+
+  // PKCS#7 has no key slot; clamp the checkbox so the operator
+  // can't ask for an impossible combination.
+  useEffect(() => {
+    if (format === "pkcs7" && includeKey) setIncludeKey(false);
+  }, [format, includeKey]);
+
+  async function handleExport() {
+    if (!mount || !target) {
+      toast("error", "Missing mount or target.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const res =
+        kind === "cert"
+          ? await api.pkiExportCert({
+              mount,
+              serial: target,
+              format,
+              include_private_key: includeKey,
+            })
+          : await api.pkiExportIssuer({
+              mount,
+              issuer_ref: target,
+              format,
+              include_chain: true,
+            });
+      setResult(res);
+      toast("success", `Exported (${res.format}).`);
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleCopy() {
+    if (!result) return;
+    try {
+      await navigator.clipboard.writeText(result.body);
+      toast("success", "Copied to clipboard.");
+    } catch (e) {
+      toast("error", `Copy failed: ${extractError(e)}`);
+    }
+  }
+
+  function handleDownload() {
+    if (!result) return;
+    try {
+      // Browser-style blob download — works inside Tauri's WebView
+      // on every platform without needing the @tauri-apps/plugin-fs
+      // dep. The webview hands the user the standard "save to…"
+      // dialog from the OS shell.
+      const filename =
+        kind === "cert"
+          ? `cert-${target.slice(0, 12)}.${result.filename_extension}`
+          : `${target}.${result.filename_extension}`;
+      const blob = new Blob([result.body], { type: "application/octet-stream" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      // Revoke async so the browser has a chance to start the
+      // download stream first.
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast("success", `Saved as ${filename}`);
+    } catch (e) {
+      toast("error", extractError(e));
+    }
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      size="lg"
+      title={kind === "cert" ? "Export certificate" : "Export issuer certificate"}
+      actions={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Close
+          </Button>
+          {result ? (
+            <>
+              <Button variant="ghost" onClick={handleCopy}>
+                Copy
+              </Button>
+              <Button onClick={handleDownload}>Download</Button>
+            </>
+          ) : (
+            <Button onClick={handleExport} disabled={busy || !target}>
+              {busy ? "Exporting…" : "Export"}
+            </Button>
+          )}
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <Select
+          label="Format"
+          value={format}
+          onChange={(e) => setFormat(e.target.value as "pem" | "pkcs7")}
+          options={[
+            { value: "pem", label: "PEM (cert + chain, optionally + key)" },
+            { value: "pkcs7", label: "PKCS#7 (.p7b, certs only)" },
+          ]}
+        />
+        {kind === "cert" && (
+          <label className="inline-flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={includeKey}
+              disabled={format === "pkcs7"}
+              onChange={(e) => setIncludeKey(e.target.checked)}
+            />
+            Include private key (only when the bound managed key was minted{" "}
+            <code>exportable=true</code>)
+          </label>
+        )}
+        {kind === "issuer" && (
+          <p className="text-xs text-[var(--color-text-muted)]">
+            Issuer exports never include the private key. The chain is
+            included automatically.
+          </p>
+        )}
+        {result && (
+          <div className="space-y-2">
+            <p className="text-xs text-[var(--color-text-muted)]">
+              Format: <code>{result.format}</code> · Suggested extension:{" "}
+              <code>.{result.filename_extension}</code>
+              {result.includes_private_key ? (
+                <>
+                  {" "}· Includes <strong>private key</strong>
+                </>
+              ) : null}
+            </p>
+            <pre className="bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded p-2 text-xs font-mono whitespace-pre-wrap break-all max-h-80 overflow-y-auto">
+              {result.body}
+            </pre>
+          </div>
+        )}
+      </div>
+    </Modal>
   );
 }
 

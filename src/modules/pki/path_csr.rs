@@ -56,7 +56,8 @@ impl PkiBackend {
                 "alt_names": { field_type: FieldType::Str, default: "", description: "Comma-separated DNS / IP SANs to request." },
                 "ip_sans": { field_type: FieldType::Str, default: "", description: "Comma-separated IP SANs (in addition to anything in `alt_names`)." },
                 "key_ref": { field_type: FieldType::Str, default: "", description: "Optional: pin to an existing managed key (UUID or name) instead of generating a fresh one. Subject to the role's `allow_key_reuse` / `allowed_key_refs`." },
-                "exported": { field_type: FieldType::Bool, default: false, description: "When `true`, return the freshly generated PKCS#8 PEM in the response. Ignored when `key_ref` is set (the key already lives in the managed-key store)." }
+                "exported": { field_type: FieldType::Bool, default: false, description: "When `true`, return the freshly generated PKCS#8 PEM in the response. Ignored when `key_ref` is set (the key already lives in the managed-key store)." },
+                "exportable": { field_type: FieldType::Bool, default: false, description: "Pin the backing managed key as exportable via `pki/cert/<serial>/export?include_private_key=true`. Read-only after creation. Default false." }
             },
             operations: [{op: Operation::Write, handler: r.csr_generate}],
             help: "Build a leaf CSR using the named role and stash a pending record awaiting the upstream-signed cert."
@@ -205,8 +206,16 @@ impl PkiBackendInner {
             None => {
                 // Reuse the same naming heuristic the issue path uses —
                 // empty name lets `persist_new_key` skip the name pointer.
+                // `exportable` defaults to false for CSR-driven key
+                // creation: the key is meant to live in the vault while
+                // the external CA signs the CSR. The operator can opt
+                // in via the `exportable` body parameter.
+                let exportable = req
+                    .get_data_or_default("exportable")?
+                    .as_bool()
+                    .unwrap_or(false);
                 let (entry, signer) =
-                    keys::generate_managed_key(req, role_alg, "", exported).await?;
+                    keys::generate_managed_key(req, role_alg, "", exported, exportable).await?;
                 let exported_pem = if exported {
                     Some(signer.to_pkcs8_pem()?)
                 } else {

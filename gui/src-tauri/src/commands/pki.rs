@@ -1407,6 +1407,121 @@ pub struct PkiRevokeResult {
     pub issuer_id: String,
 }
 
+// ── Cert / issuer export (PEM / PKCS#7) ──────────────────────────────
+
+#[derive(Deserialize)]
+pub struct PkiExportCertRequest {
+    pub mount: String,
+    pub serial: String,
+    /// `pem` (default) | `pkcs7`.
+    pub format: Option<String>,
+    pub include_private_key: Option<bool>,
+    /// `normal` (default) | `backup`.
+    pub mode: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct PkiExportResult {
+    /// `pem` | `pkcs7`. Echoed back so the GUI can label the save
+    /// dialog correctly.
+    pub format: String,
+    /// Suggested filename extension (no leading dot).
+    pub filename_extension: String,
+    /// Encoded payload as a UTF-8 string. Both PEM and PEM-armored
+    /// PKCS#7 are text-safe; PKCS#12 (when it lands) will switch to
+    /// a base64 variant.
+    pub body: String,
+    pub includes_private_key: bool,
+    #[serde(default)]
+    pub backup_mode: bool,
+    #[serde(default)]
+    pub serial_number: String,
+    #[serde(default)]
+    pub issuer_id: String,
+    #[serde(default)]
+    pub issuer_name: String,
+}
+
+#[tauri::command]
+pub async fn pki_export_cert(
+    state: State<'_, AppState>,
+    request: PkiExportCertRequest,
+) -> CmdResult<PkiExportResult> {
+    let mount = mount_prefix(&request.mount);
+    let mut body = Map::new();
+    if let Some(f) = request.format.filter(|s| !s.is_empty()) {
+        body.insert("format".into(), json!(f));
+    }
+    if let Some(b) = request.include_private_key {
+        body.insert("include_private_key".into(), json!(b));
+    }
+    if let Some(m) = request.mode.filter(|s| !s.is_empty()) {
+        body.insert("mode".into(), json!(m));
+    }
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("{mount}/cert/{}/export", request.serial),
+        Some(body),
+    )
+    .await?;
+    let map = data_to_map(resp);
+    Ok(PkiExportResult {
+        format: val_str(&map, "format"),
+        filename_extension: val_str(&map, "filename_extension"),
+        body: val_str(&map, "body"),
+        includes_private_key: map
+            .get("includes_private_key")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        backup_mode: map.get("backup_mode").and_then(|v| v.as_bool()).unwrap_or(false),
+        serial_number: val_str(&map, "serial_number"),
+        issuer_id: String::new(),
+        issuer_name: String::new(),
+    })
+}
+
+#[derive(Deserialize)]
+pub struct PkiExportIssuerRequest {
+    pub mount: String,
+    pub issuer_ref: String,
+    pub format: Option<String>,
+    pub include_chain: Option<bool>,
+}
+
+#[tauri::command]
+pub async fn pki_export_issuer(
+    state: State<'_, AppState>,
+    request: PkiExportIssuerRequest,
+) -> CmdResult<PkiExportResult> {
+    let mount = mount_prefix(&request.mount);
+    let mut body = Map::new();
+    if let Some(f) = request.format.filter(|s| !s.is_empty()) {
+        body.insert("format".into(), json!(f));
+    }
+    if let Some(b) = request.include_chain {
+        body.insert("include_chain".into(), json!(b));
+    }
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("{mount}/issuer/{}/export", request.issuer_ref),
+        Some(body),
+    )
+    .await?;
+    let map = data_to_map(resp);
+    Ok(PkiExportResult {
+        format: val_str(&map, "format"),
+        filename_extension: val_str(&map, "filename_extension"),
+        body: val_str(&map, "body"),
+        includes_private_key: false,
+        backup_mode: false,
+        serial_number: String::new(),
+        issuer_id: val_str(&map, "issuer_id"),
+        issuer_name: val_str(&map, "issuer_name"),
+    })
+}
+
 #[tauri::command]
 pub async fn pki_revoke_cert(
     state: State<'_, AppState>,

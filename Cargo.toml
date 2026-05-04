@@ -205,6 +205,13 @@ time = { version = "0.3", default-features = false, features = ["std"] }
 # no C system deps. `const-oid` (already transitive via `der`) carries
 # the algorithm OIDs.
 x509-cert = { version = "0.2", default-features = false, features = ["builder", "pem", "std"] }
+# CMS / PKCS#7 builder used by `pki/cert/<serial>/export?format=pkcs7`
+# and `pki/issuer/<ref>/export?format=pkcs7` to wrap a cert + chain in
+# a SignedData ContentInfo with no signers (the "certs-only" PKCS#7
+# envelope every TLS importer accepts). Stays on the same `der 0.7` /
+# `x509-cert 0.2` family the rest of the PKI module already uses, so
+# it fits in without triggering the Phase-3 RustCrypto-formats cascade.
+cms = { version = "0.2", default-features = false, features = ["alloc", "pem", "std"] }
 fips204 = { version = "0.4", default-features = false, features = ["default-rng", "ml-dsa-44", "ml-dsa-65", "ml-dsa-87"] }
 const-oid = { version = "0.9", features = ["db"] }
 # Phase 5.3: PKCS#8 (`PrivateKeyInfo`) emit/parse for ML-DSA private keys.

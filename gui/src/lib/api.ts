@@ -1242,6 +1242,41 @@ export const pkiCsrDelete = (mount: string, csrId: string) =>
   invoke<void>("pki_csr_delete", { mount, csrId });
 export const pkiCsrSetSigned = (request: PkiCsrSetSignedRequest) =>
   invoke<PkiCsrSetSignedResult>("pki_csr_set_signed", { request });
+
+// ── Cert / issuer export (PEM / PKCS#7) ──────────────────────────────
+
+export interface PkiExportCertRequest {
+  mount: string;
+  serial: string;
+  /** `pem` (default) | `pkcs7`. */
+  format?: string;
+  include_private_key?: boolean;
+  /** `normal` (default) | `backup`. */
+  mode?: string;
+}
+
+export interface PkiExportIssuerRequest {
+  mount: string;
+  issuer_ref: string;
+  format?: string;
+  include_chain?: boolean;
+}
+
+export interface PkiExportResult {
+  format: string;
+  filename_extension: string;
+  body: string;
+  includes_private_key: boolean;
+  backup_mode?: boolean;
+  serial_number?: string;
+  issuer_id?: string;
+  issuer_name?: string;
+}
+
+export const pkiExportCert = (request: PkiExportCertRequest) =>
+  invoke<PkiExportResult>("pki_export_cert", { request });
+export const pkiExportIssuer = (request: PkiExportIssuerRequest) =>
+  invoke<PkiExportResult>("pki_export_issuer", { request });
 export const pkiImportCaBundle = (request: PkiImportCaBundleRequest) =>
   invoke<PkiSetSignedResult>("pki_import_ca_bundle", { request });
 export const pkiImportCaPkcs12 = (request: PkiImportCaPkcs12Request) =>

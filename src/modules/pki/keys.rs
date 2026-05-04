@@ -95,6 +95,25 @@ pub struct KeyEntry {
     /// imports.
     #[serde(default)]
     pub exported: bool,
+    /// Read-only marker pinned at create / import time. When `false`,
+    /// `pki/cert/<serial>/export` refuses `include_private_key` even
+    /// for callers with the right policy — the only exception is the
+    /// engine-internal backup path (`mode=backup`), which bypasses the
+    /// flag but forces an encrypted output envelope.
+    ///
+    /// Defaults at write sites:
+    ///   * `pki/keys/{generate,import}` and `pki/csr/generate`:
+    ///     `false` (safer; operator opts in explicitly).
+    ///   * `pki/issue/:role`: `true` (the leaf is meant to be handed
+    ///     over to the requester).
+    ///
+    /// Once persisted, the flag is read-only — no API surfaces a
+    /// flip. To "promote" a non-exportable key, the operator must
+    /// import a fresh PEM as a separate key and re-issue.
+    /// `#[serde(default)]` keeps records written before this field
+    /// existed deserialisable (they default to `false` on read).
+    #[serde(default)]
+    pub exportable: bool,
     pub source: KeySource,
     pub created_at_unix: u64,
 }
@@ -145,28 +164,50 @@ pub async fn create_managed_key_from_signer(
     name: &str,
     source: KeySource,
 ) -> Result<KeyEntry, RvError> {
+    create_managed_key_from_signer_with_exportable(req, signer, name, source, false).await
+}
+
+/// Variant of [`create_managed_key_from_signer`] that takes an explicit
+/// `exportable` flag — used by the issue / sign / csr paths so leaves
+/// can default to exportable=true (compat with workflows that need to
+/// hand the requester their key) while shadow entries created
+/// alongside an issuer default to false.
+#[maybe_async::maybe_async]
+pub async fn create_managed_key_from_signer_with_exportable(
+    req: &Request,
+    signer: &Signer,
+    name: &str,
+    source: KeySource,
+    exportable: bool,
+) -> Result<KeyEntry, RvError> {
     if !name.is_empty() {
         ensure_name_free(req, name).await?;
     }
-    persist_new_key(req, signer, name, false, source).await
+    persist_new_key(req, signer, name, false, exportable, source).await
 }
 
 /// Generate a fresh managed key under `alg`, persist it, and return the
 /// stored [`KeyEntry`] alongside the [`Signer`] handle the caller can
 /// use immediately (so `generate/exported` doesn't have to reload from
 /// storage to emit the PKCS#8 PEM).
+///
+/// The `exportable` flag is pinned at create time. Operator-driven
+/// `pki/keys/generate` calls default to `false`; engine-internal callers
+/// (issue / sign / csr leaf-key creation) opt in via `true`.
 #[maybe_async::maybe_async]
 pub async fn generate_managed_key(
     req: &Request,
     alg: KeyAlgorithm,
     name: &str,
     exported: bool,
+    exportable: bool,
 ) -> Result<(KeyEntry, Signer), RvError> {
     if !name.is_empty() {
         ensure_name_free(req, name).await?;
     }
     let signer = Signer::generate(alg)?;
-    let entry = persist_new_key(req, &signer, name, exported, KeySource::Generated).await?;
+    let entry =
+        persist_new_key(req, &signer, name, exported, exportable, KeySource::Generated).await?;
     Ok((entry, signer))
 }
 
@@ -188,6 +229,7 @@ pub async fn import_managed_key(
     req: &Request,
     pem: &str,
     name: &str,
+    exportable: bool,
 ) -> Result<(KeyEntry, Signer), RvError> {
     if !name.is_empty() {
         ensure_name_free(req, name).await?;
@@ -211,7 +253,8 @@ pub async fn import_managed_key(
         }
     })?;
 
-    let entry = persist_new_key(req, &signer, name, false, KeySource::Imported).await?;
+    let entry =
+        persist_new_key(req, &signer, name, false, exportable, KeySource::Imported).await?;
     Ok((entry, signer))
 }
 
@@ -395,6 +438,7 @@ async fn persist_new_key(
     signer: &Signer,
     name: &str,
     exported: bool,
+    exportable: bool,
     source: KeySource,
 ) -> Result<KeyEntry, RvError> {
     let id = Uuid::new_v4().to_string();
@@ -419,6 +463,7 @@ async fn persist_new_key(
         public_key_pem,
         private_key_pem: signer.to_storage_pem(),
         exported,
+        exportable,
         source,
         created_at_unix: now_unix(),
     };

@@ -47,6 +47,68 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### PKI — Cert / issuer export with exportable-at-create flag
+
+Two new endpoints + a read-only safety flag for getting cert (and,
+when permitted, key) bytes out of the vault:
+
+- `GET pki/cert/<serial>/export` — PEM bundle (cert + chain,
+  optionally + private key) or certs-only PKCS#7 (`.p7b`). Honours
+  the bound managed key's `exportable` flag for the
+  `include_private_key=true` knob; refuses the flag for
+  format=pkcs7 (no key slot in the spec). Wires `mode=backup` for a
+  future PKCS#12-encrypted backup envelope (rejected today since
+  PKCS#12 lands in a follow-up — the route shape stays stable so
+  the GUI doesn't break later).
+- `GET pki/issuer/<ref>/export` — PEM or PKCS#7 of the issuer cert
+  + chain. **Never** emits the private key, regardless of policy
+  or mode — the route doesn't accept `include_private_key` at all.
+
+`KeyEntry.exportable` is the new gate ([src/modules/pki/keys.rs:97](src/modules/pki/keys.rs:97)):
+- Pinned at managed-key create / import time. **Read-only after** —
+  no API surfaces a flip. Even root cannot promote a non-exportable
+  key.
+- Defaults: `false` for `pki/keys/generate`, `pki/keys/import`, and
+  `pki/csr/generate` (operator opts in explicitly); `true` for the
+  shadow entries created alongside an issuer ([src/modules/pki/issuers.rs](src/modules/pki/issuers.rs))
+  remains `false` per the "issuer keys never leave" rule.
+
+Format encoders ([src/modules/pki/export.rs](src/modules/pki/export.rs)):
+- PEM bundler — concatenates cert + chain (+ optional key) PEMs.
+- PKCS#7 builder — uses `cms 0.2`'s `SignedData` to wrap a
+  `CertificateSet` with empty `digestAlgorithms` and `signerInfos`.
+  Output is PEM-armored under `-----BEGIN PKCS7-----`, the shape
+  every TLS-importer accepts. No private key support — PKCS#7
+  doesn't carry one. New dep: `cms = "0.2"` (stays in the
+  `der 0.7 / x509-cert 0.2` family the rest of the PKI module
+  already uses, so it slots in without triggering the deferred
+  Phase-3 RustCrypto-formats migration).
+
+GUI ([gui/src/routes/PkiPage.tsx](gui/src/routes/PkiPage.tsx)):
+- New `Export` button on the cert detail panel and the issuer
+  detail panel.
+- Shared `ExportModal` — format radio (`PEM` / `PKCS#7`),
+  "include private key" checkbox (greyed out for PKCS#7), Copy +
+  Download actions. Download uses a browser blob anchor so we
+  don't pull in `@tauri-apps/plugin-fs`.
+- Tauri commands `pki_export_cert` and `pki_export_issuer`
+  ([gui/src-tauri/src/commands/pki.rs](gui/src-tauri/src/commands/pki.rs))
+  thin-wrap the host endpoints; matching `pkiExportCert` /
+  `pkiExportIssuer` exports in [gui/src/lib/api.ts](gui/src/lib/api.ts).
+
+Sample policies ([docs/policies/](docs/policies/)): three Vault-style
+HCL policies (`pki-readonly`, `pki-issuer`, `pki-exporter`) showing
+the recommended ACL split — read-only auditors, CI services that
+issue but never extract, and the helpdesk role that can pull bytes
+out. The host's `KeyEntry.exportable` gate is documented as
+defence-in-depth on top of the ACL.
+
+**Out of scope (follow-up PR)**: PKCS#12 (`.p12`) export. The route
+shape (`format=pkcs12`) and `mode=backup` are wired today and
+return a clear error pointing at the missing format; the
+follow-up adds the `pkcs12 0.1.0` + `pkcs5 0.7` PBES2 + MAC
+envelope code without changing any caller-visible API.
+
 #### PKI — External-signing CSR flow for leaf certs
 
 Lets operators generate a leaf CSR locally, hand it to an external CA

@@ -22,10 +22,12 @@ pub mod acme;
 pub mod composite;
 pub mod crypto;
 pub mod csr;
+pub mod export;
 pub mod issuers;
 pub mod keys;
 pub mod path_config;
 pub mod path_csr;
+pub mod path_export;
 pub mod path_keys;
 pub mod path_intermediate;
 pub mod path_issuers;
@@ -81,6 +83,8 @@ impl PkiBackend {
             self.csr_list_path(),
             self.csr_set_signed_path(),
             self.csr_item_path(),
+            self.cert_export_path(),
+            self.issuer_export_path(),
             self.issue_path(),
             self.sign_path(),
             self.sign_verbatim_path(),
