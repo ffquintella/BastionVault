@@ -1,0 +1,31 @@
+# Ignore patterns for `tauri dev`'s file watcher.
+#
+# Tauri 2 watches the entire cargo workspace by default and rebuilds on
+# any file change. macOS Finder writes `.DS_Store` whenever a folder is
+# accessed (including by `cargo` traversing build artefacts), which the
+# default watcher treats as a source-change → triggers a rebuild loop.
+#
+# We also exclude `target/` directories because rebuild artefacts are
+# obviously not source. The `plugins-ext/` workspace is a separate cargo
+# workspace (excluded from the host's `[workspace]`), and IronRDP is a
+# git submodule whose own `target/` shouldn't trigger anything either.
+
+# OS / editor cruft
+.DS_Store
+**/.DS_Store
+*.swp
+*.swo
+*~
+
+# Build artefacts (host + every nested workspace)
+target/
+**/target/
+
+# Submodule + sibling workspaces — we depend on them as path/git deps,
+# not as live source.
+plugins-ext/
+IronRDP/
+
+# Generated docs / dist trees
+docs/_build/
+gui/dist/
