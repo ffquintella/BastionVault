@@ -313,9 +313,19 @@ impl CertSigner {
 fn normalise_to_pkcs8_pem(pem: &str) -> String {
     use rsa::pkcs1::DecodeRsaPrivateKey;
     use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
+    use rsa::traits::PublicKeyParts;
     use rsa::RsaPrivateKey;
 
     let trimmed = pem.trim();
+
+    // Detect the `[BEGIN ...]` PEM label first — it's a useful
+    // diagnostic when the key turns out to be unparseable by every
+    // path (the operator sees what shape we attempted, not a generic
+    // failure).
+    let pem_label = pem::parse(trimmed)
+        .ok()
+        .map(|p| p.tag().to_string())
+        .unwrap_or_default();
 
     // Try every shape we know to recognise. rsa-0.9 is permissive
     // enough that any of these succeeding is a hint the input is RSA.
@@ -332,13 +342,100 @@ fn normalise_to_pkcs8_pem(pem: &str) -> String {
         return pem.to_string();
     };
 
+    // Diagnostic: log the RSA key shape so a downstream rcgen / ring
+    // rejection can be correlated with the actual modulus / exponent /
+    // CRT-presence values. Without this, "Could not parse key pair"
+    // is ambiguous — could be wrong OID, non-65537 exponent, missing
+    // CRT, exotic modulus size, etc.
+    let bits = priv_key.size() * 8;
+    let e_bytes = priv_key.e().to_bytes_be();
+    let e_display = if e_bytes.len() <= 8 {
+        let mut v: u64 = 0;
+        for &b in &e_bytes {
+            v = (v << 8) | b as u64;
+        }
+        v.to_string()
+    } else {
+        format!("{}-byte big-int", e_bytes.len())
+    };
+    log::info!(
+        "pki: normalising RSA key — pem_label={:?} modulus_bits={} e={}",
+        pem_label,
+        bits,
+        e_display
+    );
+
     // Re-emit through rsa-0.9. The encoder ALWAYS produces a
     // canonical PKCS#8 with `rsaEncryption` OID + full CRT tuple,
     // regardless of what the input layout was.
     match priv_key.to_pkcs8_pem(LineEnding::LF) {
         Ok(p) => p.to_string(),
-        Err(_) => pem.to_string(),
+        Err(e) => {
+            log::warn!(
+                "pki: RSA key parsed by rsa-0.9 but PKCS#8 re-emit failed: {e}"
+            );
+            pem.to_string()
+        }
     }
+}
+
+/// Parse the PKCS#8 `AlgorithmIdentifier` OID from the supplied PEM /
+/// DER. Returns the dotted-decimal representation, or `None` if the
+/// blob doesn't look like PKCS#8. Used in the `Signer::from_storage_pem`
+/// failure path so the operator sees *which* algorithm OID their key
+/// carries — `1.2.840.113549.1.1.1` (rsaEncryption, expected),
+/// `1.2.840.113549.1.1.10` (RSASSA-PSS — ring rejects), or something
+/// more exotic.
+fn sniff_pkcs8_algorithm_oid(pem: &str) -> Option<String> {
+    let parsed = pem::parse(pem.trim()).ok()?;
+    let der = parsed.contents();
+    // PrivateKeyInfo := SEQUENCE { INT version, AlgorithmIdentifier { OID, ... }, ... }
+    // Walk the outer SEQUENCE → version INTEGER → algorithm SEQUENCE → OID.
+    fn take_tlv<'a>(input: &'a [u8], expected: u8) -> Option<(&'a [u8], &'a [u8])> {
+        if input.first() != Some(&expected) {
+            return None;
+        }
+        let len_byte = *input.get(1)?;
+        let (len, header) = if len_byte < 0x80 {
+            (len_byte as usize, 2)
+        } else {
+            let n = (len_byte & 0x7f) as usize;
+            if n == 0 || n > 4 {
+                return None;
+            }
+            let mut len = 0usize;
+            for i in 0..n {
+                len = (len << 8) | *input.get(2 + i)? as usize;
+            }
+            (len, 2 + n)
+        };
+        let total = header + len;
+        if input.len() < total {
+            return None;
+        }
+        Some((&input[header..total], &input[total..]))
+    }
+    let (outer, _) = take_tlv(der, 0x30)?;
+    let (_version, after_version) = take_tlv(outer, 0x02)?;
+    let (alg_seq, _) = take_tlv(after_version, 0x30)?;
+    let (oid_bytes, _) = take_tlv(alg_seq, 0x06)?;
+    // Decode dotted-decimal. First byte = first*40 + second; remainder
+    // are base-128 with continuation bit.
+    let mut out = String::new();
+    let first = *oid_bytes.first()?;
+    let _ = std::fmt::Write::write_fmt(
+        &mut out,
+        format_args!("{}.{}", first / 40, first % 40),
+    );
+    let mut acc: u64 = 0;
+    for &b in &oid_bytes[1..] {
+        acc = (acc << 7) | (b & 0x7f) as u64;
+        if b & 0x80 == 0 {
+            let _ = std::fmt::Write::write_fmt(&mut out, format_args!(".{}", acc));
+            acc = 0;
+        }
+    }
+    Some(out)
 }
 
 pub(crate) fn rcgen_err(e: rcgen::Error) -> RvError {
@@ -468,7 +565,37 @@ impl Signer {
         // Both round-trip cleanly through rsa 0.9's PKCS#1 decoder +
         // PKCS#8 re-emit. Non-RSA / actually-PKCS#8 PEMs fall through.
         let normalised = normalise_to_pkcs8_pem(pem);
-        Ok(Self::Classical(CertSigner::from_pem(&normalised)?))
+        match CertSigner::from_pem(&normalised) {
+            Ok(s) => Ok(Self::Classical(s)),
+            Err(e) => {
+                // Decorate the rcgen error with the key's algorithm OID
+                // when we can read it. ring rejects anything other than
+                // `1.2.840.113549.1.1.1` (rsaEncryption) for RSA keys,
+                // and the bare "Could not parse key pair" string the
+                // user sees in the import toast doesn't tell them why.
+                if let Some(oid) = sniff_pkcs8_algorithm_oid(&normalised) {
+                    log::warn!(
+                        "pki: from_storage_pem rejected — algorithm OID {oid}: {e}"
+                    );
+                    if oid == "1.2.840.113549.1.1.10" {
+                        return Err(RvError::ErrString(
+                            "key uses RSASSA-PSS algorithm OID; the embedded \
+                             ring crypto provider only accepts plain rsaEncryption \
+                             (1.2.840.113549.1.1.1). Re-key the CA without RSA-PSS \
+                             parameters, or use an HSM that signs externally."
+                                .into(),
+                        ));
+                    }
+                    if oid != "1.2.840.113549.1.1.1" && !oid.is_empty() {
+                        return Err(RvError::ErrString(format!(
+                            "key uses non-rsaEncryption algorithm OID {oid}; \
+                             the embedded crypto provider does not support it"
+                        )));
+                    }
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Caller-facing PKCS#8 PEM. This is what the engine returns over the
