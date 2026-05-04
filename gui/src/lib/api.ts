@@ -1186,6 +1186,62 @@ export const pkiSetSignedIntermediate = (request: PkiSetSignedIntermediateReques
   invoke<PkiSetSignedResult>("pki_set_signed_intermediate", { request });
 export const pkiSignIntermediate = (request: PkiSignIntermediateRequest) =>
   invoke<PkiSignIntermediateResult>("pki_sign_intermediate", { request });
+
+// ── External-signing CSR flow (`pki/csr/*`) ──────────────────────────
+
+export interface PkiCsrGenerateRequest {
+  mount: string;
+  role: string;
+  common_name: string;
+  alt_names?: string;
+  ip_sans?: string;
+  key_ref?: string;
+  exported?: boolean;
+}
+
+export interface PkiCsrGenerateResult {
+  csr_id: string;
+  csr: string;
+  key_id: string;
+  role: string;
+  common_name: string;
+  private_key: string | null;
+  private_key_type: string | null;
+}
+
+export interface PkiCsrPending {
+  csr_id: string;
+  role: string;
+  key_id: string;
+  common_name: string;
+  csr: string;
+  created_at: number;
+}
+
+export interface PkiCsrSetSignedRequest {
+  mount: string;
+  csr_id: string;
+  certificate: string;
+}
+
+export interface PkiCsrSetSignedResult {
+  serial_number: string;
+  not_after: number;
+  key_id: string;
+  source: string;
+  is_orphaned: boolean;
+}
+
+export const pkiCsrGenerate = (request: PkiCsrGenerateRequest) =>
+  invoke<PkiCsrGenerateResult>("pki_csr_generate", { request });
+export const pkiCsrList = (mount: string) =>
+  invoke<string[]>("pki_csr_list", { mount });
+export const pkiCsrRead = (mount: string, csrId: string) =>
+  invoke<PkiCsrPending | null>("pki_csr_read", { mount, csrId });
+export const pkiCsrDelete = (mount: string, csrId: string) =>
+  invoke<void>("pki_csr_delete", { mount, csrId });
+export const pkiCsrSetSigned = (request: PkiCsrSetSignedRequest) =>
+  invoke<PkiCsrSetSignedResult>("pki_csr_set_signed", { request });
 export const pkiImportCaBundle = (request: PkiImportCaBundleRequest) =>
   invoke<PkiSetSignedResult>("pki_import_ca_bundle", { request });
 export const pkiImportCaPkcs12 = (request: PkiImportCaPkcs12Request) =>

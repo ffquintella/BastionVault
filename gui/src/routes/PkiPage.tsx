@@ -28,7 +28,15 @@ import type {
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 
-type TabId = "issuers" | "roles" | "keys" | "issue" | "certs" | "tidy" | "xca";
+type TabId =
+  | "issuers"
+  | "roles"
+  | "keys"
+  | "issue"
+  | "certs"
+  | "csr"
+  | "tidy"
+  | "xca";
 
 const KEY_TYPE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "ec", label: "ECDSA P-256 (default)" },
@@ -243,6 +251,7 @@ export function PkiPage() {
                   { id: "keys", label: "Keys" },
                   { id: "issue", label: "Issue" },
                   { id: "certs", label: "Certificates" },
+                  { id: "csr", label: "External CSR" },
                   { id: "tidy", label: "Tidy" },
                   ...(xcaPluginPresent
                     ? [{ id: "xca", label: "Import XCA" }]
@@ -258,6 +267,7 @@ export function PkiPage() {
             {tab === "keys" && <KeysTab mount={activeMount} />}
             {tab === "issue" && <IssueTab mount={activeMount} />}
             {tab === "certs" && <CertsTab mount={activeMount} />}
+            {tab === "csr" && <ExternalCsrTab mount={activeMount} />}
             {tab === "tidy" && <TidyTab mount={activeMount} />}
             {tab === "xca" && xcaPluginPresent && (
               <XcaImportTab mount={activeMount} pluginVersion={xcaPluginVersion} />
@@ -3181,6 +3191,403 @@ function XcaImportTab({
           </div>
         </Card>
       )}
+    </div>
+  );
+}
+
+// ── External CSR tab — outgoing CSR for upstream signing ─────────────
+//
+// Mirrors `pki/csr/*`. Three responsibilities:
+//   1. Generate a CSR against a role; show the PEM so the operator can
+//      copy it to the upstream CA out-of-band.
+//   2. List pending CSRs awaiting the upstream signature.
+//   3. Submit the upstream-signed cert to install it under the
+//      orphan-cert index, bound to the backing managed key.
+
+function ExternalCsrTab({ mount }: { mount: string }) {
+  const { toast } = useToast();
+  const [roles, setRoles] = useState<string[]>([]);
+  const [pending, setPending] = useState<api.PkiCsrPending[]>([]);
+  const [busy, setBusy] = useState(false);
+  // Generate-form state
+  const [genRole, setGenRole] = useState("");
+  const [genCn, setGenCn] = useState("");
+  const [genAltNames, setGenAltNames] = useState("");
+  const [genIpSans, setGenIpSans] = useState("");
+  const [genKeyRef, setGenKeyRef] = useState("");
+  const [genExported, setGenExported] = useState(false);
+  const [generated, setGenerated] = useState<api.PkiCsrGenerateResult | null>(null);
+  // Set-signed state, keyed by csr_id
+  const [signedPaste, setSignedPaste] = useState<Record<string, string>>({});
+  const [openPanel, setOpenPanel] = useState<string | null>(null);
+  // Pending-delete confirmation
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+
+  const loadRoles = useCallback(async () => {
+    if (!mount) return;
+    try {
+      const list = await api.pkiListRoles(mount);
+      setRoles(list);
+    } catch (e) {
+      toast("error", extractError(e));
+    }
+  }, [mount, toast]);
+
+  const loadPending = useCallback(async () => {
+    if (!mount) return;
+    try {
+      const ids = await api.pkiCsrList(mount);
+      const records = await Promise.all(
+        ids.map((id) => api.pkiCsrRead(mount, id).catch(() => null)),
+      );
+      setPending(records.filter((r): r is api.PkiCsrPending => !!r));
+    } catch (e) {
+      toast("error", extractError(e));
+    }
+  }, [mount, toast]);
+
+  useEffect(() => {
+    loadRoles();
+    loadPending();
+  }, [loadRoles, loadPending]);
+
+  async function handleGenerate() {
+    if (!genRole) {
+      toast("error", "Pick a role first.");
+      return;
+    }
+    if (!genCn.trim()) {
+      toast("error", "Common Name is required.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await api.pkiCsrGenerate({
+        mount,
+        role: genRole,
+        common_name: genCn.trim(),
+        alt_names: genAltNames.trim() || undefined,
+        ip_sans: genIpSans.trim() || undefined,
+        key_ref: genKeyRef.trim() || undefined,
+        exported: genExported,
+      });
+      setGenerated(result);
+      toast("success", `CSR generated (${result.csr_id.slice(0, 8)}…)`);
+      // Reset form except role; refresh pending list.
+      setGenCn("");
+      setGenAltNames("");
+      setGenIpSans("");
+      setGenKeyRef("");
+      setGenExported(false);
+      await loadPending();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSetSigned(csrId: string) {
+    const cert = (signedPaste[csrId] || "").trim();
+    if (!cert) {
+      toast("error", "Paste the signed certificate PEM first.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await api.pkiCsrSetSigned({
+        mount,
+        csr_id: csrId,
+        certificate: cert,
+      });
+      toast(
+        "success",
+        `Cert installed (serial ${result.serial_number.slice(0, 16)}…)`,
+      );
+      setSignedPaste((s) => {
+        const next = { ...s };
+        delete next[csrId];
+        return next;
+      });
+      setOpenPanel(null);
+      await loadPending();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDelete(csrId: string) {
+    setBusy(true);
+    try {
+      await api.pkiCsrDelete(mount, csrId);
+      toast("success", "Pending CSR removed.");
+      await loadPending();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+      setConfirmDelete(null);
+    }
+  }
+
+  async function copyToClipboard(text: string, label: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("success", `${label} copied to clipboard.`);
+    } catch (e) {
+      toast("error", `Copy failed: ${extractError(e)}`);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <div className="space-y-3">
+          <div>
+            <h3 className="text-base font-semibold">Generate CSR</h3>
+            <p className="text-xs text-[var(--color-text-muted)] mt-1">
+              Builds a PKCS#10 CSR using the role's <code>key_type</code> /
+              <code> key_bits</code> and locked DN fields. The private key
+              lands in the managed-key store; you take the CSR to an
+              external CA, then come back to install the signed cert.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <Select
+              label="Role"
+              value={genRole}
+              onChange={(e) => setGenRole(e.target.value)}
+              required
+              options={[
+                { value: "", label: "— pick a role —" },
+                ...roles.map((r) => ({ value: r, label: r })),
+              ]}
+            />
+            <Input
+              label="Common Name"
+              value={genCn}
+              onChange={(e) => setGenCn(e.target.value)}
+              placeholder="example.com"
+              required
+            />
+            <Input
+              label="DNS / IP SANs"
+              value={genAltNames}
+              onChange={(e) => setGenAltNames(e.target.value)}
+              placeholder="www.example.com,api.example.com"
+            />
+            <Input
+              label="IP SANs (extra)"
+              value={genIpSans}
+              onChange={(e) => setGenIpSans(e.target.value)}
+              placeholder="10.0.0.1,10.0.0.2"
+            />
+            <Input
+              label="Reuse managed key (optional)"
+              value={genKeyRef}
+              onChange={(e) => setGenKeyRef(e.target.value)}
+              placeholder="key UUID or name"
+            />
+            <div className="flex items-end">
+              <label className="inline-flex items-center gap-2 text-sm pb-2">
+                <input
+                  type="checkbox"
+                  checked={genExported}
+                  onChange={(e) => setGenExported(e.target.checked)}
+                />
+                Return private key in response (one-shot)
+              </label>
+            </div>
+          </div>
+
+          <div>
+            <Button onClick={handleGenerate} disabled={busy || !mount}>
+              {busy ? "Generating…" : "Generate CSR"}
+            </Button>
+          </div>
+
+          {generated && (
+            <div className="border border-[var(--color-border)] rounded-lg p-3 space-y-2 bg-[var(--color-bg)]">
+              <div className="flex items-center justify-between">
+                <div className="text-sm">
+                  <span className="font-medium">CSR </span>
+                  <span className="font-mono text-xs text-[var(--color-text-muted)]">
+                    {generated.csr_id}
+                  </span>
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    variant="ghost"
+                    onClick={() => copyToClipboard(generated.csr, "CSR")}
+                  >
+                    Copy CSR
+                  </Button>
+                  {generated.private_key && (
+                    <Button
+                      variant="ghost"
+                      onClick={() =>
+                        copyToClipboard(generated.private_key!, "Private key")
+                      }
+                    >
+                      Copy private key
+                    </Button>
+                  )}
+                </div>
+              </div>
+              <pre className="bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded p-2 text-xs font-mono whitespace-pre-wrap break-all max-h-64 overflow-y-auto">
+                {generated.csr}
+              </pre>
+              {generated.private_key && (
+                <>
+                  <p className="text-xs text-[var(--color-text-muted)]">
+                    Private key (returned only this once — copy it now;
+                    it's also kept under managed key{" "}
+                    <code>{generated.key_id.slice(0, 8)}…</code>):
+                  </p>
+                  <pre className="bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded p-2 text-xs font-mono whitespace-pre-wrap break-all max-h-48 overflow-y-auto">
+                    {generated.private_key}
+                  </pre>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      </Card>
+
+      <Card>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-base font-semibold">Pending CSRs</h3>
+            <Button variant="ghost" onClick={loadPending} disabled={busy}>
+              Refresh
+            </Button>
+          </div>
+          {pending.length === 0 ? (
+            <EmptyState
+              title="No pending CSRs"
+              description="CSRs you generate above land here until you install the upstream-signed certificate."
+            />
+          ) : (
+            <Table
+              columns={[
+                {
+                  key: "common_name",
+                  header: "Common Name",
+                  render: (p) => <span className="truncate">{p.common_name}</span>,
+                },
+                {
+                  key: "role",
+                  header: "Role",
+                  render: (p) => p.role || "—",
+                },
+                {
+                  key: "csr_id",
+                  header: "CSR ID",
+                  render: (p) => (
+                    <span className="font-mono text-xs">
+                      {p.csr_id.slice(0, 8)}…
+                    </span>
+                  ),
+                },
+                {
+                  key: "key_id",
+                  header: "Key",
+                  render: (p) => (
+                    <span className="font-mono text-xs">
+                      {p.key_id.slice(0, 8)}…
+                    </span>
+                  ),
+                },
+                {
+                  key: "created",
+                  header: "Created",
+                  render: (p) => fmtUnix(p.created_at),
+                },
+                {
+                  key: "actions",
+                  header: "",
+                  render: (p) => (
+                    <div className="flex gap-2 justify-end">
+                      <Button
+                        variant="ghost"
+                        onClick={() => copyToClipboard(p.csr, "CSR")}
+                      >
+                        Copy CSR
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        onClick={() =>
+                          setOpenPanel(openPanel === p.csr_id ? null : p.csr_id)
+                        }
+                      >
+                        {openPanel === p.csr_id ? "Cancel" : "Install signed cert"}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        onClick={() => setConfirmDelete(p.csr_id)}
+                      >
+                        Drop
+                      </Button>
+                    </div>
+                  ),
+                },
+              ]}
+              data={pending}
+              rowKey={(p) => p.csr_id}
+            />
+          )}
+
+          {openPanel && (
+            <div className="border border-[var(--color-border)] rounded-lg p-3 space-y-2 bg-[var(--color-bg)]">
+              <p className="text-sm">
+                Install signed certificate for{" "}
+                <span className="font-mono text-xs">{openPanel.slice(0, 8)}…</span>
+              </p>
+              <Textarea
+                label="Signed certificate (PEM)"
+                value={signedPaste[openPanel] || ""}
+                onChange={(e) =>
+                  setSignedPaste((s) => ({
+                    ...s,
+                    [openPanel]: e.target.value,
+                  }))
+                }
+                rows={10}
+                placeholder={`-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----`}
+              />
+              <div className="flex gap-2">
+                <Button
+                  onClick={() => handleSetSigned(openPanel)}
+                  disabled={busy}
+                >
+                  {busy ? "Installing…" : "Install"}
+                </Button>
+                <Button variant="ghost" onClick={() => setOpenPanel(null)}>
+                  Close
+                </Button>
+              </div>
+              <p className="text-xs text-[var(--color-text-muted)]">
+                The cert lands under <strong>Certificates</strong> with the{" "}
+                <code>csr-external</code> source label and is bound to the
+                backing managed key. The pending CSR record is removed on
+                success.
+              </p>
+            </div>
+          )}
+        </div>
+      </Card>
+
+      <ConfirmModal
+        open={!!confirmDelete}
+        title="Drop pending CSR?"
+        message="This removes the pending request only. The backing managed key is preserved — you can re-use it on a new CSR by referencing it in 'Reuse managed key'."
+        confirmLabel="Drop"
+        onConfirm={() => confirmDelete && handleDelete(confirmDelete)}
+        onClose={() => setConfirmDelete(null)}
+      />
     </div>
   );
 }

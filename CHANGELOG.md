@@ -45,6 +45,70 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### PKI — External-signing CSR flow for leaf certs
+
+Lets operators generate a leaf CSR locally, hand it to an external CA
+for signing, and install the resulting cert back into the engine — the
+leaf-cert analogue of the existing `pki/intermediate/generate` +
+`pki/intermediate/set-signed` flow that already exists for
+intermediate CAs. The backing private key stays in the managed-key
+store throughout, and the upstream-signed cert lands under the
+orphan-cert index (`is_orphaned: true`, `source: "csr-external"`)
+bound to that key — so `pki/key/<id>` delete refuses while the cert
+is live.
+
+Backend:
+- [`src/modules/pki/path_csr.rs`](src/modules/pki/path_csr.rs) — new
+  module exposing
+  `pki/csr/generate` (Write),
+  `pki/csr` (List),
+  `pki/csr/<csr_id>` (Read, Delete), and
+  `pki/csr/<csr_id>/set-signed` (Write).
+- [`src/modules/pki/storage.rs`](src/modules/pki/storage.rs) — new
+  `PendingCsr` record + `csr/pending/<id>` storage prefix.
+- [`src/modules/pki/x509.rs`](src/modules/pki/x509.rs) — new
+  `build_leaf_csr` helper: routes through the existing
+  `params_for_subject` so the CSR carries the same role-driven
+  Key Usage / EKU / DN locked-fields the issue path produces. CSRs
+  request — the upstream CA decides whether to honour.
+- [`src/modules/pki/mod.rs`](src/modules/pki/mod.rs) — routes
+  registered alongside the intermediate / issue paths.
+
+Tauri commands + frontend api:
+- [`gui/src-tauri/src/commands/pki.rs`](gui/src-tauri/src/commands/pki.rs)
+  — `pki_csr_generate`, `pki_csr_list`, `pki_csr_read`, `pki_csr_delete`,
+  `pki_csr_set_signed` wrap the routes with strongly-typed request /
+  response shapes.
+- [`gui/src/lib/api.ts`](gui/src/lib/api.ts) — matching
+  `pkiCsr*` exports.
+
+GUI:
+- [`gui/src/routes/PkiPage.tsx`](gui/src/routes/PkiPage.tsx) — new
+  **External CSR** tab between *Certificates* and *Tidy*. Three
+  panels: a generate form (role + CN + SANs + optional `key_ref`
+  reuse + optional one-shot private-key export), a pending-CSRs
+  table (Common Name / Role / CSR ID / Key / Created + per-row
+  Copy-CSR / Install-signed-cert / Drop actions), and an inline
+  paste-cert panel that runs `set-signed` against the selected
+  pending row.
+
+Validation: `set-signed` parses the supplied PEM, compares the cert's
+`SubjectPublicKeyInfo` against the pending CSR's pubkey, and rejects
+with `ErrPkiCertKeyMismatch` on divergence — the same check the
+`pki/intermediate/set-signed` path already runs. The cert serial gets
+bound to the backing key via `keys::add_cert_ref`, then the pending
+record is dropped. Re-issuance against the same key is supported by
+running `csr/generate` again with `key_ref` set to the persisted key
+UUID (subject to the role's `allow_key_reuse` / `allowed_key_refs`
+gating).
+
+Phase 1 limit: classical algorithms only (RSA / ECDSA / Ed25519). PQC
+CSR support lands when the rcgen-PQC story is ready — the dispatch
+in `path_csr.rs::csr_generate` already routes through `Signer` so
+the PQC path is a small follow-up.
+
 ### Changed
 
 #### Dependency upgrade sweep — Phases 1, 2, 4, 5 (russh), 6

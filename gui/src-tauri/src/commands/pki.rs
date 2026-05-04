@@ -482,6 +482,175 @@ pub async fn pki_sign_intermediate(
     })
 }
 
+// ── External-signing CSR flow (`pki/csr/*`) ──────────────────────────
+
+#[derive(Deserialize)]
+pub struct PkiCsrGenerateRequest {
+    pub mount: String,
+    pub role: String,
+    pub common_name: String,
+    pub alt_names: Option<String>,
+    pub ip_sans: Option<String>,
+    pub key_ref: Option<String>,
+    pub exported: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub struct PkiCsrGenerateResult {
+    pub csr_id: String,
+    pub csr: String,
+    pub key_id: String,
+    pub role: String,
+    pub common_name: String,
+    pub private_key: Option<String>,
+    pub private_key_type: Option<String>,
+}
+
+#[tauri::command]
+pub async fn pki_csr_generate(
+    state: State<'_, AppState>,
+    request: PkiCsrGenerateRequest,
+) -> CmdResult<PkiCsrGenerateResult> {
+    let mount = mount_prefix(&request.mount);
+    let mut body = Map::new();
+    body.insert("role".into(), json!(request.role));
+    body.insert("common_name".into(), json!(request.common_name));
+    if let Some(s) = request.alt_names.filter(|s| !s.is_empty()) {
+        body.insert("alt_names".into(), json!(s));
+    }
+    if let Some(s) = request.ip_sans.filter(|s| !s.is_empty()) {
+        body.insert("ip_sans".into(), json!(s));
+    }
+    if let Some(k) = request.key_ref.filter(|s| !s.is_empty()) {
+        body.insert("key_ref".into(), json!(k));
+    }
+    if request.exported.unwrap_or(false) {
+        body.insert("exported".into(), json!(true));
+    }
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{mount}/csr/generate"),
+        Some(body),
+    )
+    .await?;
+    let map = data_to_map(resp);
+    Ok(PkiCsrGenerateResult {
+        csr_id: val_str(&map, "csr_id"),
+        csr: val_str(&map, "csr"),
+        key_id: val_str(&map, "key_id"),
+        role: val_str(&map, "role"),
+        common_name: val_str(&map, "common_name"),
+        private_key: map.get("private_key").and_then(|v| v.as_str()).map(String::from),
+        private_key_type: map.get("private_key_type").and_then(|v| v.as_str()).map(String::from),
+    })
+}
+
+#[tauri::command]
+pub async fn pki_csr_list(state: State<'_, AppState>, mount: String) -> CmdResult<Vec<String>> {
+    let mount = mount_prefix(&mount);
+    let resp = make_request(&state, Operation::List, format!("{mount}/csr"), None).await?;
+    Ok(val_str_array(&data_to_map(resp), "keys"))
+}
+
+#[derive(Serialize)]
+pub struct PkiCsrPending {
+    pub csr_id: String,
+    pub role: String,
+    pub key_id: String,
+    pub common_name: String,
+    pub csr: String,
+    pub created_at: u64,
+}
+
+#[tauri::command]
+pub async fn pki_csr_read(
+    state: State<'_, AppState>,
+    mount: String,
+    csr_id: String,
+) -> CmdResult<Option<PkiCsrPending>> {
+    let mount = mount_prefix(&mount);
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("{mount}/csr/{csr_id}"),
+        None,
+    )
+    .await
+    .ok();
+    let Some(resp) = resp else { return Ok(None) };
+    let map = data_to_map(resp);
+    if map.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PkiCsrPending {
+        csr_id: val_str(&map, "csr_id"),
+        role: val_str(&map, "role"),
+        key_id: val_str(&map, "key_id"),
+        common_name: val_str(&map, "common_name"),
+        csr: val_str(&map, "csr"),
+        created_at: map.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
+    }))
+}
+
+#[tauri::command]
+pub async fn pki_csr_delete(
+    state: State<'_, AppState>,
+    mount: String,
+    csr_id: String,
+) -> CmdResult<()> {
+    let mount = mount_prefix(&mount);
+    make_request(
+        &state,
+        Operation::Delete,
+        format!("{mount}/csr/{csr_id}"),
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct PkiCsrSetSignedRequest {
+    pub mount: String,
+    pub csr_id: String,
+    pub certificate: String,
+}
+
+#[derive(Serialize)]
+pub struct PkiCsrSetSignedResult {
+    pub serial_number: String,
+    pub not_after: u64,
+    pub key_id: String,
+    pub source: String,
+    pub is_orphaned: bool,
+}
+
+#[tauri::command]
+pub async fn pki_csr_set_signed(
+    state: State<'_, AppState>,
+    request: PkiCsrSetSignedRequest,
+) -> CmdResult<PkiCsrSetSignedResult> {
+    let mount = mount_prefix(&request.mount);
+    let mut body = Map::new();
+    body.insert("certificate".into(), json!(request.certificate));
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{mount}/csr/{}/set-signed", request.csr_id),
+        Some(body),
+    )
+    .await?;
+    let map = data_to_map(resp);
+    Ok(PkiCsrSetSignedResult {
+        serial_number: val_str(&map, "serial_number"),
+        not_after: map.get("not_after").and_then(|v| v.as_u64()).unwrap_or(0),
+        key_id: val_str(&map, "key_id"),
+        source: val_str(&map, "source"),
+        is_orphaned: map.get("is_orphaned").and_then(|v| v.as_bool()).unwrap_or(true),
+    })
+}
+
 #[derive(Deserialize)]
 pub struct PkiImportCaBundleRequest {
     pub mount: String,

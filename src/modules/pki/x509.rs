@@ -265,6 +265,33 @@ pub fn build_intermediate_csr(
     params.serialize_request(signer.key_pair()).map_err(rcgen_err)
 }
 
+/// Build a CSR for a leaf-style request (CN + SANs + role-driven DN /
+/// key usages). Used by `pki/csr/generate` to produce a CSR that gets
+/// signed by an *external* CA. The CSR's public key matches `signer`'s
+/// keypair; when the operator brings the upstream-signed cert back via
+/// `pki/csr/<id>/set-signed`, we verify the SPKI matches before
+/// indexing.
+///
+/// We intentionally route through [`params_for_subject`] so the CSR
+/// requests the *same* key usages and EKUs the role would otherwise
+/// produce on `pki/issue/:role`. Whether the upstream CA honours those
+/// requested attributes is its policy decision — a CSR is a polite ask,
+/// not an instruction.
+pub fn build_leaf_csr(
+    role: &RoleEntry,
+    subject: &SubjectInput,
+    signer: &CertSigner,
+) -> Result<rcgen::CertificateSigningRequest, RvError> {
+    // CSRs don't carry serial / validity bytes — the issuing CA assigns
+    // both. Pass a throw-away serial through `params_for_subject` so we
+    // can reuse it for SAN/DN/EKU population. `serialize_request` only
+    // serialises the subject + extensions + pubkey, so the serial /
+    // validity drop on the floor.
+    let serial_throwaway = random_serial_bytes();
+    let params = params_for_subject(role, subject, role.ttl, &serial_throwaway)?;
+    params.serialize_request(signer.key_pair()).map_err(rcgen_err)
+}
+
 /// `rcgen::Issuer` consumes its signing key, so we reconstruct one from the
 /// CertSigner's PKCS#8 PEM each time we need an issuer handle. The CertSigner
 /// itself remains live and reusable.

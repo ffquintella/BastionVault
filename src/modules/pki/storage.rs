@@ -253,6 +253,48 @@ pub struct CertRecord {
     pub key_id: String,
 }
 
+// ── External-signing CSR flow (`pki/csr/*`) ──────────────────────────
+//
+// Mirrors the intermediate-CA flow but for *leaf* certs whose signature
+// comes from an external authority. The engine persists a [`PendingCsr`]
+// at `csr/pending/<id>` between `pki/csr/generate` and
+// `pki/csr/<id>/set-signed`; once the signed cert lands it's stored
+// under the orphan-cert index (no issuer linkage — we didn't sign it)
+// and the pending record is dropped.
+pub const KEY_PREFIX_CSR_PENDING: &str = "csr/pending/";
+
+pub fn pending_csr_storage_key(id: &str) -> String {
+    format!("{KEY_PREFIX_CSR_PENDING}{id}")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingCsr {
+    /// UUID assigned at `pki/csr/generate` time. Also the path
+    /// component on the per-CSR endpoint.
+    pub id: String,
+    /// Role this CSR was generated against. Captured here so
+    /// `set-signed` can re-validate the role still exists / hasn't
+    /// drifted. Empty when the role was deleted between generate and
+    /// set-signed (we still allow the install in that case but log a
+    /// warning).
+    pub role_name: String,
+    /// Managed-key UUID backing this CSR. Always set — every CSR
+    /// generation either pinned to an existing managed key or
+    /// auto-stashed the freshly generated key in the managed-key
+    /// store, so `set-signed` can bind the resulting cert serial to
+    /// the same key via [`super::keys::add_cert_ref`].
+    pub key_id: String,
+    /// Subject CN as supplied at generate time. Persisted so the GUI
+    /// list endpoint can render a meaningful row label without
+    /// re-parsing the PEM.
+    pub common_name: String,
+    /// CSR PEM (`-----BEGIN CERTIFICATE REQUEST-----`). Re-served
+    /// verbatim by the per-CSR read endpoint so the operator can
+    /// re-copy it after closing the original generate response.
+    pub csr_pem: String,
+    pub created_at_unix: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CrlState {
     pub crl_number: u64,
