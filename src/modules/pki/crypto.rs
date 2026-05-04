@@ -855,31 +855,45 @@ impl Signer {
                         format!(" (RSA {bits}-bit{exp_note}{size_note})")
                     }
                     None => {
-                        // rsa-0.9 couldn't parse — could be SEC1 EC,
-                        // DSA, encrypted PKCS#8, or some XCA-specific
-                        // shape. Surface a top-level DER sketch +
-                        // first-bytes hex so the operator can ship
-                        // them to a maintainer.
-                        let (sketch, head_hex) = pem::parse(normalised.trim())
-                            .ok()
-                            .map(|p| {
-                                let der = p.contents();
-                                let head: Vec<String> = der
-                                    .iter()
-                                    .take(32)
-                                    .map(|b| format!("{b:02x}"))
-                                    .collect();
-                                (sketch_der(der), head.join(""))
-                            })
-                            .unwrap_or_else(|| ("pem-parse-failed".to_string(), String::new()));
-                        format!(
-                            " (could not introspect key shape; der_sketch=\"{sketch}\", \
-                             head32={head_hex})"
-                        )
+                        // rsa-0.9 couldn't parse the key in any form,
+                        // and `sniff_pkcs8_algorithm_oid` returned
+                        // nothing (so it isn't even PKCS#8). The DER
+                        // sketch + first bytes go into the dev log
+                        // for maintainer diagnosis, but the operator
+                        // sees a plain-language message: when the
+                        // top byte isn't `0x30` (DER SEQUENCE) the
+                        // by-far most likely explanation is the
+                        // upstream decryption ran with the wrong
+                        // password — most commonly an XCA per-key
+                        // `ownPass` that wasn't supplied.
+                        if let Ok(parsed) = pem::parse(normalised.trim()) {
+                            let der = parsed.contents();
+                            let sketch = sketch_der(der);
+                            let head: String = der
+                                .iter()
+                                .take(32)
+                                .map(|b| format!("{b:02x}"))
+                                .collect();
+                            log::warn!(
+                                "pki: key payload is not a recognised private-key DER \
+                                 (sketch={sketch}, head32={head}) — likely a \
+                                 wrong-password decrypt"
+                            );
+                            if der.first() != Some(&0x30) {
+                                return Err(RvError::ErrString(
+                                    "password does not match — the key payload \
+                                     is not a valid private key. If this came from an \
+                                     XCA database with a per-key `ownPass`, supply \
+                                     that password and retry."
+                                        .into(),
+                                ));
+                            }
+                        }
+                        " (key payload is not a recognised private-key format)".to_string()
                     }
                 };
                 Err(RvError::ErrString(format!(
-                    "ring rejected key{detail}; bare rcgen error: {e}"
+                    "could not import key{detail}; underlying parser error: {e}"
                 )))
             }
         }
