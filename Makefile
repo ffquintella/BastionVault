@@ -53,7 +53,7 @@ RUSTUP_CARGO_BIN ?= $(HOME)/.cargo/bin
 endif
 export PATH := $(RUSTUP_CARGO_BIN):$(PATH)
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugin-bump
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugin-bump
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -121,29 +121,56 @@ docs: ## Start the documentation site locally
 # first sync run, every subsequent bump keeps all four files in
 # lockstep.
 
+# Cross-platform `sed -i` invocation. BSD sed (macOS, FreeBSD) needs an
+# explicit empty backup-suffix argument (`-i ''`); GNU sed (Linux) errors
+# on that and wants either `-i` alone or `-i ''` written without a space.
+# Detect with --version, which BSD sed lacks.
+SED_INPLACE := $(shell sed --version >/dev/null 2>&1 && echo "sed -i" || echo "sed -i ''")
+
+# `bump-*` keeps the four version sites in lockstep:
+#   * root `Cargo.toml`               (workspace crate version)
+#   * `gui/src-tauri/Cargo.toml`      (Tauri Rust crate)
+#   * `gui/package.json`              (npm — bastion-vault-gui)
+#   * `gui/src-tauri/tauri.conf.json` (Tauri runtime version pin)
+#
+# Workspace crates under `crates/` (`bv_crypto`, `bastion-plugin-sdk`,
+# `bv-plugin-pack`) have independent versioning lifecycles and are NOT
+# touched here — bump them by hand or via dedicated scripts as
+# semver-relevant changes land.
+#
+# Each sed uses `[^\"]*` for the existing-version match so a manually
+# patched root (or a previously-drifted gui) still bumps cleanly.
+
 bump-patch: ## Bump patch version (0.0.x) across root + gui
 	@NEW=$$(echo $(VERSION) | awk -F. '{printf "%d.%d.%d", $$1, $$2, $$3+1}'); \
-	sed -i '' "s/^version = \"$(VERSION)\"/version = \"$$NEW\"/" Cargo.toml; \
-	sed -i '' "s/^version = \"[^\"]*\"/version = \"$$NEW\"/" gui/src-tauri/Cargo.toml; \
-	sed -i '' "s/^  \"version\": \"[^\"]*\"/  \"version\": \"$$NEW\"/" gui/package.json; \
-	sed -i '' "s/^  \"version\": \"[^\"]*\"/  \"version\": \"$$NEW\"/" gui/src-tauri/tauri.conf.json; \
-	echo "Bumped version: $(VERSION) -> $$NEW (root + gui)"
+	$(MAKE) --no-print-directory _bump-write NEW=$$NEW
 
 bump-minor: ## Bump minor version (0.x.0) across root + gui
 	@NEW=$$(echo $(VERSION) | awk -F. '{printf "%d.%d.0", $$1, $$2+1}'); \
-	sed -i '' "s/^version = \"$(VERSION)\"/version = \"$$NEW\"/" Cargo.toml; \
-	sed -i '' "s/^version = \"[^\"]*\"/version = \"$$NEW\"/" gui/src-tauri/Cargo.toml; \
-	sed -i '' "s/^  \"version\": \"[^\"]*\"/  \"version\": \"$$NEW\"/" gui/package.json; \
-	sed -i '' "s/^  \"version\": \"[^\"]*\"/  \"version\": \"$$NEW\"/" gui/src-tauri/tauri.conf.json; \
-	echo "Bumped version: $(VERSION) -> $$NEW (root + gui)"
+	$(MAKE) --no-print-directory _bump-write NEW=$$NEW
 
 bump-major: ## Bump major version (x.0.0) across root + gui
 	@NEW=$$(echo $(VERSION) | awk -F. '{printf "%d.0.0", $$1+1}'); \
-	sed -i '' "s/^version = \"$(VERSION)\"/version = \"$$NEW\"/" Cargo.toml; \
-	sed -i '' "s/^version = \"[^\"]*\"/version = \"$$NEW\"/" gui/src-tauri/Cargo.toml; \
-	sed -i '' "s/^  \"version\": \"[^\"]*\"/  \"version\": \"$$NEW\"/" gui/package.json; \
-	sed -i '' "s/^  \"version\": \"[^\"]*\"/  \"version\": \"$$NEW\"/" gui/src-tauri/tauri.conf.json; \
-	echo "Bumped version: $(VERSION) -> $$NEW (root + gui)"
+	$(MAKE) --no-print-directory _bump-write NEW=$$NEW
+
+# Internal target — does the actual rewrite. Kept separate so the three
+# user-facing targets stay one-liners and the sed list lives in one place.
+_bump-write:
+	@if [ -z "$(NEW)" ]; then echo "_bump-write: NEW must be set" >&2; exit 1; fi
+	@# `1,/^version = /` constrains the substitution to the lines from
+	@# 1 to the FIRST match — i.e. the `[package]` version. Without
+	@# this, a workspace `Cargo.toml` carrying `[dependencies.libc] /
+	@# version = "0.2"` would also get rewritten, which broke the
+	@# previous bump pass.
+	@$(SED_INPLACE) '1,/^version = /s/^version = "[^"]*"/version = "$(NEW)"/' Cargo.toml
+	@$(SED_INPLACE) '1,/^version = /s/^version = "[^"]*"/version = "$(NEW)"/' gui/src-tauri/Cargo.toml
+	@$(SED_INPLACE) '1,/^  "version":/s/^  "version": "[^"]*"/  "version": "$(NEW)"/' gui/package.json
+	@$(SED_INPLACE) '1,/^  "version":/s/^  "version": "[^"]*"/  "version": "$(NEW)"/' gui/src-tauri/tauri.conf.json
+	@echo "Bumped version: $(VERSION) -> $(NEW)"
+	@echo "  Cargo.toml:                    $$(grep '^version' Cargo.toml | head -1)"
+	@echo "  gui/src-tauri/Cargo.toml:      $$(grep '^version' gui/src-tauri/Cargo.toml | head -1)"
+	@echo "  gui/package.json:              $$(grep '\"version\"' gui/package.json | head -1 | sed 's/^[ \t]*//')"
+	@echo "  gui/src-tauri/tauri.conf.json: $$(grep '\"version\"' gui/src-tauri/tauri.conf.json | head -1 | sed 's/^[ \t]*//')"
 
 clean: ## Remove Cargo build artefacts (target/) across the workspace
 	cargo clean

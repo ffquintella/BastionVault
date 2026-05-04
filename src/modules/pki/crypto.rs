@@ -289,10 +289,27 @@ impl CertSigner {
     }
 }
 
-/// Re-encode a non-PKCS#8 RSA PEM as PKCS#8. Returns the input
-/// unchanged when it isn't PKCS#1, when it's already valid PKCS#8, or
-/// when re-encoding fails (let the strict downstream parser surface the
-/// real error in that case).
+/// Canonicalise an RSA private-key PEM into a strict PKCS#8 layout
+/// rcgen / ring will accept. Returns the input unchanged for non-RSA
+/// PEMs (passing them through to whichever downstream parser knows
+/// the format) and for inputs we can't decode at all.
+///
+/// Rcgen ≥ 0.14 routes RSA through `ring`, which is stricter than the
+/// `rsa` crate's parser:
+///   * the algorithm OID must be plain `rsaEncryption`
+///     (`1.2.840.113549.1.1.1`) — not `id-RSASSA-PSS`,
+///   * the key must carry the full CRT tuple (p, q, dP, dQ, qInv),
+///   * the public exponent must be 65537.
+///
+/// XCA databases (and some older OpenSSL exports) emit RSA keys in
+/// shapes that `rsa-0.9` accepts but `ring` does not — most commonly
+/// PKCS#1 RSAPrivateKey DER under a PKCS#8 PEM label, or PKCS#8
+/// without CRT components. Both round-trip cleanly through
+/// `rsa::RsaPrivateKey::to_pkcs8_pem`, which always emits the
+/// canonical PKCS#8 with CRT and the rsaEncryption OID. Re-emitting
+/// unconditionally (instead of only when the input parse fails)
+/// catches the "PKCS#8 but missing CRT" case the previous version
+/// missed.
 fn normalise_to_pkcs8_pem(pem: &str) -> String {
     use rsa::pkcs1::DecodeRsaPrivateKey;
     use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
@@ -300,32 +317,28 @@ fn normalise_to_pkcs8_pem(pem: &str) -> String {
 
     let trimmed = pem.trim();
 
-    // Fast path: if PKCS#8 RSA parsing already works, the body is PKCS#8 —
-    // pass through. (Non-RSA PKCS#8 also passes through here because
-    // `from_pkcs8_pem` for `RsaPrivateKey` rejects the wrong algorithm.)
-    if RsaPrivateKey::from_pkcs8_pem(trimmed).is_ok() {
+    // Try every shape we know to recognise. rsa-0.9 is permissive
+    // enough that any of these succeeding is a hint the input is RSA.
+    let priv_key = if let Ok(k) = RsaPrivateKey::from_pkcs8_pem(trimmed) {
+        k
+    } else if let Ok(k) = RsaPrivateKey::from_pkcs1_pem(trimmed) {
+        k
+    } else if let Ok(parsed) = pem::parse(trimmed) {
+        match RsaPrivateKey::from_pkcs1_der(parsed.contents()) {
+            Ok(k) => k,
+            Err(_) => return pem.to_string(),
+        }
+    } else {
         return pem.to_string();
-    }
+    };
 
-    // Try PKCS#1 by label (`-----BEGIN RSA PRIVATE KEY-----`, OpenSSL's
-    // pre-PKCS#8 default).
-    if let Ok(k) = RsaPrivateKey::from_pkcs1_pem(trimmed) {
-        if let Ok(p8) = k.to_pkcs8_pem(LineEnding::LF) {
-            return p8.to_string();
-        }
+    // Re-emit through rsa-0.9. The encoder ALWAYS produces a
+    // canonical PKCS#8 with `rsaEncryption` OID + full CRT tuple,
+    // regardless of what the input layout was.
+    match priv_key.to_pkcs8_pem(LineEnding::LF) {
+        Ok(p) => p.to_string(),
+        Err(_) => pem.to_string(),
     }
-
-    // Try parsing the inner DER as PKCS#1 even when the PEM label says
-    // `PRIVATE KEY` (XCA's xca-import plugin emits this shape).
-    if let Ok(parsed) = pem::parse(trimmed) {
-        if let Ok(k) = RsaPrivateKey::from_pkcs1_der(parsed.contents()) {
-            if let Ok(p8) = k.to_pkcs8_pem(LineEnding::LF) {
-                return p8.to_string();
-            }
-        }
-    }
-
-    pem.to_string()
 }
 
 pub(crate) fn rcgen_err(e: rcgen::Error) -> RvError {
