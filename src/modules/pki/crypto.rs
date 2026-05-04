@@ -290,8 +290,17 @@ impl CertSigner {
 }
 
 pub(crate) fn rcgen_err(e: rcgen::Error) -> RvError {
-    log::error!("pki: rcgen error: {e}");
-    RvError::ErrPkiInternal
+    // Surface the rcgen detail through the wire response (it already
+    // gets logged here for server-side correlation). The previous shape
+    // returned a bare `ErrPkiInternal` whose Display is "PKI internal
+    // error." — useless for diagnosing why a specific RSA key was
+    // rejected on import (e.g. unsupported PEM label, RSA-1024 sniffed
+    // as 2048-routed, non-CRT layout, exponent != 65537, etc.). The
+    // operator needs the rcgen message; logs only help when the
+    // operator can read them.
+    let msg = e.to_string();
+    log::error!("pki: rcgen error: {msg}");
+    RvError::ErrString(format!("pki: rcgen rejected key/cert: {msg}"))
 }
 
 /// Try to parse `pem` as an RSA PKCS#8 PEM and return the matching
