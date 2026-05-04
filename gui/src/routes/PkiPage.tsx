@@ -3635,6 +3635,8 @@ function ExternalCsrTab({ mount }: { mount: string }) {
 //     encrypted format (PKCS#12 — landing in a follow-up; today the
 //     host returns the gating error and the modal surfaces it).
 
+type ExportFormatId = "pem" | "pkcs7" | "pkcs12";
+
 function ExportModal({
   open,
   kind,
@@ -3649,8 +3651,9 @@ function ExportModal({
   onClose: () => void;
 }) {
   const { toast } = useToast();
-  const [format, setFormat] = useState<"pem" | "pkcs7">("pem");
+  const [format, setFormat] = useState<ExportFormatId>("pem");
   const [includeKey, setIncludeKey] = useState(false);
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<api.PkiExportResult | null>(null);
 
@@ -3659,12 +3662,14 @@ function ExportModal({
     if (open) {
       setFormat("pem");
       setIncludeKey(false);
+      setPassword("");
       setResult(null);
     }
   }, [open]);
 
   // PKCS#7 has no key slot; clamp the checkbox so the operator
-  // can't ask for an impossible combination.
+  // can't ask for an impossible combination. PKCS#12 *does* carry
+  // keys, so we leave the checkbox alone there.
   useEffect(() => {
     if (format === "pkcs7" && includeKey) setIncludeKey(false);
   }, [format, includeKey]);
@@ -3672,6 +3677,10 @@ function ExportModal({
   async function handleExport() {
     if (!mount || !target) {
       toast("error", "Missing mount or target.");
+      return;
+    }
+    if (format === "pkcs12" && !password.trim()) {
+      toast("error", "PKCS#12 requires a password.");
       return;
     }
     setBusy(true);
@@ -3683,12 +3692,14 @@ function ExportModal({
               serial: target,
               format,
               include_private_key: includeKey,
+              password: format === "pkcs12" ? password : undefined,
             })
           : await api.pkiExportIssuer({
               mount,
               issuer_ref: target,
               format,
               include_chain: true,
+              password: format === "pkcs12" ? password : undefined,
             });
       setResult(res);
       toast("success", `Exported (${res.format}).`);
@@ -3712,15 +3723,30 @@ function ExportModal({
   function handleDownload() {
     if (!result) return;
     try {
-      // Browser-style blob download — works inside Tauri's WebView
-      // on every platform without needing the @tauri-apps/plugin-fs
-      // dep. The webview hands the user the standard "save to…"
-      // dialog from the OS shell.
       const filename =
         kind === "cert"
           ? `cert-${target.slice(0, 12)}.${result.filename_extension}`
           : `${target}.${result.filename_extension}`;
-      const blob = new Blob([result.body], { type: "application/octet-stream" });
+      // Body comes back as `utf8` for PEM / PKCS#7 and `base64` for
+      // PKCS#12 raw DER. Decode the base64 case before stuffing it
+      // into the Blob so the .p12 file lands on disk byte-correct.
+      let bytes: Uint8Array;
+      if (result.body_encoding === "base64") {
+        const bin = atob(result.body);
+        bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+      } else {
+        bytes = new TextEncoder().encode(result.body);
+      }
+      // Browser-style blob download — works inside Tauri's WebView
+      // on every platform without needing the @tauri-apps/plugin-fs
+      // dep. The webview hands the user the standard "save to…"
+      // dialog from the OS shell.
+      // `Blob` typings on TS 5.x complain about `Uint8Array<ArrayBufferLike>`
+      // — feed the underlying buffer slice directly to dodge the
+      // SharedArrayBuffer-vs-ArrayBuffer type-narrowing issue.
+      const blob = new Blob([bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer], {
+        type: "application/octet-stream",
+      });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -3768,10 +3794,11 @@ function ExportModal({
         <Select
           label="Format"
           value={format}
-          onChange={(e) => setFormat(e.target.value as "pem" | "pkcs7")}
+          onChange={(e) => setFormat(e.target.value as ExportFormatId)}
           options={[
             { value: "pem", label: "PEM (cert + chain, optionally + key)" },
             { value: "pkcs7", label: "PKCS#7 (.p7b, certs only)" },
+            { value: "pkcs12", label: "PKCS#12 (.p12, password-encrypted)" },
           ]}
         />
         {kind === "cert" && (
@@ -3792,6 +3819,15 @@ function ExportModal({
             included automatically.
           </p>
         )}
+        {format === "pkcs12" && (
+          <Input
+            label="PKCS#12 password"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="Required — encrypts the .p12 file"
+          />
+        )}
         {result && (
           <div className="space-y-2">
             <p className="text-xs text-[var(--color-text-muted)]">
@@ -3803,9 +3839,17 @@ function ExportModal({
                 </>
               ) : null}
             </p>
-            <pre className="bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded p-2 text-xs font-mono whitespace-pre-wrap break-all max-h-80 overflow-y-auto">
-              {result.body}
-            </pre>
+            {result.body_encoding === "base64" ? (
+              <p className="text-xs text-[var(--color-text-muted)]">
+                Binary payload ({result.body.length.toLocaleString()} base64
+                chars). Use <strong>Download</strong> — Copy would paste the
+                base64 envelope, not the bytes.
+              </p>
+            ) : (
+              <pre className="bg-[var(--color-bg-elevated)] border border-[var(--color-border)] rounded p-2 text-xs font-mono whitespace-pre-wrap break-all max-h-80 overflow-y-auto">
+                {result.body}
+              </pre>
+            )}
           </div>
         )}
       </div>

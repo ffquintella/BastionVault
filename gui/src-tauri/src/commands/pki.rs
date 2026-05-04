@@ -1413,24 +1413,29 @@ pub struct PkiRevokeResult {
 pub struct PkiExportCertRequest {
     pub mount: String,
     pub serial: String,
-    /// `pem` (default) | `pkcs7`.
+    /// `pem` (default) | `pkcs7` | `pkcs12`.
     pub format: Option<String>,
     pub include_private_key: Option<bool>,
     /// `normal` (default) | `backup`.
     pub mode: Option<String>,
+    /// Required when `format=pkcs12`.
+    pub password: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct PkiExportResult {
-    /// `pem` | `pkcs7`. Echoed back so the GUI can label the save
-    /// dialog correctly.
+    /// `pem` | `pkcs7` | `pkcs12`. Echoed back so the GUI can label
+    /// the save dialog correctly.
     pub format: String,
     /// Suggested filename extension (no leading dot).
     pub filename_extension: String,
-    /// Encoded payload as a UTF-8 string. Both PEM and PEM-armored
-    /// PKCS#7 are text-safe; PKCS#12 (when it lands) will switch to
-    /// a base64 variant.
+    /// Encoded payload — UTF-8 for text formats, base64 for PKCS#12
+    /// (raw DER bytes don't fit cleanly in JSON otherwise).
     pub body: String,
+    /// `utf8` | `base64`. Tells the GUI whether to decode the body
+    /// before writing it to disk.
+    #[serde(default)]
+    pub body_encoding: String,
     pub includes_private_key: bool,
     #[serde(default)]
     pub backup_mode: bool,
@@ -1458,6 +1463,9 @@ pub async fn pki_export_cert(
     if let Some(m) = request.mode.filter(|s| !s.is_empty()) {
         body.insert("mode".into(), json!(m));
     }
+    if let Some(p) = request.password.filter(|s| !s.is_empty()) {
+        body.insert("password".into(), json!(p));
+    }
     let resp = make_request(
         &state,
         Operation::Read,
@@ -1470,6 +1478,7 @@ pub async fn pki_export_cert(
         format: val_str(&map, "format"),
         filename_extension: val_str(&map, "filename_extension"),
         body: val_str(&map, "body"),
+        body_encoding: val_str(&map, "body_encoding"),
         includes_private_key: map
             .get("includes_private_key")
             .and_then(|v| v.as_bool())
@@ -1487,6 +1496,7 @@ pub struct PkiExportIssuerRequest {
     pub issuer_ref: String,
     pub format: Option<String>,
     pub include_chain: Option<bool>,
+    pub password: Option<String>,
 }
 
 #[tauri::command]
@@ -1502,6 +1512,9 @@ pub async fn pki_export_issuer(
     if let Some(b) = request.include_chain {
         body.insert("include_chain".into(), json!(b));
     }
+    if let Some(p) = request.password.filter(|s| !s.is_empty()) {
+        body.insert("password".into(), json!(p));
+    }
     let resp = make_request(
         &state,
         Operation::Read,
@@ -1514,6 +1527,7 @@ pub async fn pki_export_issuer(
         format: val_str(&map, "format"),
         filename_extension: val_str(&map, "filename_extension"),
         body: val_str(&map, "body"),
+        body_encoding: val_str(&map, "body_encoding"),
         includes_private_key: false,
         backup_mode: false,
         serial_number: String::new(),

@@ -34,8 +34,10 @@ use std::{collections::HashMap, sync::Arc};
 
 use serde_json::{json, Map, Value};
 
+use base64::Engine as _;
+
 use super::{
-    export::{pem_bundle, pkcs7_certs_only, ExportBundle, ExportFormat},
+    export::{build_pkcs12, pem_bundle, pkcs7_certs_only, ExportBundle, ExportFormat},
     issuers, keys, storage, PkiBackend, PkiBackendInner,
 };
 use crate::{
@@ -52,12 +54,13 @@ impl PkiBackend {
             pattern: r"cert/(?P<serial>[0-9a-fA-F:\-]+)/export$",
             fields: {
                 "serial": { field_type: FieldType::Str, required: true, description: "Hex serial number of the cert (with or without colons)." },
-                "format": { field_type: FieldType::Str, default: "pem", description: "`pem` (default) | `pkcs7`. PKCS#12 lands in a follow-up PR." },
-                "include_private_key": { field_type: FieldType::Bool, default: false, description: "Include the bound managed key in the response. Only honoured when (a) the cert has a bound managed key, (b) the key was minted with `exportable=true`, and (c) `format` carries the key (PEM only — PKCS#7 has no key slot)." },
-                "mode": { field_type: FieldType::Str, default: "normal", description: "`normal` (default) honours the per-key `exportable` flag. `backup` bypasses the flag but requires an encrypted format." }
+                "format": { field_type: FieldType::Str, default: "pem", description: "`pem` (default) | `pkcs7` | `pkcs12`." },
+                "include_private_key": { field_type: FieldType::Bool, default: false, description: "Include the bound managed key in the response. Only honoured when (a) the cert has a bound managed key, (b) the key was minted with `exportable=true`, and (c) `format` carries the key (PEM and PKCS#12 only — PKCS#7 has no key slot)." },
+                "mode": { field_type: FieldType::Str, default: "normal", description: "`normal` (default) honours the per-key `exportable` flag. `backup` bypasses the flag but requires an encrypted format (PKCS#12)." },
+                "password": { field_type: FieldType::Str, default: "", description: "PKCS#12 envelope password. Required when `format=pkcs12` (also serves as the file's encryption key on import)." }
             },
             operations: [{op: Operation::Read, handler: r.export_cert}],
-            help: "Export a leaf certificate (and optionally its bound managed key) in PEM or PKCS#7 format."
+            help: "Export a leaf certificate (and optionally its bound managed key) in PEM, PKCS#7, or PKCS#12 format."
         })
     }
 
@@ -67,8 +70,9 @@ impl PkiBackend {
             pattern: r"issuer/(?P<issuer_ref>[\w\-]+)/export$",
             fields: {
                 "issuer_ref": { field_type: FieldType::Str, required: true, description: "Issuer ID (UUID) or name." },
-                "format": { field_type: FieldType::Str, default: "pem", description: "`pem` (default) | `pkcs7`." },
-                "include_chain": { field_type: FieldType::Bool, default: true, description: "When true (default), include the issuer's parent chain in the output." }
+                "format": { field_type: FieldType::Str, default: "pem", description: "`pem` (default) | `pkcs7` | `pkcs12`. PKCS#12 carries the cert + chain only (issuer keys are never exported on this route)." },
+                "include_chain": { field_type: FieldType::Bool, default: true, description: "When true (default), include the issuer's parent chain in the output." },
+                "password": { field_type: FieldType::Str, default: "", description: "PKCS#12 envelope password. Required when `format=pkcs12`." }
             },
             operations: [{op: Operation::Read, handler: r.export_issuer}],
             help: "Export the issuer certificate (public material). The private key is never included on this route — even with the right policy and even in backup mode."
@@ -121,19 +125,31 @@ impl PkiBackendInner {
             }
         };
 
+        let password = req
+            .get_data_or_default("password")?
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+
         // PKCS#7 doesn't carry private keys.
         if include_private_key && matches!(format, ExportFormat::Pkcs7) {
             return Err(RvError::ErrString(
-                "export: PKCS#7 cannot carry a private key; pick format=pem"
+                "export: PKCS#7 cannot carry a private key; pick format=pem or pkcs12"
                     .into(),
             ));
         }
-        // Backup mode requires an encrypted format. PKCS#12 is the
-        // only one we'll add; today neither PEM nor PKCS#7 qualifies.
-        if backup_mode {
+        // PKCS#12 requires a password (it's the file's encryption key).
+        if matches!(format, ExportFormat::Pkcs12) && password.is_empty() {
             return Err(RvError::ErrString(
-                "export: mode=backup requires an encrypted format \
-                 (PKCS#12, landing in a follow-up); cannot run on PEM / PKCS#7"
+                "export: PKCS#12 requires a password to encrypt the bag".into(),
+            ));
+        }
+        // Backup mode bypasses the per-key `exportable` flag, but only
+        // for encrypted formats — i.e. PKCS#12. PEM / PKCS#7 plaintext
+        // would defeat the point of the read-only flag.
+        if backup_mode && !matches!(format, ExportFormat::Pkcs12) {
+            return Err(RvError::ErrString(
+                "export: mode=backup requires an encrypted format (PKCS#12)"
                     .into(),
             ));
         }
@@ -202,6 +218,12 @@ impl PkiBackendInner {
             ExportFormat::Pkcs7 => {
                 pkcs7_certs_only(&record.certificate_pem, &chain_pems)?
             }
+            ExportFormat::Pkcs12 => build_pkcs12(
+                &record.certificate_pem,
+                &chain_pems,
+                private_key_pem.as_deref(),
+                &password,
+            )?,
         };
 
         Ok(Some(Response::data_response(Some(bundle_to_data(
@@ -235,6 +257,17 @@ impl PkiBackendInner {
             .as_bool()
             .unwrap_or(true);
 
+        let password = req
+            .get_data_or_default("password")?
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        if matches!(format, ExportFormat::Pkcs12) && password.is_empty() {
+            return Err(RvError::ErrString(
+                "export: PKCS#12 requires a password to encrypt the bag".into(),
+            ));
+        }
+
         let issuer = issuers::load_issuer(req, &issuer_ref).await?;
 
         let chain_pems: Vec<String> = if include_chain {
@@ -244,12 +277,16 @@ impl PkiBackendInner {
         };
 
         // Issuer route never emits the private key, regardless of
-        // body params or mode. The API simply doesn't accept those
-        // knobs here (see `issuer_export_path` field set).
+        // body params or mode. The API just doesn't accept those
+        // knobs here (see `issuer_export_path` field set), and the
+        // PKCS#12 path is forced through with `private_key_pem=None`.
         let bundle = match format {
             ExportFormat::Pem => pem_bundle(&issuer.cert_pem, &chain_pems, None),
             ExportFormat::Pkcs7 => {
                 pkcs7_certs_only(&issuer.cert_pem, &chain_pems)?
+            }
+            ExportFormat::Pkcs12 => {
+                build_pkcs12(&issuer.cert_pem, &chain_pems, None, &password)?
             }
         };
 
@@ -258,9 +295,29 @@ impl PkiBackendInner {
         data.insert("issuer_name".into(), json!(issuer.name));
         data.insert("format".into(), json!(format_label(&bundle)));
         data.insert("filename_extension".into(), json!(bundle.extension));
-        data.insert("body".into(), json!(String::from_utf8_lossy(&bundle.body)));
+        data.insert("body".into(), json!(encode_body(&bundle)));
+        data.insert("body_encoding".into(), json!(body_encoding(&bundle)));
         data.insert("includes_private_key".into(), json!(false));
         Ok(Some(Response::data_response(Some(data))))
+    }
+}
+
+/// Choose the wire encoding for the export body based on the format.
+/// Text formats (PEM, PEM-armored PKCS#7) ship as UTF-8; PKCS#12 is
+/// raw DER bytes and must be base64'd to fit the JSON response.
+fn encode_body(bundle: &ExportBundle) -> String {
+    if bundle.format.is_binary() {
+        base64::engine::general_purpose::STANDARD.encode(&bundle.body)
+    } else {
+        String::from_utf8_lossy(&bundle.body).into_owned()
+    }
+}
+
+fn body_encoding(bundle: &ExportBundle) -> &'static str {
+    if bundle.format.is_binary() {
+        "base64"
+    } else {
+        "utf8"
     }
 }
 
@@ -292,7 +349,8 @@ fn bundle_to_data(
     data.insert("serial_number".into(), json!(serial_hex));
     data.insert("format".into(), json!(format_label(bundle)));
     data.insert("filename_extension".into(), json!(bundle.extension));
-    data.insert("body".into(), json!(String::from_utf8_lossy(&bundle.body)));
+    data.insert("body".into(), json!(encode_body(bundle)));
+    data.insert("body_encoding".into(), json!(body_encoding(bundle)));
     data.insert("includes_private_key".into(), json!(include_private_key));
     data.insert("backup_mode".into(), json!(backup_mode));
     data
@@ -302,6 +360,7 @@ fn format_label(bundle: &ExportBundle) -> &'static str {
     match bundle.format {
         ExportFormat::Pem => "pem",
         ExportFormat::Pkcs7 => "pkcs7",
+        ExportFormat::Pkcs12 => "pkcs12",
     }
 }
 

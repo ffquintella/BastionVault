@@ -212,6 +212,14 @@ x509-cert = { version = "0.2", default-features = false, features = ["builder", 
 # `x509-cert 0.2` family the rest of the PKI module already uses, so
 # it fits in without triggering the Phase-3 RustCrypto-formats cascade.
 cms = { version = "0.2", default-features = false, features = ["alloc", "pem", "std"] }
+# PKCS#12 builder for `pki/cert/<serial>/export?format=pkcs12` and the
+# matching issuer route. `kdf` enables RFC 7292 Appendix B.2 — the
+# legacy PKCS#12 KDF used to derive the MAC key from the password.
+pkcs12 = { version = "0.1", features = ["kdf"] }
+# PBES2 encryption envelope used by the shrouded private-key bag and
+# the encrypted cert bag inside `.p12` files.  PBES2 + PBKDF2-SHA256
+# + AES-256-CBC is the modern shape every importer accepts.
+pkcs5 = { version = "0.7", features = ["alloc", "pbes2"] }
 fips204 = { version = "0.4", default-features = false, features = ["default-rng", "ml-dsa-44", "ml-dsa-65", "ml-dsa-87"] }
 const-oid = { version = "0.9", features = ["db"] }
 # Phase 5.3: PKCS#8 (`PrivateKeyInfo`) emit/parse for ML-DSA private keys.

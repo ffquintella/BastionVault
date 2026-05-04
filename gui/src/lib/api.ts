@@ -1248,11 +1248,13 @@ export const pkiCsrSetSigned = (request: PkiCsrSetSignedRequest) =>
 export interface PkiExportCertRequest {
   mount: string;
   serial: string;
-  /** `pem` (default) | `pkcs7`. */
+  /** `pem` (default) | `pkcs7` | `pkcs12`. */
   format?: string;
   include_private_key?: boolean;
   /** `normal` (default) | `backup`. */
   mode?: string;
+  /** Required when `format=pkcs12` (the file's encryption key). */
+  password?: string;
 }
 
 export interface PkiExportIssuerRequest {
@@ -1260,12 +1262,15 @@ export interface PkiExportIssuerRequest {
   issuer_ref: string;
   format?: string;
   include_chain?: boolean;
+  password?: string;
 }
 
 export interface PkiExportResult {
   format: string;
   filename_extension: string;
   body: string;
+  /** `utf8` (PEM, PKCS#7) | `base64` (PKCS#12 raw DER). */
+  body_encoding?: string;
   includes_private_key: boolean;
   backup_mode?: boolean;
   serial_number?: string;

@@ -103,11 +103,42 @@ issue but never extract, and the helpdesk role that can pull bytes
 out. The host's `KeyEntry.exportable` gate is documented as
 defence-in-depth on top of the ACL.
 
-**Out of scope (follow-up PR)**: PKCS#12 (`.p12`) export. The route
-shape (`format=pkcs12`) and `mode=backup` are wired today and
-return a clear error pointing at the missing format; the
-follow-up adds the `pkcs12 0.1.0` + `pkcs5 0.7` PBES2 + MAC
-envelope code without changing any caller-visible API.
+**PKCS#12 (`.p12`) export** — pure-Rust, no `openssl-sys` /
+`aws-lc-sys`. Adds `pkcs12 0.1.0` (with `kdf` feature for the
+RFC 7292 Appendix B.2 KDF) and `pkcs5 0.7` (with `pbes2` +
+`alloc` features for the password-based encryption envelope) on
+top of the existing `der 0.7` / `x509-cert 0.2` family. Bundle
+shape mirrors what OpenSSL emits:
+
+  * AuthenticatedSafe = SEQUENCE OF [
+      ContentInfo(id-encryptedData, EncryptedData(PBES2 over
+        SafeContents containing one CertBag per cert in the
+        chain)),
+      (when private_key_pem is supplied)
+      ContentInfo(id-data, SafeContents containing one
+        pkcs8-shrouded-key bag wrapping a PBES2-encrypted
+        EncryptedPrivateKeyInfo).
+    ]
+  * Outer ContentInfo = id-data wrapping the AuthenticatedSafe
+    DER.
+  * MacData = HMAC-SHA256 over the AuthenticatedSafe DER, key
+    derived via the PKCS#12 KDF.
+
+Both encrypted sections use the same `password` so importers
+prompt the user only once. PBKDF2-SHA256 + AES-256-CBC at 100k
+iterations matches modern OpenSSL defaults; salts and IVs are
+fresh-random per envelope.
+
+Wire shape: the host endpoint returns the raw DER as base64 in
+the JSON response (PKCS#12 is binary; PEM / PKCS#7 stay UTF-8).
+The new `body_encoding` field tells the GUI to base64-decode
+before stuffing into the download Blob, so the `.p12` lands on
+disk byte-correct.
+
+`mode=backup` now works end-to-end — bypasses the
+`KeyEntry.exportable=false` flag, requires `format=pkcs12` (so
+the bypassed key still ends up encrypted on disk), and accepts
+the same password parameter.
 
 #### PKI — External-signing CSR flow for leaf certs
 
