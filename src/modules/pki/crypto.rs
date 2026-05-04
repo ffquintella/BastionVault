@@ -379,6 +379,41 @@ fn normalise_to_pkcs8_pem(pem: &str) -> String {
     }
 }
 
+/// Parse the modulus length (in bits) and public exponent (decimal
+/// string) of an RSA private key from any of the shapes
+/// [`normalise_to_pkcs8_pem`] understands. Returns `None` for
+/// non-RSA / unparseable input. Output goes straight into operator-
+/// facing error messages so the toast tells them what's incompatible.
+fn sniff_rsa_shape(pem: &str) -> Option<(usize, String)> {
+    use rsa::pkcs1::DecodeRsaPrivateKey;
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::traits::PublicKeyParts;
+    use rsa::RsaPrivateKey;
+
+    let trimmed = pem.trim();
+    let priv_key = if let Ok(k) = RsaPrivateKey::from_pkcs8_pem(trimmed) {
+        k
+    } else if let Ok(k) = RsaPrivateKey::from_pkcs1_pem(trimmed) {
+        k
+    } else if let Ok(parsed) = pem::parse(trimmed) {
+        RsaPrivateKey::from_pkcs1_der(parsed.contents()).ok()?
+    } else {
+        return None;
+    };
+    let bits = priv_key.size() * 8;
+    let e_bytes = priv_key.e().to_bytes_be();
+    let exp = if e_bytes.len() <= 8 {
+        let mut v: u64 = 0;
+        for &b in &e_bytes {
+            v = (v << 8) | b as u64;
+        }
+        v.to_string()
+    } else {
+        format!("{}-byte big-int", e_bytes.len())
+    };
+    Some((bits, exp))
+}
+
 /// Parse the PKCS#8 `AlgorithmIdentifier` OID from the supplied PEM /
 /// DER. Returns the dotted-decimal representation, or `None` if the
 /// blob doesn't look like PKCS#8. Used in the `Signer::from_storage_pem`
@@ -568,32 +603,60 @@ impl Signer {
         match CertSigner::from_pem(&normalised) {
             Ok(s) => Ok(Self::Classical(s)),
             Err(e) => {
-                // Decorate the rcgen error with the key's algorithm OID
-                // when we can read it. ring rejects anything other than
-                // `1.2.840.113549.1.1.1` (rsaEncryption) for RSA keys,
-                // and the bare "Could not parse key pair" string the
-                // user sees in the import toast doesn't tell them why.
-                if let Some(oid) = sniff_pkcs8_algorithm_oid(&normalised) {
-                    log::warn!(
-                        "pki: from_storage_pem rejected — algorithm OID {oid}: {e}"
-                    );
-                    if oid == "1.2.840.113549.1.1.10" {
-                        return Err(RvError::ErrString(
-                            "key uses RSASSA-PSS algorithm OID; the embedded \
-                             ring crypto provider only accepts plain rsaEncryption \
-                             (1.2.840.113549.1.1.1). Re-key the CA without RSA-PSS \
-                             parameters, or use an HSM that signs externally."
-                                .into(),
-                        ));
-                    }
-                    if oid != "1.2.840.113549.1.1.1" && !oid.is_empty() {
-                        return Err(RvError::ErrString(format!(
-                            "key uses non-rsaEncryption algorithm OID {oid}; \
-                             the embedded crypto provider does not support it"
-                        )));
-                    }
+                // Decorate the rcgen failure with whatever we can read
+                // off the key, directly in the error string the GUI
+                // toast renders. The dev-console log lines from
+                // `normalise_to_pkcs8_pem` are also emitted, but those
+                // only help an operator with terminal access — the
+                // toast needs the diagnosis self-contained.
+                let oid = sniff_pkcs8_algorithm_oid(&normalised).unwrap_or_default();
+                let key_shape = sniff_rsa_shape(&normalised);
+                log::warn!(
+                    "pki: from_storage_pem rejected — algorithm OID {oid:?}, shape {key_shape:?}: {e}"
+                );
+                // Specific OID-driven errors first (most actionable).
+                if oid == "1.2.840.113549.1.1.10" {
+                    return Err(RvError::ErrString(
+                        "key uses RSASSA-PSS algorithm OID; the embedded \
+                         ring crypto provider only accepts plain rsaEncryption \
+                         (1.2.840.113549.1.1.1). Re-key the CA without RSA-PSS \
+                         parameters, or use an HSM that signs externally."
+                            .into(),
+                    ));
                 }
-                Err(e)
+                if !oid.is_empty() && oid != "1.2.840.113549.1.1.1" {
+                    return Err(RvError::ErrString(format!(
+                        "key uses non-rsaEncryption algorithm OID {oid}; \
+                         the embedded crypto provider does not support it"
+                    )));
+                }
+                // OID is rsaEncryption (or unreadable) but rcgen / ring
+                // still rejected. Embed the modulus / exponent so the
+                // operator can see whether it's an exotic size or a
+                // non-65537 exponent — the two other things ring is
+                // strict about.
+                let detail = match key_shape {
+                    Some((bits, ref exp)) => {
+                        let exp_note = if exp == "65537" {
+                            String::new()
+                        } else {
+                            format!(", non-standard exponent e={exp} (ring requires e=65537)")
+                        };
+                        let size_note = if matches!(bits, 2048 | 3072 | 4096) {
+                            String::new()
+                        } else {
+                            format!(
+                                ", modulus {bits} bits is outside ring's supported \
+                                 sizes {{2048, 3072, 4096}}"
+                            )
+                        };
+                        format!(" (RSA {bits}-bit{exp_note}{size_note})")
+                    }
+                    None => " (could not introspect key shape)".to_string(),
+                };
+                Err(RvError::ErrString(format!(
+                    "ring rejected RSA key{detail}; bare rcgen error: {e}"
+                )))
             }
         }
     }
