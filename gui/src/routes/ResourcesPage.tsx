@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { Link } from "react-router-dom";
 import { Layout } from "../components/Layout";
 import {
   Button,
@@ -253,7 +254,10 @@ export function ResourcesPage() {
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">Resources</h1>
-          <Button size="sm" onClick={() => setShowCreate(true)}>Add Resource</Button>
+          <div className="flex items-center gap-2">
+            <PmpImportLink />
+            <Button size="sm" onClick={() => setShowCreate(true)}>Add Resource</Button>
+          </div>
         </div>
 
         {/* Breadcrumb-style path indicator. Shows the active filter as
@@ -2515,3 +2519,32 @@ function ResourceSharingCard({
   );
 }
 
+
+// ── PMP import entry-point ───────────────────────────────────────
+// Renders a "Import from PMP" link in the Resources page header,
+// but only when the `pmp-import` plugin is registered. Mirrors the
+// gating documented in features/pmp-import.md (no broken link, no
+// stub page when the plugin isn't installed).
+function PmpImportLink() {
+  const [present, setPresent] = useState(false);
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const list = await api.pluginsList();
+        if (live) setPresent(list.some((p) => p.name === "pmp-import"));
+      } catch {
+        if (live) setPresent(false);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, []);
+  if (!present) return null;
+  return (
+    <Link to="/resources/import-pmp">
+      <Button size="sm" variant="secondary">Import from PMP</Button>
+    </Link>
+  );
+}

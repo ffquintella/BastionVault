@@ -311,6 +311,11 @@ plugins-pack: plugins-wasm plugins-process plugins-pack-build ## Pack each plugi
 		--manifest $(PLUGINS_DIR)/bastion-plugin-xca/plugin.toml \
 		--binary   $(PLUGINS_OUT)/bastion-plugin-xca$(if $(filter Windows_NT,$(OS)),.exe,) \
 		--out      $(PLUGINS_OUT)/bastion-plugin-xca.bvplugin
+	@echo "==> packing bastion-plugin-pmp (process) into .bvplugin"
+	./target/release/bv-plugin-pack$(if $(filter Windows_NT,$(OS)),.exe,) \
+		--manifest $(PLUGINS_DIR)/bastion-plugin-pmp/plugin.toml \
+		--binary   $(PLUGINS_OUT)/bastion-plugin-pmp$(if $(filter Windows_NT,$(OS)),.exe,) \
+		--out      $(PLUGINS_OUT)/bastion-plugin-pmp.bvplugin
 	@echo ""
 	@echo "==> Bundles ready in $(PLUGINS_OUT)/"
 	@ls -lh $(PLUGINS_OUT)/*.bvplugin 2>/dev/null || true
@@ -354,6 +359,13 @@ plugins-sign: plugins-wasm plugins-process plugins-pack-build ## Repack each plu
 		--out               $(PLUGINS_OUT)/bastion-plugin-xca.bvplugin \
 		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
 		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
+	@echo "==> signing bastion-plugin-pmp (process)"
+	./target/release/bv-plugin-pack$(if $(filter Windows_NT,$(OS)),.exe,) \
+		--manifest          $(PLUGINS_DIR)/bastion-plugin-pmp/plugin.toml \
+		--binary            $(PLUGINS_OUT)/bastion-plugin-pmp$(if $(filter Windows_NT,$(OS)),.exe,) \
+		--out               $(PLUGINS_OUT)/bastion-plugin-pmp.bvplugin \
+		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
+		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
 	@echo ""
 	@echo "==> Signed bundles ready in $(PLUGINS_OUT)/"
 	@echo "    Publisher pubkey to register on the host: $(PLUGINS_SIGNING_KEY).pub"
@@ -364,12 +376,15 @@ plugins-process: plugins-init ## Compile the process-runtime reference plugins (
 	cd $(PLUGINS_DIR) && cargo build --release -p bastion-plugin-postgres
 	@echo "==> building bastion-plugin-xca (native)"
 	cd $(PLUGINS_DIR) && cargo build --release -p bastion-plugin-xca
+	@echo "==> building bastion-plugin-pmp (native)"
+	cd $(PLUGINS_DIR) && cargo build --release -p bastion-plugin-pmp
 	@mkdir -p $(PLUGINS_OUT)
 	@cp $(PLUGINS_DIR)/target/release/bastion-plugin-postgres$(if $(filter Windows_NT,$(OS)),.exe,) $(PLUGINS_OUT)/
 	@cp $(PLUGINS_DIR)/target/release/bastion-plugin-xca$(if $(filter Windows_NT,$(OS)),.exe,) $(PLUGINS_OUT)/
+	@cp $(PLUGINS_DIR)/target/release/bastion-plugin-pmp$(if $(filter Windows_NT,$(OS)),.exe,) $(PLUGINS_OUT)/
 	@echo ""
 	@echo "==> Process plugins ready in $(PLUGINS_OUT)/"
-	@ls -lh $(PLUGINS_OUT)/bastion-plugin-postgres* $(PLUGINS_OUT)/bastion-plugin-xca* 2>/dev/null || true
+	@ls -lh $(PLUGINS_OUT)/bastion-plugin-postgres* $(PLUGINS_OUT)/bastion-plugin-xca* $(PLUGINS_OUT)/bastion-plugin-pmp* 2>/dev/null || true
 
 plugins: plugins-pack plugins-process ## Build every reference plugin (WASM + .bvplugin bundle + process)
 	@echo ""
@@ -382,7 +397,7 @@ plugins: plugins-pack plugins-process ## Build every reference plugin (WASM + .b
 # Override the bump kind on the command line: `make plugin-bump type=minor`
 # (defaults to patch). Each plugin's current version is read from its own
 # Cargo.toml so plugins that have drifted out of lockstep stay independent.
-PLUGIN_NAMES := bastion-plugin-totp bastion-plugin-postgres bastion-plugin-xca
+PLUGIN_NAMES := bastion-plugin-totp bastion-plugin-postgres bastion-plugin-xca bastion-plugin-pmp
 type ?= patch
 
 plugin-bump: ## Bump plugin versions across plugins-ext (type=major|minor|patch, default patch)

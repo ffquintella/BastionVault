@@ -28,6 +28,92 @@ describe("resource types — Resource Connect schema", () => {
     expect(server.fields.find((f) => f.key === "os")?.type).toBe("text");
   });
 
+  it("firewall type carries vendor, HA role, and SSH-22 connect default", () => {
+    const fw = DEFAULT_RESOURCE_TYPES["firewall"];
+    expect(fw).toBeDefined();
+    expect(fw.label).toBe("Firewall");
+    const vendor = fw.fields.find((f) => f.key === "vendor");
+    expect(vendor?.type).toBe("select");
+    const vendorValues = (vendor?.options ?? []).map((o) => o.value);
+    expect(vendorValues).toEqual(
+      expect.arrayContaining([
+        "fortinet",
+        "palo_alto",
+        "cisco",
+        "checkpoint",
+        "juniper",
+        "sophos",
+        "pfsense",
+        "other",
+      ]),
+    );
+    const ha = fw.fields.find((f) => f.key === "ha_role");
+    expect(ha?.type).toBe("select");
+    expect((ha?.options ?? []).map((o) => o.value)).toEqual(
+      expect.arrayContaining(["standalone", "active", "passive"]),
+    );
+    expect(fw.connect?.enabled).toBe(true);
+    expect(fw.connect?.default_ports?.ssh).toBe(22);
+  });
+
+  it("switch type carries vendor, layer, and SSH-22 connect default", () => {
+    const sw = DEFAULT_RESOURCE_TYPES["switch"];
+    expect(sw).toBeDefined();
+    expect(sw.label).toBe("Switch");
+    const vendor = sw.fields.find((f) => f.key === "vendor");
+    expect(vendor?.type).toBe("select");
+    expect((vendor?.options ?? []).map((o) => o.value)).toEqual(
+      expect.arrayContaining([
+        "cisco",
+        "arista",
+        "juniper",
+        "hpe_aruba",
+        "huawei",
+        "mikrotik",
+        "ubiquiti",
+        "other",
+      ]),
+    );
+    const layer = sw.fields.find((f) => f.key === "switch_layer");
+    expect(layer?.type).toBe("select");
+    expect((layer?.options ?? []).map((o) => o.value)).toEqual(
+      expect.arrayContaining(["l2", "l3"]),
+    );
+    expect(sw.connect?.enabled).toBe(true);
+    expect(sw.connect?.default_ports?.ssh).toBe(22);
+  });
+
+  it("database engine is a closed enum covering the canonical engines", () => {
+    const db = DEFAULT_RESOURCE_TYPES["database"];
+    const engine = db.fields.find((f) => f.key === "engine");
+    expect(engine?.type).toBe("select");
+    expect((engine?.options ?? []).map((o) => o.value)).toEqual(
+      expect.arrayContaining([
+        "postgresql",
+        "mysql",
+        "mariadb",
+        "mssql",
+        "oracle",
+        "mongodb",
+        "redis",
+        "elasticsearch",
+        "sqlite",
+        "other",
+      ]),
+    );
+    expect(db.fields.find((f) => f.key === "engine_version")?.type).toBe("text");
+    expect(db.fields.find((f) => f.key === "tls_required")?.type).toBe("select");
+  });
+
+  it("network_device stays as the catch-all (no firewall/switch in the placeholder)", () => {
+    const nd = DEFAULT_RESOURCE_TYPES["network_device"];
+    expect(nd).toBeDefined();
+    const dt = nd.fields.find((f) => f.key === "device_type");
+    expect(dt?.type).toBe("text");
+    expect(dt?.placeholder ?? "").not.toMatch(/switch/i);
+    expect(dt?.placeholder ?? "").not.toMatch(/firewall/i);
+  });
+
   it("getTypeDef on an unknown id returns a generic placeholder", () => {
     const td = getTypeDef(DEFAULT_RESOURCE_TYPES, "definitely-not-a-type");
     expect(td.id).toBe("definitely-not-a-type");

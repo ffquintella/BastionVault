@@ -5,6 +5,7 @@ import { LoginPage } from "./routes/LoginPage";
 import { DashboardPage } from "./routes/DashboardPage";
 import { SecretsPage } from "./routes/SecretsPage";
 import { ResourcesPage } from "./routes/ResourcesPage";
+import { PmpImportPage } from "./routes/PmpImportPage";
 import { FilesPage } from "./routes/FilesPage";
 import { UsersPage } from "./routes/UsersPage";
 import { AppRolePage } from "./routes/AppRolePage";
@@ -50,6 +51,10 @@ export default function App() {
             <Route
               path="/dashboard"
               element={<ProtectedRoute><DashboardPage /></ProtectedRoute>}
+            />
+            <Route
+              path="/resources/import-pmp"
+              element={<ProtectedRoute><PmpImportPage /></ProtectedRoute>}
             />
             <Route
               path="/resources/*"

@@ -63,15 +63,19 @@ kv/core-switch-a/enable-secret   → Secret (regular KV entry)
 
 ### Built-in Resource Types
 
-| Type | Description | Typical fields |
-|------|-------------|----------------|
-| `server` | Linux, Windows, macOS machines | hostname, IP, port (SSH/RDP), OS |
-| `network_device` | Switches, routers, firewalls | hostname, IP, port, OS/firmware |
-| `website` | URLs with login credentials | hostname (URL), port (443) |
-| `database` | MySQL, PostgreSQL, etc. | hostname, IP, port, OS |
-| `application` | SaaS/internal apps, API services | hostname (URL), notes |
+| Type | Description | Typical fields | Connect |
+|------|-------------|----------------|---------|
+| `server` | Linux, Windows, macOS machines | hostname, IP, port (SSH/RDP), `os_type` (linux/windows/macos/bsd/unix), OS, location, owner | SSH / RDP per `os_type` |
+| `firewall` | Edge / DMZ / segmentation firewalls | hostname, mgmt IP, port, **vendor** (fortinet / palo_alto / cisco / checkpoint / juniper / sophos / pfsense / other), model, firmware, **HA role** (standalone / active / passive), site / zone, owner | SSH (default port 22) |
+| `switch` | L2 / L3 switches | hostname, mgmt IP, port, **vendor** (cisco / arista / juniper / hpe_aruba / huawei / mikrotik / ubiquiti / other), model, firmware / OS, **layer** (l2 / l3), stack-member count, location, owner | SSH (default port 22) |
+| `network_device` | Catch-all for routers, load balancers, wireless controllers, console servers, …  Use `firewall` or `switch` when one of those fits. | hostname, mgmt IP, free-text device type, manufacturer, model, location, owner | (none by default) |
+| `website` | URLs with login credentials | URL, hostname, technology, owner | (none) |
+| `database` | Database servers | hostname, IP, port, **engine** (postgresql / mysql / mariadb / mssql / oracle / mongodb / redis / elasticsearch / sqlite / other), engine_version, database_name, **tls_required** (yes / no), owner | (none) |
+| `application` | SaaS / internal apps, API services | hostname, port, technology, repository, owner | (none) |
 
-Users can enter any custom type string when creating a resource. The type is a free-form field with the built-in values offered as suggestions.
+Users can enter any custom type string when creating a resource. The type is a free-form field with the built-in values offered as suggestions; saved-config types take precedence over the builtins (`mergeTypeConfig()` returns the saved set verbatim when present).
+
+See [`features/resource-types-firewall-switch-db.md`](resource-types-firewall-switch-db.md) for the rationale behind splitting `firewall` and `switch` out of the original `network_device` catch-all.
 
 ## GUI Screens
 
