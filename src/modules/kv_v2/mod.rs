@@ -66,6 +66,7 @@ impl KvV2Backend {
         let h_data_write = self.inner.clone();
         let h_data_delete = self.inner.clone();
         let h_metadata_list_prefix = self.inner.clone();
+        let h_metadata_list_subprefix = self.inner.clone();
         let h_metadata_read = self.inner.clone();
         let h_metadata_delete = self.inner.clone();
         let h_destroy = self.inner.clone();
@@ -128,6 +129,26 @@ impl KvV2Backend {
                         {op: Operation::List, handler: h_metadata_list_prefix.handle_metadata_list}
                     ],
                     help: "List all secret names."
+                },
+                {
+                    // Listing under a sub-prefix (e.g.
+                    // `metadata/pmp-import/2026-Q2/`). The trailing
+                    // `/` distinguishes a List from a Read on the
+                    // single-name route below — Vault clients use
+                    // a trailing slash on LIST URLs, and the
+                    // router only invokes the List handler when
+                    // it's present.
+                    pattern: "metadata/(?P<prefix>.+)/$",
+                    fields: {
+                        "prefix": {
+                            field_type: FieldType::Str,
+                            description: "Sub-prefix to list under"
+                        }
+                    },
+                    operations: [
+                        {op: Operation::List, handler: h_metadata_list_subprefix.handle_metadata_list_subprefix}
+                    ],
+                    help: "List secret names under a sub-prefix."
                 },
                 {
                     pattern: "metadata/(?P<name>.+)",
@@ -601,6 +622,40 @@ impl KvV2BackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let keys = req.storage_list("metadata/").await?;
+        let resp = Response::list_response(&keys);
+        Ok(Some(resp))
+    }
+
+    /// List the immediate children of a sub-prefix under the
+    /// metadata namespace. Mirrors `handle_metadata_list` but
+    /// honours the `prefix` capture from the route, so an operator
+    /// can drill into nested folders (e.g.
+    /// `secret/metadata/pmp-import/2026-Q2/`) the same way Vault's
+    /// reference KV-v2 does.
+    pub async fn handle_metadata_list_subprefix(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let prefix = req
+            .get_data("prefix")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        // Defence-in-depth — keep the listing scoped to the
+        // backend's `metadata/` namespace and refuse anything that
+        // tries to climb out via `..`.
+        if prefix.contains("..") {
+            return Err(RvError::ErrRequestInvalid);
+        }
+        let path = if prefix.is_empty() {
+            "metadata/".to_string()
+        } else if prefix.ends_with('/') {
+            format!("metadata/{prefix}")
+        } else {
+            format!("metadata/{prefix}/")
+        };
+        let keys = req.storage_list(&path).await?;
         let resp = Response::list_response(&keys);
         Ok(Some(resp))
     }

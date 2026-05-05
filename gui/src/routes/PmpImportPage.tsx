@@ -140,8 +140,15 @@ export function PmpImportPage() {
       .slice(0, 15),
   );
   const [collision, setCollision] = useState<CollisionPolicy>("skip");
-  const [kvMount, setKvMount] = useState("secret");
-  const [kvMountChoices, setKvMountChoices] = useState<string[]>(["secret"]);
+  // KV mount tracking. Convention from SecretsPage: `mountBase`
+  // includes the trailing slash (e.g. `"secret/"`) and `mountType`
+  // is `"kv"` or `"kv-v2"`. Both are required to build the
+  // `data/`-vs-bare path the host's `adjust_kv_path` expects.
+  const [kvMount, setKvMount] = useState("secret/");
+  const [kvMountType, setKvMountType] = useState<"kv" | "kv-v2">("kv-v2");
+  const [kvMountChoices, setKvMountChoices] = useState<{ path: string; type: "kv" | "kv-v2" }[]>([
+    { path: "secret/", type: "kv-v2" },
+  ]);
   const [validateReport, setValidateReport] = useState<ValidateReport | null>(null);
   const [tagColumns, setTagColumns] = useState<string[]>([]);
   const [preserveUnknown, setPreserveUnknown] = useState(true);
@@ -164,14 +171,21 @@ export function PmpImportPage() {
       try {
         const mounts = await api.listMounts();
         const kvs = mounts
-          .filter((m) => m.mount_type.startsWith("kv"))
-          .map((m) => m.path.replace(/\/$/, ""));
+          .filter((m) => m.mount_type === "kv" || m.mount_type === "kv-v2")
+          .map((m) => ({
+            path: m.path.endsWith("/") ? m.path : `${m.path}/`,
+            type: m.mount_type as "kv" | "kv-v2",
+          }));
         if (kvs.length > 0) {
           setKvMountChoices(kvs);
-          if (!kvs.includes("secret") && kvs[0]) setKvMount(kvs[0]);
+          // Prefer a mount literally called `secret/`; otherwise
+          // pick the first one.
+          const preferred = kvs.find((k) => k.path === "secret/") ?? kvs[0];
+          setKvMount(preferred.path);
+          setKvMountType(preferred.type);
         }
       } catch {
-        // keep the default `secret`
+        // keep the default `secret/` + kv-v2
       }
       try {
         const saved = await api.resourceTypesRead();
@@ -381,9 +395,15 @@ export function PmpImportPage() {
     }
 
     // ── Pass 3: KV blobs. ───────────────────────────────────────
+    // Plugin-emitted paths use a literal `secret/` prefix as a
+    // placeholder. We strip it and rebase under whatever KV mount
+    // the operator picked. The mount path already ends in `/` per
+    // SecretsPage's convention; writeSecret takes `path` as the
+    // bit *after* the mount.
     for (const b of selectedKv) {
-      const path = b.path.replace(/^secret\//, `${kvMount}/`);
-      prog.current = path;
+      const relative = b.path.replace(/^secret\//, "");
+      const fullPath = `${kvMount}${relative}`;
+      prog.current = fullPath;
       setProgress({ ...prog });
       try {
         const flat: Record<string, string> = {};
@@ -392,9 +412,9 @@ export function PmpImportPage() {
           else if (v === null || v === undefined) flat[k] = "";
           else flat[k] = String(v);
         }
-        await api.writeSecret(path.replace(`${kvMount}/`, ""), flat, kvMount, "kv-v2");
+        await api.writeSecret(relative, flat, kvMount, kvMountType);
       } catch (e: unknown) {
-        prog.errors.push({ target: path, message: extractError(e) });
+        prog.errors.push({ target: fullPath, message: extractError(e) });
       }
       prog.done += 1;
       setProgress({ ...prog });
@@ -463,7 +483,11 @@ export function PmpImportPage() {
             batchId={batchId}
             setBatchId={setBatchId}
             kvMount={kvMount}
-            setKvMount={setKvMount}
+            setKvMount={(v) => {
+              setKvMount(v);
+              const m = kvMountChoices.find((c) => c.path === v);
+              if (m) setKvMountType(m.type);
+            }}
             kvMountChoices={kvMountChoices}
             collision={collision}
             setCollision={setCollision}
@@ -534,7 +558,7 @@ function PickStep(props: {
   setBatchId: (v: string) => void;
   kvMount: string;
   setKvMount: (v: string) => void;
-  kvMountChoices: string[];
+  kvMountChoices: { path: string; type: "kv" | "kv-v2" }[];
   collision: CollisionPolicy;
   setCollision: (v: CollisionPolicy) => void;
   onNext: () => void;
@@ -617,7 +641,10 @@ function PickStep(props: {
           />
           <Select
             label="KV mount"
-            options={props.kvMountChoices.map((m) => ({ value: m, label: m }))}
+            options={props.kvMountChoices.map((m) => ({
+              value: m.path,
+              label: `${m.path} (${m.type})`,
+            }))}
             value={props.kvMount}
             onChange={(e) => props.setKvMount(e.target.value)}
           />
@@ -842,7 +869,7 @@ function ReviewStep(props: {
       >
         <div className="text-sm space-y-3">
           <div className="text-[var(--color-text-muted)]">
-            Mount: <code>{props.kvMount}/</code>
+            Mount: <code>{props.kvMount}</code>
           </div>
           {kvGrouped.map(([kind, blobs]) => (
             <details key={kind} open className="border border-[var(--color-border)] rounded">
@@ -864,7 +891,7 @@ function ReviewStep(props: {
                       }
                     />
                     <code className="truncate">
-                      {b.path.replace(/^secret\//, `${props.kvMount}/`)}
+                      {b.path.replace(/^secret\//, props.kvMount)}
                     </code>
                   </label>
                 ))}

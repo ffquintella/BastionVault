@@ -434,6 +434,29 @@ async fn test_kv_v2_logical_backend(core: &Core, token: &str) {
     let keys = data["keys"].as_array().unwrap();
     assert_eq!(keys.len(), 1);
 
+    // --- Nested LIST: write under a sub-prefix and confirm the
+    // sub-prefix LIST returns the immediate child. Regression for
+    // a missing route discovered during the PMP importer rollout
+    // (importer wrote to `secret/data/pmp-import/<batch>/...` but
+    // the GUI's drill-down LIST returned empty because no handler
+    // was registered for `metadata/<prefix>/`). ---
+    let write_data = json!({"data": {"k": "v"}}).as_object().unwrap().clone();
+    let mut req = Request::new("kvv2/data/folder-a/leaf");
+    req.operation = Operation::Write;
+    req.client_token = token.to_string();
+    req.body = Some(write_data);
+    let _ = core.handle_request(&mut req).await.unwrap();
+
+    let mut req = Request::new("kvv2/metadata/folder-a/");
+    req.operation = Operation::List;
+    req.client_token = token.to_string();
+    let resp = core.handle_request(&mut req).await;
+    assert!(resp.is_ok(), "nested LIST must return a response");
+    let resp = resp.unwrap().unwrap();
+    let data = resp.data.unwrap();
+    let keys = data["keys"].as_array().expect("keys[] in nested LIST");
+    assert!(keys.iter().any(|k| k.as_str() == Some("leaf")));
+
     // --- Metadata hard-delete ---
     let mut req = Request::new("kvv2/metadata/myapp");
     req.operation = Operation::Delete;
