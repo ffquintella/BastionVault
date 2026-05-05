@@ -246,9 +246,8 @@ pub fn build_pkcs12(
     password: &str,
 ) -> Result<ExportBundle, RvError> {
     use pkcs12::{
-        authenticated_safe::AuthenticatedSafe, digest_info::DigestInfo,
-        mac_data::MacData, pfx::Pfx, pfx::Version, safe_bag::SafeBag,
-        PKCS_12_PKCS8_KEY_BAG_OID, PKCS_12_X509_CERT_OID,
+        digest_info::DigestInfo, mac_data::MacData, pfx::Pfx, pfx::Version,
+        safe_bag::SafeBag, PKCS_12_PKCS8_KEY_BAG_OID, PKCS_12_X509_CERT_OID,
     };
     use pkcs12::cert_type::CertBag;
 
