@@ -20,8 +20,10 @@ import {
   useToast,
 } from "../components/ui";
 import * as api from "../lib/api";
-import type { ResourceMetadata } from "../lib/types";
+import type { ResourceMetadata, ResourceTypeConfig } from "../lib/types";
+import { DEFAULT_RESOURCE_TYPES, mergeTypeConfig } from "../lib/resourceTypes";
 import { extractError } from "../lib/error";
+import { ResourceTypeIcon } from "../components/ui";
 import { useAuthStore } from "../stores/authStore";
 
 interface ValidateReport {
@@ -148,6 +150,7 @@ export function PmpImportPage() {
   const [resourceSelection, setResourceSelection] = useState<Record<string, boolean>>({});
   const [kvSelection, setKvSelection] = useState<Record<string, boolean>>({});
   const [progress, setProgress] = useState<RunProgress | null>(null);
+  const [typeConfig, setTypeConfig] = useState<ResourceTypeConfig>(DEFAULT_RESOURCE_TYPES);
 
   // ── Plugin presence + KV mount probe ───────────────────────────
   useEffect(() => {
@@ -169,6 +172,12 @@ export function PmpImportPage() {
         }
       } catch {
         // keep the default `secret`
+      }
+      try {
+        const saved = await api.resourceTypesRead();
+        setTypeConfig(mergeTypeConfig(saved as ResourceTypeConfig | null));
+      } catch {
+        setTypeConfig(DEFAULT_RESOURCE_TYPES);
       }
     })();
   }, []);
@@ -433,7 +442,7 @@ export function PmpImportPage() {
           </Button>
         </div>
 
-        <div className="text-sm bg-[var(--color-info-bg,#eef6ff)] border border-[var(--color-info-border,#cfe3ff)] rounded p-3">
+        <div className="text-sm bg-[var(--color-primary)]/10 border border-[var(--color-primary)]/30 text-[var(--color-text)] rounded p-3">
           <strong>Owner.</strong> All imported resources and KV entries will be owned by{" "}
           <strong>{principal || "the current operator"}</strong>. PMP's <em>Department</em> column
           maps to an asset group, not an owner.
@@ -470,6 +479,7 @@ export function PmpImportPage() {
             setKvSelection={setKvSelection}
             kvMount={kvMount}
             collision={collision}
+            typeConfig={typeConfig}
             onBack={() => setStep("pick")}
             onRun={runImport}
             busy={busy}
@@ -498,7 +508,7 @@ function StepBar({ step }: { step: Step }) {
             className={`px-2 py-1 rounded ${
               s.id === step
                 ? "bg-[var(--color-primary)] text-white"
-                : "bg-[var(--color-surface-2,#eee)] text-[var(--color-text-muted)]"
+                : "bg-[var(--color-surface)] text-[var(--color-text-muted)] border border-[var(--color-border)]"
             }`}
           >
             {s.label}
@@ -642,6 +652,7 @@ function ReviewStep(props: {
   setKvSelection: (v: Record<string, boolean>) => void;
   kvMount: string;
   collision: CollisionPolicy;
+  typeConfig: ResourceTypeConfig;
   onBack: () => void;
   onRun: () => void;
   busy: boolean;
@@ -701,7 +712,7 @@ function ReviewStep(props: {
               .join(", ") || "(none)"}
           </div>
           {plan.summary.skipped.length > 0 && (
-            <div className="text-[var(--color-warning,#a36b00)]">
+            <div className="text-[var(--color-warning)]">
               Skipped {plan.summary.skipped.length} row(s): {plan.summary.skipped
                 .slice(0, 3)
                 .map((s) => `row ${s.row} (${s.reason})`)
@@ -751,10 +762,14 @@ function ReviewStep(props: {
         }
       >
         <div className="space-y-3 text-sm">
-          {grouped.map(([type, rs]) => (
+          {grouped.map(([type, rs]) => {
+            const td = props.typeConfig[type] ?? {
+              id: type, label: type, color: "neutral" as const, fields: [],
+            };
+            return (
             <details key={type} open className="border border-[var(--color-border)] rounded">
               <summary className="px-3 py-2 cursor-pointer flex items-center gap-2">
-                <Badge label={type} variant="info" />
+                <ResourceTypeIcon typeDef={td} withLabel />
                 <span className="font-semibold">{rs.length}</span>
               </summary>
               <div className="p-2 space-y-1">
@@ -782,7 +797,7 @@ function ReviewStep(props: {
                         <Badge key={g} label={g} variant="neutral" />
                       ))}
                     </summary>
-                    <ul className="px-4 py-2 text-xs space-y-1 bg-[var(--color-surface-2,#f7f7f7)]">
+                    <ul className="px-4 py-2 text-xs space-y-1 bg-[var(--color-bg)] border-t border-[var(--color-border)]">
                       {r.secrets.map((s) => (
                         <li key={s.name} className="flex items-center gap-2">
                           <Badge label="account" variant="info" />
@@ -794,7 +809,7 @@ function ReviewStep(props: {
                         </li>
                       ))}
                       {r.secrets.length === 0 && (
-                        <li className="text-[var(--color-warning,#a36b00)]">
+                        <li className="text-[var(--color-warning)]">
                           No accounts — this row would create a resource without credentials and
                           will be skipped at run time.
                         </li>
@@ -804,7 +819,8 @@ function ReviewStep(props: {
                 ))}
               </div>
             </details>
-          ))}
+            );
+          })}
           {grouped.length === 0 && (
             <div className="text-[var(--color-text-muted)]">No resources in this plan.</div>
           )}
@@ -912,7 +928,7 @@ function RunStep({
         <div>
           Batch: <code>{plan.batch_id}</code>
         </div>
-        <div className="w-full bg-[var(--color-surface-2,#eee)] rounded h-2 overflow-hidden">
+        <div className="w-full bg-[var(--color-surface)] border border-[var(--color-border)] rounded h-2 overflow-hidden">
           <div
             className="bg-[var(--color-primary)] h-full transition-all"
             style={{ width: `${pct}%` }}
@@ -922,14 +938,15 @@ function RunStep({
           {done} / {total} steps · {pct}% · {progress?.current ?? ""}
         </div>
         {errors.length > 0 && (
-          <details open className="border border-[var(--color-error-border,#fbb)] rounded p-2 bg-[var(--color-error-bg,#fee)]">
-            <summary className="cursor-pointer font-semibold">
+          <details open className="border border-[var(--color-danger)]/40 rounded p-2 bg-[var(--color-danger)]/10 text-[var(--color-text)]">
+            <summary className="cursor-pointer font-semibold text-[var(--color-danger)]">
               {errors.length} error(s)
             </summary>
-            <ul className="mt-2 list-disc pl-5">
+            <ul className="mt-2 list-disc pl-5 max-h-64 overflow-y-auto text-xs space-y-1">
               {errors.map((e, i) => (
                 <li key={i}>
-                  <code>{e.target}</code>: {e.message}
+                  <code className="text-[var(--color-text)]">{e.target}</code>:{" "}
+                  <span className="text-[var(--color-text-muted)]">{e.message}</span>
                 </li>
               ))}
             </ul>

@@ -33,3 +33,4 @@ export { TargetPicker } from "./TargetPicker";
 export { GroupsSection } from "./GroupsSection";
 export { Breadcrumb } from "./Breadcrumb";
 export { ToastProvider, useToast } from "./Toast";
+export { ResourceTypeIcon, RESOURCE_TYPE_ICON_CATALOG } from "./ResourceTypeIcon";

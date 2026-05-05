@@ -172,6 +172,11 @@ export interface ResourceTypeDef {
   id: string;
   label: string;
   color: "info" | "success" | "warning" | "error" | "neutral";
+  /** Lucide icon name (e.g. `Server`, `Database`, `Shield`). When
+   *  unset, the GUI falls back to a text badge. Defaults are baked
+   *  into `DEFAULT_RESOURCE_TYPES` per builtin; operator-defined
+   *  types pick from a curated list in Settings → Resource Types. */
+  icon?: string;
   fields: ResourceFieldDef[];
   /** Per-type Resource-Connect policy (Phase 7). Optional —
    *  omitted = enabled. When `enabled = false`, the Connect

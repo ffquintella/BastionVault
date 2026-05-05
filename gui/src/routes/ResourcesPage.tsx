@@ -21,6 +21,7 @@ import {
   SecretPairsEditor,
   SecretHistoryPanel,
   ResourceHistoryPanel,
+  ResourceTypeIcon,
   pairsFromData,
   dataFromPairs,
   type SecretPair,
@@ -175,7 +176,7 @@ export function ResourcesPage() {
             <button onClick={() => { setSelected(null); setResourceInfo(null); }}
               className="text-[var(--color-text-muted)] hover:text-[var(--color-text)]">&larr; Back</button>
             <h1 className="text-2xl font-bold">{String(resourceInfo.name)}</h1>
-            <Badge label={typeDef.label} variant={typeDef.color} />
+            <ResourceTypeIcon typeDef={typeDef} withLabel size={18} />
           </div>
 
           <Card>
@@ -311,7 +312,7 @@ export function ResourcesPage() {
                   className="p-4 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-xl text-left hover:border-[var(--color-primary)] transition-colors">
                   <div className="flex items-center gap-2 mb-2">
                     <span className="font-medium truncate flex-1 min-w-0">{String(meta.name)}</span>
-                    <Badge label={td.label} variant={td.color} />
+                    <ResourceTypeIcon typeDef={td} />
                     {quickProfile && (
                       <ConnectQuickButton
                         resource={meta}

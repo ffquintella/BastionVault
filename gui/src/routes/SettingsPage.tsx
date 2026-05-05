@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Layout } from "../components/Layout";
-import { Button, Card, Badge, Input, Select, Modal, ConfirmModal, Tabs, useToast } from "../components/ui";
+import { Button, Card, Badge, Input, Select, Modal, ConfirmModal, Tabs, useToast, ResourceTypeIcon, RESOURCE_TYPE_ICON_CATALOG } from "../components/ui";
 import { useVaultStore } from "../stores/vaultStore";
 import { useAuthStore } from "../stores/authStore";
 import { usePasswordPolicyStore } from "../stores/passwordPolicyStore";
@@ -926,7 +926,7 @@ export function SettingsPage() {
             {Object.values(resTypes).map((t) => (
               <div key={t.id} className="flex items-center justify-between py-2 border-b border-[var(--color-border)] last:border-0">
                 <div className="flex items-center gap-2">
-                  <Badge label={t.label} variant={t.color} />
+                  <ResourceTypeIcon typeDef={t} withLabel />
                   <span className="text-xs text-[var(--color-text-muted)]">{t.fields.length} fields</span>
                 </div>
                 <div className="flex gap-1">
@@ -1125,6 +1125,7 @@ function TypeEditorModal({ typeDef, onSave, onClose }: {
   const [id, setId] = useState(typeDef?.id ?? "");
   const [label, setLabel] = useState(typeDef?.label ?? "");
   const [color, setColor] = useState<string>(typeDef?.color ?? "info");
+  const [icon, setIcon] = useState<string>(typeDef?.icon ?? "");
   const [fields, setFields] = useState<ResourceFieldDef[]>(typeDef?.fields ?? []);
   // Phase 7 — per-type Resource-Connect policy. Persisted on the
   // type record's `connect` block; missing record == enabled.
@@ -1157,6 +1158,7 @@ function TypeEditorModal({ typeDef, onSave, onClose }: {
       id: resolvedId,
       label: label || resolvedId,
       color: color as ResourceTypeDef["color"],
+      ...(icon ? { icon } : {}),
       fields: fields.filter((f) => f.key),
       ...(connect ? { connect } : {}),
     });
@@ -1183,6 +1185,27 @@ function TypeEditorModal({ typeDef, onSave, onClose }: {
             placeholder="My Device" />
           <Select label="Color" value={color} onChange={(e) => setColor(e.target.value)}
             options={COLOR_OPTIONS} />
+          <div className="flex items-end gap-2">
+            <Select
+              label="Icon"
+              value={icon}
+              onChange={(e) => setIcon(e.target.value)}
+              options={[
+                { value: "", label: "(none — show label)" },
+                ...RESOURCE_TYPE_ICON_CATALOG.map((c) => ({ value: c.value, label: c.label })),
+              ]}
+            />
+            <ResourceTypeIcon
+              typeDef={{
+                id: id || "preview",
+                label: label || "Preview",
+                color: color as ResourceTypeDef["color"],
+                icon: icon || undefined,
+                fields: [],
+              }}
+              size={20}
+            />
+          </div>
         </div>
 
         <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2">

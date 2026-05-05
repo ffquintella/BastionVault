@@ -45,6 +45,23 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Changed
+
+#### PMP importer — non-connectable rows now route to KV, not Resources
+
+- The Resources inventory is for *connectable devices* (server / database / firewall / switch / network_device / website / application). Previously, unrecognised PMP `OS Type` values (e.g. `Arquivos de Incidentes`, `Resource Type`, custom PMP install types) were synthesising empty BV resources with auto-slugged custom type ids, polluting the inventory with non-clickable entries. Those rows now route to KV by default under `secret/pmp-import/<batch-id>/{incident-files|other}/<resource>/<account>` with the same JSON envelope shape (value_b64 + PMP context). The catch-all kind is `other`. Verified against the operator's real fixture: 99 rows now produce 53 resources + 11 KV entries (was 55 + 8). Tests added to `tests/version_matrix.rs` covering the routing rule and the new `kv:<kind>` form of `type_overrides` (lets operators force normally-resource rows into KV and vice versa). Mapping change in `bastion-plugin-pmp/src/mapping.rs`; `RowKind::Unknown` removed.
+
+#### Resource-type icons (configurable, with built-in defaults)
+
+- New `ResourceTypeIcon` UI component (`gui/src/components/ui/ResourceTypeIcon.tsx`) renders a Lucide icon with a colour-tinted pill and a native `title` tooltip carrying the type label. Falls back to a text pill when the type has no icon configured (or when an unknown icon name is set on a saved type) so legibility is never lost.
+- `ResourceTypeDef` gains an optional `icon` field. Defaults baked into `DEFAULT_RESOURCE_TYPES`: server → `Server`, database → `Database`, firewall → `ShieldCheck`, switch → `Network`, network_device → `Router`, website → `Globe`, application → `AppWindow`.
+- Settings → Resource Types editor adds an icon picker (curated catalog of ~21 Lucide icons covering server, database, shield, network, router, wireless, globe, application, code, cloud, CPU, disk, monitor, mobile, camera, printer, key, lock, document, generic), with a live preview next to the picker.
+- Resources page (list + detail views) and the PMP importer wizard's review step now render the type as an icon-with-tooltip instead of the old text badge.
+
+#### PMP importer — wizard readability fixes
+
+- Owner banner, step bar, account-list expand, progress bar, error panel, and skipped-rows warning all migrated from light-mode-only colour fallbacks (white-on-white in dark mode) to the project's `var(--color-*)` token system. Errors panel now uses `var(--color-danger)` with a translucent background and a scrollable list so a multi-error import surfaces every entry.
+
 ### Added
 
 #### First-class `firewall` / `switch` resource types + refined `database` — feature spec

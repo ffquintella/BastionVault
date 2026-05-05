@@ -243,14 +243,17 @@ The fixed PMP→BV lookup the plugin ships with (overridable per call via `type_
 | `Cisco IOS` | `switch` (default; overridable to `firewall` for ASA, or `network_device` for routers / wireless via `type_overrides`) | (unset) — pre-fills `vendor=cisco`. Depends on [resource-types-firewall-switch-db](resource-types-firewall-switch-db.md). |
 | `Fortimanager` | `firewall` | (unset) — pre-fills `vendor=fortinet`. Depends on [resource-types-firewall-switch-db](resource-types-firewall-switch-db.md). |
 | `Web Site Accounts` | `website` | (unset) |
-| `Generic Keys` | **KV blob** under `secret/pmp-import/<batch-id>/generic-keys/<sanitised-resource-name>/<sanitised-account>` | n/a — see [KV-bound row types](#kv-bound-row-types) below. |
-| `Application Passwords` | **KV blob** under `secret/pmp-import/<batch-id>/application-passwords/<sanitised-resource-name>/<sanitised-account>` | n/a — see [KV-bound row types](#kv-bound-row-types) below. |
-| `License Store` | **KV blob** under `secret/pmp-import/<batch-id>/license-store/<sanitised-resource-name>/<sanitised-account>` | n/a — see [KV-bound row types](#kv-bound-row-types) below. |
-| `Arquivos de Incidentes`, `Resource Type`, anything else | `<custom — verbatim slug>` | (unset) — surfaced in `unknown_columns` so the GUI can prompt to register a custom type |
+| `Generic Keys` | **KV blob** under `secret/pmp-import/<batch-id>/generic-keys/<resource>/<account>` | n/a — see [KV-bound row types](#kv-bound-row-types) below. |
+| `Application Passwords` | **KV blob** under `secret/pmp-import/<batch-id>/application-passwords/<resource>/<account>` | n/a |
+| `License Store` | **KV blob** under `secret/pmp-import/<batch-id>/license-store/<resource>/<account>` | n/a |
+| `Arquivos de Incidentes` | **KV blob** under `secret/pmp-import/<batch-id>/incident-files/<resource>/<account>` | n/a — incident attachments. |
+| `Resource Type`, **anything else not in this table** | **KV blob** under `secret/pmp-import/<batch-id>/other/<resource>/<account>` | The Resources inventory is for **connectable devices** (server / database / firewall / switch / network device / website / application). Unrecognised PMP `OS Type` values go to KV by default — operators who want a custom resource type for these register it via Settings → Resource Types and re-run with `type_overrides: { "<PMP value>": "<bv type id>" }`. The reverse direction also works: `type_overrides: { "Linux": "kv:other" }` forces a normally-resource row into KV. |
 
 ## KV-bound row types
 
-Three of PMP's resource types — `Generic Keys`, `Application Passwords`, and `License Store` — describe **secret blobs that aren't tied to a hostname or an account login**. PMP itself models them as resources only because that's the only container PMP has; in BastionVault the right home is the KV engine, not the Resource inventory.
+PMP rows describe two distinct things: **connectable devices** (servers, databases, firewalls, switches, websites, applications) and **passive credentials / artefacts** (keys, licences, application passwords, incident attachments, custom catch-all categories the operator's PMP install added). The Resources inventory is for the first category — anything you'd open a session against. Everything else routes to the **KV engine** under `secret/pmp-import/<batch-id>/<kind>/<resource>/<account>`.
+
+That's the rule. The known PMP types that always go to KV are `Generic Keys` (`generic-keys`), `Application Passwords` (`application-passwords`), `License Store` (`license-store`), and `Arquivos de Incidentes` (`incident-files`). Everything else not in the connectable-device list — including PMP's `Resource Type` value and any custom PMP resource type the operator's install defines — routes to KV under the catch-all `other`. Operators who want a custom BV resource type for one of these register it via **Settings → Resource Types** and re-run with `type_overrides: { "<PMP OS Type value>": "<bv type id>" }`. The reverse override `type_overrides: { "Linux": "kv:other" }` is also supported and forces a normally-resource row into KV.
 
 Mapping rules:
 

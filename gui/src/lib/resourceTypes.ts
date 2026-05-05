@@ -6,6 +6,7 @@ export const DEFAULT_RESOURCE_TYPES: ResourceTypeConfig = {
     id: "server",
     label: "Server",
     color: "info",
+    icon: "Server",
     fields: [
       { key: "hostname", label: "Hostname", type: "fqdn", placeholder: "web01.example.com" },
       { key: "ip_address", label: "IP Address", type: "ip", placeholder: "10.0.1.50" },
@@ -37,6 +38,7 @@ export const DEFAULT_RESOURCE_TYPES: ResourceTypeConfig = {
     id: "database",
     label: "Database",
     color: "error",
+    icon: "Database",
     fields: [
       { key: "hostname", label: "Hostname", type: "fqdn", placeholder: "db01.example.com" },
       { key: "ip_address", label: "IP Address", type: "ip", placeholder: "10.0.2.10" },
@@ -78,6 +80,7 @@ export const DEFAULT_RESOURCE_TYPES: ResourceTypeConfig = {
     id: "firewall",
     label: "Firewall",
     color: "error",
+    icon: "ShieldCheck",
     fields: [
       { key: "hostname", label: "Hostname", type: "fqdn", placeholder: "fw-edge-01" },
       { key: "ip_address", label: "Management IP", type: "ip", placeholder: "10.0.0.1" },
@@ -120,6 +123,7 @@ export const DEFAULT_RESOURCE_TYPES: ResourceTypeConfig = {
     id: "switch",
     label: "Switch",
     color: "warning",
+    icon: "Network",
     fields: [
       { key: "hostname", label: "Hostname", type: "fqdn", placeholder: "sw-core-01" },
       { key: "ip_address", label: "Management IP", type: "ip", placeholder: "10.0.0.2" },
@@ -162,6 +166,7 @@ export const DEFAULT_RESOURCE_TYPES: ResourceTypeConfig = {
     id: "network_device",
     label: "Network Device",
     color: "warning",
+    icon: "Router",
     fields: [
       { key: "hostname", label: "Hostname", type: "fqdn", placeholder: "rtr-edge-01" },
       { key: "ip_address", label: "Management IP", type: "ip", placeholder: "10.0.0.1" },
@@ -176,6 +181,7 @@ export const DEFAULT_RESOURCE_TYPES: ResourceTypeConfig = {
     id: "website",
     label: "Website",
     color: "success",
+    icon: "Globe",
     fields: [
       { key: "url", label: "URL", type: "url", placeholder: "https://example.com" },
       { key: "hostname", label: "Server", type: "fqdn", placeholder: "web01.example.com" },
@@ -187,6 +193,7 @@ export const DEFAULT_RESOURCE_TYPES: ResourceTypeConfig = {
     id: "application",
     label: "Application",
     color: "neutral",
+    icon: "AppWindow",
     fields: [
       { key: "hostname", label: "Server", type: "fqdn", placeholder: "app01.example.com" },
       { key: "port", label: "Port", type: "number", placeholder: "8080" },
