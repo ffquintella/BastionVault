@@ -2,10 +2,9 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use url::Url;
-use webauthn_rs::prelude::*;
-use webauthn_rs::WebauthnBuilder;
-
+use super::rp::{
+    AuthenticationState, PublicKeyCredentialAssertion, RelyingParty,
+};
 use super::{Fido2Backend, Fido2BackendInner};
 use crate::{
     context::Context,
@@ -53,7 +52,7 @@ impl Fido2Backend {
                 "credential": {
                     field_type: FieldType::Str,
                     required: true,
-                    description: "JSON-encoded PublicKeyCredential assertion from the browser."
+                    description: "JSON-encoded PublicKeyCredentialAssertion from the browser."
                 }
             },
             operations: [
@@ -119,20 +118,16 @@ impl Fido2BackendInner {
             return Err(RvError::ErrFido2CredentialNotFound);
         }
 
-        let rp_origin = Url::parse(&config.rp_origin)
-            .map_err(|e| RvError::ErrFido2AuthFailed(format!("invalid rp_origin: {e}")))?;
+        let rp = RelyingParty {
+            rp_id: &config.rp_id,
+            rp_origin: &config.rp_origin,
+            rp_name: &config.rp_name,
+        };
 
-        let webauthn = WebauthnBuilder::new(&config.rp_id, &rp_origin)
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?
-            .rp_name(&config.rp_name)
-            .build()
+        let (challenge, auth_state) = rp
+            .begin_authentication(&passkeys)
             .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
 
-        let (challenge, auth_state) = webauthn
-            .start_passkey_authentication(&passkeys)
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
-
-        // Store authentication state.
         let state_json = serde_json::to_string(&auth_state)
             .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
         let state_entry = StorageEntry::new(
@@ -161,36 +156,40 @@ impl Fido2BackendInner {
         let state_entry = req.storage_get(&format!("challenge/auth/{username}")).await?
             .ok_or(RvError::ErrFido2ChallengeExpired)?;
         let state_str: String = serde_json::from_slice(&state_entry.value)?;
-        let auth_state: PasskeyAuthentication = serde_json::from_str(&state_str)
+        let auth_state: AuthenticationState = serde_json::from_str(&state_str)
             .map_err(|e| RvError::ErrFido2AuthFailed(format!("invalid state: {e}")))?;
 
-        // Delete the challenge state (single use).
+        // Single-use: drop the challenge regardless of outcome below.
         req.storage_delete(&format!("challenge/auth/{username}")).await?;
 
-        let rp_origin = Url::parse(&config.rp_origin)
-            .map_err(|e| RvError::ErrFido2AuthFailed(format!("invalid rp_origin: {e}")))?;
+        let rp = RelyingParty {
+            rp_id: &config.rp_id,
+            rp_origin: &config.rp_origin,
+            rp_name: &config.rp_name,
+        };
 
-        let webauthn = WebauthnBuilder::new(&config.rp_id, &rp_origin)
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?
-            .rp_name(&config.rp_name)
-            .build()
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
+        let assertion: PublicKeyCredentialAssertion =
+            serde_json::from_str(&credential_json).map_err(|e| {
+                RvError::ErrFido2AuthFailed(format!("invalid credential: {e}"))
+            })?;
 
-        let auth_response: PublicKeyCredential = serde_json::from_str(&credential_json)
-            .map_err(|e| RvError::ErrFido2AuthFailed(format!("invalid credential: {e}")))?;
-
-        let auth_result = webauthn
-            .finish_passkey_authentication(&auth_response, &auth_state)
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
-
-        // Update the credential's sign count to detect cloning.
         let mut user_entry = self.get_user_credentials(req, &username).await?
             .ok_or(RvError::ErrFido2CredentialNotFound)?;
 
         let mut passkeys = user_entry.get_passkeys()
             .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
+
+        let auth_result = rp
+            .finish_authentication(&assertion, &auth_state, &passkeys)
+            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
+
+        // Update the matched credential's sign count.
         for pk in passkeys.iter_mut() {
-            pk.update_credential(&auth_result);
+            if let Ok(id) = pk.cred_id_bytes() {
+                if id == auth_result.cred_id {
+                    pk.sign_count = auth_result.new_sign_count;
+                }
+            }
         }
         user_entry.set_passkeys(&passkeys)
             .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
@@ -203,7 +202,6 @@ impl Fido2BackendInner {
             .expand_identity_group_policies(&username, &user_entry.policies)
             .await;
 
-        // Build Auth response to issue a vault token.
         let mut auth = Auth {
             lease: Lease {
                 ttl: user_entry.ttl,
@@ -258,8 +256,6 @@ impl Fido2BackendInner {
         }
         let user_entry = user_entry.unwrap();
 
-        // Compare against the union of direct and group-derived policies,
-        // since the login path grants this union.
         let effective = self
             .expand_identity_group_policies(&username, &user_entry.policies)
             .await;

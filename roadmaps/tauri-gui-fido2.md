@@ -65,9 +65,24 @@ A new credential backend at `src/modules/credential/fido2/` implementing the sta
 ### Dependencies
 
 ```toml
-webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
-webauthn-rs-proto = "0.5"
+ciborium = "0.2"   # CBOR for attestationObject / authenticatorData / COSE_Key
 ```
+
+The server no longer depends on `webauthn-rs`. A minimal in-tree Relying Party lives at [`src/modules/credential/fido2/rp/`](../src/modules/credential/fido2/rp/) and handles passkey registration/authentication directly using `p256` (ES256) and `ed25519-dalek` (EdDSA). Only attestation format `none` is accepted — the same posture we always operated under, since attestation chain validation was never enforced.
+
+#### `openssl-sys` is gone from the server crate
+
+`cargo tree -p bastion_vault -i openssl` is empty after the migration. The remaining OpenSSL pulls are GUI-only (the Mozilla `authenticator` crate's `crypto_openssl` feature, and a single PKCS#12 import in `gui/src-tauri/src/commands/pki.rs`); both are tracked as separate cleanups.
+
+Container image notes (kept for reference, no longer needed for the server binary):
+
+- The pre-migration builder stage statically linked openssl into `bvault` via `OPENSSL_STATIC=1` + `OPENSSL_NO_VENDOR=1`.
+- A post-build `ldd` check failed the container build if `bvault` ended up dynamically linked against `libssl` / `libcrypto`.
+- These guards are now belt-and-suspenders rather than load-bearing.
+
+#### Storage compatibility
+
+Stored `credentials_json` blobs from the prior `webauthn-rs`-backed code path are NOT readable by the in-tree `Passkey`. Operators upgrading past this commit must re-enroll FIDO2 keys. The new `Passkey` shape carries a `v` field so future migrations can be discriminated without another break.
 
 ### Module Files
 
@@ -77,7 +92,18 @@ src/modules/credential/fido2/
 ├── path_register.rs    # POST register/begin, POST register/complete
 ├── path_login.rs       # POST login/begin, POST login/complete
 ├── path_credentials.rs # LIST/GET/DELETE credentials/{user}/{id}
-└── types.rs            # Serializable WebAuthn types
+├── types.rs            # UserCredentialEntry (storage)
+└── rp/                 # Pure-Rust Relying Party (replaces webauthn-rs)
+    ├── mod.rs          # RelyingParty + Passkey + ceremony entry points
+    ├── proto.rs        # Wire-format (browser ↔ server) JSON types
+    ├── client_data.rs  # clientDataJSON parse/verify
+    ├── auth_data.rs    # authenticatorData + attestationObject parse
+    ├── cose.rs         # COSE_Key → ES256/Ed25519 verifier
+    ├── verify.rs       # Signature verification glue
+    ├── challenge.rs    # 32-byte random challenges
+    ├── b64.rs          # base64url-no-pad helpers
+    ├── errors.rs       # RpError
+    └── tests.rs        # Unit tests (parsers, validators, round-trip)
 ```
 
 ### API Endpoints

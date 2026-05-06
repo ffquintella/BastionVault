@@ -165,8 +165,13 @@ x509-parser = { version = "0.18", features = ["verify"] }
 flate2 = "1.0"
 sha1-saml = { package = "sha1", version = "0.10", features = ["oid"] }
 sha2-saml = { package = "sha2", version = "0.10", features = ["oid"] }
-webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
-webauthn-rs-proto = "0.5"
+# Pure-Rust WebAuthn RP support (replaces `webauthn-rs`, which transitively
+# pulled OpenSSL via `webauthn-attestation-ca`). The in-tree RP lives at
+# `src/modules/credential/fido2/rp/` and only handles attestation `none`,
+# which is what we always accepted anyway. CBOR for COSE_Key /
+# attestationObject parsing comes from `ciborium`; signature verification
+# uses the existing `p256` and `ed25519-dalek` deps.
+ciborium = "0.2"
 zstd = "0.13"
 # Exchange (import/export) module: password-encrypted .bvx files.
 # Argon2id is the OWASP-recommended memory-hard KDF; XChaCha20-Poly1305
@@ -178,8 +183,8 @@ chacha20poly1305 = "0.10"
 # Scheduled-exports cron parser. Pure-Rust, no system deps. See
 # `features/scheduled-exports.md`.
 cron = "0.16"
-# `uuid` is already a transitive dep via webauthn-rs; promote to a direct
-# dep for the scheduled-exports id generation.
+# `uuid` v4 is used for FIDO2 user-handle generation and for the
+# scheduled-exports id generation.
 uuid = { version = "1", features = ["v4"] }
 # Plugin system v1: WASM runtime via wasmtime. Pure-Rust JIT with fuel
 # metering + memory limits + linker-based host capability injection. See

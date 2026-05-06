@@ -16,7 +16,7 @@ use crate::{
         token_util::{token_fields, TokenParams},
     },
 };
-use webauthn_rs::prelude::Passkey;
+use crate::modules::credential::fido2::rp::Passkey;
 
 //const DEFAULT_MAX_TTL: Duration = Duration::from_secs(365*24*60*60 as u64);
 

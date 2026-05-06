@@ -2,11 +2,10 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use url::Url;
-use webauthn_rs::prelude::*;
-use webauthn_rs::WebauthnBuilder;
-
 use super::{UserPassBackend, UserPassBackendInner};
+use crate::modules::credential::fido2::rp::{
+    AuthenticationState, PublicKeyCredentialAssertion, RelyingParty,
+};
 use crate::{
     context::Context,
     errors::RvError,
@@ -52,7 +51,7 @@ impl UserPassBackend {
                 "credential": {
                     field_type: FieldType::Str,
                     required: true,
-                    description: "JSON-encoded PublicKeyCredential assertion from the browser."
+                    description: "JSON-encoded PublicKeyCredentialAssertion from the browser."
                 }
             },
             operations: [
@@ -81,28 +80,24 @@ impl UserPassBackendInner {
             .ok_or(RvError::ErrFido2CredentialNotFound)?;
 
         let passkeys = user_entry.get_passkeys()
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
+            .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
 
         if passkeys.is_empty() {
             return Err(RvError::ErrFido2CredentialNotFound);
         }
 
-        let rp_origin = Url::parse(&config.rp_origin)
-            .map_err(|e| RvError::ErrFido2AuthFailed(format!("invalid rp_origin: {e}")))?;
+        let rp = RelyingParty {
+            rp_id: &config.rp_id,
+            rp_origin: &config.rp_origin,
+            rp_name: &config.rp_name,
+        };
 
-        let webauthn = WebauthnBuilder::new(&config.rp_id, &rp_origin)
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?
-            .rp_name(&config.rp_name)
-            .build()
+        let (challenge, auth_state) = rp
+            .begin_authentication(&passkeys)
             .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
 
-        let (challenge, auth_state) = webauthn
-            .start_passkey_authentication(&passkeys)
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
-
-        // Store authentication state.
         let state_json = serde_json::to_string(&auth_state)
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
+            .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
         let state_entry = StorageEntry::new(
             &format!("challenge/auth/{username}"),
             &state_json,
@@ -110,7 +105,7 @@ impl UserPassBackendInner {
         req.storage_put(&state_entry).await?;
 
         let challenge_json = serde_json::to_value(&challenge)
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
+            .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
         Ok(Some(Response::data_response(challenge_json.as_object().cloned())))
     }
 
@@ -125,43 +120,43 @@ impl UserPassBackendInner {
         let username = req.get_data("username")?.as_str().unwrap().to_lowercase();
         let credential_json = req.get_data("credential")?.as_str().unwrap().to_string();
 
-        // Load authentication state.
         let state_entry = req.storage_get(&format!("challenge/auth/{username}")).await?
             .ok_or(RvError::ErrFido2ChallengeExpired)?;
         let state_str: String = serde_json::from_slice(&state_entry.value)?;
-        let auth_state: PasskeyAuthentication = serde_json::from_str(&state_str)
-            .map_err(|e| RvError::ErrFido2AuthFailed(format!("invalid state: {e}")))?;
+        let auth_state: AuthenticationState = serde_json::from_str(&state_str)
+            .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(format!("invalid state: {e}")))?;
 
-        // Delete the challenge state (single use).
+        // Single-use challenge.
         req.storage_delete(&format!("challenge/auth/{username}")).await?;
 
-        let rp_origin = Url::parse(&config.rp_origin)
-            .map_err(|e| RvError::ErrFido2AuthFailed(format!("invalid rp_origin: {e}")))?;
+        let rp = RelyingParty {
+            rp_id: &config.rp_id,
+            rp_origin: &config.rp_origin,
+            rp_name: &config.rp_name,
+        };
 
-        let webauthn = WebauthnBuilder::new(&config.rp_id, &rp_origin)
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?
-            .rp_name(&config.rp_name)
-            .build()
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
+        let assertion: PublicKeyCredentialAssertion = serde_json::from_str(&credential_json)
+            .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(format!("invalid credential: {e}")))?;
 
-        let auth_response: PublicKeyCredential = serde_json::from_str(&credential_json)
-            .map_err(|e| RvError::ErrFido2AuthFailed(format!("invalid credential: {e}")))?;
-
-        let auth_result = webauthn
-            .finish_passkey_authentication(&auth_response, &auth_state)
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
-
-        // Update the credential's sign count to detect cloning.
         let mut user_entry = self.get_user(req, &username).await?
             .ok_or(RvError::ErrFido2CredentialNotFound)?;
 
         let mut passkeys = user_entry.get_passkeys()
+            .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
+
+        let auth_result = rp
+            .finish_authentication(&assertion, &auth_state, &passkeys)
             .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
+
         for pk in passkeys.iter_mut() {
-            pk.update_credential(&auth_result);
+            if let Ok(id) = pk.cred_id_bytes() {
+                if id == auth_result.cred_id {
+                    pk.sign_count = auth_result.new_sign_count;
+                }
+            }
         }
         user_entry.set_passkeys(&passkeys)
-            .map_err(|e| RvError::ErrFido2AuthFailed(e.to_string()))?;
+            .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
         self.set_user(req, &username, &user_entry).await?;
 
         // Union direct policies with any attached through identity user-groups
@@ -171,9 +166,6 @@ impl UserPassBackendInner {
             .expand_identity_group_policies(GroupKind::User, &username, &user_entry.policies)
             .await;
 
-        // Ensure token_policies mirrors effective policies before
-        // populate_token_auth (which overwrites auth.policies with
-        // token_policies).
         if user_entry.token_policies.is_empty() && !effective_policies.is_empty() {
             user_entry.token_policies = effective_policies.clone();
         } else if !effective_policies.is_empty() {
@@ -197,9 +189,6 @@ impl UserPassBackendInner {
         };
         auth.metadata.insert("username".to_string(), username.to_string());
         auth.metadata.insert("mount_path".to_string(), "userpass/".to_string());
-        // FIDO2 shares the UserPass username namespace, so look up the
-        // same entity_id as password login. See `path_login.rs` for
-        // the helper.
         if let Some(entity_id) =
             super::path_login::resolve_entity_id(&self.core, "userpass/", &username).await
         {
@@ -207,7 +196,6 @@ impl UserPassBackendInner {
         }
         user_entry.populate_token_auth(&mut auth);
 
-        // Safety net: if populate_token_auth cleared policies, restore them.
         if auth.policies.is_empty() && !effective_policies.is_empty() {
             auth.policies = effective_policies;
         }
@@ -220,7 +208,7 @@ impl UserPassBackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        // Reuse the same renewal logic as password login since both use UserEntry
+        // Reuse the same renewal logic as password login since both use UserEntry.
         self.login_renew(_backend, req).await
     }
 }

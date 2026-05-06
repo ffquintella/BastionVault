@@ -37,7 +37,9 @@ hex = "0.4"
 sha2 = "0.11"
 serde_cbor = "0.11"
 authenticator = { version = "0.5", default-features = false, features = ["crypto_openssl"] }
-webauthn-rs-proto = "0.5"
+# `base64urlsafedata` (a small standalone crate, no OpenSSL) provides the
+# Base64UrlSafeData wrapper used in `commands/fido2_native.rs` for browser
+# WebAuthn JSON. We no longer pull `webauthn-rs-proto` here — it was unused.
 base64urlsafedata = "0.5"
 base64 = "0.22"
 # AEAD + KDF + PQC primitives used by the local keystore

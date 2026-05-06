@@ -19,6 +19,7 @@ pub mod path_config;
 pub mod path_credentials;
 pub mod path_login;
 pub mod path_register;
+pub mod rp;
 pub mod types;
 
 static FIDO2_BACKEND_HELP: &str = r#"

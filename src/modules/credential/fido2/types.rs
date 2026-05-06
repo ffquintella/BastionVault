@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use derive_more::{Deref, DerefMut};
 use serde::{Deserialize, Serialize};
-use webauthn_rs::prelude::*;
 
+use super::rp::Passkey;
 use crate::utils::{
     deserialize_duration, serialize_duration,
     token_util::TokenParams,
@@ -20,6 +20,11 @@ pub struct Fido2Config {
 }
 
 /// A user's FIDO2 credential entry stored in vault storage.
+///
+/// Note: when migrating from a `webauthn-rs`-backed deployment, existing
+/// `credentials_json` blobs are not deserializable into the in-tree
+/// `Passkey` shape. Operators must re-enroll keys; see
+/// `roadmaps/tauri-gui-fido2.md`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Deref, DerefMut)]
 pub struct UserCredentialEntry {
     pub username: String,
@@ -32,7 +37,7 @@ pub struct UserCredentialEntry {
     #[deref]
     #[deref_mut]
     pub token_params: TokenParams,
-    /// Serialized passkey credentials (JSON-encoded Vec<Passkey>).
+    /// Serialized passkey credentials (JSON-encoded `Vec<Passkey>`).
     #[serde(default)]
     pub credentials_json: String,
 }

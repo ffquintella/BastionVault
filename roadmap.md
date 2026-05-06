@@ -4,114 +4,137 @@ Global entrypoint for roadmap and long-term planning in this repository.
 
 The post-quantum crypto migration is complete. The default build uses a PQ-first, OpenSSL-free cryptographic stack.
 
+## At a glance
+
+| State | Count |
+|---|---|
+| Done | 42 |
+| Partial | 2 |
+| Todo | 10 |
+| Removed | 1 |
+| **Total tracked features** | **55** |
+
+Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-and-distribution.md)) — three new spec files, no code yet, sequenced into four release waves.
+
 ## How to read this
 
-- **Status** is one of `Done`, `Todo`, `Partial`, `Removed` — followed by a one-line summary.
-- Detailed phase notes live in each feature's spec under [`features/`](features/).
-- Multi-phase initiatives that have closed out are summarised under **Completed Initiatives**.
-- Currently open follow-ups that aren't a top-line feature live under **Deferred sub-initiatives**.
+- Tables below carry one row per tracked feature. **Status** is one of `Done`, `Todo`, `Partial`, `Removed`. **Notes** is a one-line summary with a spec link.
+- Detailed phase notes for each feature live in the linked spec under [`features/`](features/) — the table is deliberately terse.
+- Multi-phase initiatives that have closed out are summarised under [Completed Initiatives](#completed-initiatives) with full phase notes and outcomes.
+- Open follow-ups that are not a top-line feature live under [Deferred sub-initiatives](#deferred-sub-initiatives).
 
 ## Feature Status
 
 ### Core
 
-| Feature | Status |
-|---|---|
-| Core Vault Operations (init / seal / unseal / status) | Done |
-| Secret Management (KV CRUD) | Done |
-| Secret Versioning & Soft-Delete | Todo |
-| Access Control (RBAC + path-based ACL) | Done |
-| Identity Groups (user / app groups → policy mapping) | Done |
-| Per-User Scoping (ownership + policy templating + sharing) | Done — all 10 phases + the migration backfill endpoint |
-| Asset Groups (collections of resources + KV paths with group-based ACLs) | Done — all 13 phases incl. ownership, sharing, member redaction |
-| Audit Logging (tamper-evident, HMAC chain) | Done — Phase 1 (file device); syslog/HTTP devices deferred |
-| Metrics (Prometheus) | Done |
+| Feature | Status | Notes |
+|---|---|---|
+| Core Vault Operations (init / seal / unseal / status) | Done | Vault-API-compatible. |
+| Secret Management (KV CRUD) | Done | KV v1 + KV v2 incl. nested-folder LIST. |
+| Secret Versioning & Soft-Delete | Todo | [spec](features/secret-versioning-and-soft-delete.md) |
+| Access Control (RBAC + path-based ACL) | Done | Path-based policy engine with allow / deny / capabilities. |
+| Identity Groups (user / app groups → policy mapping) | Done | [spec](features/identity-groups.md) — policy union for UserPass / AppRole / FIDO2. |
+| Per-User Scoping (ownership + policy templating + sharing) | Done | [spec](features/per-user-scoping.md) — 10 phases + migration backfill. |
+| Asset Groups (collections of resources + KV paths) | Done | [spec](features/resource-groups.md) — 13 phases incl. ownership, sharing, member redaction. |
+| Audit Logging (tamper-evident, HMAC chain) | Done | Phase 1 file device shipped; syslog / HTTP devices [deferred](#deferred-sub-initiatives). |
+| Metrics (Prometheus) | Done | Standard `/metrics` endpoint. |
 
 ### Cryptography
 
-| Feature | Status |
-|---|---|
-| Post-Quantum Crypto Migration | Done |
-| Key Management (ML-KEM-768, ML-DSA-65, ChaCha20-Poly1305) | Done |
-| Key Rotation & Re-encryption | Done |
-| HSM Support | Todo |
+| Feature | Status | Notes |
+|---|---|---|
+| Post-Quantum Crypto Migration | Done | [roadmap](roadmaps/post-quantum-crypto-migration.md) — host stack OpenSSL-free, including FIDO2 (now using an in-tree pure-Rust WebAuthn RP at `src/modules/credential/fido2/rp/`). |
+| Key Management (ML-KEM-768, ML-DSA-65, ChaCha20-Poly1305) | Done | PQ-first stack. |
+| Key Rotation & Re-encryption | Done | Re-encrypt with new barrier key on rotate. |
+| HSM Support | Todo | [spec](features/hsm-support.md) |
 
 ### Storage
 
-| Feature | Status |
-|---|---|
-| Storage Backend: Encrypted File | Done |
-| Storage Backend: MySQL | Done |
-| Storage Backend: SQLx | Removed (libsqlite3-sys conflict) |
-| Storage Backend: Hiqlite (embedded Raft SQLite, HA) | Done |
-| Cloud targets for Encrypted File (S3 / OneDrive / Google Drive / Dropbox) | Done — all 8 phases incl. cache decorator + key-obfuscation |
-| Import / Export & Backup / Restore | Done |
-| Import / Export Module (`.bvx`) ([spec](features/import-export-module.md)) | Todo |
-| Scheduled Exports ([spec](features/scheduled-exports.md)) | Todo |
-| Caching | Done — token + ciphertext-only secret cache + memory hardening |
-| Batch Operations | Done — Phase 1 (HTTP); CLI + SDK deferred |
+| Feature | Status | Notes |
+|---|---|---|
+| Storage Backend: Encrypted File | Done | Local file storage with barrier encryption. |
+| Storage Backend: MySQL | Done | Diesel + r2d2 pool. |
+| Storage Backend: SQLx | Removed | libsqlite3-sys conflict. |
+| Storage Backend: Hiqlite (embedded Raft SQLite, HA) | Done | [roadmap](roadmaps/hiqlite-default-ha-storage.md) — default backend, 6 phases. |
+| Cloud targets for Encrypted File (S3 / OneDrive / Google Drive / Dropbox) | Done | [spec](features/cloud-storage-backend.md) — 8 phases incl. cache decorator + key obfuscation. |
+| Import / Export & Backup / Restore | Done | [spec](features/import-export-backup-restore.md) — BVBK binary format with HMAC-SHA256. |
+| Import / Export Module (`.bvx`) | Todo | [spec](features/import-export-module.md) |
+| Scheduled Exports | Todo | [spec](features/scheduled-exports.md) |
+| Caching | Done | [spec](features/caching.md) — token cache + ciphertext-only secret cache + memory hardening. |
+| Batch Operations | Done | [spec](features/batch-operations.md) — Phase 1 HTTP shipped; CLI + SDK [deferred](#deferred-sub-initiatives). |
 
 ### Resources
 
-| Feature | Status |
-|---|---|
-| Resource Management (inventory + grouped secrets) | Done |
-| File Resources (binary blobs + local-FS sync) | Done — all 8 phases (local-FS, SMB, SFTP, SCP, periodic re-sync, sync-on-write) |
-| First-class `firewall` / `switch` types + refined `database` ([spec](features/resource-types-firewall-switch-db.md)) | Done — all three phases. `firewall` + `switch` builtins added to `gui/src/lib/resourceTypes.ts` (vendor enums, HA role, layer, firmware, model; SSH-22 connect defaults). `database.engine` converted to a closed enum (PostgreSQL / MySQL / MariaDB / MSSQL / Oracle / MongoDB / Redis / Elasticsearch / SQLite / Other) plus `engine_version` + `tls_required`. PMP importer's lookup table maps `Fortimanager` → firewall and `Cisco IOS` → switch (verified end-to-end against the operator's real PMP fixture). Built-in resource type table in `features/resources.md` updated. No data migration; existing `network_device` resources untouched. |
-| Resource Connect — in-app SSH / RDP for server resources ([spec](features/resource-connect.md)) | Done — Phases 1–7 shipped. Launch matrix: SSH × {Secret, LDAP, PKI} ✅, RDP × {Secret, LDAP, PKI (CredSSP smartcard via sspi-rs's PIV emulator)} ✅. Phase 7 polish landed: per-resource-type Connect policy on `ResourceTypeDef`, recently-connected list (last 10) on every resource, ⌘K global Connect palette with fuzzy resource × profile picker. Only the `ssh-engine` credential source remains as a deferred follow-up. |
+| Feature | Status | Notes |
+|---|---|---|
+| Resource Management (inventory + grouped secrets) | Done | [spec](features/resources.md) — 14 Tauri commands, full GUI. |
+| File Resources (binary blobs + sync targets) | Done | [spec](features/file-resources.md) — local-FS + SMB + SFTP + SCP + periodic re-sync + sync-on-write. |
+| First-class `firewall` / `switch` types + refined `database` | Done | [spec](features/resource-types-firewall-switch-db.md) — three phases shipped; closed-enum DB engines, vendor / HA-role / layer / firmware fields. |
+| Resource Connect — in-app SSH / RDP for server resources | Done | [spec](features/resource-connect.md) — Phases 1–7 incl. ⌘K palette, recently-connected list, Connect-policy on `ResourceTypeDef`. SSH-engine credential source [deferred](#deferred-sub-initiatives). |
 
 ### Networking & TLS
 
-| Feature | Status |
-|---|---|
-| TLS & mTLS (Rustls-based) | Done |
+| Feature | Status | Notes |
+|---|---|---|
+| TLS & mTLS (Rustls-based) | Done | PQ-friendly hybrid suites (X25519MLKEM768) supported. |
 
 ### Authentication
 
-| Feature | Status |
-|---|---|
-| Auth: Token | Done |
-| Auth: AppRole | Done |
-| Auth: Userpass | Done |
-| Auth: Certificate | Done |
-| Auth: OIDC | Done — server module + login + provider admin lifecycle |
-| Auth: SAML 2.0 | Done — pure-Rust SP-initiated SSO, no libxml2 / xmlsec |
-| Auth: FIDO2 / WebAuthn / YubiKey | Done |
-| Auth: Machine Authentication ([spec](features/machine-authentication.md)) | Todo — composite-key (random part + host-hardware fingerprint of CPU id, RAM, SMBIOS UUID, disk serial, NIC MAC, …) auth for headless clients on client-server installs. Random part is bound to the physical machine that enrolled — copying `machine.random` to another host fails login. Admin-approval gate via CLI (`bvault machine-auth approve`) and GUI (Settings → Auth → Machines). Optional TPM 2.0 backend behind a build feature for hardware-rooted non-export. |
+| Feature | Status | Notes |
+|---|---|---|
+| Auth: Token | Done | Vault-shape token store. |
+| Auth: AppRole | Done | RoleID + SecretID. |
+| Auth: Userpass | Done | Argon2 password hashing. |
+| Auth: Certificate | Done | mTLS client-cert auth. |
+| Auth: OIDC | Done | [spec](features/oidc-auth.md) — server module + GUI lifecycle, PKCE / nonce / JWKS. |
+| Auth: SAML 2.0 | Done | [spec](features/saml-auth.md) — pure-Rust SP-initiated SSO, no libxml2 / xmlsec. |
+| Auth: FIDO2 / WebAuthn / YubiKey | Done | [roadmap](roadmaps/tauri-gui-fido2.md) — server uses an in-tree pure-Rust RP (`fido2/rp/`); no `openssl` in the server crate. ES256 + Ed25519, attestation `none` only. |
+| Auth: Machine Authentication | Todo | [spec](features/machine-authentication.md) — composite-key (random + host-hardware fingerprint), admin-approval gated. |
 
 ### Secret Engines
 
-| Feature | Status |
-|---|---|
-| PKI ([spec](features/pki-secret-engine.md)) | Done — Phases 1–5.2; classical + ML-DSA PQC + composite, multi-issuer, on-demand + auto tidy |
-| PKI: ACME server endpoints ([spec](features/pki-acme.md)) | Done — Phases 6.1 + 6.1.5 + 6.2 + 6.3, feature-complete on RFC 8555 (HTTP-01 + DNS-01, EAB, key-change, revoke, rate limit, expiry sweep) |
-| PKI: Key Management + Cert Lifecycle ([spec](features/pki-key-management-and-lifecycle.md)) | Done — all seven phases (L1–L7): managed key store; key reuse on issue/sign; issuer-bound keys + chain endpoint; emission controls; cert-lifecycle module + manual renew + scheduler; `CertDeliveryPlugin` trait with built-in `file` + `http-push` deliverers and `cert-lifecycle/sys/deliverers` admin route. The `plugin-ext` bridge that would let third-party deliverers register at runtime is the remaining follow-up; the trait + `DelivererRegistry::register` plug point are stable. |
-| Transit ([spec](features/transit-secret-engine.md)) | Done — Phases 1–4: AEAD + HMAC + sign/verify + ML-KEM datakey + ML-DSA + derived/convergent + BYOK + hybrid composite |
-| TOTP ([spec](features/totp-secret-engine.md)) | Done — Phases 1–4: HOTP/TOTP + GUI |
-| SSH ([spec](features/ssh-secret-engine.md)) | Done — Phases 1–4: CA Ed25519 + OTP + ML-DSA-65 PQC + GUI |
-| OpenLDAP / AD password-rotation ([spec](features/ldap-secret-engine.md)) | Done — all 5 phases incl. identity-aware check-out affinity |
-| Dynamic Secrets framework ([spec](features/dynamic-secrets.md)) | Todo — host ships only the framework; concrete engines (Postgres, MySQL, AWS, …) ship as plugins under [`dynamic-engine-plugins/`](dynamic-engine-plugins/), loaded on demand |
-| XCA database import ([spec](features/xca-import.md)) | Todo — **external plugin** under `plugins-ext/bastion-plugin-xca` (process runtime). Reads XCA `.xdb` SQLite databases, decrypts with the master password (EVP_BytesToKey + PBKDF2 paths), returns a plan the GUI walks via existing PKI / KV routes. **Zero host-crate code**: rides on the plugin substrate alongside `bastion-plugin-postgres`. |
-| Password Manager Pro resource import ([spec](features/pmp-import.md)) | Done — all phases shipped: `validate` + `preview` + `import` ops over `.xls`/`.xlsx`, fixed `OS Type` → BV type/os_type table with per-call overrides, multi-account collapse, KV routing for `Generic Keys`/`Application Passwords`/`License Store`, Department → asset-group derivation, custom-column preservation, fixture-driven test green against operator sample (99 rows → 55 resources + 8 KV blobs + 10 asset groups). Phase 5 hardening: encrypted-export rejection at validate time (CFB+EncryptedPackage sniff), synthetic version-matrix tests covering PMP 11/12/13 layouts, operator migration guide at `plugins-ext/bastion-plugin-pmp/docs/migration-guide.md`. Wizard at `gui/src/routes/PmpImportPage.tsx` (route `/resources/import-pmp`, gated on `pluginsList`); three steps, three-pass run that writes resource + every account-secret + KV blob + asset-group merge. Original baseline: **external plugin** under `plugins-ext/bastion-plugin-pmp` (process runtime). Reads ManageEngine PMP `ExportPasswordView` spreadsheets (`.xls` and `.xlsx`), splits the overloaded `OS Type` column into BV `type` + `os_type`, collapses multi-account rows into one resource with N secrets, **routes the non-resource-shaped row types (`Generic Keys`, `Application Passwords`, `License Store`) into the KV engine** under `secret/pmp-import/<batch-id>/<kind>/...`, **maps PMP `Department` to a slugified asset group** (auto-create + merge), and **records the importing operator as owner** of every created resource / KV entry. Returns a plan the GUI walks via existing Resource + KV + Asset Group Tauri commands. **Zero host-crate code**: rides on the plugin substrate alongside `bastion-plugin-xca`. |
+| Feature | Status | Notes |
+|---|---|---|
+| PKI | Done | [spec](features/pki-secret-engine.md) — Phases 1–5.2; classical + ML-DSA + composite, multi-issuer, on-demand + auto tidy. |
+| PKI: ACME server endpoints | Done | [spec](features/pki-acme.md) — RFC-8555 feature-complete, HTTP-01 + DNS-01 + EAB. |
+| PKI: Key Management + Cert Lifecycle | Done | [spec](features/pki-key-management-and-lifecycle.md) — 7 phases incl. `CertDeliveryPlugin` trait. |
+| Transit | Done | [spec](features/transit-secret-engine.md) — Phases 1–4: AEAD + HMAC + sign/verify + ML-KEM + ML-DSA + BYOK + hybrid. |
+| TOTP | Done | [spec](features/totp-secret-engine.md) — Phases 1–4: HOTP / TOTP + GUI. |
+| SSH | Done | [spec](features/ssh-secret-engine.md) — Phases 1–4: CA Ed25519 + OTP + ML-DSA-65. |
+| OpenLDAP / AD password-rotation | Done | [spec](features/ldap-secret-engine.md) — 5 phases incl. identity-aware check-out affinity. |
+| Dynamic Secrets framework | Todo | [spec](features/dynamic-secrets.md) — host ships only the framework; engines under [`dynamic-engine-plugins/`](dynamic-engine-plugins/). |
+| XCA database import | Done | [spec](features/xca-import.md) — external plugin `bastion-plugin-xca` shipped; reads `.xdb` SQLite, decrypts both XCA envelope formats, imports into the PKI engine via the operator-driven GUI wizard. |
+| Password Manager Pro resource import | Done | [spec](features/pmp-import.md) — `bastion-plugin-pmp` external plugin + GUI wizard. |
 
 ### Infrastructure
 
-| Feature | Status |
-|---|---|
-| High Availability (Raft via Hiqlite) | Done |
-| Plugin System ([spec](features/plugin-system.md)) | Done — WASM + supervised long-lived process runtime, signed manifests, per-plugin metrics, GUI |
-| Namespaces / Multi-tenancy ([spec](features/namespaces-multitenancy.md)) | Partial |
-| Kubernetes Integration ([spec](features/kubernetes-integration.md)) | Todo |
-| Rustion Bastion Integration ([spec](features/rustion-integration.md)) | Todo — spec drafted; mediates Resource Connect through a PQC bastion with master-cert trust anchor, signed/encrypted session-grant envelopes, TTL+renewal, recording delegated to Rustion |
-| Web UI / Desktop GUI (Tauri) | Done — all 9 phases |
-| Compliance Reporting ([spec](features/compliance-reporting.md)) | Todo |
+| Feature | Status | Notes |
+|---|---|---|
+| High Availability (Raft via Hiqlite) | Done | [roadmap](roadmaps/hiqlite-default-ha-storage.md) — cluster CLI, PQ TLS, HA fault-injection. |
+| Plugin System | Done | [spec](features/plugin-system.md) — WASM + supervised process runtime, signed manifests, per-plugin metrics, GUI. |
+| Namespaces / Multi-tenancy | Partial | [spec](features/namespaces-multitenancy.md) |
+| Kubernetes Integration | Todo | [spec](features/kubernetes-integration.md) — `kubernetes` auth backend + CSI driver + agent injector. |
+| Rustion Bastion Integration | Todo | [spec](features/rustion-integration.md) — mediates Resource Connect through a PQC bastion; recording delegated to Rustion. |
+| Web UI / Desktop GUI (Tauri) | Done | [roadmap](roadmaps/tauri-gui-fido2.md) — 9 phases, 55 Tauri commands, 79 React modules, 10 pages. |
+| Compliance Reporting | Todo | [spec](features/compliance-reporting.md) |
+
+### Packaging & Distribution
+
+Sequenced together under [`roadmaps/packaging-and-distribution.md`](roadmaps/packaging-and-distribution.md). Specs drafted; no code yet.
+
+| Feature | Status | Notes |
+|---|---|---|
+| Server Container Image (Podman / OCI, standalone + cluster) | Partial | [spec](features/packaging-podman-server.md) — **Phase 1 shipped**: standalone, `linux/amd64`, distroless `cc-debian12:nonroot`, GHCR push on `v*.*.*` tags, unsigned. Phases 1.5 (client-IP propagation), 2 (cluster), 3 (multi-arch + Cosign + SBOM + `:debug`), 4 (Helm chart) pending. |
+| Native Client Installers (deb / rpm / pkg / msi for GUI + CLI) | Todo | [spec](features/packaging-client-binaries.md) — Tauri bundler for GUI, parallel CLI track via `cargo-deb` / `cargo-generate-rpm` / `pkgbuild` / WiX 3.x. Double-signed (platform-native + Cosign). Phase 5 publishes apt + dnf repos. |
+| Client Distribution Website (OCI image) | Todo | [spec](features/packaging-distribution-website.md) — small `axum` + `askama` static-site server, signed `manifest.json` consumed by both the landing page and the GUI's "update available" banner (link-out only, no auto-update). |
 
 ## Active Initiatives
 
-None — all previously-active items have closed out. Next up are the `Todo` rows above, primarily:
+- **Packaging & Distribution** ([roadmap](roadmaps/packaging-and-distribution.md)) — server container image + native client installers + client-binary distribution website. Three feature specs drafted, no code yet. Sequenced into four release waves; Wave 1 = standalone server image.
+
+Next-up `Todo` rows once Packaging & Distribution lands:
 
 - Secret Versioning & Soft-Delete
-- Resource Connect (Phase 1 unblocks Phases 2–7)
 - Dynamic Secrets framework + first engine plugins
 - HSM Support
 - Kubernetes Integration
@@ -131,26 +154,50 @@ Each entry below has a dedicated spec / roadmap document with full phase notes.
 - [Per-User Scoping (Ownership & Sharing)](features/per-user-scoping.md) — 10 phases + migration backfill, `OwnerStore` + `ShareStore`, `scopes = ["owner", "shared"]`, policy templating, `/sharing` GUI page + per-resource Sharing tab.
 - [Identity Groups](features/identity-groups.md) — user + app groups, policy union for UserPass / AppRole / FIDO2 logins, integration tests, GUI.
 - [Resource / Asset Groups](features/resource-groups.md) — 13 phases; collections of resources + KV paths, two reverse indexes, ACL `groups = [...]` qualifier, ownership + sharing + member redaction, GUI.
-- [File Resources](features/file-resources.md) — `files/` mount, 32 MiB cap + SHA-256 integrity, ownership / sharing / asset-group membership, local-FS sync target, content versioning, GUI. Phases 5–7 (SMB / SFTP / SCP / periodic re-sync) deferred (see below).
+- [File Resources](features/file-resources.md) — `files/` mount, 32 MiB cap + SHA-256 integrity, ownership / sharing / asset-group membership, local-FS / SMB / SFTP / SCP sync, content versioning, GUI.
 - [Cloud Storage Targets for Encrypted File](features/cloud-storage-backend.md) — 8 phases; pluggable `FileTarget` trait + S3 / OneDrive / Google Drive / Dropbox providers, OAuth/PKCE infra, OS keychain, key-obfuscation decorator, multi-vault saved profiles.
 - [Cloud FileTarget Memory Cache](features/cloud-storage-backend.md) — bounded TTL cache (30 s read / 10 s list / 65k entries / 500 MiB), singleflight coalescing, stale-while-revalidate, opt-in prefetch, Prometheus metrics. Default-on for cloud providers.
 - [PKI Secret Engine](features/pki-secret-engine.md) — Phases 1–5.2; classical + PQC + composite, multi-issuer with per-usage gates, full Vault-shape route surface, on-demand + auto tidy.
 - [PKI Key Management + Cert Lifecycle](features/pki-key-management-and-lifecycle.md) — all seven phases (L1–L7): managed key store, key reuse on issue/sign, issuer-bound keys, chain endpoint + `ca_chain` on responses, emission controls (domain matrix + ACME kill-switch + TTL/pathLen clamps), cert-lifecycle module with manual renew, periodic scheduler with backoff, and `CertDeliveryPlugin` trait with built-in `file` + `http-push` deliverers. The `plugin-ext` bridge for third-party deliverers is a deferred follow-up.
+- [PKI ACME Server](features/pki-acme.md) — Phases 6.1 + 6.1.5 + 6.2 + 6.3, feature-complete on RFC 8555 (HTTP-01 + DNS-01, EAB, key-change, revoke, rate limit, expiry sweep).
+- [Transit Secret Engine](features/transit-secret-engine.md) — Phases 1–4: AEAD + HMAC + sign/verify + ML-KEM datakey + ML-DSA + derived/convergent + BYOK + hybrid composite.
+- [TOTP Secret Engine](features/totp-secret-engine.md) — Phases 1–4: HOTP / TOTP + GUI.
+- [SSH Secret Engine](features/ssh-secret-engine.md) — Phases 1–4: CA Ed25519 + OTP + ML-DSA-65 PQC + GUI.
+- [OpenLDAP / AD password-rotation](features/ldap-secret-engine.md) — 5 phases incl. identity-aware check-out affinity.
 - [OIDC Authentication](features/oidc-auth.md) — server module + GUI admin lifecycle. PKCE + CSRF + nonce, JWKS verification, claim-to-policy mapping, mode-aware redirect-URI hints (server-stable vs. RFC 8252 loopback).
 - [SAML 2.0 Authentication](features/saml-auth.md) — pure-Rust SP-initiated SSO; AuthnRequest, streaming `quick-xml` parsing, RSA-SHA256/SHA1 verify, hand-rolled Exclusive C14N. Zero libxml2 / xmlsec / OpenSSL footprint. 46 tests.
+- [First-class `firewall` / `switch` types + refined `database`](features/resource-types-firewall-switch-db.md) — three phases shipped: `firewall` + `switch` builtins (vendor enums, HA role, layer, firmware, model; SSH-22 connect defaults), `database.engine` closed enum (PostgreSQL / MySQL / MariaDB / MSSQL / Oracle / MongoDB / Redis / Elasticsearch / SQLite / Other) + `engine_version` + `tls_required`. PMP importer's `Fortimanager` → firewall and `Cisco IOS` → switch mappings verified end-to-end.
+- [Resource Connect](features/resource-connect.md) — Phases 1–7. Launch matrix: SSH × {Secret, LDAP, PKI} ✅, RDP × {Secret, LDAP, PKI (CredSSP smartcard via sspi-rs's PIV emulator)} ✅. Per-resource-type Connect policy on `ResourceTypeDef`, recently-connected list (last 10), ⌘K global Connect palette with fuzzy resource × profile picker.
+- [XCA database import](features/xca-import.md) — external plugin `bastion-plugin-xca` (process runtime) reads XCA `.xdb` SQLite databases, decrypts both envelope formats (EVP_BytesToKey for XCA ≤ 2.0, PBKDF2-HMAC-SHA512 for XCA ≥ 2.4) plus per-key `ownPass`, and imports certificates / private keys / CRLs into the PKI engine via the `Settings → PKI → Import XCA` GUI wizard. Standalone keys / CSRs / templates land as KV blobs under `secret/xca-import/<batch-id>/...`. Zero host-crate code; rides on the plugin substrate alongside `bastion-plugin-pmp`.
+- [Password Manager Pro resource import](features/pmp-import.md) — all phases shipped: `validate` + `preview` + `import` ops over `.xls` / `.xlsx`, fixed `OS Type` → BV type/os_type table with per-call overrides, multi-account collapse, KV routing for `Generic Keys` / `Application Passwords` / `License Store`, Department → asset-group derivation, custom-column preservation. External plugin under `plugins-ext/bastion-plugin-pmp` (process runtime); GUI wizard at `gui/src/routes/PmpImportPage.tsx`. Encrypted-export rejection at validate time, synthetic version-matrix tests covering PMP 11 / 12 / 13 layouts, operator migration guide bundled with the plugin.
 
 ## Deferred sub-initiatives
 
 Self-contained follow-ups with no current blocker on the parent feature. Each can graduate to Active when operator demand + a specific implementation choice are confirmed.
+
+**Audit Logging**
+- Syslog and HTTP audit devices — Phase 1 file device shipped; the trait + dispatcher accept additional devices; only the syslog / HTTP implementations are missing.
+
+**Batch Operations**
+- CLI + SDK clients — Phase 1 HTTP surface shipped; the CLI and SDK wrappers are deferred until at least one engine asks for them.
 
 **PKI**
 - `--allow-mixed-chain` opt-in — guard is fail-closed today; trivial to add as a flag for migration windows.
 - AIA / CRL Distribution Points / Name Constraints extensions in issued certs — `pki/config/urls` round-trips the URLs; cert builders don't emit the extensions yet.
 - Composite IETF-draft tracking — Phase 3 pins a BastionVault-internal prehash domain; swap point is `composite::bv_prehash` once `draft-ietf-lamps-pq-composite-sigs` locks.
 - Additional composite variants — Phase 3 ships `id-MLDSA65-ECDSA-P256-SHA512`; other pairings (44+P-256, 87+P-384, RSA-PSS) follow the same structure.
+- `plugin-ext` bridge for third-party `CertDeliveryPlugin` deliverers — trait + `DelivererRegistry::register` plug point are stable; runtime bridge is the remaining work.
+
+**Resource Connect**
+- `ssh-engine` credential source — final cell of the launch matrix; SSH × {Secret, LDAP, PKI} all green, the SSH-engine variant is the deferred fourth.
+
+**FIDO2 / WebAuthn**
+- ~~Replace the `openssl-sys` link in `webauthn-rs` 0.5~~ — done. The server now uses an in-tree pure-Rust Relying Party at [`src/modules/credential/fido2/rp/`](src/modules/credential/fido2/rp/); `cargo tree -p bastion_vault -i openssl` is empty. See [tauri-gui-fido2.md](roadmaps/tauri-gui-fido2.md) for the new module layout. Storage compat note: existing FIDO2 enrollments require re-enrollment after the upgrade.
+- Remove GUI-side OpenSSL — the `authenticator` crate's `crypto_openssl` feature plus a single PKCS#12 import in `gui/src-tauri/src/commands/pki.rs`. Candidates: `ctap-hid-fido2` (USB-only) or `authenticator` with `crypto_nss`; `p12-keystore` for the PKCS#12 import.
 
 ## Notes
 
 - Put new roadmap documents under [`roadmaps/`](roadmaps/).
-- Keep this file updated whenever a roadmap is added, renamed, or removed.
+- Keep this file updated whenever a feature status changes (Todo → In Progress → Done) or a new roadmap is added.
+- The status table is the single source of truth for project progress. The `Notes` column is intentionally short — phase-by-phase detail belongs in the linked spec, not in this table.
 - Prefer one roadmap per major initiative so planning, sequencing, and acceptance criteria stay reviewable.

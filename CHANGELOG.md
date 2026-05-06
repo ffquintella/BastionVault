@@ -47,6 +47,33 @@ EXAMPLE ENTRY:
 
 ### Changed
 
+#### FIDO2 RP — replace `webauthn-rs` with in-tree pure-Rust implementation
+
+- New module `src/modules/credential/fido2/rp/` implements a minimal
+  WebAuthn Relying Party with no `openssl` dependency. Supports passkey
+  registration and authentication with attestation format `none`,
+  ES256 + Ed25519 signatures (which covers every passkey-capable
+  authenticator in practice).
+- Rewires `modules/credential/fido2/path_register.rs`,
+  `path_login.rs`, and the userpass mirrors
+  (`userpass/path_fido2_register.rs`, `path_fido2_login.rs`,
+  `path_users.rs`) onto the new `RelyingParty` API.
+- Storage shape changes: `credentials_json` is now an array of in-tree
+  `Passkey` records (`v=1`). Existing FIDO2 enrollments produced by
+  the prior `webauthn-rs`-backed code path are NOT readable — operators
+  must re-enroll keys after upgrading.
+- Drops `webauthn-rs` and `webauthn-rs-proto` from `Cargo.toml`; adds
+  `ciborium` for CBOR parsing. Net effect:
+  `openssl` and `openssl-sys` are no longer in the server crate's
+  dependency tree (`cargo tree -p bastion_vault -i openssl` is empty).
+  GUI-side `openssl` from the Mozilla `authenticator` crate is
+  unchanged and tracked as a separate cleanup.
+- Also removes the unused `webauthn-rs-proto` dep from
+  `gui/src-tauri/Cargo.toml`.
+- 10 new unit tests in `rp/tests.rs` cover challenge generation, RP
+  origin/host validation, clientData verification (type/origin/challenge
+  mismatches), authenticatorData parsing, and Passkey JSON round-trip.
+
 #### PMP importer — non-connectable rows now route to KV, not Resources
 
 - The Resources inventory is for *connectable devices* (server / database / firewall / switch / network_device / website / application). Previously, unrecognised PMP `OS Type` values (e.g. `Arquivos de Incidentes`, `Resource Type`, custom PMP install types) were synthesising empty BV resources with auto-slugged custom type ids, polluting the inventory with non-clickable entries. Those rows now route to KV by default under `secret/pmp-import/<batch-id>/{incident-files|other}/<resource>/<account>` with the same JSON envelope shape (value_b64 + PMP context). The catch-all kind is `other`. Verified against the operator's real fixture: 99 rows now produce 53 resources + 11 KV entries (was 55 + 8). Tests added to `tests/version_matrix.rs` covering the routing rule and the new `kv:<kind>` form of `type_overrides` (lets operators force normally-resource rows into KV and vice versa). Mapping change in `bastion-plugin-pmp/src/mapping.rs`; `RowKind::Unknown` removed.
@@ -62,7 +89,40 @@ EXAMPLE ENTRY:
 
 - Owner banner, step bar, account-list expand, progress bar, error panel, and skipped-rows warning all migrated from light-mode-only colour fallbacks (white-on-white in dark mode) to the project's `var(--color-*)` token system. Errors panel now uses `var(--color-danger)` with a translucent background and a scrollable list so a multi-error import surfaces every entry.
 
+### Fixed
+
+#### Audit chain now records the connecting client's IP
+
+- [`src/audit/entry.rs`](src/audit/entry.rs) `AuditEntry::from_request` previously hardcoded `remote_address: String::new()` on both `auth` and `request` halves of every audit line, so the audit chain never carried the connecting client's address even though `Request.connection.peer_addr` was already populated by the HTTP layer ([src/http/logical.rs:72](src/http/logical.rs:72)). The fix reads the peer address out of `req.connection` and writes it into both `auth.remote_address` and `request.remote_address`; if `connection` is `None` (synthetic / internal calls) both fields stay empty. Two regression tests added to [`src/audit/entry.rs`](src/audit/entry.rs): `entry_carries_peer_addr_from_connection` and `entry_remote_address_empty_when_no_connection`. This closes the Wave 1 / Phase 1 acceptance bar in [`features/packaging-podman-server.md`](features/packaging-podman-server.md) which required "audit-log entries for operator init / unseal / KV writes carry the connecting client's socket-level IP". Trusted-proxy header derivation (`client_ip_socket` + `client_ip_derived` separation, `BASTIONVAULT_TRUSTED_PROXIES`, PROXY-protocol acceptor) remains scheduled for Phase 1.5 — that work now augments an already-populated socket-IP field instead of having to create one from scratch.
+
+### Changed
+
+#### XCA database import — status flipped to Done
+
+- [`features/xca-import.md`](features/xca-import.md) status moved to **Done**. External plugin `bastion-plugin-xca` (process runtime) is shipped: reads XCA `.xdb` SQLite databases, decrypts both envelope formats (EVP_BytesToKey for XCA ≤ 2.0, PBKDF2-HMAC-SHA512 for XCA ≥ 2.4) including per-key `ownPass`, and imports certificates / private keys / CRLs into the PKI engine via the `Settings → PKI → Import XCA` GUI wizard. Standalone keys / CSRs / templates land as KV blobs under `secret/xca-import/<batch-id>/...`. Zero host-crate code; rides on the plugin substrate alongside `bastion-plugin-pmp`. Roadmap counts updated (Done 41 → 42, Todo 12 → 11); entry added to the Completed Initiatives list.
+
 ### Added
+
+#### Packaging & Distribution — Wave 1, Phase 1: standalone server container image (amd64)
+
+- New [`deploy/container/Containerfile`](deploy/container/Containerfile) — two-stage OCI build. Stage 1 builds `bvault` + `bv-ssh-helper` from `rust:1-slim-bookworm` with `clang` + `cmake` + `git` + `pkg-config` + `libssl-dev`. The host crypto stack is OpenSSL-free, but `webauthn-rs` 0.5.4 (FIDO2 / WebAuthn attestation) transitively pulls in `openssl-sys`; we install `libssl-dev` to satisfy the build and set `OPENSSL_STATIC=1` + `OPENSSL_NO_VENDOR=1` so openssl is statically linked into the binary and the distroless runtime never needs `libssl.so.3` at run time. A post-build `ldd` check fails the build if a `libssl` / `libcrypto` dynamic link sneaks back in, so a misconfiguration surfaces at build time instead of as a confusing "cannot find libssl.so.3" error at container start. Stage 2 is `gcr.io/distroless/cc-debian12:nonroot` — glibc + ca-certificates + the two binaries + the inert sample config, nothing else. Runs as UID `65532:65532`, exposes `8200`, `WORKDIR=/var/lib/bvault`, `ENTRYPOINT=["/usr/local/bin/bvault"]`, `CMD=["server", "--config", "/etc/bvault/config.hcl"]`. No shell in the runtime — entrypoint is the binary directly; the mode-resolver wrapper lands as a static-built helper in Wave 2 alongside cluster mode.
+- New [`deploy/container/config/config.hcl.sample`](deploy/container/config/config.hcl.sample) — Hiqlite single-node config baked at `/etc/bvault/config.hcl`, with **placeholder secrets that intentionally fail validation** so an operator who forgets to bind-mount their own config gets a loud immediate failure rather than a silently misconfigured production server. Documents the disable_mlock + `IPC_LOCK` capability tradeoff for distroless / rootless deployments.
+- New [`deploy/container/README.md`](deploy/container/README.md) — operator quickstart: pulling, the bind-mount layout (`/var/lib/bvault/data`, `/etc/bvault/config.hcl`, `/etc/bvault/tls/`), the manual `operator init` + `operator unseal` flow (no auto-init, no auto-unseal), the recommended orchestrator readiness probe pointing at `/v1/sys/health` (a binary-based `HEALTHCHECK` arrives in Phase 3), and an explicit "what this image does not do" list.
+- New [`deploy/compose/standalone.yml`](deploy/compose/standalone.yml) — `podman compose` / `docker compose` reference for a single-node standalone deployment. Bind-mounts a host `./config.hcl`, `./tls/`, and a named `bv-data` volume; documents that `user:` overrides are not supported (UID is hard-coded at 65532 in the image).
+- New [`.github/workflows/container-image.yml`](.github/workflows/container-image.yml) — GitHub Actions workflow triggered on `v*.*.*` tags (and `workflow_dispatch` for manual smoke tests). Builds `linux/amd64` via `docker/build-push-action@v5`, tags with `vX.Y.Z` / `vX.Y` / `vX` / `latest` via `docker/metadata-action@v5`, pushes to `ghcr.io/<owner>/bastionvault` using `GITHUB_TOKEN` with `packages: write` scope. Uses GitHub Actions cache (`type=gha`) to amortise the slow first-time Rust compile across runs. **Unsigned** — Cosign keyless signing + CycloneDX SBOM attestation arrive in Wave 2 / Phase 3.
+- New repo-root [`.dockerignore`](.dockerignore) — excludes `target/`, `.git/`, `gui/node_modules/`, `gui/dist/`, `gui/src-tauri/target/`, the `plugins-ext/` and `IronRDP` submodules (both excluded from the cargo workspace), and editor / OS noise. Keeps the build context small and reproducible.
+
+##### Spec sync
+
+- [`features/packaging-podman-server.md`](features/packaging-podman-server.md) volume paths reconciled with the project's existing `bvault` convention from [`config/single-node.hcl`](config/single-node.hcl): `/etc/bastionvault/` → `/etc/bvault/`, `/var/lib/bastionvault` → `/var/lib/bvault/data`, `/var/log/bastionvault/` → `/var/log/bvault/`. Image / container / chart names (`bastionvault`, `bastionvault-server`) unchanged.
+
+#### Packaging & Distribution — roadmap + three feature specs
+
+- New roadmap doc at [`roadmaps/packaging-and-distribution.md`](roadmaps/packaging-and-distribution.md) sequences server-image + client-installers + downloads-website work into four release waves and tracks the cross-cutting decisions (distroless base, Cosign keyless signing, no auto-update, no auto-init / auto-unseal, single shared `manifest.json` format, single release workflow that emits all artefacts).
+- New feature spec [`features/packaging-podman-server.md`](features/packaging-podman-server.md) — one signed OCI container image for the server, parameterised at start time into either a standalone single-process server or a Hiqlite Raft cluster member. Two-stage build with a distroless `cc-debian12:nonroot` runtime, multi-arch (amd64 + arm64), Cosign keyless + SLSA v1 provenance + CycloneDX SBOM, pinned tags + `:debug` variant for incident response, five phases ending in a reference Helm chart. Refuses to start without operator-supplied config; refuses cluster mode without TLS material; no insecure-cluster fallback; no auto-init / auto-unseal. **Client-IP visibility (new Phase 1.5)** is treated as a first-class server concern, not a container-tooling concern: `actix-web`'s socket layer reports the connecting peer natively, and a new trusted-proxy gate (`BASTIONVAULT_TRUSTED_PROXIES`, comma-separated CIDRs, empty by default → forwarded headers ignored) right-to-left walks `X-Forwarded-For` / RFC 7239 `Forwarded` and stops at the first untrusted hop so a spoofed header from outside the trusted set cannot impersonate an internal IP. Mutually-exclusive `BASTIONVAULT_PROXY_PROTOCOL=v1|v2` accepts a HAProxy PROXY-protocol header in front of the listener for L4 deployments. Audit events carry **both** `client_ip_socket` and `client_ip_derived` so a forged-header incident can be reconstructed from the audit chain alone. Production `:latest` / `:vX.Y.Z` images carry no userspace network tools (no `ss` / `ip` / `tcpdump` / `curl`); the `:debug` variant adds those four for operator-side inspection of "is my proxy actually forwarding the real client IP?" without rebuilding the image.
+- New feature spec [`features/packaging-client-binaries.md`](features/packaging-client-binaries.md) — native installers for the Tauri GUI (`bastionvault-gui`) and the `bvault` CLI on Linux (deb + rpm), macOS (pkg), and Windows (msi via WiX 3.x). Tauri's bundler drives the GUI side; `cargo-deb` / `cargo-generate-rpm` / `pkgbuild`+`productbuild` / a CLI-only WiX project drive the CLI side. Every artefact carries a platform-native signature (Authenticode / notarised pkg / GPG-signed deb+rpm) **and** a Cosign keyless signature. Five phases (Linux → macOS → Windows → manifest.json + GitHub Releases publish → optional apt/dnf repos). Per-machine Windows installs only; no auto-update.
+- New feature spec [`features/packaging-distribution-website.md`](features/packaging-distribution-website.md) — small Rust binary (`bv-downloads-server`, axum + askama) packaged as an OCI image that serves a branded landing page rendered from a mounted `manifest.json`. Operator drops signed client artefacts into a read-only volume; the container surfaces SHA-256 + Cosign signatures next to every download. No upload, no admin panel, no telemetry. Same distroless / nonroot / multi-arch / Cosign-signed posture as the server image. Phase 4 wires the GUI's "update available" banner to poll the manifest endpoint and link out to the install — no silent self-replacement.
+- [`roadmap.md`](roadmap.md) — new "Packaging & Distribution" section with three rows pointing at the specs above; the initiative is added to "Active Initiatives" with a one-line summary of the four-wave plan.
 
 #### First-class `firewall` / `switch` resource types + refined `database` — feature spec
 
