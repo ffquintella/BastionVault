@@ -26,3 +26,7 @@ Cargo.lock
 # Claude Code local settings (machine-local)
 .claude/
 .DS_Store
+
+# Local container-image push config (operator-specific; written by
+# `make container-repo-setup`, consumed by `make container-image-push`).
+.container-repo.env

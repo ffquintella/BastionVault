@@ -113,11 +113,26 @@ custody decisions require their own review.
   ship cleanly?" into a multi-tab investigation; one workflow with a
   matrix and a single publish job keeps the answer to one URL.
 
-## What is **not** yet implemented
+## What is shipped vs. still to do
 
-Everything. No `Containerfile`, no `cargo deb` config, no WiX project,
-no notarisation script, no Cosign workflow, no downloads server crate,
-no Helm chart, no apt / dnf repo, no Tauri-build CI matrix.
+**Shipped (Wave 1 / Phase 1):**
+
+- `deploy/container/Containerfile` — distroless, nonroot, statically-linked server build.
+- `deploy/container/config/config.hcl.sample` and `deploy/container/README.md`.
+- `deploy/compose/standalone.yml` — single-node reference compose.
+- `.github/workflows/container-image.yml` — GHCR build + push on tags (linux/amd64, unsigned).
+- `.dockerignore` — keeps the build context small + reproducible.
+
+**Still to do** (deferred to later waves):
+
+- Multi-arch (`linux/arm64`) for the server image.
+- Cosign keyless signing + SLSA provenance + CycloneDX SBOM attestations.
+- 3-node cluster compose reference (Hiqlite Raft).
+- Helm chart for Kubernetes deploys.
+- `cargo deb` / `cargo rpm` configs, WiX project, macOS notarisation script.
+- Tauri-build CI matrix (Linux / macOS / Windows).
+- Downloads server crate + its OCI image, manifest endpoint, GUI update-banner hookup.
+- apt / dnf repo hosting (stretch).
 
 The three feature specs each have a "Current State" section spelling
 out what does and does not exist; this roadmap closes when all three

@@ -53,7 +53,7 @@ RUSTUP_CARGO_BIN ?= $(HOME)/.cargo/bin
 endif
 export PATH := $(RUSTUP_CARGO_BIN):$(PATH)
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugin-bump
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugin-bump container-image container-image-run container-repo-setup container-repo-show container-image-push
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -171,6 +171,178 @@ _bump-write:
 	@echo "  gui/src-tauri/Cargo.toml:      $$(grep '^version' gui/src-tauri/Cargo.toml | head -1)"
 	@echo "  gui/package.json:              $$(grep '\"version\"' gui/package.json | head -1 | sed 's/^[ \t]*//')"
 	@echo "  gui/src-tauri/tauri.conf.json: $$(grep '\"version\"' gui/src-tauri/tauri.conf.json | head -1 | sed 's/^[ \t]*//')"
+
+# ── Server container image (Wave 1, Phase 1 of Packaging & Distribution) ──
+#
+# Builds the OCI image defined by `deploy/container/Containerfile`. The
+# build context is the repo root so the cargo workspace can be copied in.
+#
+# Tooling: prefers `podman`, falls back to `docker`. Both are first-class
+# on Linux and macOS (Docker Desktop / podman machine) so the same
+# invocation works on either OS.
+#
+# Override knobs (chain on the command line):
+#   make container-image CONTAINER_TOOL=docker
+#   make container-image IMAGE_NAME=ghcr.io/ffquintella/bastionvault
+#   make container-image IMAGE_TAG=v0.4.0-rc1
+#   make container-image PLATFORM=linux/arm64
+#
+# `BUILDX` toggles `docker buildx build` (multi-arch capable) when
+# CONTAINER_TOOL=docker. Podman handles --platform natively so the toggle
+# has no effect there.
+
+CONTAINER_TOOL ?= $(shell command -v podman >/dev/null 2>&1 && echo podman || echo docker)
+IMAGE_NAME     ?= bastionvault
+IMAGE_TAG      ?= $(VERSION)
+BUILDX         ?= 0
+
+# Default `PLATFORM` to the host's native architecture so local builds
+# don't go through QEMU. Cross-arch emulation (e.g. building linux/amd64
+# on Apple Silicon) reliably segfaults rustc inside the builder image —
+# QEMU's amd64 emulation isn't tight enough for the JIT-ish behaviour
+# of rustup's downloaded rustc. The CI workflow pins amd64 explicitly
+# on a Linux/amd64 runner, so producing amd64 release images is still
+# straightforward — just not from a Mac laptop.
+#
+# Override on the command line for cross-arch builds you really want:
+#   make container-image PLATFORM=linux/amd64
+ifeq ($(OS),Windows_NT)
+_HOST_ARCH := amd64
+else
+_HOST_UNAME_M := $(shell uname -m)
+ifeq ($(_HOST_UNAME_M),arm64)
+_HOST_ARCH := arm64
+else ifeq ($(_HOST_UNAME_M),aarch64)
+_HOST_ARCH := arm64
+else
+_HOST_ARCH := amd64
+endif
+endif
+PLATFORM ?= linux/$(_HOST_ARCH)
+
+# Resolve the docker subcommand once: `buildx build` if BUILDX=1 (and
+# we're on docker), plain `build` otherwise.
+ifeq ($(CONTAINER_TOOL),docker)
+ifeq ($(BUILDX),1)
+_BUILD_CMD := docker buildx build --platform $(PLATFORM)
+else
+_BUILD_CMD := docker build
+endif
+else
+_BUILD_CMD := $(CONTAINER_TOOL) build --platform $(PLATFORM)
+endif
+
+container-image: ## Build the server OCI image (auto-detects podman/docker, override with CONTAINER_TOOL=)
+	@command -v $(CONTAINER_TOOL) >/dev/null 2>&1 || { \
+		echo "ERROR: '$(CONTAINER_TOOL)' not found. Install podman or docker, or override with CONTAINER_TOOL=."; \
+		exit 1; \
+	}
+	@echo "==> Building $(IMAGE_NAME):$(IMAGE_TAG) ($(PLATFORM)) with $(CONTAINER_TOOL)"
+	$(_BUILD_CMD) \
+		-f deploy/container/Containerfile \
+		-t $(IMAGE_NAME):$(IMAGE_TAG) \
+		-t $(IMAGE_NAME):latest \
+		.
+	@echo ""
+	@echo "==> Built $(IMAGE_NAME):$(IMAGE_TAG) and $(IMAGE_NAME):latest"
+	@echo "    Inspect: $(CONTAINER_TOOL) images $(IMAGE_NAME)"
+	@echo "    Run:     make container-image-run"
+
+container-image-run: ## Run the locally-built server image (config from deploy/container/config/)
+	$(CONTAINER_TOOL) run --rm -it \
+		-p 8200:8200 \
+		-v $(PWD)/deploy/container/config:/etc/bvault/config:ro \
+		$(IMAGE_NAME):$(IMAGE_TAG)
+
+# ── Container image push (Sonatype Nexus, Docker Hub, GHCR, …) ─────────
+#
+# Two-step UX:
+#   1. `make container-repo-setup` — interactive prompts; writes the
+#      target registry config to `.container-repo.env` (gitignored).
+#   2. `make container-image-push` — re-tags the local image and pushes
+#      to whatever was saved.
+#
+# `.container-repo.env` is plain shell `KEY=value` lines so it can be
+# sourced from the recipe and inspected with `cat`. We never write
+# passwords; operators run `podman login` / `docker login` separately
+# and the credential helpers handle the rest.
+
+CONTAINER_REPO_ENV := .container-repo.env
+
+container-repo-setup: ## Interactive setup: pick the target registry to push to (writes $(CONTAINER_REPO_ENV))
+	@echo "==> Container image registry setup"
+	@echo "    Saves to: $(CONTAINER_REPO_ENV) (gitignored)"
+	@echo ""
+	@echo "    Examples:"
+	@echo "      Sonatype Nexus (port-based connector, e.g. 5000):"
+	@echo "        REGISTRY=repo.example.com:5000   NAMESPACE=           IMAGE_NAME=bastionvault"
+	@echo "      Sonatype Nexus (path-based routing):"
+	@echo "        REGISTRY=repo.example.com        NAMESPACE=<repo>     IMAGE_NAME=bastionvault"
+	@echo "      Docker Hub:"
+	@echo "        REGISTRY=docker.io               NAMESPACE=<user|org> IMAGE_NAME=bastionvault"
+	@echo "      GitHub Container Registry:"
+	@echo "        REGISTRY=ghcr.io                 NAMESPACE=<user|org> IMAGE_NAME=bastionvault"
+	@echo ""
+	@printf "Registry hostname[:port]    [docker.io]: " ; read REG ; \
+	 printf "Namespace / repo path       [empty]    : " ; read NS  ; \
+	 printf "Image name                  [bastionvault]: " ; read IMG ; \
+	 printf "Default tag                 [$(VERSION)]: " ; read TAG ; \
+	 REG=$${REG:-docker.io} ; \
+	 IMG=$${IMG:-bastionvault} ; \
+	 TAG=$${TAG:-$(VERSION)} ; \
+	 { \
+	   echo "# Generated by 'make container-repo-setup'."; \
+	   echo "# Read by 'make container-image-push'. Do not commit."; \
+	   echo "REGISTRY=$$REG"; \
+	   echo "NAMESPACE=$$NS"; \
+	   echo "IMAGE_NAME=$$IMG"; \
+	   echo "DEFAULT_TAG=$$TAG"; \
+	 } > $(CONTAINER_REPO_ENV)
+	@echo ""
+	@echo "==> Wrote $(CONTAINER_REPO_ENV):"
+	@sed 's/^/    /' $(CONTAINER_REPO_ENV)
+	@echo ""
+	@echo "Next: log in to the registry with your container tool, then push."
+	@echo "  $(CONTAINER_TOOL) login $$(grep '^REGISTRY=' $(CONTAINER_REPO_ENV) | cut -d= -f2)"
+	@echo "  make container-image-push"
+
+container-repo-show: ## Print the saved registry config from $(CONTAINER_REPO_ENV)
+	@if [ ! -f $(CONTAINER_REPO_ENV) ]; then \
+		echo "No registry configured yet. Run 'make container-repo-setup' first."; \
+		exit 1; \
+	fi
+	@echo "==> $(CONTAINER_REPO_ENV)"
+	@sed 's/^/    /' $(CONTAINER_REPO_ENV)
+
+container-image-push: ## Tag + push $(IMAGE_NAME):$(IMAGE_TAG) to the saved registry. Override with PUSH_TAG=
+	@if [ ! -f $(CONTAINER_REPO_ENV) ]; then \
+		echo "ERROR: no registry configured. Run 'make container-repo-setup' first."; \
+		exit 1; \
+	fi
+	@command -v $(CONTAINER_TOOL) >/dev/null 2>&1 || { \
+		echo "ERROR: '$(CONTAINER_TOOL)' not found."; exit 1; \
+	}
+	@. ./$(CONTAINER_REPO_ENV) ; \
+	 LOCAL_TAG="$(IMAGE_NAME):$(IMAGE_TAG)" ; \
+	 PUSH_TAG="$${PUSH_TAG:-$$DEFAULT_TAG}" ; \
+	 if [ -n "$$NAMESPACE" ]; then \
+	   REMOTE="$$REGISTRY/$$NAMESPACE/$$IMAGE_NAME:$$PUSH_TAG" ; \
+	 else \
+	   REMOTE="$$REGISTRY/$$IMAGE_NAME:$$PUSH_TAG" ; \
+	 fi ; \
+	 if ! $(CONTAINER_TOOL) image inspect "$$LOCAL_TAG" >/dev/null 2>&1 ; then \
+	   echo "ERROR: local image '$$LOCAL_TAG' not found. Build it first:" ; \
+	   echo "  make container-image" ; \
+	   exit 1 ; \
+	 fi ; \
+	 echo "==> tagging $$LOCAL_TAG as $$REMOTE" ; \
+	 $(CONTAINER_TOOL) tag "$$LOCAL_TAG" "$$REMOTE" ; \
+	 echo "==> pushing $$REMOTE" ; \
+	 $(CONTAINER_TOOL) push "$$REMOTE"
+	@echo ""
+	@echo "==> Push complete."
+	@echo "    If push failed with auth errors, run:"
+	@echo "      $(CONTAINER_TOOL) login \$$(grep '^REGISTRY=' $(CONTAINER_REPO_ENV) | cut -d= -f2)"
 
 clean: ## Remove Cargo build artefacts (target/) across the workspace
 	cargo clean
