@@ -88,6 +88,12 @@ impl AuditEntry {
     /// is used to redact the client token and request body values.
     /// `log_raw` disables redaction (dev/debug only).
     pub fn from_request(req: &Request, hmac_key: &[u8], log_raw: bool) -> Self {
+        let remote_address = req
+            .connection
+            .as_ref()
+            .map(|c| c.peer_addr.clone())
+            .unwrap_or_default();
+
         let auth = AuditAuth {
             client_token: if req.client_token.is_empty() {
                 String::new()
@@ -108,7 +114,7 @@ impl AuditEntry {
                         .collect()
                 })
                 .unwrap_or_default(),
-            remote_address: String::new(),
+            remote_address: remote_address.clone(),
         };
 
         Self {
@@ -120,7 +126,7 @@ impl AuditEntry {
                 operation: operation_str(req.operation).to_string(),
                 path: req.path.clone(),
                 data: redact_body(req.body.as_ref(), hmac_key, log_raw),
-                remote_address: String::new(),
+                remote_address,
             },
             response: None,
             error: String::new(),
@@ -253,5 +259,31 @@ mod tests {
         body.insert("password".into(), Value::String("plaintext".into()));
         let out = redact_body(Some(&body), key, true).unwrap();
         assert_eq!(out["password"].as_str().unwrap(), "plaintext");
+    }
+
+    #[test]
+    fn entry_carries_peer_addr_from_connection() {
+        use crate::logical::{Connection, Operation, Request};
+        let mut req = Request::new("secret/foo");
+        req.operation = Operation::Read;
+        let mut conn = Connection::default();
+        conn.peer_addr = "203.0.113.42:54321".to_string();
+        req.connection = Some(conn);
+
+        let entry = AuditEntry::from_request(&req, b"k", false);
+        assert_eq!(entry.auth.remote_address, "203.0.113.42:54321");
+        assert_eq!(entry.request.remote_address, "203.0.113.42:54321");
+    }
+
+    #[test]
+    fn entry_remote_address_empty_when_no_connection() {
+        use crate::logical::{Operation, Request};
+        let mut req = Request::new("secret/foo");
+        req.operation = Operation::Read;
+        // req.connection stays None — e.g. internal/synthetic call.
+
+        let entry = AuditEntry::from_request(&req, b"k", false);
+        assert!(entry.auth.remote_address.is_empty());
+        assert!(entry.request.remote_address.is_empty());
     }
 }

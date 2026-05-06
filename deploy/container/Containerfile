@@ -1,0 +1,101 @@
+# BastionVault server — official OCI image (Wave 1, Phase 1: standalone, amd64).
+#
+# Build context is the repository root. Build with:
+#   podman build -f deploy/container/Containerfile -t bastionvault:dev .
+#
+# Phase 1 ships standalone mode only. The cluster-mode entrypoint and a
+# tiny static mode-resolver binary land in Wave 2 (Phase 2 of the
+# Packaging & Distribution roadmap). Distroless has no shell, so the
+# entrypoint is the bvault binary directly — no entrypoint.sh wrapper.
+#
+# See features/packaging-podman-server.md for the full design and
+# roadmaps/packaging-and-distribution.md for the wave sequencing.
+
+# ---------- Stage 1: builder ----------
+FROM docker.io/library/rust:1-slim-bookworm AS builder
+
+# Build tooling.
+#   - clang + cmake: cover the few sub-deps that need a C compiler
+#     (e.g. ring, some PQ crates' build scripts).
+#   - libssl-dev + pkg-config: required because webauthn-rs (FIDO2 /
+#     WebAuthn) transitively pulls in openssl-sys for attestation cert
+#     validation. The host crypto stack is OpenSSL-free, but this one
+#     dep is the exception. We statically link openssl into the binary
+#     (OPENSSL_STATIC=1 below) so the distroless runtime doesn't need
+#     libssl.so.3 at run time. Replacing webauthn-rs with a rustls-only
+#     equivalent is tracked as a follow-up.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        clang \
+        cmake \
+        git \
+        libssl-dev \
+        pkg-config \
+ && rm -rf /var/lib/apt/lists/*
+
+# Force openssl-sys to statically link against the system openssl
+# (libssl.a / libcrypto.a from libssl-dev). OPENSSL_NO_VENDOR=1 keeps
+# us from accidentally rebuilding openssl from source when the openssl
+# crate is built with the `vendored` feature transitively enabled.
+ENV OPENSSL_STATIC=1 \
+    OPENSSL_NO_VENDOR=1
+
+WORKDIR /src
+
+# Copy the workspace and build the two server-side binaries.
+# We deliberately don't try to be cute with cargo-chef in Phase 1 —
+# slower CI is acceptable; cache layering is a Phase 3 concern.
+COPY . .
+
+RUN cargo build --release --bin bvault \
+ && cargo build --release --bin bv-ssh-helper
+
+# Sanity check: confirm the resulting binary doesn't need libssl at
+# runtime. Distroless has no libssl, so a dynamic link here would fail
+# at container start with a confusing "cannot find libssl.so.3" error.
+# Failing the build here surfaces the problem at build time instead.
+RUN if ldd /src/target/release/bvault | grep -E 'libssl|libcrypto'; then \
+        echo "ERROR: bvault is dynamically linked against openssl. The distroless runtime does not provide libssl. Re-check OPENSSL_STATIC."; \
+        exit 1; \
+    fi
+
+# ---------- Stage 2: runtime ----------
+# Distroless: glibc + ca-certificates + nothing else. No shell, no
+# package manager, no userspace network tools. The :debug variant in
+# Phase 3 adds ss / ip / tcpdump / curl for incident response.
+FROM gcr.io/distroless/cc-debian12:nonroot
+
+LABEL org.opencontainers.image.title="BastionVault" \
+      org.opencontainers.image.description="Identity-based secrets management server (Vault-API compatible)" \
+      org.opencontainers.image.source="https://github.com/ffquintella/BastionVault" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.vendor="BastionVault"
+
+# Binaries.
+COPY --from=builder /src/target/release/bvault         /usr/local/bin/bvault
+COPY --from=builder /src/target/release/bv-ssh-helper  /usr/local/bin/bv-ssh-helper
+
+# Inert sample config (file storage at /var/lib/bvault/data, TLS expected
+# at /etc/bvault/tls/). The operator MUST mount their own config and
+# TLS material; the server refuses to start with the bundled sample
+# unmodified because the storage backend secrets are placeholder values.
+COPY deploy/container/config/config.hcl.sample /etc/bvault/config.hcl
+
+# nonroot UID baked into the distroless base.
+USER 65532:65532
+
+# Storage volume. The image expects the operator to mount real
+# persistent storage here; without it the container is a sealed-only
+# scratchpad whose data dies with the container.
+VOLUME ["/var/lib/bvault/data"]
+
+# Working directory anchored to the data volume so any relative paths
+# in operator-supplied configs resolve sensibly.
+WORKDIR /var/lib/bvault
+
+# API listener.
+EXPOSE 8200
+
+ENTRYPOINT ["/usr/local/bin/bvault"]
+CMD ["server", "--config", "/etc/bvault/config.hcl"]

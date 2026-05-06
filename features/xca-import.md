@@ -1,5 +1,7 @@
 # Feature: Import XCA database into the PKI engine (external plugin)
 
+**Status: Done.** External plugin `bastion-plugin-xca` shipped under `plugins-ext/`. Both XCA encryption envelopes supported (EVP_BytesToKey for XCA ≤ 2.0, PBKDF2-HMAC-SHA512 for XCA ≥ 2.4), per-key `ownPass` honoured, GUI wizard live at `Settings → PKI → Import XCA`. The phase table below is preserved for historical reference.
+
 ## Summary
 
 Let an operator load an [XCA](https://hohnstaedt.de/xca/) database file

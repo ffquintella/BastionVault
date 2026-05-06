@@ -11,7 +11,7 @@ The strategy, target architecture, and phase definitions remain in [post-quantum
 
 Overall state: **complete**
 
-The post-quantum crypto migration is fully done. The default build is PQ-backed with no OpenSSL or Tongsuo dependencies.
+The post-quantum crypto migration is fully done. The host crypto stack is PQ-backed with no direct OpenSSL or Tongsuo dependencies. See the [Caveat note](#caveat--webauthn-rs-transitive-added-in-a-later-initiative) below: the later FIDO2 initiative re-introduced `openssl-sys` transitively via `webauthn-rs` for attestation-cert validation only; the running [server container image](../features/packaging-podman-server.md) statically links it so distroless never gains a `libssl.so.3`.
 
 ## Checklist
 
@@ -172,8 +172,12 @@ The post-quantum crypto migration is fully done. The default build is PQ-backed 
 Validated during the final cleanup:
 
 - `cargo check -q` — passes (no errors)
-- no `openssl` crate in `Cargo.toml`
+- no `openssl` crate in `Cargo.toml` (direct deps)
 - no `use openssl` imports in active source code
 - no Tongsuo references in active source code
 
-The default build is fully PQ-first and OpenSSL-free.
+The default build is fully PQ-first and the host code is OpenSSL-free.
+
+## Caveat — `webauthn-rs` transitive (added in a later initiative)
+
+The [Tauri GUI / FIDO2 initiative](tauri-gui-fido2.md) added `webauthn-rs` 0.5 as a direct dependency for FIDO2 / WebAuthn registration + login. `webauthn-rs` transitively pulls in `openssl-sys` (`webauthn-attestation-ca` → `openssl` → `openssl-sys`) for attestation-cert validation. `cargo tree -i openssl-sys` shows the chain. This is **not** a regression of this migration — none of the cryptographic primitives the host actually performs (encryption, signing, key establishment, TLS, hashing, HMAC) reach openssl; it is one upstream library's choice of attestation-validation backend. The [server container image](../features/packaging-podman-server.md) statically links openssl into `bvault` (`OPENSSL_STATIC=1` + `OPENSSL_NO_VENDOR=1`) and a post-build `ldd` check fails the build if a dynamic link sneaks back in, so the running distroless runtime carries no `libssl.so.3` on disk. Tracked for upstream / replacement under [Deferred sub-initiatives → FIDO2 / WebAuthn](../roadmap.md).

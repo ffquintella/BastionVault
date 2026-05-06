@@ -1,0 +1,39 @@
+# BastionVault standalone — podman-compose / docker-compose reference.
+#
+# Wave 1, Phase 1: single-node, file/Hiqlite storage on a named volume,
+# TLS material expected on the host at ./tls/, operator-supplied config
+# at ./config.hcl.
+#
+# Bring up:
+#   podman compose -f deploy/compose/standalone.yml up -d
+#
+# Then init + unseal manually (no auto-init by design):
+#   podman compose -f deploy/compose/standalone.yml exec bastionvault \
+#     bvault operator init
+#   podman compose -f deploy/compose/standalone.yml exec bastionvault \
+#     bvault operator unseal <key-1>
+#
+# See deploy/container/README.md for the full operator quickstart.
+
+services:
+  bastionvault:
+    image: ghcr.io/ffquintella/bastionvault:vX.Y.Z
+    container_name: bastionvault
+    restart: unless-stopped
+    ports:
+      - "8200:8200"
+    volumes:
+      - bv-data:/var/lib/bvault/data
+      - ./config.hcl:/etc/bvault/config.hcl:ro,Z
+      - ./tls:/etc/bvault/tls:ro,Z
+    # The runtime user is hard-coded to UID 65532 in the image.
+    # If your bind-mounted ./tls or ./config.hcl is not readable by
+    # that UID on the host, fix host-side permissions (chmod / chown)
+    # rather than overriding `user:` here — that override is not
+    # supported.
+
+volumes:
+  bv-data:
+    # Operator-managed: rebind to a real path or a CSI volume in
+    # production deployments. The named volume here is for quick
+    # local trial only.

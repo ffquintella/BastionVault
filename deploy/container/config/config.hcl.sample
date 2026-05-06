@@ -1,0 +1,45 @@
+# BastionVault — sample container config (Wave 1, Phase 1).
+#
+# This file is baked into the container image at /etc/bvault/config.hcl
+# as a starting point only. The placeholder secrets below MUST be
+# replaced before the server will accept this config; the bundled file
+# is intentionally unstartable so an operator who forgets to mount their
+# own config gets a loud, immediate failure rather than a silently
+# misconfigured production server.
+#
+# To customise: bind-mount a real config over /etc/bvault/config.hcl
+# at run time, e.g.
+#
+#   podman run -d \
+#     -v ./my-config.hcl:/etc/bvault/config.hcl:ro,Z \
+#     -v ./tls:/etc/bvault/tls:ro,Z \
+#     -v bv-data:/var/lib/bvault/data \
+#     -p 8200:8200 \
+#     ghcr.io/ffquintella/bastionvault:vX.Y.Z
+#
+# See features/packaging-podman-server.md for the full design and
+# deploy/container/README.md for an operator quickstart.
+
+storage "hiqlite" {
+  data_dir    = "/var/lib/bvault/data"
+  node_id     = 1
+  secret_raft = "REPLACE_ME_raft_16ch"
+  secret_api  = "REPLACE_ME_api_16chr"
+}
+
+listener "tcp" {
+  address       = "0.0.0.0:8200"
+  tls_disable   = false
+  tls_cert_file = "/etc/bvault/tls/server.crt"
+  tls_key_file  = "/etc/bvault/tls/server.key"
+}
+
+api_addr   = "https://0.0.0.0:8200"
+log_level  = "info"
+
+# disable_mlock is left at its default (false). Distroless / rootless
+# containers often cannot mlock; if the server logs an mlock failure on
+# startup, the operator's options are (in preference order):
+#   1. Add the IPC_LOCK capability to the container.
+#   2. Set disable_mlock = true here, accepting that secret material
+#      may be paged to swap.

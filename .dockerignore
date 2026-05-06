@@ -1,0 +1,41 @@
+# Build-context filter for `podman build` / `docker build` invoked
+# against the repository root with the official Containerfile at
+# deploy/container/Containerfile.
+#
+# Goal: keep the upload to the builder small + reproducible.
+# Anything genuinely needed for `cargo build --release --bin bvault`
+# must NOT be excluded here.
+
+# --- Heavy build outputs ---
+target/
+**/target/
+debug/
+**/debug/
+
+# --- VCS metadata ---
+.git/
+.gitignore
+.gitattributes
+.gitmodules
+
+# --- GUI / desktop bundle (server image does not include the GUI) ---
+gui/node_modules/
+gui/dist/
+gui/src-tauri/target/
+
+# --- External submodules not needed for the server build ---
+# `plugins-ext/` is excluded from the Cargo workspace (see Cargo.toml),
+# so the server build doesn't need it. `IronRDP` likewise.
+plugins-ext/
+IronRDP/
+
+# --- Editor / OS noise ---
+.vscode/
+.idea/
+.DS_Store
+**/*.bak
+**/*~
+
+# --- Tests fixtures + docs are kept (some build scripts read them) ---
+# Don't add `docs/` or `tests/` here without verifying nothing in the
+# build path reads them.

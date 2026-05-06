@@ -11,7 +11,11 @@ Remove the dependency on the Tongsuo library and migrate BastionVault toward a p
 
 ## Status: Complete
 
-All phases of the post-quantum crypto migration have been completed. The default build is fully PQ-backed with no OpenSSL or Tongsuo dependencies.
+All phases of the post-quantum crypto migration have been completed. The default build is fully PQ-backed; the host crypto stack (storage barrier, TLS via Rustls, hashing / HMAC, transit, PKI, audit chain, key wrapping) carries no OpenSSL or Tongsuo dependencies.
+
+### Caveat — `webauthn-rs` transitive (added in a later initiative)
+
+The [Tauri GUI / FIDO2 initiative](tauri-gui-fido2.md) added the `webauthn-rs` 0.5 dependency for FIDO2 / WebAuthn registration + login. `webauthn-rs` transitively pulls in `openssl-sys` (`webauthn-attestation-ca` → `openssl` → `openssl-sys`) for attestation-cert validation. This is **not** a regression of this migration — the cryptographic *primitives* used by the host (encryption, signing, key establishment, TLS) remain OpenSSL-free; it is one upstream library's choice of attestation-validation backend. The [server container image](../features/packaging-podman-server.md) statically links openssl into `bvault` via `OPENSSL_STATIC=1` so the runtime distroless image carries no `libssl.so.3` on disk. Tracked for upstream / replacement under [Deferred sub-initiatives → FIDO2 / WebAuthn](../roadmap.md).
 
 ## Important Scope Clarification
 
