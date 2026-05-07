@@ -342,7 +342,7 @@ container-repo-show: ## Print the saved registry config from $(CONTAINER_REPO_EN
 	@echo "==> $(CONTAINER_REPO_ENV)"
 	@sed 's/^/    /' $(CONTAINER_REPO_ENV)
 
-container-image-push: ## Tag + push $(IMAGE_NAME):$(IMAGE_TAG) to the saved registry. Override with PUSH_TAG=
+container-image-push: ## Tag + push $(IMAGE_NAME):$(IMAGE_TAG) AND :latest to the saved registry. Override version with PUSH_TAG=
 	@if [ ! -f $(CONTAINER_REPO_ENV) ]; then \
 		echo "ERROR: no registry configured. Run 'make container-repo-setup' first."; \
 		exit 1; \
@@ -353,12 +353,14 @@ container-image-push: ## Tag + push $(IMAGE_NAME):$(IMAGE_TAG) to the saved regi
 	@. ./$(CONTAINER_REPO_ENV) ; \
 	 SCHEME=$${SCHEME:-https} ; \
 	 LOCAL_TAG="$(IMAGE_NAME):$(IMAGE_TAG)" ; \
-	 PUSH_TAG="$${PUSH_TAG:-$$DEFAULT_TAG}" ; \
+	 VERSION_TAG="$${PUSH_TAG:-$(IMAGE_TAG)}" ; \
 	 if [ -n "$$NAMESPACE" ]; then \
-	   REMOTE="$$REGISTRY/$$NAMESPACE/$$IMAGE_NAME:$$PUSH_TAG" ; \
+	   REMOTE_PFX="$$REGISTRY/$$NAMESPACE/$$IMAGE_NAME" ; \
 	 else \
-	   REMOTE="$$REGISTRY/$$IMAGE_NAME:$$PUSH_TAG" ; \
+	   REMOTE_PFX="$$REGISTRY/$$IMAGE_NAME" ; \
 	 fi ; \
+	 REMOTE_VERSION="$$REMOTE_PFX:$$VERSION_TAG" ; \
+	 REMOTE_LATEST="$$REMOTE_PFX:latest" ; \
 	 if ! $(CONTAINER_TOOL) image inspect "$$LOCAL_TAG" >/dev/null 2>&1 ; then \
 	   echo "ERROR: local image '$$LOCAL_TAG' not found. Build it first:" ; \
 	   echo "  make container-image" ; \
@@ -375,10 +377,14 @@ container-image-push: ## Tag + push $(IMAGE_NAME):$(IMAGE_TAG) to the saved regi
 	       echo "         push fails with a TLS error." ;; \
 	   esac ; \
 	 fi ; \
-	 echo "==> tagging $$LOCAL_TAG as $$REMOTE" ; \
-	 $(CONTAINER_TOOL) tag "$$LOCAL_TAG" "$$REMOTE" ; \
-	 echo "==> pushing $$REMOTE (scheme=$$SCHEME)" ; \
-	 $(CONTAINER_TOOL) push $$PUSH_FLAGS "$$REMOTE"
+	 echo "==> tagging $$LOCAL_TAG as $$REMOTE_VERSION" ; \
+	 $(CONTAINER_TOOL) tag "$$LOCAL_TAG" "$$REMOTE_VERSION" ; \
+	 echo "==> tagging $$LOCAL_TAG as $$REMOTE_LATEST" ; \
+	 $(CONTAINER_TOOL) tag "$$LOCAL_TAG" "$$REMOTE_LATEST" ; \
+	 echo "==> pushing $$REMOTE_VERSION (scheme=$$SCHEME)" ; \
+	 $(CONTAINER_TOOL) push $$PUSH_FLAGS "$$REMOTE_VERSION" ; \
+	 echo "==> pushing $$REMOTE_LATEST (scheme=$$SCHEME)" ; \
+	 $(CONTAINER_TOOL) push $$PUSH_FLAGS "$$REMOTE_LATEST"
 	@echo ""
 	@echo "==> Push complete."
 	@echo "    If push failed with auth errors, run:"
