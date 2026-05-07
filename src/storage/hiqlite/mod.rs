@@ -491,12 +491,24 @@ impl HiqliteBackend {
 
 impl Drop for HiqliteBackend {
     fn drop(&mut self) {
-        // Attempt graceful shutdown before dropping the runtime.
-        // We must shut down the client first while the runtime is still alive,
-        // otherwise the spawned tasks will be forcibly cancelled.
-        if let Some(ref rt) = self._runtime {
+        // Graceful shutdown: must run the client's async shutdown while the
+        // owned runtime is still alive, then drop the runtime. Both `block_on`
+        // and dropping a `Runtime` are forbidden inside another runtime's
+        // worker thread (panics with "Cannot drop a runtime in a context where
+        // blocking is not allowed"), so when we own a runtime we move the
+        // shutdown + drop onto a dedicated OS thread.
+        if let Some(rt) = self._runtime.take() {
             let client = self.client.clone();
-            let _ = rt.block_on(async move { client.shutdown().await });
+            let joiner = std::thread::spawn(move || {
+                let _ = rt.block_on(async move { client.shutdown().await });
+                // `rt` drops here, on a plain OS thread — safe to block.
+            });
+            // If we're not inside an async runtime, wait for graceful shutdown
+            // so tests and CLI exits are deterministic. Inside a runtime we
+            // must not block the worker, so we let the thread finish detached.
+            if tokio::runtime::Handle::try_current().is_err() {
+                let _ = joiner.join();
+            }
         } else if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let client = self.client.clone();
             handle.spawn(async move {
@@ -646,5 +658,32 @@ mod test {
             assert!(got.is_some(), "Entry {} not found in destination", entry.key);
             assert_eq!(got.unwrap().value, entry.value);
         }
+    }
+
+    /// Regression test: dropping a HiqliteBackend that owns a tokio Runtime
+    /// from inside an outer tokio runtime previously panicked with
+    /// "Cannot drop a runtime in a context where blocking is not allowed".
+    /// The fix moves shutdown + runtime drop onto a detached OS thread.
+    #[serial]
+    #[tokio::test]
+    async fn test_hiqlite_backend_drop_inside_runtime() {
+        if !should_run() {
+            eprintln!("Skipping hiqlite test (set CARGO_TEST_HIQLITE=1 to enable)");
+            return;
+        }
+
+        // Outer runtime is present, so `new()` takes the `needs_own_runtime`
+        // path and stores a Runtime in `_runtime`.
+        assert!(tokio::runtime::Handle::try_current().is_ok());
+
+        let conf = make_test_conf("test_hiqlite_backend_drop_inside_runtime");
+        let backend = HiqliteBackend::new(&conf).expect("backend creation failed");
+        assert!(
+            backend._runtime.is_some(),
+            "backend should own a runtime when constructed inside an outer runtime",
+        );
+
+        // Drop here, inside the outer runtime. Must not panic.
+        drop(backend);
     }
 }
