@@ -89,6 +89,11 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | Auth: OIDC | Done | [spec](features/oidc-auth.md) — server module + GUI lifecycle, PKCE / nonce / JWKS. |
 | Auth: SAML 2.0 | Done | [spec](features/saml-auth.md) — pure-Rust SP-initiated SSO, no libxml2 / xmlsec. |
 | Auth: FIDO2 / WebAuthn / YubiKey | Done | [roadmap](roadmaps/tauri-gui-fido2.md) — server uses an in-tree pure-Rust RP (`fido2/rp/`); no `openssl` in the server crate. ES256 + Ed25519, attestation `none` only. |
+| Packaging — server container image | In progress | [roadmap](roadmaps/packaging-and-distribution.md) — Wave 1 + Wave 2 (cluster compose, multi-arch, Cosign keyless, CycloneDX SBOM, `:debug` variant) shipped. Helm chart + Phase 1.5 trusted-proxy still open. |
+| Packaging — Linux CLI installers | Done (amd64) | cargo-deb + cargo-generate-rpm metadata in `Cargo.toml`; `make linux-cli-packages`. GPG signing + arm64 cross-builds deferred to later waves. |
+| Packaging — Linux GUI installers | Skeleton | Postinst/prerm scripts staged; `tauri.conf.json` wiring + first `tauri build` pass on a Linux host pending. |
+| Packaging — macOS / Windows installers | Todo | Wave 3 — pending macOS / Windows build runners + signing identities (notary, EV Authenticode). |
+| Packaging — client distribution website | Todo | Wave 3/4 — depends on signed client artefacts. |
 | Auth: Machine Authentication | Todo | [spec](features/machine-authentication.md) — composite-key (random + host-hardware fingerprint), admin-approval gated. |
 
 ### Secret Engines

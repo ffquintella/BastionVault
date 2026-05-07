@@ -1,0 +1,31 @@
+#!/bin/sh
+# Post-install scriptlet for the BastionVault GUI .deb / .rpm.
+# Runs as root on the target system; must succeed silently or fail
+# loudly. No bash-isms — Debian guarantees /bin/sh is POSIX, and RPM
+# scriptlets run under /bin/sh as well.
+
+set -e
+
+# Refresh the XDG desktop database so the freshly-installed
+# /usr/share/applications/bastionvault.desktop appears in the menu
+# without a session restart. Both update-desktop-database and
+# update-mime-database are no-ops when their target directories are
+# empty, so missing inputs don't block install.
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q /usr/share/applications || true
+fi
+
+# Register the `bv://` URL handler scheme. The MIME package XML lives
+# in /usr/share/mime/packages/bastionvault.xml and is shipped by the
+# bundler.
+if command -v update-mime-database >/dev/null 2>&1; then
+    update-mime-database /usr/share/mime || true
+fi
+
+# GTK icon-theme cache rebuild so the hicolor icon ships in 128x128
+# is picked up by the menu launcher.
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+fi
+
+exit 0

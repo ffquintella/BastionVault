@@ -276,20 +276,23 @@ installers/cli/
 
 ## Implementation Scope
 
-### Phase 1 — Linux Packages (deb + rpm), GUI + CLI, amd64
+### Phase 1 — Linux Packages (deb + rpm), GUI + CLI, amd64 — **CLI done; GUI skeleton**
 
 | File | Purpose |
 |---|---|
-| `gui/src-tauri/tauri.linux.conf.json` | Tauri bundler config: deb + rpm, post-install scripts, .desktop entry, icon paths. |
-| `gui/src-tauri/installers/linux/postinst`, `prerm` | XDG / MIME registration. |
-| Root `Cargo.toml` `[package.metadata.deb]` + `[package.metadata.generate-rpm]` | CLI .deb / .rpm. Manpage + completions emitted at build time by a `build.rs` extension. |
-| `installers/cli/README.md` | How to build locally. |
-| `.github/workflows/client-installers.yml` | Matrix entry: `ubuntu-22.04` / amd64. **Not yet GPG-signed.** |
+| [`gui/src-tauri/installers/linux/postinst`](../gui/src-tauri/installers/linux/postinst) + [`prerm`](../gui/src-tauri/installers/linux/prerm) | XDG / MIME / icon-cache registration on install / removal. **Done.** |
+| `gui/src-tauri/tauri.conf.json` `bundle.linux.{deb,rpm}.files` | Wiring of the postinst/prerm into the Tauri bundler. **Deferred** — wiring it cold without a real `tauri build` pass on Linux invites silent format drift; lands on first Linux-host build. See `gui/src-tauri/installers/linux/README.md`. |
+| Root [`Cargo.toml`](../Cargo.toml) `[package.metadata.deb]` + `[package.metadata.generate-rpm]` | CLI .deb / .rpm. **Done.** |
+| [`installers/cli/manpage/bvault.1`](../installers/cli/manpage/bvault.1) + [`installers/cli/completions/`](../installers/cli/completions/) | Static manpage + bash/zsh/fish completion stubs. Phase-1 hand-written; a follow-up will plug `clap_mangen` / `clap_complete` for derived output. **Done.** |
+| [`installers/cli/README.md`](../installers/cli/README.md) | How to build locally. **Done.** |
+| `Makefile` `linux-cli-deb` / `linux-cli-rpm` / `linux-cli-packages` | Local builds via cargo-deb / cargo-generate-rpm. **Done.** |
+| `.github/workflows/client-installers.yml` | Matrix entry: `ubuntu-22.04` / amd64. **Not yet GPG-signed.** **Deferred** until the GUI bundling lands so a single workflow covers both deliverables. |
 
-Acceptance: `apt install ./bastionvault-gui_X.Y.Z_amd64.deb` and `dnf
-install ./bastionvault-gui-X.Y.Z-1.x86_64.rpm` both put a working GUI on
-the target distro; the CLI counterparts install a working `bvault`
-binary with completions.
+Acceptance (CLI, met today): `cargo install cargo-deb cargo-generate-rpm`
+followed by `make linux-cli-packages` produces a `target/debian/*.deb`
+and a `target/generate-rpm/*.rpm` containing the `bvault` binary, the
+manpage at `/usr/share/man/man1/bvault.1`, and the three completion
+files. Acceptance (GUI): pending the first Linux-host `tauri build` pass.
 
 ### Phase 2 — macOS .pkg (GUI + CLI, x86_64 + arm64 + universal2)
 

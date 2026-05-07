@@ -131,11 +131,31 @@ podman inspect ghcr.io/ffquintella/bastionvault:vX.Y.Z \
 Reference that digest in your deployment so a tag rewrite cannot
 substitute a different image under you.
 
+## Cluster mode (3 nodes, Hiqlite Raft)
+
+A reference 3-node cluster lives at
+[`deploy/compose/cluster.yml`](../compose/cluster.yml) with per-node
+HCL configs in [`deploy/compose/cluster/`](../compose/cluster/). The
+image is the same as standalone mode — cluster-vs-standalone is decided
+by the mounted `config.hcl`, not by an env-var or flag.
+
+```sh
+cd deploy/compose
+podman compose -f cluster.yml up -d
+podman compose -f cluster.yml logs -f bv-1 | grep -E "leader|raft"
+```
+
+After leader election, run `bvault operator init` against any node and
+unseal each node individually (cluster nodes do not auto-share the
+unseal state — that's a deliberate seal-per-node property). See
+[`deploy/compose/cluster/README.md`](../compose/cluster/README.md) for
+the full cookbook.
+
 ## Roadmap pointers
 
 | Capability | Wave | Tracking |
 |---|---|---|
-| Cluster mode (Hiqlite multi-node) | 2 / Phase 2 | [features/packaging-podman-server.md](../../features/packaging-podman-server.md) |
-| Trusted-proxy / PROXY-protocol client-IP propagation | 2 / Phase 1.5 | same spec, "Client IP visibility" |
+| Cluster mode (Hiqlite multi-node) | 2 / Phase 2 | **Done** — [`deploy/compose/cluster.yml`](../compose/cluster.yml) |
+| Trusted-proxy / PROXY-protocol client-IP propagation | 2 / Phase 1.5 | [features/packaging-podman-server.md](../../features/packaging-podman-server.md) — "Client IP visibility" |
 | `linux/arm64` + Cosign signing + CycloneDX SBOM + `:debug` | 3 / Phase 3 | same spec |
 | Helm chart for Kubernetes | 4 / Phase 4 | same spec |

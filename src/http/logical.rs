@@ -13,7 +13,10 @@ use super::AUTH_COOKIE_NAME;
 use crate::{
     core::Core,
     errors::RvError,
-    http::{request_auth, response_error, response_json_ok, response_ok, Connection},
+    http::{
+        client_ip::{ClientIp, TrustedProxies},
+        request_auth, response_error, response_json_ok, response_ok, Connection,
+    },
     logical::{Connection as ReqConnection, Operation, Response},
 };
 
@@ -41,8 +44,9 @@ async fn logical_request_handler_v1(
     method: Method,
     path: web::Path<String>,
     core: web::Data<Arc<Core>>,
+    trusted: web::Data<TrustedProxies>,
 ) -> Result<HttpResponse, RvError> {
-    logical_request_handler_inner(req, body, method, path, core, 1).await
+    logical_request_handler_inner(req, body, method, path, core, trusted, 1).await
 }
 
 async fn logical_request_handler_v2(
@@ -51,8 +55,9 @@ async fn logical_request_handler_v2(
     method: Method,
     path: web::Path<String>,
     core: web::Data<Arc<Core>>,
+    trusted: web::Data<TrustedProxies>,
 ) -> Result<HttpResponse, RvError> {
-    logical_request_handler_inner(req, body, method, path, core, 2).await
+    logical_request_handler_inner(req, body, method, path, core, trusted, 2).await
 }
 
 async fn logical_request_handler_inner(
@@ -61,6 +66,7 @@ async fn logical_request_handler_inner(
     method: Method,
     path: web::Path<String>,
     core: web::Data<Arc<Core>>,
+    trusted: web::Data<TrustedProxies>,
     api_version: u8,
 ) -> Result<HttpResponse, RvError> {
     let Some(conn) = req.conn_data::<Connection>() else {
@@ -70,6 +76,11 @@ async fn logical_request_handler_inner(
 
     let mut req_conn = ReqConnection::default();
     req_conn.peer_addr = conn.peer.to_string();
+    // Phase 1.5: walk X-Forwarded-For / Forwarded against the
+    // configured trusted-proxy CIDRs to derive the original client IP.
+    // Falls back to the socket peer when no proxies are trusted.
+    let cip = ClientIp::resolve(conn.peer, &req, trusted.get_ref());
+    req_conn.peer_addr_derived = cip.derived.to_string();
     if let Some(tls) = &conn.tls {
         req_conn.peer_tls_cert.clone_from(&tls.client_cert_chain);
     }

@@ -1,0 +1,47 @@
+.TH BVAULT 1 "May 2026" "bvault 0.3.2" "BastionVault Manual"
+.SH NAME
+bvault \- BastionVault command-line client
+.SH SYNOPSIS
+.B bvault
+.RI [ subcommand ]
+.RI [ flags ]
+.SH DESCRIPTION
+.B bvault
+is the command-line client for a BastionVault server. It speaks the
+Vault-compatible HTTP API and can also be used to start, init, and
+unseal a server instance.
+.PP
+The CLI is configured by the
+.B BASTIONVAULT_ADDR
+and
+.B BASTIONVAULT_TOKEN
+environment variables (a fallback to the equivalent
+.B VAULT_ADDR
+/
+.B VAULT_TOKEN
+is honoured for compatibility).
+.SH COMMON SUBCOMMANDS
+.TP
+.B server
+Run a BastionVault server.
+.TP
+.B operator init
+Initialise a freshly provisioned server, generating root token and
+unseal keys.
+.TP
+.B operator unseal
+Submit one unseal share. Repeat until the seal threshold is met.
+.TP
+.B status
+Show the seal / leader / health state of the configured server.
+.SH FILES
+.TP
+.I /etc/bvault/config.hcl
+Default config path used by the official container image.
+.SH SEE ALSO
+.BR bv-ssh-helper (1),
+the BastionVault online documentation at
+.UR https://github.com/ffquintella/BastionVault
+.UE .
+.SH COPYRIGHT
+Apache-2.0. See /usr/share/doc/bastionvault/.

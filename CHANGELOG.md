@@ -45,6 +45,78 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### Server — Client-IP propagation (Wave 2 / Phase 1.5)
+
+- New module [`src/http/client_ip.rs`](src/http/client_ip.rs):
+  `BASTIONVAULT_TRUSTED_PROXIES` CIDR parser plus a right-to-left
+  walker for both `X-Forwarded-For` and RFC 7239 `Forwarded`. The walk
+  stops at the first hop **not** in the trusted set, which prevents an
+  attacker outside the trusted CIDRs from forging a header to
+  impersonate an internal IP. 9 unit tests cover the threat model.
+- New module [`src/http/proxy_protocol.rs`](src/http/proxy_protocol.rs):
+  HAProxy PROXY-protocol v1 + v2 parser plus a `ProxyProtocolMode` env
+  validator. The acceptor that intercepts the TCP accept loop is
+  deferred to a follow-up — the parser is the load-bearing piece and
+  the wiring choice (custom `ServerBuilder` shim vs. localhost
+  loopback shim) deserves its own design pass. `BASTIONVAULT_PROXY_PROTOCOL`
+  is parsed at startup so an invalid value fails loudly.
+- [`src/logical/connection.rs`](src/logical/connection.rs) gains
+  `peer_addr_derived` next to `peer_addr`; both are populated in the
+  HTTP handler ([`src/http/logical.rs`](src/http/logical.rs)) using
+  `ClientIp::resolve`.
+- [`src/audit/entry.rs`](src/audit/entry.rs) gains `remote_address_socket`
+  and `remote_address_derived` on both `AuditAuth` and `AuditRequest`.
+  The legacy `remote_address` field now carries the derived address —
+  this is the field consumers that read just one address want — while
+  the two new fields preserve both views for forensics (so a reviewer
+  can always tell "the proxy attested X originating from Y" from "the
+  socket reported Y directly"). 1 new regression test.
+- [`deploy/container/config/config.hcl.sample`](deploy/container/config/config.hcl.sample)
+  documents both env vars in a commented "Client-IP propagation" block.
+
+#### Packaging & Distribution — Wave 2
+
+Three deliverables shipped under the [Wave 2 sequencing](roadmaps/packaging-and-distribution.md):
+
+- **Server Phase 2 — Cluster mode reference.** `deploy/compose/cluster.yml`
+  brings up 3 bvault containers on a shared compose network, each with
+  its own `cluster/node{1,2,3}.hcl`. The image is unchanged —
+  cluster-vs-standalone is decided by the mounted `config.hcl`, not by
+  an entrypoint env-var (matches the spec's "templating belongs in the
+  operator's deployment tool" stance, simpler than the originally
+  proposed entrypoint helper). Operator cookbook in
+  `deploy/compose/cluster/README.md`.
+- **Server Phase 3 — Multi-arch + signing + SBOM.** Extended
+  [`.github/workflows/container-image.yml`](.github/workflows/container-image.yml)
+  to build `linux/amd64` + `linux/arm64` under one manifest list per
+  tag, sign the digest with **Cosign keyless** (GitHub OIDC, no static
+  keys), and attach a CycloneDX SBOM via `syft` + `cosign attest`.
+  A new `:debug` variant (`deploy/container/Containerfile.debug`)
+  ships the same binaries on `debug-nonroot` distroless plus
+  `ss`/`ip`/`tcpdump`/`curl` for incident response. Verification +
+  SBOM-download one-liners are in the workflow's job summary.
+- **Server Containerfile cleanup.** Now that the FIDO2 RP migration
+  removed openssl from the server crate, dropped `libssl-dev`,
+  `pkg-config`, `OPENSSL_STATIC=1`, and `OPENSSL_NO_VENDOR=1` from the
+  builder stage. The `ldd` guard now flags any future regression
+  rather than guarding an intentional static link.
+- **Client Phase 1 — Linux CLI packages.** `[package.metadata.deb]`
+  and `[package.metadata.generate-rpm]` blocks in `Cargo.toml` produce
+  installable .deb / .rpm for the `bvault` CLI on amd64. Static
+  manpage + bash/zsh/fish completion stubs live under
+  `installers/cli/`. Build with `make linux-cli-deb`,
+  `make linux-cli-rpm`, or `make linux-cli-packages` (requires
+  `cargo install cargo-deb cargo-generate-rpm`). Phase 4 GPG signing
+  is still pending.
+- **Client Phase 1 — Linux GUI skeleton.** `gui/src-tauri/installers/linux/`
+  carries the `postinst` + `prerm` scriptlets the Tauri bundler will
+  reference when run on a real Linux build host (XDG / MIME / icon
+  cache refresh). The `tauri.conf.json` wiring is deliberately
+  deferred until a `tauri build` pass on Linux validates the asset
+  paths — committing it cold invites silent format drift.
+
 ### Changed
 
 #### FIDO2 RP — replace `webauthn-rs` with in-tree pure-Rust implementation

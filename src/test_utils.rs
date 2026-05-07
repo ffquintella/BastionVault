@@ -721,10 +721,15 @@ pub async fn new_unseal_test_bastion_vault(name: &str) -> (BastionVault, Arc<Cor
 }
 
 pub fn new_test_http_server(core: Arc<Core>, tls_config: Option<TestTlsConfig>) -> Result<(Server, String), RvError> {
+    // Tests run with no trusted proxies — direct-exposure semantics,
+    // matching the production default. Phase 1.5 hookup, mirrors
+    // src/cli/command/server.rs.
+    let trusted_proxies = web::Data::new(http::client_ip::TrustedProxies::default());
     let mut http_server = HttpServer::new(move || {
         App::new()
             .wrap(middleware::Logger::default())
             .app_data(web::Data::new(core.clone()))
+            .app_data(trusted_proxies.clone())
             .configure(http::init_service)
             .default_service(web::to(HttpResponse::NotFound))
     })
@@ -749,12 +754,14 @@ pub fn new_test_http_server_with_prometheus(
     metrics_manager: Arc<RwLock<MetricsManager>>,
     tls_config: Option<TestTlsConfig>,
 ) -> Result<(Server, String), RvError> {
+    let trusted_proxies = web::Data::new(http::client_ip::TrustedProxies::default());
     let mut http_server = HttpServer::new(move || {
         App::new()
             .wrap(middleware::Logger::default())
             .wrap(from_fn(metrics_midleware))
             .app_data(web::Data::new(core.clone()))
             .app_data(web::Data::new(metrics_manager.clone()))
+            .app_data(trusted_proxies.clone())
             .configure(http::init_service)
             .default_service(web::to(HttpResponse::NotFound))
     })

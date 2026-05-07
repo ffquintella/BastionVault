@@ -190,12 +190,53 @@ impl Server {
         let bvault = BastionVault::new(backend, Some(&config))?;
         let core = bvault.core.load().clone();
 
+        // Phase 1.5: parse BASTIONVAULT_TRUSTED_PROXIES once at start.
+        // Bad CIDRs are logged at warn level but do not abort the
+        // server — operators expect tail-of-startup config issues to
+        // surface in logs, not crash the process during a rolling
+        // restart. Parsing always returns a usable (possibly empty)
+        // TrustedProxies; an empty set means "no proxy promotion,"
+        // which is the safe default.
+        let (trusted_proxies, bad_cidrs) = http::client_ip::TrustedProxies::from_env();
+        for bad in &bad_cidrs {
+            log::warn!(
+                "BASTIONVAULT_TRUSTED_PROXIES: ignoring entry `{bad}` (not a valid CIDR)"
+            );
+        }
+        if !trusted_proxies.is_empty() {
+            log::info!(
+                "BASTIONVAULT_TRUSTED_PROXIES active — X-Forwarded-For / Forwarded headers \
+                 will be promoted for connections originating from configured CIDRs"
+            );
+        }
+        // Phase 1.5: parse BASTIONVAULT_PROXY_PROTOCOL. The acceptor
+        // wiring is not landed yet (the parser lives in
+        // src/http/proxy_protocol.rs but isn't intercepting
+        // connections); for now we just validate the env var so an
+        // invalid value fails loudly at startup instead of silently
+        // doing nothing.
+        match http::proxy_protocol::ProxyProtocolMode::from_env() {
+            Ok(http::proxy_protocol::ProxyProtocolMode::Off) => {}
+            Ok(mode) => {
+                log::warn!(
+                    "BASTIONVAULT_PROXY_PROTOCOL={mode:?} requested, but the acceptor \
+                     wiring is not yet active (Phase 1.5 ships the parser only). \
+                     Use BASTIONVAULT_TRUSTED_PROXIES + X-Forwarded-For meanwhile."
+                );
+            }
+            Err(e) => {
+                log::error!("invalid BASTIONVAULT_PROXY_PROTOCOL: {e}");
+            }
+        }
+        let trusted_proxies = web::Data::new(trusted_proxies);
+
         let mut http_server = HttpServer::new(move || {
             App::new()
                 .wrap(middleware::Logger::default())
                 .wrap(from_fn(metrics_midleware))
                 .app_data(web::Data::new(core.clone()))
                 .app_data(web::Data::new(metrics_manager.clone()))
+                .app_data(trusted_proxies.clone())
                 .configure(http::init_service)
                 .default_service(web::to(HttpResponse::NotFound))
         })

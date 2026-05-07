@@ -1,12 +1,14 @@
-# BastionVault server — official OCI image (Wave 1, Phase 1: standalone, amd64).
+# BastionVault server — official OCI image.
+#
+# Wave 1: standalone, amd64.
+# Wave 2: cluster mode (per-node HCL via deploy/compose/cluster.yml),
+#         multi-arch (linux/amd64 + linux/arm64), Cosign keyless
+#         signing, CycloneDX SBOM attestation.
 #
 # Build context is the repository root. Build with:
 #   podman build -f deploy/container/Containerfile -t bastionvault:dev .
-#
-# Phase 1 ships standalone mode only. The cluster-mode entrypoint and a
-# tiny static mode-resolver binary land in Wave 2 (Phase 2 of the
-# Packaging & Distribution roadmap). Distroless has no shell, so the
-# entrypoint is the bvault binary directly — no entrypoint.sh wrapper.
+# Or via the make target (auto-detects podman/docker, native arch):
+#   make container-image
 #
 # See features/packaging-podman-server.md for the full design and
 # roadmaps/packaging-and-distribution.md for the wave sequencing.
@@ -14,49 +16,36 @@
 # ---------- Stage 1: builder ----------
 FROM docker.io/library/rust:1-slim-bookworm AS builder
 
-# Build tooling.
-#   - clang + cmake: cover the few sub-deps that need a C compiler
-#     (e.g. ring, some PQ crates' build scripts).
-#   - libssl-dev + pkg-config: required because webauthn-rs (FIDO2 /
-#     WebAuthn) transitively pulls in openssl-sys for attestation cert
-#     validation. The host crypto stack is OpenSSL-free, but this one
-#     dep is the exception. We statically link openssl into the binary
-#     (OPENSSL_STATIC=1 below) so the distroless runtime doesn't need
-#     libssl.so.3 at run time. Replacing webauthn-rs with a rustls-only
-#     equivalent is tracked as a follow-up.
+# Build tooling. The server crate is fully OpenSSL-free as of the
+# FIDO2 RP migration (`src/modules/credential/fido2/rp/`), so we no
+# longer need libssl-dev or the OPENSSL_STATIC dance that earlier
+# revisions of this file carried.
+#   - clang + cmake: covers sub-deps that need a C compiler (e.g.
+#     ring, some PQ crates' build scripts).
+#   - git + ca-certificates: cargo registry + submodule fetches.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates \
         clang \
         cmake \
         git \
-        libssl-dev \
-        pkg-config \
  && rm -rf /var/lib/apt/lists/*
-
-# Force openssl-sys to statically link against the system openssl
-# (libssl.a / libcrypto.a from libssl-dev). OPENSSL_NO_VENDOR=1 keeps
-# us from accidentally rebuilding openssl from source when the openssl
-# crate is built with the `vendored` feature transitively enabled.
-ENV OPENSSL_STATIC=1 \
-    OPENSSL_NO_VENDOR=1
 
 WORKDIR /src
 
 # Copy the workspace and build the two server-side binaries.
-# We deliberately don't try to be cute with cargo-chef in Phase 1 —
-# slower CI is acceptable; cache layering is a Phase 3 concern.
 COPY . .
 
 RUN cargo build --release --bin bvault \
  && cargo build --release --bin bv-ssh-helper
 
-# Sanity check: confirm the resulting binary doesn't need libssl at
-# runtime. Distroless has no libssl, so a dynamic link here would fail
-# at container start with a confusing "cannot find libssl.so.3" error.
-# Failing the build here surfaces the problem at build time instead.
+# Belt-and-braces: confirm the resulting binary really doesn't need
+# libssl at runtime. Distroless has no libssl, so a stray dynamic link
+# would fail at container start with a confusing "cannot find
+# libssl.so.3" error. Failing the build here surfaces the regression at
+# build time, before publish.
 RUN if ldd /src/target/release/bvault | grep -E 'libssl|libcrypto'; then \
-        echo "ERROR: bvault is dynamically linked against openssl. The distroless runtime does not provide libssl. Re-check OPENSSL_STATIC."; \
+        echo "ERROR: bvault is dynamically linked against openssl. The server crate is supposed to be openssl-free; some new dep has reintroduced it."; \
         exit 1; \
     fi
 

@@ -53,8 +53,26 @@ pub struct AuditAuth {
     pub policies: Vec<String>,
     #[serde(default)]
     pub metadata: Map<String, Value>,
+    /// Derived client address (after walking trusted-proxy XFF/Forwarded
+    /// headers, falls back to the socket peer). This is the field
+    /// downstream consumers should treat as "the requester's IP."
+    /// Kept under the original name for backwards compatibility with
+    /// existing log shippers.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub remote_address: String,
+    /// Socket-level peer (string form, with port). What `getpeername`
+    /// returned at accept time — this is the proxy's address when a
+    /// reverse proxy is in front of us. Always recorded so a reviewer
+    /// can distinguish "the proxy attested X originating from Y" from
+    /// "the socket reported Y directly." See
+    /// `features/packaging-podman-server.md` § Client IP visibility.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub remote_address_socket: String,
+    /// Derived client IP (no port). Equals `remote_address` for
+    /// requests that go through a trusted proxy, and equals the socket
+    /// peer's IP for direct-exposure requests.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub remote_address_derived: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -67,8 +85,13 @@ pub struct AuditRequest {
     /// was sent or when the device is configured to omit data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
+    /// Derived client address — see `AuditAuth.remote_address`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub remote_address: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub remote_address_socket: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub remote_address_derived: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -88,11 +111,21 @@ impl AuditEntry {
     /// is used to redact the client token and request body values.
     /// `log_raw` disables redaction (dev/debug only).
     pub fn from_request(req: &Request, hmac_key: &[u8], log_raw: bool) -> Self {
-        let remote_address = req
+        let socket_addr = req
             .connection
             .as_ref()
             .map(|c| c.peer_addr.clone())
             .unwrap_or_default();
+        // Phase 1.5: prefer the derived address (after trusted-proxy
+        // resolution) when present. Falls back to the socket peer for
+        // back-compat with pre-1.5 entries and for code paths that
+        // don't construct a Connection (e.g. internal-only requests).
+        let derived_addr = req
+            .connection
+            .as_ref()
+            .map(|c| c.peer_addr_derived.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| socket_addr.clone());
 
         let auth = AuditAuth {
             client_token: if req.client_token.is_empty() {
@@ -114,7 +147,9 @@ impl AuditEntry {
                         .collect()
                 })
                 .unwrap_or_default(),
-            remote_address: remote_address.clone(),
+            remote_address: derived_addr.clone(),
+            remote_address_socket: socket_addr.clone(),
+            remote_address_derived: derived_addr.clone(),
         };
 
         Self {
@@ -126,7 +161,9 @@ impl AuditEntry {
                 operation: operation_str(req.operation).to_string(),
                 path: req.path.clone(),
                 data: redact_body(req.body.as_ref(), hmac_key, log_raw),
-                remote_address,
+                remote_address: derived_addr.clone(),
+                remote_address_socket: socket_addr,
+                remote_address_derived: derived_addr,
             },
             response: None,
             error: String::new(),
@@ -271,8 +308,34 @@ mod tests {
         req.connection = Some(conn);
 
         let entry = AuditEntry::from_request(&req, b"k", false);
+        // Direct exposure (no derived addr set): both fields equal the
+        // socket peer.
         assert_eq!(entry.auth.remote_address, "203.0.113.42:54321");
         assert_eq!(entry.request.remote_address, "203.0.113.42:54321");
+        assert_eq!(entry.auth.remote_address_socket, "203.0.113.42:54321");
+        assert_eq!(entry.auth.remote_address_derived, "203.0.113.42:54321");
+    }
+
+    #[test]
+    fn entry_distinguishes_socket_and_derived_when_proxied() {
+        use crate::logical::{Connection, Operation, Request};
+        let mut req = Request::new("secret/foo");
+        req.operation = Operation::Read;
+        let mut conn = Connection::default();
+        conn.peer_addr = "10.0.0.5:443".to_string(); // edge proxy
+        conn.peer_addr_derived = "203.0.113.7".to_string(); // real client
+        req.connection = Some(conn);
+
+        let entry = AuditEntry::from_request(&req, b"k", false);
+        // The "primary" remote_address is the derived one.
+        assert_eq!(entry.auth.remote_address, "203.0.113.7");
+        assert_eq!(entry.request.remote_address, "203.0.113.7");
+        // Both views are preserved separately so a reviewer can tell
+        // proxy from origin.
+        assert_eq!(entry.auth.remote_address_socket, "10.0.0.5:443");
+        assert_eq!(entry.auth.remote_address_derived, "203.0.113.7");
+        assert_eq!(entry.request.remote_address_socket, "10.0.0.5:443");
+        assert_eq!(entry.request.remote_address_derived, "203.0.113.7");
     }
 
     #[test]
@@ -285,5 +348,7 @@ mod tests {
         let entry = AuditEntry::from_request(&req, b"k", false);
         assert!(entry.auth.remote_address.is_empty());
         assert!(entry.request.remote_address.is_empty());
+        assert!(entry.auth.remote_address_socket.is_empty());
+        assert!(entry.auth.remote_address_derived.is_empty());
     }
 }

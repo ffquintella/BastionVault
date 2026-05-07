@@ -1,6 +1,6 @@
 # Roadmap: Packaging & Distribution
 
-Status: **Active — Wave 1 / Phase 1 shipped (standalone server image, amd64, unsigned). Wave 1 / Phases 1.5–2 next.**
+Status: **Active — Waves 1 + 2 shipped except for GUI Linux bundler (needs Linux build host validation) and Phase 1.5 trusted-proxy work. Wave 3 (macOS / Windows installers + downloads website) next.**
 
 ## Goal
 
@@ -49,15 +49,29 @@ release.
 Operators can pull a working server container and run a single-node
 deployment.
 
-### Wave 2 — Server cluster + first Linux client installers
+### Wave 2 — Server cluster + first Linux client installers — **shipped (with one caveat)**
 
-- Server image Phase 2 (cluster mode, 3-node compose reference).
-- Server image Phase 3 (multi-arch + Cosign + SBOM).
-- Client installers Phase 1 (Linux deb + rpm, GUI + CLI, amd64).
+- Server image Phase 2 (cluster mode, 3-node compose reference). **Done.**
+  See [`deploy/compose/cluster.yml`](../deploy/compose/cluster.yml) and
+  the per-node configs in [`deploy/compose/cluster/`](../deploy/compose/cluster/).
+- Server image Phase 3 (multi-arch + Cosign + SBOM). **Done.**
+  Extended [`container-image.yml`](../.github/workflows/container-image.yml)
+  to build `linux/amd64` + `linux/arm64`, Cosign keyless sign, and
+  attach a CycloneDX SBOM. New `:debug` variant lives at
+  [`deploy/container/Containerfile.debug`](../deploy/container/Containerfile.debug).
+- Client installers Phase 1 — CLI (Linux deb + rpm, amd64). **Done.**
+  cargo-deb / cargo-generate-rpm metadata in `Cargo.toml`; static
+  manpage + completions in [`installers/cli/`](../installers/cli/);
+  `make linux-cli-packages` builds both.
+- Client installers Phase 1 — GUI (Linux deb + rpm, amd64). **Skeleton.**
+  Postinst/prerm scripts in
+  [`gui/src-tauri/installers/linux/`](../gui/src-tauri/installers/linux/);
+  the `tauri.conf.json` wiring is deferred until a real `tauri build`
+  pass on a Linux host validates the asset paths.
 
 Server is now signed and HA-deployable. End users on Linux can install
-the GUI and CLI from native packages, but those packages are still hand-
-distributed by the operator.
+the CLI from native packages today; the GUI side completes once a
+Linux build host runs the bundler against the staged scripts.
 
 ### Wave 3 — macOS + Windows client installers + downloads website
 
@@ -115,24 +129,39 @@ custody decisions require their own review.
 
 ## What is shipped vs. still to do
 
-**Shipped (Wave 1 / Phase 1):**
+**Shipped (Waves 1 + 2):**
 
-- `deploy/container/Containerfile` — distroless, nonroot, statically-linked server build.
+- `deploy/container/Containerfile` — distroless, nonroot server build.
+  As of the FIDO2 RP migration the builder stage no longer needs
+  `libssl-dev` / `OPENSSL_STATIC` — server crate is openssl-free.
+- `deploy/container/Containerfile.debug` — `:debug` variant on
+  `debug-nonroot` with `ss` / `ip` / `tcpdump` / `curl` for incident
+  response.
 - `deploy/container/config/config.hcl.sample` and `deploy/container/README.md`.
 - `deploy/compose/standalone.yml` — single-node reference compose.
-- `.github/workflows/container-image.yml` — GHCR build + push on tags (linux/amd64, unsigned).
-- `.dockerignore` — keeps the build context small + reproducible.
+- `deploy/compose/cluster.yml` + `deploy/compose/cluster/{node1,node2,node3}.hcl`
+  + `deploy/compose/cluster/README.md` — 3-node Hiqlite Raft reference.
+- `.github/workflows/container-image.yml` — GHCR build, multi-arch
+  (`linux/amd64` + `linux/arm64`), Cosign keyless signing on the
+  manifest digest, CycloneDX SBOM via `syft` attached as a Cosign
+  attestation. Both production and `:debug` variants per tag.
+- `.dockerignore`.
+- `Cargo.toml` `[package.metadata.deb]` + `[package.metadata.generate-rpm]`
+  for the `bvault` CLI; `installers/cli/` static manpage + completions;
+  `make linux-cli-packages`.
+- `gui/src-tauri/installers/linux/{postinst,prerm}` — bundler scriptlet
+  inputs for the GUI deb/rpm (skeleton; needs a real Tauri build host
+  pass to wire into `tauri.conf.json`).
 
 **Still to do** (deferred to later waves):
 
-- Multi-arch (`linux/arm64`) for the server image.
-- Cosign keyless signing + SLSA provenance + CycloneDX SBOM attestations.
-- 3-node cluster compose reference (Hiqlite Raft).
-- Helm chart for Kubernetes deploys.
-- `cargo deb` / `cargo rpm` configs, WiX project, macOS notarisation script.
-- Tauri-build CI matrix (Linux / macOS / Windows).
-- Downloads server crate + its OCI image, manifest endpoint, GUI update-banner hookup.
-- apt / dnf repo hosting (stretch).
+- Trusted-proxy / PROXY-protocol client-IP propagation (Wave 2 / Phase 1.5).
+- Helm chart for Kubernetes deploys (Wave 4 / Phase 4).
+- macOS .pkg + Windows .msi (Wave 3 / Phases 2–3).
+- Cosign + manifest.json + GitHub Release publish for client artefacts (Wave 3 / Phase 4).
+- Downloads server crate + its OCI image (Wave 3, packaging-distribution-website.md).
+- GUI deb/rpm bundling — Tauri config wiring + a real `tauri build` pass on a Linux host.
+- apt / dnf repo hosting (Wave 4 stretch).
 
 The three feature specs each have a "Current State" section spelling
 out what does and does not exist; this roadmap closes when all three

@@ -43,3 +43,26 @@ log_level  = "info"
 #   1. Add the IPC_LOCK capability to the container.
 #   2. Set disable_mlock = true here, accepting that secret material
 #      may be paged to swap.
+
+# ── Client-IP propagation (Wave 2 / Phase 1.5) ────────────────────────
+#
+# When BastionVault runs behind a reverse proxy or L4 load balancer,
+# the socket-level peer address is the proxy's IP, not the client's.
+# Two env vars surface the original client IP through the audit log
+# and the rate-limit layer; pass them via `-e` (podman/docker) or
+# the `environment:` block in compose.
+#
+#   # Promote X-Forwarded-For / Forwarded only from configured CIDRs.
+#   # The walker stops at the first hop NOT in this list, so a spoofed
+#   # XFF from outside the trusted set cannot impersonate an internal IP.
+#   BASTIONVAULT_TRUSTED_PROXIES=10.0.0.0/8,fc00::/7
+#
+#   # PROXY-protocol acceptor (HAProxy, AWS NLB with proxy-protocol-v2,
+#   # etc.). Phase 1.5 ships the parser only; the listener-side wiring
+#   # lands in a follow-up. Use TRUSTED_PROXIES + X-Forwarded-For for
+#   # now.
+#   BASTIONVAULT_PROXY_PROTOCOL=v2
+#
+# The audit log records BOTH the socket-level peer (the proxy) and the
+# derived client IP on every entry — see
+# features/packaging-podman-server.md § Client IP visibility.

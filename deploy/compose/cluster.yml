@@ -1,0 +1,94 @@
+# BastionVault 3-node Hiqlite cluster — podman-compose / docker-compose reference.
+#
+# Wave 2, Phase 2 (Packaging & Distribution).
+#
+# What this brings up:
+#   - Three bvault server containers (bv-1, bv-2, bv-3) on the same
+#     compose network. Each starts from the same image, mounts its
+#     own per-node HCL config from `cluster/node{1,2,3}.hcl`, and
+#     advertises its Raft + API addresses to the other two nodes.
+#   - Three named volumes for persistent SQLite + Raft state.
+#   - mTLS material for Raft inter-node traffic, mounted read-only
+#     from `./cluster/tls/`. The image refuses to start cluster nodes
+#     without it.
+#
+# Not in scope here:
+#   - Bootstrapping the cluster (operator init / unseal). Run those
+#     against `bv-1` after the cluster converges, the same as
+#     bare-metal HA. See deploy/container/README.md.
+#   - Public-facing TLS termination. The compose exposes 8300 from
+#     bv-1 only; in production put a load-balancer in front of all
+#     three nodes and propagate client IPs via X-Forwarded-For
+#     (BASTIONVAULT_TRUSTED_PROXIES) or PROXY-protocol
+#     (BASTIONVAULT_PROXY_PROTOCOL=v2). See packaging-podman-server.md.
+#
+# Bring up:
+#   podman compose -f deploy/compose/cluster.yml up -d
+#
+# Watch the leader converge:
+#   podman compose -f deploy/compose/cluster.yml logs -f bv-1 \
+#       | grep -E "leader|raft"
+#
+# Initialise (run against any node; convention is bv-1):
+#   podman compose -f deploy/compose/cluster.yml exec bv-1 \
+#       bvault operator init
+#   podman compose -f deploy/compose/cluster.yml exec bv-1 \
+#       bvault operator unseal <key-1>
+#
+# Tear down (preserves volumes):
+#   podman compose -f deploy/compose/cluster.yml down
+#
+# Tear down + delete data (destructive):
+#   podman compose -f deploy/compose/cluster.yml down -v
+
+x-bv-image: &bv-image
+  image: ghcr.io/ffquintella/bastionvault:vX.Y.Z
+  restart: unless-stopped
+  # The image runs as UID 65532. Per-node HCLs and TLS material in
+  # ./cluster/ on the host must be readable by that UID. Fix host-side
+  # permissions (`chmod 0644`, `chown 65532:65532`) rather than
+  # overriding `user:` here — that override is not supported.
+
+services:
+  bv-1:
+    <<: *bv-image
+    container_name: bv-1
+    hostname: bv-1
+    ports:
+      # Only one node's API is exposed to the host by default; in
+      # production put a load-balancer in front of all three.
+      - "8300:8300"
+    volumes:
+      - bv-1-data:/var/lib/bvault/data
+      - ./cluster/node1.hcl:/etc/bvault/config.hcl:ro,Z
+      - ./cluster/tls:/etc/bvault/tls:ro,Z
+    networks: [bv-cluster]
+
+  bv-2:
+    <<: *bv-image
+    container_name: bv-2
+    hostname: bv-2
+    volumes:
+      - bv-2-data:/var/lib/bvault/data
+      - ./cluster/node2.hcl:/etc/bvault/config.hcl:ro,Z
+      - ./cluster/tls:/etc/bvault/tls:ro,Z
+    networks: [bv-cluster]
+
+  bv-3:
+    <<: *bv-image
+    container_name: bv-3
+    hostname: bv-3
+    volumes:
+      - bv-3-data:/var/lib/bvault/data
+      - ./cluster/node3.hcl:/etc/bvault/config.hcl:ro,Z
+      - ./cluster/tls:/etc/bvault/tls:ro,Z
+    networks: [bv-cluster]
+
+volumes:
+  bv-1-data:
+  bv-2-data:
+  bv-3-data:
+
+networks:
+  bv-cluster:
+    driver: bridge

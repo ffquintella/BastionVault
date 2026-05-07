@@ -1,0 +1,31 @@
+#compdef bvault
+# zsh completion stub for bvault. Phase 1 minimal implementation;
+# a follow-up will switch to clap_complete-generated output.
+
+_bvault() {
+    local -a subcommands operator_subs
+    subcommands=(
+        'server:Run a BastionVault server'
+        'operator:Initialise / unseal / seal / rotate operations'
+        'status:Show seal and health status'
+        'read:Read a secret'
+        'write:Write a secret'
+        'list:List under a path'
+        'delete:Delete at a path'
+        'login:Authenticate against a server'
+        'version:Print version'
+        'help:Show help for a subcommand'
+    )
+    operator_subs=( init unseal seal rotate )
+
+    if (( CURRENT == 2 )); then
+        _describe 'subcommand' subcommands
+        return
+    fi
+    case "${words[2]}" in
+        operator) _values 'operator subcommand' $operator_subs ;;
+        *)        _files ;;
+    esac
+}
+
+_bvault "$@"

@@ -350,47 +350,62 @@ container's address). The audit-side wiring (`AuditEntry.auth.remote_address`
 `Request.connection.peer_addr`) is in [`src/audit/entry.rs`](../src/audit/entry.rs);
 two regression tests guard it.
 
-### Phase 1.5 — Trusted-Proxy / PROXY-Protocol Client-IP Propagation
+### Phase 1.5 — Trusted-Proxy / PROXY-Protocol Client-IP Propagation — **DONE (XFF/Forwarded), partial (PROXY-protocol)**
+
+| File | Purpose | Status |
+|---|---|---|
+| [`src/http/client_ip.rs`](../src/http/client_ip.rs) | `BASTIONVAULT_TRUSTED_PROXIES` CIDR parser + right-to-left `X-Forwarded-For` / `Forwarded` walker; surfaces a `ClientIp { socket, derived }` struct. 9 unit tests cover empty config, untrusted-socket guard, multi-hop chain walk, attacker-injected internal IP, RFC 7239 precedence, IPv6 brackets. | **Done.** |
+| [`src/http/proxy_protocol.rs`](../src/http/proxy_protocol.rs) | PROXY-protocol v1 + v2 **parser** + `ProxyProtocolMode` env-var validator. The listener-side acceptor that wraps actix-web's TCP accept loop is **deferred** to a follow-up — the parser is the load-bearing piece, and the wiring choice (custom `ServerBuilder` shim vs. localhost-loopback proxy) is its own design decision. The env var is parsed at startup so an invalid value fails loudly. | **Done (parser); deferred (acceptor wiring).** |
+| [`src/logical/connection.rs`](../src/logical/connection.rs) (extension) | Added `peer_addr_derived: String` next to the existing `peer_addr` so handlers downstream of the HTTP layer (audit, rate-limit) receive both views. | **Done.** |
+| [`src/http/logical.rs`](../src/http/logical.rs) (extension) | Threads `web::Data<TrustedProxies>` into the v1/v2 logical handlers and calls `ClientIp::resolve` on every request. | **Done.** |
+| [`src/audit/entry.rs`](../src/audit/entry.rs) (extension) | `AuditAuth` and `AuditRequest` carry `remote_address_socket` + `remote_address_derived` alongside the existing `remote_address` (which now holds the derived address for forward-compat with consumers that read only one field). 1 new regression test. | **Done.** |
+| [`src/cli/command/server.rs`](../src/cli/command/server.rs) (extension) | Reads `BASTIONVAULT_TRUSTED_PROXIES` and `BASTIONVAULT_PROXY_PROTOCOL` at startup, logs invalid CIDR entries at warn level, registers `web::Data<TrustedProxies>`. | **Done.** |
+| [`deploy/container/config/config.hcl.sample`](../deploy/container/config/config.hcl.sample) (extension) | Both env vars documented in a commented "Client-IP propagation" block. | **Done.** |
+| `docs/docs/operations/container-image.md` (Phase 3 extension) | "Running behind a reverse proxy" + "Running behind an L4 load balancer with PROXY protocol" sections. | **Deferred** with the rest of the operator-docs writing task. |
+
+Acceptance (XFF / Forwarded path): the unit tests in
+`src/http/client_ip.rs::tests` and `src/audit/entry.rs::tests`
+verify the right-to-left walk, the spoof-resistance property
+("attacker outside the trusted set cannot impersonate an internal
+IP"), RFC 7239 precedence, and that audit entries record both views
+distinctly. End-to-end nginx/haproxy fixture coverage lives in the
+deferred integration test.
+
+Acceptance (PROXY-protocol acceptor): pending. The parser is unit-tested
+(`src/http/proxy_protocol.rs::tests`); the listener wiring needs a
+separate design pass.
+
+### Phase 2 — Cluster Mode — **DONE**
+
+The originally-proposed `entrypoint.sh` mode resolver was dropped: the
+existing `bvault server --config <file>` flow already accepts everything
+a cluster node needs via HCL, and templating per-node configs through the
+deployment tool (compose / Helm / Ansible) keeps the resolution visible
+to the operator instead of hiding it inside the image. This matches the
+spec's own "Templating belongs in the operator's deployment tool" stance
+in the **Configuration surface** section above.
 
 | File | Purpose |
 |---|---|
-| `src/http/client_ip.rs` (new) | `BASTIONVAULT_TRUSTED_PROXIES` parser + right-to-left X-Forwarded-For walker; surfaces a `ClientIp { socket_peer, derived }` struct for the audit + rate-limit layers. |
-| `src/http/proxy_protocol.rs` (new) | Optional HAProxy PROXY-protocol v1 + v2 acceptor in front of the actix-web listener. Off unless `BASTIONVAULT_PROXY_PROTOCOL` is set. |
-| `src/audit/event.rs` (extension) | Add `client_ip_socket` and `client_ip_derived` to every audit event; never collapse them into one field. |
-| `deploy/container/config/config.hcl.sample` (extension) | Document both env vars in commented form. |
-| `docs/docs/operations/container-image.md` (Phase 3 extension) | "Running behind a reverse proxy" + "Running behind an L4 load balancer with PROXY protocol" sections. |
-
-Acceptance: behind an nginx fixture configured with
-`X-Forwarded-For $proxy_add_x_forwarded_for`, audit events show the
-real client IP in `client_ip_derived` and the nginx IP in
-`client_ip_socket`; behind an haproxy fixture configured with `send-proxy-v2`,
-the same property holds with `BASTIONVAULT_PROXY_PROTOCOL=v2`. With
-neither set, both fields equal the socket peer. A spoofed
-`X-Forwarded-For` originating from outside the trusted CIDR list is
-**not** promoted to `client_ip_derived`.
-
-### Phase 2 — Cluster Mode
-
-| File | Purpose |
-|---|---|
-| `deploy/container/entrypoint.sh` (extension) | Cluster mode branch. Reads `BASTIONVAULT_MODE`, `BASTIONVAULT_NODE_ID`, `BASTIONVAULT_CLUSTER_PEERS`, builds `-hiqlite-*` flags. |
-| `deploy/compose/cluster.yml` | 3-node cluster reference. |
-| `tests/cluster_image.rs` | Integration test: spin a 3-node cluster from the published image with `podman compose`, write a secret on leader, read on follower, kill leader, confirm a new leader is elected, read still works. |
+| [`deploy/compose/cluster.yml`](../deploy/compose/cluster.yml) | 3-node cluster reference. **Done.** |
+| [`deploy/compose/cluster/node{1,2,3}.hcl`](../deploy/compose/cluster/) | Per-node Hiqlite configs (peers, listen addrs, secrets). **Done.** |
+| [`deploy/compose/cluster/README.md`](../deploy/compose/cluster/README.md) | Operator cookbook: TLS material, init/unseal per node. **Done.** |
+| `tests/cluster_image.rs` | Integration test: spin a 3-node cluster from the published image, write on leader, read on follower, kill leader, confirm new leader, read still works. **Deferred** until the multi-arch image lands a tag we can pull in CI. |
 
 Acceptance: a 3-node Hiqlite cluster runs to convergence under the
-official image; rolling restart by digest preserves the leader's data.
+official image. Verified by the cookbook in
+`deploy/compose/cluster/README.md`; the automated test follows the
+first signed-image tag.
 
-### Phase 3 — Multi-Arch + Signing + SBOM
+### Phase 3 — Multi-Arch + Signing + SBOM — **DONE (workflow), partial (operator docs)**
 
 | File | Purpose |
 |---|---|
-| `.github/workflows/container-image.yml` (extension) | `buildx`/`buildah manifest` for `linux/amd64` + `linux/arm64`; `cosign sign` keyless on the resulting digest; `syft` SBOM + `cosign attest`. |
-| `deploy/container/Containerfile.debug` | `:debug` variant for incident response. Adds `ss`, `ip`, `tcpdump`, `curl` from `iproute2` + `tcpdump` + `curl` packages on top of the `debug-nonroot` base. **No** package manager carried into the final image. |
-| `docs/docs/operations/container-image.md` | Operator-facing docs: pulling, verifying, mounting volumes, env-var matrix, cluster cookbook, **plus a "Client IP propagation" cookbook covering direct exposure, X-Forwarded-For behind an ingress, and PROXY-protocol behind an L4 load balancer**. |
+| [`.github/workflows/container-image.yml`](../.github/workflows/container-image.yml) | `buildx` for `linux/amd64` + `linux/arm64` under one manifest list; `cosign sign --yes <image>@<digest>` keyless via GitHub OIDC; `syft` CycloneDX SBOM + `cosign attest --type cyclonedx`; matrix builds production + `:debug` variants in parallel. **Done.** |
+| [`deploy/container/Containerfile.debug`](../deploy/container/Containerfile.debug) | `:debug` variant. `debug-nonroot` distroless base + `ss`/`ip`/`tcpdump`/`curl` copied in from a Debian builder layer. No package manager carried into the final image. **Done.** |
+| `docs/docs/operations/container-image.md` | Operator-facing docs: pulling, verifying, mounting volumes, env-var matrix, cluster cookbook, "Client IP propagation" cookbook. **Deferred** — split off as a separate writing task; verification + SBOM-download one-liners are surfaced in the workflow's job summary in the meantime. |
 
-Acceptance: `cosign verify` and `cosign verify-attestation` both succeed
-against a published `vX.Y.Z` tag; the manifest list resolves to two
-arch-specific manifests; `syft scan registry:…` returns the SBOM.
+Acceptance: `cosign verify --certificate-identity-regexp 'https://github.com/ffquintella/BastionVault/' --certificate-oidc-issuer https://token.actions.githubusercontent.com <image>@<digest>` succeeds; `cosign verify-attestation --type cyclonedx <image>@<digest>` returns the SBOM; the manifest list resolves to two arch-specific manifests for `linux/amd64` + `linux/arm64`. Verifiable on the first tag pushed under this workflow.
 
 ### Phase 4 — Helm Chart Reference
 

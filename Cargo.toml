@@ -415,6 +415,67 @@ unnecessary_map_or = "allow"
 name = "bvault"
 path = "bin/bastion_vault.rs"
 
+# ── CLI Linux packaging: deb (cargo-deb) + rpm (cargo-generate-rpm) ──
+#
+# Wave 2 / Phase 1 of the Packaging & Distribution roadmap. The
+# `bastionvault` package provides the operator/end-user CLI binary
+# `bvault` plus its manpage and shell completions. It does NOT install
+# a systemd unit / Windows service — server installs go through the
+# container image, not the workstation package.
+#
+# Build locally:
+#   cargo install cargo-deb cargo-generate-rpm
+#   make linux-cli-packages
+#
+# See features/packaging-client-binaries.md for the full design.
+
+[package.metadata.deb]
+name = "bastionvault"
+maintainer = "BastionVault <noreply@bastionvault.io>"
+copyright = "2026 BastionVault Contributors"
+license-file = ["LICENSE", "0"]
+extended-description = """
+BastionVault is an identity-based secrets management server with a
+Vault-compatible API. This package installs the bvault command-line
+client used to interact with a BastionVault server.
+"""
+section = "utils"
+priority = "optional"
+depends = "ca-certificates"
+assets = [
+    # Binary (cargo-deb implicitly builds the `bvault` bin first).
+    ["target/release/bvault", "usr/bin/", "755"],
+    # Static manpage + shell completions. Phase 1 ships hand-written
+    # stubs; a follow-up will plug clap_mangen / clap_complete in for
+    # auto-generation. cargo-deb's deb_compression default (xz) keeps
+    # the on-wire size small even with the stubs.
+    ["installers/cli/manpage/bvault.1", "usr/share/man/man1/", "644"],
+    ["installers/cli/completions/bvault.bash", "usr/share/bash-completion/completions/bvault", "644"],
+    ["installers/cli/completions/_bvault",     "usr/share/zsh/site-functions/_bvault", "644"],
+    ["installers/cli/completions/bvault.fish", "usr/share/fish/vendor_completions.d/bvault.fish", "644"],
+    # Project docs the package archive ships, in line with Debian policy.
+    ["README.md",    "usr/share/doc/bastionvault/", "644"],
+    ["CHANGELOG.md", "usr/share/doc/bastionvault/", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "bastionvault"
+summary = "BastionVault command-line client"
+license = "Apache-2.0"
+url = "https://github.com/ffquintella/BastionVault"
+# `assets` mirrors the deb shape, with the path conventions RPM expects.
+assets = [
+    { source = "target/release/bvault", dest = "/usr/bin/bvault", mode = "755" },
+    { source = "installers/cli/manpage/bvault.1", dest = "/usr/share/man/man1/bvault.1", mode = "644", doc = true },
+    { source = "installers/cli/completions/bvault.bash", dest = "/usr/share/bash-completion/completions/bvault", mode = "644" },
+    { source = "installers/cli/completions/_bvault",     dest = "/usr/share/zsh/site-functions/_bvault", mode = "644" },
+    { source = "installers/cli/completions/bvault.fish", dest = "/usr/share/fish/vendor_completions.d/bvault.fish", mode = "644" },
+    { source = "README.md",    dest = "/usr/share/doc/bastionvault/README.md",   mode = "644", doc = true },
+    { source = "CHANGELOG.md", dest = "/usr/share/doc/bastionvault/CHANGELOG.md",mode = "644", doc = true },
+]
+[package.metadata.generate-rpm.requires]
+ca-certificates = "*"
+
 # Phase 2 of the SSH secret engine: target-host helper that PAM's
 # `pam_exec` invokes to validate an OTP against `/v1/ssh/verify`.
 # Tiny binary, deliberately separate from the server so operators can

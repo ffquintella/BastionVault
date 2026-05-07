@@ -1,14 +1,17 @@
-# BastionVault server container image — build + push to GHCR.
+# BastionVault server container image — build + push + sign + attest.
 #
-# Wave 1, Phase 1 of the Packaging & Distribution roadmap:
-# - linux/amd64 only
-# - unsigned (Cosign keyless signing arrives in Wave 2 / Phase 3)
-# - tags pushed: vX.Y.Z, vX.Y, vX, latest
+# Wave 2 / Phase 3 of the Packaging & Distribution roadmap:
+# - linux/amd64 + linux/arm64 (manifest list under one tag)
+# - production + `:debug` variants
+# - Cosign keyless signing (GitHub OIDC, no static keys)
+# - CycloneDX SBOM via syft, attached as a Cosign attestation
+# - tags pushed: vX.Y.Z, vX.Y, vX, latest, plus `-debug` suffixes
 #
 # See:
 #   roadmaps/packaging-and-distribution.md
 #   features/packaging-podman-server.md
 #   deploy/container/Containerfile
+#   deploy/container/Containerfile.debug
 
 name: container-image
 
@@ -26,12 +29,38 @@ on:
 permissions:
   contents: read
   packages: write
+  # `id-token: write` is required so the runner can mint the OIDC
+  # token Cosign uses for keyless signing.
+  id-token: write
+  # `attestations: write` lets cosign attest CycloneDX SBOMs into the
+  # registry's referrers index.
+  attestations: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/bastionvault
 
 jobs:
   build-and-push:
-    name: Build + push linux/amd64
+    # One job builds both arches in parallel via buildx, both image
+    # variants (production + debug), and signs each digest. Splitting
+    # variant or arch into separate jobs would re-introduce the
+    # cross-job artefact-passing dance that buildx specifically avoids.
+    name: Build + push + sign (multi-arch)
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 90
+
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - variant: production
+            file: deploy/container/Containerfile
+            tag_suffix: ''
+            cache_scope: container-image
+          - variant: debug
+            file: deploy/container/Containerfile.debug
+            tag_suffix: -debug
+            cache_scope: container-image-debug
 
     steps:
       - name: Checkout
@@ -43,8 +72,10 @@ jobs:
           submodules: false
 
       - name: Set up QEMU
-        # Not strictly needed for amd64-on-amd64, but installing it now
-        # means Wave 2's arm64 addition is a one-line buildx change.
+        # Required for the linux/arm64 leg on an amd64 runner. Slow but
+        # produces a real arm64 image without provisioning a separate
+        # arm64 runner; if the build time becomes a problem we can
+        # switch to a self-hosted arm64 runner per leg.
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
@@ -61,7 +92,11 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/bastionvault
+          images: ${{ env.IMAGE }}
+          # `flavor.suffix` lets us append `-debug` to every tag for the
+          # debug variant in one place — no per-tag duplication.
+          flavor: |
+            suffix=${{ matrix.tag_suffix }},onlatest=true
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -70,34 +105,99 @@ jobs:
             type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
             type=raw,value=manual-${{ github.sha }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.tag == '' }}
           labels: |
-            org.opencontainers.image.title=BastionVault
+            org.opencontainers.image.title=BastionVault${{ matrix.tag_suffix == '-debug' && ' (debug)' || '' }}
             org.opencontainers.image.description=Identity-based secrets management server (Vault-API compatible)
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=Apache-2.0
 
-      - name: Build + push
+      - name: Build + push (multi-arch)
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: deploy/container/Containerfile
-          platforms: linux/amd64
+          file: ${{ matrix.file }}
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Cache builder layers across runs to amortise the slow Rust
-          # compile. Phase 3 may switch to cargo-chef for finer control.
-          cache-from: type=gha,scope=container-image-amd64
-          cache-to: type=gha,scope=container-image-amd64,mode=max
+          # compile. Per-variant scope keeps the prod and debug caches
+          # from invalidating each other when only one Containerfile
+          # changes.
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}
+          cache-to:   type=gha,scope=${{ matrix.cache_scope }},mode=max
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Cosign keyless sign
+        # Sign the manifest-list digest. Cosign automatically signs all
+        # arch-specific manifests reachable from the list, so verifiers
+        # who pull `:vX.Y.Z` for either arch get a verified signature.
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          # We sign by digest, not by tag, so a future tag rewrite
+          # cannot retro-validate a different image. Each tag we
+          # pushed resolves to the same digest above; one signature
+          # covers them all.
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Generate CycloneDX SBOM
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          syft "${IMAGE}@${DIGEST}" \
+              -o cyclonedx-json="sbom-${{ matrix.variant }}.cdx.json"
+
+      - name: Attest SBOM with Cosign
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          cosign attest --yes \
+              --predicate "sbom-${{ matrix.variant }}.cdx.json" \
+              --type cyclonedx \
+              "${IMAGE}@${DIGEST}"
+
+      - name: Upload SBOM artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.variant }}
+          path: sbom-${{ matrix.variant }}.cdx.json
+          retention-days: 90
 
       - name: Summary
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           {
-            echo "### Pushed image"
+            echo "### Pushed ${{ matrix.variant }} image"
             echo ""
+            echo "Digest: \`${DIGEST}\`"
+            echo ""
+            echo "Tags:"
             echo '```'
             echo "${{ steps.meta.outputs.tags }}"
             echo '```'
             echo ""
-            echo "Wave 1 / Phase 1 — unsigned. Cosign signing + SBOM arrive in Wave 2 / Phase 3."
+            echo "Architectures: \`linux/amd64\`, \`linux/arm64\`"
+            echo ""
+            echo "Verify the signature locally:"
+            echo '```'
+            echo "cosign verify ${IMAGE}@${DIGEST} \\"
+            echo "    --certificate-identity-regexp 'https://github.com/${{ github.repository }}/' \\"
+            echo "    --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo '```'
+            echo ""
+            echo "Inspect the CycloneDX SBOM:"
+            echo '```'
+            echo "cosign download attestation ${IMAGE}@${DIGEST} \\"
+            echo "    --predicate-type cyclonedx \\"
+            echo "    | jq -r '.payload | @base64d | fromjson'"
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

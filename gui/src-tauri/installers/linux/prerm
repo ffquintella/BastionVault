@@ -1,0 +1,20 @@
+#!/bin/sh
+# Pre-removal scriptlet. Run before files are unlinked so we can use
+# them for cleanup (e.g. deregister desktop entries before they vanish).
+# Same /bin/sh portability rules as postinst.
+
+set -e
+
+# Refresh XDG / MIME / icon caches so the disappearing files don't
+# leave stale entries.
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q /usr/share/applications || true
+fi
+if command -v update-mime-database >/dev/null 2>&1; then
+    update-mime-database /usr/share/mime || true
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+fi
+
+exit 0

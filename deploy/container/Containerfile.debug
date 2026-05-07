@@ -1,0 +1,83 @@
+# BastionVault server — `:debug` variant for incident response.
+#
+# Same binaries, same UID, same volumes as the production image. The
+# only difference is the runtime base — `debug-nonroot` (busybox shell
+# + a handful of tools) — and that we copy in `ss`, `ip`, `tcpdump`,
+# `curl` so an operator can debug client-IP / TLS / network issues
+# without rebuilding.
+#
+# This image is NOT for general production use. Push it under the
+# `:debug` tag suffix (e.g. `vX.Y.Z-debug`) and document it as a
+# break-glass tool. The production image stays distroless.
+#
+# Built by the same workflow as the production Containerfile; the
+# multi-arch matrix produces both image variants per tag.
+
+# ---------- Stage 1: builder ----------
+FROM docker.io/library/rust:1-slim-bookworm AS builder
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        clang \
+        cmake \
+        git \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+RUN cargo build --release --bin bvault \
+ && cargo build --release --bin bv-ssh-helper
+RUN if ldd /src/target/release/bvault | grep -E 'libssl|libcrypto'; then \
+        echo "ERROR: bvault is dynamically linked against openssl."; \
+        exit 1; \
+    fi
+
+# ---------- Stage 2: tools-staging ----------
+# We pull `ss`, `ip`, `tcpdump`, `curl` from a Debian builder layer
+# (rather than installing apt into the runtime) so the final image
+# does NOT carry a package manager. The tools are copied in as
+# pre-built binaries with their dynamic-loader-resolved deps.
+FROM docker.io/library/debian:bookworm-slim AS tools
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        iproute2 \
+        tcpdump \
+        curl \
+        ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# ---------- Stage 3: runtime ----------
+# `debug-nonroot` distroless = glibc + ca-certificates + busybox.
+# `busybox` provides /busybox/sh; the entrypoint is still bvault.
+FROM gcr.io/distroless/cc-debian12:debug-nonroot
+
+LABEL org.opencontainers.image.title="BastionVault (debug)" \
+      org.opencontainers.image.description="BastionVault server with shell + ss/ip/tcpdump/curl for incident response. Not for general production." \
+      org.opencontainers.image.source="https://github.com/ffquintella/BastionVault" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.vendor="BastionVault"
+
+# Server binaries.
+COPY --from=builder /src/target/release/bvault         /usr/local/bin/bvault
+COPY --from=builder /src/target/release/bv-ssh-helper  /usr/local/bin/bv-ssh-helper
+
+# Diagnostic tools. We carry only the binaries the troubleshooting
+# cookbook actually mentions; resist the urge to grow this set.
+COPY --from=tools /usr/sbin/ss            /usr/local/bin/ss
+COPY --from=tools /usr/sbin/ip            /usr/local/bin/ip
+COPY --from=tools /usr/bin/tcpdump        /usr/local/bin/tcpdump
+COPY --from=tools /usr/bin/curl           /usr/local/bin/curl
+# tcpdump runtime deps that aren't already in distroless-cc.
+COPY --from=tools /usr/lib/x86_64-linux-gnu/libpcap.so.* /usr/lib/x86_64-linux-gnu/
+
+COPY deploy/container/config/config.hcl.sample /etc/bvault/config.hcl
+
+USER 65532:65532
+VOLUME ["/var/lib/bvault/data"]
+WORKDIR /var/lib/bvault
+EXPOSE 8200
+
+ENTRYPOINT ["/usr/local/bin/bvault"]
+CMD ["server", "--config", "/etc/bvault/config.hcl"]

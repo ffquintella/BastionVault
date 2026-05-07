@@ -19,8 +19,10 @@ use serde_json::{json, Map, Value};
 use crate::{core::Core, errors::RvError, logical::Request};
 
 pub mod batch;
+pub mod client_ip;
 pub mod logical;
 pub mod metrics;
+pub mod proxy_protocol;
 pub mod sys;
 
 pub const AUTH_COOKIE_NAME: &str = "token";
