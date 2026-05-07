@@ -185,7 +185,7 @@ _bump-write:
 #   make container-image CONTAINER_TOOL=docker
 #   make container-image IMAGE_NAME=ghcr.io/ffquintella/bastionvault
 #   make container-image IMAGE_TAG=v0.4.0-rc1
-#   make container-image PLATFORM=linux/arm64
+#   make container-image PLATFORM=linux/arm64    # default is linux/amd64
 #
 # `BUILDX` toggles `docker buildx build` (multi-arch capable) when
 # CONTAINER_TOOL=docker. Podman handles --platform natively so the toggle
@@ -196,29 +196,16 @@ IMAGE_NAME     ?= bastionvault
 IMAGE_TAG      ?= $(VERSION)
 BUILDX         ?= 0
 
-# Default `PLATFORM` to the host's native architecture so local builds
-# don't go through QEMU. Cross-arch emulation (e.g. building linux/amd64
-# on Apple Silicon) reliably segfaults rustc inside the builder image —
-# QEMU's amd64 emulation isn't tight enough for the JIT-ish behaviour
-# of rustup's downloaded rustc. The CI workflow pins amd64 explicitly
-# on a Linux/amd64 runner, so producing amd64 release images is still
-# straightforward — just not from a Mac laptop.
+# Default `PLATFORM` to linux/amd64 so the image we build by default
+# matches what we publish from CI (Linux/amd64 runners) and what most
+# deployment targets expect. On Apple Silicon this goes through QEMU,
+# which historically segfaults rustc inside the builder image — if you
+# hit that, build natively for arm64 with `make container-image-run`
+# (which overrides PLATFORM=linux/arm64) or pass PLATFORM= explicitly.
 #
-# Override on the command line for cross-arch builds you really want:
-#   make container-image PLATFORM=linux/amd64
-ifeq ($(OS),Windows_NT)
-_HOST_ARCH := amd64
-else
-_HOST_UNAME_M := $(shell uname -m)
-ifeq ($(_HOST_UNAME_M),arm64)
-_HOST_ARCH := arm64
-else ifeq ($(_HOST_UNAME_M),aarch64)
-_HOST_ARCH := arm64
-else
-_HOST_ARCH := amd64
-endif
-endif
-PLATFORM ?= linux/$(_HOST_ARCH)
+# Override on the command line for cross-arch builds:
+#   make container-image PLATFORM=linux/arm64    # default is linux/amd64
+PLATFORM ?= linux/amd64
 
 # Resolve the docker subcommand once: `buildx build` if BUILDX=1 (and
 # we're on docker), plain `build` otherwise.
@@ -248,8 +235,11 @@ container-image: ## Build the server OCI image (auto-detects podman/docker, over
 	@echo "    Inspect: $(CONTAINER_TOOL) images $(IMAGE_NAME)"
 	@echo "    Run:     make container-image-run"
 
-container-image-run: ## Run the locally-built server image (config from deploy/container/config/)
+container-image-run: ## Build (linux/arm64) and run the server image locally (config from deploy/container/config/)
+	@$(MAKE) container-image PLATFORM=linux/arm64
+	@echo "==> Running $(IMAGE_NAME):$(IMAGE_TAG) (linux/arm64)"
 	$(CONTAINER_TOOL) run --rm -it \
+		--platform linux/arm64 \
 		-p 8200:8200 \
 		-v $(PWD)/deploy/container/config:/etc/bvault/config:ro \
 		$(IMAGE_NAME):$(IMAGE_TAG)
