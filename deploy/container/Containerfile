@@ -5,16 +5,32 @@
 #         multi-arch (linux/amd64 + linux/arm64), Cosign keyless
 #         signing, CycloneDX SBOM attestation.
 #
+# Cross-compilation:
+#   The builder stage runs on $BUILDPLATFORM (the host arch — no QEMU on
+#   the Rust toolchain, which is what kills naive multi-arch builds on
+#   Apple Silicon) and Rust cross-compiles to $TARGETPLATFORM using the
+#   matching gcc cross-toolchain. The runtime stage is then pulled for
+#   $TARGETPLATFORM and the binary is copied in.
+#
 # Build context is the repository root. Build with:
 #   podman build -f deploy/container/Containerfile -t bastionvault:dev .
-# Or via the make target (auto-detects podman/docker, native arch):
+# Or via the make target (auto-detects podman/docker, defaults to amd64):
 #   make container-image
+#   make container-image PLATFORM=linux/arm64
+#
+# Docker users need buildx for BUILDPLATFORM/TARGETPLATFORM:
+#   make container-image CONTAINER_TOOL=docker BUILDX=1
+# Podman supports these automatic ARGs natively.
 #
 # See features/packaging-podman-server.md for the full design and
 # roadmaps/packaging-and-distribution.md for the wave sequencing.
 
-# ---------- Stage 1: builder ----------
-FROM docker.io/library/rust:1-slim-bookworm AS builder
+# ---------- Stage 1: builder (runs on BUILDPLATFORM, cross-compiles to TARGETPLATFORM) ----------
+FROM --platform=$BUILDPLATFORM docker.io/library/rust:1-slim-bookworm AS builder
+
+ARG BUILDPLATFORM
+ARG TARGETPLATFORM
+ARG TARGETARCH
 
 # Build tooling. The server crate is fully OpenSSL-free as of the
 # FIDO2 RP migration (`src/modules/credential/fido2/rp/`), so we no
@@ -23,37 +39,64 @@ FROM docker.io/library/rust:1-slim-bookworm AS builder
 #   - clang + cmake: covers sub-deps that need a C compiler (e.g.
 #     ring, some PQ crates' build scripts).
 #   - git + ca-certificates: cargo registry + submodule fetches.
+#   - binutils: `readelf` for the openssl-link sanity check (needed
+#     because the binary is foreign-arch when cross-compiling, so
+#     `ldd` can't run on it).
+#   - gcc-x86-64-linux-gnu / gcc-aarch64-linux-gnu: cross linkers and
+#     C compilers for cc-rs build scripts.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
+        binutils \
         ca-certificates \
         clang \
         cmake \
+        gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+        gcc-x86-64-linux-gnu g++-x86-64-linux-gnu \
         git \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
-
-# Copy the workspace and build the two server-side binaries.
 COPY . .
 
-RUN cargo build --release --bin bvault \
- && cargo build --release --bin bv-ssh-helper
+# Resolve TARGETARCH → Rust target triple + cross-toolchain prefix,
+# install the rust target, and build with cc-rs / cargo pointed at
+# the cross compiler. Output goes to /out/ so the runtime stage doesn't
+# need to know the target triple.
+RUN set -eux; \
+    case "$TARGETARCH" in \
+        amd64)  RUST_TARGET=x86_64-unknown-linux-gnu;  CROSS_PFX=x86_64-linux-gnu ;; \
+        arm64)  RUST_TARGET=aarch64-unknown-linux-gnu; CROSS_PFX=aarch64-linux-gnu ;; \
+        *)      echo "unsupported TARGETARCH=$TARGETARCH"; exit 1 ;; \
+    esac; \
+    rustup target add "$RUST_TARGET"; \
+    RUST_TARGET_ENV=$(echo "$RUST_TARGET" | tr '[:lower:]-' '[:upper:]_'); \
+    RUST_TARGET_VAR=$(echo "$RUST_TARGET" | tr '-' '_'); \
+    export CARGO_TARGET_${RUST_TARGET_ENV}_LINKER=${CROSS_PFX}-gcc; \
+    export CC_${RUST_TARGET_VAR}=${CROSS_PFX}-gcc; \
+    export CXX_${RUST_TARGET_VAR}=${CROSS_PFX}-g++; \
+    export AR_${RUST_TARGET_VAR}=${CROSS_PFX}-ar; \
+    cargo build --release --target "$RUST_TARGET" --bin bvault; \
+    cargo build --release --target "$RUST_TARGET" --bin bv-ssh-helper; \
+    mkdir -p /out; \
+    cp "target/${RUST_TARGET}/release/bvault"        /out/bvault; \
+    cp "target/${RUST_TARGET}/release/bv-ssh-helper" /out/bv-ssh-helper
 
 # Belt-and-braces: confirm the resulting binary really doesn't need
 # libssl at runtime. Distroless has no libssl, so a stray dynamic link
 # would fail at container start with a confusing "cannot find
 # libssl.so.3" error. Failing the build here surfaces the regression at
-# build time, before publish.
-RUN if ldd /src/target/release/bvault | grep -E 'libssl|libcrypto'; then \
+# build time, before publish. We use `readelf -d` (static, arch-agnostic)
+# instead of `ldd` because the binary may be foreign-arch.
+RUN if readelf -d /out/bvault | grep -E 'NEEDED.*(libssl|libcrypto)'; then \
         echo "ERROR: bvault is dynamically linked against openssl. The server crate is supposed to be openssl-free; some new dep has reintroduced it."; \
         exit 1; \
     fi
 
-# ---------- Stage 2: runtime ----------
+# ---------- Stage 2: runtime (pulled for TARGETPLATFORM) ----------
 # Distroless: glibc + ca-certificates + nothing else. No shell, no
 # package manager, no userspace network tools. The :debug variant in
 # Phase 3 adds ss / ip / tcpdump / curl for incident response.
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM --platform=$TARGETPLATFORM gcr.io/distroless/cc-debian12:nonroot
 
 LABEL org.opencontainers.image.title="BastionVault" \
       org.opencontainers.image.description="Identity-based secrets management server (Vault-API compatible)" \
@@ -62,8 +105,8 @@ LABEL org.opencontainers.image.title="BastionVault" \
       org.opencontainers.image.vendor="BastionVault"
 
 # Binaries.
-COPY --from=builder /src/target/release/bvault         /usr/local/bin/bvault
-COPY --from=builder /src/target/release/bv-ssh-helper  /usr/local/bin/bv-ssh-helper
+COPY --from=builder /out/bvault         /usr/local/bin/bvault
+COPY --from=builder /out/bv-ssh-helper  /usr/local/bin/bv-ssh-helper
 
 # Inert sample config (file storage at /var/lib/bvault/data, TLS expected
 # at /etc/bvault/tls/). The operator MUST mount their own config and
