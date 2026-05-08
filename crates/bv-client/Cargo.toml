@@ -1,0 +1,19 @@
+[package]
+name = "bv-client"
+version = "0.3.4"
+edition = "2021"
+license = "Apache-2.0"
+description = "Client crate for BastionVault: HTTP client + Backend trait used by the GUI to talk to a BastionVault server. Has zero dependencies on the bastion_vault server crate."
+
+[dependencies]
+async-trait = "0.1"
+http = "1"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+ureq = { version = "3.3", features = ["json"] }
+rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
+# `rt` only — we just need `spawn_blocking` to keep the sync ureq
+# call off the async executor. Consumers bring their own runtime.
+tokio = { version = "1", features = ["rt"] }

@@ -18,6 +18,11 @@ tauri-plugin-dialog = "2"
 # debug builds when BASTION_TAURI_MCP=1 is set.
 tauri-plugin-mcp-bridge = { version = "0.11.1", optional = true }
 bastion_vault = { path = "../..", default-features = false }
+# Slim client crate: HTTP client + Backend trait. Brought in
+# unconditionally because the GUI's Connect-page flows always need it.
+# The complementary EmbeddedBackend wrapper around `bastion_vault::core`
+# lives in this crate behind the `embedded_vault` feature.
+bv-client = { path = "../../crates/bv-client" }
 # rustls is transitively present via the host crate; we list it here
 # so the GUI startup can pin the process-level CryptoProvider before
 # any TLS-using code runs (rustls 0.23 panics on first use otherwise
