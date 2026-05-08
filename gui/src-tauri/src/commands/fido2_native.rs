@@ -23,7 +23,10 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, State};
 
-use crate::commands::fido2::{Fido2LoginResponse, make_request};
+use bv_client::Operation;
+
+use crate::commands::fido2::Fido2LoginResponse;
+use crate::commands::make_request;
 use crate::error::{CmdResult, CommandError};
 use crate::state::AppState;
 
@@ -70,19 +73,15 @@ fn base64url_decode(s: &str) -> Result<Vec<u8>, CommandError> {
 
 /// Read the FIDO2 relying party config from the vault.
 async fn read_fido2_config(state: &State<'_, AppState>) -> Result<(String, String, String), CommandError> {
-    use bastion_vault::logical::{Operation, Request};
+    use bv_client::Operation;
 
-    let vault_guard = state.vault.lock().await;
-    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
-    let core = vault.core.load();
-    let token = state.token.lock().await.clone().unwrap_or_default();
-
-    let mut req = Request::default();
-    req.operation = Operation::Read;
-    req.path = "auth/userpass/fido2/config".to_string();
-    req.client_token = token;
-
-    let resp = core.handle_request(&mut req).await.map_err(CommandError::from)?;
+    let resp = make_request(
+        state,
+        Operation::Read,
+        "auth/userpass/fido2/config".to_string(),
+        None,
+    )
+    .await?;
     let data = resp
         .and_then(|r| r.data)
         .ok_or("FIDO2 not configured")?;
@@ -222,7 +221,7 @@ pub async fn fido2_native_register(
 
     let resp = make_request(
         &state,
-        bastion_vault::logical::Operation::Write,
+        Operation::Write,
         "auth/userpass/fido2/register/begin".to_string(),
         Some(body),
     ).await?;
@@ -401,7 +400,7 @@ pub async fn fido2_native_register(
 
     make_request(
         &state,
-        bastion_vault::logical::Operation::Write,
+        Operation::Write,
         "auth/userpass/fido2/register/complete".to_string(),
         Some(body),
     ).await?;
@@ -427,7 +426,7 @@ pub async fn fido2_native_login(
 
     let resp = make_request(
         &state,
-        bastion_vault::logical::Operation::Write,
+        Operation::Write,
         "auth/userpass/fido2/login/begin".to_string(),
         Some(body),
     ).await?;
@@ -575,7 +574,7 @@ pub async fn fido2_native_login(
 
     let resp = make_request(
         &state,
-        bastion_vault::logical::Operation::Write,
+        Operation::Write,
         "auth/userpass/fido2/login/complete".to_string(),
         Some(body),
     ).await?;

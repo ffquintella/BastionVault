@@ -1,8 +1,12 @@
+use bv_client::Operation;
 use serde::Serialize;
+use serde_json::{Map, Value};
 use tauri::State;
 
 use crate::error::CmdResult;
 use crate::state::AppState;
+
+use super::dispatch_with_token;
 
 #[derive(Serialize)]
 pub struct LoginResponse {
@@ -12,14 +16,10 @@ pub struct LoginResponse {
 
 #[tauri::command]
 pub async fn login_token(state: State<'_, AppState>, token: String) -> CmdResult<LoginResponse> {
-    let vault_guard = state.vault.lock().await;
-    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
-    let core = vault.core.load();
-
     // Validate the token up-front by calling `auth/token/lookup-self`
     // with it. This is the Vault-compatible "introspect my own token"
     // endpoint — any valid token can read its own metadata, an
-    // invalid one gets `ErrPermissionDenied` / `ErrResponse`. Doing
+    // invalid one gets a "permission denied" / "invalid" error. Doing
     // the round-trip here turns a wrong token into an immediate
     // "Invalid token" login failure instead of letting the user
     // navigate to a page and get a confusing "Permission denied"
@@ -29,31 +29,27 @@ pub async fn login_token(state: State<'_, AppState>, token: String) -> CmdResult
     // surface to the UI so role-gated routes (Admin sections, etc.)
     // render correctly from the moment of login rather than waiting
     // on a follow-up fetch.
-    use bastion_vault::logical::{Operation, Request};
-
-    let mut req = Request::default();
-    req.operation = Operation::Read;
-    req.path = "auth/token/lookup-self".to_string();
-    req.client_token = token.clone();
-
-    let resp = core
-        .handle_request(&mut req)
-        .await
-        .map_err(|e| {
-            // Surface a more operator-friendly message than the raw
-            // vault error for the common case — "permission denied"
-            // on lookup-self means the token string didn't match
-            // anything known, not that policy blocked the introspect.
-            let msg = format!("{e}");
-            if msg.to_ascii_lowercase().contains("permission denied")
-                || msg.to_ascii_lowercase().contains("invalid")
-            {
-                crate::error::CommandError::from("Invalid token")
-            } else {
-                crate::error::CommandError::from(e)
-            }
-        })?
-        .ok_or_else(|| crate::error::CommandError::from("Invalid token"))?;
+    let resp = dispatch_with_token(
+        &state,
+        Operation::Read,
+        "auth/token/lookup-self".to_string(),
+        None,
+        &token,
+    )
+    .await
+    .map_err(|e| {
+        // Surface a more operator-friendly message than the raw
+        // vault error for the common case — "permission denied"
+        // on lookup-self means the token string didn't match
+        // anything known, not that policy blocked the introspect.
+        let msg = e.to_string().to_ascii_lowercase();
+        if msg.contains("permission denied") || msg.contains("invalid") {
+            crate::error::CommandError::from("Invalid token")
+        } else {
+            e
+        }
+    })?
+    .ok_or_else(|| crate::error::CommandError::from("Invalid token"))?;
 
     // Extract policies from the response data. The shape is
     // `{data: {policies: [...], ...}}`. Missing/empty policies is
@@ -72,7 +68,6 @@ pub async fn login_token(state: State<'_, AppState>, token: String) -> CmdResult
         })
         .unwrap_or_else(|| vec!["default".to_string()]);
 
-    drop(vault_guard);
     *state.token.lock().await = Some(token.clone());
 
     Ok(LoginResponse { token, policies })
@@ -84,35 +79,44 @@ pub async fn login_userpass(
     username: String,
     password: String,
 ) -> CmdResult<LoginResponse> {
-    let vault_guard = state.vault.lock().await;
-    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
-    let core = vault.core.load();
-
-    // Build a login request through the vault's internal request handling.
-    use bastion_vault::logical::{Operation, Request};
-    use serde_json::{Map, Value};
-
     let mut body = Map::new();
     body.insert("password".to_string(), Value::String(password));
 
-    let mut req = Request::default();
-    req.operation = Operation::Write;
-    req.path = format!("auth/userpass/login/{username}");
-    req.body = Some(body);
-
-    let resp = core.handle_request(&mut req).await
-        .map_err(|e| crate::error::CommandError::from(e))?;
+    // Login endpoints take no token. Pass an empty string; both
+    // EmbeddedBackend (just stores it on the Request) and
+    // RemoteBackend (skips the X-BastionVault-Token header for
+    // /login paths) handle it correctly.
+    let resp = dispatch_with_token(
+        &state,
+        Operation::Write,
+        format!("auth/userpass/login/{username}"),
+        Some(body),
+        "",
+    )
+    .await?;
 
     match resp {
         Some(r) => {
             if let Some(auth) = r.auth {
-                let token = auth.client_token.clone();
-                drop(vault_guard);
+                let token = auth
+                    .get("client_token")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let policies = auth
+                    .get("policies")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if token.is_empty() {
+                    return Err("Login failed: no token in auth response".into());
+                }
                 *state.token.lock().await = Some(token.clone());
-                Ok(LoginResponse {
-                    token,
-                    policies: auth.policies.clone(),
-                })
+                Ok(LoginResponse { token, policies })
             } else {
                 Err("Login failed: no auth in response".into())
             }

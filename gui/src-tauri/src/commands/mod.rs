@@ -11,13 +11,30 @@ use crate::state::AppState;
 /// `EmbeddedBackend` (in-process `Core`) or a `RemoteBackend` (HTTP).
 ///
 /// Replaces the per-file `make_request` helpers that each used to
-/// reach into `state.vault` directly; once every command file has
-/// been migrated to call this, the legacy `state.vault` field can go.
+/// reach into `state.vault` directly. Reads the active token out of
+/// `AppState::token`; for flows that need a different token (e.g.
+/// `login_token` validating a user-supplied token, or `/login`
+/// endpoints that take no token), use [`dispatch_with_token`].
 pub async fn make_request(
     state: &State<'_, AppState>,
     operation: Operation,
     path: String,
     body: Option<Map<String, Value>>,
+) -> CmdResult<Option<JsonResponse>> {
+    let token = state.token.lock().await.clone().unwrap_or_default();
+    dispatch_with_token(state, operation, path, body, &token).await
+}
+
+/// Variant of [`make_request`] that takes an explicit token instead
+/// of reading `AppState::token`. Used by login flows that either need
+/// to validate a user-supplied token (`auth/token/lookup-self`) or
+/// call a `/login` endpoint with no token at all.
+pub async fn dispatch_with_token(
+    state: &State<'_, AppState>,
+    operation: Operation,
+    path: String,
+    body: Option<Map<String, Value>>,
+    token: &str,
 ) -> CmdResult<Option<JsonResponse>> {
     let backend_guard = state.backend.lock().await;
     let backend = backend_guard
@@ -26,10 +43,8 @@ pub async fn make_request(
         .clone();
     drop(backend_guard);
 
-    let token = state.token.lock().await.clone().unwrap_or_default();
-
     backend
-        .handle(operation, &path, body, &token)
+        .handle(operation, &path, body, token)
         .await
         .map_err(CommandError::from)
 }

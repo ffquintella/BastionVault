@@ -26,13 +26,15 @@
 //! `write_config` which redacts on read; the admin UI only surfaces
 //! boolean `_set` hints.
 
-use bastion_vault::logical::{Operation, Request};
+use bv_client::Operation;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tauri::State;
 
 use crate::error::{CmdResult, CommandError};
 use crate::state::{AppState, VaultMode};
+
+use super::make_request;
 
 // ── Shared shapes ──────────────────────────────────────────────────
 
@@ -833,19 +835,7 @@ async fn sys_read(
     state: &State<'_, AppState>,
     path: &str,
 ) -> Result<Map<String, Value>, CommandError> {
-    let vault_guard = state.vault.lock().await;
-    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
-    let core = vault.core.load();
-    let token = state.token.lock().await.clone().unwrap_or_default();
-
-    let mut req = Request::default();
-    req.operation = Operation::Read;
-    req.path = path.to_string();
-    req.client_token = token;
-    let resp = core
-        .handle_request(&mut req)
-        .await
-        .map_err(CommandError::from)?;
+    let resp = make_request(state, Operation::Read, path.to_string(), None).await?;
     Ok(resp.and_then(|r| r.data).unwrap_or_default())
 }
 
@@ -854,34 +844,11 @@ async fn sys_write(
     path: &str,
     body: Map<String, Value>,
 ) -> Result<(), CommandError> {
-    let vault_guard = state.vault.lock().await;
-    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
-    let core = vault.core.load();
-    let token = state.token.lock().await.clone().unwrap_or_default();
-
-    let mut req = Request::default();
-    req.operation = Operation::Write;
-    req.path = path.to_string();
-    req.client_token = token;
-    req.body = Some(body);
-    core.handle_request(&mut req)
-        .await
-        .map_err(CommandError::from)?;
+    make_request(state, Operation::Write, path.to_string(), Some(body)).await?;
     Ok(())
 }
 
 async fn sys_delete(state: &State<'_, AppState>, path: &str) -> Result<(), CommandError> {
-    let vault_guard = state.vault.lock().await;
-    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
-    let core = vault.core.load();
-    let token = state.token.lock().await.clone().unwrap_or_default();
-
-    let mut req = Request::default();
-    req.operation = Operation::Delete;
-    req.path = path.to_string();
-    req.client_token = token;
-    core.handle_request(&mut req)
-        .await
-        .map_err(CommandError::from)?;
+    make_request(state, Operation::Delete, path.to_string(), None).await?;
     Ok(())
 }

@@ -18,10 +18,11 @@
 //! backend handles the PKCE + JWKS + ID-token verification
 //! server-side; this module only has to carry the loopback bytes.
 //!
-//! Works against both embedded and remote vaults:
-//!   * Embedded — calls flow through `vault.core.handle_request`.
-//!   * Remote   — calls flow through the configured `remote_client`.
-//! `dispatch_to_vault` picks the right path off `AppState`.
+//! Works against both embedded and remote vaults — `dispatch_vault_write`
+//! routes through the shared `Backend` trait object on `AppState`,
+//! so the embedded path goes through `Core::handle_request` and the
+//! remote path goes through `RemoteBackend` over HTTP. Same JSON
+//! shape either way.
 
 use std::{
     io::{BufRead, BufReader, Write},
@@ -380,88 +381,47 @@ fn respond_ok(stream: &mut TcpStream) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Send a write-shaped request into the vault. Picks the embedded
-/// core (`vault.core.handle_request`) when the mode is `Embedded`,
-/// otherwise routes through the remote HTTP client.
+/// Send a write-shaped request into the vault, going through the
+/// shared `Backend` trait so both Embedded and Remote modes use the
+/// same path. Returns a flat Map containing the response's `data`
+/// object plus an `auth` field (if any) so the existing oidc
+/// callback parsing on the JS side can keep its shape.
 ///
-/// Returns the response `data` object unwrapped — `auth_url` sits
-/// in the data payload for `auth/<mount>/auth_url`, and the `auth`
-/// field for `callback` sits at the top of the envelope. We merge
-/// both into a single object for the caller to introspect.
+/// The oidc/auth_url + oidc/callback endpoints are marked `unauth`
+/// on the backend, so we explicitly pass an empty token rather
+/// than leaking whatever's in `state.token`.
 async fn dispatch_vault_write(
     state: &State<'_, AppState>,
     path: &str,
     body: Map<String, Value>,
 ) -> Result<Map<String, Value>, CommandError> {
-    use crate::state::VaultMode;
+    use bv_client::Operation;
 
-    let mode = state.mode.lock().await.clone();
-    match mode {
-        VaultMode::Embedded => {
-            let vault_guard = state.vault.lock().await;
-            let vault = vault_guard.as_ref().ok_or("Vault not open")?;
-            let core = vault.core.load();
+    let resp = crate::commands::dispatch_with_token(
+        state,
+        Operation::Write,
+        path.to_string(),
+        Some(body),
+        "",
+    )
+    .await?
+    .ok_or("vault returned empty response")?;
 
-            use bastion_vault::logical::{Operation, Request};
-            let mut req = Request::default();
-            req.operation = Operation::Write;
-            req.path = path.to_string();
-            req.body = Some(body);
-            // The oidc/auth_url + oidc/callback endpoints are
-            // marked `unauth` on the backend, so a missing token
-            // is fine.
-
-            let resp = core
-                .handle_request(&mut req)
-                .await
-                .map_err(CommandError::from)?;
-            let resp = resp.ok_or("vault returned empty response")?;
-            let mut out = Map::new();
-            if let Some(data) = resp.data {
-                for (k, v) in data {
-                    out.insert(k, v);
-                }
-            }
-            if let Some(auth) = resp.auth {
-                // Project the Auth struct into the JSON shape the
-                // frontend side already expects.
-                let mut auth_obj = Map::new();
-                auth_obj.insert(
-                    "client_token".into(),
-                    Value::String(auth.client_token.clone()),
-                );
-                auth_obj.insert(
-                    "policies".into(),
-                    Value::Array(auth.policies.iter().cloned().map(Value::String).collect()),
-                );
-                auth_obj.insert(
-                    "display_name".into(),
-                    Value::String(auth.display_name.clone()),
-                );
-                out.insert("auth".into(), Value::Object(auth_obj));
-            }
-            Ok(out)
-        }
-        VaultMode::Remote => {
-            let client_guard = state.remote_client.lock().await;
-            let client = client_guard
-                .as_ref()
-                .ok_or("Not connected to remote server")?;
-            let endpoint = format!("{}/{}", client.api_prefix(), path);
-            let resp = client
-                .request_write(endpoint, Some(body))
-                .map_err(|e| CommandError::from(format!("remote write failed: {e}")))?;
-            let mut out = Map::new();
-            if let Some(data) = resp.response_data {
-                if let Some(obj) = data.as_object() {
-                    for (k, v) in obj {
-                        out.insert(k.clone(), v.clone());
-                    }
-                }
-            }
-            Ok(out)
+    let mut out = Map::new();
+    if let Some(data) = resp.data {
+        for (k, v) in data {
+            out.insert(k, v);
         }
     }
+    if let Some(auth) = resp.auth {
+        // `auth` already arrives as a JSON Value (RemoteBackend
+        // forwarded it verbatim, EmbeddedBackend serialized the
+        // server-side Auth struct via serde). Pass it through
+        // untouched — the frontend already knows how to read
+        // `auth.client_token` / `auth.policies`.
+        out.insert("auth".into(), auth);
+    }
+    Ok(out)
 }
 
 /// Short opaque session id. Not security-sensitive (the bound port

@@ -52,20 +52,15 @@ const ARGON2_P: u32 = 4;
 
 /// Look up the caller's policies and refuse if `root` is missing.
 async fn require_root(state: &State<'_, AppState>) -> Result<(), CommandError> {
-    use bastion_vault::logical::{Operation, Request};
-    let vault_guard = state.vault.lock().await;
-    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
-    let core = vault.core.load();
-    let token = state.token.lock().await.clone().ok_or("Not authenticated")?;
-    let mut req = Request::default();
-    req.operation = Operation::Read;
-    req.path = "auth/token/lookup-self".into();
-    req.client_token = token;
-    let resp = core
-        .handle_request(&mut req)
-        .await
-        .map_err(CommandError::from)?
-        .ok_or("token lookup returned empty response")?;
+    use bv_client::Operation;
+    let resp = crate::commands::make_request(
+        state,
+        Operation::Read,
+        "auth/token/lookup-self".to_string(),
+        None,
+    )
+    .await?
+    .ok_or("token lookup returned empty response")?;
     let policies: Vec<String> = resp
         .data
         .as_ref()

@@ -1,4 +1,4 @@
-use bastion_vault::logical::{Operation, Request};
+use bv_client::Operation;
 use serde::Serialize;
 use serde_json::Value;
 use tauri::State;
@@ -106,49 +106,70 @@ pub async fn open_vault(state: State<'_, AppState>) -> CmdResult<()> {
 /// Tauri call with a low-privilege token is rejected here.
 #[tauri::command]
 pub async fn seal_vault(state: State<'_, AppState>) -> CmdResult<()> {
-    use bastion_vault::modules::{auth::AuthModule, policy::PolicyModule};
-
-    let vault_guard = state.vault.lock().await;
-    let Some(vault) = vault_guard.as_ref() else {
-        return Ok(());
-    };
-
-    let core = vault.core.load();
-    let token = state.token.lock().await.clone().unwrap_or_default();
-    if token.is_empty() {
-        return Err("Authentication required to seal the vault".into());
-    }
-
-    // Resolve the token → Auth, then probe `sys/seal` Write.
-    let auth_module = core
-        .module_manager
-        .get_module::<AuthModule>("auth")
-        .ok_or("auth module unavailable")?;
-    let token_store = auth_module
-        .token_store
-        .load_full()
-        .ok_or("token store unavailable")?;
-
-    let auth = token_store
-        .check_token("sys/seal", &token)
-        .await
-        .map_err(CommandError::from)?
-        .ok_or("invalid or expired token")?;
-
-    let policy_module = core
-        .module_manager
-        .get_module::<PolicyModule>("policy")
-        .ok_or("policy module unavailable")?;
-    let policy_store = policy_module.policy_store.load();
-
-    if !policy_store
-        .can_operate(&auth, "sys/seal", Operation::Write)
-        .await
+    #[cfg(feature = "embedded_vault")]
     {
-        return Err("Permission denied: caller lacks `update` on sys/seal".into());
+        use bastion_vault::logical::Operation as ServerOp;
+        use bastion_vault::modules::{auth::AuthModule, policy::PolicyModule};
+
+        let vault_guard = state.vault.lock().await;
+        if let Some(vault) = vault_guard.as_ref() {
+            let core = vault.core.load();
+            let token = state.token.lock().await.clone().unwrap_or_default();
+            if token.is_empty() {
+                return Err("Authentication required to seal the vault".into());
+            }
+
+            // Resolve the token → Auth, then probe `sys/seal` Write.
+            // This is an embedded-only optimisation: it short-circuits
+            // an unauthorized seal client-side rather than letting the
+            // request travel through the dispatcher only to be rejected.
+            // Even a hand-crafted Tauri call with a low-privilege token
+            // is rejected here.
+            let auth_module = core
+                .module_manager
+                .get_module::<AuthModule>("auth")
+                .ok_or("auth module unavailable")?;
+            let token_store = auth_module
+                .token_store
+                .load_full()
+                .ok_or("token store unavailable")?;
+
+            let auth = token_store
+                .check_token("sys/seal", &token)
+                .await
+                .map_err(CommandError::from)?
+                .ok_or("invalid or expired token")?;
+
+            let policy_module = core
+                .module_manager
+                .get_module::<PolicyModule>("policy")
+                .ok_or("policy module unavailable")?;
+            let policy_store = policy_module.policy_store.load();
+
+            if !policy_store
+                .can_operate(&auth, "sys/seal", ServerOp::Write)
+                .await
+            {
+                return Err("Permission denied: caller lacks `update` on sys/seal".into());
+            }
+
+            embedded::seal_vault(vault).await?;
+            *state.backend.lock().await = None;
+            return Ok(());
+        }
     }
 
-    embedded::seal_vault(vault).await?;
+    // Remote mode (or embedded with no open vault): route through the
+    // trait. The server applies the same `sys/seal` Write policy
+    // check; failure surfaces as a Permission Denied error from the
+    // backend.
+    crate::commands::make_request(
+        &state,
+        Operation::Write,
+        "sys/seal".to_string(),
+        None,
+    )
+    .await?;
     *state.backend.lock().await = None;
     Ok(())
 }
@@ -453,20 +474,13 @@ async fn read_ui_mounts(
     state: &State<'_, AppState>,
     field: &str,
 ) -> Result<serde_json::Map<String, Value>, CommandError> {
-    let vault_guard = state.vault.lock().await;
-    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
-    let core = vault.core.load();
-    let token = state.token.lock().await.clone().unwrap_or_default();
-
-    let mut req = Request::default();
-    req.operation = Operation::Read;
-    req.path = "sys/internal/ui/mounts".to_string();
-    req.client_token = token;
-
-    let resp = core
-        .handle_request(&mut req)
-        .await
-        .map_err(CommandError::from)?;
+    let resp = crate::commands::make_request(
+        state,
+        Operation::Read,
+        "sys/internal/ui/mounts".to_string(),
+        None,
+    )
+    .await?;
 
     let data = resp
         .and_then(|r| r.data)
@@ -505,16 +519,6 @@ pub async fn list_audit_events(
     to: String,
     limit: Option<u32>,
 ) -> CmdResult<Vec<AuditEvent>> {
-    let vault_guard = state.vault.lock().await;
-    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
-    let core = vault.core.load();
-    let token = state.token.lock().await.clone().unwrap_or_default();
-
-    let mut req = Request::default();
-    req.operation = Operation::Read;
-    req.path = "sys/audit/events".to_string();
-    req.client_token = token;
-
     // The handler parses these from `req.data` after field resolution;
     // for Read it populates from the body, so stuff them there.
     let mut body = serde_json::Map::new();
@@ -527,11 +531,15 @@ pub async fn list_audit_events(
     if let Some(l) = limit {
         body.insert("limit".into(), Value::Number(l.into()));
     }
-    if !body.is_empty() {
-        req.body = Some(body);
-    }
+    let body = if body.is_empty() { None } else { Some(body) };
 
-    let resp = core.handle_request(&mut req).await.map_err(CommandError::from)?;
+    let resp = crate::commands::make_request(
+        &state,
+        Operation::Read,
+        "sys/audit/events".to_string(),
+        body,
+    )
+    .await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     let arr = data.get("events").and_then(|v| v.as_array()).cloned();
     let out = arr
@@ -639,22 +647,15 @@ pub async fn set_sso_settings(
     state: State<'_, AppState>,
     enabled: bool,
 ) -> CmdResult<()> {
-    let vault_guard = state.vault.lock().await;
-    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
-    let core = vault.core.load();
-    let token = state.token.lock().await.clone().unwrap_or_default();
-
-    let mut req = Request::default();
-    req.operation = Operation::Write;
-    req.path = "sys/sso/settings".to_string();
-    req.client_token = token;
     let mut body = serde_json::Map::new();
     body.insert("enabled".into(), Value::Bool(enabled));
-    req.body = Some(body);
-
-    core.handle_request(&mut req)
-        .await
-        .map_err(CommandError::from)?;
+    crate::commands::make_request(
+        &state,
+        Operation::Write,
+        "sys/sso/settings".to_string(),
+        Some(body),
+    )
+    .await?;
     Ok(())
 }
 
@@ -663,21 +664,18 @@ async fn read_sys_path(
     path: &str,
     authed: bool,
 ) -> Result<serde_json::Map<String, Value>, CommandError> {
-    let vault_guard = state.vault.lock().await;
-    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
-    let core = vault.core.load();
-
-    let mut req = Request::default();
-    req.operation = Operation::Read;
-    req.path = path.to_string();
-    if authed {
-        req.client_token = state.token.lock().await.clone().unwrap_or_default();
-    }
-
-    let resp = core
-        .handle_request(&mut req)
-        .await
-        .map_err(CommandError::from)?;
+    let resp = if authed {
+        crate::commands::make_request(state, Operation::Read, path.to_string(), None).await?
+    } else {
+        crate::commands::dispatch_with_token(
+            state,
+            Operation::Read,
+            path.to_string(),
+            None,
+            "",
+        )
+        .await?
+    };
     Ok(resp.and_then(|r| r.data).unwrap_or_default())
 }
 
