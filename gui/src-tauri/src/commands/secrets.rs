@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 
-use bastion_vault::logical::{Operation, Request};
+use bv_client::Operation;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use tauri::State;
 
-use crate::error::{CmdResult, CommandError};
+use crate::error::CmdResult;
 use crate::state::AppState;
+
+use super::make_request;
 
 #[derive(Serialize)]
 pub struct SecretData {
@@ -16,29 +18,6 @@ pub struct SecretData {
 #[derive(Serialize)]
 pub struct SecretListResult {
     pub keys: Vec<String>,
-}
-
-async fn make_request(
-    state: &State<'_, AppState>,
-    operation: Operation,
-    path: String,
-    body: Option<Map<String, Value>>,
-) -> Result<Option<bastion_vault::logical::Response>, CommandError> {
-    let vault_guard = state.vault.lock().await;
-    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
-    let core = vault.core.load();
-
-    let token = state.token.lock().await.clone().unwrap_or_default();
-
-    let mut req = Request::default();
-    req.operation = operation;
-    req.path = path;
-    req.client_token = token;
-    req.body = body;
-
-    core.handle_request(&mut req)
-        .await
-        .map_err(CommandError::from)
 }
 
 /// Adjust a KV path for v2 by inserting the appropriate prefix after the mount.

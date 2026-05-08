@@ -1,32 +1,12 @@
-use bastion_vault::logical::{Operation, Request};
+use bv_client::Operation;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use tauri::State;
 
-use crate::error::{CmdResult, CommandError};
+use crate::error::CmdResult;
 use crate::state::AppState;
 
-pub(crate) async fn make_request(
-    state: &State<'_, AppState>,
-    operation: Operation,
-    path: String,
-    body: Option<Map<String, Value>>,
-) -> Result<Option<bastion_vault::logical::Response>, CommandError> {
-    let vault_guard = state.vault.lock().await;
-    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
-    let core = vault.core.load();
-    let token = state.token.lock().await.clone().unwrap_or_default();
-
-    let mut req = Request::default();
-    req.operation = operation;
-    req.path = path;
-    req.client_token = token;
-    req.body = body;
-
-    core.handle_request(&mut req)
-        .await
-        .map_err(CommandError::from)
-}
+use super::make_request;
 
 // ── Config ─────────────────────────────────────────────────────────
 // Now stored within the userpass mount at auth/userpass/fido2/config
@@ -175,11 +155,21 @@ pub async fn fido2_login_complete(
     match resp {
         Some(r) => {
             if let Some(auth) = r.auth {
-                let token = auth.client_token.clone();
-                Ok(Fido2LoginResponse {
-                    token,
-                    policies: auth.policies.clone(),
-                })
+                let token = auth
+                    .get("client_token")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let policies = auth
+                    .get("policies")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(Fido2LoginResponse { token, policies })
             } else {
                 Err("FIDO2 authentication failed: no auth in response".into())
             }
