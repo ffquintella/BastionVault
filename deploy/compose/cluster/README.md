@@ -28,10 +28,18 @@ files are readable by that UID (`chmod 0644 *.hcl tls/*.crt`,
 
 ```sh
 # 1. Generate / drop in real TLS material under ./tls/.
-#    Self-signed test material:
+#    Self-signed test material. The extensions matter: rustls/webpki
+#    (used by the `bvault` CLI) rejects certs with `CA:TRUE` as a TLS
+#    leaf (`CaUsedAsEndEntity`) and requires a SAN — CN alone is not
+#    accepted. Replace the SAN entries with the hostnames/IPs your
+#    clients will actually connect to.
 mkdir -p tls
 openssl req -x509 -newkey ed25519 -nodes -days 90 \
     -subj "/CN=bastionvault-cluster" \
+    -addext "basicConstraints=critical,CA:FALSE" \
+    -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+    -addext "extendedKeyUsage=serverAuth" \
+    -addext "subjectAltName=DNS:bv-1,DNS:bv-2,DNS:bv-3,DNS:localhost,IP:127.0.0.1" \
     -keyout tls/server.key -out tls/server.crt
 chmod 0640 tls/server.key
 chmod 0644 tls/server.crt
