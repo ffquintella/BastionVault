@@ -1,6 +1,9 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use bastion_vault::api::{client::TLSConfigBuilder, Client};
+use bv_client::{
+    tls::TLSConfigBuilder as BvTLSConfigBuilder, RemoteBackend,
+};
 use serde::Serialize;
 use tauri::State;
 
@@ -76,13 +79,60 @@ pub async fn connect_remote(
         return Err("Connection failed: no response from server".into());
     }
 
+    // Build a parallel `RemoteBackend` (bv-client) using the same
+    // address + TLS material so migrated commands route through the
+    // trait. The legacy `Client` above is still populated; once the
+    // command migration is finished we can drop it.
+    let remote_backend = build_remote_backend(&profile)?;
+
     *state.mode.lock().await = VaultMode::Remote;
     *state.remote_client.lock().await = Some(client);
     *state.remote_profile.lock().await = Some(profile);
+    *state.backend.lock().await = Some(Arc::new(remote_backend));
     // Clear embedded vault if switching from embedded.
     *state.vault.lock().await = None;
 
     Ok(())
+}
+
+/// Build a `bv_client::RemoteBackend` from a `RemoteProfile`. Mirrors
+/// the TLS resolution above for the legacy `Client` so the two
+/// observe the same trust material.
+fn build_remote_backend(profile: &RemoteProfile) -> CmdResult<RemoteBackend> {
+    let mut builder = RemoteBackend::builder().with_address(&profile.address);
+
+    if profile.address.starts_with("https://") {
+        let mut tls_builder =
+            BvTLSConfigBuilder::new().with_insecure(profile.tls_skip_verify);
+
+        if let Some(ca_path) = &profile.ca_cert_path {
+            if !ca_path.is_empty() {
+                tls_builder = tls_builder
+                    .with_server_ca_path(&PathBuf::from(ca_path))
+                    .map_err(|e| CommandError::from(format!("CA cert error: {e}")))?;
+            }
+        }
+
+        if let (Some(cert_path), Some(key_path)) =
+            (&profile.client_cert_path, &profile.client_key_path)
+        {
+            if !cert_path.is_empty() && !key_path.is_empty() {
+                tls_builder = tls_builder
+                    .with_client_cert_path(
+                        &PathBuf::from(cert_path),
+                        &PathBuf::from(key_path),
+                    )
+                    .map_err(|e| CommandError::from(format!("Client cert error: {e}")))?;
+            }
+        }
+
+        let tls_config = tls_builder
+            .build()
+            .map_err(|e| CommandError::from(format!("TLS config error: {e}")))?;
+        builder = builder.with_tls_config(tls_config);
+    }
+
+    Ok(builder.build())
 }
 
 /// Disconnect from remote server and reset to embedded mode.
@@ -91,6 +141,7 @@ pub async fn disconnect_remote(state: State<'_, AppState>) -> CmdResult<()> {
     *state.mode.lock().await = VaultMode::Embedded;
     *state.remote_client.lock().await = None;
     *state.remote_profile.lock().await = None;
+    *state.backend.lock().await = None;
     *state.token.lock().await = None;
     Ok(())
 }

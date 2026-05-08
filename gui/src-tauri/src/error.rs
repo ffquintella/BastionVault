@@ -17,6 +17,12 @@ impl From<bastion_vault::errors::RvError> for CommandError {
     }
 }
 
+impl From<bv_client::ClientError> for CommandError {
+    fn from(e: bv_client::ClientError) -> Self {
+        Self { message: e.to_string() }
+    }
+}
+
 impl From<String> for CommandError {
     fn from(s: String) -> Self {
         Self { message: s }

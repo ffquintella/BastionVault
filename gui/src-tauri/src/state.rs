@@ -5,6 +5,7 @@ use bastion_vault::api::Client;
 use bastion_vault::storage::physical::file::oauth::{
     ConsentSession, OAuthCredentials, OAuthProvider,
 };
+use bv_client::Backend;
 use tokio::sync::Mutex;
 
 /// In-flight OAuth consent session for a cloud storage target.
@@ -65,6 +66,13 @@ pub struct AppState {
     pub remote_client: Mutex<Option<Client>>,
     /// Remote server profile (only set in Remote mode).
     pub remote_profile: Mutex<Option<RemoteProfile>>,
+    /// Trait-object backend used by migrated commands. Always populated
+    /// to mirror whichever of `vault` / `remote_client` is active —
+    /// embedded mode wraps `vault` in an `EmbeddedBackend`, remote mode
+    /// wraps a `RemoteBackend`. New commands route through this; the
+    /// legacy `vault` / `remote_client` fields above stay during the
+    /// migration so unmigrated commands keep compiling.
+    pub backend: Mutex<Option<Arc<dyn Backend>>>,
     /// Active auth token (used in both modes).
     pub token: Mutex<Option<String>>,
     /// Channel for receiving PIN input from the frontend during FIDO2 ceremonies.
@@ -97,6 +105,7 @@ impl AppState {
             vault: Mutex::new(None),
             remote_client: Mutex::new(None),
             remote_profile: Mutex::new(None),
+            backend: Mutex::new(None),
             token: Mutex::new(None),
             pin_sender: std::sync::Mutex::new(None),
             cloud_sessions: std::sync::Mutex::new(HashMap::new()),

@@ -43,8 +43,17 @@ pub async fn init_vault(state: State<'_, AppState>) -> CmdResult<InitResponse> {
     let outcome = embedded::init_embedded().await?;
     let root_token = outcome.root_token.clone();
     let unseal_key_hex = outcome.unseal_key_hex.clone();
+    let vault_arc = outcome.vault.clone();
     *vault_guard = Some(outcome.vault);
     drop(vault_guard);
+    #[cfg(feature = "embedded_vault")]
+    {
+        *state.backend.lock().await = Some(std::sync::Arc::new(
+            crate::backend::EmbeddedBackend::new(vault_arc),
+        ));
+    }
+    #[cfg(not(feature = "embedded_vault"))]
+    let _ = vault_arc;
     *state.token.lock().await = Some(root_token.clone());
 
     Ok(InitResponse {
@@ -63,8 +72,17 @@ pub async fn open_vault(state: State<'_, AppState>) -> CmdResult<()> {
         return Ok(());
     }
     let vault = embedded::open_embedded().await?;
+    let vault_arc = vault.clone();
     *vault_guard = Some(vault);
     drop(vault_guard);
+    #[cfg(feature = "embedded_vault")]
+    {
+        *state.backend.lock().await = Some(std::sync::Arc::new(
+            crate::backend::EmbeddedBackend::new(vault_arc),
+        ));
+    }
+    #[cfg(not(feature = "embedded_vault"))]
+    let _ = vault_arc;
 
     // Restore the per-vault root token the init flow stashed under
     // this profile's id. Keeps the post-open session alive without
@@ -131,6 +149,7 @@ pub async fn seal_vault(state: State<'_, AppState>) -> CmdResult<()> {
     }
 
     embedded::seal_vault(vault).await?;
+    *state.backend.lock().await = None;
     Ok(())
 }
 
@@ -173,6 +192,7 @@ pub async fn reset_local_keystore(state: State<'_, AppState>) -> CmdResult<()> {
     // Drop the in-process vault handle + cached token too — they
     // reference the now-invalid local keystore state.
     *state.vault.lock().await = None;
+    *state.backend.lock().await = None;
     *state.token.lock().await = None;
     crate::local_keystore::wipe_all()?;
     Ok(())
@@ -210,6 +230,7 @@ pub async fn recover_unseal_key(
     // Drop the active vault + token first so the keystore update
     // doesn't race an in-flight session.
     *state.vault.lock().await = None;
+    *state.backend.lock().await = None;
     *state.token.lock().await = None;
 
     // Wipe then re-seal so the old cache's ML-KEM material
@@ -236,6 +257,7 @@ pub async fn recover_unseal_key(
 #[tauri::command]
 pub async fn disconnect_vault(state: State<'_, AppState>) -> CmdResult<()> {
     *state.vault.lock().await = None;
+    *state.backend.lock().await = None;
     *state.token.lock().await = None;
     Ok(())
 }
@@ -247,6 +269,7 @@ pub async fn reset_vault(state: State<'_, AppState>) -> CmdResult<()> {
     // Drop the active vault + session first so we don't race with
     // ongoing reads during the wipe.
     *state.vault.lock().await = None;
+    *state.backend.lock().await = None;
     *state.token.lock().await = None;
 
     // Drop the per-vault entry for the currently-active profile

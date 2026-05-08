@@ -139,7 +139,12 @@ windows = { version = "0.61", features = ["Win32_Foundation"] }
 # of the four providers without a custom build flag. Server-only
 # operators who want a leaner binary can override by disabling the
 # cloud_* features at their own workspace level.
-default = ["storage_hiqlite", "cloud_targets", "ssh_pqc"]
+default = ["embedded_vault", "storage_hiqlite", "cloud_targets", "ssh_pqc"]
+# Enables the in-process `EmbeddedBackend` adapter that wraps
+# `bastion_vault::core::Core::handle_request`. With this feature off,
+# the GUI is a pure remote client (Phase 3 of the decoupling will
+# also make `bastion_vault` itself an optional dep).
+embedded_vault = []
 storage_hiqlite = ["bastion_vault/storage_hiqlite"]
 cloud_targets = ["bastion_vault/cloud_targets"]
 # Post-quantum SSH certificates (ML-DSA-65). On by default so the
