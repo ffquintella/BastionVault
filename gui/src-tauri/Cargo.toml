@@ -125,8 +125,8 @@ winapi = { version = "0.3", features = ["std"] }
 # Used from the Tauri setup hook to disable WebView2 form autofill, which
 # would otherwise persist typed secret values to Chromium's Web Data cache.
 # Version pinned to match the transitive dep pulled in by Tauri/wry.
-webview2-com = "0.39"
-windows = { version = "0.62", features = ["Win32_Foundation"] }
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_Foundation"] }
 
 [features]
 # Cloud storage targets are on by default in the desktop GUI build so

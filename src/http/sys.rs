@@ -171,15 +171,25 @@ async fn sys_unseal_request_handler(
     body.clear();
     let key: Zeroizing<Vec<u8>> = Zeroizing::new(hex::decode(payload.key.clone())?);
 
+    // Idempotent: if the vault is already unsealed, swallow the
+    // `ErrBarrierUnsealed` and just return current seal status (200).
+    // Matches HashiCorp Vault's behavior — re-running `vault operator
+    // unseal` against an already-open vault is a no-op, not a 400.
     #[cfg(not(feature = "sync_handler"))]
     {
-        let _result = core.unseal(&key).await?;
+        match core.unseal(&key).await {
+            Ok(_) | Err(RvError::ErrBarrierUnsealed) => {}
+            Err(e) => return Err(e),
+        }
         response_seal_status(core).await
     }
 
     #[cfg(feature = "sync_handler")]
     {
-        let _result = core.unseal(&key)?;
+        match core.unseal(&key) {
+            Ok(_) | Err(RvError::ErrBarrierUnsealed) => {}
+            Err(e) => return Err(e),
+        }
         response_seal_status(core)
     }
 }

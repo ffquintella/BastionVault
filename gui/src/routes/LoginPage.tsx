@@ -221,7 +221,15 @@ export function LoginPage() {
     setLoading(true);
     setError(null);
     try {
-      const result = await api.loginToken(token);
+      // The two backend commands diverge on which AppState slot they
+      // read: `login_token` validates against the in-process embedded
+      // vault, `remote_login_token` against the connected HTTP client.
+      // Routing on `mode` here is what stops "Vault not open" from
+      // surfacing when the user is signed into a remote server.
+      const result =
+        mode === "Remote"
+          ? await api.remoteLoginToken(token)
+          : await api.loginToken(token);
       await finalizeLogin(result.token, result.policies);
       navigate("/dashboard");
     } catch (err: unknown) {
@@ -263,7 +271,10 @@ export function LoginPage() {
     setLoading(true);
     setError(null);
     try {
-      const result = await api.loginUserpass(username, password);
+      const result =
+        mode === "Remote"
+          ? await api.remoteLoginUserpass(username, password)
+          : await api.loginUserpass(username, password);
       await finalizeLogin(result.token, result.policies);
       navigate("/dashboard");
     } catch (err: unknown) {

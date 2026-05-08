@@ -22,13 +22,25 @@ pub struct HttpResponse {
 impl HttpResponse {
     pub fn print_debug_info(&self) {
         println!("URL: {} {}", self.method, self.url);
-        print!("Code: {}.", self.response_status);
-        if self.response_status != 200 || self.response_status != 204 {
-            println!(" Error:");
+        let is_ok = self.response_status == 200 || self.response_status == 204;
+        if is_ok {
+            println!("Code: {}.", self.response_status);
+        } else {
+            println!("Code: {}. Error:", self.response_status);
         }
 
         if let Some(response_data) = &self.response_data {
-            println!("{response_data:?}");
+            // Prefer the `error` field when present so the user sees a
+            // human-readable message instead of the full Debug-formatted
+            // JSON Object. Falls back to pretty-printed JSON otherwise.
+            if let Some(err) = response_data.get("error").and_then(|v| v.as_str()) {
+                println!("{err}");
+            } else {
+                match serde_json::to_string_pretty(response_data) {
+                    Ok(s) => println!("{s}"),
+                    Err(_) => println!("{response_data:?}"),
+                }
+            }
         }
     }
 }

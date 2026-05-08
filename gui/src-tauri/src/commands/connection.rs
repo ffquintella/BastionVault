@@ -159,7 +159,7 @@ pub async fn get_remote_status(state: State<'_, AppState>) -> CmdResult<RemoteSt
 pub async fn remote_login_token(
     state: State<'_, AppState>,
     token: String,
-) -> CmdResult<()> {
+) -> CmdResult<crate::commands::auth::LoginResponse> {
     let client_guard = state.remote_client.lock().await;
     let client = client_guard.as_ref().ok_or("Not connected to remote server")?;
 
@@ -169,7 +169,7 @@ pub async fn remote_login_token(
     // we surface that as "Invalid token" without storing anything.
     let endpoint = format!("{}/auth/token/lookup-self", client.api_prefix());
     let bound = client.clone().with_token(&token);
-    bound
+    let resp = bound
         .request_read(endpoint)
         .map_err(|e| {
             let msg = format!("{e}");
@@ -183,9 +183,19 @@ pub async fn remote_login_token(
             }
         })?;
 
+    // Extract policies so the UI can gate role-specific routes on the
+    // first render — same shape as the embedded `login_token` path.
+    let policies: Vec<String> = resp
+        .response_data
+        .as_ref()
+        .and_then(|d| d.get("data").and_then(|x| x.get("policies")).or_else(|| d.get("policies")))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|p| p.as_str().map(String::from)).collect())
+        .unwrap_or_else(|| vec!["default".to_string()]);
+
     drop(client_guard);
-    *state.token.lock().await = Some(token);
-    Ok(())
+    *state.token.lock().await = Some(token.clone());
+    Ok(crate::commands::auth::LoginResponse { token, policies })
 }
 
 /// Login to a remote vault with username/password.

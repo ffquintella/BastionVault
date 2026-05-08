@@ -142,7 +142,7 @@ export const getPasswordPolicy = () => invoke<PasswordPolicy>("get_password_poli
 export const setPasswordPolicy = (policy: PasswordPolicy) =>
   invoke<void>("set_password_policy", { policy });
 export const remoteLoginToken = (token: string) =>
-  invoke<void>("remote_login_token", { token });
+  invoke<LoginResponse>("remote_login_token", { token });
 export const remoteLoginUserpass = (username: string, password: string) =>
   invoke<LoginResponse>("remote_login_userpass", { username, password });
 
