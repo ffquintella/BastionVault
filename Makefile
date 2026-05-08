@@ -76,7 +76,7 @@ build: prune-stale ## Build the project in release mode
 	cargo build --release
 
 run-dev: prune-stale ## Run the development server
-	cargo run -- server --config config/dev.hcl
+	CARGO_BUILD_JOBS=6 cargo run -- server --config config/dev.hcl
 
 gui-deps: ## Install GUI frontend dependencies
 	cd gui && npm install
@@ -86,10 +86,20 @@ gui-deps: ## Install GUI frontend dependencies
 # can see exactly what the dev / prod GUI binaries ship with.
 # `ssh_pqc` enables ML-DSA-65 SSH CA generation in the /ssh page.
 run-dev-gui: gui-deps prune-stale ## Run the desktop GUI in dev mode with local MCP bridge enabled
-	cd gui && BASTION_EMBEDDED_STORAGE=file BASTION_TAURI_MCP=1 npx tauri dev -- --features storage_hiqlite,mcp_local_dev,ssh_pqc
+	cd gui && CARGO_BUILD_JOBS=6 BASTION_EMBEDDED_STORAGE=file BASTION_TAURI_MCP=1 npx tauri dev -- --features storage_hiqlite,mcp_local_dev,ssh_pqc
 
 run-dev-gui-hiqlite: gui-deps prune-stale ## Run the desktop GUI in dev mode, embedded vault on hiqlite (ports 8210/8220)
-	cd gui && BASTION_EMBEDDED_STORAGE=hiqlite npx tauri dev -- --features storage_hiqlite,ssh_pqc
+	cd gui && CARGO_BUILD_JOBS=6 BASTION_EMBEDDED_STORAGE=hiqlite npx tauri dev -- --features storage_hiqlite,ssh_pqc
+
+# Lightest dev build: Tauri host + vite, with `bastion_vault` pulled
+# in at default-features=false. That means no hiqlite (no Raft/SQLite
+# compile), no cloud storage targets, no PQC SSH — just the bare
+# minimum needed for the GUI to talk to an external bvault server via
+# the Connect page. Local Vault profiles that depend on those
+# features won't work in this build; that's the trade-off for the
+# faster compile.
+run-dev-gui-only: gui-deps prune-stale ## Run the desktop GUI in dev mode with no backend storage features (lightest compile)
+	cd gui && CARGO_BUILD_JOBS=6 npx tauri dev -- --no-default-features
 
 gui-build: gui-deps prune-stale ## Build the desktop GUI for production
 	cd gui && npx tauri build -- --features storage_hiqlite,ssh_pqc
