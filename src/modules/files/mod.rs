@@ -3004,6 +3004,14 @@ mod integration_tests {
         let _ = fs::remove_file(&tmp);
     }
 
+    // Exercises both the SMB and SSH URL validators alongside the
+    // generic credential checks. The URL parsers live in
+    // feature-gated submodules (`files_smb` / `files_ssh_sync`) so
+    // a build without those features accepts malformed URLs at save
+    // time and the test fails on the assertion that follows. Gate
+    // the whole test on those features so the default `cargo test
+    // --lib` (no extra features) doesn't see it.
+    #[cfg(all(feature = "files_smb", feature = "files_ssh_sync"))]
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_sync_target_unsupported_kind_rejected_at_save() {
         let (_bv, core, root_token) =
