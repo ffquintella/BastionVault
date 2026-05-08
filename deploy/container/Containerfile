@@ -75,6 +75,7 @@ RUN set -eux; \
     export CC_${RUST_TARGET_VAR}=${CROSS_PFX}-gcc; \
     export CXX_${RUST_TARGET_VAR}=${CROSS_PFX}-g++; \
     export AR_${RUST_TARGET_VAR}=${CROSS_PFX}-ar; \
+    : "${CARGO_BUILD_JOBS:=2}"; export CARGO_BUILD_JOBS; \
     cargo build --release --target "$RUST_TARGET" --bin bvault; \
     cargo build --release --target "$RUST_TARGET" --bin bv-ssh-helper; \
     mkdir -p /out; \

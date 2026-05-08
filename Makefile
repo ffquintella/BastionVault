@@ -224,6 +224,26 @@ container-image: ## Build the server OCI image (auto-detects podman/docker, over
 		echo "ERROR: '$(CONTAINER_TOOL)' not found. Install podman or docker, or override with CONTAINER_TOOL=."; \
 		exit 1; \
 	}
+	@if [ "$(CONTAINER_TOOL)" = "podman" ]; then \
+		if ! podman info >/dev/null 2>&1; then \
+			if podman machine list --format '{{.Name}}' 2>/dev/null | grep -q .; then \
+				running=$$(podman machine list --format '{{.Running}}' 2>/dev/null | grep -c true || true); \
+				if [ "$$running" -eq 0 ]; then \
+					echo "==> Podman machine not running, starting it..."; \
+					podman machine start || { echo "ERROR: failed to start podman machine"; exit 1; }; \
+				fi; \
+				for i in 1 2 3 4 5 6 7 8 9 10; do \
+					podman info >/dev/null 2>&1 && break; \
+					sleep 1; \
+				done; \
+				podman info >/dev/null 2>&1 || { echo "ERROR: podman machine started but daemon not responding"; exit 1; }; \
+			else \
+				echo "ERROR: podman is not running and no podman machine is configured."; \
+				echo "       Run 'podman machine init' first, then retry."; \
+				exit 1; \
+			fi; \
+		fi; \
+	fi
 	@echo "==> Building $(IMAGE_NAME):$(IMAGE_TAG) ($(PLATFORM)) with $(CONTAINER_TOOL)"
 	$(_BUILD_CMD) \
 		-f deploy/container/Containerfile \
