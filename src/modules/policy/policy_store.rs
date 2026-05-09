@@ -154,6 +154,17 @@ path "sys/control-group/request" {
 }
 "#;
 
+// Administrator baseline. Full access to every path with every
+// capability — the equivalent of `root` for non-root tokens. Issued
+// for break-glass / day-1 admin use; pair with audit logging.
+static ADMINISTRATOR_POLICY_NAME: &str = "administrator";
+static ADMINISTRATOR_POLICY: &str = r#"
+# Full access — every path, every capability.
+path "*" {
+    capabilities = ["create", "read", "update", "delete", "list", "sudo"]
+}
+"#;
+
 static RESPONSE_WRAPPING_POLICY_NAME: &str = "response-wrapping";
 static RESPONSE_WRAPPING_POLICY: &str = r#"
 path "cubbyhole/response" {
@@ -921,6 +932,7 @@ impl PolicyStore {
     /// Load default ACL policies into the policy store.
     pub async fn load_default_acl_policy(&self) -> Result<(), RvError> {
         self.load_acl_policy(DEFAULT_POLICY_NAME, DEFAULT_POLICY).await?;
+        self.load_acl_policy(ADMINISTRATOR_POLICY_NAME, ADMINISTRATOR_POLICY).await?;
         self.load_acl_policy(RESPONSE_WRAPPING_POLICY_NAME, RESPONSE_WRAPPING_POLICY).await?;
         self.load_acl_policy(CONTROL_GROUP_POLICY_NAME, CONTROL_GROUP_POLICY).await?;
         self.load_acl_policy(STANDARD_USER_POLICY_NAME, STANDARD_USER_POLICY).await?;

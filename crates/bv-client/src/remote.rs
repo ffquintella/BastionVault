@@ -187,10 +187,22 @@ impl Backend for RemoteBackend {
                 if status == 204 {
                     return Ok((status, Value::Null));
                 }
-                let json: Value = response
+                // Read raw bytes first — some server paths reply with
+                // an empty body (notably error responses without an
+                // `errors` envelope). serde_json::from_slice on `[]`
+                // yields a confusing "EOF while parsing a value at
+                // line 1 column 0" that masks the real status code,
+                // so treat empty as Null and let the status branch
+                // below produce a sensible message.
+                let bytes = response
                     .body_mut()
-                    .read_json()
+                    .read_to_vec()
                     .map_err(ClientError::from)?;
+                let json = if bytes.iter().all(|b| b.is_ascii_whitespace()) {
+                    Value::Null
+                } else {
+                    serde_json::from_slice(&bytes).map_err(ClientError::from)?
+                };
                 Ok((status, json))
             })
         })
@@ -217,6 +229,7 @@ impl Backend for RemoteBackend {
             // The HTTP API typically replies with `{"errors":[...]}`
             // so we pull that out when we can.
             let message = match &json {
+                Value::Null => format!("HTTP {status} (no body)"),
                 Value::Object(obj) => obj
                     .get("errors")
                     .and_then(|v| match v {

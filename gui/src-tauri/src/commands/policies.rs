@@ -36,7 +36,10 @@ pub struct PolicyHistoryResult {
 
 #[tauri::command]
 pub async fn list_policies(state: State<'_, AppState>) -> CmdResult<PolicyListResult> {
-    let resp = make_request(&state, Operation::List, "sys/policies/acl/".to_string(), None).await?;
+    // Server registers this route as `GET /v1/sys/policies/acl` and
+    // forces `Operation::List` inside the handler — go through Read
+    // (GET) with no trailing slash so actix routing actually matches.
+    let resp = make_request(&state, Operation::Read, "sys/policies/acl".to_string(), None).await?;
 
     match resp {
         Some(r) => {

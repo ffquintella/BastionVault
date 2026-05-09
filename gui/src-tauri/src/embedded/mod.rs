@@ -604,7 +604,11 @@ pub async fn open_embedded() -> Result<Arc<BastionVault>, CommandError> {
     Ok(Arc::new(vault))
 }
 
-/// Seal the vault.
+/// Seal the vault. Only used by the embedded-vault seal command path —
+/// `commands::system::seal_vault` gates its embedded branch on
+/// `#[cfg(feature = "embedded_vault")]`, so without that feature this
+/// helper has no callers.
+#[cfg(feature = "embedded_vault")]
 pub async fn seal_vault(vault: &BastionVault) -> Result<(), CommandError> {
     vault.core.load().seal().await.map_err(|e| CommandError::from(e))
 }
