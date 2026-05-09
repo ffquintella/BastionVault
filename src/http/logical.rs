@@ -176,6 +176,27 @@ fn response_logical(resp: &Response, path: &str) -> Result<HttpResponse, RvError
 }
 
 pub fn init_logical_service(cfg: &mut web::ServiceConfig) {
-    cfg.service(web::scope("/v1").route("/{path:.*}", web::route().to(logical_request_handler_v1)));
-    cfg.service(web::scope("/v2").route("/{path:.*}", web::route().to(logical_request_handler_v2)));
+    // Bump the per-request body limit off actix's 256 KiB default.
+    // The logical surface includes file uploads (`files/files` POST
+    // carries a base64-encoded blob inline) and PKI workflows (CSRs,
+    // certificate chains) that routinely exceed that ceiling. 32 MiB
+    // matches `sys/batch`'s explicit limit and gives operators
+    // headroom for normal file workloads without making the server
+    // an unbounded sink. Larger uploads should chunk via a dedicated
+    // engine later; for now this is the pragmatic ceiling.
+    let payload_cfg = web::PayloadConfig::default().limit(default_logical_body_limit());
+    cfg.service(
+        web::scope("/v1")
+            .app_data(payload_cfg.clone())
+            .route("/{path:.*}", web::route().to(logical_request_handler_v1)),
+    );
+    cfg.service(
+        web::scope("/v2")
+            .app_data(payload_cfg)
+            .route("/{path:.*}", web::route().to(logical_request_handler_v2)),
+    );
+}
+
+fn default_logical_body_limit() -> usize {
+    32 * 1024 * 1024
 }
