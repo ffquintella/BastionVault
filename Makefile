@@ -407,6 +407,16 @@ container-image-push: ## Tag + push $(IMAGE_NAME):$(IMAGE_TAG) AND :latest to th
 	       echo "         push fails with a TLS error." ;; \
 	   esac ; \
 	 fi ; \
+	 LOGIN_FLAGS="" ; \
+	 if [ "$$SCHEME" = "http" ] && [ "$(CONTAINER_TOOL)" = "podman" ]; then \
+	   LOGIN_FLAGS="--tls-verify=false" ; \
+	 fi ; \
+	 if $(CONTAINER_TOOL) login $$LOGIN_FLAGS --get-login "$$REGISTRY" >/dev/null 2>&1 ; then \
+	   echo "==> already logged in to $$REGISTRY as $$($(CONTAINER_TOOL) login $$LOGIN_FLAGS --get-login $$REGISTRY 2>/dev/null)" ; \
+	 else \
+	   echo "==> not logged in to $$REGISTRY — running '$(CONTAINER_TOOL) login'" ; \
+	   $(CONTAINER_TOOL) login $$LOGIN_FLAGS "$$REGISTRY" || { echo "ERROR: login to $$REGISTRY failed"; exit 1; } ; \
+	 fi ; \
 	 echo "==> tagging $$LOCAL_TAG as $$REMOTE_VERSION" ; \
 	 $(CONTAINER_TOOL) tag "$$LOCAL_TAG" "$$REMOTE_VERSION" ; \
 	 echo "==> tagging $$LOCAL_TAG as $$REMOTE_LATEST" ; \
