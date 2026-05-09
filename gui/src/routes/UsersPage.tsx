@@ -128,10 +128,18 @@ export function UsersPage() {
       const methods = await api.listAuthMethods();
       const mounted = methods.some((m) => m.path === mountPath);
       if (!mounted) {
-        await api.enableAuthMethod("userpass/", "userpass", "Username & password authentication");
+        try {
+          await api.enableAuthMethod("userpass/", "userpass", "Username & password authentication");
+        } catch (e) {
+          toast(
+            "error",
+            `Could not enable userpass auth at ${mountPath}: ${extractError(e)}. ` +
+              `Your token may lack permission on sys/auth/userpass.`,
+          );
+        }
       }
-    } catch {
-      // fall through
+    } catch (e) {
+      toast("error", `Could not list auth methods: ${extractError(e)}`);
     }
     await Promise.all([loadUsers(), loadPolicies()]);
   }

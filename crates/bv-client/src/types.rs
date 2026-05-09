@@ -55,16 +55,45 @@ impl JsonResponse {
     /// Build a response from a parsed JSON body. Pulls out the
     /// well-known top-level keys the BastionVault HTTP API uses and
     /// drops anything else on the floor — the GUI only reads these.
+    ///
+    /// The server speaks two body shapes:
+    /// 1. *Envelope* — `{"data": {...}, "auth": {...}, "warnings": [...]}`
+    ///    used by `response_logical` (the `/v1/{path}` catch-all
+    ///    handler).
+    /// 2. *Raw* — the response's `data` map serialized at the top
+    ///    level, e.g. `{"secret": {...}, "auth": {...}}` from
+    ///    `sys/internal/ui/mounts`. This is what `http::handle_request`
+    ///    emits for the dedicated sys handlers.
+    ///
+    /// We detect the envelope shape by the presence of a top-level
+    /// `"data"` key, OR an `"auth"` value that looks like a login
+    /// payload (`{"client_token": "..."}`). Otherwise, treat the whole
+    /// object as the `data` field — a raw sys response like
+    /// `{"secret": ..., "auth": ...mounts}` then lands in `out.data`
+    /// where consumers expect it, instead of being shredded across
+    /// the envelope fields.
     pub fn from_json(value: Value) -> Self {
         let mut out = JsonResponse::default();
         let Value::Object(mut obj) = value else {
             return out;
         };
+
+        let auth_is_login = obj.get("auth").map(is_login_auth).unwrap_or(false);
+        let is_envelope = obj.contains_key("data") || auth_is_login;
+
+        if !is_envelope {
+            // Raw shape: the entire body is the response's data map.
+            // Don't touch any other "envelope" keys — they're real
+            // data fields that happen to share names.
+            out.data = Some(obj);
+            return out;
+        }
+
         if let Some(Value::Object(data)) = obj.remove("data") {
             out.data = Some(data);
         }
         if let Some(auth) = obj.remove("auth") {
-            if !auth.is_null() {
+            if !auth.is_null() && is_login_auth(&auth) {
                 out.auth = Some(auth);
             }
         }
@@ -94,5 +123,56 @@ impl JsonResponse {
             out.redirect = s;
         }
         out
+    }
+}
+
+/// A login-style `auth` payload always carries a `client_token`. The
+/// `sys/internal/ui/mounts` response also has an `"auth"` key, but
+/// that one is a *map of auth-mount entries*, not a login payload —
+/// telling them apart by this single field keeps `from_json` from
+/// mis-routing mount data into [`JsonResponse::auth`].
+fn is_login_auth(v: &Value) -> bool {
+    v.as_object().is_some_and(|o| o.contains_key("client_token"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn from_json_envelope_with_data() {
+        let r = JsonResponse::from_json(json!({
+            "data": {"keys": ["a", "b"]},
+            "warnings": ["w1"],
+        }));
+        assert!(r.data.as_ref().unwrap().contains_key("keys"));
+        assert!(r.auth.is_none());
+        assert_eq!(r.warnings, vec!["w1".to_string()]);
+    }
+
+    #[test]
+    fn from_json_login_envelope() {
+        let r = JsonResponse::from_json(json!({
+            "auth": {"client_token": "tok", "policies": ["root"]},
+        }));
+        assert!(r.auth.is_some());
+        assert!(r.data.is_none());
+    }
+
+    #[test]
+    fn from_json_raw_sys_internal_ui_mounts() {
+        // Server's `http::handle_request` emits the response's data
+        // map at the top level for dedicated sys handlers. The
+        // `auth` key here is a map of auth-mount entries, not a
+        // login payload — it must land in `data`, not `auth`.
+        let r = JsonResponse::from_json(json!({
+            "secret": {"secret/": {"type": "kv-v2"}},
+            "auth": {"token/": {"type": "token"}},
+        }));
+        let data = r.data.expect("raw body should populate data");
+        assert!(data.contains_key("secret"));
+        assert!(data.contains_key("auth"));
+        assert!(r.auth.is_none(), "mount-map auth must not be treated as login");
     }
 }
