@@ -682,57 +682,44 @@ pub async fn pki_import_ca_pkcs12(
 ) -> CmdResult<PkiSetSignedResult> {
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine;
-    use openssl::pkcs12::Pkcs12;
+    use p12_keystore::KeyStore;
+    use pem::Pem;
 
     let der = B64
         .decode(request.pkcs12_b64.trim())
         .map_err(|e| format!("pki_import_ca_pkcs12: base64 decode failed: {e}"))?;
-    let p12 = Pkcs12::from_der(&der)
-        .map_err(|e| format!("pki_import_ca_pkcs12: not a valid PKCS#12 container: {e}"))?;
-    let parsed = p12
-        .parse2(&request.passphrase)
-        .map_err(|e| format!("pki_import_ca_pkcs12: passphrase rejected or container malformed: {e}"))?;
+    let keystore = KeyStore::from_pkcs12(&der, &request.passphrase).map_err(|e| {
+        format!("pki_import_ca_pkcs12: passphrase rejected or container malformed: {e}")
+    })?;
+    let (_alias, chain_entry) = keystore
+        .private_key_chain()
+        .ok_or("pki_import_ca_pkcs12: container has no private key entry")?;
 
-    let cert = parsed
-        .cert
-        .ok_or("pki_import_ca_pkcs12: container has no certificate".to_string())?;
-    let pkey = parsed
-        .pkey
-        .ok_or("pki_import_ca_pkcs12: container has no private key".to_string())?;
+    let chain = chain_entry.chain();
+    let leaf = chain
+        .first()
+        .ok_or("pki_import_ca_pkcs12: container has no certificate")?;
 
-    let cert_pem = String::from_utf8(
-        cert.to_pem()
-            .map_err(|e| format!("pki_import_ca_pkcs12: cert → PEM failed: {e}"))?,
-    )
-    .map_err(|e| format!("pki_import_ca_pkcs12: cert PEM not UTF-8: {e}"))?;
-    // PKCS#8 (unencrypted) so the engine's `pki/config/ca` PEM-bundle
-    // splitter recognises the `PRIVATE KEY` header. `to_pem_pkcs8` is
-    // the right call regardless of the inner key type (RSA / EC /
-    // Ed25519): it emits the standard PKCS#8 wrapper.
-    let key_pem = String::from_utf8(
-        pkey.private_key_to_pem_pkcs8()
-            .map_err(|e| format!("pki_import_ca_pkcs12: key → PKCS#8 PEM failed: {e}"))?,
-    )
-    .map_err(|e| format!("pki_import_ca_pkcs12: key PEM not UTF-8: {e}"))?;
+    // p12-keystore normalises the private key to PKCS#8 DER regardless
+    // of the inner key type (RSA / EC / Ed25519), which is exactly the
+    // shape the server's `pki/config/ca` `pem_bundle` splitter expects
+    // behind a `PRIVATE KEY` header.
+    let cert_pem = pem::encode(&Pem::new("CERTIFICATE", leaf.as_der().to_vec()));
+    let key_pem = pem::encode(&Pem::new("PRIVATE KEY", chain_entry.key().to_vec()));
 
     // Concat in any order — `split_pem_bundle` recognises both blocks
-    // by tag. Append additional CA chain certs (if any) so an
+    // by tag. Append intermediate / root certs (if any) so an
     // intermediate-bundled-with-its-root .p12 still imports cleanly.
     let mut bundle = String::new();
     bundle.push_str(&cert_pem);
     if !cert_pem.ends_with('\n') {
         bundle.push('\n');
     }
-    if let Some(chain) = parsed.ca {
-        for ca in chain.iter() {
-            if let Ok(pem_bytes) = ca.to_pem() {
-                if let Ok(s) = String::from_utf8(pem_bytes) {
-                    bundle.push_str(&s);
-                    if !s.ends_with('\n') {
-                        bundle.push('\n');
-                    }
-                }
-            }
+    for ca in chain.iter().skip(1) {
+        let s = pem::encode(&Pem::new("CERTIFICATE", ca.as_der().to_vec()));
+        bundle.push_str(&s);
+        if !s.ends_with('\n') {
+            bundle.push('\n');
         }
     }
     bundle.push_str(&key_pem);

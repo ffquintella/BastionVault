@@ -161,6 +161,16 @@ Three deliverables shipped under the [Wave 2 sequencing](roadmaps/packaging-and-
 
 - Owner banner, step bar, account-list expand, progress bar, error panel, and skipped-rows warning all migrated from light-mode-only colour fallbacks (white-on-white in dark mode) to the project's `var(--color-*)` token system. Errors panel now uses `var(--color-danger)` with a translucent background and a scrollable list so a multi-error import surfaces every entry.
 
+### Removed
+
+#### OpenSSL — fully evicted from the workspace
+
+- [`Cargo.toml`](Cargo.toml) Dropped the windows-only `openssl = { version = "0.10", features = ["vendored"] }` dependency. It had no direct callers in `src/` and was a vestigial defensive add — `cargo tree -i openssl-sys --target x86_64-pc-windows-msvc` now returns empty across the entire workspace.
+- [`gui/src-tauri/Cargo.toml`](gui/src-tauri/Cargo.toml) `authenticator 0.5` switched from `crypto_openssl` → `crypto_rust` (pure-Rust AES/CBC/HMAC/p256 backend that ships with the same crate). The Windows FIDO2 transport still works; no behavior change at the API surface.
+- [`gui/src-tauri/Cargo.toml`](gui/src-tauri/Cargo.toml) Removed the vendored OpenSSL dep that backed `pki_import_ca_pkcs12`. Replaced with `p12-keystore = "0.2.1"` (`pbes1` feature for the legacy 3DES / RC2 cipher modes Windows-minted .p12 files use) plus `pem 3.0` for PEM encoding.
+- [`gui/src-tauri/src/commands/pki.rs`](gui/src-tauri/src/commands/pki.rs) `pki_import_ca_pkcs12` rewritten on top of `p12_keystore::KeyStore::from_pkcs12`. The library normalises private keys to PKCS#8 DER regardless of the inner key type (RSA / EC / Ed25519), so the existing server-side `pem_bundle` splitter at `pki/config/ca` accepts the resulting PEM block under the standard `PRIVATE KEY` header without changes. Cert chain handling now iterates `chain()[1..]` instead of the openssl `parsed.ca` slot.
+- Net result: no more `openssl-src` Perl-driven build step on Windows, the workspace's TLS surface is now exclusively `rustls + aws-lc-rs`, and no C-side OpenSSL ABI is required to build either the server or the GUI.
+
 ### Fixed
 
 #### Remote backend — Policies page empty + login crashed on empty error bodies
