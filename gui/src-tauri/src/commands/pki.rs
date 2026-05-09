@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tauri::State;
 
-use crate::error::{CmdResult, CommandError};
+use crate::error::CmdResult;
 use crate::state::AppState;
 
 use super::make_request;

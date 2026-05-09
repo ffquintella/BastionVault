@@ -176,24 +176,56 @@ pub async fn seal_vault(state: State<'_, AppState>) -> CmdResult<()> {
 
 #[tauri::command]
 pub async fn get_vault_status(state: State<'_, AppState>) -> CmdResult<VaultStatus> {
-    let vault_guard = state.vault.lock().await;
-    match vault_guard.as_ref() {
-        Some(vault) => {
+    // Embedded mode: probe `Core` directly. `Core::sealed()` /
+    // `inited()` are the in-process truth — no HTTP roundtrip needed.
+    {
+        let vault_guard = state.vault.lock().await;
+        if let Some(vault) = vault_guard.as_ref() {
             let core = vault.core.load();
             let initialized = core.inited().await.unwrap_or(false);
             let sealed = core.sealed();
-            Ok(VaultStatus {
-                initialized,
+            return Ok(VaultStatus { initialized, sealed, has_vault: true });
+        }
+    }
+
+    // Remote mode: ask the server. `sys/seal-status` is wired into
+    // the HTTP layer (not the logical engine pipeline), so it's not
+    // reachable via the Backend trait's `Operation::Read` dispatch —
+    // we go through the legacy `Client::sys().seal_status()` for
+    // now. (Phase 3 will replace this with a `bv_client::RemoteBackend`
+    // sys-helper once `state.remote_client` is dropped.)
+    {
+        let client_guard = state.remote_client.lock().await;
+        if let Some(client) = client_guard.as_ref() {
+            let resp = client.sys().seal_status().map_err(|e| {
+                CommandError::from(format!("sys/seal-status failed: {e}"))
+            })?;
+            let body = resp
+                .response_data
+                .as_ref()
+                .and_then(|v| v.as_object())
+                .ok_or("sys/seal-status: empty response body")?;
+            // The server response is a flat object — `{sealed, t, n,
+            // progress}`. `initialized` isn't on this endpoint, but
+            // an unsealable response means the vault has been
+            // initialized at least once, so derive it from the
+            // presence of a non-zero share count `n`.
+            let sealed = body.get("sealed").and_then(|v| v.as_bool()).unwrap_or(true);
+            let n = body.get("n").and_then(|v| v.as_u64()).unwrap_or(0);
+            return Ok(VaultStatus {
+                initialized: n > 0,
                 sealed,
                 has_vault: true,
-            })
+            });
         }
-        None => Ok(VaultStatus {
-            initialized: embedded::is_initialized().unwrap_or(false),
-            sealed: true,
-            has_vault: false,
-        }),
     }
+
+    // No backend at all — chooser screen, freshly-disconnected, etc.
+    Ok(VaultStatus {
+        initialized: embedded::is_initialized().unwrap_or(false),
+        sealed: true,
+        has_vault: false,
+    })
 }
 
 /// Blow away the local keystore — the encrypted file that caches

@@ -583,14 +583,26 @@ pub async fn fido2_native_login(
     match resp {
         Some(r) => {
             if let Some(auth) = r.auth {
-                let token = auth.client_token.clone();
-                // Store token in state
+                let token = auth
+                    .get("client_token")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let policies = auth
+                    .get("policies")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if token.is_empty() {
+                    return Err("Login failed: no token in auth response".into());
+                }
                 *state.token.lock().await = Some(token.clone());
                 let _ = app_handle.emit("fido2-status", "complete");
-                Ok(Fido2LoginResponse {
-                    token,
-                    policies: auth.policies.clone(),
-                })
+                Ok(Fido2LoginResponse { token, policies })
             } else {
                 Err("Login failed: no auth in response".into())
             }
