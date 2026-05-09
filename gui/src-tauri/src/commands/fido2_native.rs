@@ -71,17 +71,42 @@ fn base64url_decode(s: &str) -> Result<Vec<u8>, CommandError> {
     Ok(b.into())
 }
 
+/// `True` when an error from `make_request` looks like the userpass
+/// FIDO2 endpoints' "no config / no credential / no entry" 404 path.
+/// `LoginPage.handleContinue` substring-matches "not configured" /
+/// "credential not found" / "no credentials" to decide whether to
+/// fall through to the password screen — translating bare HTTP 404s
+/// into one of those shapes lets the GUI recover transparently
+/// without surfacing a "HTTP 404 (no body)" toast in the operator's
+/// face.
+fn is_not_configured_err(e: &CommandError) -> bool {
+    let s = e.message.as_str();
+    s.contains("HTTP 404") || s.contains("404 (no body)")
+}
+
 /// Read the FIDO2 relying party config from the vault.
 async fn read_fido2_config(state: &State<'_, AppState>) -> Result<(String, String, String), CommandError> {
     use bv_client::Operation;
 
-    let resp = make_request(
+    // The server returns 404 (with an empty body) when no FIDO2 config
+    // entry has ever been written for this userpass mount. Treat that
+    // as "not configured" so `LoginPage.handleContinue` recognises the
+    // marker substring and falls through to password entry rather than
+    // surfacing a confusing "HTTP 404 (no body)" toast.
+    let resp = match make_request(
         state,
         Operation::Read,
         "auth/userpass/fido2/config".to_string(),
         None,
     )
-    .await?;
+    .await
+    {
+        Ok(r) => r,
+        Err(e) if is_not_configured_err(&e) => {
+            return Err("FIDO2 not configured".into());
+        }
+        Err(e) => return Err(e),
+    };
     let data = resp
         .and_then(|r| r.data)
         .ok_or("FIDO2 not configured")?;
@@ -424,16 +449,26 @@ pub async fn fido2_native_login(
     let mut body = Map::new();
     body.insert("username".to_string(), Value::String(username.clone()));
 
-    let resp = make_request(
+    let resp = match make_request(
         &state,
         Operation::Write,
         "auth/userpass/fido2/login/begin".to_string(),
         Some(body),
-    ).await?;
+    ).await {
+        Ok(r) => r,
+        // 404 here means the user has no registered FIDO2 credentials
+        // (or FIDO2 isn't configured). Either way, the GUI should drop
+        // to password entry — translate to a substring the LoginPage
+        // fall-through detector recognises.
+        Err(e) if is_not_configured_err(&e) => {
+            return Err("FIDO2 credential not found for this user".into());
+        }
+        Err(e) => return Err(e),
+    };
 
     let data = resp
         .and_then(|r| r.data)
-        .ok_or("No challenge data returned")?;
+        .ok_or("FIDO2 credential not found for this user")?;
 
     // 3. Parse RequestChallengeResponse
     let data_value = Value::Object(data.clone());

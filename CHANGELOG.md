@@ -45,6 +45,14 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Changed
+
+- Version bumped to **0.4.1** across `Cargo.toml`, `gui/src-tauri/Cargo.toml`, `gui/package.json`, `gui/src-tauri/tauri.conf.json` to ship the OpenSSL-removal + remote-backend Sign-In fixes.
+
+#### GUI — Sign In falls through to password when FIDO2 is not provisioned
+
+- [`gui/src-tauri/src/commands/fido2_native.rs`](gui/src-tauri/src/commands/fido2_native.rs) `read_fido2_config` and `fido2_native_login` now translate a bare HTTP 404 (the shape `auth/userpass/fido2/config` and `auth/userpass/fido2/login/begin` return when nothing has been provisioned for the userpass mount) into the `"FIDO2 not configured"` / `"FIDO2 credential not found for this user"` strings that [`gui/src/routes/LoginPage.tsx:257`](gui/src/routes/LoginPage.tsx:257) substring-matches to drop to the password screen. Without this, the operator saw a confusing `HTTP 404: HTTP 404 (no body)` toast on every Sign In attempt against a server with no FIDO2 setup, with no path forward to enter their password.
+
 ### Added
 
 #### Server — Client-IP propagation (Wave 2 / Phase 1.5)
