@@ -45,7 +45,13 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
-_(no changes since 0.5.1)_
+_(no changes since 0.5.2)_
+
+## [0.5.2] - 2026-05-10
+
+### Fixed
+
+- **Plugin admin in remote mode — `/sys/plugins/{publishers,accept_unsigned,quarantine,active-surfaces}` returning 404 "plugin not found"** ([`src/http/sys.rs`](src/http/sys.rs)) — actix-web matches resources in registration order, so the `/plugins/{name}` wildcard registered first was swallowing the literal-segment routes. Reorder so all literal `/plugins/<word>` resources come before the wildcard. Symptoms: Plugins page stuck on "Loading…" for the publisher allowlist + accept-unsigned toggle, and a "plugin not found" toast every time the surface watcher ticked. The earlier comment claiming actix prefers literals over wildcards was incorrect.
 
 ## [0.5.1] - 2026-05-10
 

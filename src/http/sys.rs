@@ -2260,6 +2260,28 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
                 .route(web::get().to(sys_plugins_list_handler))
                 .route(web::post().to(sys_plugins_register_handler)),
         )
+        // Literal `/plugins/<word>` resources MUST be registered before
+        // the `/plugins/{name}` wildcard — actix-web matches resources
+        // in registration order, so a wildcard registered first would
+        // swallow `publishers`, `accept_unsigned`, `quarantine`, and
+        // `active-surfaces` and answer 404 "plugin not found".
+        .service(
+            web::resource("/plugins/publishers")
+                .route(web::get().to(sys_plugins_publishers_get_handler))
+                .route(web::put().to(sys_plugins_publishers_put_handler)),
+        )
+        .service(
+            web::resource("/plugins/accept_unsigned")
+                .route(web::put().to(sys_plugins_accept_unsigned_put_handler)),
+        )
+        .service(
+            web::resource("/plugins/quarantine")
+                .route(web::get().to(sys_plugins_quarantine_list_handler)),
+        )
+        .service(
+            web::resource("/plugins/active-surfaces")
+                .route(web::get().to(sys_plugins_active_surfaces_handler)),
+        )
         .service(
             web::resource("/plugins/{name}")
                 .route(web::get().to(sys_plugins_get_handler))
@@ -2289,27 +2311,6 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
         .service(
             web::resource("/plugins/{name}/versions/{version}")
                 .route(web::delete().to(sys_plugins_versions_delete_handler)),
-        )
-        .service(
-            web::resource("/plugins/publishers")
-                .route(web::get().to(sys_plugins_publishers_get_handler))
-                .route(web::put().to(sys_plugins_publishers_put_handler)),
-        )
-        .service(
-            web::resource("/plugins/accept_unsigned")
-                .route(web::put().to(sys_plugins_accept_unsigned_put_handler)),
-        )
-        .service(
-            web::resource("/plugins/quarantine")
-                .route(web::get().to(sys_plugins_quarantine_list_handler)),
-        )
-        // Plugin Extensibility v1 — surface + assets. Note: actix-web's
-        // route resolver prefers literal segments over `{}` wildcards,
-        // so `/plugins/active-surfaces` here does not clash with
-        // `/plugins/{name}` registered above.
-        .service(
-            web::resource("/plugins/active-surfaces")
-                .route(web::get().to(sys_plugins_active_surfaces_handler)),
         )
         .service(
             web::resource("/plugins/{name}/surface")
