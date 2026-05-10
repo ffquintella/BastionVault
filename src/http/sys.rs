@@ -2256,7 +2256,18 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
                 .route(web::post().to(sys_scheduled_exports_run_now_handler)),
         )
         .service(
+            // Plugin registration uploads the manifest + binary (and
+            // optionally a surface + client assets) inline as base64
+            // inside one JSON body. A real `.bvplugin` is comfortably
+            // bigger than actix's default 256 KiB `web::Bytes` limit;
+            // without an explicit `PayloadConfig` the server resets
+            // the connection mid-upload (Windows surfaces this as
+            // `ConnectionAborted` / WSAECONNABORTED 10053). Use the
+            // same 32 MiB ceiling logical and batch already settled
+            // on so operators don't hit a different limit on a
+            // different route.
             web::resource("/plugins")
+                .app_data(web::PayloadConfig::default().limit(default_plugin_register_body_limit()))
                 .route(web::get().to(sys_plugins_list_handler))
                 .route(web::post().to(sys_plugins_register_handler)),
         )
@@ -2408,5 +2419,13 @@ pub fn init_sys_service(cfg: &mut web::ServiceConfig) {
 /// Body-size limit for the batch route when no `Config` extension is
 /// present. Matches the documented default in `features/batch-operations.md`.
 fn default_batch_body_limit() -> usize {
+    32 * 1024 * 1024
+}
+
+/// Body-size limit for `POST /v1/sys/plugins` (registration). Plugin
+/// bundles routinely run a few MiB, so the actix default of 256 KiB
+/// rejects most uploads mid-stream. 32 MiB matches the logical and
+/// batch limits.
+fn default_plugin_register_body_limit() -> usize {
     32 * 1024 * 1024
 }

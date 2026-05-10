@@ -45,7 +45,13 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
-_(no changes since 0.5.2)_
+### Fixed
+
+- **Plugin registration aborting mid-upload on real-world `.bvplugin` bundles** ([`src/http/sys.rs`](src/http/sys.rs)) — `POST /v1/sys/plugins` reads the body via `web::Bytes`, but the `/v1/sys` scope had no `PayloadConfig`, so any upload past actix-web's default 256 KiB limit (i.e. essentially every real plugin) was rejected mid-stream. On Windows the GUI surfaced this as `Some ureq error happened, Io(Os { code: 10053, kind: ConnectionAborted, ... })`. Set an explicit 32 MiB `PayloadConfig` on the `/plugins` resource, matching the logical and batch ceilings.
+
+### Plugins (out-of-tree)
+
+- **`bastion-plugin-xca` 0.1.20 → 0.1.21** — version bump alongside the host registration-limit fix; no plugin code changes.
 
 ## [0.5.2] - 2026-05-10
 
