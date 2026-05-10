@@ -47,6 +47,20 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Plugin Extensibility — Phase 2 client-side surface fetch + content-addressed cache
+
+- [`crates/bv-client/src/backend.rs`](crates/bv-client/src/backend.rs) The `Backend` trait gains two methods with default implementations: `active_surfaces(token, etag) -> SurfaceFetch` and `fetch_asset(plugin, version, sha256, token) -> Option<Vec<u8>>`. The `SurfaceFetch::NotModified` variant lets the cache short-circuit a 304 without re-reading the bundle's etag for comparison. Default impls return an empty bundle / `None` so existing backends (the GUI's `EmbeddedBackend`, in-memory test stubs) keep compiling without changes.
+- [`crates/bv-client/src/remote.rs`](crates/bv-client/src/remote.rs) `RemoteBackend::active_surfaces` issues `GET /v1/sys/plugins/active-surfaces` with `If-None-Match: "<etag>"`, parses the `{"data": ActiveSurfaceBundle}` envelope, and prefers the server's `ETag` response header over the bundle's self-computed one. `fetch_asset` hits the per-version asset endpoint, refuses non-hex-of-64 input, treats 404 as `Ok(None)`, and re-verifies the SHA-256 on the response body as defence-in-depth against MITM/proxy corruption.
+- [`crates/bv-client/src/surface.rs`](crates/bv-client/src/surface.rs) New module with the on-disk content-addressed cache. Layout: `<base>/<vault-id>/_meta.json`, `<base>/<vault-id>/<plugin>/<version>/surface.json`, `<base>/<vault-id>/_assets/<sha256>.bin`. Top-level orchestration:
+  - `refresh(backend, cache, token)` — sends `If-None-Match`, returns the cached bundle on 304, writes through on 200, falls back to a force-fetch on the impossible "304 with no cache" combination.
+  - `ensure_asset(backend, cache, plugin, version, sha256, token)` — cache-first; round-trips on miss; rejects bytes whose hash doesn't match.
+  - `vault_id_for(address, identifier)` — stable 32-char prefix of `sha256(address || \0 || identifier)` so two vaults sharing a `dirs::cache` don't collide.
+  - Cache write is atomic-via-rename and tombstones plugin/version subtrees that aren't in the new bundle.
+  - Corrupt or hash-mismatched cached bytes drop to a cold fetch rather than serving bad data.
+  8 new unit tests covering: cold-cache write+readback, warm-cache short-circuit on `If-None-Match → 304`, etag-change re-fetch, corrupt-surface fallback, evicted-plugin tombstoning, content-addressed asset cache reuse, hash-mismatch rejection on `write_asset`, vault-id stability/collision-resistance.
+
+Phase 3 next: GUI consumes the bundle and renders menus/forms generically via a new `<SurfaceRouter>`/`<SurfaceForm>`/`<SurfaceTable>` component family.
+
 #### Plugin Extensibility — Phase 1 server-side surface storage + HTTP routes
 
 - [`src/plugins/manifest.rs`](src/plugins/manifest.rs) `PluginManifest` grows two optional fields — `surface: Option<SurfaceRef>` (schema_version, sha256, size) and `client_assets: Vec<ClientAssetRef>` (name, kind, sha256, size). Both default-empty on serde, so v1 plugins keep round-tripping. `validate()` rejects bad surface hashes, too-new schema versions, duplicate / slashed asset names. 6 new manifest tests, including `legacy_manifest_round_trips_without_new_fields`.

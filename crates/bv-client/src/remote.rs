@@ -248,4 +248,136 @@ impl Backend for RemoteBackend {
             Err(ClientError::server(status, message))
         }
     }
+
+    async fn active_surfaces(
+        &self,
+        token: &str,
+        etag: Option<&str>,
+    ) -> Result<crate::backend::SurfaceFetch, ClientError> {
+        // Trailing slash + leading slash hygiene matches `build_url`.
+        let url = self.build_url("sys/plugins/active-surfaces");
+        let inner = Arc::clone(&self.inner);
+        let token = token.to_string();
+        let etag = etag.map(|s| s.to_string());
+
+        let (status, body, etag_header) = tokio::task::spawn_blocking(move || {
+            let mut builder = Request::builder()
+                .method("GET")
+                .uri(&url)
+                .header("Accept", "application/json");
+            if !token.is_empty() {
+                builder = builder.header("X-BastionVault-Token", &token);
+            }
+            for (k, v) in &inner.headers {
+                builder = builder.header(k, v);
+            }
+            if let Some(tag) = &etag {
+                builder = builder.header("If-None-Match", format!("\"{tag}\""));
+            }
+            let req = builder.body(()).map_err(ClientError::from)?;
+            let mut resp = inner.agent.run(req).map_err(ClientError::from)?;
+            let status = resp.status().as_u16();
+            let etag_hdr = resp
+                .headers()
+                .get("ETag")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim_matches('"').to_string());
+            let bytes = resp.body_mut().read_to_vec().map_err(ClientError::from)?;
+            Ok::<_, ClientError>((status, bytes, etag_hdr))
+        })
+        .await
+        .map_err(|e| ClientError::backend(format!("join: {e}")))??;
+
+        if status == 304 {
+            return Ok(crate::backend::SurfaceFetch::NotModified);
+        }
+        if !(200..300).contains(&status) {
+            return Err(ClientError::server(status, format!("HTTP {status}")));
+        }
+        // Server wraps the bundle in `{"data": ActiveSurfaceBundle}`
+        // to keep the response shape consistent with `response_json_ok`.
+        let v: Value = if body.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&body).map_err(ClientError::from)?
+        };
+        let mut bundle: bv_plugin_surface::ActiveSurfaceBundle = match v {
+            Value::Object(mut o) => match o.remove("data") {
+                Some(d) => serde_json::from_value(d).map_err(ClientError::from)?,
+                None => serde_json::from_value(Value::Object(o)).map_err(ClientError::from)?,
+            },
+            other => serde_json::from_value(other).map_err(ClientError::from)?,
+        };
+        // Prefer the server-supplied ETag header over the bundle's
+        // self-computed one — they should match, but the header is
+        // the wire-of-truth for cache-key purposes.
+        if let Some(h) = etag_header {
+            if !h.is_empty() {
+                bundle.etag = h;
+            }
+        }
+        Ok(crate::backend::SurfaceFetch::Bundle(bundle))
+    }
+
+    async fn fetch_asset(
+        &self,
+        plugin: &str,
+        version: &str,
+        sha256: &str,
+        token: &str,
+    ) -> Result<Option<Vec<u8>>, ClientError> {
+        if sha256.len() != 64 || !sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ClientError::backend(format!(
+                "fetch_asset: sha256 `{sha256}` is not 64 hex chars"
+            )));
+        }
+        let url = self.build_url(&format!(
+            "sys/plugins/{plugin}/versions/{version}/asset/{sha256}"
+        ));
+        let inner = Arc::clone(&self.inner);
+        let token = token.to_string();
+        let sha = sha256.to_string();
+
+        let (status, body) = tokio::task::spawn_blocking(move || {
+            let mut builder = Request::builder()
+                .method("GET")
+                .uri(&url)
+                .header("Accept", "application/octet-stream");
+            if !token.is_empty() {
+                builder = builder.header("X-BastionVault-Token", &token);
+            }
+            for (k, v) in &inner.headers {
+                builder = builder.header(k, v);
+            }
+            let req = builder.body(()).map_err(ClientError::from)?;
+            let mut resp = inner.agent.run(req).map_err(ClientError::from)?;
+            let status = resp.status().as_u16();
+            let bytes = resp.body_mut().read_to_vec().map_err(ClientError::from)?;
+            Ok::<_, ClientError>((status, bytes))
+        })
+        .await
+        .map_err(|e| ClientError::backend(format!("join: {e}")))??;
+
+        if status == 404 {
+            return Ok(None);
+        }
+        if !(200..300).contains(&status) {
+            return Err(ClientError::server(status, format!("HTTP {status}")));
+        }
+        // Re-verify the hash before handing bytes back. The server
+        // already does this, but a defence-in-depth check here
+        // catches MITM / proxy corruption that survives TLS (e.g. a
+        // logging proxy that incorrectly rewrites bodies).
+        let computed = {
+            use sha2::{Digest, Sha256};
+            let digest = Sha256::digest(&body);
+            hex::encode(digest)
+        };
+        if computed != sha {
+            return Err(ClientError::backend(format!(
+                "fetch_asset: server returned bytes hashing to `{computed}` for asset `{sha}`"
+            )));
+        }
+        Ok(Some(body))
+    }
 }

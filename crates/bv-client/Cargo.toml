@@ -17,3 +17,12 @@ rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
 # `rt` only — we just need `spawn_blocking` to keep the sync ureq
 # call off the async executor. Consumers bring their own runtime.
 tokio = { version = "1", features = ["rt"] }
+# Plugin Extensibility v1: shared SurfaceManifest types and
+# ActiveSurfaceBundle envelope. Consumed by the surface module.
+bv_plugin_surface = { path = "../bv_plugin_surface" }
+sha2 = "0.11"
+hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "macros"] }

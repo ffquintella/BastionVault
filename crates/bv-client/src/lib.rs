@@ -14,11 +14,13 @@
 pub mod backend;
 pub mod error;
 pub mod remote;
+pub mod surface;
 pub mod tls;
 pub mod types;
 
-pub use backend::Backend;
+pub use backend::{Backend, SurfaceFetch};
 pub use error::ClientError;
 pub use remote::RemoteBackend;
+pub use surface::{ensure_asset, refresh, vault_id_for, CacheError, SurfaceCache};
 pub use tls::TLSConfigBuilder;
 pub use types::{JsonResponse, Operation};
