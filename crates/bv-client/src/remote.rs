@@ -254,8 +254,41 @@ impl Backend for RemoteBackend {
         token: &str,
         etag: Option<&str>,
     ) -> Result<crate::backend::SurfaceFetch, ClientError> {
+        self.fetch_active_surfaces(token, etag, false).await
+    }
+
+    async fn watch_active_surfaces(
+        &self,
+        token: &str,
+        etag: Option<&str>,
+    ) -> Result<crate::backend::SurfaceFetch, ClientError> {
+        self.fetch_active_surfaces(token, etag, true).await
+    }
+
+    async fn fetch_asset(
+        &self,
+        plugin: &str,
+        version: &str,
+        sha256: &str,
+        token: &str,
+    ) -> Result<Option<Vec<u8>>, ClientError> {
+        self.do_fetch_asset(plugin, version, sha256, token).await
+    }
+}
+
+impl RemoteBackend {
+    async fn fetch_active_surfaces(
+        &self,
+        token: &str,
+        etag: Option<&str>,
+        watch: bool,
+    ) -> Result<crate::backend::SurfaceFetch, ClientError> {
         // Trailing slash + leading slash hygiene matches `build_url`.
-        let url = self.build_url("sys/plugins/active-surfaces");
+        let url = if watch {
+            format!("{}?watch=1", self.build_url("sys/plugins/active-surfaces"))
+        } else {
+            self.build_url("sys/plugins/active-surfaces")
+        };
         let inner = Arc::clone(&self.inner);
         let token = token.to_string();
         let etag = etag.map(|s| s.to_string());
@@ -319,7 +352,7 @@ impl Backend for RemoteBackend {
         Ok(crate::backend::SurfaceFetch::Bundle(bundle))
     }
 
-    async fn fetch_asset(
+    async fn do_fetch_asset(
         &self,
         plugin: &str,
         version: &str,

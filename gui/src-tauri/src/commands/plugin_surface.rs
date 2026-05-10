@@ -158,6 +158,41 @@ pub async fn plugin_surface_asset<R: Runtime>(
     Ok(PluginSurfaceAssetResult { bytes_b64 })
 }
 
+// ── Watch (long-poll) ────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct PluginSurfaceWatchResult {
+    /// `true` when the server's long-poll surfaced a new bundle.
+    /// `false` indicates a 304 / timeout — caller should re-invoke.
+    pub updated: bool,
+    pub bundle: Option<ActiveSurfaceBundle>,
+}
+
+/// One iteration of the long-poll watcher. The frontend calls this
+/// repeatedly inside a loop while the user is signed in; each call
+/// blocks on the server for up to ~25 s, then returns either a fresh
+/// bundle (the operator activated a new plugin version) or a "no
+/// change" indicator. Stopping the loop is the React side's job —
+/// just stop re-invoking on unmount / sign-out.
+///
+/// Plugin Extensibility v1, Phase 5.
+#[tauri::command]
+pub async fn plugin_surface_watch_tick<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+) -> CmdResult<PluginSurfaceWatchResult> {
+    let cache = resolve_cache(&app, &state).await?;
+    let backend = current_backend(&state).await?;
+    let token = current_token(&state).await;
+    let new_bundle = bv_client::watch_once(&*backend, &cache, &token)
+        .await
+        .map_err(CommandError::from)?;
+    Ok(PluginSurfaceWatchResult {
+        updated: new_bundle.is_some(),
+        bundle: new_bundle,
+    })
+}
+
 // ── Form-hook execution ──────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]

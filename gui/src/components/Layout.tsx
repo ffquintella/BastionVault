@@ -9,6 +9,7 @@ import { AboutModal } from "./AboutModal";
 import * as api from "../lib/api";
 import { PluginMenuSlot } from "./PluginMenuSlot";
 import { usePluginSurfacesStore } from "../stores/pluginSurfacesStore";
+import { useToast } from "./ui/Toast";
 
 // localStorage key for the persisted expanded/collapsed state of the
 // Admin section in the sidebar. Default (no key set) is expanded so
@@ -156,14 +157,44 @@ export function Layout({ children }: LayoutProps) {
   // server has nothing to serve (no plugins, no surface support),
   // the store stays empty and the sidebar slots render nothing.
   const refreshPluginSurfaces = usePluginSurfacesStore((s) => s.refresh);
+  const startWatchPluginSurfaces = usePluginSurfacesStore((s) => s.startWatch);
   const clearPluginSurfaces = usePluginSurfacesStore((s) => s.clear);
   useEffect(() => {
     if (!isAuthenticated) {
       clearPluginSurfaces();
       return;
     }
-    void refreshPluginSurfaces();
-  }, [isAuthenticated, refreshPluginSurfaces, clearPluginSurfaces]);
+    void refreshPluginSurfaces().then(() => {
+      // Phase 5: kick off the long-poll watcher so a server-side
+      // activate / delete propagates without a manual reload. The
+      // watcher is idempotent — repeated `startWatch` calls (e.g.
+      // a re-render) do not stack loops.
+      startWatchPluginSurfaces();
+    });
+  }, [
+    isAuthenticated,
+    refreshPluginSurfaces,
+    startWatchPluginSurfaces,
+    clearPluginSurfaces,
+  ]);
+
+  // Phase 5: surface a non-modal toast whenever the watcher picks up
+  // a new plugin-surface version. The store flips `lastUpdate` to
+  // `null` after we read it, so the toast fires once per change.
+  const lastUpdate = usePluginSurfacesStore((s) => s.lastUpdate);
+  const clearLastUpdate = usePluginSurfacesStore((s) => s.clearLastUpdate);
+  const { toast } = useToast();
+  useEffect(() => {
+    if (!lastUpdate || lastUpdate.length === 0) return;
+    const summary = lastUpdate
+      .map(({ plugin, version }) => `${plugin} → ${version}`)
+      .join(", ");
+    toast(
+      "info",
+      `Plugin surface updated: ${summary}. Open a new page to see changes.`,
+    );
+    clearLastUpdate();
+  }, [lastUpdate, clearLastUpdate, toast]);
 
   // Load the live mount-type set so per-item `requiresMountType`
   // gates work. We only ever need the set of types, not the full

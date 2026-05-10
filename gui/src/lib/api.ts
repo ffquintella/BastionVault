@@ -1304,6 +1304,20 @@ export const pluginSurfaceHook = (
     args: { plugin, version, sha256, export: exportName, inputJson },
   }).then((r) => r.output_json);
 
+/**
+ * One iteration of the active-surface long-poll. Calls the Tauri
+ * `plugin_surface_watch_tick` command, which blocks for up to ~25 s
+ * on the server before returning. Resolves with `{ updated: true,
+ * bundle }` when the operator activates a new plugin version, or
+ * `{ updated: false }` on timeout / no change. The caller drives
+ * the loop — typically the plugin-surfaces store while the user is
+ * signed in. Plugin Extensibility v1, Phase 5.
+ */
+export const pluginSurfaceWatchTick = () =>
+  invoke<{ updated: boolean; bundle: ActiveSurfaceBundle | null }>(
+    "plugin_surface_watch_tick",
+  );
+
 // ── PKI Secret Engine ─────────────────────────────────────────────
 
 export const pkiListMounts = () => invoke<PkiMountInfo[]>("pki_list_mounts");

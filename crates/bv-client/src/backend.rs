@@ -49,6 +49,21 @@ pub trait Backend: Send + Sync {
         }))
     }
 
+    /// Plugin Extensibility v1 / Phase 5 — long-poll variant of
+    /// `active_surfaces`. The remote server upgrades to a `?watch=1`
+    /// request that returns when the aggregate ETag changes (or
+    /// after a 30 s timeout). Backends without long-poll support
+    /// fall through to the default impl, which is the regular
+    /// `active_surfaces` so callers degrade to short-poll behaviour
+    /// rather than hanging.
+    async fn watch_active_surfaces(
+        &self,
+        token: &str,
+        etag: Option<&str>,
+    ) -> Result<SurfaceFetch, ClientError> {
+        self.active_surfaces(token, etag).await
+    }
+
     /// Plugin Extensibility v1 — download a single client asset by
     /// content hash. Returns the raw bytes; the caller is expected to
     /// re-verify the SHA-256 against the manifest declaration before

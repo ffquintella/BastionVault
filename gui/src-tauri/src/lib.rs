@@ -226,6 +226,7 @@ pub fn run() {
             commands::plugin_surface::plugin_surface_asset,
             commands::plugin_surface::plugin_surface_dispatch,
             commands::plugin_surface::plugin_surface_hook,
+            commands::plugin_surface::plugin_surface_watch_tick,
             // Secrets
             commands::secrets::list_secrets,
             commands::secrets::read_secret,

@@ -47,6 +47,20 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Plugin Extensibility — Phase 5 long-poll auto-update watcher
+
+- [`src/http/sys.rs`](src/http/sys.rs) `sys_plugins_active_surfaces_handler` accepts `?watch=1` (or `watch=true`). When the operator-supplied `If-None-Match` matches the current aggregate ETag, the handler enters a 25-second polling loop (2-second cadence) that returns as soon as the ETag changes — no SSE/WS plumbing, fits the existing actix-web stack, and a missed wakeup is just a one-tick lag. 25-second ceiling leaves 5 s slack before the bv-client default `timeout_global` (30 s) fires.
+- [`crates/bv-client/src/backend.rs`](crates/bv-client/src/backend.rs) `Backend::watch_active_surfaces` (default-impl falls back to `active_surfaces` so non-long-poll backends degrade gracefully).
+- [`crates/bv-client/src/remote.rs`](crates/bv-client/src/remote.rs) `RemoteBackend` impl factored: `fetch_active_surfaces(token, etag, watch)` shared between the regular and watch variants; `watch=true` appends `?watch=1` to the URL. `fetch_asset` rerouted through a `do_fetch_asset` helper to keep the trait impl flat.
+- [`crates/bv-client/src/surface.rs`](crates/bv-client/src/surface.rs) New `watch_once(backend, cache, token)` helper: returns `Some(bundle)` on change (cache also written through), `None` on 304 / timeout. 2 new tests: `watch_once_returns_new_bundle_when_etag_changed`, `watch_once_returns_none_on_unchanged_etag`. bv-client total now 13 passing.
+- [`gui/src-tauri/src/commands/plugin_surface.rs`](gui/src-tauri/src/commands/plugin_surface.rs) New Tauri command `plugin_surface_watch_tick` — one iteration of the watcher (the React side drives the loop, which makes lifecycle / cancellation the renderer's responsibility instead of needing a backend supervisor task).
+- [`gui/src/lib/api.ts`](gui/src/lib/api.ts) `pluginSurfaceWatchTick()` invoke wrapper.
+- [`gui/src/stores/pluginSurfacesStore.ts`](gui/src/stores/pluginSurfacesStore.ts) `startWatch()` / `stopWatch()` actions plus a `lastUpdate: { plugin, version }[]` field that flips when the watcher picks up new bundle entries (diff against the previous `entries` map by `plugin → version`). Backoff on transport errors (2 s → 60 s, doubling, reset on success). Module-level `watchRunning` flag so a re-render doesn't stack loops; `clear()` flips it false on sign-out.
+- [`gui/src/components/Layout.tsx`](gui/src/components/Layout.tsx) calls `startWatch()` after the initial `refresh()`; on `lastUpdate` change, fires a non-modal `toast("info", "Plugin surface updated: <plugin> → <version>. Open a new page to see changes.")` and clears the marker.
+- Verified: `cargo check --lib` clean, `cargo check -p bastion-vault-gui --no-default-features` clean, `cargo test -p bv-client` 13/13 passing, `npx tsc --noEmit` clean, GUI boots with zero console errors.
+
+Phase 6 next: operator UX redesign — surface preview in the admin Plugins page + active-surface map.
+
 #### Plugin Extensibility — Phase 4 form-hook WASM sandbox
 
 - New module [`gui/src-tauri/src/plugin_hooks.rs`](gui/src-tauri/src/plugin_hooks.rs). Pinned to the host crate's `wasmtime = "43"` so the workspace shares one compiled artifact. Per-call sandbox: 100 M instructions of fuel, 256 MiB memory ceiling via `StoreLimitsBuilder`, 4 MiB cap on input/output JSON, NaN canonicalisation on, **zero host imports** — a hook either runs as pure compute on a string in / string out or fails to instantiate. The ABI mirrors the existing `bv_run` shape so plugin authors using `bastion-plugin-sdk` reuse the same export pattern: `bv_alloc(size) -> i32`, `<export>(ptr, len) -> i64` (packed `(ptr<<32)|len`). Process-global Wasmtime engine + a sha256-keyed compiled-module cache so repeated hook calls skip cranelift. 8 unit tests: round-trip, cache short-circuit, missing export, missing `bv_alloc`, out-of-bounds output, fuel exhaustion, oversize input, host-imports-rejected.

@@ -290,6 +290,36 @@ pub async fn refresh<B: Backend + ?Sized>(
     }
 }
 
+/// Plugin Extensibility v1 / Phase 5 — long-poll watcher.
+///
+/// Issues `watch_active_surfaces` against `backend`, blocking until
+/// either the bundle ETag changes (server-side detected) or the
+/// underlying transport's timeout fires. Returns the new bundle on
+/// change. Returns `Ok(None)` on `SurfaceFetch::NotModified` —
+/// callers typically loop on the same handle so a 304 just maps to
+/// "try again with the same etag".
+///
+/// Intentionally separate from [`refresh`] so callers can decide
+/// whether to commit the new bundle to the cache or display it
+/// transiently (the GUI does both: cache write + Tauri event emit).
+pub async fn watch_once<B: Backend + ?Sized>(
+    backend: &B,
+    cache: &SurfaceCache,
+    token: &str,
+) -> Result<Option<ActiveSurfaceBundle>, ClientError> {
+    let cached = cache.read_bundle();
+    let etag = cached.as_ref().map(|b| b.etag.as_str());
+    match backend.watch_active_surfaces(token, etag).await? {
+        SurfaceFetch::NotModified => Ok(None),
+        SurfaceFetch::Bundle(b) => {
+            // Best-effort persist; a write failure doesn't change
+            // the in-memory bundle the caller is about to render.
+            let _ = cache.write_bundle(&b);
+            Ok(Some(b))
+        }
+    }
+}
+
 /// Fetch (and cache) one asset. Re-uses the on-disk copy when the
 /// hash matches; otherwise round-trips the server.
 pub async fn ensure_asset<B: Backend + ?Sized>(
@@ -641,6 +671,43 @@ mod tests {
             .write_asset(&"a".repeat(64), b"different bytes")
             .unwrap_err();
         assert!(matches!(err, CacheError::HashMismatch { .. }));
+    }
+
+    #[tokio::test]
+    async fn watch_once_returns_new_bundle_when_etag_changed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = SurfaceCache::new(tmp.path(), "vault-a");
+        let backend = StubBackend::new(vec![
+            bundle_with("totp", "etag-1"),
+            bundle_with("totp", "etag-2"),
+        ]);
+        // Seed the cache with etag-1 so watch_once can compare.
+        let _ = refresh(&backend, &cache, "tok").await.unwrap();
+        // Now the stub will hand back etag-2 — watch_once should
+        // return Some(bundle) and the cache should advance. The
+        // default `watch_active_surfaces` impl delegates to
+        // `active_surfaces`, so the stub serves the next queued
+        // bundle exactly the way it does for `refresh`.
+        let got = watch_once(&backend, &cache, "tok").await.unwrap();
+        assert!(got.is_some());
+        assert_eq!(got.as_ref().unwrap().etag, "etag-2");
+        assert_eq!(cache.read_meta().etag, "etag-2");
+    }
+
+    #[tokio::test]
+    async fn watch_once_returns_none_on_unchanged_etag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = SurfaceCache::new(tmp.path(), "vault-a");
+        // Both queued bundles share the same etag — the stub maps
+        // matching etag to NotModified, which watch_once surfaces
+        // as None to its caller.
+        let backend = StubBackend::new(vec![
+            bundle_with("totp", "etag-1"),
+            bundle_with("totp", "etag-1"),
+        ]);
+        let _ = refresh(&backend, &cache, "tok").await.unwrap();
+        let got = watch_once(&backend, &cache, "tok").await.unwrap();
+        assert!(got.is_none());
     }
 
     #[test]

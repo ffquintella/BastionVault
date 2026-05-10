@@ -1692,15 +1692,50 @@ async fn sys_plugins_active_surfaces_handler(
         .get("If-None-Match")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.trim_matches('"').to_string());
+
+    // Plugin Extensibility v1 / Phase 5: `?watch=1` upgrades the
+    // request to a long-poll. The handler keeps recomputing the
+    // aggregated bundle every ~2 s; as soon as the ETag differs from
+    // the operator-supplied `If-None-Match` (or after a 30 s timeout)
+    // it returns. Cheaper than SSE/WS — fits the existing actix-web
+    // plumbing — and a missed wakeup just means the GUI re-polls on
+    // the next tick.
+    let query = req.query_string();
+    let watch_requested =
+        query.split('&').any(|kv| matches!(kv, "watch=1" | "watch=true"));
+
     let result: Result<HttpResponse, RvError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         // Mount lookup is wired in Phase 1 with a placeholder (empty
         // string) — the GUI tolerates an empty mount because it only
         // resolves bindings client-side. A future Phase 1 follow-up
         // will inject the actual mount registry here.
-        let bundle = catalog
+        let mut bundle = catalog
             .aggregated_active_surfaces(core.barrier.as_storage(), |_| None)
             .await?;
+
+        if watch_requested && if_none_match.as_deref() == Some(bundle.etag.as_str()) {
+            // Long-poll loop. 25 s ceiling (leaves 5 s of slack
+            // before the bv-client default 30 s `timeout_global`
+            // fires), 2 s polling cadence. Deliberately conservative:
+            // no Notify-channel wakeup wired on activate/delete yet,
+            // so the worst case is a ~2 s lag between activation and
+            // the GUI re-rendering.
+            let started = std::time::Instant::now();
+            let max_wait = std::time::Duration::from_secs(25);
+            let poll_interval = std::time::Duration::from_millis(2000);
+            while started.elapsed() < max_wait {
+                tokio::time::sleep(poll_interval).await;
+                let next = catalog
+                    .aggregated_active_surfaces(core.barrier.as_storage(), |_| None)
+                    .await?;
+                if next.etag != bundle.etag {
+                    bundle = next;
+                    break;
+                }
+            }
+        }
+
         if if_none_match.as_deref() == Some(bundle.etag.as_str()) {
             return Ok(HttpResponse::NotModified()
                 .insert_header(("ETag", format!("\"{}\"", bundle.etag)))
