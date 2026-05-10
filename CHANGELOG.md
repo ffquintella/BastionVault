@@ -45,7 +45,13 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
-_(no changes since 0.5.0)_
+_(no changes since 0.5.1)_
+
+## [0.5.1] - 2026-05-10
+
+### Changed
+
+- **GUI plugin admin works in remote mode.** Previously every command on the Plugins page (`plugins_list`, `plugins_get_publishers`, `plugins_get_accept_unsigned`, `plugins_metrics`, etc.) hit `state.vault` directly and returned `"Vault not open"` when the GUI was connected to a remote server, producing a wall of error toasts. Each Tauri command in [`gui/src-tauri/src/commands/plugins.rs`](gui/src-tauri/src/commands/plugins.rs) now branches on `state.mode`: embedded keeps the in-process catalog/runtime path, remote forwards to the equivalent `/v1/sys/plugins/*` endpoint via `state.remote_client` with the active token attached. Server-side audit on the HTTP path replaces the embedded-side `emit_sys_audit` calls in the remote branch to avoid double-logging. `plugins_metrics` returns an empty list in remote mode (the server's `/sys/metrics` is Prometheus text, not JSON; the panel's empty state is the right surfacing).
 
 ## [0.5.0] - 2026-05-10
 

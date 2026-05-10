@@ -1,13 +1,18 @@
 //! Tauri commands backing the GUI Plugins admin page.
 //!
-//! Embedded mode dispatches directly against the open vault's
-//! barrier-decrypted storage + the in-process `WasmRuntime`. Remote
-//! mode uses the equivalent `/v1/sys/plugins/*` HTTP endpoints; we
-//! don't wrap those here because the GUI's `useEmbeddedOrRemote` glue
-//! routes through the existing `Sys` API client when in remote mode.
-//! For now the plugin admin tab is embedded-only; remote-mode parity
-//! lands when the GUI's auth/remote layer learns about the plugin
-//! endpoints.
+//! Both connection modes are supported:
+//!
+//! * **Embedded** — dispatches directly against the open vault's
+//!   barrier-decrypted storage + the in-process `WasmRuntime`.
+//! * **Remote** — forwards each call to `/v1/sys/plugins/*` on the
+//!   connected server via the shared `state.remote_client`. The
+//!   server emits its own audit on the HTTP path, so the embedded-side
+//!   `emit_sys_audit` calls below are skipped in this branch to avoid
+//!   double-logging.
+//!
+//! Each command starts with a `state.mode` check. Response shapes
+//! match between modes so the frontend's `api.ts` doesn't need to
+//! know which mode it's in.
 
 use base64::Engine;
 use bastion_vault::plugins::{
@@ -15,12 +20,107 @@ use bastion_vault::plugins::{
     ConfigField, ConfigStore, InvokeOutcome, PluginCatalog, PluginManifest, WasmRuntime,
     DEFAULT_FUEL, DEFAULT_MEMORY_BYTES,
 };
-use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
 use tauri::State;
 
 use crate::error::{CmdResult, CommandError};
-use crate::state::AppState;
+use crate::state::{AppState, VaultMode};
+
+// ── Remote-mode HTTP helpers ──────────────────────────────────────
+//
+// In remote mode each command forwards to a `/v1/sys/plugins/*`
+// endpoint via the `Client` the connect flow stashed on AppState.
+// The token is attached per-request via `with_token`.
+
+/// Issue a request to the remote server, returning the raw status +
+/// response body. The Client is configured with `http_status_as_error
+/// (false)`, so 4xx/5xx surface here as an Ok with the failing status
+/// — callers decide whether the status counts as success (e.g. 404 →
+/// `None` for `plugins_get`, or always-error for `plugins_list`).
+async fn remote_raw(
+    state: &State<'_, AppState>,
+    method: &str,
+    path: &str,
+    body: Option<Map<String, Value>>,
+) -> Result<(u16, Value), CommandError> {
+    let client_guard = state.remote_client.lock().await;
+    let client = client_guard
+        .as_ref()
+        .ok_or("Not connected to remote server")?
+        .clone();
+    drop(client_guard);
+
+    let token = state.token.lock().await.clone().unwrap_or_default();
+    let bound = client.with_token(&token);
+    let url = format!("{}/{}", bound.api_prefix(), path);
+
+    let resp = match method {
+        "GET" => bound.request_read(url),
+        "POST" => bound.request_write(url, body),
+        "PUT" => bound.request_put(url, body),
+        "DELETE" => bound.request_delete(url, body),
+        other => return Err(CommandError::from(format!("unsupported method `{other}`"))),
+    }
+    .map_err(|e| CommandError::from(format!("{e}")))?;
+
+    Ok((resp.response_status, resp.response_data.unwrap_or(Value::Null)))
+}
+
+/// Like [`remote_raw`] but turns any non-2xx status into a
+/// `CommandError` populated from the server's `{"error": "..."}`
+/// envelope.
+async fn remote_call(
+    state: &State<'_, AppState>,
+    method: &str,
+    path: &str,
+    body: Option<Map<String, Value>>,
+) -> Result<Value, CommandError> {
+    let (status, json) = remote_raw(state, method, path, body).await?;
+    if (200..300).contains(&status) {
+        Ok(json)
+    } else {
+        Err(CommandError::from(remote_error_message(status, &json)))
+    }
+}
+
+/// Like [`remote_call`] but maps a `404 Not Found` to `Ok(None)`.
+/// Used by lookup commands whose Tauri signatures already model
+/// "missing" with `Option<_>`.
+async fn remote_call_opt(
+    state: &State<'_, AppState>,
+    method: &str,
+    path: &str,
+    body: Option<Map<String, Value>>,
+) -> Result<Option<Value>, CommandError> {
+    let (status, json) = remote_raw(state, method, path, body).await?;
+    if status == 404 {
+        return Ok(None);
+    }
+    if (200..300).contains(&status) {
+        Ok(Some(json))
+    } else {
+        Err(CommandError::from(remote_error_message(status, &json)))
+    }
+}
+
+fn remote_error_message(status: u16, json: &Value) -> String {
+    json.as_object()
+        .and_then(|o| o.get("error").and_then(|v| v.as_str()))
+        .map(String::from)
+        .unwrap_or_else(|| format!("HTTP {status}"))
+}
+
+fn decode_json<T: serde::de::DeserializeOwned>(v: Value, what: &str) -> Result<T, CommandError> {
+    serde_json::from_value(v).map_err(|e| CommandError::from(format!("decode {what}: {e}")))
+}
+
+async fn is_remote(state: &State<'_, AppState>) -> bool {
+    matches!(*state.mode.lock().await, VaultMode::Remote)
+}
+
+// ── Public command surface ────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
 pub struct PluginListResult {
@@ -32,6 +132,14 @@ pub struct PluginListResult {
 pub async fn plugins_get_publishers(
     state: State<'_, AppState>,
 ) -> CmdResult<BTreeMap<String, String>> {
+    if is_remote(&state).await {
+        let json = remote_call(&state, "GET", "sys/plugins/publishers", None).await?;
+        let pubs = json
+            .get("publishers")
+            .cloned()
+            .unwrap_or(Value::Object(Map::new()));
+        return decode_json(pubs, "publishers");
+    }
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
@@ -51,7 +159,10 @@ pub async fn plugins_set_publishers(
     publishers: BTreeMap<String, String>,
 ) -> CmdResult<()> {
     // Validate hex + length up front so a typo doesn't break verify
-    // later. ML-DSA-65 PK is 1952 bytes / 3904 hex chars.
+    // later. ML-DSA-65 PK is 1952 bytes / 3904 hex chars. We do this
+    // client-side regardless of mode so the operator gets the same
+    // immediate feedback whether they're hitting an embedded vault
+    // or a remote server.
     for (name, pk_hex) in &publishers {
         if name.is_empty() {
             return Err("publisher name cannot be empty".into());
@@ -59,7 +170,6 @@ pub async fn plugins_set_publishers(
         let bytes = hex_decode(pk_hex).ok_or_else(|| {
             CommandError::from(format!("publisher `{name}` public key is not valid hex"))
         })?;
-        // ML_DSA_65_PUBLIC_KEY_LEN re-export from bv_crypto.
         if bytes.len() != bv_crypto::ML_DSA_65_PUBLIC_KEY_LEN {
             return Err(CommandError::from(format!(
                 "publisher `{name}` public key must be {} bytes, got {}",
@@ -68,6 +178,15 @@ pub async fn plugins_set_publishers(
             )));
         }
     }
+
+    if is_remote(&state).await {
+        let body = json!({ "keys": publishers })
+            .as_object()
+            .cloned();
+        remote_call(&state, "PUT", "sys/plugins/publishers", body).await?;
+        return Ok(());
+    }
+
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
@@ -96,8 +215,20 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 
 /// Read the engine's `accept_unsigned` flag. Default-closed when the
 /// key is missing, matching `verifier::read_accept_unsigned`.
+///
+/// The HTTP API has no dedicated GET for this flag, so in remote mode
+/// we read it off the combined publishers endpoint, which already
+/// returns it alongside the allowlist.
 #[tauri::command]
 pub async fn plugins_get_accept_unsigned(state: State<'_, AppState>) -> CmdResult<bool> {
+    if is_remote(&state).await {
+        let json = remote_call(&state, "GET", "sys/plugins/publishers", None).await?;
+        let v = json
+            .get("accept_unsigned")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        return Ok(v);
+    }
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
@@ -107,13 +238,21 @@ pub async fn plugins_get_accept_unsigned(state: State<'_, AppState>) -> CmdResul
 }
 
 /// Flip the `accept_unsigned` flag. Logged at WARN by the verifier
-/// when set to `true`. Embedded-mode only (matches the rest of the
-/// admin Plugins page).
+/// when set to `true`.
 #[tauri::command]
 pub async fn plugins_set_accept_unsigned(
     state: State<'_, AppState>,
     on: bool,
 ) -> CmdResult<bool> {
+    if is_remote(&state).await {
+        let body = json!({ "accept_unsigned": on }).as_object().cloned();
+        let resp = remote_call(&state, "PUT", "sys/plugins/accept_unsigned", body).await?;
+        let v = resp
+            .get("accept_unsigned")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(on);
+        return Ok(v);
+    }
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
@@ -125,6 +264,15 @@ pub async fn plugins_set_accept_unsigned(
 
 #[tauri::command]
 pub async fn plugins_list(state: State<'_, AppState>) -> CmdResult<PluginListResult> {
+    if is_remote(&state).await {
+        let json = remote_call(&state, "GET", "sys/plugins", None).await?;
+        let plugins_v = json
+            .get("plugins")
+            .cloned()
+            .unwrap_or(Value::Array(Vec::new()));
+        let plugins: Vec<PluginManifest> = decode_json(plugins_v, "plugin manifests")?;
+        return Ok(PluginListResult { plugins });
+    }
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
@@ -141,6 +289,19 @@ pub async fn plugins_get(
     state: State<'_, AppState>,
     name: String,
 ) -> CmdResult<Option<PluginManifest>> {
+    if is_remote(&state).await {
+        match remote_call_opt(&state, "GET", &format!("sys/plugins/{name}"), None).await? {
+            None => return Ok(None),
+            Some(json) => {
+                let manifest_v = json.get("manifest").cloned().unwrap_or(Value::Null);
+                if manifest_v.is_null() {
+                    return Ok(None);
+                }
+                let m: PluginManifest = decode_json(manifest_v, "plugin manifest")?;
+                return Ok(Some(m));
+            }
+        }
+    }
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
@@ -165,6 +326,27 @@ pub async fn plugins_register(
     state: State<'_, AppState>,
     input: PluginRegisterInput,
 ) -> CmdResult<PluginManifest> {
+    if is_remote(&state).await {
+        // The HTTP register endpoint takes manifest + binary_b64 in the
+        // same shape the Tauri command does, so we just forward the
+        // payload as-is. base64 validation happens server-side; we
+        // sanity-check decodability locally for parity with the
+        // embedded path's pre-flight error.
+        base64::engine::general_purpose::STANDARD
+            .decode(input.binary_b64.as_bytes())
+            .map_err(|_| "binary_b64 not valid base64")?;
+        let body = json!({
+            "manifest": input.manifest,
+            "binary_b64": input.binary_b64,
+        })
+        .as_object()
+        .cloned();
+        let resp = remote_call(&state, "POST", "sys/plugins", body).await?;
+        let manifest_v = resp.get("manifest").cloned().unwrap_or(Value::Null);
+        let manifest: PluginManifest = decode_json(manifest_v, "registered manifest")?;
+        return Ok(manifest);
+    }
+
     let binary = base64::engine::general_purpose::STANDARD
         .decode(input.binary_b64.as_bytes())
         .map_err(|_| "binary_b64 not valid base64")?;
@@ -215,6 +397,11 @@ pub async fn plugins_register(
 
 #[tauri::command]
 pub async fn plugins_delete(state: State<'_, AppState>, name: String) -> CmdResult<()> {
+    if is_remote(&state).await {
+        remote_call(&state, "DELETE", &format!("sys/plugins/{name}"), None).await?;
+        return Ok(());
+    }
+
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
@@ -247,7 +434,7 @@ pub async fn plugins_delete(state: State<'_, AppState>, name: String) -> CmdResu
     outcome
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PluginInvokeResult {
     /// "success" | "plugin_error"
     pub status: String,
@@ -256,7 +443,7 @@ pub struct PluginInvokeResult {
     pub response_b64: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PluginConfigResult {
     pub schema: Vec<ConfigField>,
     pub values: BTreeMap<String, String>,
@@ -267,6 +454,10 @@ pub async fn plugins_get_config(
     state: State<'_, AppState>,
     name: String,
 ) -> CmdResult<PluginConfigResult> {
+    if is_remote(&state).await {
+        let json = remote_call(&state, "GET", &format!("sys/plugins/{name}/config"), None).await?;
+        return decode_json(json, "plugin config");
+    }
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
@@ -293,6 +484,11 @@ pub async fn plugins_set_config(
     name: String,
     values: BTreeMap<String, String>,
 ) -> CmdResult<()> {
+    if is_remote(&state).await {
+        let body = json!({ "values": values }).as_object().cloned();
+        remote_call(&state, "PUT", &format!("sys/plugins/{name}/config"), body).await?;
+        return Ok(());
+    }
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
@@ -330,7 +526,7 @@ pub async fn plugins_set_config(
     outcome
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PluginVersionsResult {
     pub versions: Vec<PluginManifest>,
     pub active: Option<String>,
@@ -341,6 +537,10 @@ pub async fn plugins_versions(
     state: State<'_, AppState>,
     name: String,
 ) -> CmdResult<PluginVersionsResult> {
+    if is_remote(&state).await {
+        let json = remote_call(&state, "GET", &format!("sys/plugins/{name}/versions"), None).await?;
+        return decode_json(json, "plugin versions");
+    }
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
@@ -362,6 +562,16 @@ pub async fn plugins_activate_version(
     name: String,
     version: String,
 ) -> CmdResult<()> {
+    if is_remote(&state).await {
+        remote_call(
+            &state,
+            "POST",
+            &format!("sys/plugins/{name}/versions/{version}/activate"),
+            None,
+        )
+        .await?;
+        return Ok(());
+    }
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
@@ -406,6 +616,16 @@ pub async fn plugins_delete_version(
     name: String,
     version: String,
 ) -> CmdResult<()> {
+    if is_remote(&state).await {
+        remote_call(
+            &state,
+            "DELETE",
+            &format!("sys/plugins/{name}/versions/{version}"),
+            None,
+        )
+        .await?;
+        return Ok(());
+    }
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
@@ -417,7 +637,7 @@ pub async fn plugins_delete_version(
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PluginReloadResult {
     pub name: String,
     pub active_version: String,
@@ -430,6 +650,13 @@ pub async fn plugins_reload(
     state: State<'_, AppState>,
     name: String,
 ) -> CmdResult<PluginReloadResult> {
+    if is_remote(&state).await {
+        let json = remote_call(&state, "POST", &format!("sys/plugins/{name}/reload"), None).await?;
+        // The server response carries an extra `drained_via` key the
+        // Tauri shape doesn't model; serde's default behavior drops
+        // unknown fields so we can decode straight into our struct.
+        return decode_json(json, "plugin reload result");
+    }
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
@@ -481,6 +708,29 @@ pub async fn plugins_invoke(
     input_b64: Option<String>,
     fuel: Option<u64>,
 ) -> CmdResult<PluginInvokeResult> {
+    if is_remote(&state).await {
+        // Server happily accepts an empty/missing input_b64; mirror
+        // the embedded validation so a bad base64 fails locally
+        // before we burn a round-trip.
+        if let Some(b64) = &input_b64 {
+            if !b64.is_empty() {
+                base64::engine::general_purpose::STANDARD
+                    .decode(b64.as_bytes())
+                    .map_err(|_| "input_b64 not valid base64")?;
+            }
+        }
+        let mut body = Map::new();
+        if let Some(b64) = input_b64.clone() {
+            body.insert("input_b64".to_string(), Value::String(b64));
+        }
+        if let Some(f) = fuel {
+            body.insert("fuel".to_string(), Value::Number(f.into()));
+        }
+        let body = if body.is_empty() { None } else { Some(body) };
+        let json = remote_call(&state, "POST", &format!("sys/plugins/{name}/invoke"), body).await?;
+        return decode_json(json, "plugin invoke result");
+    }
+
     let input = match input_b64 {
         Some(b64) if !b64.is_empty() => base64::engine::general_purpose::STANDARD
             .decode(b64.as_bytes())
@@ -587,7 +837,16 @@ pub struct PluginMetricsListResult {
 /// families backing `bvault_plugin_invokes_total`,
 /// `bvault_plugin_fuel_consumed_total`, and
 /// `bvault_plugin_invoke_duration_seconds`.
+///
+/// Embedded mode reads the in-process registry directly. Remote mode
+/// has no JSON-shaped metrics endpoint — the server's `/sys/metrics`
+/// is Prometheus text — so this returns an empty list. The desktop
+/// metrics panel's empty state ("No invokes recorded since boot") is
+/// the right surfacing for that.
 #[tauri::command]
-pub async fn plugins_metrics(_state: State<'_, AppState>) -> CmdResult<PluginMetricsListResult> {
+pub async fn plugins_metrics(state: State<'_, AppState>) -> CmdResult<PluginMetricsListResult> {
+    if is_remote(&state).await {
+        return Ok(PluginMetricsListResult { snapshots: Vec::new() });
+    }
     Ok(PluginMetricsListResult { snapshots: snapshot_all() })
 }
