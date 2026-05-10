@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+_(no changes since 0.5.0)_
+
+## [0.5.0] - 2026-05-10
+
+**Headline release: Plugin Extensibility v1.** Plugins now contribute menus + JSON-Schema forms + tables + detail views to the GUI declaratively via a `surface.json` shipped in the bundle, with optional client-side WASM form hooks executed in a sandboxed Wasmtime in the Tauri backend. The GUI fetches an aggregated `active-surfaces` bundle on login, content-addresses assets in a per-vault cache, and live-updates via a long-poll watcher when the operator activates a new version. v1 plugins keep working unchanged. Eight phases shipped end-to-end, from spec through reference TOTP example. Versions bumped from 0.4.1 across `Cargo.toml`, `gui/src-tauri/Cargo.toml`, `gui/package.json`, `gui/src-tauri/tauri.conf.json`.
+
 ### Added
 
 #### Plugin Extensibility — Phase 7 reference example, SDK helpers, operator walkthrough (final phase)
