@@ -68,6 +68,7 @@ pub mod connection;
 pub mod exchange;
 pub mod pki;
 pub mod plugins;
+pub mod plugin_surface;
 pub mod scheduled_exports;
 pub mod policies;
 pub mod resources;

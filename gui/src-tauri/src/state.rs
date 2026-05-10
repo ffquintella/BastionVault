@@ -96,6 +96,11 @@ pub struct AppState {
     /// use to drive the remote PTY.
     pub connect_sessions:
         tokio::sync::Mutex<HashMap<String, crate::session::SessionState>>,
+    /// Plugin Extensibility v1: per-vault on-disk surface cache.
+    /// Resolved on first use from the Tauri app's cache directory
+    /// (`<dirs::cache>/com.bastionvault.gui/plugins/<vault-id>/`).
+    /// Cleared when the operator switches vaults.
+    pub plugin_surface_cache: Mutex<Option<bv_client::SurfaceCache>>,
 }
 
 impl AppState {
@@ -111,6 +116,7 @@ impl AppState {
             cloud_sessions: std::sync::Mutex::new(HashMap::new()),
             oidc_sessions: std::sync::Mutex::new(HashMap::new()),
             connect_sessions: tokio::sync::Mutex::new(HashMap::new()),
+            plugin_surface_cache: Mutex::new(None),
         }
     }
 }

@@ -220,6 +220,10 @@ pub fn run() {
             commands::plugins::plugins_delete_version,
             commands::plugins::plugins_reload,
             commands::plugins::plugins_metrics,
+            // Plugin Extensibility v1 — surface manifest fetch + cache + dispatch
+            commands::plugin_surface::plugin_surfaces_refresh,
+            commands::plugin_surface::plugin_surface_asset,
+            commands::plugin_surface::plugin_surface_dispatch,
             // Secrets
             commands::secrets::list_secrets,
             commands::secrets::read_secret,

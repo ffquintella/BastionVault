@@ -23,6 +23,7 @@ bastion_vault = { path = "../..", default-features = false }
 # The complementary EmbeddedBackend wrapper around `bastion_vault::core`
 # lives in this crate behind the `embedded_vault` feature.
 bv-client = { path = "../../crates/bv-client" }
+bv_plugin_surface = { path = "../../crates/bv_plugin_surface" }
 # rustls is transitively present via the host crate; we list it here
 # so the GUI startup can pin the process-level CryptoProvider before
 # any TLS-using code runs (rustls 0.23 panics on first use otherwise

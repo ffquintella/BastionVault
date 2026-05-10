@@ -1158,6 +1158,131 @@ export const pluginsMetrics = () =>
     (r) => r.snapshots,
   );
 
+// ── Plugin Extensibility v1: surface manifest + dispatch ─────────
+//
+// The active-surface bundle drives dynamic GUI extension: each
+// plugin contributes menus + pages + forms via a `surface.json`
+// shipped in its bundle. The renderer (gui/src/components/surface/)
+// fetches the bundle on login and dispatches form submits / row
+// actions through `pluginSurfaceDispatch`, which is a thin shell
+// over the existing backend.handle({op, path, body}).
+
+export type SurfaceOp = "read" | "write" | "delete" | "list";
+export type SurfaceSection = "secrets" | "sharing" | "admin" | "settings";
+
+export interface SurfaceBinding {
+  op: SurfaceOp;
+  path: string;
+}
+
+export interface SurfaceMenu {
+  id: string;
+  label: string;
+  icon?: string;
+  section: SurfaceSection;
+  route: string;
+  min_policy?: string;
+}
+
+export interface SurfaceColumn {
+  field: string;
+  label: string;
+}
+
+export interface SurfaceRowAction {
+  label: string;
+  binding: SurfaceBinding;
+  confirm?: boolean;
+}
+
+export interface SurfaceTable {
+  kind: "table";
+  id: string;
+  binding: SurfaceBinding;
+  columns: SurfaceColumn[];
+  row_actions?: SurfaceRowAction[];
+  empty_text?: string;
+}
+
+export interface SurfaceSubmit {
+  label: string;
+  binding: SurfaceBinding;
+}
+
+export interface SurfaceForm {
+  kind: "form";
+  id: string;
+  title?: string;
+  schema: Record<string, unknown>;
+  submit: SurfaceSubmit;
+  hook?: string;
+}
+
+export interface SurfaceDetailField {
+  field: string;
+  label: string;
+  live?: boolean;
+}
+
+export interface SurfaceDetail {
+  kind: "detail";
+  id: string;
+  binding: SurfaceBinding;
+  fields: SurfaceDetailField[];
+}
+
+export type SurfaceComponent = SurfaceTable | SurfaceForm | SurfaceDetail;
+
+export interface SurfacePage {
+  route: string;
+  title: string;
+  components: SurfaceComponent[];
+}
+
+export interface SurfaceManifest {
+  schema_version: number;
+  title: string;
+  icon?: string;
+  menus?: SurfaceMenu[];
+  pages?: SurfacePage[];
+  config_form?: SurfaceForm | null;
+}
+
+export interface ActiveSurfaceEntry {
+  plugin: string;
+  version: string;
+  mount: string;
+  surface: SurfaceManifest;
+  /// `[asset_name, sha256]` pairs.
+  assets: [string, string][];
+}
+
+export interface ActiveSurfaceBundle {
+  etag: string;
+  entries: ActiveSurfaceEntry[];
+}
+
+export const pluginSurfacesRefresh = () =>
+  invoke<{ bundle: ActiveSurfaceBundle }>("plugin_surfaces_refresh").then(
+    (r) => r.bundle,
+  );
+
+export const pluginSurfaceAsset = (plugin: string, version: string, sha256: string) =>
+  invoke<{ bytes_b64: string | null }>("plugin_surface_asset", {
+    args: { plugin, version, sha256 },
+  }).then((r) => r.bytes_b64);
+
+export const pluginSurfaceDispatch = (
+  op: SurfaceOp,
+  path: string,
+  mount: string,
+  params: Record<string, string> = {},
+  body?: Record<string, unknown>,
+) =>
+  invoke<{ data: Record<string, unknown> | null }>("plugin_surface_dispatch", {
+    args: { op, path, mount, params, body: body ?? null },
+  }).then((r) => r.data);
+
 // ── PKI Secret Engine ─────────────────────────────────────────────
 
 export const pkiListMounts = () => invoke<PkiMountInfo[]>("pki_list_mounts");

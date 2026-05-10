@@ -277,7 +277,7 @@ Two new event types:
 | 0 | Spec ratification (this doc + ABI plan) | **Done** |
 | 1 | Server surface storage + types crate + 3 HTTP routes | **Done** |
 | 2 | `bv-client` surface fetch + content-addressed cache | **Done** |
-| 3 | GUI dynamic surface rendering | Todo |
+| 3 | GUI dynamic surface rendering | **Done** |
 | 4 | Form-hook ABI in Tauri backend | Todo |
 | 5 | Auto-update via long-poll watcher | Todo |
 | 6 | Operator UX redesign | Todo |

@@ -7,6 +7,8 @@ import { BackupModal } from "./BackupModal";
 import { TitleBar } from "./TitleBar";
 import { AboutModal } from "./AboutModal";
 import * as api from "../lib/api";
+import { PluginMenuSlot } from "./PluginMenuSlot";
+import { usePluginSurfacesStore } from "../stores/pluginSurfacesStore";
 
 // localStorage key for the persisted expanded/collapsed state of the
 // Admin section in the sidebar. Default (no key set) is expanded so
@@ -147,6 +149,21 @@ export function Layout({ children }: LayoutProps) {
   const reset = useVaultStore((s) => s.reset);
   const isAdmin = policies.some((p) => adminPolicies.has(p));
   const policySet = new Set(policies);
+
+  // Plugin Extensibility v1: pull the active-surface bundle once
+  // per authenticated session so plugin-contributed menus appear
+  // alongside the static nav. Failures are non-fatal — if the
+  // server has nothing to serve (no plugins, no surface support),
+  // the store stays empty and the sidebar slots render nothing.
+  const refreshPluginSurfaces = usePluginSurfacesStore((s) => s.refresh);
+  const clearPluginSurfaces = usePluginSurfacesStore((s) => s.clear);
+  useEffect(() => {
+    if (!isAuthenticated) {
+      clearPluginSurfaces();
+      return;
+    }
+    void refreshPluginSurfaces();
+  }, [isAuthenticated, refreshPluginSurfaces, clearPluginSurfaces]);
 
   // Load the live mount-type set so per-item `requiresMountType`
   // gates work. We only ever need the set of types, not the full
@@ -295,6 +312,14 @@ export function Layout({ children }: LayoutProps) {
             />
           ))}
 
+          {/* Plugin Extensibility v1: dynamic menus contributed
+              by registered plugins. `secrets` and `sharing` belong
+              in the user nav; `admin` slots in below the static
+              admin items. `settings` is reserved for the Settings
+              sub-nav (Phase 6). */}
+          <PluginMenuSlot section="secrets" />
+          <PluginMenuSlot section="sharing" />
+
           {isAdmin && visibleAdminNav.length > 0 && (
             <div className="mt-4 pt-3 border-t border-[var(--color-border)]">
               <button
@@ -334,6 +359,10 @@ export function Layout({ children }: LayoutProps) {
                   id="nav-admin-section"
                   className="mt-1 ml-2 pl-2 border-l border-[var(--color-border)] space-y-0.5"
                 >
+                  {/* Plugin-contributed admin entries live next to
+                      the static admin links. Filtered by `min_policy`
+                      so non-admin users never see them. */}
+                  <PluginMenuSlot section="admin" />
                   {visibleAdminNav.map((item) => (
                     <NavLink
                       key={item.path}

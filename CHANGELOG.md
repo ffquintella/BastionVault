@@ -47,6 +47,25 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Plugin Extensibility — Phase 3 GUI dynamic surface rendering
+
+- [`gui/src-tauri/src/state.rs`](gui/src-tauri/src/state.rs) `AppState` gains `plugin_surface_cache: Mutex<Option<SurfaceCache>>`. Lazily resolved to `<dirs::cache>/com.bastionvault.gui/plugins/<vault-id>/` on first use, where `<vault-id>` is `bv_client::vault_id_for(address, "")` — collision-resistant across vaults sharing a host cache dir.
+- [`gui/src-tauri/src/commands/plugin_surface.rs`](gui/src-tauri/src/commands/plugin_surface.rs) Three new Tauri commands: `plugin_surfaces_refresh` (calls `bv_client::refresh`, returns the bundle), `plugin_surface_asset` (calls `ensure_asset`, returns base64), `plugin_surface_dispatch` (resolves a surface `{op, path}` binding by substituting `{mount}` and `{<form_field>}` placeholders, then dispatches through the existing `Backend::handle`). Path resolution refuses unsubstituted placeholders, `..`, and any path that escapes the plugin's mount.
+- [`gui/src/lib/api.ts`](gui/src/lib/api.ts) Frontend types for the surface schema (`SurfaceMenu`, `SurfacePage`, `SurfaceComponent`, `SurfaceBinding`, `SurfaceForm`, `SurfaceTable`, `SurfaceDetail`, `ActiveSurfaceBundle`) plus three thin `invoke<T>` wrappers: `pluginSurfacesRefresh`, `pluginSurfaceAsset`, `pluginSurfaceDispatch`.
+- [`gui/src/stores/pluginSurfacesStore.ts`](gui/src/stores/pluginSurfacesStore.ts) Zustand slice tracking `bundle`, `loading`, `error`, plus selectors `menusForSection(section, policies)` (filters by `min_policy`) and `pageByRoute(route)`. Cleared on sign-out.
+- [`gui/src/components/PluginMenuSlot.tsx`](gui/src/components/PluginMenuSlot.tsx) Sidebar slot that renders plugin-contributed menus for a given `section`. Hides menus the active token's policies don't satisfy (UX hint only — server ACLs are authoritative).
+- [`gui/src/components/Layout.tsx`](gui/src/components/Layout.tsx) Triggers `refreshPluginSurfaces()` once per authenticated session; injects `<PluginMenuSlot section="secrets">`, `<PluginMenuSlot section="sharing">`, and `<PluginMenuSlot section="admin">` (the last only inside the admin sub-nav).
+- [`gui/src/components/surface/`](gui/src/components/surface/) Three renderer components driving everything generically off the surface manifest:
+  - `SurfaceTable.tsx` — issues `op=list`, normalises `{keys: [...]}` / `{entries: [...]}` / single-record shapes, renders one row per entry with declared columns. Row actions dispatch through the same `pluginSurfaceDispatch` (with `{<field>}` substitution from the row), call `confirm:` via `window.confirm`, and trigger a reload on success.
+  - `SurfaceForm.tsx` — schema-driven form supporting a JSON-Schema 2020-12 subset: `string` / `integer` / `number` / `boolean`, `format: "password"` (→ `<SecretInput>`), `format: "textarea"` (→ `<Textarea>`), `enum` (→ `<select>`), plus `title` / `description` / `default` / `required`. The `hook` field is read but warns to console — Phase 4 wires the actual WASM hook execution.
+  - `SurfaceDetail.tsx` — `op=read` view with a key/value list. Fields with `live: true` re-issue the read on a 5-second cadence while mounted.
+  - `SurfaceRouter.tsx` — wraps in `<Layout>`, looks up the current path in `pageByRoute`, walks `page.components`, and instantiates the matching renderer per entry. Empty / unknown / errored paths render an `<EmptyState>` rather than a blank screen.
+- [`gui/src/App.tsx`](gui/src/App.tsx) New protected route `/plugin/:plugin/*` resolves to `<SurfaceRouter>`. Splat pattern lets one plugin contribute multiple pages sharing a `/plugin/<name>/` prefix.
+
+Verified: `npx tsc --noEmit` clean, `npx vite build` succeeds (1.09 MB JS, 52 kB CSS), `cargo check -p bastion-vault-gui --no-default-features` clean.
+
+Phase 4 next: form-hook ABI in the Tauri backend (sandboxed Wasmtime; no host imports; `validate` / `pre_submit` / `post_response`).
+
 #### Plugin Extensibility — Phase 2 client-side surface fetch + content-addressed cache
 
 - [`crates/bv-client/src/backend.rs`](crates/bv-client/src/backend.rs) The `Backend` trait gains two methods with default implementations: `active_surfaces(token, etag) -> SurfaceFetch` and `fetch_asset(plugin, version, sha256, token) -> Option<Vec<u8>>`. The `SurfaceFetch::NotModified` variant lets the cache short-circuit a 304 without re-reading the bundle's etag for comparison. Default impls return an empty bundle / `None` so existing backends (the GUI's `EmbeddedBackend`, in-memory test stubs) keep compiling without changes.

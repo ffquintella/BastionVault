@@ -23,6 +23,7 @@ import { SshPage } from "./routes/SshPage";
 import { TotpPage } from "./routes/TotpPage";
 import { LdapPage } from "./routes/LdapPage";
 import { PluginsPage } from "./routes/PluginsPage";
+import { SurfaceRouter } from "./components/surface/SurfaceRouter";
 import { SessionSshWindow } from "./routes/SessionSshWindow";
 import { SessionRdpWindow } from "./routes/SessionRdpWindow";
 import { useAuthStore } from "./stores/authStore";
@@ -111,6 +112,15 @@ export default function App() {
             <Route
               path="/plugins"
               element={<ProtectedRoute><PluginsPage /></ProtectedRoute>}
+            />
+            {/* Plugin Extensibility v1: dynamic plugin pages.
+                The splat pattern lets a plugin contribute multiple
+                routes that share a `/plugin/<name>/` prefix. The
+                SurfaceRouter looks the path up in the active-surface
+                bundle and renders the matching components. */}
+            <Route
+              path="/plugin/:plugin/*"
+              element={<ProtectedRoute><SurfaceRouter /></ProtectedRoute>}
             />
             <Route
               path="/pki"
