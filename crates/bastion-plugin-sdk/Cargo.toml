@@ -22,6 +22,11 @@ crate-type = ["rlib"]
 [dependencies]
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
+# Re-exported so plugin authors get the surface manifest types
+# without needing to depend on the host crate. Behind the
+# `surface` feature so plugins that don't ship a surface keep
+# their dep tree minimal.
+bv_plugin_surface = { path = "../bv_plugin_surface", optional = true }
 
 [dev-dependencies]
 # Serializes the host_test tests so the shared in-memory STATE in
@@ -34,6 +39,13 @@ serial_test = "3"
 # small.
 default = []
 json = ["dep:serde", "dep:serde_json"]
+
+# Plugin Extensibility v1: pull in the SurfaceManifest types
+# (re-exported as `bastion_plugin_sdk::surface`) plus the
+# `form_hook!` macro for authoring client-side form-hook WASM
+# modules. Implies `json` because the macro emits JSON
+# serialise/deserialise glue around the hook export.
+surface = ["dep:bv_plugin_surface", "json"]
 
 # Replace `extern "C"` host imports with thread-local stubs so plugin
 # authors can `cargo test` their handlers on the host. Implies the SDK

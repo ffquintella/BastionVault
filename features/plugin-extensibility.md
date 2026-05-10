@@ -1,6 +1,6 @@
 # Plugin Extensibility
 
-**Status:** In Progress (Phase 0 → Phase 1 foundation landed; see [roadmap](../roadmaps/plugin-extensibility-redesign.md))
+**Status:** Done — all 8 phases shipped. See [roadmap](../roadmaps/plugin-extensibility-redesign.md) for the original delivery plan.
 **Owner:** Felipe Quintella
 
 This is the operator- and plugin-author-facing spec for the redesign tracked in [`roadmaps/plugin-extensibility-redesign.md`](../roadmaps/plugin-extensibility-redesign.md). Read the roadmap first for motivation, threat model, and phasing. This spec is the contract.
@@ -270,6 +270,95 @@ Two new event types:
 
 **v2 GUI talking to a v1 server** sees `active-surfaces` 404 and treats it as "no plugin surfaces" — no error, no degraded UI.
 
+## Operator walkthrough
+
+End-to-end flow for shipping a new plugin that contributes a surface, taking the [TOTP example](../crates/bastion-plugin-sdk/examples/totp_surface.rs) as the running case.
+
+### 1. Author the surface
+
+Plugin authors add a build-time helper that emits `surface.json` from typed Rust:
+
+```bash
+cargo run --example totp_surface --features surface,json \
+  -p bastion-plugin-sdk \
+  > surface.json
+```
+
+The example prints a fully-validated `SurfaceManifest`. Validation uses the same code path the server runs at registration, so a malformed surface fails fast at the author's terminal.
+
+### 2. Write a form hook (optional)
+
+A form hook is a tiny Rust function `(serde_json::Value) -> serde_json::Value` plus the [`form_hook!`](../crates/bastion-plugin-sdk/src/lib.rs) macro:
+
+```rust
+fn validate_create(input: Value) -> Value { /* ... */ }
+form_hook!(validate_create);
+```
+
+Build it as a WASM artifact (cdylib equivalent — no entry point):
+
+```bash
+cargo build --release \
+  --target wasm32-unknown-unknown \
+  --example totp_form_hook \
+  --features surface,json -p bastion-plugin-sdk
+```
+
+The `[`examples/totp_form_hook.rs`](../crates/bastion-plugin-sdk/examples/totp_form_hook.rs) reference also unit-tests the hook on the host (without WASM) by gating the macro behind `#[cfg(target_arch = "wasm32")]`.
+
+### 3. Pack the bundle
+
+The packer (`bv-plugin-pack`) consumes the manifest, server binary, surface JSON, and any client assets, and emits a single `.bvplugin` file in the [v2 layout](#bundle-layout-format-version-2):
+
+```bash
+bv-plugin-pack pack \
+  --manifest plugin.toml \
+  --binary target/wasm32-wasip1/release/totp.wasm \
+  --surface surface.json \
+  --asset totp-form-hooks.wasm=target/wasm32-unknown-unknown/release/examples/totp_form_hook.wasm \
+  --signing-seed-file ./acme.seed \
+  --signing-key-name acme-corp \
+  --out totp-1.4.0.bvplugin
+```
+
+`--asset` accepts repeated `name=path` pairs; the packer computes each `sha256` and bakes the matching `client_assets[]` entry into the manifest.
+
+> Packer support for the v2 sections is on the Phase 7 follow-up list — until then, register the surface bytes via the JSON `surface_b64` / `client_assets_b64` fields on `POST /v1/sys/plugins`.
+
+### 4. Register and activate
+
+The operator uploads via the existing GUI *Register plugin* button, or via the HTTP API:
+
+```bash
+curl -X POST https://vault.example.com/v1/sys/plugins \
+  -H "X-BastionVault-Token: $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "manifest":          { ... },
+    "binary_b64":        "...",
+    "surface_b64":       "...",
+    "client_assets_b64": [{ "name": "totp-form-hooks.wasm", "bytes_b64": "..." }]
+  }'
+```
+
+The catalog cross-checks every uploaded asset's SHA-256 against the matching `manifest.client_assets[].sha256`. Mismatches reject the registration with a clear `ErrString`. Activate the version once smoke-tested:
+
+```bash
+curl -X POST .../v1/sys/plugins/totp/versions/1.4.0/activate
+```
+
+### 5. Watch it land in the GUI
+
+Already-signed-in operators see the new version through the long-poll watcher — a non-modal toast announces *"Plugin surface updated: totp → 1.4.0"* within ~2 s. New navigations pick up the menu under *Secrets → TOTP*; in-flight pages keep using the old surface until the user moves.
+
+### 6. Verify with the operator UX
+
+The admin *Plugins* page (Phase 6) shows the new plugin's row with a `1 menu / 2 pages / 1 asset` chip cluster and a *Preview surface* button. The *Active surface map* below the registered list catches route collisions before they hit the user.
+
+### Migration of v1 plugins
+
+A plugin that ships **no** `surface` block in its manifest keeps working exactly as it did before — the active-surfaces aggregator skips it, the GUI's admin page renders it the way it always did, and the operator administers it through the existing *Invoke / Configure / Reload / Delete* controls. Adding a surface to an existing plugin is a manifest extension; the previous manifests still parse cleanly thanks to `serde(default)`.
+
 ## Status
 
 | Phase | What | Status |
@@ -281,4 +370,4 @@ Two new event types:
 | 4 | Form-hook ABI in Tauri backend | **Done** |
 | 5 | Auto-update via long-poll watcher | **Done** |
 | 6 | Operator UX redesign | **Done** |
-| 7 | Reference plugin (TOTP) + SDK + docs | Todo |
+| 7 | Reference plugin (TOTP) + SDK + docs | **Done** |

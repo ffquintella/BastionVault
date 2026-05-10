@@ -47,6 +47,20 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Plugin Extensibility — Phase 7 reference example, SDK helpers, operator walkthrough (final phase)
+
+- [`crates/bastion-plugin-sdk/Cargo.toml`](crates/bastion-plugin-sdk/Cargo.toml) New optional `surface` feature (implies `json`) that pulls in `bv_plugin_surface` and unlocks the surface-authoring helpers.
+- [`crates/bastion-plugin-sdk/src/lib.rs`](crates/bastion-plugin-sdk/src/lib.rs) Two additions behind `feature = "surface"`:
+  - `bastion_plugin_sdk::surface::*` — re-exports the full `bv_plugin_surface` type set (`SurfaceManifest`, components, bindings, `ActiveSurfaceBundle`, `CURRENT_SCHEMA_VERSION`) plus a `surface_builder(title)` helper that returns a default-shaped manifest with the current schema version.
+  - `form_hook!(<fn>)` macro — emits the `bv_alloc` + `<export>(ptr,len)->i64` trampoline the GUI's WASM sandbox expects. The user-supplied function is `(serde_json::Value) -> serde_json::Value`; the macro handles JSON in/out marshalling and returns the `(ptr<<32)|len` packing on the way back. No-op on non-wasm targets so authors `cargo test` their hooks with normal `Value`s. Internal `form_hook_abi::{alloc, read_input, pack_response}` glue stays `#[doc(hidden)]`.
+- [`crates/bastion-plugin-sdk/examples/totp_surface.rs`](crates/bastion-plugin-sdk/examples/totp_surface.rs) Reference example — a TOTP plugin's surface (codes table with delete row-action, register form with a base-32 secret field bound to a form-hook reference, optional live-polling detail page). Calls `validate("totp", &assets)` before printing so a malformed example can't ship.
+- [`crates/bastion-plugin-sdk/examples/totp_form_hook.rs`](crates/bastion-plugin-sdk/examples/totp_form_hook.rs) Companion form-hook example using the new `form_hook!` macro. Validates the secret as base-32 (allowing space + dash separators), strips formatting, and returns the cleaned-up `values` payload so the form submits a normalised secret. 3 host-side unit tests (rejects empty name, rejects non-base32, strips spaces/dashes) all passing.
+- [`features/plugin-extensibility.md`](features/plugin-extensibility.md) Status flipped to **Done**. New *Operator walkthrough* section covers author → form-hook → pack → register → activate → live-update → UX verify, plus migration notes for v1 plugins (no-op).
+- [`roadmap.md`](roadmap.md) Plugin Extensibility row → Done; tracked totals bumped (Done 42→43, Todo 11→10).
+- Verified: `cargo check --workspace` clean; `cargo run --example totp_surface --features surface,json` produces a valid surface JSON; `cargo test --example totp_form_hook --features surface,json` 3/3 passing.
+
+All 8 phases of Plugin Extensibility shipped.
+
 #### Plugin Extensibility — Phase 6 operator UX redesign
 
 - New module [`gui/src/components/surface/SurfaceAdminPanel.tsx`](gui/src/components/surface/SurfaceAdminPanel.tsx) with two operator-facing pieces driven off the existing `usePluginSurfacesStore` (so Phase 5's watcher loop refreshes both views automatically):

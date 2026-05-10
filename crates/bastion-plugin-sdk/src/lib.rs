@@ -195,6 +195,146 @@ pub mod abi {
     pub use bv_run_impl as run;
 }
 
+// ── Plugin Extensibility v1: surface authoring + form hooks ──────────
+
+#[cfg(feature = "surface")]
+pub mod surface {
+    //! Surface-manifest authoring helpers, re-exporting the types
+    //! defined in the central [`bv_plugin_surface`] crate so plugin
+    //! authors don't have to take a direct dep on it.
+    //!
+    //! See [`features/plugin-extensibility.md`](https://github.com/ffquintella/BastionVault/blob/main/features/plugin-extensibility.md)
+    //! for the schema reference.
+    pub use bv_plugin_surface::{
+        ActiveSurfaceBundle, ActiveSurfaceEntry, CURRENT_SCHEMA_VERSION,
+        SurfaceBinding, SurfaceColumn, SurfaceComponent, SurfaceDetail,
+        SurfaceDetailField, SurfaceError, SurfaceForm, SurfaceManifest,
+        SurfaceMenu, SurfaceOp, SurfacePage, SurfaceRowAction,
+        SurfaceSection, SurfaceSubmit, SurfaceTable,
+    };
+
+    /// Build a minimal-shaped [`SurfaceManifest`] with sensible
+    /// defaults: current schema version, the supplied title, and
+    /// empty menu/page lists. Chain the returned struct's fields
+    /// (the fields are public on `SurfaceManifest`) to add menus
+    /// and pages.
+    pub fn surface_builder(title: &str) -> SurfaceManifest {
+        SurfaceManifest {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            title: title.to_string(),
+            icon: String::new(),
+            menus: Vec::new(),
+            pages: Vec::new(),
+            config_form: None,
+        }
+    }
+}
+
+#[cfg(feature = "surface")]
+#[doc(hidden)]
+pub mod form_hook_abi {
+    //! Internal glue for [`form_hook!`]. Plugin authors don't call
+    //! these directly — the macro emits the trampoline.
+
+    extern crate alloc;
+    use alloc::vec::Vec;
+
+    /// Same allocator as [`crate::abi::bv_alloc_impl`] — the host
+    /// calls this on the form-hook module to reserve input space.
+    /// Re-exported here so the `form_hook!` macro doesn't depend on
+    /// the `register!` macro's path.
+    pub fn alloc(len: i32) -> i32 {
+        crate::abi::bv_alloc_impl(len)
+    }
+
+    /// Read `len` bytes at `ptr` from this module's linear memory
+    /// and return them as a Rust slice. Mirrors the host-side
+    /// contract: bytes are valid for the duration of the call.
+    ///
+    /// # Safety
+    /// `ptr` and `len` come from the host; they describe a region
+    /// the host populated via `bv_alloc`. The slice borrow is
+    /// confined to the trampoline, so no aliasing concerns.
+    pub unsafe fn read_input<'a>(ptr: i32, len: i32) -> &'a [u8] {
+        if ptr <= 0 || len <= 0 {
+            &[]
+        } else {
+            core::slice::from_raw_parts(ptr as usize as *const u8, len as usize)
+        }
+    }
+
+    /// Stash `bytes` somewhere the linear memory can return them
+    /// to the host: leak a `Vec` and return its `(ptr, len)` packed
+    /// the way the host's `plugin_hooks::run_hook` expects —
+    /// `(ptr << 32) | len`.
+    pub fn pack_response(bytes: Vec<u8>) -> i64 {
+        if bytes.is_empty() {
+            return 0;
+        }
+        let len = bytes.len() as i64;
+        let ptr = bytes.as_ptr() as usize as i64;
+        core::mem::forget(bytes);
+        (ptr << 32) | len
+    }
+}
+
+/// Author a single client-side form-hook export.
+///
+/// Plugin Extensibility v1 / Phase 4 — emits the
+/// `<export>(ptr, len) -> i64` trampoline the GUI's WASM sandbox
+/// expects, plus the matching `bv_alloc` if one isn't already
+/// emitted by [`register!`]. The user-supplied function takes a
+/// `serde_json::Value` (or any `Deserialize` type via the explicit
+/// `<T>` form) and returns a `serde_json::Value` (or any
+/// `Serialize` type).
+///
+/// Usage:
+///
+/// ```ignore
+/// use bastion_plugin_sdk::form_hook;
+/// use serde_json::{json, Value};
+///
+/// fn validate_create(input: Value) -> Value {
+///     let secret = input.get("secret").and_then(|v| v.as_str()).unwrap_or("");
+///     if !secret.chars().all(|c| matches!(c, 'A'..='Z' | '2'..='7')) {
+///         return json!({
+///             "ok": false,
+///             "errors": { "secret": "Must be base32 (A–Z, 2–7)." }
+///         });
+///     }
+///     json!({ "ok": true })
+/// }
+///
+/// form_hook!(validate_create);
+/// ```
+///
+/// On a non-wasm target the macro is a no-op so the author can
+/// `cargo test` the function with normal `serde_json::Value`s.
+#[cfg(feature = "surface")]
+#[macro_export]
+macro_rules! form_hook {
+    ($export:ident) => {
+        #[cfg(all(target_arch = "wasm32", not(feature = "host_test")))]
+        #[no_mangle]
+        pub extern "C" fn bv_alloc(len: i32) -> i32 {
+            $crate::form_hook_abi::alloc(len)
+        }
+
+        #[cfg(all(target_arch = "wasm32", not(feature = "host_test")))]
+        #[no_mangle]
+        pub extern "C" fn $export(ptr: i32, len: i32) -> i64 {
+            // SAFETY: host's contract — see `read_input`'s docs.
+            let input_bytes = unsafe { $crate::form_hook_abi::read_input(ptr, len) };
+            let parsed: ::serde_json::Value =
+                ::serde_json::from_slice(input_bytes)
+                    .unwrap_or_else(|_| ::serde_json::Value::Null);
+            let out: ::serde_json::Value = $export(parsed);
+            let bytes = ::serde_json::to_vec(&out).unwrap_or_default();
+            $crate::form_hook_abi::pack_response(bytes)
+        }
+    };
+}
+
 /// Wire a [`Plugin`] impl up to the WASM ABI.
 ///
 /// The macro emits two `#[no_mangle] pub extern "C"` exports:
