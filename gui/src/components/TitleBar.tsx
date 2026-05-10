@@ -2,6 +2,21 @@ import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AppMenu } from "./AppMenu";
 
+/**
+ * `true` when the page is running inside the Tauri webview shell —
+ * checked by feature-detecting the bridge object Tauri injects on
+ * window. Plain `vite dev` (no Tauri shell) leaves
+ * `__TAURI_INTERNALS__` undefined, which makes `getCurrentWindow()`
+ * synchronously read `.metadata` on `undefined` and throw before
+ * any try/catch downstream can react. Guarding every call site
+ * keeps the GUI usable in browser-only smoke tests and matches the
+ * way the existing `react-* / shell` plugins gracefully no-op
+ * outside Tauri.
+ */
+function inTauri(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
 interface TitleBarProps {
   /** Sign out — Layout owns the auth + router state. Omit on unauth routes. */
   onSignOut?: () => void;
@@ -32,10 +47,11 @@ export function TitleBar({
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
-    const w = getCurrentWindow();
+    if (!inTauri()) return;
     let unlisten: (() => void) | undefined;
     (async () => {
       try {
+        const w = getCurrentWindow();
         setMaximized(await w.isMaximized());
         unlisten = await w.onResized(async () => {
           setMaximized(await w.isMaximized());
@@ -50,6 +66,7 @@ export function TitleBar({
   }, []);
 
   async function handleMinimize() {
+    if (!inTauri()) return;
     try {
       await getCurrentWindow().minimize();
     } catch {
@@ -58,6 +75,7 @@ export function TitleBar({
   }
 
   async function handleMaximizeToggle() {
+    if (!inTauri()) return;
     try {
       await getCurrentWindow().toggleMaximize();
     } catch {
@@ -66,6 +84,7 @@ export function TitleBar({
   }
 
   async function handleClose() {
+    if (!inTauri()) return;
     try {
       await getCurrentWindow().close();
     } catch {
