@@ -1170,6 +1170,22 @@ struct PluginRegisterRequest {
     /// rather than a path so the entire registration is one barrier-
     /// scoped transaction.
     binary_b64: String,
+    /// Plugin Extensibility v1: base64-encoded `surface.json` bytes,
+    /// when the manifest declares a surface. The catalog cross-checks
+    /// the SHA-256 against `manifest.surface.sha256`.
+    #[serde(default)]
+    surface_b64: Option<String>,
+    /// Plugin Extensibility v1: base64-encoded client assets (form
+    /// hooks today). Each entry's `name` must match a corresponding
+    /// `client_assets[]` entry in the manifest.
+    #[serde(default)]
+    client_assets_b64: Vec<PluginRegisterAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PluginRegisterAsset {
+    name: String,
+    bytes_b64: String,
 }
 
 async fn sys_plugins_list_handler(
@@ -1203,6 +1219,78 @@ async fn sys_plugins_register_handler(
 
         let catalog = crate::plugins::PluginCatalog::new();
         catalog.put(core.barrier.as_storage(), &payload.manifest, &binary).await?;
+
+        // Plugin Extensibility v1: persist surface + assets when the
+        // operator uploaded them. The catalog re-verifies hashes
+        // against the manifest declarations, so a tampered upload
+        // fails registration with a clear error rather than landing
+        // a half-bad plugin.
+        let surface_present = payload.manifest.surface.is_some();
+        if let (Some(surface_b64), Some(surface_ref)) =
+            (payload.surface_b64.as_ref(), payload.manifest.surface.as_ref())
+        {
+            let surface_bytes = base64::engine::general_purpose::STANDARD
+                .decode(surface_b64.as_bytes())
+                .map_err(|_| RvError::ErrRequestInvalid)?;
+            catalog
+                .put_surface(
+                    core.barrier.as_storage(),
+                    &payload.manifest.name,
+                    &payload.manifest.version,
+                    &surface_bytes,
+                    &surface_ref.sha256,
+                )
+                .await?;
+        } else if surface_present {
+            return Err(RvError::ErrString(
+                "manifest declares a surface but request omitted `surface_b64`".into(),
+            ));
+        }
+        // Cross-check declared assets against uploaded ones.
+        let declared: std::collections::BTreeMap<&str, &crate::plugins::manifest::ClientAssetRef> =
+            payload
+                .manifest
+                .client_assets
+                .iter()
+                .map(|a| (a.name.as_str(), a))
+                .collect();
+        let uploaded: std::collections::BTreeMap<&str, &str> = payload
+            .client_assets_b64
+            .iter()
+            .map(|a| (a.name.as_str(), a.bytes_b64.as_str()))
+            .collect();
+        for n in declared.keys() {
+            if !uploaded.contains_key(n) {
+                return Err(RvError::ErrString(format!(
+                    "manifest declares client asset `{n}` but no matching upload was provided"
+                )));
+            }
+        }
+        for (n, b64) in &uploaded {
+            let aref = declared.get(n).ok_or_else(|| {
+                RvError::ErrString(format!("uploaded asset `{n}` not declared in manifest"))
+            })?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(b64.as_bytes())
+                .map_err(|_| RvError::ErrRequestInvalid)?;
+            if (bytes.len() as u64) != aref.size {
+                return Err(RvError::ErrString(format!(
+                    "asset `{n}` size {} does not match declared {}",
+                    bytes.len(),
+                    aref.size
+                )));
+            }
+            catalog
+                .put_asset(
+                    core.barrier.as_storage(),
+                    &payload.manifest.name,
+                    &payload.manifest.version,
+                    &bytes,
+                    &aref.sha256,
+                )
+                .await?;
+        }
+
         Ok(response_json_ok(None, json!({ "manifest": payload.manifest })))
     })
     .await;
@@ -1537,6 +1625,130 @@ async fn sys_plugins_accept_unsigned_put_handler(
     })
     .await;
     audit.finish(&result, &audit_path, Operation::Write).await;
+    result
+}
+
+// ── Plugin Extensibility v1: surface + assets ────────────────────────
+
+async fn sys_plugins_surface_get_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let name = req.match_info().get("name").unwrap_or("").to_string();
+    let audit_path = format!("sys/plugins/{name}/surface");
+    let if_none_match = req
+        .headers()
+        .get("If-None-Match")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim_matches('"').to_string());
+    let result: Result<HttpResponse, RvError> = (async move {
+        let catalog = crate::plugins::PluginCatalog::new();
+        match catalog.read_active_surface(core.barrier.as_storage(), &name).await? {
+            None => Ok(response_error(StatusCode::NOT_FOUND, "no surface for this plugin")),
+            Some((manifest, bytes)) => {
+                // Hash is already verified by `read_active_surface`;
+                // use the stored `surface.sha256` directly so we
+                // don't re-hash on every fetch.
+                let etag = manifest
+                    .surface
+                    .as_ref()
+                    .map(|s| s.sha256.clone())
+                    .unwrap_or_default();
+                if if_none_match.as_deref() == Some(etag.as_str()) {
+                    return Ok(HttpResponse::NotModified()
+                        .insert_header(("ETag", format!("\"{etag}\"")))
+                        .finish());
+                }
+                let parsed: bv_plugin_surface::SurfaceManifest =
+                    serde_json::from_slice(&bytes).map_err(|_| RvError::ErrRequestInvalid)?;
+                Ok(HttpResponse::Ok()
+                    .insert_header(("ETag", format!("\"{etag}\"")))
+                    .insert_header(("Cache-Control", "no-cache"))
+                    .json(json!({
+                        "data": {
+                            "plugin": manifest.name,
+                            "version": manifest.version,
+                            "etag": etag,
+                            "surface": parsed,
+                        }
+                    })))
+            }
+        }
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Read).await;
+    result
+}
+
+async fn sys_plugins_active_surfaces_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let audit_path = "sys/plugins/active-surfaces".to_string();
+    let if_none_match = req
+        .headers()
+        .get("If-None-Match")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim_matches('"').to_string());
+    let result: Result<HttpResponse, RvError> = (async move {
+        let catalog = crate::plugins::PluginCatalog::new();
+        // Mount lookup is wired in Phase 1 with a placeholder (empty
+        // string) — the GUI tolerates an empty mount because it only
+        // resolves bindings client-side. A future Phase 1 follow-up
+        // will inject the actual mount registry here.
+        let bundle = catalog
+            .aggregated_active_surfaces(core.barrier.as_storage(), |_| None)
+            .await?;
+        if if_none_match.as_deref() == Some(bundle.etag.as_str()) {
+            return Ok(HttpResponse::NotModified()
+                .insert_header(("ETag", format!("\"{}\"", bundle.etag)))
+                .finish());
+        }
+        Ok(HttpResponse::Ok()
+            .insert_header(("ETag", format!("\"{}\"", bundle.etag)))
+            .insert_header(("Cache-Control", "no-cache"))
+            .json(json!({ "data": bundle })))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Read).await;
+    result
+}
+
+async fn sys_plugins_asset_get_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let name = req.match_info().get("name").unwrap_or("").to_string();
+    let version = req.match_info().get("version").unwrap_or("").to_string();
+    let sha256 = req.match_info().get("sha256").unwrap_or("").to_string();
+    let audit_path = format!("sys/plugins/{name}/{version}/asset/{sha256}");
+    // Defence-in-depth: the regex on the route already constrains
+    // shape, but reject anything that isn't lowercase hex of length
+    // 64 here too.
+    let valid_hash =
+        sha256.len() == 64 && sha256.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase());
+    let result: Result<HttpResponse, RvError> = (async move {
+        if !valid_hash {
+            return Ok(response_error(StatusCode::BAD_REQUEST, "asset sha256 must be 64 lowercase hex chars"));
+        }
+        let catalog = crate::plugins::PluginCatalog::new();
+        match catalog
+            .read_asset(core.barrier.as_storage(), &name, &version, &sha256)
+            .await?
+        {
+            None => Ok(response_error(StatusCode::NOT_FOUND, "asset not found")),
+            Some(bytes) => Ok(HttpResponse::Ok()
+                .content_type("application/octet-stream")
+                .insert_header(("ETag", format!("\"{sha256}\"")))
+                .insert_header(("Cache-Control", "public, max-age=31536000, immutable"))
+                .body(bytes)),
+        }
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Read).await;
     result
 }
 
@@ -2055,6 +2267,22 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
         .service(
             web::resource("/plugins/quarantine")
                 .route(web::get().to(sys_plugins_quarantine_list_handler)),
+        )
+        // Plugin Extensibility v1 — surface + assets. Note: actix-web's
+        // route resolver prefers literal segments over `{}` wildcards,
+        // so `/plugins/active-surfaces` here does not clash with
+        // `/plugins/{name}` registered above.
+        .service(
+            web::resource("/plugins/active-surfaces")
+                .route(web::get().to(sys_plugins_active_surfaces_handler)),
+        )
+        .service(
+            web::resource("/plugins/{name}/surface")
+                .route(web::get().to(sys_plugins_surface_get_handler)),
+        )
+        .service(
+            web::resource("/plugins/{name}/versions/{version}/asset/{sha256}")
+                .route(web::get().to(sys_plugins_asset_get_handler)),
         )
         .service(
             web::resource("/seal")

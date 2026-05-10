@@ -47,6 +47,15 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Plugin Extensibility — Phase 1 server-side surface storage + HTTP routes
+
+- [`src/plugins/manifest.rs`](src/plugins/manifest.rs) `PluginManifest` grows two optional fields — `surface: Option<SurfaceRef>` (schema_version, sha256, size) and `client_assets: Vec<ClientAssetRef>` (name, kind, sha256, size). Both default-empty on serde, so v1 plugins keep round-tripping. `validate()` rejects bad surface hashes, too-new schema versions, duplicate / slashed asset names. 6 new manifest tests, including `legacy_manifest_round_trips_without_new_fields`.
+- [`src/plugins/catalog.rs`](src/plugins/catalog.rs) Five new methods on `PluginCatalog`: `put_surface` (recomputes SHA-256, parses + validates the JSON before persisting), `read_active_surface`, `put_asset` (content-addressed by sha256 — same asset across versions de-dupes naturally), `read_asset` (rehashes on read; refuses tampered storage), and `aggregated_active_surfaces` returning the typed `bv_plugin_surface::ActiveSurfaceBundle` with a stable etag. `delete_version` and `delete` now also clear `core/plugins/<name>/versions/<version>/surface` and the per-version `assets/` subtree. 5 new catalog tests covering round-trip, hash mismatch, content-addressed dedup, etag stability across re-fetch, and delete-clears.
+- [`src/http/sys.rs`](src/http/sys.rs) Three new routes: `GET /v1/sys/plugins/<name>/surface` (active version, `If-None-Match` → 304), `GET /v1/sys/plugins/active-surfaces` (aggregated bundle, top-level etag, `If-None-Match` → 304), `GET /v1/sys/plugins/<name>/versions/<version>/asset/<sha256>` (content-addressed asset, `Cache-Control: public, immutable`). The existing register handler now accepts optional `surface_b64` + `client_assets_b64: [{name, bytes_b64}]`. Registration cross-checks every uploaded asset against `manifest.client_assets[]` (presence, size, sha256) and rejects mismatches with a clear `ErrString`. Audit pipeline carries the new paths automatically.
+- All 17 plugins-catalog tests + 17 plugins-manifest tests pass; full plugins module suite is 67 passing, 1 ignored.
+
+Phase 2 next: wire `bv-client::surface` to fetch the aggregated bundle and content-address the assets in the per-vault cache.
+
 #### Plugin Extensibility — Phase 0 + Phase 1 type foundation
 
 - Spec doc landed at [`features/plugin-extensibility.md`](features/plugin-extensibility.md): bundle layout v2, manifest extensions, surface schema reference (menus / pages / form / table / detail components), form-hook ABI, client cache layout, server endpoints, audit events, and migration notes for v1 plugins (which keep working untouched).

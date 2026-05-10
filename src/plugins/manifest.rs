@@ -163,6 +163,50 @@ pub struct PluginManifest {
     /// hex-encoded ML-DSA-65 public-key bytes.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub signing_key: String,
+
+    /// Plugin Extensibility v1: surface manifest reference. Present
+    /// when the plugin ships a `surface.json` declaring menus / pages
+    /// / forms for the GUI. Validated against the bundled bytes at
+    /// registration. Absent for v1 plugins, which keep working
+    /// unchanged via the existing admin-only Plugins page. See
+    /// [`features/plugin-extensibility.md`](../features/plugin-extensibility.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<SurfaceRef>,
+
+    /// Plugin Extensibility v1: client-side assets the plugin ships
+    /// (today: form-hook WASM modules). Each entry is content-addressed
+    /// by `sha256` and fetched by clients via the per-version asset
+    /// endpoint. Empty for plugins with no client-side hooks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub client_assets: Vec<ClientAssetRef>,
+}
+
+/// Plugin Extensibility v1: pointer to the plugin's `surface.json`.
+/// The hash gets verified at registration and on every catalog read so
+/// the surface a client receives matches what the operator pinned.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SurfaceRef {
+    /// `surface.json`'s `schema_version`. Mirrored on the manifest so
+    /// the catalog can refuse a too-new surface without parsing the
+    /// JSON. Bumped per the central [`bv_plugin_surface`] crate.
+    pub schema_version: u32,
+    /// SHA-256 of the surface JSON bytes, hex-encoded. The catalog
+    /// recomputes on read; a mismatch is treated as tampering.
+    pub sha256: String,
+    /// Size of the surface JSON in bytes.
+    pub size: u64,
+}
+
+/// Plugin Extensibility v1: declaration of one client-side asset.
+/// Today only `kind = "form-hook"` is honoured by the GUI; future
+/// kinds (e.g. `"icon"`, `"css-token"`) will be added behind a schema
+/// version bump on the surface, not the manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClientAssetRef {
+    pub name: String,
+    pub kind: String,
+    pub sha256: String,
+    pub size: u64,
 }
 
 fn default_abi_version() -> String {
@@ -249,6 +293,26 @@ impl PluginManifest {
                 return Err("config_schema field of kind=select must declare options");
             }
         }
+        if let Some(s) = &self.surface {
+            if s.sha256.len() != 64 || !s.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err("surface.sha256 must be 64 hex chars");
+            }
+            if s.schema_version > bv_plugin_surface::CURRENT_SCHEMA_VERSION {
+                return Err("surface.schema_version is newer than this host supports");
+            }
+        }
+        let mut asset_names = std::collections::BTreeSet::new();
+        for a in &self.client_assets {
+            if a.name.trim().is_empty() || a.name.contains('/') || a.name.contains("..") {
+                return Err("client_assets entry has invalid name");
+            }
+            if !asset_names.insert(a.name.clone()) {
+                return Err("client_assets entries must have unique names");
+            }
+            if a.sha256.len() != 64 || !a.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err("client_assets entry sha256 must be 64 hex chars");
+            }
+        }
         Ok(())
     }
 }
@@ -271,6 +335,8 @@ mod tests {
             config_schema: vec![],
             signature: String::new(),
             signing_key: String::new(),
+            surface: None,
+            client_assets: vec![],
         }
     }
 
@@ -356,6 +422,94 @@ mod tests {
             options: vec![],
         });
         assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn accepts_manifest_with_surface() {
+        let mut m = fixture();
+        m.surface = Some(SurfaceRef {
+            schema_version: 1,
+            sha256: "0".repeat(64),
+            size: 256,
+        });
+        m.client_assets.push(ClientAssetRef {
+            name: "form-hooks.wasm".to_string(),
+            kind: "form-hook".to_string(),
+            sha256: "1".repeat(64),
+            size: 4096,
+        });
+        m.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_bad_surface_sha256() {
+        let mut m = fixture();
+        m.surface = Some(SurfaceRef {
+            schema_version: 1,
+            sha256: "deadbeef".to_string(),
+            size: 0,
+        });
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_too_new_surface_schema_version() {
+        let mut m = fixture();
+        m.surface = Some(SurfaceRef {
+            schema_version: 999,
+            sha256: "0".repeat(64),
+            size: 0,
+        });
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_client_asset_names() {
+        let mut m = fixture();
+        m.client_assets.push(ClientAssetRef {
+            name: "h.wasm".to_string(),
+            kind: "form-hook".to_string(),
+            sha256: "0".repeat(64),
+            size: 1,
+        });
+        m.client_assets.push(ClientAssetRef {
+            name: "h.wasm".to_string(),
+            kind: "form-hook".to_string(),
+            sha256: "1".repeat(64),
+            size: 1,
+        });
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_client_asset_name_with_slash() {
+        let mut m = fixture();
+        m.client_assets.push(ClientAssetRef {
+            name: "../escape.wasm".to_string(),
+            kind: "form-hook".to_string(),
+            sha256: "0".repeat(64),
+            size: 1,
+        });
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn legacy_manifest_round_trips_without_new_fields() {
+        // A v1 plugin's serialised manifest never had `surface` or
+        // `client_assets`. Make sure we still parse one — the redesign
+        // is supposed to be additive.
+        let json = r#"{
+            "name": "old-plugin",
+            "version": "0.1.0",
+            "plugin_type": "secret-engine",
+            "runtime": "wasm",
+            "abi_version": "1.0",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "size": 1024
+        }"#;
+        let m: super::PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(m.surface.is_none());
+        assert!(m.client_assets.is_empty());
     }
 
     #[test]

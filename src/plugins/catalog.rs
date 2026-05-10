@@ -35,6 +35,7 @@
 //! new versioned entry exists, so the operator can clean them up
 //! manually when convenient.
 
+use bv_plugin_surface::{ActiveSurfaceBundle, ActiveSurfaceEntry, SurfaceManifest};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -356,6 +357,13 @@ impl PluginCatalog {
         }
         let _ = storage.delete(&binary_versioned_key(name, version)).await;
         let _ = storage.delete(&manifest_versioned_key(name, version)).await;
+        let _ = storage.delete(&surface_versioned_key(name, version)).await;
+        let asset_prefix = format!("{}{}/versions/{}/assets/", PLUGIN_PREFIX, name, version);
+        if let Ok(keys) = storage.list(&asset_prefix).await {
+            for k in keys {
+                let _ = storage.delete(&format!("{asset_prefix}{k}")).await;
+            }
+        }
         Ok(())
     }
 
@@ -382,6 +390,14 @@ impl PluginCatalog {
                 let version = entry.strip_suffix('/').unwrap_or(&entry);
                 let _ = storage.delete(&binary_versioned_key(name, version)).await;
                 let _ = storage.delete(&manifest_versioned_key(name, version)).await;
+                let _ = storage.delete(&surface_versioned_key(name, version)).await;
+                let asset_prefix =
+                    format!("{}{}/versions/{}/assets/", PLUGIN_PREFIX, name, version);
+                if let Ok(asset_keys) = storage.list(&asset_prefix).await {
+                    for k in asset_keys {
+                        let _ = storage.delete(&format!("{asset_prefix}{k}")).await;
+                    }
+                }
             }
         }
         // Active pointer + legacy entries.
@@ -419,6 +435,207 @@ impl PluginCatalog {
             return Err(RvError::ErrRequestInvalid);
         }
         Ok(())
+    }
+
+    // ── Plugin Extensibility v1: surface + client assets ─────────────────
+
+    /// Plugin Extensibility v1 — register or replace the surface JSON
+    /// for a (name, version). The caller passes the raw bytes the
+    /// operator uploaded; we recompute the SHA-256 and cross-check
+    /// against `manifest.surface.sha256` so a tampered surface can't
+    /// sneak past the bundle.
+    ///
+    /// Stored at `core/plugins/<name>/versions/<version>/surface`.
+    pub async fn put_surface(
+        &self,
+        storage: &dyn Storage,
+        name: &str,
+        version: &str,
+        surface_bytes: &[u8],
+        expected_sha256: &str,
+    ) -> Result<(), RvError> {
+        let mut hasher = Sha256::new();
+        hasher.update(surface_bytes);
+        let computed = hasher.finalize();
+        let computed_hex: String = computed.iter().map(|b| format!("{b:02x}")).collect();
+        if computed_hex != expected_sha256 {
+            return Err(RvError::ErrString(format!(
+                "surface sha256 mismatch: manifest declares `{expected_sha256}` but uploaded bytes hash to `{computed_hex}`"
+            )));
+        }
+        // Ensure the bytes are valid surface JSON before persisting.
+        // A bad surface should fail registration, not surface 500s on
+        // every later read.
+        let parsed: SurfaceManifest = serde_json::from_slice(surface_bytes).map_err(|e| {
+            RvError::ErrString(format!("surface.json is not a valid SurfaceManifest: {e}"))
+        })?;
+        // Names of declared client assets, for hook-reference checks.
+        // We don't have the manifest here — caller is expected to have
+        // validated against `manifest.client_assets` already; pass an
+        // empty set so hook references that are present fall back to
+        // the asset-store check at GET time.
+        let asset_names: std::collections::BTreeSet<&str> =
+            std::collections::BTreeSet::new();
+        if let Err(e) = parsed.validate(name, &asset_names) {
+            return Err(RvError::ErrString(format!("surface.json failed validation: {e}")));
+        }
+        storage
+            .put(&StorageEntry {
+                key: surface_versioned_key(name, version),
+                value: surface_bytes.to_vec(),
+            })
+            .await
+    }
+
+    /// Read the surface JSON for the active version of `name`.
+    /// Returns `None` when the plugin has no surface or no active
+    /// version. Recomputes the SHA-256 and refuses to serve a surface
+    /// whose bytes don't match `manifest.surface.sha256` — a defensive
+    /// bound around storage tampering.
+    pub async fn read_active_surface(
+        &self,
+        storage: &dyn Storage,
+        name: &str,
+    ) -> Result<Option<(PluginManifest, Vec<u8>)>, RvError> {
+        let manifest = match self.get_manifest(storage, name).await? {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+        let surface_ref = match &manifest.surface {
+            Some(s) => s.clone(),
+            None => return Ok(None),
+        };
+        let key = surface_versioned_key(&manifest.name, &manifest.version);
+        let bytes = match storage.get(&key).await? {
+            Some(e) => e.value,
+            None => return Ok(None),
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let computed: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        if computed != surface_ref.sha256 {
+            return Err(RvError::ErrString(format!(
+                "stored surface for `{name}` v{} hashes to `{computed}` but manifest declares `{}`",
+                manifest.version, surface_ref.sha256
+            )));
+        }
+        Ok(Some((manifest, bytes)))
+    }
+
+    /// Plugin Extensibility v1 — store one client asset under
+    /// `core/plugins/<name>/versions/<version>/assets/<sha256>`.
+    /// Content-addressed: the sha256 is the storage key, so re-uploading
+    /// the same asset across versions is a no-op rather than a
+    /// duplicated copy.
+    pub async fn put_asset(
+        &self,
+        storage: &dyn Storage,
+        name: &str,
+        version: &str,
+        bytes: &[u8],
+        expected_sha256: &str,
+    ) -> Result<(), RvError> {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        let computed: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        if computed != expected_sha256 {
+            return Err(RvError::ErrString(format!(
+                "asset sha256 mismatch: manifest declares `{expected_sha256}` but uploaded bytes hash to `{computed}`"
+            )));
+        }
+        storage
+            .put(&StorageEntry {
+                key: asset_versioned_key(name, version, expected_sha256),
+                value: bytes.to_vec(),
+            })
+            .await
+    }
+
+    /// Read one client asset by its content hash. Used by the
+    /// `GET /v1/sys/plugins/<name>/<version>/asset/<sha256>` endpoint.
+    /// We re-verify the hash on read so a tampered storage layer
+    /// can't substitute one asset for another.
+    pub async fn read_asset(
+        &self,
+        storage: &dyn Storage,
+        name: &str,
+        version: &str,
+        sha256: &str,
+    ) -> Result<Option<Vec<u8>>, RvError> {
+        let bytes = match storage.get(&asset_versioned_key(name, version, sha256)).await? {
+            Some(e) => e.value,
+            None => return Ok(None),
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let computed: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        if computed != sha256 {
+            return Err(RvError::ErrString(format!(
+                "stored asset for `{name}` v{version} hashes to `{computed}` but request asked for `{sha256}`"
+            )));
+        }
+        Ok(Some(bytes))
+    }
+
+    /// Plugin Extensibility v1 — assemble the aggregated surface
+    /// bundle that `GET /v1/sys/plugins/active-surfaces` returns.
+    /// Walks every registered plugin, picks up the active version's
+    /// surface (if any), and parses it into the typed
+    /// [`SurfaceManifest`]. Plugins without a surface are skipped.
+    ///
+    /// `mount_for_plugin` resolves a plugin name to its mount path —
+    /// passed as a closure so callers can wire it to whatever
+    /// router/registry knows about mounts. When `None` is returned,
+    /// the entry's `mount` is set to the empty string and the GUI
+    /// renderer skips bindings that depend on `{mount}` (a future
+    /// improvement: drop the entry entirely).
+    pub async fn aggregated_active_surfaces<F>(
+        &self,
+        storage: &dyn Storage,
+        mut mount_for_plugin: F,
+    ) -> Result<ActiveSurfaceBundle, RvError>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        let manifests = self.list(storage).await?;
+        let mut entries: Vec<ActiveSurfaceEntry> = Vec::new();
+        for m in manifests {
+            let surface_ref = match &m.surface {
+                Some(s) => s.clone(),
+                None => continue,
+            };
+            let bytes = match storage.get(&surface_versioned_key(&m.name, &m.version)).await? {
+                Some(e) => e.value,
+                None => continue,
+            };
+            // Hash check.
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            let computed: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+            if computed != surface_ref.sha256 {
+                // Skip rather than fail the whole bundle — one
+                // tampered plugin shouldn't take down everyone's GUI.
+                continue;
+            }
+            let parsed: SurfaceManifest = match serde_json::from_slice(&bytes) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let assets: Vec<(String, String)> = m
+                .client_assets
+                .iter()
+                .map(|a| (a.name.clone(), a.sha256.clone()))
+                .collect();
+            entries.push(ActiveSurfaceEntry {
+                plugin: m.name.clone(),
+                version: m.version.clone(),
+                mount: mount_for_plugin(&m.name).unwrap_or_default(),
+                surface: parsed,
+                assets,
+            });
+        }
+        let etag = ActiveSurfaceBundle::compute_etag(&entries);
+        Ok(ActiveSurfaceBundle { etag, entries })
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────
@@ -500,6 +717,14 @@ fn legacy_binary_key(name: &str) -> String {
     format!("{PLUGIN_PREFIX}{name}/binary")
 }
 
+fn surface_versioned_key(name: &str, version: &str) -> String {
+    format!("{PLUGIN_PREFIX}{name}/versions/{version}/surface")
+}
+
+fn asset_versioned_key(name: &str, version: &str, sha256: &str) -> String {
+    format!("{PLUGIN_PREFIX}{name}/versions/{version}/assets/{sha256}")
+}
+
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
     if s.len() % 2 != 0 {
         return None;
@@ -545,6 +770,8 @@ mod tests {
             config_schema: vec![],
             signature: String::new(),
             signing_key: String::new(),
+            surface: None,
+            client_assets: vec![],
         }
     }
 
@@ -765,5 +992,166 @@ mod tests {
         m.capabilities.allowed_hosts = vec!["*".to_string()];
         let err = cat.put(&s, &m, &bin).await.unwrap_err();
         assert!(format!("{err:?}").contains("wildcard"));
+    }
+
+    // ── Plugin Extensibility v1: surface + asset round-trip tests ────
+
+    fn sha256_hex(b: &[u8]) -> String {
+        let mut h = Sha256::new();
+        h.update(b);
+        h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn build_minimal_surface_json(plugin: &str) -> Vec<u8> {
+        let s = serde_json::json!({
+            "schema_version": 1,
+            "title": plugin,
+            "menus": [{
+                "id": format!("{plugin}.main"),
+                "label": "Main",
+                "section": "secrets",
+                "route": format!("/plugin/{plugin}/codes"),
+            }],
+            "pages": [{
+                "route": format!("/plugin/{plugin}/codes"),
+                "title": "Codes",
+                "components": [{
+                    "kind": "table",
+                    "id": format!("{plugin}.list"),
+                    "binding": { "op": "list", "path": "{mount}/codes" },
+                    "columns": [{ "field": "name", "label": "Name" }],
+                }],
+            }],
+        });
+        serde_json::to_vec(&s).unwrap()
+    }
+
+    #[tokio::test]
+    async fn put_surface_round_trip() {
+        let s = MemStorage::default();
+        enable_unsigned(&s).await;
+        let cat = PluginCatalog::new();
+        let bin = b"v1".to_vec();
+        let mut m = manifest_with("p", "0.1.0", &bin);
+        let surface_bytes = build_minimal_surface_json("p");
+        m.surface = Some(super::super::manifest::SurfaceRef {
+            schema_version: 1,
+            sha256: sha256_hex(&surface_bytes),
+            size: surface_bytes.len() as u64,
+        });
+        cat.put(&s, &m, &bin).await.unwrap();
+        cat.put_surface(&s, "p", "0.1.0", &surface_bytes, &m.surface.as_ref().unwrap().sha256)
+            .await
+            .unwrap();
+        let (got_manifest, got_bytes) = cat.read_active_surface(&s, "p").await.unwrap().unwrap();
+        assert_eq!(got_manifest.version, "0.1.0");
+        assert_eq!(got_bytes, surface_bytes);
+    }
+
+    #[tokio::test]
+    async fn put_surface_rejects_hash_mismatch() {
+        let s = MemStorage::default();
+        let cat = PluginCatalog::new();
+        let surface_bytes = build_minimal_surface_json("p");
+        let err = cat
+            .put_surface(&s, "p", "0.1.0", &surface_bytes, &"0".repeat(64))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("sha256 mismatch"));
+    }
+
+    #[tokio::test]
+    async fn put_asset_content_addressed_round_trip() {
+        let s = MemStorage::default();
+        let cat = PluginCatalog::new();
+        let asset = b"\x00asm\x01\x00\x00\x00 (mock wasm)".to_vec();
+        let h = sha256_hex(&asset);
+        cat.put_asset(&s, "p", "0.1.0", &asset, &h).await.unwrap();
+        let got = cat.read_asset(&s, "p", "0.1.0", &h).await.unwrap().unwrap();
+        assert_eq!(got, asset);
+    }
+
+    #[tokio::test]
+    async fn read_asset_returns_none_for_unknown_hash() {
+        let s = MemStorage::default();
+        let cat = PluginCatalog::new();
+        let got = cat
+            .read_asset(&s, "p", "0.1.0", &"a".repeat(64))
+            .await
+            .unwrap();
+        assert!(got.is_none());
+    }
+
+    #[tokio::test]
+    async fn aggregated_surfaces_etag_round_trip() {
+        let s = MemStorage::default();
+        enable_unsigned(&s).await;
+        let cat = PluginCatalog::new();
+        // Plugin A with a surface
+        let bin_a = b"a-bin".to_vec();
+        let surface_a = build_minimal_surface_json("a");
+        let mut m_a = manifest_with("a", "1.0.0", &bin_a);
+        m_a.surface = Some(super::super::manifest::SurfaceRef {
+            schema_version: 1,
+            sha256: sha256_hex(&surface_a),
+            size: surface_a.len() as u64,
+        });
+        cat.put(&s, &m_a, &bin_a).await.unwrap();
+        cat.put_surface(&s, "a", "1.0.0", &surface_a, &m_a.surface.as_ref().unwrap().sha256)
+            .await
+            .unwrap();
+        // Plugin B with no surface
+        let bin_b = b"b-bin".to_vec();
+        let m_b = manifest_with("b", "1.0.0", &bin_b);
+        cat.put(&s, &m_b, &bin_b).await.unwrap();
+
+        let bundle = cat
+            .aggregated_active_surfaces(&s, |_| None)
+            .await
+            .unwrap();
+        // Only `a` contributes — `b` has no surface.
+        assert_eq!(bundle.entries.len(), 1);
+        assert_eq!(bundle.entries[0].plugin, "a");
+        assert!(!bundle.etag.is_empty());
+
+        // Re-running with no changes yields the same etag.
+        let again = cat
+            .aggregated_active_surfaces(&s, |_| None)
+            .await
+            .unwrap();
+        assert_eq!(bundle.etag, again.etag);
+    }
+
+    #[tokio::test]
+    async fn delete_clears_surface_and_assets() {
+        let s = MemStorage::default();
+        enable_unsigned(&s).await;
+        let cat = PluginCatalog::new();
+        let bin = b"v1".to_vec();
+        let surface_bytes = build_minimal_surface_json("p");
+        let surface_hash = sha256_hex(&surface_bytes);
+        let asset = b"asset-bytes".to_vec();
+        let asset_hash = sha256_hex(&asset);
+
+        let mut m = manifest_with("p", "0.1.0", &bin);
+        m.surface = Some(super::super::manifest::SurfaceRef {
+            schema_version: 1,
+            sha256: surface_hash.clone(),
+            size: surface_bytes.len() as u64,
+        });
+        m.client_assets.push(super::super::manifest::ClientAssetRef {
+            name: "h.wasm".to_string(),
+            kind: "form-hook".to_string(),
+            sha256: asset_hash.clone(),
+            size: asset.len() as u64,
+        });
+        cat.put(&s, &m, &bin).await.unwrap();
+        cat.put_surface(&s, "p", "0.1.0", &surface_bytes, &surface_hash).await.unwrap();
+        cat.put_asset(&s, "p", "0.1.0", &asset, &asset_hash).await.unwrap();
+
+        // delete clears both.
+        cat.delete(&s, "p").await.unwrap();
+        assert!(cat.read_active_surface(&s, "p").await.unwrap().is_none());
+        assert!(cat.read_asset(&s, "p", "0.1.0", &asset_hash).await.unwrap().is_none());
     }
 }

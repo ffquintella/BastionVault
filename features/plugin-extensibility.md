@@ -244,7 +244,7 @@ The cache is invalidated by:
 |---|---|---|
 | `GET /v1/sys/plugins/<name>/surface` | `read` on `sys/plugins/<name>` | Active-version surface. Honours `If-None-Match`. |
 | `GET /v1/sys/plugins/active-surfaces` | `read` on `sys/plugins/active-surfaces` | Aggregated bundle: every active plugin's surface, plus a top-level ETag. |
-| `GET /v1/sys/plugins/<name>/<version>/asset/<sha256>` | `read` on `sys/plugins/<name>` | Raw bytes of a referenced client asset, content-hash-verified. |
+| `GET /v1/sys/plugins/<name>/versions/<version>/asset/<sha256>` | `read` on `sys/plugins/<name>` | Raw bytes of a referenced client asset, content-hash-verified. Cached forever (immutable). |
 
 The aggregated endpoint is the one clients hit on login. The per-plugin endpoint exists for the operator UX preview pane.
 
@@ -275,7 +275,7 @@ Two new event types:
 | Phase | What | Status |
 |---|---|---|
 | 0 | Spec ratification (this doc + ABI plan) | **Done** |
-| 1 | Server surface storage + types crate + 3 HTTP routes | In Progress |
+| 1 | Server surface storage + types crate + 3 HTTP routes | **Done** |
 | 2 | `bv-client` surface fetch + content-addressed cache | Todo |
 | 3 | GUI dynamic surface rendering | Todo |
 | 4 | Form-hook ABI in Tauri backend | Todo |

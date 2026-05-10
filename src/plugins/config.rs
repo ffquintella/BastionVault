@@ -227,6 +227,8 @@ mod tests {
             ],
             signature: String::new(),
             signing_key: String::new(),
+            surface: None,
+            client_assets: vec![],
         }
     }
 

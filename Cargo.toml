@@ -42,6 +42,7 @@ resolver = "2"
 
 [dependencies]
 bv_crypto = { path = "crates/bv_crypto" }
+bv_plugin_surface = { path = "crates/bv_plugin_surface" }
 aes-gcm = "0.10"
 anyhow = { version = "^1.0" }
 thiserror = { version = "^2.0" }

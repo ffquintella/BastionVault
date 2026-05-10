@@ -975,6 +975,8 @@ mod tests {
             config_schema: vec![],
             signature: String::new(),
             signing_key: String::new(),
+            surface: None,
+            client_assets: vec![],
         }
     }
 

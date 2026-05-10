@@ -221,6 +221,8 @@ mod tests {
             config_schema: vec![],
             signature: sig.into(),
             signing_key: signer.into(),
+            surface: None,
+            client_assets: vec![],
         }
     }
 

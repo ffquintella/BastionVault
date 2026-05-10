@@ -218,7 +218,7 @@ Each phase ships independently and leaves the system in a working state. Phase b
   |---|---|---|
   | `GET /v1/sys/plugins/<name>/surface` | `sys_plugins_surface_get_handler` | Active-version surface + ETag |
   | `GET /v1/sys/plugins/active-surfaces` | `sys_plugins_active_surfaces_handler` | Aggregated surface bundle (one round trip) |
-  | `GET /v1/sys/plugins/<name>/<version>/asset/<sha256>` | `sys_plugins_asset_get_handler` | Raw asset by content hash |
+  | `GET /v1/sys/plugins/<name>/versions/<version>/asset/<sha256>` | `sys_plugins_asset_get_handler` | Raw asset by content hash |
 
 - Audit emits `plugin.surface.published`, `plugin.surface.fetched`.
 - Operator `min_policy` validation: if a referenced policy doesn't exist, registration fails with a clear error.
