@@ -2,6 +2,7 @@ mod backend;
 mod commands;
 mod embedded;
 mod error;
+mod plugin_hooks;
 mod preferences;
 mod local_keystore;
 mod secure_store;
@@ -224,6 +225,7 @@ pub fn run() {
             commands::plugin_surface::plugin_surfaces_refresh,
             commands::plugin_surface::plugin_surface_asset,
             commands::plugin_surface::plugin_surface_dispatch,
+            commands::plugin_surface::plugin_surface_hook,
             // Secrets
             commands::secrets::list_secrets,
             commands::secrets::read_secret,

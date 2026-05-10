@@ -158,6 +158,87 @@ pub async fn plugin_surface_asset<R: Runtime>(
     Ok(PluginSurfaceAssetResult { bytes_b64 })
 }
 
+// ── Form-hook execution ──────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct PluginSurfaceHookArgs {
+    pub plugin: String,
+    pub version: String,
+    /// SHA-256 of the asset bytes the manifest declared. The cache
+    /// is content-addressed, so this is the storage key as well as
+    /// the integrity check the host re-verifies on read.
+    pub sha256: String,
+    /// One of `validate` / `pre_submit` / `post_response`. The
+    /// frontend picks based on the lifecycle event; the host doesn't
+    /// constrain the name — a hook is free to expose its own helpers
+    /// — but only those three are wired into `SurfaceForm` today.
+    pub export: String,
+    /// JSON bytes the hook receives in its linear memory. Capped by
+    /// `plugin_hooks::MAX_PAYLOAD_BYTES` so a buggy form can't waste
+    /// the entire memory budget on input alone.
+    pub input_json: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PluginSurfaceHookResult {
+    /// The hook's return value, as a JSON string. Caller is expected
+    /// to `JSON.parse` it on the frontend side; we keep it opaque
+    /// here so the host doesn't have to know the shape of every
+    /// hook response.
+    pub output_json: String,
+}
+
+#[tauri::command]
+pub async fn plugin_surface_hook<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    args: PluginSurfaceHookArgs,
+) -> CmdResult<PluginSurfaceHookResult> {
+    if args.sha256.len() != 64 || !args.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(CommandError::from(
+            "plugin_surface_hook: sha256 must be 64 hex chars",
+        ));
+    }
+    // Resolve the asset bytes through the existing surface cache.
+    // `ensure_asset` enforces the SHA-256 match on both the cached
+    // and freshly-downloaded paths, so by the time we hand bytes to
+    // the WASM compiler we know they match the manifest declaration.
+    let cache = resolve_cache(&app, &state).await?;
+    let backend = current_backend(&state).await?;
+    let token = current_token(&state).await;
+    let bytes = bv_client::ensure_asset(
+        &*backend,
+        &cache,
+        &args.plugin,
+        &args.version,
+        &args.sha256,
+        &token,
+    )
+    .await
+    .map_err(CommandError::from)?
+    .ok_or_else(|| {
+        CommandError::from(format!(
+            "plugin_surface_hook: asset `{}` not available on the server",
+            args.sha256
+        ))
+    })?;
+
+    // Wasmtime calls are CPU-bound — park them on the blocking pool
+    // so the Tauri command worker can keep responding to other
+    // commands during a long compile.
+    let sha = args.sha256.clone();
+    let export = args.export.clone();
+    let input = args.input_json.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        crate::plugin_hooks::run_hook(&sha, &bytes, &export, &input)
+    })
+    .await
+    .map_err(|e| CommandError::from(format!("plugin_surface_hook: join: {e}")))?
+    .map_err(|e| CommandError::from(format!("plugin_surface_hook: {e}")))?;
+
+    Ok(PluginSurfaceHookResult { output_json: output })
+}
+
 // ── Dispatch (the generic surface → backend bridge) ──────────────────
 
 #[derive(Debug, Deserialize)]

@@ -124,6 +124,21 @@ p12-keystore = { version = "0.2.1", features = ["pbes1"] }
 # the PKCS#12 import flow hands back to the server's `pem_bundle`
 # splitter. Mirrors the `pem` pin the host crate uses.
 pem = "3.0"
+# Plugin Extensibility v1 / Phase 4: form-hook sandbox.
+# Runs operator-trusted, plugin-supplied WASM bytes inside the Tauri
+# backend with the same fuel + memory limits the server's plugin
+# runtime uses (256 MiB, 100 M instructions per call). No host
+# imports, no DOM access — the only ABI surface is a string-in /
+# string-out call over the plugin's linear memory.
+# Version-pinned to match the host crate's `wasmtime = "43"` so the
+# two crates share a single compiled artifact in the workspace
+# build cache.
+wasmtime = { version = "43", default-features = false, features = ["cranelift", "runtime"] }
+# Used by `plugin_hooks::HookError` for `#[derive(Error)]`. Other GUI
+# error types historically `impl Display` by hand; the hook runner
+# has enough variants that the macro saves a meaningful chunk of
+# boilerplate.
+thiserror = "2"
 
 [target.'cfg(windows)'.dependencies]
 # Force winapi's "std" feature so winapi::ctypes::c_void unifies with
@@ -157,3 +172,9 @@ cloud_targets = ["bastion_vault/cloud_targets"]
 # selects ML-DSA-65 pays no runtime cost.
 ssh_pqc = ["bastion_vault/ssh_pqc"]
 mcp_local_dev = ["dep:tauri-plugin-mcp-bridge"]
+
+[dev-dependencies]
+# `wat` lets the plugin_hooks tests assemble small WAT fixtures
+# without dragging the wasmtime `wat` feature into the runtime
+# build (which would balloon the GUI binary).
+wat = "1"

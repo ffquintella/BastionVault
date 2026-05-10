@@ -85,7 +85,7 @@ export function SurfaceRouter() {
                 {c.kind === "form" && (
                   <SurfaceForm
                     spec={c}
-                    mount={entry.mount}
+                    entry={entry}
                     onSubmitted={() => void refresh()}
                   />
                 )}

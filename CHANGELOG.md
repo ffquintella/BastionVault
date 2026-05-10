@@ -47,6 +47,17 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Plugin Extensibility — Phase 4 form-hook WASM sandbox
+
+- New module [`gui/src-tauri/src/plugin_hooks.rs`](gui/src-tauri/src/plugin_hooks.rs). Pinned to the host crate's `wasmtime = "43"` so the workspace shares one compiled artifact. Per-call sandbox: 100 M instructions of fuel, 256 MiB memory ceiling via `StoreLimitsBuilder`, 4 MiB cap on input/output JSON, NaN canonicalisation on, **zero host imports** — a hook either runs as pure compute on a string in / string out or fails to instantiate. The ABI mirrors the existing `bv_run` shape so plugin authors using `bastion-plugin-sdk` reuse the same export pattern: `bv_alloc(size) -> i32`, `<export>(ptr, len) -> i64` (packed `(ptr<<32)|len`). Process-global Wasmtime engine + a sha256-keyed compiled-module cache so repeated hook calls skip cranelift. 8 unit tests: round-trip, cache short-circuit, missing export, missing `bv_alloc`, out-of-bounds output, fuel exhaustion, oversize input, host-imports-rejected.
+- New Tauri command `plugin_surface_hook` in [`gui/src-tauri/src/commands/plugin_surface.rs`](gui/src-tauri/src/commands/plugin_surface.rs). Resolves the asset bytes through the existing surface cache (content-addressed by `sha256`, hash-verified on every read), parks the wasmtime call on `tokio::task::spawn_blocking` so the Tauri command worker keeps responding during a long compile, returns the hook's UTF-8 JSON output verbatim.
+- Frontend wiring:
+  - [`gui/src/lib/api.ts`](gui/src/lib/api.ts) `pluginSurfaceHook(plugin, version, sha256, export, inputJson)` invoke wrapper.
+  - [`gui/src/components/surface/SurfaceForm.tsx`](gui/src/components/surface/SurfaceForm.tsx) on submit, when the spec declares `hook: "<asset>#<export>"`, looks the asset up in the entry's `client_assets[]` table, calls the hook with the form values JSON, and parses the response: `{ ok: false, errors: { field: msg } }` blocks submit and surfaces per-field error messages on the matching `<Input>` / `<SecretInput>` / `<Textarea>` / `<select>`; `{ values: {...} }` rewrites the payload (pre-submit transform). Hook failures (compile error, fuel exhaustion, missing export) are non-fatal — log to console and submit the unrewritten values, since server-side ACLs remain authoritative. SurfaceForm now also takes the full `entry` instead of just `mount` so the asset table is reachable; `<SurfaceRouter>` updated to pass it.
+- Verified: `cargo check -p bastion-vault-gui --no-default-features` clean, `npx tsc --noEmit` clean, all 8 plugin_hooks tests pass, preview boots with zero console errors.
+
+Phase 5 next: long-poll watcher on `active-surfaces` so the GUI auto-refreshes when an operator activates a new plugin version.
+
 #### Plugin Extensibility — Phase 3 GUI dynamic surface rendering
 
 - [`gui/src-tauri/src/state.rs`](gui/src-tauri/src/state.rs) `AppState` gains `plugin_surface_cache: Mutex<Option<SurfaceCache>>`. Lazily resolved to `<dirs::cache>/com.bastionvault.gui/plugins/<vault-id>/` on first use, where `<vault-id>` is `bv_client::vault_id_for(address, "")` — collision-resistant across vaults sharing a host cache dir.

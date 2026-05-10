@@ -1283,6 +1283,27 @@ export const pluginSurfaceDispatch = (
     args: { op, path, mount, params, body: body ?? null },
   }).then((r) => r.data);
 
+/**
+ * Run one form-hook export inside the Tauri-side wasmtime sandbox.
+ * The hook bytes are resolved through the existing surface cache
+ * (content-addressed by `sha256`), so a hot cache short-circuits
+ * the round-trip. `inputJson` and the returned `outputJson` are
+ * raw JSON strings — the caller `JSON.parse`s on the way out so
+ * the GUI doesn't need to know each hook's response shape.
+ *
+ * Plugin Extensibility v1, Phase 4.
+ */
+export const pluginSurfaceHook = (
+  plugin: string,
+  version: string,
+  sha256: string,
+  exportName: string,
+  inputJson: string,
+) =>
+  invoke<{ output_json: string }>("plugin_surface_hook", {
+    args: { plugin, version, sha256, export: exportName, inputJson },
+  }).then((r) => r.output_json);
+
 // ── PKI Secret Engine ─────────────────────────────────────────────
 
 export const pkiListMounts = () => invoke<PkiMountInfo[]>("pki_list_mounts");
