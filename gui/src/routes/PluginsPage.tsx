@@ -1,5 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { Layout } from "../components/Layout";
+import {
+  ActiveSurfaceMapCard,
+  SurfaceStats,
+} from "../components/surface/SurfaceAdminPanel";
 import { Button, Card, Input, Select, Modal, ConfirmModal, Badge, useToast } from "../components/ui";
 import * as api from "../lib/api";
 import type {
@@ -298,6 +302,13 @@ export function PluginsPage() {
           )}
         </Card>
 
+        {/* Plugin Extensibility v1 / Phase 6: aggregated map of every
+            menu the active version of every active plugin contributes,
+            with route-collision detection. Renders nothing useful when
+            no plugin ships a surface yet — the empty state explains
+            what to do. */}
+        <ActiveSurfaceMapCard />
+
         <PluginMetricsPanel />
       </div>
 
@@ -387,6 +398,7 @@ function PluginRow({
           </p>
         )}
         <CapabilityBadges capabilities={plugin.capabilities} />
+        <SurfaceStats pluginName={plugin.name} />
       </div>
       <div className="flex flex-col gap-1 shrink-0">
         <Button size="sm" variant="ghost" onClick={onInvoke}>Invoke</Button>

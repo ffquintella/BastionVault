@@ -280,5 +280,5 @@ Two new event types:
 | 3 | GUI dynamic surface rendering | **Done** |
 | 4 | Form-hook ABI in Tauri backend | **Done** |
 | 5 | Auto-update via long-poll watcher | **Done** |
-| 6 | Operator UX redesign | Todo |
+| 6 | Operator UX redesign | **Done** |
 | 7 | Reference plugin (TOTP) + SDK + docs | Todo |

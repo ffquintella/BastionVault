@@ -47,6 +47,17 @@ EXAMPLE ENTRY:
 
 ### Added
 
+#### Plugin Extensibility — Phase 6 operator UX redesign
+
+- New module [`gui/src/components/surface/SurfaceAdminPanel.tsx`](gui/src/components/surface/SurfaceAdminPanel.tsx) with two operator-facing pieces driven off the existing `usePluginSurfacesStore` (so Phase 5's watcher loop refreshes both views automatically):
+  - `<SurfaceStats pluginName>` — inline cluster on each `PluginRow` showing `M menus / P pages / A assets` plus a *Preview surface* trigger. Renders nothing for v1 plugins that ship no surface.
+  - `<PreviewSurfaceModal>` — opens from *Preview surface*. Two tabs: **Structured** view (mount + schema_version chips, menu list with section / route / `min_policy` annotations, page list grouped by ID with the component kinds inside, client-asset table with truncated SHA-256), and **Raw JSON** fallback for anything the structured view doesn't surface yet.
+  - `<ActiveSurfaceMapCard>` — full-width card below the registered-plugins list. Aggregates every active plugin's menu contributions grouped by section (`secrets` / `sharing` / `admin` / `settings`), annotates `min_policy` requirements, and runs a route-collision detector that flags any `route` declared by more than one plugin (almost always a copy-paste bug). Manual *Refresh* button + a truncated bundle ETag for support.
+- [`gui/src/routes/PluginsPage.tsx`](gui/src/routes/PluginsPage.tsx) wires `<SurfaceStats>` into `<PluginRow>` next to the existing `<CapabilityBadges>` and renders `<ActiveSurfaceMapCard />` between *Registered plugins* and *Per-plugin metrics*.
+- Verified: `npx tsc --noEmit` clean, GUI boots with zero console errors.
+
+Phase 7 next: reference plugin (TOTP) shipping `surface.json` + a `validate_create` form-hook + SDK helpers + the operator workflow walkthrough doc.
+
 #### Plugin Extensibility — Phase 5 long-poll auto-update watcher
 
 - [`src/http/sys.rs`](src/http/sys.rs) `sys_plugins_active_surfaces_handler` accepts `?watch=1` (or `watch=true`). When the operator-supplied `If-None-Match` matches the current aggregate ETag, the handler enters a 25-second polling loop (2-second cadence) that returns as soon as the ETag changes — no SSE/WS plumbing, fits the existing actix-web stack, and a missed wakeup is just a one-tick lag. 25-second ceiling leaves 5 s slack before the bv-client default `timeout_global` (30 s) fires.
