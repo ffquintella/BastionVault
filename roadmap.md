@@ -10,9 +10,9 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 |---|---|
 | Done | 42 |
 | Partial | 2 |
-| Todo | 10 |
+| Todo | 11 |
 | Removed | 1 |
-| **Total tracked features** | **55** |
+| **Total tracked features** | **56** |
 
 Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-and-distribution.md)) — three new spec files, no code yet, sequenced into four release waves.
 
@@ -117,6 +117,7 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 |---|---|---|
 | High Availability (Raft via Hiqlite) | Done | [roadmap](roadmaps/hiqlite-default-ha-storage.md) — cluster CLI, PQ TLS, HA fault-injection. |
 | Plugin System | Done | [spec](features/plugin-system.md) — WASM + supervised process runtime, signed manifests, per-plugin metrics, GUI. |
+| Plugin Extensibility (surface manifest, dynamic GUI menus/forms, client cache, auto-update) | Todo | [roadmap](roadmaps/plugin-extensibility-redesign.md) — proposed; 8 phases (≈10 engineer-weeks). |
 | Namespaces / Multi-tenancy | Partial | [spec](features/namespaces-multitenancy.md) |
 | Kubernetes Integration | Todo | [spec](features/kubernetes-integration.md) — `kubernetes` auth backend + CSI driver + agent injector. |
 | Rustion Bastion Integration | Todo | [spec](features/rustion-integration.md) — mediates Resource Connect through a PQC bastion; recording delegated to Rustion. |

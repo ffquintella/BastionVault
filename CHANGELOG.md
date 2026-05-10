@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### Plugin Extensibility — proposed roadmap
+
+- New roadmap doc [`roadmaps/plugin-extensibility-redesign.md`](roadmaps/plugin-extensibility-redesign.md) proposes an additive layer on top of the existing plugin system that lets plugins ship a declarative `surface.json` (menus, JSON-Schema forms, page bindings) plus optional client-side WASM form hooks. The GUI fetches an aggregated active-surface bundle on login, content-addresses the assets in a per-vault cache, and refreshes via a long-poll endpoint on activate. 8 phases, ≈10 engineer-weeks. v1 plugins keep working unchanged. Tracked in [roadmap.md](roadmap.md) with Todo status.
+
 ### Changed
 
 - Version bumped to **0.4.1** across `Cargo.toml`, `gui/src-tauri/Cargo.toml`, `gui/package.json`, `gui/src-tauri/tauri.conf.json` to ship the OpenSSL-removal + remote-backend Sign-In fixes.
