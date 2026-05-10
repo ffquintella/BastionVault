@@ -47,9 +47,11 @@ EXAMPLE ENTRY:
 
 ### Added
 
-#### Plugin Extensibility — proposed roadmap
+#### Plugin Extensibility — Phase 0 + Phase 1 type foundation
 
-- New roadmap doc [`roadmaps/plugin-extensibility-redesign.md`](roadmaps/plugin-extensibility-redesign.md) proposes an additive layer on top of the existing plugin system that lets plugins ship a declarative `surface.json` (menus, JSON-Schema forms, page bindings) plus optional client-side WASM form hooks. The GUI fetches an aggregated active-surface bundle on login, content-addresses the assets in a per-vault cache, and refreshes via a long-poll endpoint on activate. 8 phases, ≈10 engineer-weeks. v1 plugins keep working unchanged. Tracked in [roadmap.md](roadmap.md) with Todo status.
+- Spec doc landed at [`features/plugin-extensibility.md`](features/plugin-extensibility.md): bundle layout v2, manifest extensions, surface schema reference (menus / pages / form / table / detail components), form-hook ABI, client cache layout, server endpoints, audit events, and migration notes for v1 plugins (which keep working untouched).
+- New shared types crate [`crates/bv_plugin_surface/`](crates/bv_plugin_surface/) — single source of truth for `surface.json`. Defines `SurfaceManifest`, `SurfaceMenu`, `SurfacePage`, `SurfaceComponent` (table/form/detail), `SurfaceBinding` (with `{mount}/...` scoping enforcement), `ActiveSurfaceBundle`, plus a stable `surface_etag` over canonical JSON and an aggregated `ActiveSurfaceBundle::compute_etag`. `validate()` rejects: unknown `schema_version`, menu routes outside `/plugin/<this-plugin>/`, bindings that escape `{mount}/` or contain `..`, duplicate component / menu IDs, hook references to undeclared assets. 11 unit tests (cold-validate happy path, every rejection path, etag stability, json round-trip).
+- Roadmap doc [`roadmaps/plugin-extensibility-redesign.md`](roadmaps/plugin-extensibility-redesign.md) tracks the full 8-phase delivery (≈10 engineer-weeks): server surface storage → bv-client cache → GUI dynamic render → form-hook sandbox → auto-update → operator UX → reference plugin + SDK + docs. Tracked in [roadmap.md](roadmap.md) at Todo / In Progress.
 
 ### Changed
 

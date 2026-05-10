@@ -26,6 +26,7 @@ members = [
     "crates/bastion-plugin-sdk",
     "crates/bv-client",
     "crates/bv-plugin-pack",
+    "crates/bv_plugin_surface",
     "gui/src-tauri",
 ]
 # `plugins-ext/` is a git submodule with its own Cargo workspace
