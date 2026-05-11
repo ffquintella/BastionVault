@@ -437,9 +437,15 @@ function IssuersTab({ mount }: { mount: string }) {
           }
         />
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <div>
-            <div className="space-y-1">
+        // `min-h` on the grid stretches the panel to fill the
+        // viewport vertically; the right-hand detail column inherits
+        // that height via grid auto-stretch. `max-h` on the left list
+        // bounds it so a long issuer list scrolls inside its column
+        // instead of pushing the rest of the page off-screen. See
+        // also the CertsTab table for the same pattern.
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 min-h-[calc(100vh-22rem)]">
+          <div className="min-h-0">
+            <div className="space-y-1 max-h-[calc(100vh-22rem)] overflow-auto">
               {issuers.map((i) => (
                 <button
                   key={i.id}
@@ -2329,7 +2335,13 @@ function CertsTab({ mount }: { mount: string }) {
         />
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <div className="lg:col-span-2 max-h-[32rem] overflow-auto min-w-0">
+          {/* `min-h-[20rem]` keeps the list usable in a small window;
+              `max-h-[calc(100vh-22rem)]` lets it expand to fill the
+              available vertical space when the window is tall. The
+              ~22rem reservation accounts for the layout sidebar
+              padding, page header, Mount card, Tabs card, and this
+              Card's own title row + paddings. */}
+          <div className="lg:col-span-2 min-h-[20rem] max-h-[calc(100vh-22rem)] overflow-auto min-w-0">
             <Table<CertSummary>
               tableClassName="table-fixed"
               columns={[

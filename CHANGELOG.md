@@ -45,6 +45,19 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-05-11
+
+### Changed
+
+- **`make plugins` now takes a target triple** ([`Makefile`](Makefile)) — new `PLUGINS_PROCESS_TARGET` variable cross-compiles every process-runtime plugin (xca-import, postgres, pmp) for a specified Rust target instead of the host. Resolves the `Exec format error (os error 8)` operators were hitting when they uploaded plugins built on a macOS workstation into a Linux container — the kernel refused to `execve()` the wrong-format Mach-O. The rustup target is auto-installed; cross-linkers are not. The Makefile auto-detects [`cross`](https://github.com/cross-rs/cross) on PATH when cross-compiling and routes through it; bare-cargo cross builds get an upfront warning instead of an inscrutable rust-lld link failure. The pack / sign steps now derive the `.exe` suffix from the *target* triple, not the host OS, so cross-compiled Windows binaries land with the right name. `make plugins` with no flag still builds for the host, unchanged.
+  ```
+  # Linux x86_64 container, built from any host:
+  make plugins PLUGINS_PROCESS_TARGET=x86_64-unknown-linux-gnu
+  # Linux arm64 container:
+  make plugins PLUGINS_PROCESS_TARGET=aarch64-unknown-linux-gnu
+  ```
+- **PKI page resizes vertically with the window** ([`gui/src/routes/PkiPage.tsx`](gui/src/routes/PkiPage.tsx)) — the Issued certificates table and the Issuers tab grid both had a hard `max-h-[32rem]` cap (or no constraint at all, in the Issuers case), leaving large empty space at the bottom of a tall window. Both now use `min-h-[calc(100vh-22rem)]` on the grid and `max-h-[calc(100vh-22rem)] overflow-auto` on the scrollable list column, so the panels fill the available viewport height and the lists scroll inside their columns instead of pushing the rest of the page off-screen. Small-window behaviour preserved via `min-h-[20rem]` on the certs list and the outer `<main>`'s existing `overflow-auto`.
+
 ## [0.5.8] - 2026-05-11
 
 ### Added

@@ -53,7 +53,7 @@ RUSTUP_CARGO_BIN ?= $(HOME)/.cargo/bin
 endif
 export PATH := $(RUSTUP_CARGO_BIN):$(PATH)
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugin-bump container-image container-image-run container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugin-bump container-image container-image-run container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -542,6 +542,61 @@ PLUGINS_OUT := $(PLUGINS_DIR)/dist
 PLUGINS_SIGNING_KEY ?= $(PLUGINS_OUT)/dev-signing-key
 PLUGINS_SIGNING_KEY_NAME ?= bastionvault-dev
 
+# Target triple for the process-runtime plugins. Empty (the default)
+# means "build for the current host" — cargo's native target. Set
+# this to cross-compile for a different OS/arch, e.g. when packaging
+# Linux binaries from a macOS workstation for a Linux container:
+#
+#   make plugins PLUGINS_PROCESS_TARGET=x86_64-unknown-linux-gnu
+#   make plugins PLUGINS_PROCESS_TARGET=aarch64-unknown-linux-gnu
+#
+# The rustup target is auto-installed via `plugins-process-target`.
+# Cross-linkers / sysroots are NOT installed by this Makefile.
+#
+# When the target differs from the host (typical: macOS workstation
+# cross-compiling to Linux), bare `cargo` will fail at the link step
+# because clang on macOS doesn't speak GCC-style ELF linker flags.
+# The auto-detect below routes the build through `cross`
+# (https://github.com/cross-rs/cross) when:
+#
+#   - PLUGINS_PROCESS_TARGET is set
+#   - PLUGINS_CARGO wasn't explicitly overridden
+#   - `cross` is on PATH and Docker/Podman is running
+#
+# Force a specific runner with `PLUGINS_CARGO=cargo` (bare) or
+# `PLUGINS_CARGO=cross` (always container). Install cross with
+# `cargo install cross --git https://github.com/cross-rs/cross`.
+PLUGINS_PROCESS_TARGET ?=
+
+# Host triple is detected once via rustc so we can compare against
+# PLUGINS_PROCESS_TARGET. Older make doesn't shell well; fall back
+# to empty if rustc isn't on PATH (and the comparison will treat the
+# target as "not a cross-build", which is correct in that case).
+PLUGINS_HOST_TARGET := $(shell rustc -vV 2>/dev/null | sed -n 's/^host: //p')
+PLUGINS_IS_CROSS := $(if $(PLUGINS_PROCESS_TARGET),$(if $(filter $(PLUGINS_PROCESS_TARGET),$(PLUGINS_HOST_TARGET)),,1),)
+PLUGINS_HAS_CROSS := $(shell command -v cross >/dev/null 2>&1 && echo 1)
+
+# Default runner: `cross` for cross-builds when available, else `cargo`.
+# Override explicitly to opt out (`PLUGINS_CARGO=cargo`) or force
+# (`PLUGINS_CARGO=cross`).
+PLUGINS_CARGO ?= $(if $(and $(PLUGINS_IS_CROSS),$(PLUGINS_HAS_CROSS)),cross,cargo)
+
+# Derived helpers so the recipes below stay readable.
+#
+# `_target_arg`   — empty when building for host, `--target <triple>`
+#                   when cross-compiling. Spliced into the cargo line.
+# `_target_dir`   — `target/release` for host builds, or
+#                   `target/<triple>/release` for cross builds. This
+#                   is where cargo drops the compiled binaries.
+# `_exe`          — `.exe` for Windows targets (host OR cross), empty
+#                   otherwise. Replaces the old `$(filter Windows_NT,$(OS))`
+#                   check, which would mis-suffix when cross-compiling
+#                   from a Windows host to Linux.
+_target_arg := $(if $(PLUGINS_PROCESS_TARGET),--target $(PLUGINS_PROCESS_TARGET),)
+_target_dir := $(if $(PLUGINS_PROCESS_TARGET),target/$(PLUGINS_PROCESS_TARGET)/release,target/release)
+_is_windows_target := $(if $(PLUGINS_PROCESS_TARGET),$(findstring pc-windows,$(PLUGINS_PROCESS_TARGET)),$(filter Windows_NT,$(OS)))
+_exe := $(if $(_is_windows_target),.exe,)
+
 plugins-init: ## Initialise the BastionVault-Plugins submodule (first-time setup)
 	@if [ ! -f "$(PLUGINS_DIR)/Cargo.toml" ]; then \
 		echo "==> initialising plugins-ext submodule"; \
@@ -555,6 +610,14 @@ plugins-target: ## Install the wasm32-wasip1 Rust target if missing
 		echo "==> installing rustup target $(PLUGINS_WASM_TARGET)"; \
 		rustup target add $(PLUGINS_WASM_TARGET); \
 	}
+
+plugins-process-target: ## Install the cross-compile target for process plugins if PLUGINS_PROCESS_TARGET is set
+	@if [ -n "$(PLUGINS_PROCESS_TARGET)" ]; then \
+		rustup target list --installed | grep -q '^$(PLUGINS_PROCESS_TARGET)$$' || { \
+			echo "==> installing rustup target $(PLUGINS_PROCESS_TARGET)"; \
+			rustup target add $(PLUGINS_PROCESS_TARGET); \
+		}; \
+	fi
 
 plugins-pack-build: ## Build the bv-plugin-pack helper that produces .bvplugin bundles
 	cargo build --release -p bv-plugin-pack
@@ -570,25 +633,30 @@ plugins-wasm: plugins-init plugins-target ## Compile the WASM reference plugins 
 	@ls -lh $(PLUGINS_OUT)/*.wasm 2>/dev/null || true
 
 plugins-pack: plugins-wasm plugins-process plugins-pack-build ## Pack each plugin (WASM or process) + its plugin.toml into a .bvplugin bundle
+	@# bv-plugin-pack always runs on the host, so its `.exe` suffix
+	@# follows the host OS, not PLUGINS_PROCESS_TARGET. The packed
+	@# binaries do follow the target — that's the whole point of
+	@# `_exe` (see top of this section).
+	$(eval _host_exe := $(if $(filter Windows_NT,$(OS)),.exe,))
 	@echo "==> packing bastion-plugin-totp (wasm) into .bvplugin"
-	./target/release/bv-plugin-pack$(if $(filter Windows_NT,$(OS)),.exe,) \
+	./target/release/bv-plugin-pack$(_host_exe) \
 		--manifest $(PLUGINS_DIR)/bastion-plugin-totp/plugin.toml \
 		--binary   $(PLUGINS_OUT)/bastion_plugin_totp.wasm \
 		--out      $(PLUGINS_OUT)/bastion-plugin-totp.bvplugin
 	@echo "==> packing bastion-plugin-postgres (process) into .bvplugin"
-	./target/release/bv-plugin-pack$(if $(filter Windows_NT,$(OS)),.exe,) \
+	./target/release/bv-plugin-pack$(_host_exe) \
 		--manifest $(PLUGINS_DIR)/bastion-plugin-postgres/plugin.toml \
-		--binary   $(PLUGINS_OUT)/bastion-plugin-postgres$(if $(filter Windows_NT,$(OS)),.exe,) \
+		--binary   $(PLUGINS_OUT)/bastion-plugin-postgres$(_exe) \
 		--out      $(PLUGINS_OUT)/bastion-plugin-postgres.bvplugin
 	@echo "==> packing bastion-plugin-xca (process) into .bvplugin"
-	./target/release/bv-plugin-pack$(if $(filter Windows_NT,$(OS)),.exe,) \
+	./target/release/bv-plugin-pack$(_host_exe) \
 		--manifest $(PLUGINS_DIR)/bastion-plugin-xca/plugin.toml \
-		--binary   $(PLUGINS_OUT)/bastion-plugin-xca$(if $(filter Windows_NT,$(OS)),.exe,) \
+		--binary   $(PLUGINS_OUT)/bastion-plugin-xca$(_exe) \
 		--out      $(PLUGINS_OUT)/bastion-plugin-xca.bvplugin
 	@echo "==> packing bastion-plugin-pmp (process) into .bvplugin"
-	./target/release/bv-plugin-pack$(if $(filter Windows_NT,$(OS)),.exe,) \
+	./target/release/bv-plugin-pack$(_host_exe) \
 		--manifest $(PLUGINS_DIR)/bastion-plugin-pmp/plugin.toml \
-		--binary   $(PLUGINS_OUT)/bastion-plugin-pmp$(if $(filter Windows_NT,$(OS)),.exe,) \
+		--binary   $(PLUGINS_OUT)/bastion-plugin-pmp$(_exe) \
 		--out      $(PLUGINS_OUT)/bastion-plugin-pmp.bvplugin
 	@echo ""
 	@echo "==> Bundles ready in $(PLUGINS_OUT)/"
@@ -612,31 +680,32 @@ plugins-sign: plugins-wasm plugins-process plugins-pack-build ## Repack each plu
 		echo "==> $(PLUGINS_SIGNING_KEY).seed missing — run \`make plugins-keygen\` first"; \
 		exit 1; \
 	fi
+	$(eval _host_exe := $(if $(filter Windows_NT,$(OS)),.exe,))
 	@echo "==> signing bastion-plugin-totp (wasm)"
-	./target/release/bv-plugin-pack$(if $(filter Windows_NT,$(OS)),.exe,) \
+	./target/release/bv-plugin-pack$(_host_exe) \
 		--manifest          $(PLUGINS_DIR)/bastion-plugin-totp/plugin.toml \
 		--binary            $(PLUGINS_OUT)/bastion_plugin_totp.wasm \
 		--out               $(PLUGINS_OUT)/bastion-plugin-totp.bvplugin \
 		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
 		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
 	@echo "==> signing bastion-plugin-postgres (process)"
-	./target/release/bv-plugin-pack$(if $(filter Windows_NT,$(OS)),.exe,) \
+	./target/release/bv-plugin-pack$(_host_exe) \
 		--manifest          $(PLUGINS_DIR)/bastion-plugin-postgres/plugin.toml \
-		--binary            $(PLUGINS_OUT)/bastion-plugin-postgres$(if $(filter Windows_NT,$(OS)),.exe,) \
+		--binary            $(PLUGINS_OUT)/bastion-plugin-postgres$(_exe) \
 		--out               $(PLUGINS_OUT)/bastion-plugin-postgres.bvplugin \
 		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
 		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
 	@echo "==> signing bastion-plugin-xca (process)"
-	./target/release/bv-plugin-pack$(if $(filter Windows_NT,$(OS)),.exe,) \
+	./target/release/bv-plugin-pack$(_host_exe) \
 		--manifest          $(PLUGINS_DIR)/bastion-plugin-xca/plugin.toml \
-		--binary            $(PLUGINS_OUT)/bastion-plugin-xca$(if $(filter Windows_NT,$(OS)),.exe,) \
+		--binary            $(PLUGINS_OUT)/bastion-plugin-xca$(_exe) \
 		--out               $(PLUGINS_OUT)/bastion-plugin-xca.bvplugin \
 		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
 		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
 	@echo "==> signing bastion-plugin-pmp (process)"
-	./target/release/bv-plugin-pack$(if $(filter Windows_NT,$(OS)),.exe,) \
+	./target/release/bv-plugin-pack$(_host_exe) \
 		--manifest          $(PLUGINS_DIR)/bastion-plugin-pmp/plugin.toml \
-		--binary            $(PLUGINS_OUT)/bastion-plugin-pmp$(if $(filter Windows_NT,$(OS)),.exe,) \
+		--binary            $(PLUGINS_OUT)/bastion-plugin-pmp$(_exe) \
 		--out               $(PLUGINS_OUT)/bastion-plugin-pmp.bvplugin \
 		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
 		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
@@ -645,26 +714,50 @@ plugins-sign: plugins-wasm plugins-process plugins-pack-build ## Repack each plu
 	@echo "    Publisher pubkey to register on the host: $(PLUGINS_SIGNING_KEY).pub"
 	@ls -lh $(PLUGINS_OUT)/*.bvplugin 2>/dev/null || true
 
-plugins-process: plugins-init ## Compile the process-runtime reference plugins (release, native target)
-	@echo "==> building bastion-plugin-postgres (native)"
-	cd $(PLUGINS_DIR) && cargo build --release -p bastion-plugin-postgres
-	@echo "==> building bastion-plugin-xca (native)"
-	cd $(PLUGINS_DIR) && cargo build --release -p bastion-plugin-xca
-	@echo "==> building bastion-plugin-pmp (native)"
-	cd $(PLUGINS_DIR) && cargo build --release -p bastion-plugin-pmp
+plugins-process: plugins-init plugins-process-target ## Compile the process-runtime reference plugins (release, host or PLUGINS_PROCESS_TARGET)
+	@# Guard against the common "bare cargo can't cross-link" trap.
+	@# If we're cross-compiling and the operator hasn't routed
+	@# through `cross` (and isn't using a known cross-toolchain
+	@# linker), the link step will explode deep inside cargo with an
+	@# inscrutable rust-lld error. Surface it now with a real fix.
+	@if [ -n "$(PLUGINS_IS_CROSS)" ] && [ "$(PLUGINS_CARGO)" = "cargo" ]; then \
+		echo "==> WARNING: cross-compiling $(PLUGINS_HOST_TARGET) → $(PLUGINS_PROCESS_TARGET) with bare cargo."; \
+		echo "    This usually fails at link time (rust-lld can't accept GCC-style flags)."; \
+		echo ""; \
+		echo "    Fix: install \`cross\` and re-run — it'll be auto-detected:"; \
+		echo "      cargo install cross --git https://github.com/cross-rs/cross"; \
+		echo "      make plugins PLUGINS_PROCESS_TARGET=$(PLUGINS_PROCESS_TARGET)"; \
+		echo ""; \
+		echo "    \`cross\` needs Docker or Podman running. Override with"; \
+		echo "    PLUGINS_CARGO=cargo to force bare cargo (you'll need a"; \
+		echo "    matching cross-linker on PATH and CARGO_TARGET_*_LINKER set)."; \
+		echo ""; \
+	fi
+	@echo "==> building bastion-plugin-postgres ($(if $(PLUGINS_PROCESS_TARGET),$(PLUGINS_PROCESS_TARGET),native)) via $(PLUGINS_CARGO)"
+	cd $(PLUGINS_DIR) && $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-postgres
+	@echo "==> building bastion-plugin-xca ($(if $(PLUGINS_PROCESS_TARGET),$(PLUGINS_PROCESS_TARGET),native)) via $(PLUGINS_CARGO)"
+	cd $(PLUGINS_DIR) && $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-xca
+	@echo "==> building bastion-plugin-pmp ($(if $(PLUGINS_PROCESS_TARGET),$(PLUGINS_PROCESS_TARGET),native)) via $(PLUGINS_CARGO)"
+	cd $(PLUGINS_DIR) && $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-pmp
 	@mkdir -p $(PLUGINS_OUT)
-	@cp $(PLUGINS_DIR)/target/release/bastion-plugin-postgres$(if $(filter Windows_NT,$(OS)),.exe,) $(PLUGINS_OUT)/
-	@cp $(PLUGINS_DIR)/target/release/bastion-plugin-xca$(if $(filter Windows_NT,$(OS)),.exe,) $(PLUGINS_OUT)/
-	@cp $(PLUGINS_DIR)/target/release/bastion-plugin-pmp$(if $(filter Windows_NT,$(OS)),.exe,) $(PLUGINS_OUT)/
+	@cp $(PLUGINS_DIR)/$(_target_dir)/bastion-plugin-postgres$(_exe) $(PLUGINS_OUT)/
+	@cp $(PLUGINS_DIR)/$(_target_dir)/bastion-plugin-xca$(_exe)      $(PLUGINS_OUT)/
+	@cp $(PLUGINS_DIR)/$(_target_dir)/bastion-plugin-pmp$(_exe)      $(PLUGINS_OUT)/
 	@echo ""
 	@echo "==> Process plugins ready in $(PLUGINS_OUT)/"
 	@ls -lh $(PLUGINS_OUT)/bastion-plugin-postgres* $(PLUGINS_OUT)/bastion-plugin-xca* $(PLUGINS_OUT)/bastion-plugin-pmp* 2>/dev/null || true
 
-plugins: plugins-pack plugins-process ## Build every reference plugin (WASM + .bvplugin bundle + process)
+plugins: plugins-pack plugins-process ## Build every reference plugin (WASM + .bvplugin bundle + process). Cross-compile with PLUGINS_PROCESS_TARGET=<triple>
 	@echo ""
-	@echo "==> All reference plugins built. Upload the artefacts via the GUI"
+	@echo "==> All reference plugins built$(if $(PLUGINS_PROCESS_TARGET), for $(PLUGINS_PROCESS_TARGET),). Upload the artefacts via the GUI"
 	@echo "   Plugins page (Admin → Plugins → Register plugin → Select file…),"
 	@echo "   alongside the matching plugin.toml from $(PLUGINS_DIR)/<plugin>/."
+	@if [ -z "$(PLUGINS_PROCESS_TARGET)" ]; then \
+		echo ""; \
+		echo "   Built for the host. To target a Linux server from this workstation:"; \
+		echo "     make plugins PLUGINS_PROCESS_TARGET=x86_64-unknown-linux-gnu"; \
+		echo "     make plugins PLUGINS_PROCESS_TARGET=aarch64-unknown-linux-gnu"; \
+	fi
 
 # `plugin-bump` bumps each reference plugin's version in lockstep across
 # both `plugins-ext/<plugin>/Cargo.toml` and `plugins-ext/<plugin>/plugin.toml`.
