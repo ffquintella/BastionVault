@@ -102,16 +102,27 @@ A two-stage build:
 └──────────────────────────────────────────┘
 ```
 
-Why distroless: the runtime contains glibc + ca-certificates + a single
-shell (bash, plus its libtinfo dep) and nothing else. No package manager,
-no userspace network tools, no compiler. The CVE surface is the absolute
-minimum compatible with a dynamically-linked Rust binary that still lets
-operators `kubectl exec` / `podman exec` for diagnostics. bash is staged
-in from `debian:bookworm-slim` (same arch as the runtime) rather than
-installed via apt so the final image never carries a package manager;
-`/bin/sh` is a symlink to bash so POSIX-shell consumers work too. The
-`:debug` variant additionally layers on `ss`, `ip`, `tcpdump`, `curl` for
-incident response.
+Why distroless: the runtime contains glibc + ca-certificates and
+nothing else. No shell (by default), no package manager, no userspace
+network tools, no compiler. The CVE surface is the absolute minimum
+compatible with a dynamically-linked Rust binary.
+
+Operators who want a shell inside the production image (for `kubectl
+exec` / `podman exec` diagnostics, init / readiness scripts, or
+because some other process shells out) can opt in at build time:
+
+```
+make container-image INCLUDE_SHELL=1
+```
+
+That stages `busybox-static` from a `debian:bookworm-slim` builder
+layer and copies it into the runtime as `/bin/busybox` with `/bin/sh`
+symlinked to it. Static binary, no library deps, ~1 MB. apt only runs
+in the staging container — the final image still carries no package
+manager. The default remains `INCLUDE_SHELL=0` so the published
+images stay classically shell-less; the `:debug` variant additionally
+layers on `ss`, `ip`, `tcpdump`, `curl` for incident response and is
+unaffected by this flag.
 
 **OpenSSL caveat.** The host crypto stack is OpenSSL-free, but
 `webauthn-rs` 0.5 (FIDO2 / WebAuthn attestation, used by [`auth/fido2`](../roadmaps/tauri-gui-fido2.md))
@@ -512,12 +523,13 @@ is published to the same OCI registry as the image
 
 ## Security Considerations
 
-- **Distroless runtime**: no package manager, no `curl`, no `nc`,
-  no compiler. `bash` is the only shell, staged in from
-  `debian:bookworm-slim` (with `/bin/sh` as a symlink to it) so
-  operators can `kubectl exec` / `podman exec` for diagnostics and so
-  binaries that shell out have something to invoke. Reduces both the
-  post-exploit toolbox and the CVE patch cadence.
+- **Distroless runtime**: no shell, no package manager, no `curl`, no
+  `nc`, no compiler. Reduces both the post-exploit toolbox and the
+  CVE patch cadence. A shell can be opted in at build time with
+  `make container-image INCLUDE_SHELL=1`, which stages busybox-static
+  (no library deps, ~1 MB) as `/bin/busybox` with `/bin/sh` symlinked
+  to it. apt only runs in the staging container so the final image
+  still carries no package manager.
 - **No `libssl.so.3` in the runtime image**, even though `webauthn-rs`
   transitively links openssl-sys for FIDO2 attestation. The builder
   statically links openssl into `bvault` (`OPENSSL_STATIC=1` +

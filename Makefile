@@ -196,15 +196,25 @@ _bump-write:
 #   make container-image IMAGE_NAME=ghcr.io/ffquintella/bastionvault
 #   make container-image IMAGE_TAG=v0.4.0-rc1
 #   make container-image PLATFORM=linux/arm64    # default is linux/amd64
+#   make container-image INCLUDE_SHELL=1         # bake busybox /bin/sh in
 #
 # `BUILDX` toggles `docker buildx build` (multi-arch capable) when
 # CONTAINER_TOOL=docker. Podman handles --platform natively so the toggle
 # has no effect there.
+#
+# `INCLUDE_SHELL` (0|1, default 0) controls whether the production image
+# carries a shell. Off by default to preserve the classic shell-less
+# distroless property (smallest attack surface, no /bin/sh available
+# inside the container at all). Set to 1 to stage `busybox-static` from
+# a Debian builder layer and copy it into the runtime as /bin/busybox
+# with /bin/sh -> busybox. The :debug variant always has a shell and is
+# unaffected by this flag.
 
 CONTAINER_TOOL ?= $(shell command -v podman >/dev/null 2>&1 && echo podman || echo docker)
 IMAGE_NAME     ?= bastionvault
 IMAGE_TAG      ?= $(VERSION)
 BUILDX         ?= 0
+INCLUDE_SHELL  ?= 0
 
 # Default `PLATFORM` to linux/amd64 so the image we build by default
 # matches what we publish from CI (Linux/amd64 runners) and what most
@@ -254,8 +264,9 @@ container-image: ## Build the server OCI image (auto-detects podman/docker, over
 			fi; \
 		fi; \
 	fi
-	@echo "==> Building $(IMAGE_NAME):$(IMAGE_TAG) ($(PLATFORM)) with $(CONTAINER_TOOL)"
+	@echo "==> Building $(IMAGE_NAME):$(IMAGE_TAG) ($(PLATFORM), INCLUDE_SHELL=$(INCLUDE_SHELL)) with $(CONTAINER_TOOL)"
 	$(_BUILD_CMD) \
+		--build-arg INCLUDE_SHELL=$(INCLUDE_SHELL) \
 		-f deploy/container/Containerfile \
 		-t $(IMAGE_NAME):$(IMAGE_TAG) \
 		-t $(IMAGE_NAME):latest \

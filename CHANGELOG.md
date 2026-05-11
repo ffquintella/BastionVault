@@ -45,9 +45,11 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
-### Changed
+## [0.5.8] - 2026-05-11
 
-- **Container image now ships `bash`** ([`deploy/container/Containerfile`](deploy/container/Containerfile), [`features/packaging-podman-server.md`](features/packaging-podman-server.md)) — the production distroless image previously had no shell, which made `kubectl exec` / `podman exec` useless for diagnostics and broke processes that shell out. A new `tools` stage built from `debian:bookworm-slim` (pulled for `$TARGETPLATFORM` so the multi-arch matrix is preserved) stages `bash` + its `libtinfo` runtime dep; the runtime stage copies them in at `/bin/bash`, `/bin/sh` (symlink → `bash`), and `/lib/<triple>/libtinfo.so.6*`. No package manager is added to the final image — apt only runs in the staging container — so the distroless property is preserved.
+### Added
+
+- **Opt-in shell in the production container image** ([`deploy/container/Containerfile`](deploy/container/Containerfile), [`Makefile`](Makefile), [`features/packaging-podman-server.md`](features/packaging-podman-server.md)) — the distroless production image still ships shell-less by default, but `make container-image INCLUDE_SHELL=1` (default `0`) now bakes in `busybox-static` from a `debian:bookworm-slim` builder layer as `/bin/busybox` with `/bin/sh` symlinked to it. Static binary, no library deps, ~1 MB. Useful for operators who need `kubectl exec` / `podman exec` for diagnostics or have processes that shell out. apt only runs in the staging container, so the final image carries no package manager regardless of the flag. The `:debug` variant always had a busybox shell and is unaffected.
 
 ## [0.5.7] - 2026-05-11
 
