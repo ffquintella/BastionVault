@@ -165,22 +165,123 @@ pub async fn open_ssh_session(
         .channel_open_session()
         .await
         .map_err(|e| format!("channel_open_session: {e}"))?;
+
+    // OpenSSH's client sends `no-more-sessions@openssh.com` AFTER
+    // the session channel is open as a hardening hint ("I won't
+    // open any more sessions on this connection — if you see one,
+    // it's a hijack"). Sending it before the channel-open is
+    // explicitly treated as an attack by sshd (it disconnects with
+    // "Possible attack: attempt to open a session after additional
+    // sessions disabled"). want_reply=false so servers that don't
+    // recognise the extension just ignore it.
+    if let Err(e) = session.no_more_sessions(false).await {
+        log::warn!(
+            "resource-connect/ssh: no-more-sessions hint failed (continuing): {e:?}"
+        );
+    }
+    // Populated terminal modes blob, mirroring what OpenSSH's
+    // client sends. IMPORTANT: do NOT include Pty::TTY_OP_END in
+    // this slice — russh's pty-req encoder (client/session.rs)
+    // computes the modes-string length prefix as `1 + 5 * len`
+    // *before* iterating, but then skips any TTY_OP_END entries
+    // and auto-appends a single TTY_OP_END byte. Including
+    // TTY_OP_END here therefore makes the declared length 5 bytes
+    // longer than the actual modes payload, so sshd reads past
+    // the end of the modes string into padding/garbage, sees an
+    // invalid mode opcode, and the session child dies — no
+    // SSH_MSG_DISCONNECT, just a silent TCP teardown. This is the
+    // root cause of the "early eof" we were chasing.
+    let modes: &[(russh::Pty, u32)] = &[
+        (russh::Pty::VINTR, 3),     // ^C
+        (russh::Pty::VQUIT, 28),    // ^\
+        (russh::Pty::VERASE, 127),  // DEL
+        (russh::Pty::VKILL, 21),    // ^U
+        (russh::Pty::VEOF, 4),      // ^D
+        (russh::Pty::VEOL, 0),
+        (russh::Pty::VSTART, 17),   // ^Q
+        (russh::Pty::VSTOP, 19),    // ^S
+        (russh::Pty::VSUSP, 26),    // ^Z
+        (russh::Pty::VREPRINT, 18), // ^R
+        (russh::Pty::VWERASE, 23),  // ^W
+        (russh::Pty::VLNEXT, 22),   // ^V
+        (russh::Pty::ICRNL, 1),
+        (russh::Pty::IXON, 1),
+        (russh::Pty::IXANY, 0),
+        (russh::Pty::IXOFF, 0),
+        (russh::Pty::IMAXBEL, 1),
+        (russh::Pty::ISIG, 1),
+        (russh::Pty::ICANON, 1),
+        (russh::Pty::ECHO, 1),
+        (russh::Pty::ECHOE, 1),
+        (russh::Pty::ECHOK, 1),
+        (russh::Pty::ECHONL, 0),
+        (russh::Pty::NOFLSH, 0),
+        (russh::Pty::TOSTOP, 0),
+        (russh::Pty::IEXTEN, 1),
+        (russh::Pty::ECHOCTL, 1),
+        (russh::Pty::ECHOKE, 1),
+        (russh::Pty::PENDIN, 0),
+        (russh::Pty::OPOST, 1),
+        (russh::Pty::ONLCR, 1),
+        (russh::Pty::TTY_OP_ISPEED, 38400),
+        (russh::Pty::TTY_OP_OSPEED, 38400),
+        // NOTE: no TTY_OP_END here — russh appends it for us.
+    ];
     channel
-        .request_pty(
-            true,
-            "xterm-256color",
-            80,
-            24,
-            0,
-            0,
-            &[(russh::Pty::TTY_OP_END, 0)],
-        )
+        .request_pty(true, "xterm-256color", 80, 24, 0, 0, modes)
         .await
         .map_err(|e| format!("request_pty: {e}"))?;
+    // russh's request_pty / request_shell are fire-and-forget — they
+    // call send_msg and return without awaiting the server's
+    // CHANNEL_SUCCESS reply, even when want_reply=true. Most sshd
+    // builds tolerate back-to-back channel requests, but some
+    // (observed on RHEL/CentOS 8.x sshd 8.7) tear down the TCP
+    // connection if shell-req arrives before they've finished
+    // replying to pty-req. OpenSSH's client waits for the reply
+    // between requests; mirror that here by draining the next
+    // ChannelMsg before issuing the shell request. Anything other
+    // than Success/Failure is forwarded into a small buffer so the
+    // worker loop below picks it up on its first poll.
+    let mut pre_shell_buf: Vec<u8> = Vec::new();
+    match channel.wait().await {
+        Some(ChannelMsg::Success) => {}
+        Some(ChannelMsg::Failure) => {
+            return Err("ssh: server refused pty-req".into());
+        }
+        Some(ChannelMsg::Data { data }) => pre_shell_buf.extend_from_slice(&data),
+        Some(ChannelMsg::ExtendedData { data, .. }) => {
+            pre_shell_buf.extend_from_slice(&data)
+        }
+        Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
+            return Err(
+                "ssh: server closed the channel before pty-req completed".into(),
+            );
+        }
+        _ => {}
+    }
     channel
         .request_shell(true)
         .await
         .map_err(|e| format!("request_shell: {e}"))?;
+    // Drain the shell-req reply the same way so the worker loop
+    // starts on the first real PTY byte.
+    match channel.wait().await {
+        Some(ChannelMsg::Success) => {}
+        Some(ChannelMsg::Failure) => {
+            return Err("ssh: server refused shell request".into());
+        }
+        Some(ChannelMsg::Data { data }) => pre_shell_buf.extend_from_slice(&data),
+        Some(ChannelMsg::ExtendedData { data, .. }) => {
+            pre_shell_buf.extend_from_slice(&data)
+        }
+        Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
+            return Err(
+                "ssh: server closed the channel before shell request completed"
+                    .into(),
+            );
+        }
+        _ => {}
+    }
 
     // Control channel — the per-session task pumps from here.
     let (tx, mut rx) = mpsc::channel::<SshControl>(64);
@@ -198,8 +299,10 @@ pub async fn open_ssh_session(
         // Resize control message arrives (the React effect always
         // fires a resize immediately after registering the
         // listener, which makes it a reliable "ready" handshake).
-        let mut early_buf: Vec<u8> = Vec::new();
+        let mut early_buf: Vec<u8> = pre_shell_buf;
         let mut ready = false;
+        #[allow(unused_assignments)]
+        let mut close_reason: String = "remote host closed the connection".into();
 
         // Pump loop: select between (1) bytes from russh (forward
         // to the WebviewWindow as a Tauri event) and (2) control
@@ -229,12 +332,29 @@ pub async fn open_ssh_session(
                                 early_buf.extend_from_slice(&data);
                             }
                         }
-                        Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
+                        Some(ChannelMsg::Eof) => {
+                            close_reason = "remote sent EOF".into();
+                            break;
+                        }
+                        Some(ChannelMsg::Close) => {
+                            close_reason = "remote closed the channel".into();
+                            break;
+                        }
+                        None => {
+                            close_reason = "ssh transport closed (TCP EOF / disconnect before shell was ready)".into();
                             break;
                         }
                         Some(ChannelMsg::ExitStatus { exit_status }) => {
+                            // Status arrives before Eof/Close; the
+                            // following message in the stream will
+                            // break the loop with the right reason.
                             log::info!(
                                 "resource-connect/ssh: remote exit status {exit_status}"
+                            );
+                        }
+                        Some(ChannelMsg::ExitSignal { signal_name, error_message, .. }) => {
+                            log::info!(
+                                "resource-connect/ssh: remote exit signal {signal_name:?} ({error_message})"
                             );
                         }
                         _ => {}
@@ -247,6 +367,7 @@ pub async fn open_ssh_session(
                                 log::warn!(
                                     "resource-connect/ssh: write to channel failed: {e:?}"
                                 );
+                                close_reason = format!("write to ssh channel failed: {e}");
                                 break;
                             }
                         }
@@ -277,7 +398,13 @@ pub async fn open_ssh_session(
                                 }
                             }
                         }
-                        Some(SshControl::Close) | None => {
+                        Some(SshControl::Close) => {
+                            close_reason = "operator closed the session".into();
+                            let _ = channel.eof().await;
+                            break;
+                        }
+                        None => {
+                            close_reason = "session control channel dropped".into();
                             let _ = channel.eof().await;
                             break;
                         }
@@ -285,9 +412,29 @@ pub async fn open_ssh_session(
                 }
             }
         }
+        log::info!(
+            "resource-connect/ssh: worker exiting — reason: {close_reason}"
+        );
         // Fire the closed event so the WebviewWindow shows
-        // "disconnected" instead of waiting forever.
-        let _ = app_for_task.emit(&closed_event_for_task, ());
+        // "disconnected" instead of waiting forever. The worker can
+        // exit before the React listener has subscribed (a server
+        // that drops the connection right after the shell request
+        // is the worst case: pty-req + shell-req succeed, the
+        // window spawns, but by the time React mounts the worker is
+        // already gone). Re-emit a couple of times on a short delay
+        // so the frontend picks it up no matter when its listener
+        // came online.
+        let payload = ClosedPayload { reason: close_reason };
+        let _ = app_for_task.emit(&closed_event_for_task, payload.clone());
+        let app_for_replay = app_for_task.clone();
+        let evt_for_replay = closed_event_for_task.clone();
+        let payload_for_replay = payload.clone();
+        tokio::spawn(async move {
+            for delay in [200u64, 800, 2500] {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                let _ = app_for_replay.emit(&evt_for_replay, payload_for_replay.clone());
+            }
+        });
         let _ = session
             .disconnect(russh::Disconnect::ByApplication, "", "")
             .await;
@@ -317,6 +464,15 @@ pub async fn open_ssh_session(
         stdout_event,
         closed_event,
     })
+}
+
+#[derive(Serialize, Clone)]
+struct ClosedPayload {
+    /// Human-readable reason the session ended. Surfaced in the
+    /// session window's status bar so the operator can tell apart
+    /// "I clicked Disconnect" from "the server killed it during
+    /// PAM" without having to dig into logs.
+    reason: String,
 }
 
 #[derive(Serialize, Clone)]

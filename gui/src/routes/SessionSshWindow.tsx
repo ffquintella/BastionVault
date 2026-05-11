@@ -120,9 +120,19 @@ export function SessionSshWindow() {
       term.write(bytes);
     });
 
-    const unlistenClosed = listen(closedEvent, () => {
+    let closedHandled = false;
+    const unlistenClosed = listen<{ reason?: string }>(closedEvent, (ev) => {
+      // The host re-emits the closed event a few times on a short
+      // delay so we still catch it if the worker died before this
+      // listener was registered. De-duplicate so the terminal
+      // doesn't get the "[connection closed]" banner printed three
+      // times in a row.
+      if (closedHandled) return;
+      closedHandled = true;
+      const reason = ev.payload?.reason ?? "connection closed by remote host";
       setStatus("closed");
-      term.write("\r\n\x1b[33m[connection closed by remote host]\x1b[0m\r\n");
+      setErrorMessage(reason);
+      term.write(`\r\n\x1b[33m[${reason}]\x1b[0m\r\n`);
     });
 
     // Initial resize doubles as the "frontend listener is live"

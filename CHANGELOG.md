@@ -45,6 +45,17 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.5.10] - 2026-05-11
+
+### Fixed
+
+- **Resource-Connect SSH sessions no longer fail with a blank terminal + "session control channel closed"** ([`gui/src-tauri/src/session/ssh.rs`](gui/src-tauri/src/session/ssh.rs)) — three independent bugs were stacking up to make SSH sessions unusable against hardened sshd builds (notably RHEL/CentOS 8.x sshd 8.7):
+  1. **Malformed `pty-req` packet** — russh's `request_pty` encoder counts `Pty::TTY_OP_END` entries from the caller's slice in its declared modes-string length prefix (`1 + 5 * len`) but then silently skips writing them and auto-appends a single `TTY_OP_END` byte at the end. We were passing `TTY_OP_END` in the slice (matching the obvious reading of the API), so the declared length was 5 bytes longer than the actual modes payload. Lenient sshds tolerated the trailing garbage; hardened ones read past the end into packet padding, hit an invalid mode opcode, and the session child died — no `SSH_MSG_DISCONNECT`, just a silent TCP teardown. Fix: drop `TTY_OP_END` from the slice; russh adds it for us.
+  2. **`request_pty` / `request_shell` are fire-and-forget in russh 0.60** — `want_reply: true` only tells the server to reply, but the russh API does NOT await `CHANNEL_SUCCESS` before returning. We now drain the success reply between requests, mirroring OpenSSH's wire behaviour, so a server that refuses pty-req surfaces as `ssh: server refused pty-req` instead of looking like a transport drop.
+  3. **`no-more-sessions@openssh.com` hint** — OpenSSH's client sends this hardening hint right after the session channel is open; mirroring it keeps us on the same code path as openssh on servers that enter different session-setup branches based on its presence. Important ordering note: sending it *before* `channel-open` is interpreted as an attack ("Possible attack: attempt to open a session after additional sessions disabled") and gets the connection disconnected.
+- **Closed-event delivery is now reliable when the worker dies before the React listener mounts** ([`gui/src-tauri/src/session/ssh.rs`](gui/src-tauri/src/session/ssh.rs), [`gui/src/routes/SessionSshWindow.tsx`](gui/src/routes/SessionSshWindow.tsx)) — the worker task could exit before the spawned WebviewWindow's React effect had subscribed to `closed_event`, which dropped the event into a void and left the operator staring at a blank terminal. The host now re-emits the closed event at 200 ms / 800 ms / 2500 ms after the initial fire, and the payload carries a human-readable `reason` string (e.g. `ssh transport closed (TCP EOF / disconnect before shell was ready)`) so the status bar and inline terminal banner show why the session ended instead of nothing. The React side de-dupes the re-emits.
+- **GUI logs were silently dropped** ([`gui/src-tauri/src/lib.rs`](gui/src-tauri/src/lib.rs), [`gui/src-tauri/Cargo.toml`](gui/src-tauri/Cargo.toml)) — the GUI crate depended on `log` but never registered a backend, so every `log::info!` / `log::warn!` call in the GUI (and in russh via the `log` facade) was a no-op regardless of `RUST_LOG`. Initialise `env_logger` from `run()` with a default filter of `info`, overridable via `RUST_LOG`. Without this fix, diagnosing the SSH bug above would have been impossible.
+
 ## [0.5.9] - 2026-05-11
 
 ### Changed

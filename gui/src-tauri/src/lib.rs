@@ -60,6 +60,16 @@ fn harden_webview_autofill(window: &tauri::WebviewWindow) -> Result<(), Box<dyn 
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Initialize a logger so `log::info!` / `log::warn!` calls in the
+    // GUI crate (and dependencies like russh) actually surface. Without
+    // this, every log line is silently dropped because the `log` facade
+    // has no registered backend. Default filter keeps things quiet;
+    // override via `RUST_LOG` (e.g. `RUST_LOG=bastion_vault_gui=debug,russh=debug`).
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    )
+    .try_init();
+
     // Best-effort Chromium-flag disable for autofill-related features. Runs
     // before Tauri initializes WebView2 so the runtime picks it up at launch.
     // The authoritative hardening happens in `harden_webview_autofill` below.

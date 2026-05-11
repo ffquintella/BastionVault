@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { Layout } from "../components/Layout";
 import {
   Button,
@@ -1430,6 +1430,8 @@ function Toggle({
 
 // ── Keys tab — managed key store (Phase L1 + reuse from L2/L3) ────
 
+const KEYS_PAGE_SIZE = 25;
+
 function KeysTab({ mount }: { mount: string }) {
   const { toast } = useToast();
   const [ids, setIds] = useState<string[]>([]);
@@ -1438,6 +1440,8 @@ function KeysTab({ mount }: { mount: string }) {
   const [showCreate, setShowCreate] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showExportedKey, setShowExportedKey] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
   const [confirmDelete, setConfirmDelete] = useState<{
     id: string;
     name: string;
@@ -1450,13 +1454,18 @@ function KeysTab({ mount }: { mount: string }) {
     try {
       const list = await api.pkiListKeys(mount);
       setIds(list);
+      const entries = await Promise.all(
+        list.map(async (id) => {
+          try {
+            return [id, await api.pkiReadKey(mount, id)] as const;
+          } catch {
+            return null;
+          }
+        }),
+      );
       const map: Record<string, PkiManagedKey> = {};
-      for (const id of list) {
-        try {
-          map[id] = await api.pkiReadKey(mount, id);
-        } catch {
-          /* skip rows that fail to read */
-        }
+      for (const e of entries) {
+        if (e) map[e[0]] = e[1];
       }
       setDetails(map);
     } catch (e) {
@@ -1465,6 +1474,25 @@ function KeysTab({ mount }: { mount: string }) {
       setLoading(false);
     }
   }, [mount, toast]);
+
+  const filteredIds = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return ids;
+    return ids.filter((id) => {
+      if (id.toLowerCase().includes(q)) return true;
+      const name = details[id]?.name?.toLowerCase() ?? "";
+      return name.includes(q);
+    });
+  }, [ids, details, search]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredIds.length / KEYS_PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages);
+  const pageStart = (currentPage - 1) * KEYS_PAGE_SIZE;
+  const pageIds = filteredIds.slice(pageStart, pageStart + KEYS_PAGE_SIZE);
+
+  useEffect(() => {
+    setPage(1);
+  }, [search, mount]);
 
   useEffect(() => {
     void reload();
@@ -1495,6 +1523,21 @@ function KeysTab({ mount }: { mount: string }) {
           <Button onClick={() => setShowCreate(true)}>Generate</Button>
         </div>
       </div>
+      {!loading && ids.length > 0 && (
+        <div className="flex flex-wrap items-center gap-3 mb-3">
+          <div className="flex-1 min-w-[240px]">
+            <Input
+              placeholder="Search by name or ID…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </div>
+          <div className="text-xs text-[var(--color-text-muted)]">
+            {filteredIds.length} of {ids.length} key
+            {ids.length === 1 ? "" : "s"}
+          </div>
+        </div>
+      )}
       {loading ? (
         <div className="text-sm text-[var(--color-text-muted)]">Loading…</div>
       ) : ids.length === 0 ? (
@@ -1502,6 +1545,10 @@ function KeysTab({ mount }: { mount: string }) {
           title="No managed keys"
           description="Generate one or import a PEM-encoded private key."
         />
+      ) : filteredIds.length === 0 ? (
+        <div className="text-sm text-[var(--color-text-muted)]">
+          No keys match “{search}”.
+        </div>
       ) : (
         <Table<{ id: string }>
           columns={[
@@ -1585,9 +1632,37 @@ function KeysTab({ mount }: { mount: string }) {
               },
             },
           ]}
-          data={ids.map((id) => ({ id }))}
+          data={pageIds.map((id) => ({ id }))}
           rowKey={(r) => r.id}
         />
+      )}
+      {!loading && filteredIds.length > KEYS_PAGE_SIZE && (
+        <div className="flex justify-between items-center mt-3 text-sm">
+          <div className="text-[var(--color-text-muted)]">
+            Showing {pageStart + 1}–
+            {Math.min(pageStart + KEYS_PAGE_SIZE, filteredIds.length)} of{" "}
+            {filteredIds.length}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={currentPage <= 1}
+            >
+              Previous
+            </Button>
+            <span className="text-[var(--color-text-muted)]">
+              Page {currentPage} of {totalPages}
+            </span>
+            <Button
+              variant="ghost"
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              disabled={currentPage >= totalPages}
+            >
+              Next
+            </Button>
+          </div>
+        </div>
       )}
       <GenerateKeyModal
         open={showCreate}
@@ -2170,6 +2245,7 @@ function CertsTab({ mount }: { mount: string }) {
   const [issuerNames, setIssuerNames] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState("");
+  const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<string | null>(null);
   const [cert, setCert] = useState<PkiCertRecord | null>(null);
   const [revokeTarget, setRevokeTarget] = useState<string | null>(null);
@@ -2297,15 +2373,29 @@ function CertsTab({ mount }: { mount: string }) {
     }
   }
 
-  const filtered = filter
-    ? summaries.filter((s) => {
-        const f = filter.toLowerCase();
-        return (
-          s.serial.toLowerCase().includes(f) ||
-          s.common_name.toLowerCase().includes(f)
-        );
-      })
-    : summaries;
+  const filtered = useMemo(
+    () =>
+      filter
+        ? summaries.filter((s) => {
+            const f = filter.toLowerCase();
+            return (
+              s.serial.toLowerCase().includes(f) ||
+              s.common_name.toLowerCase().includes(f)
+            );
+          })
+        : summaries,
+    [summaries, filter],
+  );
+
+  const CERTS_PAGE_SIZE = 50;
+  const totalPages = Math.max(1, Math.ceil(filtered.length / CERTS_PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages);
+  const pageStart = (currentPage - 1) * CERTS_PAGE_SIZE;
+  const pageRows = filtered.slice(pageStart, pageStart + CERTS_PAGE_SIZE);
+
+  useEffect(() => {
+    setPage(1);
+  }, [filter, mount]);
 
   return (
     <Card
@@ -2458,10 +2548,38 @@ function CertsTab({ mount }: { mount: string }) {
                   },
                 },
               ]}
-              data={filtered}
+              data={pageRows}
               rowKey={(r) => r.serial}
               emptyMessage={loading ? "Loading…" : "No matching serials"}
             />
+            {filtered.length > CERTS_PAGE_SIZE && (
+              <div className="flex justify-between items-center mt-3 text-sm">
+                <div className="text-[var(--color-text-muted)]">
+                  Showing {pageStart + 1}–
+                  {Math.min(pageStart + CERTS_PAGE_SIZE, filtered.length)} of{" "}
+                  {filtered.length}
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="ghost"
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={currentPage <= 1}
+                  >
+                    Previous
+                  </Button>
+                  <span className="text-[var(--color-text-muted)]">
+                    Page {currentPage} of {totalPages}
+                  </span>
+                  <Button
+                    variant="ghost"
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    disabled={currentPage >= totalPages}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
+            )}
           </div>
           {cert && selected && (
             <CertDetail
