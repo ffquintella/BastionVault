@@ -45,9 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-05-11
+
 ### Changed
 
 - **GUI admin section now recognizes `super-admin` and `administrator` as full-admin policy-name keywords** ([`gui/src/components/Layout.tsx`](gui/src/components/Layout.tsx)) — operators can now grant the admin menu to non-root accounts by assigning a policy literally named `super-admin` or `administrator`, in addition to the existing `root` / `admin`. GUI visibility only; API authorization is still enforced by the policy's HCL rules server-side.
+- **Workspace engine links (PKI, SSH, TOTP, OpenLDAP/AD, Cert Lifecycle) recognize the super-admin keywords** ([`gui/src/components/Layout.tsx`](gui/src/components/Layout.tsx)) — accounts assigned `super-admin` or `administrator` now see the same workspace engine nav as a root token, not just the Admin section. Introduces a shared `SUPER_ADMIN` constant so the per-item `requires` arrays and the `adminPolicies` set stay in lockstep.
 
 ### Fixed
 
