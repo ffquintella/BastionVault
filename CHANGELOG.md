@@ -45,6 +45,10 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Changed
+
+- **GUI admin section now recognizes `super-admin` and `administrator` as full-admin policy-name keywords** ([`gui/src/components/Layout.tsx`](gui/src/components/Layout.tsx)) — operators can now grant the admin menu to non-root accounts by assigning a policy literally named `super-admin` or `administrator`, in addition to the existing `root` / `admin`. GUI visibility only; API authorization is still enforced by the policy's HCL rules server-side.
+
 ### Fixed
 
 - **Plugin registration aborting mid-upload on real-world `.bvplugin` bundles** ([`src/http/sys.rs`](src/http/sys.rs)) — `POST /v1/sys/plugins` reads the body via `web::Bytes`, but the `/v1/sys` scope had no `PayloadConfig`, so any upload past actix-web's default 256 KiB limit (i.e. essentially every real plugin) was rejected mid-stream. On Windows the GUI surfaced this as `Some ureq error happened, Io(Os { code: 10053, kind: ConnectionAborted, ... })`. Set an explicit 32 MiB `PayloadConfig` on the `/plugins` resource, matching the logical and batch ceilings.

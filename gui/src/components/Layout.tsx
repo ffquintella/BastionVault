@@ -112,13 +112,20 @@ const adminNav: NavItem[] = [
   { path: "/settings", label: "Settings" },
 ];
 
-// Policies that grant access to the Admin section as a whole. `root`
-// and `admin` see every admin link. Operators who want to delegate
-// just one admin sub-feature can grant the corresponding *-admin
-// policy below without granting full admin. `pki-admin` does NOT
-// belong here — PKI is a workspace feature now, not an admin one.
+// Policies that grant access to the Admin section as a whole. `root`,
+// `super-admin`, `administrator`, and `admin` are well-known
+// super-administrator policy-name keywords — any user assigned one of
+// these sees every admin link. Operators who want to delegate just one
+// admin sub-feature can grant the corresponding *-admin policy below
+// without granting full admin. `pki-admin` does NOT belong here — PKI
+// is a workspace feature now, not an admin one.
+//
+// Note: GUI visibility only. Actual API authorization is still enforced
+// server-side by the policy's HCL path/capabilities rules.
 const adminPolicies = new Set([
   "root",
+  "super-admin",
+  "administrator",
   "admin",
   "exchange-admin",
   "plugin-admin",
