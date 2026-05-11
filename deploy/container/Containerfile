@@ -93,10 +93,39 @@ RUN if readelf -d /out/bvault | grep -E 'NEEDED.*(libssl|libcrypto)'; then \
         exit 1; \
     fi
 
-# ---------- Stage 2: runtime (pulled for TARGETPLATFORM) ----------
-# Distroless: glibc + ca-certificates + nothing else. No shell, no
-# package manager, no userspace network tools. The :debug variant in
-# Phase 3 adds ss / ip / tcpdump / curl for incident response.
+# ---------- Stage 2: tools (pulled for TARGETPLATFORM) ----------
+# Pull `bash` + its libtinfo runtime dep from a Debian image of the
+# same arch as the runtime stage so we can lay it down in distroless
+# without adding apt to the final image. We stage this rather than
+# `apt-get install` directly in the runtime because distroless has no
+# package manager (and we want to keep it that way).
+FROM --platform=$TARGETPLATFORM docker.io/library/debian:bookworm-slim AS tools
+
+ARG TARGETARCH
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends bash \
+ && rm -rf /var/lib/apt/lists/*
+
+# Resolve the per-arch multiarch libdir once so the COPY lines in the
+# runtime stage have a single, predictable source path. bash links
+# against libtinfo (ncurses); everything else it needs is in glibc,
+# which distroless-cc already provides.
+RUN set -eux; \
+    case "$TARGETARCH" in \
+        amd64) LIBDIR=x86_64-linux-gnu ;; \
+        arm64) LIBDIR=aarch64-linux-gnu ;; \
+        *)     echo "unsupported TARGETARCH=$TARGETARCH"; exit 1 ;; \
+    esac; \
+    mkdir -p /staged/bin /staged/lib/${LIBDIR}; \
+    cp /usr/bin/bash /staged/bin/bash; \
+    ln -s bash /staged/bin/sh; \
+    cp -a /lib/${LIBDIR}/libtinfo.so.6* /staged/lib/${LIBDIR}/
+
+# ---------- Stage 3: runtime (pulled for TARGETPLATFORM) ----------
+# Distroless: glibc + ca-certificates + bash (added above). No
+# package manager, no userspace network tools. The :debug variant
+# layers on ss / ip / tcpdump / curl for incident response.
 FROM --platform=$TARGETPLATFORM gcr.io/distroless/cc-debian12:nonroot
 
 LABEL org.opencontainers.image.title="BastionVault" \
@@ -108,6 +137,16 @@ LABEL org.opencontainers.image.title="BastionVault" \
 # Binaries.
 COPY --from=builder /out/bvault         /usr/local/bin/bvault
 COPY --from=builder /out/bv-ssh-helper  /usr/local/bin/bv-ssh-helper
+
+# Shell. distroless/cc has no shell by default; we bring in bash so
+# operators can `kubectl exec` / `podman exec` for diagnostics, run
+# init / readiness scripts, and so processes that shell out (e.g.
+# the bv-ssh-helper one-shot wrappers, future hooks) have something
+# to invoke. /bin/sh is a symlink to bash so POSIX-shell consumers
+# work too. libtinfo is bash's only non-glibc runtime dep.
+COPY --from=tools /staged/bin/bash  /bin/bash
+COPY --from=tools /staged/bin/sh    /bin/sh
+COPY --from=tools /staged/lib/      /lib/
 
 # Inert sample config (file storage at /var/lib/bvault/data, TLS expected
 # at /etc/bvault/tls/). The operator MUST mount their own config and

@@ -102,9 +102,16 @@ A two-stage build:
 └──────────────────────────────────────────┘
 ```
 
-Why distroless: the runtime contains glibc + ca-certificates and nothing
-else. No shell, no package manager, no debug tools. The CVE surface is the
-absolute minimum compatible with a dynamically-linked Rust binary.
+Why distroless: the runtime contains glibc + ca-certificates + a single
+shell (bash, plus its libtinfo dep) and nothing else. No package manager,
+no userspace network tools, no compiler. The CVE surface is the absolute
+minimum compatible with a dynamically-linked Rust binary that still lets
+operators `kubectl exec` / `podman exec` for diagnostics. bash is staged
+in from `debian:bookworm-slim` (same arch as the runtime) rather than
+installed via apt so the final image never carries a package manager;
+`/bin/sh` is a symlink to bash so POSIX-shell consumers work too. The
+`:debug` variant additionally layers on `ss`, `ip`, `tcpdump`, `curl` for
+incident response.
 
 **OpenSSL caveat.** The host crypto stack is OpenSSL-free, but
 `webauthn-rs` 0.5 (FIDO2 / WebAuthn attestation, used by [`auth/fido2`](../roadmaps/tauri-gui-fido2.md))
@@ -505,8 +512,12 @@ is published to the same OCI registry as the image
 
 ## Security Considerations
 
-- **Distroless runtime**: no shell, no package manager, no `curl`, no
-  `nc`. Reduces both the post-exploit toolbox and the CVE patch cadence.
+- **Distroless runtime**: no package manager, no `curl`, no `nc`,
+  no compiler. `bash` is the only shell, staged in from
+  `debian:bookworm-slim` (with `/bin/sh` as a symlink to it) so
+  operators can `kubectl exec` / `podman exec` for diagnostics and so
+  binaries that shell out have something to invoke. Reduces both the
+  post-exploit toolbox and the CVE patch cadence.
 - **No `libssl.so.3` in the runtime image**, even though `webauthn-rs`
   transitively links openssl-sys for FIDO2 attestation. The builder
   statically links openssl into `bvault` (`OPENSSL_STATIC=1` +
