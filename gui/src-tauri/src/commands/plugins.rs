@@ -825,6 +825,23 @@ pub async fn plugins_invoke(
 }
 
 
+/// Read a file from the user's local filesystem and return its bytes
+/// base64-encoded. Used by plugin pages (e.g. PKI Import XCA) that
+/// accept a local file but invoke a plugin which may run on a remote
+/// server — the file lives on the client, so the GUI ships the bytes
+/// inline rather than passing a `file_path` the server can't resolve.
+///
+/// No mode gate: this only touches the local filesystem and never
+/// reaches the vault, so it's safe in either embedded or remote mode.
+#[tauri::command]
+pub async fn read_local_file_b64(path: String) -> CmdResult<String> {
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| CommandError::from(format!("read {path}: {e}")))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+}
+
+
 // ── Phase 5.12 — per-plugin metrics for the GUI ──
 
 #[derive(Debug, serde::Serialize)]

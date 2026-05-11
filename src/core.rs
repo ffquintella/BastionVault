@@ -421,6 +421,8 @@ impl Core {
         state.kek = kek.deref().clone();
         self.state.store(Arc::new(state));
 
+        log::info!(target: "security", "vault unsealed");
+
         // Perform initial setup
         if let Err(e) = self.post_unseal().await {
             let mut state = (*self.state.load_full()).clone();
@@ -512,6 +514,7 @@ impl Core {
         state.kek.clear();
         self.state.store(Arc::new(state));
 
+        log::info!(target: "security", "vault sealed");
         self.barrier.seal()
     }
 
@@ -578,7 +581,48 @@ impl Core {
         let hmac_key = self.state.load().hmac_key.clone();
         if !hmac_key.is_empty() {
             match crate::audit::AuditBroker::new(self, hmac_key).await {
-                Ok(broker) => self.audit_broker.store(Some(broker)),
+                Ok(broker) => {
+                    // First-boot convenience: if the operator pointed
+                    // `log_dir` at a directory but never enabled any
+                    // audit device, register a file device on
+                    // `<log_dir>/audit.log` so the third structured
+                    // stream lights up alongside operations + security.
+                    // No-ops on re-unseal once a device exists.
+                    if let Some((path, rotate_size, rotate_keep)) =
+                        crate::logging::default_audit_options()
+                    {
+                        if !broker.has_devices() {
+                            let mut opts = std::collections::HashMap::new();
+                            opts.insert(
+                                "file_path".to_string(),
+                                path.to_string_lossy().into_owned(),
+                            );
+                            opts.insert(
+                                "rotate_size_bytes".to_string(),
+                                rotate_size.to_string(),
+                            );
+                            opts.insert("rotate_keep".to_string(), rotate_keep.to_string());
+                            let cfg = crate::audit::AuditDeviceConfig {
+                                path: "file/".to_string(),
+                                device_type: "file".to_string(),
+                                description: "default file audit device".to_string(),
+                                options: opts,
+                            };
+                            if let Err(e) = broker.enable_device(cfg).await {
+                                log::warn!(
+                                    "audit: failed to auto-enable default file device at {}: {e}",
+                                    path.display()
+                                );
+                            } else {
+                                log::info!(
+                                    "audit: auto-enabled default file device at {}",
+                                    path.display()
+                                );
+                            }
+                        }
+                    }
+                    self.audit_broker.store(Some(broker));
+                }
                 Err(e) => log::warn!("audit broker init failed: {e}. Audit disabled."),
             }
         }

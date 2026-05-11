@@ -1085,6 +1085,12 @@ export const pluginsInvoke = (name: string, inputB64?: string, fuel?: number) =>
     fuel: fuel ?? null,
   });
 
+/** Read a file from the user's local filesystem and return its bytes
+ * as base64. Used by flows like PKI Import XCA where the plugin can
+ * run on a remote server but the file lives on the client machine. */
+export const readLocalFileB64 = (path: string) =>
+  invoke<string>("read_local_file_b64", { path });
+
 // ── Plugin config ──────────────────────────────────────────────────────────
 //
 // Plugins declare a `config_schema` in their manifest; operators set

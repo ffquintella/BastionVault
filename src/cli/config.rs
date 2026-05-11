@@ -36,6 +36,29 @@ pub struct Config {
     pub log_format: String,
     #[serde(default)]
     pub log_level: String,
+    /// Directory the server writes structured log files into:
+    /// `operations.log`, `security.log`, and `audit.log`. Empty
+    /// disables file logging (logs go to stderr only). The audit log
+    /// is bootstrapped on first unseal via the audit broker.
+    #[serde(default)]
+    pub log_dir: String,
+    /// Also mirror operational + security logs to stderr. Defaults
+    /// to true so foreground/dev runs stay readable; flip to false
+    /// in production when you only want the on-disk files.
+    #[serde(default = "default_bool_true", deserialize_with = "parse_bool_string")]
+    #[default(true)]
+    pub log_to_stderr: bool,
+    /// Per-file rotation threshold in megabytes. When an individual
+    /// log file (operations / security / audit) reaches this size it
+    /// is renamed to `<name>.1`, prior `.1` shifts to `.2`, etc.,
+    /// keeping `log_rotate_keep` historical copies. `0` → use the
+    /// built-in default (100 MiB).
+    #[serde(default)]
+    pub log_rotate_size_mb: u64,
+    /// Number of rotated copies to keep per stream. `0` → use the
+    /// built-in default (5).
+    #[serde(default)]
+    pub log_rotate_keep: u32,
     #[serde(default)]
     pub pid_file: String,
     #[serde(default)]

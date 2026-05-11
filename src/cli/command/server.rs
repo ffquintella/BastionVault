@@ -90,7 +90,23 @@ impl Server {
         }
 
         env::set_var("RUST_LOG", config.log_level.as_str());
-        env_logger::init();
+        // Custom file-fanout logger: `operations.log` gets every
+        // record at or above `log_level`; `security.log` gets the
+        // subset whose target is `security` (seal/unseal, login
+        // failures, policy denials). When `log_dir` is empty we fall
+        // back to stderr only and skip the audit-log auto-bootstrap.
+        if let Err(e) = crate::logging::init(crate::logging::LogConfig {
+            level: config.log_level.as_str(),
+            log_dir: config.log_dir.as_str(),
+            log_to_stderr: config.log_to_stderr,
+            rotate_size_bytes: config
+                .log_rotate_size_mb
+                .saturating_mul(1024 * 1024),
+            rotate_keep: config.log_rotate_keep,
+        }) {
+            eprintln!("logging init failed: {e}. Falling back to env_logger.");
+            env_logger::init();
+        }
 
         let (_, storage) = config.storage.iter().next().unwrap();
         let (_, listener) = config.listener.iter().next().unwrap();

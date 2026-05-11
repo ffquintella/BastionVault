@@ -62,6 +62,7 @@ pub mod core;
 pub mod errors;
 pub mod handler;
 pub mod http;
+pub mod logging;
 pub mod logical;
 pub mod metrics;
 pub mod module_manager;

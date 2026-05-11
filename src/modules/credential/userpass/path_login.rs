@@ -101,7 +101,7 @@ impl UserPassBackendInner {
 
         let user = self.get_user(req, &username).await?;
         if user.is_none() {
-            log::error!("{err_info}");
+            log::warn!(target: "security", "userpass login failed: unknown user '{username}'");
             let resp = Response::error_response(err_info);
             return Ok(Some(resp));
         }
@@ -118,7 +118,7 @@ impl UserPassBackendInner {
 
         let check = self.verify_password_hash(password, &user.password_hash)?;
         if !check {
-            log::error!("{err_info}");
+            log::warn!(target: "security", "userpass login failed: bad password for '{username}'");
             let resp = Response::error_response(err_info);
             return Ok(Some(resp));
         }

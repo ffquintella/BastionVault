@@ -45,6 +45,18 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-05-11
+
+### Added
+
+- **Structured on-disk server logs** ([`src/logging.rs`](src/logging.rs), [`src/cli/config.rs`](src/cli/config.rs)) — new `log_dir` and `log_to_stderr` config fields. When `log_dir` is set the server writes three files: `operations.log` (every record at or above `log_level`), `security.log` (records emitted with `target: "security"` — seal/unseal, failed logins, denied policies), and `audit.log` (auto-bootstrapped by the audit broker on first unseal via [`src/core.rs`](src/core.rs) when no audit devices are persisted yet). Replaces the previous `env_logger`-only stderr setup. Convenience `security_warn!` / `security_info!` / `security_error!` macros are exported for consistent target tagging.
+- **In-process size-based log rotation** ([`src/logging.rs`](src/logging.rs), [`src/audit/file_device.rs`](src/audit/file_device.rs)) — new `log_rotate_size_mb` (default 100) and `log_rotate_keep` (default 5) config fields. When a log file hits the threshold the server renames it to `<name>.1`, shifts the prior numbered copies up, drops anything beyond `keep`, and reopens a fresh file in place. The auto-bootstrapped audit device honours the same policy via new `rotate_size_bytes` / `rotate_keep` options on [`FileAuditDevice`](src/audit/file_device.rs); operators who prefer external logrotate can keep `log_rotate_size_mb = 0` and rely on the existing `reload()`-on-SIGHUP path.
+- **Security-tagged log calls at seal/unseal and userpass login failures** ([`src/core.rs`](src/core.rs), [`src/modules/credential/userpass/path_login.rs`](src/modules/credential/userpass/path_login.rs)) — first round of explicit security-event emissions so `security.log` has real content on day one.
+
+### Fixed
+
+- **Import XCA on remote vaults failing with "Request is invalid"** ([`gui/src-tauri/src/commands/plugins.rs`](gui/src-tauri/src/commands/plugins.rs), [`gui/src/routes/PkiPage.tsx`](gui/src/routes/PkiPage.tsx)) — the GUI sent the chosen XCA file as `file_path`, but in remote mode the plugin runs on the server and the path only exists on the client. The server-side plugin failed to open the file and the error was mapped to `RvError::ErrRequestInvalid`. Added a new `read_local_file_b64` Tauri command and switched the preview call to ship the file inline as `file_b64`, which the plugin already supports — same flow works embedded and remote.
+
 ## [0.5.4] - 2026-05-11
 
 ### Changed

@@ -22,3 +22,15 @@ api_addr   = "http://127.0.0.1:8200"
 log_level  = "debug"
 log_format = "{date} {req.path}"
 pid_file   = "/tmp/bastion_vault.pid"
+
+# Structured on-disk logs. Writes three files under `log_dir`:
+#   operations.log — every record at or above `log_level`
+#   security.log   — seal/unseal, failed logins, denied policies
+#   audit.log      — auto-registered audit device, one JSON line per request
+# Each file is size-rotated in-process: when it hits `log_rotate_size_mb`,
+# it's renamed to `<name>.1`, prior `.1` shifts to `.2`, etc., keeping
+# `log_rotate_keep` historical copies.
+log_dir             = "/tmp/bastion_vault/logs"
+log_to_stderr       = true
+log_rotate_size_mb  = 100
+log_rotate_keep     = 5

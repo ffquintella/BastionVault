@@ -2817,9 +2817,14 @@ function XcaImportTab({
     }
     setBusy(true);
     try {
+      // The XCA file lives on the user's machine, but the plugin runs
+      // on the vault server — which, in remote mode, can't see the
+      // local path. Read the bytes here and ship them inline as
+      // `file_b64` so the same flow works embedded and remote.
+      const fileB64 = await api.readLocalFileB64(filePath);
       const out = (await invokeXca({
         op: "preview",
-        file_path: filePath,
+        file_b64: fileB64,
         master_password: password || undefined,
       })) as XcaPreview;
       setPreview(out);
