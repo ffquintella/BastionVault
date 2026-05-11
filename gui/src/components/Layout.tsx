@@ -36,6 +36,13 @@ type NavItem = {
   requiresMountType?: string;
 };
 
+// Well-known full-admin policy names. Any of these grants the same
+// nav as `root` — both the workspace engine links and the Admin
+// section. Operators can assign one of these to delegate full GUI
+// access without issuing a root token. See also `adminPolicies` below,
+// which is kept in lockstep with this list.
+const SUPER_ADMIN = ["root", "super-admin", "administrator", "admin"] as const;
+
 // Workspace items — visible to every authenticated user, subject to
 // `requires` and `requiresMountType` per item. PKI lives here (not
 // under Admin) because regular users with `pki-user` need to issue
@@ -50,18 +57,19 @@ const userNav: NavItem[] = [
   {
     path: "/pki",
     label: "PKI",
-    requires: ["root", "admin", "pki-admin", "pki-user"],
+    requires: [...SUPER_ADMIN, "pki-admin", "pki-user"],
     requiresMountType: "pki",
   },
   // SSH engine. Same gating shape as PKI: hidden when no `ssh/` mount
   // exists or when the token has no SSH-relevant policy. We don't ship
   // dedicated `ssh-admin` / `ssh-user` baseline policies yet — until
-  // those land, root + admin gate the entry; operators who already
-  // delegate via custom policies can override `requires` per install.
+  // those land, the super-admin keywords gate the entry; operators who
+  // already delegate via custom policies can override `requires` per
+  // install.
   {
     path: "/ssh",
     label: "SSH",
-    requires: ["root", "admin"],
+    requires: [...SUPER_ADMIN],
     requiresMountType: "ssh",
   },
   // TOTP engine. Gated by the dedicated `totp-admin` / `totp-user`
@@ -73,7 +81,7 @@ const userNav: NavItem[] = [
   {
     path: "/totp",
     label: "TOTP",
-    requires: ["root", "admin", "totp-admin", "totp-user"],
+    requires: [...SUPER_ADMIN, "totp-admin", "totp-user"],
     requiresMountType: "totp",
   },
   // OpenLDAP / AD password-rotation engine. Same gating shape as
@@ -82,7 +90,7 @@ const userNav: NavItem[] = [
   {
     path: "/ldap",
     label: "OpenLDAP / AD",
-    requires: ["root", "admin", "ldap-admin", "ldap-user"],
+    requires: [...SUPER_ADMIN, "ldap-admin", "ldap-user"],
     requiresMountType: "openldap",
   },
   // Cert-Lifecycle module (Phases L5–L7). Surface alongside PKI when
@@ -91,7 +99,7 @@ const userNav: NavItem[] = [
   {
     path: "/cert-lifecycle",
     label: "Cert Lifecycle",
-    requires: ["root", "admin", "pki-admin", "pki-user"],
+    requires: [...SUPER_ADMIN, "pki-admin", "pki-user"],
     requiresMountType: "cert-lifecycle",
   },
 ];
@@ -122,11 +130,8 @@ const adminNav: NavItem[] = [
 //
 // Note: GUI visibility only. Actual API authorization is still enforced
 // server-side by the policy's HCL path/capabilities rules.
-const adminPolicies = new Set([
-  "root",
-  "super-admin",
-  "administrator",
-  "admin",
+const adminPolicies = new Set<string>([
+  ...SUPER_ADMIN,
   "exchange-admin",
   "plugin-admin",
 ]);
