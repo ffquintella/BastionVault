@@ -223,7 +223,7 @@ ifeq ($(CONTAINER_TOOL),docker)
 ifeq ($(BUILDX),1)
 _BUILD_CMD := docker buildx build --platform $(PLATFORM)
 else
-_BUILD_CMD := docker build
+_BUILD_CMD := docker build --platform $(PLATFORM)
 endif
 else
 _BUILD_CMD := $(CONTAINER_TOOL) build --platform $(PLATFORM)

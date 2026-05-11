@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-05-11
+
+### Fixed
+
+- **`make container-image` building for the host arch instead of `linux/amd64`** ([`Makefile`](Makefile)) — the `docker` (non-buildx) branch of `_BUILD_CMD` omitted `--platform`, so on arm64 hosts the build silently ignored the `PLATFORM ?= linux/amd64` default. Now passes `--platform $(PLATFORM)` in every branch (podman, `docker build`, `docker buildx build`), so the default produces an amd64 image regardless of host and `PLATFORM=` overrides are honoured consistently.
+
 ## [0.5.5] - 2026-05-11
 
 ### Added
