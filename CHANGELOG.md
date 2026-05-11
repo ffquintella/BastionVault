@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-05-11
+
+### Fixed
+
+- **`BrokenPipe` / `ConnectionAborted` mid-upload when invoking plugins with large inputs** ([`src/http/sys.rs`](src/http/sys.rs)) — `POST /v1/sys/plugins/{name}/invoke` was registered without a `PayloadConfig`, so actix capped the request body at its 256 KiB `web::Bytes` default and reset the connection mid-stream for anything larger. This bit the GUI's **PKI → Import XCA → Preview** flow, which ships the full XCA `.xdb` inline as base64 inside the JSON body — ureq surfaced the reset as `Io(Os { code: 32, kind: BrokenPipe })` on macOS. The invoke route now attaches a 32 MiB `PayloadConfig` matching the registration / logical / batch ceilings, so multi-MiB plugin inputs (XCA databases, PMP exports, etc.) upload cleanly.
+
 ## [0.5.6] - 2026-05-11
 
 ### Fixed

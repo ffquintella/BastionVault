@@ -2299,7 +2299,17 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
                 .route(web::delete().to(sys_plugins_delete_handler)),
         )
         .service(
+            // Plugin invocations carry their input inline as base64
+            // inside the JSON body. Some plugins (e.g. `xca-import`)
+            // legitimately receive multi-MiB blobs — an entire XCA
+            // `.xdb` database — so we'd otherwise blow through actix's
+            // 256 KiB `web::Bytes` default and the server would reset
+            // the connection mid-upload (ureq surfaces this as
+            // `BrokenPipe` / EPIPE on macOS, `ConnectionAborted` on
+            // Windows). Reuse the 32 MiB ceiling already established
+            // for registration / logical / batch.
             web::resource("/plugins/{name}/invoke")
+                .app_data(web::PayloadConfig::default().limit(default_plugin_invoke_body_limit()))
                 .route(web::post().to(sys_plugins_invoke_handler)),
         )
         .service(
@@ -2427,5 +2437,14 @@ fn default_batch_body_limit() -> usize {
 /// rejects most uploads mid-stream. 32 MiB matches the logical and
 /// batch limits.
 fn default_plugin_register_body_limit() -> usize {
+    32 * 1024 * 1024
+}
+
+/// Body-size limit for `POST /v1/sys/plugins/{name}/invoke`. Plugin
+/// inputs are shipped as base64-encoded JSON; some plugins (notably
+/// `xca-import`) receive multi-MiB blobs inline, so the actix 256 KiB
+/// `web::Bytes` default would reset the connection mid-upload. 32 MiB
+/// matches the register / logical / batch limits.
+fn default_plugin_invoke_body_limit() -> usize {
     32 * 1024 * 1024
 }
