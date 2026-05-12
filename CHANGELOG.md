@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.5.11] - 2026-05-12
+
+### Fixed
+
+- **Hiqlite backend init no longer masks startup errors with a tokio runtime-drop panic** ([`src/storage/hiqlite/mod.rs`](src/storage/hiqlite/mod.rs)) — when `Server::main` bootstraps the hiqlite backend it wraps the async constructor in a current-thread runtime (`server.rs:192-201`). If `HiqliteBackend::new_backend(...)` returned `Err(_)` (e.g. peer TLS handshake failure during Raft bootstrap because the cluster's private CA isn't in the system trust bundle), the locally-created inner `Runtime` in `HiqliteBackend::new` dropped on the outer worker thread while still inside `block_on`. Dropping a multi-threaded `Runtime` synchronously waits on its blocking pool, which is illegal in an async context and panicked with `Cannot drop a runtime in a context where blocking is not allowed`. The panic eclipsed the real error in operator-visible logs (only `LockFile … not a clean start` from the previous unclean shutdown showed through), making the root cause impossible to diagnose from `journalctl`. Fix: when an outer runtime is detected, own the entire inner runtime lifecycle (create → use → drop-on-error) on a dedicated `std::thread::scope` OS thread, so the error path drops `rt` on a plain thread. The success path is unchanged — `rt` moves into `backend._runtime` and the backend is sent back across the join; eventual backend drop is handled by the existing `Drop for HiqliteBackend` impl. Adds a regression test that drives `new()` to fail under an outer runtime and asserts `Err` instead of panic.
+
 ## [0.5.10] - 2026-05-11
 
 ### Fixed

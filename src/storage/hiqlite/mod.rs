@@ -468,24 +468,48 @@ impl HiqliteBackend {
         // tasks (Raft consensus, RPC servers) that are killed if the runtime is dropped.
         let needs_own_runtime = tokio::runtime::Handle::try_current().is_ok();
 
-        let rt = tokio::runtime::Runtime::new()?;
-
-        let mut backend = if needs_own_runtime {
-            // An outer runtime exists (e.g. actix); spawn a thread to avoid nested block_on.
+        if needs_own_runtime {
+            // An outer runtime exists (e.g. actix, or a current-thread runtime used
+            // by `Server::main` to bridge async backend bootstrap). We must NOT
+            // create or drop the inner Runtime on the calling thread, because:
+            //   - `block_on` from inside an async context is forbidden.
+            //   - Dropping a multi-threaded `Runtime` is also forbidden inside an
+            //     async context — `Drop` synchronously waits on the blocking pool,
+            //     which panics with "Cannot drop a runtime in a context where
+            //     blocking is not allowed".
+            // The previous version created `rt` here in the caller's frame and only
+            // moved `block_on` to a scoped thread. That left the `rt` drop on the
+            // error path (`?` unwind) running on the caller's async worker, which
+            // panicked and masked the real underlying error (e.g. peer TLS handshake
+            // failure during Raft bootstrap).
+            //
+            // The fix: own the entire runtime lifecycle on a dedicated OS thread.
+            // On error, `rt` drops on that thread (safe). On success, ownership
+            // moves into `backend._runtime` and the backend is sent back across the
+            // join. The eventual backend drop is handled by `Drop for HiqliteBackend`,
+            // which already detaches runtime shutdown onto its own OS thread.
             let conf = conf.clone();
             std::thread::scope(|s| {
-                let rt_ref = &rt;
-                let handle = s.spawn(move || {
-                    rt_ref.block_on(async { Self::new_backend(&conf).await })
-                });
-                handle.join().unwrap()
-            })?
+                s.spawn(move || -> Result<Self, RvError> {
+                    let rt = tokio::runtime::Runtime::new()?;
+                    let mut backend =
+                        rt.block_on(async { Self::new_backend(&conf).await })?;
+                    backend._runtime = Some(rt);
+                    Ok(backend)
+                })
+                .join()
+                .map_err(|_| {
+                    RvError::ErrCluster(
+                        "HiqliteBackend init thread panicked".to_string(),
+                    )
+                })?
+            })
         } else {
-            rt.block_on(async { Self::new_backend(conf).await })?
-        };
-
-        backend._runtime = Some(rt);
-        Ok(backend)
+            let rt = tokio::runtime::Runtime::new()?;
+            let mut backend = rt.block_on(async { Self::new_backend(conf).await })?;
+            backend._runtime = Some(rt);
+            Ok(backend)
+        }
     }
 }
 
@@ -685,5 +709,29 @@ mod test {
 
         // Drop here, inside the outer runtime. Must not panic.
         drop(backend);
+    }
+
+    /// Regression test: when `HiqliteBackend::new` is called from inside an
+    /// outer tokio runtime and the inner backend construction *fails*, the
+    /// previous implementation panicked while unwinding `?` because the
+    /// locally-created `rt` was dropped on a tokio worker thread. The fix
+    /// owns the entire runtime lifecycle on a dedicated OS thread, so the
+    /// error must propagate as an `Err` — never as a panic.
+    ///
+    /// This test does NOT require the hiqlite integration env (`CARGO_TEST_HIQLITE=1`)
+    /// because it deliberately drives `new()` to fail before any port binds.
+    #[serial]
+    #[tokio::test]
+    async fn test_hiqlite_backend_new_error_inside_runtime_does_not_panic() {
+        // We must be inside an outer runtime so `new()` takes the
+        // `needs_own_runtime` path — the path that used to panic on drop.
+        assert!(tokio::runtime::Handle::try_current().is_ok());
+
+        // Empty config — `new_backend` will fail extracting required keys
+        // (e.g. `data_dir`/`node_id`) and return an Err. The runtime created
+        // inside `new()` must be dropped cleanly on that error path.
+        let conf: HashMap<String, Value> = HashMap::new();
+        let res = HiqliteBackend::new(&conf);
+        assert!(res.is_err(), "expected Err from empty config, got Ok");
     }
 }
