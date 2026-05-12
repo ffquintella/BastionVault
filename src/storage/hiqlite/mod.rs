@@ -275,16 +275,25 @@ impl HiqliteBackend {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        // NOTE: hiqlite 0.13.1's `ServerTlsConfigCerts::new(key, cert)` takes the
+        // private key first and the certificate second — an unusual ordering that
+        // is easy to invert when reading the call site. Calling it positionally
+        // with `(cert, key)` puts cert content in the key slot, which makes
+        // `axum-server::tls_rustls::RustlsConfig::from_pem_file` fail with
+        // `The private key file contained no keys` during Raft/API bootstrap and
+        // the node crash-loops. Use struct-literal construction with named fields
+        // so the cert/key mapping can never be silently swapped again.
         let tls_raft = if tls_raft_disable {
             None
         } else if let (Some(cert), Some(key)) = (
             conf.get("tls_raft_cert").and_then(|v| v.as_str()),
             conf.get("tls_raft_key").and_then(|v| v.as_str()),
         ) {
-            Some(ServerTlsConfig::Specific(hiqlite::tls::ServerTlsConfigCerts::new(
-                cert.to_string(),
-                key.to_string(),
-            )))
+            Some(ServerTlsConfig::Specific(hiqlite::tls::ServerTlsConfigCerts {
+                key: key.to_string().into(),
+                cert: cert.to_string().into(),
+                danger_tls_no_verify: false,
+            }))
         } else {
             Some(ServerTlsConfig::TlsAutoCertificates)
         };
@@ -295,10 +304,11 @@ impl HiqliteBackend {
             conf.get("tls_api_cert").and_then(|v| v.as_str()),
             conf.get("tls_api_key").and_then(|v| v.as_str()),
         ) {
-            Some(ServerTlsConfig::Specific(hiqlite::tls::ServerTlsConfigCerts::new(
-                cert.to_string(),
-                key.to_string(),
-            )))
+            Some(ServerTlsConfig::Specific(hiqlite::tls::ServerTlsConfigCerts {
+                key: key.to_string().into(),
+                cert: cert.to_string().into(),
+                danger_tls_no_verify: false,
+            }))
         } else {
             Some(ServerTlsConfig::TlsAutoCertificates)
         };

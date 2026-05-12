@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.5.12] - 2026-05-12
+
+### Fixed
+
+- **Hiqlite TLS cert/key paths were swapped, causing every HA node to crash-loop with `The private key file contained no keys`** ([`src/storage/hiqlite/mod.rs`](src/storage/hiqlite/mod.rs)) — hiqlite 0.13.1's `ServerTlsConfigCerts::new(key, cert)` constructor takes the **private key first** and the **certificate second** (see `hiqlite-0.13.1/src/tls.rs:40`), an unusual ordering that reads naturally as `new(cert, key)` and trips up every caller. BastionVault was calling it positionally with `(cert, key)` for both Raft and API channels, so the cert PEM went into the key slot and the key PEM went into the cert slot. `axum-server::tls_rustls::RustlsConfig::from_pem_file` then tried to parse a certificate as a private key, found zero PKCS#8/PKCS#1 keys in the input, and panicked during Raft bootstrap. Combined with the now-fixed (0.5.11) runtime-drop panic in `HiqliteBackend::new`, the operator-visible symptom was a tight 5-second restart loop with only `LockFile … not a clean start` showing in the log — the real "no keys" error was eaten. Fix: switch both `tls_raft` and `tls_api` to **struct-literal construction with named fields** (`ServerTlsConfigCerts { key, cert, danger_tls_no_verify }`) so the cert/key mapping can never be silently swapped again by reading the call site the wrong way around. Operators who applied the file-content workaround (swapping `*.crt` and `*.key` contents on disk) must restore the original files before deploying 0.5.12 or higher.
+
 ## [0.5.11] - 2026-05-12
 
 ### Fixed
