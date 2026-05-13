@@ -84,10 +84,90 @@ fn is_not_configured_err(e: &CommandError) -> bool {
     s.contains("HTTP 404") || s.contains("404 (no body)")
 }
 
-/// Read the FIDO2 relying party config from the vault.
-async fn read_fido2_config(state: &State<'_, AppState>) -> Result<(String, String, String), CommandError> {
-    use bv_client::Operation;
+/// Parse `(rp_id, rp_origin)` from a remote profile address like
+/// `https://vault.example.com:8200`. Returns `None` if the address is
+/// malformed or missing a scheme/host.
+fn parse_rp_from_address(address: &str) -> Option<(String, String)> {
+    let (scheme, rest) = address.split_once("://")?;
+    if scheme.is_empty() || rest.is_empty() {
+        return None;
+    }
+    // Strip path/query/fragment so the origin stays a bare scheme://host[:port].
+    let host_with_port = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(rest)
+        .trim_end_matches('/');
+    if host_with_port.is_empty() {
+        return None;
+    }
+    // rp_id is the host without the port. Handle IPv6 literals in brackets.
+    let host = if let Some(stripped) = host_with_port.strip_prefix('[') {
+        let end = stripped.find(']')?;
+        &stripped[..end]
+    } else {
+        host_with_port.split(':').next().unwrap_or(host_with_port)
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some((host.to_string(), format!("{scheme}://{host_with_port}")))
+}
 
+/// Derive sensible FIDO2 RP defaults for the current connection.
+///
+/// - Embedded vault: `rp_id=localhost`, `rp_origin=https://localhost`.
+/// - Remote vault: `rp_id` is the server hostname, `rp_origin` is
+///   `scheme://host[:port]` parsed from the remote profile's address.
+///   This matches the derivation `SettingsPage.tsx::deriveDefaults`
+///   uses, so the two backfill paths stay consistent.
+async fn derive_fido2_defaults(state: &State<'_, AppState>) -> (String, String, String) {
+    let is_remote = matches!(
+        *state.mode.lock().await,
+        crate::state::VaultMode::Remote
+    );
+    if is_remote {
+        if let Some(profile) = state.remote_profile.lock().await.clone() {
+            if let Some((rp_id, rp_origin)) = parse_rp_from_address(&profile.address) {
+                return (rp_id, rp_origin, "BastionVault".to_string());
+            }
+        }
+    }
+    (
+        "localhost".to_string(),
+        "https://localhost".to_string(),
+        "BastionVault".to_string(),
+    )
+}
+
+/// Write FIDO2 defaults to the userpass mount. Used to backfill vaults
+/// initialized before `enable_default_auth_methods` started
+/// auto-configuring FIDO2, and remote deployments where no admin has
+/// configured FIDO2 yet.
+async fn write_default_fido2_config(state: &State<'_, AppState>) -> Result<(), CommandError> {
+    let (rp_id, rp_origin, rp_name) = derive_fido2_defaults(state).await;
+    let mut body = Map::new();
+    body.insert("rp_id".to_string(), Value::String(rp_id));
+    body.insert("rp_origin".to_string(), Value::String(rp_origin));
+    body.insert("rp_name".to_string(), Value::String(rp_name));
+    make_request(
+        state,
+        Operation::Write,
+        "auth/userpass/fido2/config".to_string(),
+        Some(body),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Read the FIDO2 relying party config from the vault.
+///
+/// If the config is missing (vault was initialized before FIDO2
+/// auto-config existed), transparently backfill the embedded-mode
+/// defaults and retry the read. The backfill needs an admin-equivalent
+/// token; if the caller lacks permission, the original "not configured"
+/// error is surfaced so login flows can fall through to password entry.
+async fn read_fido2_config(state: &State<'_, AppState>) -> Result<(String, String, String), CommandError> {
     // The server returns 404 (with an empty body) when no FIDO2 config
     // entry has ever been written for this userpass mount. Treat that
     // as "not configured" so `LoginPage.handleContinue` recognises the
@@ -102,14 +182,32 @@ async fn read_fido2_config(state: &State<'_, AppState>) -> Result<(String, Strin
     .await
     {
         Ok(r) => r,
-        Err(e) if is_not_configured_err(&e) => {
-            return Err("FIDO2 not configured".into());
-        }
+        Err(e) if is_not_configured_err(&e) => None,
         Err(e) => return Err(e),
     };
-    let data = resp
-        .and_then(|r| r.data)
-        .ok_or("FIDO2 not configured")?;
+
+    let data = match resp.and_then(|r| r.data) {
+        Some(d) => d,
+        None => {
+            // Backfill mode-appropriate defaults (localhost for embedded,
+            // derived from the remote profile's URL for remote). Silently
+            // swallow write errors (e.g. permission denied on a non-admin
+            // token) so the caller still sees the "not configured" marker
+            // and login flows fall through to password entry.
+            if write_default_fido2_config(state).await.is_err() {
+                return Err("FIDO2 not configured".into());
+            }
+            make_request(
+                state,
+                Operation::Read,
+                "auth/userpass/fido2/config".to_string(),
+                None,
+            )
+            .await?
+            .and_then(|r| r.data)
+            .ok_or("FIDO2 not configured")?
+        }
+    };
 
     let rp_id = data.get("rp_id").and_then(|v| v.as_str()).unwrap_or("localhost").to_string();
     let rp_origin = data.get("rp_origin").and_then(|v| v.as_str()).unwrap_or("https://localhost").to_string();
@@ -222,7 +320,14 @@ pub async fn fido2_submit_pin(
     pin: String,
     state: State<'_, AppState>,
 ) -> CmdResult<()> {
-    let sender = state.pin_sender.lock().unwrap().take();
+    // Clone — do NOT take — the sender. The authenticator crate may
+    // raise multiple PIN prompts in a single ceremony (e.g. InvalidPin
+    // after a wrong attempt), and each prompt goes through this command.
+    // `.take()` would null out the sender after the first submission so
+    // the second user-entered PIN would be silently dropped, causing
+    // `request_pin_from_frontend` to time out and cancel the ceremony.
+    // The ceremony cleanup at the end of register/sign clears the slot.
+    let sender = state.pin_sender.lock().unwrap().clone();
     if let Some(tx) = sender {
         tx.send(pin).map_err(|_| CommandError::from("PIN channel closed"))?;
     }

@@ -92,6 +92,12 @@ pub struct PublicKeyCredentialAttestation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthenticatorAttestationResponse {
+    // WebAuthn spec name is `clientDataJSON` (capital JSON). Serde's
+    // camelCase auto-rename would produce `clientDataJson`, which would
+    // reject every spec-compliant client (browsers + the native
+    // authenticator). Pin the rename to the spec name; keep the old
+    // camelCase form as a deserialization alias for legacy callers.
+    #[serde(rename = "clientDataJSON", alias = "clientDataJson")]
     pub client_data_json: String,
     pub attestation_object: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -146,6 +152,9 @@ pub struct PublicKeyCredentialAssertion {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthenticatorAssertionResponse {
+    // See `AuthenticatorAttestationResponse::client_data_json` for the
+    // rationale on the spec-name pin + legacy alias.
+    #[serde(rename = "clientDataJSON", alias = "clientDataJson")]
     pub client_data_json: String,
     pub authenticator_data: String,
     pub signature: String,

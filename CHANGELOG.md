@@ -45,6 +45,18 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.5.15] - 2026-05-13
+
+### Fixed
+
+- **FIDO2 PIN retry silently cancels the ceremony** (`gui/src-tauri/src/commands/fido2_native.rs`) — `fido2_submit_pin` now clones the PIN sender instead of `.take()`-ing it, so the slot stays populated across multiple PIN prompts in the same ceremony (e.g. when the authenticator responds with `InvalidPin` and asks again). Previously the second PIN entry was silently dropped, the status handler blocked on `recv_timeout`, and the authenticator's callback channel was dropped — surfacing as "Statemachine was cancelled" with no user-visible error. The ceremony cleanup at the end of register/sign still clears the slot.
+
+
+- **FIDO2 attestation/assertion field name mismatch with WebAuthn spec** (`src/modules/credential/fido2/rp/proto.rs`) — `AuthenticatorAttestationResponse::client_data_json` and `AuthenticatorAssertionResponse::client_data_json` now deserialize from the spec-compliant `clientDataJSON` (capital JSON) instead of the serde-camelCase-default `clientDataJson`. Every spec-compliant client (browsers, the native authenticator crate) sends `clientDataJSON`, so the old name silently rejected all real-world FIDO2 registrations and authentications with `missing field 'clientDataJson'`. The legacy `clientDataJson` form is retained as a deserialization alias so any in-flight clients still work.
+
+
+- **FIDO2 "not configured" error on Register Security Key** (`gui/src-tauri/src/commands/fido2_native.rs`) — `read_fido2_config` now backfills mode-appropriate defaults when the userpass mount has no FIDO2 config entry, then retries the read. Embedded vaults get `rp_id=localhost`/`rp_origin=https://localhost`; remote vaults derive `rp_id` (host) and `rp_origin` (`scheme://host[:port]`) from the connected remote profile's address, mirroring the SettingsPage `deriveDefaults` logic so admins can register keys without visiting Settings first. The write is best-effort: non-admin tokens fall through to the original "not configured" marker so login flows still recognise it and fall back to password entry.
+
 ## [0.5.14] - 2026-05-13
 
 ### Added
