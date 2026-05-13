@@ -11,6 +11,7 @@ import type {
   ResourceTypeDef,
   ResourceFieldDef,
   PasswordPolicy,
+  ClusterDiagnostics,
 } from "../lib/types";
 import type {
   SsoAdminProvider,
@@ -414,6 +415,7 @@ export function SettingsPage() {
                   <span className="text-[var(--color-text-muted)]">TLS Verify</span>
                   <span>{remoteProfile.tls_skip_verify ? "Disabled" : "Enabled"}</span>
                 </div>
+                <ClusterDiscoveryDiagnostics />
               </>
             )}
             {mode === "Embedded" && (
@@ -1884,3 +1886,117 @@ function SsoProviderModal({
     </Modal>
   );
 }
+
+/**
+ * Re-run cluster discovery + health probing against the current
+ * remote profile and render the resulting candidate table. Used by
+ * operators to debug "why did the client pick that node" without
+ * leaving the GUI. Only rendered in Remote mode (the parent gates
+ * on this) — does NOT change the live connection; the result is
+ * read-only.
+ */
+function ClusterDiscoveryDiagnostics() {
+  const { toast } = useToast();
+  const remoteProfile = useVaultStore((s) => s.remoteProfile);
+  const selectedNode = useVaultStore((s) => s.selectedNode);
+  const [open, setOpen] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [diag, setDiag] = useState<ClusterDiagnostics | null>(null);
+
+  async function runDiscover() {
+    if (!remoteProfile) return;
+    setRunning(true);
+    try {
+      const d = await api.clusterDiscover(remoteProfile);
+      setDiag(d);
+      setOpen(true);
+    } catch (e: unknown) {
+      toast("error", `Cluster discover failed: ${extractError(e)}`);
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  return (
+    <>
+      <div className="flex justify-between items-center pt-1 border-t border-[var(--color-border)] mt-1">
+        <span className="text-[var(--color-text-muted)]">
+          Cluster Discovery
+        </span>
+        <div className="flex items-center gap-2">
+          {selectedNode ? (
+            <span
+              className="font-mono text-xs"
+              title={`State: ${selectedNode.state} • RTT: ${selectedNode.rtt_ms} ms${selectedNode.cluster_id ? ` • cluster_id: ${selectedNode.cluster_id}` : ""}`}
+            >
+              {selectedNode.target}:{selectedNode.port}
+            </span>
+          ) : (
+            <span className="text-xs text-[var(--color-text-muted)]">
+              (literal / disabled)
+            </span>
+          )}
+          <Button size="sm" variant="secondary" onClick={runDiscover} loading={running}>
+            Re-probe
+          </Button>
+        </div>
+      </div>
+
+      <Modal
+        open={open}
+        onClose={() => setOpen(false)}
+        title="Cluster Discovery"
+        size="lg"
+      >
+        {diag && (
+          <div className="space-y-3 text-sm">
+            <div className="flex justify-between">
+              <span className="text-[var(--color-text-muted)]">Cluster</span>
+              <span className="font-mono">{diag.cluster_label}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-[var(--color-text-muted)]">Picked</span>
+              <span className="font-mono text-xs">
+                {diag.chosen
+                  ? `${diag.chosen.target}:${diag.chosen.port} (${diag.chosen.state}, ${diag.chosen.rtt_ms} ms)`
+                  : "(none — no healthy node)"}
+              </span>
+            </div>
+            <table className="w-full text-xs">
+              <thead className="text-[var(--color-text-muted)]">
+                <tr>
+                  <th className="text-left py-1">Target</th>
+                  <th className="text-right py-1">Pri / Wt</th>
+                  <th className="text-left py-1">State</th>
+                  <th className="text-right py-1">RTT</th>
+                  <th className="text-left py-1">Cluster ID</th>
+                </tr>
+              </thead>
+              <tbody className="font-mono">
+                {diag.candidates.map((c, i) => (
+                  <tr
+                    key={`${c.target}:${c.port}:${i}`}
+                    className="border-t border-[var(--color-border)]"
+                  >
+                    <td className="py-1">
+                      {c.scheme}://{c.target}:{c.port}
+                    </td>
+                    <td className="py-1 text-right">
+                      {c.priority} / {c.weight}
+                    </td>
+                    <td className="py-1">{c.state}</td>
+                    <td className="py-1 text-right">{c.rtt_ms} ms</td>
+                    <td className="py-1 truncate max-w-[12rem]">
+                      {c.cluster_id || "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Modal>
+    </>
+  );
+}
+

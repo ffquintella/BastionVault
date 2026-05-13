@@ -45,6 +45,21 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.5.16] - 2026-05-13
+
+### Added
+
+- **Vault Cluster — Client Discovery & Health-Aware Connection** — operator types a single DNS name; the client locates the cluster's nodes via `_bvault._tcp.<name>` SRV records, probes each one's `/v1/sys/health`, picks the best (SRV priority hard floor → leader-over-follower → RTT → SRV-weight tiebreak, with `cluster_id` minority rejection), and pins the session to that node. Explicit reconnect on node failure (no mid-session transparent failover) via the new `ClientError::NodeUnavailable` variant.
+
+  Surfaces:
+  - **bv-client**: new `discovery` + `health` modules; `RemoteBackendBuilder::{with_cluster_discovery, with_discovery_config, with_health_config, build_with_discovery}`; `RemoteBackend::selected()` + `input_label()`; `ClientError::{NodeUnavailable, NoHealthyNode}`; `classify_node_failure()` maps transport-level / sealed-5xx errors into `NodeUnavailable` from inside `RemoteBackend::handle`.
+  - **GUI** (`gui/src-tauri/src/commands/connection.rs`, `gui/src/...`): `connect_remote` runs discovery; new `RemoteProfile` fields `cluster_discovery`, `discovery_srv_service`, `health_probe_timeout_ms`; new Tauri commands `get_selected_node` + `cluster_discover`; ConnectPage adds a cluster-discovery toggle; Layout's vault chip shows the picked node in its tooltip; Settings Connection card gets a "Cluster Discovery" row + a Re-probe diagnostics modal listing every candidate's state, RTT, and cluster_id; `isNodeUnavailable` helper for reconnect UX.
+  - **CLI** (`src/cli/command/`): `HttpOptions` auto-runs discovery on bare hostnames; new `--no-cluster-discovery` flag + `VAULT_NO_CLUSTER_DISCOVERY` env var; new `bvault cluster discover` subcommand prints the scored candidate table without connecting.
+  - **Tests**: 19 new unit tests in `bv-client` (parse_input, SRV ordering, every classification row, priority hard-floor, RTT and weight tiebreaks, cluster_id minority rejection, builder opt-out, end-to-end no-healthy-node) + 7 e2e tests in `crates/bv-client/tests/cluster_discovery_e2e.rs` using in-process fake HTTP nodes for leader-over-follower, both directions of the SRV priority floor, cluster_id minority rejection, RTT tiebreak, all-unreachable rejection, and post-failure reconnect.
+  - **Docs**: new operator runbook at `docs/docs/cluster-client-discovery.md`.
+
+  ([spec](features/vault-cluster-client-discovery.md), [roadmap](roadmaps/vault-cluster-client-discovery.md))
+
 ## [0.5.15] - 2026-05-13
 
 ### Fixed

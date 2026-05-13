@@ -15,10 +15,80 @@ use ureq::Agent;
 
 use crate::{
     backend::Backend,
-    error::ClientError,
+    discovery::{self, DiscoveryConfig, SrvLookup, SystemResolver},
+    error::{classify_node_failure, ClientError},
+    health::{self, HealthConfig, Selected},
     tls::ClientTlsConfig,
     types::{JsonResponse, Operation},
 };
+
+#[cfg(test)]
+mod builder_tests {
+    use super::*;
+    use crate::discovery::{SrvRecord};
+    use async_trait::async_trait;
+
+    struct FixedResolver(Vec<SrvRecord>);
+
+    #[async_trait]
+    impl SrvLookup for FixedResolver {
+        async fn lookup_srv(&self, _label: &str) -> Result<Vec<SrvRecord>, ClientError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// Cluster name → SRV → probes. We aim every candidate at a
+    /// guaranteed-closed port (TCP/1) so the probes uniformly fail
+    /// fast, producing `NoHealthyNode`. The point of the test is
+    /// that the *plumbing* works: discovery runs, probes run, pick
+    /// runs, and the right error variant comes out.
+    #[tokio::test]
+    async fn build_with_discovery_emits_no_healthy_node_when_all_probes_fail() {
+        let resolver = FixedResolver(vec![SrvRecord {
+            target: "127.0.0.1.".into(),
+            port: 1,
+            priority: 10,
+            weight: 50,
+        }]);
+        let res = RemoteBackend::builder()
+            .with_address("test.invalid")
+            .with_health_config(HealthConfig {
+                probe_timeout: std::time::Duration::from_millis(200),
+                parallelism: 2,
+            })
+            .build_with_discovery_using(&resolver)
+            .await;
+        match res {
+            Err(ClientError::NoHealthyNode { cluster, .. }) => {
+                assert_eq!(cluster, "test.invalid");
+            }
+            Err(other) => panic!("expected NoHealthyNode, got error: {other}"),
+            Ok(_) => panic!("expected NoHealthyNode, got Ok"),
+        }
+    }
+
+    /// `with_cluster_discovery(false)` opts out — we should get a
+    /// fully-formed backend pointed at the literal input without
+    /// any SRV traffic or probe overhead.
+    #[tokio::test]
+    async fn opt_out_path_skips_discovery_entirely() {
+        struct PanicResolver;
+        #[async_trait]
+        impl SrvLookup for PanicResolver {
+            async fn lookup_srv(&self, _label: &str) -> Result<Vec<SrvRecord>, ClientError> {
+                panic!("resolver must not be called when cluster_discovery=false");
+            }
+        }
+        let be = RemoteBackend::builder()
+            .with_address("https://vault.example:9999")
+            .with_cluster_discovery(false)
+            .build_with_discovery_using(&PanicResolver)
+            .await
+            .expect("opt-out path should succeed without probing");
+        assert_eq!(be.address(), "https://vault.example:9999");
+        assert!(be.selected().is_none());
+    }
+}
 
 /// HTTP-backed implementation of [`Backend`].
 ///
@@ -37,6 +107,14 @@ struct RemoteInner {
     headers: HashMap<String, String>,
     api_version: u8,
     agent: Agent,
+    /// Populated when the backend was constructed via discovery
+    /// (cluster name → SRV → health probes → pick). Carries enough
+    /// info for log/UI surfacing of "Connected to <cluster> via
+    /// <node>, leader, 12 ms". `None` for literal-URL constructions.
+    selected: Option<Selected>,
+    /// The original input the operator typed (cluster name or
+    /// literal URL). Surfaced as `host` in `ClientError::NodeUnavailable`.
+    input_label: String,
 }
 
 #[derive(Clone, Default)]
@@ -47,6 +125,13 @@ pub struct RemoteBackendBuilder {
     tls: Option<ClientTlsConfig>,
     timeout_connect: Option<Duration>,
     timeout_global: Option<Duration>,
+    /// `true` (default) enables SRV-based cluster discovery in
+    /// `build_with_discovery`. When `false` (or when `build()` is
+    /// used) discovery is bypassed and the address is treated as a
+    /// literal URL.
+    cluster_discovery: Option<bool>,
+    discovery_config: Option<DiscoveryConfig>,
+    health_config: Option<HealthConfig>,
 }
 
 impl RemoteBackendBuilder {
@@ -84,6 +169,93 @@ impl RemoteBackendBuilder {
         self
     }
 
+    pub fn with_cluster_discovery(mut self, enabled: bool) -> Self {
+        self.cluster_discovery = Some(enabled);
+        self
+    }
+
+    pub fn with_discovery_config(mut self, cfg: DiscoveryConfig) -> Self {
+        self.discovery_config = Some(cfg);
+        self
+    }
+
+    pub fn with_health_config(mut self, cfg: HealthConfig) -> Self {
+        self.health_config = Some(cfg);
+        self
+    }
+
+    /// Run SRV discovery + `/sys/health` probing against the
+    /// configured address and return a `RemoteBackend` pinned to
+    /// the chosen node. The chosen node is frozen for the lifetime
+    /// of the returned backend; transport failures on it surface as
+    /// [`ClientError::NodeUnavailable`] and the caller is expected
+    /// to call `build_with_discovery` again to pick a new one. This
+    /// is the "Sticky session with failover-on-next-open" contract
+    /// from the feature spec.
+    ///
+    /// When `with_cluster_discovery(false)` was set, or when the
+    /// configured address is URL-shaped (`https://host:port`), this
+    /// short-circuits and behaves exactly like [`Self::build`].
+    pub async fn build_with_discovery(self) -> Result<RemoteBackend, ClientError> {
+        let resolver = SystemResolver::new();
+        self.build_with_discovery_using(&resolver).await
+    }
+
+    /// Variant of [`Self::build_with_discovery`] that takes an
+    /// explicit resolver. Used by tests to inject a fake.
+    pub async fn build_with_discovery_using(
+        self,
+        resolver: &dyn SrvLookup,
+    ) -> Result<RemoteBackend, ClientError> {
+        let input = self
+            .address
+            .clone()
+            .unwrap_or_else(|| "https://127.0.0.1:8200".to_string());
+        let discovery_enabled = self.cluster_discovery.unwrap_or(true);
+        let discovery_cfg = self.discovery_config.clone().unwrap_or_default();
+        let health_cfg = self.health_config.clone().unwrap_or_default();
+        let tls_for_probe = self.tls.clone();
+
+        if !discovery_enabled {
+            // Operator opt-out: act exactly like the synchronous
+            // builder, no SRV traffic, no health probes.
+            let mut be = self.with_address(input.clone()).build();
+            // Even in opt-out mode we record the input label for
+            // NodeUnavailable surfacing.
+            Arc::get_mut(&mut be.inner)
+                .expect("freshly built RemoteBackend has unique Arc")
+                .input_label = input;
+            return Ok(be);
+        }
+
+        let resolved = discovery::resolve(&input, &discovery_cfg, resolver).await?;
+        let candidates = resolved.into_candidates();
+        if candidates.is_empty() {
+            return Err(ClientError::no_healthy_node(input, "no candidates resolved"));
+        }
+
+        let probes = health::probe_all(&candidates, &health_cfg, tls_for_probe.as_ref()).await;
+        let selected = health::pick(&probes).ok_or_else(|| {
+            // Collect a compact diagnostic of what each probe found
+            // so the operator's error toast isn't just "none."
+            let reasons: Vec<String> = probes
+                .iter()
+                .map(|p| format!("{}={:?}", p.candidate.target, p.state))
+                .collect();
+            ClientError::no_healthy_node(&input, reasons.join(", "))
+        })?;
+
+        let address = selected.candidate.url();
+        let mut be = self.with_address(address).build();
+        // Stash the discovery/selection metadata after the fact
+        // (the synchronous build path doesn't know about it).
+        let inner = Arc::get_mut(&mut be.inner)
+            .expect("freshly built RemoteBackend has unique Arc");
+        inner.selected = Some(selected);
+        inner.input_label = input;
+        Ok(be)
+    }
+
     pub fn build(self) -> RemoteBackend {
         let mut config_builder = ureq::Agent::config_builder()
             .timeout_connect(Some(self.timeout_connect.unwrap_or(Duration::from_secs(10))))
@@ -97,12 +269,18 @@ impl RemoteBackendBuilder {
 
         let agent = config_builder.build().new_agent();
 
+        let address = self
+            .address
+            .unwrap_or_else(|| "https://127.0.0.1:8200".to_string());
+        let input_label = address.clone();
         RemoteBackend {
             inner: Arc::new(RemoteInner {
-                address: self.address.unwrap_or_else(|| "https://127.0.0.1:8200".to_string()),
+                address,
                 headers: self.headers,
                 api_version: self.api_version.unwrap_or(1),
                 agent,
+                selected: None,
+                input_label,
             }),
         }
     }
@@ -115,6 +293,23 @@ impl RemoteBackend {
 
     pub fn address(&self) -> &str {
         &self.inner.address
+    }
+
+    /// The discovery result this backend was constructed from, if
+    /// any. `None` for backends built via [`RemoteBackendBuilder::build`]
+    /// (the legacy literal-URL path); `Some` for backends built via
+    /// [`RemoteBackendBuilder::build_with_discovery`]. Carries the
+    /// chosen node + state + RTT for log/UI surfacing.
+    pub fn selected(&self) -> Option<&Selected> {
+        self.inner.selected.as_ref()
+    }
+
+    /// Original input the operator typed (cluster name or literal
+    /// URL). Used as the `host` field in `NodeUnavailable` so the
+    /// error surfaces the operator-facing label rather than the
+    /// internal IP we resolved to.
+    pub fn input_label(&self) -> &str {
+        &self.inner.input_label
     }
 
     fn api_prefix(&self) -> &'static str {
@@ -157,6 +352,7 @@ impl Backend for RemoteBackend {
 
         // ureq is sync. Park the call on a blocking thread so we
         // don't hold the executor while the network round-trips.
+        let host_for_err = inner.input_label.clone();
         let response_result = tokio::task::spawn_blocking(move || {
             let mut builder = Request::builder()
                 .method(method)
@@ -207,7 +403,12 @@ impl Backend for RemoteBackend {
             })
         })
         .await
-        .map_err(|e| ClientError::backend(format!("join: {e}")))??;
+        .map_err(|e| ClientError::backend(format!("join: {e}")))?
+        // Translate transport-level / sealed-shaped failures into
+        // `NodeUnavailable` so the caller's sticky-session recovery
+        // path can light up a "reconnect" UX instead of a generic
+        // error toast. Non-node errors pass through unchanged.
+        .map_err(|e| classify_node_failure(&host_for_err, e))?;
 
         let (status, json) = response_result;
 
@@ -245,7 +446,10 @@ impl Backend for RemoteBackend {
                     .unwrap_or_else(|| json.to_string()),
                 _ => json.to_string(),
             };
-            Err(ClientError::server(status, message))
+            Err(classify_node_failure(
+                &host_for_err,
+                ClientError::server(status, message),
+            ))
         }
     }
 

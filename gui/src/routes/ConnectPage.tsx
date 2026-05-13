@@ -78,6 +78,7 @@ export function ConnectPage() {
   const { toast } = useToast();
   const setMode = useVaultStore((s) => s.setMode);
   const setRemoteProfile = useVaultStore((s) => s.setRemoteProfile);
+  const setSelectedNode = useVaultStore((s) => s.setSelectedNode);
   const rememberSession = useAuthStore((s) => s.rememberSession);
   const restoreSession = useAuthStore((s) => s.restoreSession);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
@@ -127,6 +128,11 @@ export function ConnectPage() {
   const [remoteAddr, setRemoteAddr] = useState("https://127.0.0.1:8200");
   const [tlsSkipVerify, setTlsSkipVerify] = useState(false);
   const [caCertPath, setCaCertPath] = useState("");
+  // Cluster discovery: enabled by default so a bare DNS name auto-
+  // routes via SRV. Operators connecting to a single node either
+  // type a literal URL (skipped automatically) or untick this for
+  // diagnostics against one HA node.
+  const [clusterDiscovery, setClusterDiscovery] = useState(true);
 
   // Cloud add-form fields.
   const [cloudProvider, setCloudProvider] = useState<CloudProvider>("s3");
@@ -379,6 +385,17 @@ export function ConnectPage() {
           await api.connectRemote(profile.spec.profile);
           setMode("Remote");
           setRemoteProfile(profile.spec.profile);
+          // Pick up the cluster-discovery result (if any) so the
+          // status bar can show "Connected to <cluster> via <node>".
+          // `get_selected_node` returns null when discovery was
+          // disabled or the input was URL-shaped — that's a normal
+          // state for single-node deployments, not an error.
+          try {
+            const sel = await api.getSelectedNode();
+            setSelectedNode(sel);
+          } catch {
+            setSelectedNode(null);
+          }
           if (recordDefault) await api.setLastUsedVault(profile.id);
           if (await tryResumeSession(targetId)) return;
           navigate("/login");
@@ -698,6 +715,7 @@ export function ConnectPage() {
           address: remoteAddr.trim(),
           tls_skip_verify: tlsSkipVerify,
           ca_cert_path: caCertPath || undefined,
+          cluster_discovery: clusterDiscovery,
         };
         spec = { kind: "remote", profile };
       } else if (addKind === "cloud") {
@@ -1214,9 +1232,21 @@ export function ConnectPage() {
                 label="Server Address"
                 value={remoteAddr}
                 onChange={(e) => setRemoteAddr(e.target.value)}
-                placeholder="https://vault.example.com:8200"
-                hint="Full URL including protocol and port"
+                placeholder="vault.corp.example or https://host:8200"
+                hint="Bare DNS name uses SRV-based cluster discovery; full URL connects directly to one node."
               />
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={clusterDiscovery}
+                  onChange={(e) => setClusterDiscovery(e.target.checked)}
+                  className="rounded"
+                />
+                <span className="text-[var(--color-text-muted)]">
+                  Cluster discovery (SRV + /sys/health) — uncheck to
+                  force literal-address mode for diagnostics
+                </span>
+              </label>
               <label className="flex items-center gap-2 text-sm">
                 <input
                   type="checkbox"

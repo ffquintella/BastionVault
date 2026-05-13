@@ -56,6 +56,53 @@ pub struct RemoteProfile {
     pub ca_cert_path: Option<String>,
     pub client_cert_path: Option<String>,
     pub client_key_path: Option<String>,
+    /// Vault Cluster Client Discovery — when `true` (default) and
+    /// `address` looks like a bare DNS name, `connect_remote` queries
+    /// `_bvault._tcp.<address>` for SRV records and picks the best
+    /// node via `/sys/health` scoring before connecting. URL-shaped
+    /// addresses (`https://host:port`) always skip discovery. Set
+    /// to `false` to force literal-address mode for diagnostics
+    /// against a single node in an HA cluster.
+    ///
+    /// Optional in the serde shape so old preference files (which
+    /// predate the field) deserialize cleanly to the default.
+    #[serde(default = "default_cluster_discovery")]
+    pub cluster_discovery: bool,
+    /// Override for the SRV service label (defaults to
+    /// `_bvault._tcp`). Empty / missing → keep the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_srv_service: Option<String>,
+    /// Per-probe deadline in milliseconds (default 1500). 0 / missing
+    /// → keep the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_probe_timeout_ms: Option<u32>,
+}
+
+fn default_cluster_discovery() -> bool {
+    true
+}
+
+/// Serializable view of `bv_client::health::Selected` for the
+/// frontend. Carries enough metadata to render the connected-node
+/// indicator and to drive a `bvault cluster discover`-style
+/// diagnostics row.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SelectedNode {
+    /// Operator-facing label — the cluster name they originally
+    /// typed (e.g. `vault.corp.example`).
+    pub cluster_label: String,
+    /// Concrete `scheme://target:port` the client is actually
+    /// talking to.
+    pub address: String,
+    pub target: String,
+    pub port: u16,
+    /// `"ActiveLeader"`, `"Follower"`, `"Sealed"`, `"Uninitialized"`,
+    /// or `"Unreachable: <reason>"`. Stringified so the frontend
+    /// doesn't have to mirror the bv-client enum shape.
+    pub state: String,
+    pub rtt_ms: u32,
+    pub cluster_id: Option<String>,
+    pub version: Option<String>,
 }
 
 pub struct AppState {
@@ -66,6 +113,13 @@ pub struct AppState {
     pub remote_client: Mutex<Option<Client>>,
     /// Remote server profile (only set in Remote mode).
     pub remote_profile: Mutex<Option<RemoteProfile>>,
+    /// Cluster-discovery result for the live remote connection.
+    /// Populated by `connect_remote` when discovery ran (cluster
+    /// name → SRV → health probes → pick). `None` when the operator
+    /// used a literal URL or disabled discovery. Surfaced to the
+    /// frontend via `get_remote_status` so the status bar can show
+    /// "Connected to <cluster> via <node> (leader, 12 ms)".
+    pub selected_node: Mutex<Option<SelectedNode>>,
     /// Trait-object backend used by migrated commands. Always populated
     /// to mirror whichever of `vault` / `remote_client` is active —
     /// embedded mode wraps `vault` in an `EmbeddedBackend`, remote mode
@@ -110,6 +164,7 @@ impl AppState {
             vault: Mutex::new(None),
             remote_client: Mutex::new(None),
             remote_profile: Mutex::new(None),
+            selected_node: Mutex::new(None),
             backend: Mutex::new(None),
             token: Mutex::new(None),
             pin_sender: std::sync::Mutex::new(None),

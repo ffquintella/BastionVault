@@ -1,6 +1,6 @@
 [package]
 name = "bv-client"
-version = "0.3.4"
+version = "0.4.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Client crate for BastionVault: HTTP client + Backend trait used by the GUI to talk to a BastionVault server. Has zero dependencies on the bastion_vault server crate."
@@ -22,6 +22,11 @@ tokio = { version = "1", features = ["rt"] }
 bv_plugin_surface = { path = "../bv_plugin_surface" }
 sha2 = "0.11"
 hex = "0.4"
+# Async SRV resolution for cluster discovery. tokio-runtime feature
+# uses the same tokio handle the consumer already brings; no extra
+# runtime is spawned. Pinned to match the root crate so cargo
+# dedupes a single resolver build.
+hickory-resolver = { version = "0.24", default-features = false, features = ["system-config", "tokio-runtime"] }
 
 [dev-dependencies]
 tempfile = "3"

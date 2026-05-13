@@ -55,6 +55,8 @@ import type {
   Fido2CredentialInfo,
   RemoteProfile,
   RemoteStatus,
+  SelectedNode,
+  ClusterDiagnostics,
   PasswordPolicy,
   PkiMountInfo,
   PkiIssuerListResult,
@@ -134,6 +136,10 @@ export const getRemoteProfile = () => invoke<RemoteProfile | null>("get_remote_p
 export const connectRemote = (profile: RemoteProfile) =>
   invoke<void>("connect_remote", { profile });
 export const disconnectRemote = () => invoke<void>("disconnect_remote");
+export const getSelectedNode = () =>
+  invoke<SelectedNode | null>("get_selected_node");
+export const clusterDiscover = (profile: RemoteProfile) =>
+  invoke<ClusterDiagnostics>("cluster_discover", { profile });
 export const getRemoteStatus = () => invoke<RemoteStatus>("get_remote_status");
 export const loadPreferences = () => invoke<Preferences>("load_preferences");
 export const savePreferences = (mode: VaultMode, remoteProfile?: RemoteProfile) =>

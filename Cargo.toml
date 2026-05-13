@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.5.15"
+version = "0.5.16"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -43,6 +43,12 @@ resolver = "2"
 [dependencies]
 bv_crypto = { path = "crates/bv_crypto" }
 bv_plugin_surface = { path = "crates/bv_plugin_surface" }
+# Shared client crate — used by the CLI's `cluster discover`
+# subcommand and `HttpOptions::client_with_discovery` for SRV-based
+# cluster node selection. The bulk of bv-client (RemoteBackend HTTP
+# dispatch, plugin surface fetch, etc.) is GUI-only; the CLI only
+# touches `discovery` + `health`.
+bv-client = { path = "crates/bv-client" }
 aes-gcm = "0.10"
 anyhow = { version = "^1.0" }
 thiserror = { version = "^2.0" }

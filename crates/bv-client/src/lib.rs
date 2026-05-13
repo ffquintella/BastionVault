@@ -12,7 +12,9 @@
 //! Cargo feature gate, so the two implementations stay isolated.
 
 pub mod backend;
+pub mod discovery;
 pub mod error;
+pub mod health;
 pub mod remote;
 pub mod surface;
 pub mod tls;

@@ -156,6 +156,7 @@ export function Layout({ children }: LayoutProps) {
   const status = useVaultStore((s) => s.status);
   const mode = useVaultStore((s) => s.mode);
   const remoteProfile = useVaultStore((s) => s.remoteProfile);
+  const selectedNode = useVaultStore((s) => s.selectedNode);
   const policies = useAuthStore((s) => s.policies);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const clearAuth = useAuthStore((s) => s.clearAuth);
@@ -428,7 +429,14 @@ export function Layout({ children }: LayoutProps) {
           <button
             type="button"
             onClick={handleSwitchVault}
-            title="Switch vault"
+            // Tooltip surfaces the discovered node when cluster
+            // discovery picked one — operators sanity-check which
+            // HA node they landed on without leaving the page.
+            title={
+              mode === "Remote" && selectedNode
+                ? `Switch vault — connected via ${selectedNode.target}:${selectedNode.port} (${selectedNode.state}, ${selectedNode.rtt_ms} ms)`
+                : "Switch vault"
+            }
             aria-label="Switch vault"
             className="w-full flex items-center justify-between gap-2 rounded-md px-1.5 py-1 text-left hover:bg-[var(--color-surface-hover)] transition-colors group"
           >

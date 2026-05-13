@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use sysexits::ExitCode;
 
-use super::{cluster_failover, cluster_leader, cluster_leave, cluster_members, cluster_remove_node, cluster_status};
+use super::{cluster_discover, cluster_failover, cluster_leader, cluster_leave, cluster_members, cluster_remove_node, cluster_status};
 use crate::{cli::command::CommandExecutor, EXIT_CODE_INSUFFICIENT_PARAMS};
 
 #[derive(Parser)]
@@ -46,6 +46,7 @@ pub enum Commands {
     Failover(cluster_failover::ClusterFailover),
     #[command(name = "remove-node")]
     RemoveNode(cluster_remove_node::ClusterRemoveNode),
+    Discover(cluster_discover::ClusterDiscover),
 }
 
 impl Commands {
@@ -57,6 +58,7 @@ impl Commands {
             Commands::Leave(leave) => leave.execute(),
             Commands::Failover(failover) => failover.execute(),
             Commands::RemoveNode(remove_node) => remove_node.execute(),
+            Commands::Discover(discover) => discover.execute(),
         }
     }
 }

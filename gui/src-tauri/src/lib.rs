@@ -159,6 +159,8 @@ pub fn run() {
             commands::connection::connect_remote,
             commands::connection::disconnect_remote,
             commands::connection::get_remote_status,
+            commands::connection::get_selected_node,
+            commands::connection::cluster_discover,
             commands::connection::remote_login_token,
             commands::connection::remote_login_userpass,
             commands::connection::load_preferences,

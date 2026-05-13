@@ -1,15 +1,18 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use bastion_vault::api::{client::TLSConfigBuilder, Client};
 use bv_client::{
-    tls::TLSConfigBuilder as BvTLSConfigBuilder, RemoteBackend,
+    discovery::DiscoveryConfig,
+    health::HealthConfig,
+    tls::{ClientTlsConfig, TLSConfigBuilder as BvTLSConfigBuilder},
+    RemoteBackend,
 };
 use serde::Serialize;
 use tauri::State;
 
 use crate::error::{CmdResult, CommandError};
 use crate::preferences::Preferences;
-use crate::state::{AppState, RemoteProfile, VaultMode};
+use crate::state::{AppState, RemoteProfile, SelectedNode, VaultMode};
 
 #[tauri::command]
 pub async fn get_mode(state: State<'_, AppState>) -> CmdResult<VaultMode> {
@@ -34,60 +37,64 @@ pub async fn get_remote_profile(state: State<'_, AppState>) -> CmdResult<Option<
 }
 
 /// Connect to a remote BastionVault server.
+///
+/// When `profile.cluster_discovery` is `true` and the address isn't
+/// already URL-shaped, this runs SRV-based cluster discovery
+/// (`_bvault._tcp.<address>`) and probes each candidate's
+/// `/v1/sys/health` to pick the best node. The chosen node is
+/// frozen for the lifetime of this connection — if it fails mid
+/// session, commands return `NodeUnavailable` and the operator is
+/// expected to call `connect_remote` again to re-run discovery.
+///
+/// For literal URLs (`https://host:port`) or when discovery is
+/// explicitly disabled, this short-circuits to the pre-discovery
+/// behaviour and connects to the address as-is.
 #[tauri::command]
 pub async fn connect_remote(
     state: State<'_, AppState>,
     profile: RemoteProfile,
 ) -> CmdResult<()> {
-    let mut client_builder = Client::new()
-        .with_addr(&profile.address);
+    // Resolve the operator-typed address into a concrete URL the
+    // legacy `Client` can dial. This is the only place discovery
+    // runs — once we've picked a node, every legacy / bv-client
+    // request goes through the same target.
+    let tls_for_bv = build_bv_tls(&profile)?;
+    let (effective_address, selected) =
+        resolve_remote_address(&profile, tls_for_bv.as_ref()).await?;
 
-    // Configure TLS if the address is HTTPS.
-    if profile.address.starts_with("https://") {
-        let mut tls_builder = TLSConfigBuilder::new()
-            .with_insecure(profile.tls_skip_verify);
-
-        if let Some(ca_path) = &profile.ca_cert_path {
-            if !ca_path.is_empty() {
-                tls_builder = tls_builder
-                    .with_server_ca_path(&PathBuf::from(ca_path))
-                    .map_err(|e| CommandError::from(format!("CA cert error: {e}")))?;
-            }
-        }
-
-        if let (Some(cert_path), Some(key_path)) = (&profile.client_cert_path, &profile.client_key_path) {
-            if !cert_path.is_empty() && !key_path.is_empty() {
-                tls_builder = tls_builder
-                    .with_client_cert_path(&PathBuf::from(cert_path), &PathBuf::from(key_path))
-                    .map_err(|e| CommandError::from(format!("Client cert error: {e}")))?;
-            }
-        }
-
-        let tls_config = tls_builder.build()
-            .map_err(|e| CommandError::from(format!("TLS config error: {e}")))?;
-
-        client_builder = client_builder.with_tls_config(tls_config);
+    // Legacy `Client`: point it at the chosen URL.
+    let mut client_builder = Client::new().with_addr(&effective_address);
+    if effective_address.starts_with("https://") {
+        client_builder = client_builder.with_tls_config(build_legacy_tls(&profile)?);
     }
-
     let client = client_builder.build();
 
     // Test the connection by checking health.
-    let health = client.sys().health()
+    let health = client
+        .sys()
+        .health()
         .map_err(|e| CommandError::from(format!("Connection failed: {e}")))?;
-
     if health.response_status == 0 {
         return Err("Connection failed: no response from server".into());
     }
 
-    // Build a parallel `RemoteBackend` (bv-client) using the same
-    // address + TLS material so migrated commands route through the
-    // trait. The legacy `Client` above is still populated; once the
-    // command migration is finished we can drop it.
-    let remote_backend = build_remote_backend(&profile)?;
+    // bv-client `RemoteBackend`: pin it to the SAME chosen URL with
+    // discovery disabled. Re-running discovery here would either
+    // duplicate the SRV traffic or risk picking a different node
+    // than the legacy client, which would surface as confusing
+    // mid-session inconsistencies.
+    let mut bv_builder = RemoteBackend::builder()
+        .with_address(&effective_address)
+        .with_cluster_discovery(false);
+    if let Some(tls) = tls_for_bv {
+        bv_builder = bv_builder.with_tls_config(tls);
+    }
+    let remote_backend = bv_builder.build();
 
     *state.mode.lock().await = VaultMode::Remote;
     *state.remote_client.lock().await = Some(client);
     *state.remote_profile.lock().await = Some(profile);
+    *state.selected_node.lock().await = selected;
     *state.backend.lock().await = Some(Arc::new(remote_backend));
     // Clear embedded vault if switching from embedded.
     *state.vault.lock().await = None;
@@ -95,44 +102,124 @@ pub async fn connect_remote(
     Ok(())
 }
 
-/// Build a `bv_client::RemoteBackend` from a `RemoteProfile`. Mirrors
-/// the TLS resolution above for the legacy `Client` so the two
-/// observe the same trust material.
-fn build_remote_backend(profile: &RemoteProfile) -> CmdResult<RemoteBackend> {
-    let mut builder = RemoteBackend::builder().with_address(&profile.address);
-
-    if profile.address.starts_with("https://") {
-        let mut tls_builder =
-            BvTLSConfigBuilder::new().with_insecure(profile.tls_skip_verify);
-
-        if let Some(ca_path) = &profile.ca_cert_path {
-            if !ca_path.is_empty() {
-                tls_builder = tls_builder
-                    .with_server_ca_path(&PathBuf::from(ca_path))
-                    .map_err(|e| CommandError::from(format!("CA cert error: {e}")))?;
-            }
-        }
-
-        if let (Some(cert_path), Some(key_path)) =
-            (&profile.client_cert_path, &profile.client_key_path)
-        {
-            if !cert_path.is_empty() && !key_path.is_empty() {
-                tls_builder = tls_builder
-                    .with_client_cert_path(
-                        &PathBuf::from(cert_path),
-                        &PathBuf::from(key_path),
-                    )
-                    .map_err(|e| CommandError::from(format!("Client cert error: {e}")))?;
-            }
-        }
-
-        let tls_config = tls_builder
-            .build()
-            .map_err(|e| CommandError::from(format!("TLS config error: {e}")))?;
-        builder = builder.with_tls_config(tls_config);
+/// Run cluster discovery for `profile` and return the URL that both
+/// the legacy `Client` and the bv-client `RemoteBackend` should use,
+/// plus a serialisable [`SelectedNode`] describing the pick (or
+/// `None` when discovery short-circuited).
+async fn resolve_remote_address(
+    profile: &RemoteProfile,
+    tls: Option<&ClientTlsConfig>,
+) -> CmdResult<(String, Option<SelectedNode>)> {
+    // Two short-circuits: discovery disabled, or URL-shaped input.
+    // The bv-client discovery layer already does the URL detection
+    // for us — keep the check here at the connect command boundary
+    // so the legacy `Client` skips its TLS branching predictably.
+    if !profile.cluster_discovery || looks_like_url(&profile.address) {
+        return Ok((profile.address.clone(), None));
     }
 
-    Ok(builder.build())
+    let mut discovery_cfg = DiscoveryConfig::default();
+    if let Some(svc) = profile.discovery_srv_service.as_deref() {
+        if !svc.is_empty() {
+            discovery_cfg.srv_service = svc.to_string();
+        }
+    }
+    let mut health_cfg = HealthConfig::default();
+    if let Some(ms) = profile.health_probe_timeout_ms {
+        if ms > 0 {
+            health_cfg.probe_timeout = Duration::from_millis(ms.into());
+        }
+    }
+
+    // Use bv-client's pipeline directly. We build a throwaway
+    // `RemoteBackend` only to harvest its `selected()` — the actual
+    // RemoteBackend the rest of the app uses is built later with the
+    // discovered address baked in (see `connect_remote`).
+    let probe_backend = {
+        let mut b = RemoteBackend::builder()
+            .with_address(&profile.address)
+            .with_cluster_discovery(true)
+            .with_discovery_config(discovery_cfg)
+            .with_health_config(health_cfg);
+        if let Some(t) = tls {
+            b = b.with_tls_config(t.clone());
+        }
+        b.build_with_discovery()
+            .await
+            .map_err(|e| CommandError::from(format!("Cluster discovery failed: {e}")))?
+    };
+
+    let address = probe_backend.address().to_string();
+    let selected = probe_backend.selected().map(|s| SelectedNode {
+        cluster_label: profile.address.clone(),
+        address: s.candidate.url(),
+        target: s.candidate.target.clone(),
+        port: s.candidate.port,
+        state: format!("{:?}", s.state),
+        rtt_ms: s.rtt_ms,
+        cluster_id: s.cluster_id.clone(),
+        version: s.version.clone(),
+    });
+    Ok((address, selected))
+}
+
+fn looks_like_url(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
+}
+
+/// Build the bv-client TLS config matching the profile. Returns
+/// `None` when the address scheme is plain HTTP (no TLS needed).
+fn build_bv_tls(profile: &RemoteProfile) -> CmdResult<Option<ClientTlsConfig>> {
+    // For literal URLs we can tell from the scheme; for cluster
+    // names we don't know the scheme until discovery runs, so we
+    // build TLS whenever any TLS material is configured OR the
+    // input doesn't explicitly start with `http://`.
+    let needs_tls = profile.address.starts_with("https://")
+        || (!profile.address.starts_with("http://")
+            && (profile.tls_skip_verify
+                || profile.ca_cert_path.is_some()
+                || profile.client_cert_path.is_some()));
+    if !needs_tls {
+        return Ok(None);
+    }
+    let mut b = BvTLSConfigBuilder::new().with_insecure(profile.tls_skip_verify);
+    if let Some(p) = profile.ca_cert_path.as_deref().filter(|s| !s.is_empty()) {
+        b = b
+            .with_server_ca_path(&PathBuf::from(p))
+            .map_err(|e| CommandError::from(format!("CA cert error: {e}")))?;
+    }
+    if let (Some(cp), Some(kp)) = (
+        profile.client_cert_path.as_deref().filter(|s| !s.is_empty()),
+        profile.client_key_path.as_deref().filter(|s| !s.is_empty()),
+    ) {
+        b = b
+            .with_client_cert_path(&PathBuf::from(cp), &PathBuf::from(kp))
+            .map_err(|e| CommandError::from(format!("Client cert error: {e}")))?;
+    }
+    let cfg = b
+        .build()
+        .map_err(|e| CommandError::from(format!("TLS config error: {e}")))?;
+    Ok(Some(cfg))
+}
+
+fn build_legacy_tls(profile: &RemoteProfile) -> CmdResult<bastion_vault::api::client::TLSConfig> {
+    let mut tls_builder = TLSConfigBuilder::new().with_insecure(profile.tls_skip_verify);
+    if let Some(p) = profile.ca_cert_path.as_deref().filter(|s| !s.is_empty()) {
+        tls_builder = tls_builder
+            .with_server_ca_path(&PathBuf::from(p))
+            .map_err(|e| CommandError::from(format!("CA cert error: {e}")))?;
+    }
+    if let (Some(cp), Some(kp)) = (
+        profile.client_cert_path.as_deref().filter(|s| !s.is_empty()),
+        profile.client_key_path.as_deref().filter(|s| !s.is_empty()),
+    ) {
+        tls_builder = tls_builder
+            .with_client_cert_path(&PathBuf::from(cp), &PathBuf::from(kp))
+            .map_err(|e| CommandError::from(format!("Client cert error: {e}")))?;
+    }
+    tls_builder
+        .build()
+        .map_err(|e| CommandError::from(format!("TLS config error: {e}")))
 }
 
 /// Disconnect from remote server and reset to embedded mode.
@@ -141,9 +228,97 @@ pub async fn disconnect_remote(state: State<'_, AppState>) -> CmdResult<()> {
     *state.mode.lock().await = VaultMode::Embedded;
     *state.remote_client.lock().await = None;
     *state.remote_profile.lock().await = None;
+    *state.selected_node.lock().await = None;
     *state.backend.lock().await = None;
     *state.token.lock().await = None;
     Ok(())
+}
+
+/// Cluster-discovery result for the live connection (if any).
+/// Frontend uses this to render "Connected to <cluster> via <node>"
+/// in the status bar.
+#[tauri::command]
+pub async fn get_selected_node(state: State<'_, AppState>) -> CmdResult<Option<SelectedNode>> {
+    Ok(state.selected_node.lock().await.clone())
+}
+
+/// Run discovery + health probing for an address without storing
+/// the result. Used by the Settings page's diagnostics panel
+/// ("Cluster discovery") and by the operator's reconnect flow when
+/// they want to see what the next pick would be before actually
+/// switching.
+#[tauri::command]
+pub async fn cluster_discover(profile: RemoteProfile) -> CmdResult<ClusterDiagnostics> {
+    use bv_client::discovery::{self, SystemResolver};
+    use bv_client::health;
+
+    let tls = build_bv_tls(&profile)?;
+    let mut discovery_cfg = DiscoveryConfig::default();
+    if let Some(svc) = profile.discovery_srv_service.as_deref().filter(|s| !s.is_empty()) {
+        discovery_cfg.srv_service = svc.to_string();
+    }
+    let mut health_cfg = HealthConfig::default();
+    if let Some(ms) = profile.health_probe_timeout_ms.filter(|m| *m > 0) {
+        health_cfg.probe_timeout = Duration::from_millis(ms.into());
+    }
+
+    let resolver = SystemResolver::new();
+    let resolved = discovery::resolve(&profile.address, &discovery_cfg, &resolver)
+        .await
+        .map_err(|e| CommandError::from(format!("Discovery failed: {e}")))?;
+    let candidates: Vec<_> = resolved.into_candidates();
+    let probes = health::probe_all(&candidates, &health_cfg, tls.as_ref()).await;
+    let chosen = health::pick(&probes);
+
+    let rows = probes
+        .iter()
+        .map(|p| ProbeRow {
+            target: p.candidate.target.clone(),
+            port: p.candidate.port,
+            scheme: p.candidate.scheme.clone(),
+            priority: p.candidate.priority,
+            weight: p.candidate.weight,
+            state: format!("{:?}", p.state),
+            rtt_ms: p.rtt_ms,
+            cluster_id: p.cluster_id.clone(),
+            version: p.version.clone(),
+        })
+        .collect();
+
+    Ok(ClusterDiagnostics {
+        cluster_label: profile.address.clone(),
+        chosen: chosen.map(|s| SelectedNode {
+            cluster_label: profile.address.clone(),
+            address: s.candidate.url(),
+            target: s.candidate.target.clone(),
+            port: s.candidate.port,
+            state: format!("{:?}", s.state),
+            rtt_ms: s.rtt_ms,
+            cluster_id: s.cluster_id.clone(),
+            version: s.version.clone(),
+        }),
+        candidates: rows,
+    })
+}
+
+#[derive(Serialize)]
+pub struct ClusterDiagnostics {
+    pub cluster_label: String,
+    pub chosen: Option<SelectedNode>,
+    pub candidates: Vec<ProbeRow>,
+}
+
+#[derive(Serialize)]
+pub struct ProbeRow {
+    pub target: String,
+    pub port: u16,
+    pub scheme: String,
+    pub priority: u16,
+    pub weight: u16,
+    pub state: String,
+    pub rtt_ms: u32,
+    pub cluster_id: Option<String>,
+    pub version: Option<String>,
 }
 
 #[derive(Serialize)]

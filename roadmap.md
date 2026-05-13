@@ -116,6 +116,7 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | Feature | Status | Notes |
 |---|---|---|
 | High Availability (Raft via Hiqlite) | Done | [roadmap](roadmaps/hiqlite-default-ha-storage.md) — cluster CLI, PQ TLS, HA fault-injection. |
+| Vault Cluster — Client Discovery & Health-Aware Connection | Done | [spec](features/vault-cluster-client-discovery.md), [roadmap](roadmaps/vault-cluster-client-discovery.md) — All 8 phases shipped. `bv-client` discovery + health, `build_with_discovery` builder, sticky failure contract, Tauri `connect_remote` wiring + Settings diagnostics modal, `bvault cluster discover` CLI subcommand + `--no-cluster-discovery` flag, 26 new tests (19 unit + 7 e2e), operator runbook in docs. |
 | Plugin System | Done | [spec](features/plugin-system.md) — WASM + supervised process runtime, signed manifests, per-plugin metrics, GUI. |
 | Plugin Extensibility (surface manifest, dynamic GUI menus/forms, client cache, auto-update) | Done | [spec](features/plugin-extensibility.md), [roadmap](roadmaps/plugin-extensibility-redesign.md) — 8 phases shipped end-to-end (server surface storage + 3 HTTP routes, bv-client cache, GUI dynamic render, form-hook WASM sandbox, long-poll watcher, operator UX, reference TOTP example + SDK helpers). |
 | Namespaces / Multi-tenancy | Partial | [spec](features/namespaces-multitenancy.md) |
@@ -152,6 +153,7 @@ Next-up `Todo` rows once Packaging & Distribution lands:
 
 Each entry below has a dedicated spec / roadmap document with full phase notes.
 
+- [Vault Cluster — Client Discovery & Health-Aware Connection](roadmaps/vault-cluster-client-discovery.md) — 8 phases shipped: SRV-based node discovery, `/sys/health` scoring with leader-over-follower + RTT + cluster_id minority rejection, sticky session with explicit-reconnect on `NodeUnavailable`, GUI + CLI surfacing, `bvault cluster discover` diagnostics subcommand, 7 in-process e2e tests + 19 unit tests, operator runbook.
 - [Post-Quantum Crypto Migration](roadmaps/post-quantum-crypto-migration.md) — removed Tongsuo / OpenSSL, adopted ChaCha20-Poly1305 + ML-KEM-768 + ML-DSA-65.
 - [Hiqlite Default HA Storage](roadmaps/hiqlite-default-ha-storage.md) — 6 phases incl. cluster CLI, PQ TLS (X25519MLKEM768), HA fault-injection.
 - [Tauri GUI with FIDO2 / YubiKey Support](roadmaps/tauri-gui-fido2.md) — 9 phases, 55 Tauri commands, 49 frontend tests, 79 React modules, 10 pages.

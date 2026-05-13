@@ -16,6 +16,7 @@ use crate::{
 pub mod auth;
 pub mod auth_disable;
 pub mod cluster;
+pub mod cluster_discover;
 pub mod cluster_failover;
 pub mod cluster_leader;
 pub mod cluster_leave;
@@ -160,6 +161,21 @@ is forbidden and will make the command fail. This can be specified multiple time
 
     #[clap(long, hide = true, required = false, env = "VAULT_TOKEN", default_value = "")]
     token: String,
+
+    /// Disable SRV-based cluster discovery for this invocation. By
+    /// default a bare DNS name in `--address` runs through
+    /// `_bvault._tcp.<name>` SRV lookup + `/sys/health` scoring
+    /// before the request fires; this flag forces literal-address
+    /// mode for diagnostics against one HA node. URL-shaped values
+    /// (`https://host:port`) always skip discovery regardless.
+    #[arg(
+        long,
+        env = "VAULT_NO_CLUSTER_DISCOVERY",
+        long_help = r#"Skip SRV-based cluster discovery and connect to --address as a literal
+URL. By default a bare DNS hostname runs through cluster discovery
+(_bvault._tcp.<name> SRV records + /sys/health scoring)."#
+    )]
+    no_cluster_discovery: bool,
 }
 
 #[derive(Args)]
@@ -215,25 +231,124 @@ impl HttpOptions {
     }
 
     pub fn client(&self) -> Result<Client, RvError> {
-        let mut client = Client::new().with_addr(&self.address).with_token(&self.token);
+        // Default path: run cluster discovery if the user supplied a
+        // bare hostname, else fall through to literal-mode. The
+        // server-crate Client itself doesn't know about SRV, so we
+        // resolve here and hand it a concrete URL.
+        let resolved = self.resolved_address()?;
+        self.client_at(&resolved)
+    }
 
-        if self.address.starts_with("https://") {
+    /// Resolve `--address` into a concrete `scheme://host:port` URL.
+    /// Returns the input unchanged for URL-shaped addresses or when
+    /// `--no-cluster-discovery` was passed; otherwise runs SRV +
+    /// `/sys/health` probing via the bv-client discovery module.
+    pub fn resolved_address(&self) -> Result<String, RvError> {
+        if self.no_cluster_discovery
+            || self.address.starts_with("http://")
+            || self.address.starts_with("https://")
+        {
+            return Ok(self.address.clone());
+        }
+        let selected = self
+            .run_cluster_discovery()
+            .map_err(|e| RvError::ErrString(format!("cluster discovery failed: {e}")))?;
+        Ok(selected.candidate.url())
+    }
+
+    /// Build a `Client` aimed at an explicit URL. Used by
+    /// [`Self::client`] after discovery resolves the cluster name,
+    /// and by `cluster discover` for the diagnostics-only path.
+    pub fn client_at(&self, url: &str) -> Result<Client, RvError> {
+        let mut client = Client::new().with_addr(url).with_token(&self.token);
+
+        if url.starts_with("https://") {
             let mut tls_config_builder = TLSConfigBuilder::new().with_insecure(self.tls_skip_verify);
-
             if let Some(ca_cert) = &self.ca_cert {
                 tls_config_builder = tls_config_builder.with_server_ca_path(ca_cert)?;
             }
-
             if let (Some(client_cert), Some(client_key)) = (&self.client_cert, &self.client_key) {
                 tls_config_builder = tls_config_builder.with_client_cert_path(client_cert, client_key)?;
             }
-
             let tls_config = tls_config_builder.build()?;
-
             client = client.with_tls_config(tls_config);
         }
-
         Ok(client.build())
+    }
+
+    /// Run the full discovery + health pipeline against `--address`
+    /// and return the chosen node. Used by [`Self::client`] for the
+    /// implicit path and by the `cluster discover` subcommand for
+    /// the diagnostics-only path that also needs the raw probe
+    /// table; that subcommand calls [`Self::probe_cluster`] instead.
+    pub fn run_cluster_discovery(&self) -> Result<bv_client::health::Selected, String> {
+        let probes = self.probe_cluster()?;
+        bv_client::health::pick(&probes)
+            .ok_or_else(|| format!("no healthy node found for `{}`", self.address))
+    }
+
+    /// Resolve + probe without picking, so callers (e.g. the
+    /// `cluster discover` subcommand) can render the full probe
+    /// table even when no candidate is healthy.
+    pub fn probe_cluster(&self) -> Result<Vec<bv_client::health::ProbeResult>, String> {
+        use bv_client::discovery::{DiscoveryConfig, SystemResolver};
+        use bv_client::health::HealthConfig;
+
+        // Build the bv-client TLS config from the same CA / client
+        // cert flags the legacy `Client` uses, so probes traverse
+        // the same trust chain the eventual request will.
+        let tls = self.bv_tls_for_probe().map_err(|e| e.to_string())?;
+
+        let discovery_cfg = DiscoveryConfig::default();
+        let health_cfg = HealthConfig::default();
+
+        // hickory-resolver's async API needs a tokio runtime. We
+        // build a single-threaded one on demand to keep the
+        // otherwise-sync CLI fully sync from the caller's point of
+        // view.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("tokio init: {e}"))?;
+        rt.block_on(async {
+            let resolver = SystemResolver::new();
+            let resolved = bv_client::discovery::resolve(&self.address, &discovery_cfg, &resolver)
+                .await
+                .map_err(|e| format!("resolve: {e}"))?;
+            let candidates = resolved.into_candidates();
+            Ok(bv_client::health::probe_all(&candidates, &health_cfg, tls.as_ref()).await)
+        })
+    }
+
+    fn bv_tls_for_probe(&self) -> Result<Option<bv_client::tls::ClientTlsConfig>, RvError> {
+        // No HTTPS hint and no skip-verify? Then probes can go in
+        // the clear, matching what `client()` would have built.
+        let likely_tls = self.tls_skip_verify
+            || self.ca_cert.is_some()
+            || self.client_cert.is_some()
+            || self.address.starts_with("https://");
+        if !likely_tls {
+            return Ok(None);
+        }
+        let mut b = bv_client::tls::TLSConfigBuilder::new().with_insecure(self.tls_skip_verify);
+        if let Some(ca) = &self.ca_cert {
+            b = b
+                .with_server_ca_path(ca)
+                .map_err(|e| RvError::ErrString(format!("ca cert: {e}")))?;
+        }
+        if let (Some(cc), Some(ck)) = (&self.client_cert, &self.client_key) {
+            b = b
+                .with_client_cert_path(cc, ck)
+                .map_err(|e| RvError::ErrString(format!("client cert: {e}")))?;
+        }
+        let cfg = b
+            .build()
+            .map_err(|e| RvError::ErrString(format!("tls build: {e}")))?;
+        Ok(Some(cfg))
+    }
+
+    pub fn address_raw(&self) -> &str {
+        &self.address
     }
 }
 

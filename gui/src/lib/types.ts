@@ -13,6 +13,17 @@ export interface RemoteProfile {
   ca_cert_path?: string;
   client_cert_path?: string;
   client_key_path?: string;
+  /**
+   * SRV-based cluster discovery. When `true` (default) and `address`
+   * is a bare DNS name, the connect flow queries
+   * `_bvault._tcp.<address>` and picks the best node via `/sys/health`.
+   * URL-shaped addresses (`https://host:port`) always skip discovery.
+   */
+  cluster_discovery?: boolean;
+  /** Override for the SRV service label (defaults to `_bvault._tcp`). */
+  discovery_srv_service?: string;
+  /** Per-probe deadline in milliseconds (default 1500). */
+  health_probe_timeout_ms?: number;
 }
 
 export interface RemoteStatus {
@@ -20,6 +31,39 @@ export interface RemoteStatus {
   address: string;
   initialized: boolean;
   sealed: boolean;
+}
+
+/**
+ * Cluster-discovery result for the live connection. `null` when the
+ * operator connected to a literal URL or disabled discovery.
+ */
+export interface SelectedNode {
+  cluster_label: string;
+  address: string;
+  target: string;
+  port: number;
+  state: string;
+  rtt_ms: number;
+  cluster_id?: string | null;
+  version?: string | null;
+}
+
+export interface ProbeRow {
+  target: string;
+  port: number;
+  scheme: string;
+  priority: number;
+  weight: number;
+  state: string;
+  rtt_ms: number;
+  cluster_id?: string | null;
+  version?: string | null;
+}
+
+export interface ClusterDiagnostics {
+  cluster_label: string;
+  chosen: SelectedNode | null;
+  candidates: ProbeRow[];
 }
 
 export interface Preferences {
