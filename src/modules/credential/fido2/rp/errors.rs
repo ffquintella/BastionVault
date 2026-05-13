@@ -26,8 +26,6 @@ pub enum RpError {
     UserPresenceMissing,
     #[error("attestation contains no attested credential data")]
     MissingAttestedCredentialData,
-    #[error("unsupported attestation format `{0}` (only `none` is accepted)")]
-    UnsupportedAttestation(String),
     #[error("unsupported COSE algorithm: alg={0}")]
     UnsupportedAlg(i64),
     #[error("malformed COSE_Key: {0}")]

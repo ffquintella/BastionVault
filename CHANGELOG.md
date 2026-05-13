@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.5.17] - 2026-05-13
+
+### Fixed
+
+- **FIDO2 registration rejected real-world attestation formats** (`src/modules/credential/fido2/rp/mod.rs`) — the server's `finish_registration` hard-rejected any attestation format other than `none`, but most security keys (Yubikey + every platform authenticator I've seen) return `packed`, `fido-u2f`, or `apple` regardless of what the RP asked for, because CTAP2 doesn't oblige the authenticator to honour `attestation: "none"`. Since the server never validated the attestation statement chain anyway (only `authData` + the COSE public key matter for the credential), the format gate was over-restrictive. Now we accept any fmt, log it at debug level for diagnostics, and continue parsing `authData` as before. Removed the now-unused `RpError::UnsupportedAttestation` variant.
+
 ## [0.5.16] - 2026-05-13
 
 ### Added

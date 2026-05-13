@@ -234,12 +234,21 @@ impl<'a> RelyingParty<'a> {
         )?;
 
         // 2. attestationObject.
+        //
+        // We deliberately do NOT validate the attestation statement
+        // (no chain, no metadata-service lookup), so the `fmt` field
+        // is informational only — we just need `authData`. Real-world
+        // authenticators emit `packed` / `fido-u2f` / `apple` /
+        // `tpm` / `android-key` / `android-safetynet` even when the
+        // RP asked for `none`, because some don't honour the request
+        // and CTAP2 clients pass the response through verbatim. The
+        // earlier `fmt != "none"` gate rejected every Yubikey + most
+        // platform authenticators. We log the fmt for diagnostics
+        // (an unexpected value is interesting, just not fatal).
         let attest_bytes = base64url::decode(&attestation.response.attestation_object)
             .map_err(|e| RpError::Decode(format!("attestationObject base64: {e}")))?;
         let attest = auth_data::AttestationObject::parse(&attest_bytes)?;
-        if attest.fmt != "none" {
-            return Err(RpError::UnsupportedAttestation(attest.fmt));
-        }
+        log::debug!("FIDO2 register: attestation fmt = {}", attest.fmt);
 
         // 3. authenticatorData inside the attestation.
         let auth_data = auth_data::AuthenticatorData::parse(&attest.auth_data)?;
