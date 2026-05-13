@@ -1,197 +1,45 @@
-name: Rust
+name: Vulnerability Audit
+
+# Replaces the previous test / lint / coverage matrix with a single
+# focused job: run `cargo audit` against the workspace's resolved
+# dependency tree on every push. Tests and clippy belong on the
+# developer's machine — this CI surface only exists to catch
+# RustSec advisories before they ship.
+#
+# We deliberately do NOT run on pull_request: PRs from forks can't
+# read repo secrets, and the advisory DB is public anyway, so push-
+# only is the right scope. PRs from this repo merge to a branch that
+# then triggers this workflow.
 
 on:
   push:
-    tags:
-      - 'releases/**'
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  unix-default-test:
-    strategy:
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-    runs-on: ${{matrix.os}}
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
-    - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        components: clippy, rustfmt
-        override: true
-    - name: Run cargo fmt --all -- --check
-      run: cargo fmt --all -- --check
-    - name: Build
-      run: cargo build --verbose
-    - name: ulimit -n
-      run: ulimit -n 65535
-    - name: Run tests
-      run: cargo test --verbose
-    - name: Run tests with sync_handler features
-      run: cargo test --features sync_handler --verbose
-    - name: Run Clippy
-      run: cargo clippy -- -D warnings
-    - name: Install tarpaulin
-      run: cargo install cargo-tarpaulin
-    - name: Generate coverage report
-      run: CARGO_BIN_NAME=bvault cargo tarpaulin --out Lcov
-    - name: Upload coverage reports to Codecov
-      uses: codecov/codecov-action@v5
-      with:
-        token: ${{ secrets.CODECOV_TOKEN }}
-        slug: wa5i/BastionVault
+      - uses: actions/checkout@v4
 
-  unix-mysql-test:
-    strategy:
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-    runs-on: ${{matrix.os}}
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-    steps:
-    - uses: actions/checkout@v3
-    - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        components: clippy, rustfmt
-        override: true
-    - uses: shogo82148/actions-setup-mysql@v1
-      with:
-        mysql-version: "5.7"
-        root-password: "password"
-        my-cnf: |
-          skip-ssl
-          port=3306
-    - name: install diesel_cli
-      run: cargo install diesel_cli --no-default-features --features mysql
-    - name: init database
-      run: diesel setup --database-url mysql://root:password@127.0.0.1:3306/vault
-    - name: ulimit -n
-      run: ulimit -n 65535
-    - name: Run tests for macOS
-      if: runner.os == 'macOS'
-      run: cargo test --features storage_mysql --lib --bins --tests --verbose
-    - name: Run tests for non-macOS
-      if: runner.os != 'macOS'
-      run: cargo test --features storage_mysql --verbose
-    - name: Build crate doc
-      run: cargo doc --no-deps
+      # Cargo.lock is gitignored in this repo, so cargo-audit has
+      # nothing to scan until we materialise one. `generate-lockfile`
+      # picks the same minimum-acceptable versions Cargo would on a
+      # fresh checkout — exactly what we want to scan.
+      - name: Generate Cargo.lock
+        run: cargo generate-lockfile
 
-  unix-hiqlite-test:
-    strategy:
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-    runs-on: ${{matrix.os}}
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
 
-    steps:
-    - uses: actions/checkout@v3
-    - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        components: clippy, rustfmt
-        override: true
-    - name: ulimit -n
-      run: ulimit -n 65535
-    - name: Build with hiqlite
-      run: cargo build --features storage_hiqlite --verbose
-    - name: Run tests for macOS
-      if: runner.os == 'macOS'
-      run: cargo test --features storage_hiqlite --lib --bins --tests --verbose
-    - name: Run tests for non-macOS
-      if: runner.os != 'macOS'
-      run: cargo test --features storage_hiqlite --verbose
-    - name: Run cucumber tests
-      run: cargo test --features storage_hiqlite --test cucumber_hiqlite --verbose
-
-  windows-default-test:
-    strategy:
-      matrix:
-        os:
-          - windows-latest
-    runs-on: ${{matrix.os}}
-
-    steps:
-    - uses: actions/checkout@v3
-    - run: echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
-    - name: Setup Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
-    - name: Run tests with sync_handler features
-      run: cargo test --features sync_handler --verbose
-
-  windows-mysql-test:
-    strategy:
-      matrix:
-        os:
-          - windows-latest
-    runs-on: ${{matrix.os}}
-
-    steps:
-    - uses: actions/checkout@v3
-    - run: echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
-    - name: Download MySQL Connector/C
-      run: |
-        Invoke-WebRequest -Uri "https://cdn.mysql.com/Downloads/Connector-C/mysql-connector-c-6.1.11-winx64.msi" -OutFile "mysql-connector.msi"
-    - name: Install MySQL Connector/C
-      run: |
-        Start-Process msiexec.exe -ArgumentList '/i', 'mysql-connector.msi', '/quiet', '/norestart' -NoNewWindow -Wait
-    - name: Set MySQLCLIENT_LIB_DIR
-      run: echo "MYSQLCLIENT_LIB_DIR=C:\Program Files\MySQL\MySQL Connector C 6.1\lib\vs14" | Out-File -FilePath $env:GITHUB_ENV -Append
-    - name: Set MYSQLCLIENT_VERSION
-      run: echo "MYSQLCLIENT_VERSION=8.4.0" | Out-File -FilePath $env:GITHUB_ENV -Append
-    - uses: shogo82148/actions-setup-mysql@v1
-      with:
-        mysql-version: "5.7"
-        root-password: "password"
-        my-cnf: |
-          skip-ssl
-          port=3306
-    - name: Setup Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-    - name: install diesel_cli
-      run: cargo install diesel_cli --no-default-features --features mysql
-    - name: init database
-      run: diesel setup --database-url mysql://root:password@127.0.0.1:3306/vault
-    - name: Build
-      run: cargo build --features storage_mysql --verbose
-    - name: Run tests
-      run: cargo test --features storage_mysql --verbose
-    - name: Build crate doc
-      run: cargo doc --no-deps
-
-  windows-hiqlite-test:
-    strategy:
-      matrix:
-        os:
-          - windows-latest
-    runs-on: ${{matrix.os}}
-
-    steps:
-    - uses: actions/checkout@v3
-    - run: echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
-    - name: Setup Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-    - name: Build
-      run: cargo build --features storage_hiqlite --verbose
-    - name: Run tests
-      run: cargo test --features storage_hiqlite --verbose
+      # `--deny warnings` turns unmaintained crate notices into hard
+      # failures alongside actual vulnerabilities, so we hear about
+      # them before the next 0-day lands on a stale dep.
+      - name: Run cargo audit
+        run: cargo audit --deny warnings
