@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.5.14] - 2026-05-13
+
+### Added
+
+- **`tls_raft_no_verify` / `tls_api_no_verify` config switches for hiqlite** ([`src/storage/hiqlite/mod.rs`](src/storage/hiqlite/mod.rs)) — when operators sign Raft/API certs with a private CA that the container's trust store does not know about (common in puppet-managed deployments), hiqlite's rustls client rejected peers with `invalid peer certificate: UnknownIssuer` and Raft replication stalled with `AppendEntries 1->2 timeout`. The wrapper previously hardcoded `danger_tls_no_verify: false` and offered no way out short of injecting CA bundles into the container. The new boolean flags (default `false`, opt-in `true`) disable peer chain verification on the respective channel while keeping TLS for confidentiality. Peer authenticity is still enforced by `secret_raft`/`secret_api`. When `tls_api_no_verify = true`, the same skip-verify is propagated to the internal `ureq` agent used by `remove_node`/`trigger_failover`. A `WARN` line is logged at startup whenever either switch is enabled so the relaxed posture is auditable.
+
 ## [0.5.13] - 2026-05-13
 
 ### Fixed

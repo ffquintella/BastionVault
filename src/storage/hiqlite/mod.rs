@@ -321,6 +321,24 @@ impl HiqliteBackend {
         // `The private key file contained no keys` during Raft/API bootstrap and
         // the node crash-loops. Use struct-literal construction with named fields
         // so the cert/key mapping can never be silently swapped again.
+        // When operators sign the Raft/API certs with a private CA that the
+        // container's trust store does not know about, hiqlite's rustls client
+        // rejects peers with `invalid peer certificate: UnknownIssuer`. Mutual
+        // peer authenticity is already enforced by secret_raft/secret_api, so
+        // we expose an explicit opt-in switch (`tls_*_no_verify = true`) to
+        // skip chain verification while keeping TLS for confidentiality. The
+        // server side still presents its configured cert; only the client-side
+        // verification of the peer's cert is relaxed.
+        let tls_raft_no_verify = conf
+            .get("tls_raft_no_verify")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let tls_api_no_verify = conf
+            .get("tls_api_no_verify")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         let tls_raft = if tls_raft_disable {
             None
         } else if let (Some(cert), Some(key)) = (
@@ -330,7 +348,7 @@ impl HiqliteBackend {
             Some(ServerTlsConfig::Specific(hiqlite::tls::ServerTlsConfigCerts {
                 key: key.to_string().into(),
                 cert: cert.to_string().into(),
-                danger_tls_no_verify: false,
+                danger_tls_no_verify: tls_raft_no_verify,
             }))
         } else {
             Some(ServerTlsConfig::TlsAutoCertificates)
@@ -345,14 +363,32 @@ impl HiqliteBackend {
             Some(ServerTlsConfig::Specific(hiqlite::tls::ServerTlsConfigCerts {
                 key: key.to_string().into(),
                 cert: cert.to_string().into(),
-                danger_tls_no_verify: false,
+                danger_tls_no_verify: tls_api_no_verify,
             }))
         } else {
             Some(ServerTlsConfig::TlsAutoCertificates)
         };
 
+        if tls_raft_no_verify {
+            log::warn!(
+                "hiqlite: tls_raft_no_verify=true — peer cert chain verification is DISABLED \
+                 for the Raft channel; peer authenticity relies on secret_raft only"
+            );
+        }
+        if tls_api_no_verify {
+            log::warn!(
+                "hiqlite: tls_api_no_verify=true — peer cert chain verification is DISABLED \
+                 for the API channel; peer authenticity relies on secret_api only"
+            );
+        }
+
         let api_scheme = if tls_api.is_some() { "https" } else { "http" };
-        let tls_api_auto_certs = matches!(tls_api, Some(ServerTlsConfig::TlsAutoCertificates));
+        // Skip ureq's chain verification for the management API client when either:
+        //   - the API channel uses hiqlite's auto-generated self-signed certs, or
+        //   - the operator opted into tls_api_no_verify (e.g. private CA not in trust store).
+        // Peer authenticity is enforced by the X-API-SECRET challenge-response either way.
+        let tls_api_auto_certs =
+            matches!(tls_api, Some(ServerTlsConfig::TlsAutoCertificates)) || tls_api_no_verify;
 
         // hiqlite requires encryption keys for backup/cookie encryption
         let mut enc_keys = cryptr::EncKeys {
