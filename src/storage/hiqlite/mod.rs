@@ -1,7 +1,8 @@
-use std::{any::Any, borrow::Cow, collections::HashMap};
+use std::{any::Any, borrow::Cow, collections::HashMap, net::ToSocketAddrs, path::Path};
 
 use hiqlite::{Client, Node, NodeConfig, Param, tls::ServerTlsConfig};
 use serde_json::Value;
+use tokio::net::TcpListener;
 
 use crate::{
     errors::RvError,
@@ -201,6 +202,43 @@ fn parse_nodes(nodes_val: &Value) -> Result<Vec<Node>, RvError> {
     Ok(nodes)
 }
 
+/// Verify that `host:port` is bindable in the current network namespace.
+///
+/// hiqlite passes `listen_addr_*` straight to axum's `TcpListener::bind`. If the
+/// host resolves to an address the netns does not own (typical when an operator
+/// puts an external FQDN in `listen_addr_*` while running rootless under pasta),
+/// the bind fails with `EADDRNOTAVAIL` and the error is swallowed deep in the
+/// listener task — operations.log shows a confident "api external listening on
+/// ..." line while no socket is actually open. Probe with a short-lived bind
+/// here so we surface the misconfiguration with the real OS error.
+async fn preflight_bind(label: &str, host: &str, port: u16) -> Result<(), RvError> {
+    let socket_addrs: Vec<_> = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| {
+            RvError::ErrCluster(format!(
+                "hiqlite {label} listener: cannot resolve listen address '{host}:{port}': {e}"
+            ))
+        })?
+        .collect();
+    if socket_addrs.is_empty() {
+        return Err(RvError::ErrCluster(format!(
+            "hiqlite {label} listener: listen address '{host}:{port}' resolved to zero socket \
+             addresses"
+        )));
+    }
+    for addr in &socket_addrs {
+        let listener = TcpListener::bind(addr).await.map_err(|e| {
+            RvError::ErrCluster(format!(
+                "hiqlite {label} listener: bind({addr}) failed: {e}. The configured listen_addr \
+                 '{host}' resolves to an address this process cannot bind. Use '0.0.0.0' (or an \
+                 IP owned by this network namespace) for listen_addr_{label}."
+            ))
+        })?;
+        drop(listener);
+    }
+    Ok(())
+}
+
 impl HiqliteBackend {
     async fn new_backend(conf: &HashMap<String, Value>) -> Result<Self, RvError> {
         let data_dir = conf
@@ -344,6 +382,35 @@ impl HiqliteBackend {
         // hiqlite tries to install ring's provider in start_node(), but first-install-wins
         // semantics mean it will silently no-op since aws_lc_rs is already installed.
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        // Pre-flight bind probe. hiqlite's internal listener tasks swallow bind()
+        // errors and only log a misleading "listening on ..." line, so a misconfigured
+        // listen_addr (e.g. an external hostname inside a rootless pasta netns that
+        // resolves to an IP the netns does not own) silently produces a node that
+        // never accepts WebSocket connections — the cluster appears alive but the
+        // client loops on "Connection refused" forever. Probe both ports here so
+        // we crash with EADDRNOTAVAIL before any cluster state is touched.
+        preflight_bind("raft", listen_addr_raft, port_raft).await?;
+        preflight_bind("api", listen_addr_api, port_api).await?;
+
+        // Surface whether we are about to start with an empty WAL (fresh/pristine
+        // cluster) or resume from existing on-disk state. If the data volume has
+        // silently been wiped (e.g. a Quadlet volume regression), the operator
+        // sees "pristine" on every restart instead of having to infer it from
+        // raft-internal log lines.
+        let wal_meta = Path::new(data_dir).join("logs").join("meta.hql");
+        if wal_meta.exists() {
+            log::info!(
+                "hiqlite: resuming from existing WAL at {} (node_id={node_id})",
+                wal_meta.display()
+            );
+        } else {
+            log::warn!(
+                "hiqlite: no WAL found at {} — starting node_id={node_id} with PRISTINE state. \
+                 If this is not a first boot, the data volume may have been wiped.",
+                wal_meta.display()
+            );
+        }
 
         let client = hiqlite::start_node(node_config)
             .await

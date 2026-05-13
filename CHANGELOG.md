@@ -45,6 +45,16 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.5.13] - 2026-05-13
+
+### Fixed
+
+- **Hiqlite listener bind failures silently produced a "live" node that never accepted connections** ([`src/storage/hiqlite/mod.rs`](src/storage/hiqlite/mod.rs)) — when `listen_addr_api`/`listen_addr_raft` resolved to an address the network namespace did not own (e.g. an external FQDN inside a rootless pasta netns whose hostname mapped to the host's external IP), hiqlite's internal `TcpListener::bind` failed with `EADDRNOTAVAIL`, the error was swallowed inside the listener task, and operations.log still logged a confident `api external listening on <host>:<port>`. The cluster then deadlocked with `Could not connect Client API WebSocket … Connection refused (os error 111)` against itself. Fix: pre-flight `bind()` on both Raft and API listen sockets before calling `hiqlite::start_node`, dropping the listener immediately on success and surfacing the real OS error with a remediation hint (use `0.0.0.0` or a netns-owned IP) on failure.
+
+### Added
+
+- **Hiqlite startup log distinguishes pristine vs resumed WAL** ([`src/storage/hiqlite/mod.rs`](src/storage/hiqlite/mod.rs)) — emits a single `INFO`/`WARN` line stating whether the configured `data_dir` contains an existing WAL (`logs/meta.hql`) or whether the node is starting from pristine state. Operators no longer have to infer this from `openraft` internals, and a silently-wiped data volume (a Quadlet/volume regression) becomes obvious in the first second of operations.log instead of being hidden behind hundreds of raft init lines.
+
 ## [0.5.12] - 2026-05-12
 
 ### Fixed
