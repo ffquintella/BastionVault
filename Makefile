@@ -75,7 +75,7 @@ else
 IS_WSL := $(shell uname -r 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -q microsoft && echo 1)
 endif
 ifeq ($(IS_WSL),1)
-GUI_NPM_INSTALL := npm install --no-bin-links --no-save
+GUI_NPM_INSTALL := npm install --no-bin-links --no-save --package-lock=false
 GUI_TAURI := node node_modules/@tauri-apps/cli/tauri.js
 GUI_TSC := node node_modules/typescript/bin/tsc
 GUI_VITE := node node_modules/vite/bin/vite.js
