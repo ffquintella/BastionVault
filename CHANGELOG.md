@@ -47,6 +47,7 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+- **WSL GUI dependency install on Windows-mounted worktrees** (`Makefile`) — detect WSL and install GUI dependencies without npm bin links, then invoke Tauri, TypeScript, Vite, and Vitest through direct Node entrypoints so `/mnt/c` checkouts no longer fail on npm `chmod`.
 - **Files page "Download" button did nothing** (`gui/src/routes/FilesPage.tsx`, `gui/src-tauri/src/commands/files.rs`) — the frontend was creating a Blob URL and synthesising an `<a download>` click, which Tauri v2's webview does not honour (no OS download manager, no save dialog, no file written). Replaced with the canonical Tauri pattern: open `plugin-dialog`'s `save()` to let the user pick a destination, then call a new `export_file_to_path` Rust command that reads the file via the engine and writes the decoded bytes to disk with `std::fs::write`. Applies to both current-content downloads and per-version downloads in the history modal.
 
 ### Changed

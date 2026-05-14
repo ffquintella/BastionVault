@@ -62,6 +62,24 @@ export PATH := $(RUSTUP_CARGO_BIN):$(PATH)
 # stick around.
 KEEP ?= 3
 
+# WSL projects checked out under /mnt/c can reject npm's chmod while
+# creating node_modules/.bin links. Avoid bin links there and call the
+# package entrypoints directly; keep normal npx behavior elsewhere.
+IS_WSL := $(shell uname -r 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -q microsoft && echo 1)
+ifeq ($(IS_WSL),1)
+GUI_NPM_INSTALL := npm install --no-bin-links --no-save
+GUI_TAURI := node node_modules/@tauri-apps/cli/tauri.js
+GUI_TSC := node node_modules/typescript/bin/tsc
+GUI_VITE := node node_modules/vite/bin/vite.js
+GUI_VITEST := node node_modules/vitest/vitest.mjs
+else
+GUI_NPM_INSTALL := npm install
+GUI_TAURI := npx tauri
+GUI_TSC := npx tsc
+GUI_VITE := npx vite
+GUI_VITEST := npx vitest
+endif
+
 help: ## List available commands
 	@echo "BastionVault v$(VERSION)"
 	@echo ""
@@ -79,17 +97,17 @@ run-dev: prune-stale ## Run the development server
 	CARGO_BUILD_JOBS=6 cargo run -- server --config config/dev.hcl
 
 gui-deps: ## Install GUI frontend dependencies
-	cd gui && npm install
+	cd gui && $(GUI_NPM_INSTALL)
 
 # `--features` lists are explicit (not relying solely on the Tauri
 # crate's `default = [...]`) so an operator skimming the Makefile
 # can see exactly what the dev / prod GUI binaries ship with.
 # `ssh_pqc` enables ML-DSA-65 SSH CA generation in the /ssh page.
 run-dev-gui: gui-deps prune-stale ## Run the desktop GUI in dev mode with local MCP bridge enabled
-	cd gui && CARGO_BUILD_JOBS=6 BASTION_EMBEDDED_STORAGE=file BASTION_TAURI_MCP=1 npx tauri dev -- --features storage_hiqlite,mcp_local_dev,ssh_pqc
+	cd gui && CARGO_BUILD_JOBS=6 BASTION_EMBEDDED_STORAGE=file BASTION_TAURI_MCP=1 $(GUI_TAURI) dev -- --features storage_hiqlite,mcp_local_dev,ssh_pqc
 
 run-dev-gui-hiqlite: gui-deps prune-stale ## Run the desktop GUI in dev mode, embedded vault on hiqlite (ports 8210/8220)
-	cd gui && CARGO_BUILD_JOBS=6 BASTION_EMBEDDED_STORAGE=hiqlite npx tauri dev -- --features storage_hiqlite,ssh_pqc
+	cd gui && CARGO_BUILD_JOBS=6 BASTION_EMBEDDED_STORAGE=hiqlite $(GUI_TAURI) dev -- --features storage_hiqlite,ssh_pqc
 
 # Lightest dev build: Tauri host + vite, with `bastion_vault` pulled
 # in at default-features=false. That means no hiqlite (no Raft/SQLite
@@ -99,16 +117,16 @@ run-dev-gui-hiqlite: gui-deps prune-stale ## Run the desktop GUI in dev mode, em
 # features won't work in this build; that's the trade-off for the
 # faster compile.
 run-dev-gui-only: gui-deps prune-stale ## Run the desktop GUI in dev mode with no backend storage features (lightest compile)
-	cd gui && CARGO_BUILD_JOBS=6 npx tauri dev -- --no-default-features
+	cd gui && CARGO_BUILD_JOBS=6 $(GUI_TAURI) dev -- --no-default-features
 
 gui-build: gui-deps prune-stale ## Build the desktop GUI for production
-	cd gui && npx tauri build -- --features storage_hiqlite,ssh_pqc
+	cd gui && $(GUI_TAURI) build -- --features storage_hiqlite,ssh_pqc
 
 gui-test: gui-deps ## Run GUI frontend tests (Vitest)
-	cd gui && npx vitest run
+	cd gui && $(GUI_VITEST) run
 
 gui-check: gui-deps ## Type-check and lint the GUI frontend
-	cd gui && npx tsc --noEmit && npx vite build
+	cd gui && $(GUI_TSC) --noEmit && $(GUI_VITE) build
 
 docs: ## Start the documentation site locally
 	cd docs && npm install && npx docusaurus clear && npx docusaurus start
