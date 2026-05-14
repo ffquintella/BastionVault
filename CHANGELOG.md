@@ -52,6 +52,10 @@ EXAMPLE ENTRY:
 - **WSL GUI dependency install on Windows-mounted worktrees** (`Makefile`, `gui/package.json`) — detect WSL and install GUI dependencies without npm bin links, then invoke Tauri, TypeScript, Vite, and Vitest through direct Node entrypoints so `/mnt/c` checkouts no longer fail on npm `chmod`.
 - **Files page "Download" button did nothing** (`gui/src/routes/FilesPage.tsx`, `gui/src-tauri/src/commands/files.rs`) — the frontend was creating a Blob URL and synthesising an `<a download>` click, which Tauri v2's webview does not honour (no OS download manager, no save dialog, no file written). Replaced with the canonical Tauri pattern: open `plugin-dialog`'s `save()` to let the user pick a destination, then call a new `export_file_to_path` Rust command that reads the file via the engine and writes the decoded bytes to disk with `std::fs::write`. Applies to both current-content downloads and per-version downloads in the history modal.
 
+### Added
+
+- **RDP session window resizes the remote desktop** (`gui/src-tauri/src/session/rdp.rs`, `gui/src-tauri/src/commands/connect.rs`, `gui/src/routes/SessionRdpWindow.tsx`) — registered the DisplayControl dynamic virtual channel on the ironrdp connector, wired the previously-stubbed `RdpControl::Resize` to `ActiveStage::encode_resize`, and drove the server's `DeactivateAll` → reactivation sequence to completion. The frontend now observes the window size (debounced 250 ms), forwards the new dimensions to the host via `session_input_rdp_resize`, and re-allocates its canvas backing store on the `session-resize-{token}` event the host emits once the new resolution is finalized.
+
 ### Changed
 
 - **PKI "Import root CA" modal — PKCS#12 file picker** (`gui/src/routes/PkiPage.tsx`) — replaced the bare `<input type="file">` (which rendered as the unstyled OS "Choose File" control) with a styled button that triggers a hidden file input via a ref, matching the rest of the modal's look.

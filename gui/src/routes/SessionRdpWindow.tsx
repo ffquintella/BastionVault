@@ -22,6 +22,17 @@ interface FramePayload {
   height: number;
 }
 
+interface ResizePayload {
+  width: number;
+  height: number;
+}
+
+/// Debounce window-resize → server-resize so we don't fire a
+/// DisplayControl PDU for every pixel of drag. 250 ms feels
+/// responsive without flooding the deactivation-reactivation
+/// channel on a slow drag.
+const RESIZE_DEBOUNCE_MS = 250;
+
 function b64ToBytes(b64: string): Uint8ClampedArray {
   const bin = atob(b64);
   // Allocate a fresh ArrayBuffer so the Uint8ClampedArray's buffer
@@ -38,11 +49,17 @@ export function SessionRdpWindow() {
   const token = params.get("token") ?? "";
   const frameEvent = params.get("frame") ?? "";
   const closedEvent = params.get("closed") ?? "";
+  const resizeEvent = params.get("resize") ?? "";
   const label = params.get("label") ?? "rdp session";
   const initWidth = parseInt(params.get("w") ?? "1024", 10) || 1024;
   const initHeight = parseInt(params.get("h") ?? "600", 10) || 600;
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  // Mirrors the canvas's backing-store size so we re-allocate it on
+  // the next render after a server-confirmed resize without forcing a
+  // React re-mount of the canvas element.
+  const sizeRef = useRef<{ w: number; h: number }>({ w: initWidth, h: initHeight });
   const [status, setStatus] = useState<"connecting" | "open" | "closed" | "error">(
     "connecting",
   );
@@ -79,6 +96,44 @@ export function SessionRdpWindow() {
     const unlistenClosed = listen(closedEvent, () => {
       setStatus("closed");
     });
+
+    // Server-confirmed DisplayControl resize. The backend has already
+    // re-allocated its DecodedImage; resize ours to match so future
+    // putImageData calls don't write outside the canvas backing store.
+    const unlistenResize = resizeEvent
+      ? listen<ResizePayload>(resizeEvent, (ev) => {
+          const { width, height } = ev.payload;
+          sizeRef.current = { w: width, h: height };
+          canvas.width = width;
+          canvas.height = height;
+        })
+      : Promise.resolve(() => undefined);
+
+    // Window-resize → server-resize. Debounced so a drag emits one
+    // DisplayControl PDU per pause, not per pixel. We measure the
+    // outer container (which fills the window) rather than the
+    // canvas (which CSS-scales) — otherwise the canvas's own
+    // resize-on-confirm would feed back into ResizeObserver.
+    let resizeTimer: number | undefined;
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const w = Math.max(200, Math.floor(entry.contentRect.width));
+      const h = Math.max(200, Math.floor(entry.contentRect.height));
+      if (resizeTimer !== undefined) window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(() => {
+        // Cap at the DisplayControl ceiling (8192) — the backend
+        // also clamps via MonitorLayoutEntry::adjust_display_size,
+        // but trimming here saves one pointless round trip.
+        const width = Math.min(8192, w);
+        const height = Math.min(8192, h);
+        if (width === sizeRef.current.w && height === sizeRef.current.h) return;
+        void invoke("session_input_rdp_resize", {
+          request: { token, width, height },
+        }).catch(() => undefined);
+      }, RESIZE_DEBOUNCE_MS);
+    });
+    if (containerRef.current) observer.observe(containerRef.current);
 
     // Mouse forwarding. The button index follows JS MouseEvent
     // semantics (0=left, 1=middle, 2=right). canvas-relative
@@ -143,6 +198,9 @@ export function SessionRdpWindow() {
       window.removeEventListener("keyup", onKeyUp);
       void unlistenFrame.then((u) => u());
       void unlistenClosed.then((u) => u());
+      void unlistenResize.then((u) => u());
+      observer.disconnect();
+      if (resizeTimer !== undefined) window.clearTimeout(resizeTimer);
       // Host-side teardown is owned by the Tauri WindowEvent::
       // CloseRequested hook on the Rust side. Do NOT call
       // session_close here — React StrictMode would drop the host
@@ -151,7 +209,7 @@ export function SessionRdpWindow() {
       // the user-driven close path explicitly.
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, frameEvent, closedEvent]);
+  }, [token, frameEvent, closedEvent, resizeEvent]);
 
   async function handleDisconnect() {
     try {
@@ -224,7 +282,17 @@ export function SessionRdpWindow() {
         </button>
       </div>
 
-      <div style={{ flex: 1, position: "relative", overflow: "hidden", display: "flex", justifyContent: "center", alignItems: "center" }}>
+      <div
+        ref={containerRef}
+        style={{
+          flex: 1,
+          position: "relative",
+          overflow: "hidden",
+          display: "flex",
+          justifyContent: "center",
+          alignItems: "center",
+        }}
+      >
         <canvas
           ref={canvasRef}
           width={initWidth}
@@ -234,6 +302,12 @@ export function SessionRdpWindow() {
             background: "#0a0d18",
             cursor: "crosshair",
             outline: "1px solid #1f2030",
+            // Fill the container until the server confirms a resize.
+            // The mouse-handler rescales coords via getBoundingClientRect,
+            // so visual scaling stays input-correct.
+            width: "100%",
+            height: "100%",
+            objectFit: "contain",
           }}
           tabIndex={0}
         />

@@ -104,7 +104,7 @@ urlencoding = "2"
 # `hmac 0.13`. See `IronRDP/Cargo.toml` `[patch.crates-io]`
 # section + `crates/ironrdp-connector/Cargo.toml` for the pinned
 # rationale.
-ironrdp = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps", default-features = false, features = ["connector", "session", "graphics", "input", "pdu", "core"] }
+ironrdp = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps", default-features = false, features = ["connector", "session", "graphics", "input", "pdu", "core", "dvc", "displaycontrol"] }
 ironrdp-async = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps" }
 ironrdp-tls = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps", features = ["rustls"] }
 ironrdp-core = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps" }

@@ -37,20 +37,25 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use ironrdp::connector::connection_activation::ConnectionActivationState;
 use ironrdp::connector::{
     ClientConnector, Config as ConnectorConfig, ConnectionResult, Credentials, DesktopSize,
     SmartCardIdentity,
 };
+use ironrdp::displaycontrol::client::DisplayControlClient;
+use ironrdp::displaycontrol::pdu::MonitorLayoutEntry;
+use ironrdp::dvc::DrdynvcClient;
 use ironrdp::pdu::gcc::KeyboardType;
 use ironrdp::pdu::geometry::InclusiveRectangle;
 use ironrdp::pdu::input::fast_path::{FastPathInput, FastPathInputEvent, KeyboardFlags};
 use ironrdp::pdu::input::mouse::{MousePdu, PointerFlags};
 use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
 use ironrdp::pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
+use ironrdp::session::fast_path;
 use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{ActiveStage, ActiveStageOutput};
+use ironrdp_async::{single_sequence_step_read, FramedWrite, NetworkClient};
 use ironrdp_core::{encode_buf, WriteBuf};
-use ironrdp_async::{FramedWrite, NetworkClient};
 use ironrdp_tokio::TokioFramed;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -107,6 +112,10 @@ pub struct RdpOpenOutcome {
     pub token: String,
     pub frame_event: String,
     pub closed_event: String,
+    /// Per-session event name the frontend listens on to learn the
+    /// new desktop dimensions after a DisplayControl-driven resize
+    /// completes its deactivation-reactivation sequence.
+    pub resize_event: String,
     /// Initial desktop size advertised to the server. The frontend
     /// sizes its canvas to match.
     pub width: u16,
@@ -133,6 +142,10 @@ pub fn closed_event_name(token: &str) -> String {
     format!("session-closed-{token}")
 }
 
+pub fn resize_event_name(token: &str) -> String {
+    format!("session-resize-{token}")
+}
+
 #[derive(Debug, Clone)]
 pub enum RdpControl {
     /// Pointer movement in canvas-relative coords.
@@ -143,10 +156,11 @@ pub enum RdpControl {
     /// Keyboard key down/up. `js_code` is the JS
     /// `KeyboardEvent.code` string (e.g. `"KeyA"`, `"Enter"`).
     Key { js_code: String, pressed: bool },
-    /// Window resize from the local canvas. Reserved — Phase 4
-    /// drops it on the floor; DisplayControl-channel forwarding
-    /// lands alongside the dirty-rect optimization.
-    #[allow(dead_code)]
+    /// Window resize from the local canvas. Forwarded to the server
+    /// over the DisplayControl DVC; the server replies with a
+    /// DeactivateAll → reactivation sequence that completes with the
+    /// new desktop size, which is then emitted on
+    /// [`resize_event_name`].
     Resize { width: u16, height: u16 },
     /// Operator clicked Disconnect or x'd the window.
     Close,
@@ -164,6 +178,7 @@ pub async fn open_rdp_session(
     let token = new_token();
     let frame_event = frame_event_name(&token);
     let closed_event = closed_event_name(&token);
+    let resize_event = resize_event_name(&token);
 
     // Stage 1: resolve + TCP connect. We need a concrete `SocketAddr`
     // for the ironrdp connector (it stamps the local addr into the
@@ -198,7 +213,14 @@ pub async fn open_rdp_session(
     let cfg = build_connector_config(&args);
     let (width, height) = (cfg.desktop_size.width, cfg.desktop_size.height);
     let mut framed = TokioFramed::new(tcp);
-    let mut connector = ClientConnector::new(cfg, local);
+    // Register the DisplayControl dynamic virtual channel so the
+    // server advertises support during capability exchange. The
+    // capability-set callback is invoked when the server announces
+    // its supported monitor count / scaling — we don't need anything
+    // from it today, so reply with an empty SVC message vector.
+    let drdynvc =
+        DrdynvcClient::new().with_dynamic_channel(DisplayControlClient::new(|_caps| Ok(Vec::new())));
+    let mut connector = ClientConnector::new(cfg, local).with_static_channel(drdynvc);
     let should_upgrade = ironrdp_async::connect_begin(&mut framed, &mut connector)
         .await
         .map_err(|e| format!("rdp: connect_begin: {e}"))?;
@@ -237,6 +259,7 @@ pub async fn open_rdp_session(
     let app_for_task = app.clone();
     let frame_event_for_task = frame_event.clone();
     let closed_event_for_task = closed_event.clone();
+    let resize_event_for_task = resize_event.clone();
     tokio::spawn(active_stage_loop(
         app_for_task,
         framed,
@@ -244,6 +267,7 @@ pub async fn open_rdp_session(
         rx,
         frame_event_for_task,
         closed_event_for_task,
+        resize_event_for_task,
         width,
         height,
     ));
@@ -268,6 +292,7 @@ pub async fn open_rdp_session(
         token,
         frame_event,
         closed_event,
+        resize_event,
         width,
         height,
     })
@@ -421,8 +446,9 @@ async fn active_stage_loop<S>(
     mut rx: mpsc::Receiver<RdpControl>,
     frame_event: String,
     closed_event: String,
-    width: u16,
-    height: u16,
+    resize_event: String,
+    mut width: u16,
+    mut height: u16,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
 {
@@ -440,6 +466,39 @@ async fn active_stage_loop<S>(
             ctl = rx.recv() => {
                 match ctl {
                     Some(RdpControl::Close) | None => break,
+                    Some(RdpControl::Resize { width: rw, height: rh }) => {
+                        // Clamp to the DisplayControl-permitted range
+                        // before asking ironrdp to encode the monitor
+                        // layout PDU. The server replies with a
+                        // DeactivateAll, which the pdu-read branch
+                        // below converts into a reactivation sequence
+                        // + framebuffer resize.
+                        let (cw, ch) = MonitorLayoutEntry::adjust_display_size(
+                            u32::from(rw),
+                            u32::from(rh),
+                        );
+                        match active_stage.encode_resize(cw, ch, None, None) {
+                            Some(Ok(frame)) => {
+                                if let Err(e) = framed.write_all(&frame).await {
+                                    log::warn!("rdp: write resize pdu: {e:?}");
+                                    break;
+                                }
+                            }
+                            Some(Err(e)) => {
+                                log::warn!("rdp: encode_resize: {e:?}");
+                            }
+                            None => {
+                                // Server didn't advertise DisplayControl
+                                // support, or the DVC isn't open yet.
+                                // Drop silently — the canvas stays at
+                                // the negotiated resolution and the
+                                // frontend continues to letterbox it.
+                                log::debug!(
+                                    "rdp: resize {rw}x{rh} ignored (DisplayControl unavailable)"
+                                );
+                            }
+                        }
+                    }
                     Some(other) => {
                         if let Some(pdu) = control_to_fastpath(other) {
                             let mut buf = WriteBuf::new();
@@ -479,6 +538,9 @@ async fn active_stage_loop<S>(
                 // ~width*height*4 RGBA bytes to a tiny strip.
                 let mut dirty: Option<InclusiveRectangle> = None;
                 let mut response_frames: Vec<Vec<u8>> = Vec::new();
+                let mut reactivation: Option<
+                    Box<ironrdp::connector::connection_activation::ConnectionActivationSequence>,
+                > = None;
                 for out in outputs {
                     match out {
                         ActiveStageOutput::GraphicsUpdate(rect) => {
@@ -493,6 +555,15 @@ async fn active_stage_loop<S>(
                             });
                         }
                         ActiveStageOutput::ResponseFrame(frame) => response_frames.push(frame),
+                        ActiveStageOutput::DeactivateAll(seq) => {
+                            // The server replies with DeactivateAll
+                            // after every successful resize request.
+                            // Capture the sequence; after we've flushed
+                            // any pending response frames we drive it
+                            // to Finalized, swap in the new framebuffer
+                            // and tell the frontend the new size.
+                            reactivation = Some(seq);
+                        }
                         ActiveStageOutput::Terminate(_) => {
                             log::info!("rdp: server initiated disconnect");
                             for frame in response_frames {
@@ -509,6 +580,39 @@ async fn active_stage_loop<S>(
                         log::warn!("rdp: write response frame: {e:?}");
                         break;
                     }
+                }
+                // Drive the deactivation-reactivation sequence to
+                // completion *before* the next read_pdu() — the next
+                // server PDU is the first capabilities-exchange step,
+                // which `single_sequence_step_read` consumes on our
+                // behalf. On completion we swap in the new
+                // framebuffer + fastpath processor and tell the
+                // frontend the new size; any `dirty` rect from this
+                // round targets the old framebuffer and is dropped.
+                if let Some(mut seq) = reactivation {
+                    match run_reactivation(&mut framed, &mut active_stage, &mut seq).await {
+                        Ok(new_size) => {
+                            width = new_size.width;
+                            height = new_size.height;
+                            image = DecodedImage::new(
+                                ironrdp::graphics::image_processing::PixelFormat::RgbA32,
+                                width,
+                                height,
+                            );
+                            let _ = app.emit(
+                                &resize_event,
+                                ResizePayload { width, height },
+                            );
+                            log::info!(
+                                "rdp: reactivated at {width}x{height} after DisplayControl resize"
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!("rdp: reactivation failed: {e:?}");
+                            break;
+                        }
+                    }
+                    continue;
                 }
                 if let Some(rect) = dirty {
                     // Clamp to the desktop in case a server reports a
@@ -540,6 +644,58 @@ async fn active_stage_loop<S>(
         }
     }
     let _ = app.emit(&closed_event, ());
+}
+
+/// Drive the connection-activation state machine to `Finalized`
+/// after a DeactivateAll, then return the new desktop size and
+/// swap the fastpath processor / share_id / pointer settings into
+/// `active_stage`. Mirrors the reference client's reactivation
+/// handler in `ironrdp-client/src/rdp.rs`.
+async fn run_reactivation<S>(
+    framed: &mut TokioFramed<S>,
+    active_stage: &mut ActiveStage,
+    seq: &mut ironrdp::connector::connection_activation::ConnectionActivationSequence,
+) -> Result<DesktopSize, String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
+{
+    let mut buf = WriteBuf::new();
+    loop {
+        buf.clear();
+        let written = single_sequence_step_read(framed, seq, &mut buf)
+            .await
+            .map_err(|e| format!("reactivation step: {e:?}"))?;
+        if written.size().is_some() {
+            framed
+                .write_all(buf.filled())
+                .await
+                .map_err(|e| format!("reactivation write: {e:?}"))?;
+        }
+        if let ConnectionActivationState::Finalized {
+            io_channel_id,
+            user_channel_id,
+            desktop_size,
+            share_id,
+            enable_server_pointer,
+            pointer_software_rendering,
+        } = seq.connection_activation_state()
+        {
+            active_stage.set_fastpath_processor(
+                fast_path::ProcessorBuilder {
+                    io_channel_id,
+                    user_channel_id,
+                    share_id,
+                    enable_server_pointer,
+                    pointer_software_rendering,
+                    bulk_decompressor: None,
+                }
+                .build(),
+            );
+            active_stage.set_share_id(share_id);
+            active_stage.set_enable_server_pointer(enable_server_pointer);
+            return Ok(desktop_size);
+        }
+    }
 }
 
 /// Pack a sub-rectangle of the framebuffer into a row-packed RGBA
@@ -584,6 +740,12 @@ struct FramePayload {
     width: u16,
     height: u16,
     bytes_b64: String,
+}
+
+#[derive(Serialize, Clone)]
+struct ResizePayload {
+    width: u16,
+    height: u16,
 }
 
 fn control_to_fastpath(ctl: RdpControl) -> Option<FastPathInput> {

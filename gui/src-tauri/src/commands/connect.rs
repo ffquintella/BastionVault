@@ -304,6 +304,7 @@ pub struct RdpOpenResponse {
     pub token: String,
     pub frame_event: String,
     pub closed_event: String,
+    pub resize_event: String,
     pub window_label: String,
     pub width: u16,
     pub height: u16,
@@ -417,10 +418,11 @@ pub async fn session_open_rdp(
 
     let window_label = format!("rdp-{}", outcome.token);
     let url = format!(
-        "index.html#/session/rdp?token={}&frame={}&closed={}&label={}&w={}&h={}",
+        "index.html#/session/rdp?token={}&frame={}&closed={}&resize={}&label={}&w={}&h={}",
         urlencoding::encode(&outcome.token),
         urlencoding::encode(&outcome.frame_event),
         urlencoding::encode(&outcome.closed_event),
+        urlencoding::encode(&outcome.resize_event),
         urlencoding::encode(&label),
         outcome.width,
         outcome.height,
@@ -461,6 +463,7 @@ pub async fn session_open_rdp(
         token: outcome.token,
         frame_event: outcome.frame_event,
         closed_event: outcome.closed_event,
+        resize_event: outcome.resize_event,
         window_label,
         width: outcome.width,
         height: outcome.height,
@@ -523,6 +526,30 @@ pub async fn session_input_rdp_key(
         session::rdp::RdpControl::Key {
             js_code: request.js_code,
             pressed: request.pressed,
+        },
+    )
+    .await
+    .map_err(CommandError::from)
+}
+
+#[derive(Deserialize)]
+pub struct RdpInputResizeRequest {
+    pub token: String,
+    pub width: u16,
+    pub height: u16,
+}
+
+#[tauri::command]
+pub async fn session_input_rdp_resize(
+    state: State<'_, AppState>,
+    request: RdpInputResizeRequest,
+) -> CmdResult<()> {
+    session::rdp::send_control(
+        &state,
+        &request.token,
+        session::rdp::RdpControl::Resize {
+            width: request.width,
+            height: request.height,
         },
     )
     .await

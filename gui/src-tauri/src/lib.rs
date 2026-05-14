@@ -405,6 +405,7 @@ pub fn run() {
             commands::connect::session_input,
             commands::connect::session_input_rdp_mouse,
             commands::connect::session_input_rdp_key,
+            commands::connect::session_input_rdp_resize,
             commands::connect::session_resize,
             commands::connect::session_close,
             commands::ldap::ldap_list_static_roles,
