@@ -208,6 +208,8 @@ export function operationVariant(
       return "info";
     case "restore":
       return "info";
+    case "connect":
+      return "success";
     case "delete":
       return "error";
     default:

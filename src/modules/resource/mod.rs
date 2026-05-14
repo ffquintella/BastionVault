@@ -455,13 +455,34 @@ impl ResourceBackendInner {
             Some(e) => serde_json::from_slice(&e.value).ok(),
             None => None,
         };
-        let op = if previous.is_some() { "update" } else { "create" };
-        let changed_fields = diff_field_names(previous.as_ref(), &body);
+        let mut op = if previous.is_some() { "update" } else { "create" };
+        let mut changed_fields = diff_field_names(previous.as_ref(), &body);
+
+        // A write whose only diff is `recent_sessions` came from the
+        // GUI's session-recorder (`record_recent_session` in
+        // `commands/connect.rs`). That isn't a metadata edit — it's the
+        // operator opening a session — so we relabel it as a "connect"
+        // event with no field pill, and surface it on the security log
+        // so an operator tailing security.log sees connection activity
+        // without having to cross-reference operations.log.
+        let is_connect = op == "update"
+            && changed_fields.len() == 1
+            && changed_fields[0] == "recent_sessions";
+        if is_connect {
+            op = "connect";
+            changed_fields.clear();
+            log::info!(
+                target: "security",
+                "resource-connect: user={} resource={}",
+                caller_username(req),
+                name
+            );
+        }
 
         // Only append a history entry if something actually changed -- the
         // GUI saves on every Save button click which may be a no-op.
         // (Always record the initial create, though, even if `body` is empty.)
-        let record_history = op == "create" || !changed_fields.is_empty();
+        let record_history = op == "create" || op == "connect" || !changed_fields.is_empty();
 
         // Write the new metadata.
         let data = serde_json::to_string(&body)?;
@@ -623,6 +644,19 @@ impl ResourceBackendInner {
         match entry {
             Some(e) => {
                 let data: Map<String, Value> = serde_json::from_slice(&e.value)?;
+                // Read of a secret value is the most sensitive event
+                // this module produces. The dispatcher's audit broker
+                // already records the request, but mirroring it on the
+                // security target gets it into security.log alongside
+                // the connect events, where ops watches for "who is
+                // pulling credentials right now."
+                log::info!(
+                    target: "security",
+                    "resource-secret-read: user={} resource={} key={}",
+                    caller_username(req),
+                    resource,
+                    key_name
+                );
                 Ok(Some(Response::data_response(Some(data))))
             }
             None => Ok(None),
@@ -794,6 +828,17 @@ impl ResourceBackendInner {
         data.insert("username".to_string(), Value::from(v.username));
         data.insert("operation".to_string(), Value::from(v.operation));
         data.insert("data".to_string(), Value::Object(v.data));
+        // Historical-version reads disclose secret material just like
+        // current-value reads; record them on the same security
+        // channel with the version tag included.
+        log::info!(
+            target: "security",
+            "resource-secret-read: user={} resource={} key={} version={}",
+            caller_username(req),
+            resource,
+            key_name,
+            version
+        );
         Ok(Some(Response::data_response(Some(data))))
     }
 

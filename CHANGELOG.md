@@ -54,6 +54,10 @@ EXAMPLE ENTRY:
 
 ### Added
 
+- **Resource change history distinguishes "connect" from "update"** (`src/modules/resource/mod.rs`, `gui/src/components/ui/SecretHistoryPanel.tsx`) — a resource metadata write whose only diff is `recent_sessions` is the GUI's session-recorder appending a connection entry, not an edit. The server now relabels it as `op: "connect"` with no field pill and emits a `target: "security"` log line (`resource-connect: user=… resource=…`) so connection activity surfaces on `security.log` alongside the audit stream. The history panel renders the new op with a success-coloured badge.
+
+- **Resource-secret reads emit a security-log entry** (`src/modules/resource/mod.rs`) — `handle_secret_read` and `handle_secret_version_read` now log `resource-secret-read: user=… resource=… key=…` on the `security` target whenever a secret value (or any prior version) is disclosed. The dispatcher's audit broker still records the request itself; the security-log mirror keeps "who pulled which credential" visible on the same stream as the connect events.
+
 - **RDP session window resizes the remote desktop** (`gui/src-tauri/src/session/rdp.rs`, `gui/src-tauri/src/commands/connect.rs`, `gui/src/routes/SessionRdpWindow.tsx`) — registered the DisplayControl dynamic virtual channel on the ironrdp connector, wired the previously-stubbed `RdpControl::Resize` to `ActiveStage::encode_resize`, and drove the server's `DeactivateAll` → reactivation sequence to completion. The frontend now observes the window size (debounced 250 ms), forwards the new dimensions to the host via `session_input_rdp_resize`, and re-allocates its canvas backing store on the `session-resize-{token}` event the host emits once the new resolution is finalized.
 
 ### Changed
