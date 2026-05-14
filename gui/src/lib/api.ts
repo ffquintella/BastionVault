@@ -488,6 +488,11 @@ export const updateFileContent = (args: {
   notes?: string;
 }) => invoke<FileMeta>("update_file_content", args);
 export const deleteFile = (id: string) => invoke<void>("delete_file", { id });
+export const exportFileToPath = (args: {
+  id: string;
+  targetPath: string;
+  version?: number;
+}) => invoke<number>("export_file_to_path", args);
 export const listFileHistory = (id: string) =>
   invoke<FileHistoryResult>("list_file_history", { id });
 

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use base64::Engine;
 use bv_client::Operation;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -406,6 +407,32 @@ pub async fn read_file_version_content(
             .unwrap_or_default()
             .into(),
     })
+}
+
+#[tauri::command]
+pub async fn export_file_to_path(
+    state: State<'_, AppState>,
+    id: String,
+    target_path: String,
+    version: Option<u64>,
+) -> CmdResult<u64> {
+    let path = match version {
+        Some(v) => format!("{FILES_MOUNT}files/{id}/versions/{v}/content"),
+        None => format!("{FILES_MOUNT}files/{id}/content"),
+    };
+    let resp = make_request(&state, Operation::Read, path, None)
+        .await?
+        .and_then(|r| r.data)
+        .ok_or("file not found")?;
+    let b64 = resp
+        .get("content_base64")
+        .and_then(|v| v.as_str())
+        .ok_or("content missing")?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| CommandError::from(e.to_string()))?;
+    std::fs::write(&target_path, &bytes)?;
+    Ok(bytes.len() as u64)
 }
 
 #[tauri::command]

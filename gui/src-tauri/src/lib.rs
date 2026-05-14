@@ -292,6 +292,7 @@ pub fn run() {
             commands::files::list_file_versions,
             commands::files::read_file_version_content,
             commands::files::restore_file_version,
+            commands::files::export_file_to_path,
             // AppRole
             commands::approle::list_approles,
             commands::approle::read_approle,

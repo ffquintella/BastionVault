@@ -27,13 +27,6 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-function fromBase64(b64: string): Uint8Array {
-  const binary = atob(b64);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
-  return out;
-}
-
 export function FilesPage() {
   const { toast } = useToast();
   const [metas, setMetas] = useState<FileMeta[]>([]);
@@ -81,23 +74,14 @@ export function FilesPage() {
 
   async function doDownload(m: FileMeta) {
     try {
-      const c = await api.readFileContent(m.id);
-      const bytes = fromBase64(c.content_base64);
-      // Copy into a fresh ArrayBuffer so TS's BlobPart accepts it even
-      // under strict `ArrayBufferLike ≠ ArrayBuffer` typings.
-      const copy = new Uint8Array(bytes.length);
-      copy.set(bytes);
-      const blob = new Blob([copy.buffer], {
-        type: c.mime_type || "application/octet-stream",
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const target = await save({
+        title: "Save file",
+        defaultPath: m.name || m.id,
       });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = m.name || m.id;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      if (!target) return;
+      const n = await api.exportFileToPath({ id: m.id, targetPath: target });
+      toast("success", `Saved ${n} bytes → ${target}`);
     } catch (e) {
       toast("error", extractError(e));
     }
@@ -527,21 +511,18 @@ function VersionsTab({
 
   async function downloadVersion(v: FileVersionInfo) {
     try {
-      const c = await api.readFileVersionContent(meta.id, v.version);
-      const bytes = fromBase64(c.content_base64);
-      const copy = new Uint8Array(bytes.length);
-      copy.set(bytes);
-      const blob = new Blob([copy.buffer], {
-        type: c.mime_type || "application/octet-stream",
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const target = await save({
+        title: "Save file version",
+        defaultPath: `${v.name || meta.name || meta.id}.v${v.version}`,
       });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${v.name || meta.name || meta.id}.v${v.version}`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      if (!target) return;
+      const n = await api.exportFileToPath({
+        id: meta.id,
+        targetPath: target,
+        version: v.version,
+      });
+      toast("success", `Saved ${n} bytes → ${target}`);
     } catch (e) {
       toast("error", extractError(e));
     }

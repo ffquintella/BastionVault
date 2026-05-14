@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Layout } from "../components/Layout";
 import {
   Button,
@@ -830,6 +830,7 @@ function ImportRootCaModal({
   const [pkcs12B64, setPkcs12B64] = useState("");
   const [passphrase, setPassphrase] = useState("");
   const [busy, setBusy] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   function reset() {
     setMode("pem");
@@ -977,16 +978,30 @@ function ImportRootCaModal({
                 PKCS#12 file
               </label>
               <input
+                ref={fileInputRef}
                 type="file"
                 accept=".p12,.pfx,application/x-pkcs12"
                 onChange={onFile}
-                className="block text-sm w-full"
+                className="hidden"
               />
-              {pkcs12Name && (
-                <div className="text-xs text-[var(--color-text-muted)]">
-                  Selected: <code>{pkcs12Name}</code>
-                </div>
-              )}
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="px-3 py-1.5 rounded-lg border border-[var(--color-border)] text-sm hover:border-[var(--color-primary)] hover:text-[var(--color-primary)]"
+                >
+                  {pkcs12Name ? "Choose a different file" : "Choose file…"}
+                </button>
+                {pkcs12Name ? (
+                  <code className="text-xs text-[var(--color-text-muted)] truncate min-w-0">
+                    {pkcs12Name}
+                  </code>
+                ) : (
+                  <span className="text-xs text-[var(--color-text-muted)]">
+                    No file selected
+                  </span>
+                )}
+              </div>
             </div>
             <Input
               label="Passphrase"
