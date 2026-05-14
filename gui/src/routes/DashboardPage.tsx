@@ -11,12 +11,21 @@ export function DashboardPage() {
   const setStatus = useVaultStore((s) => s.setStatus);
   const status = useVaultStore((s) => s.status);
   const policies = useAuthStore((s) => s.policies);
+  const principal = useAuthStore((s) => s.principal);
+  const entityId = useAuthStore((s) => s.entityId);
+  const loadEntity = useAuthStore((s) => s.loadEntity);
   const [mounts, setMounts] = useState<MountInfo[]>([]);
   const [authMethods, setAuthMethods] = useState<MountInfo[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     loadDashboard();
+    // Hydrate the logged-in user's display name on first mount. The
+    // store keeps `principal` empty until something asks `entity/self`
+    // — without this call, opening the app straight on /dashboard
+    // would show an empty greeting until the user visited Sharing.
+    if (!principal) loadEntity().catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function loadDashboard() {
@@ -48,7 +57,17 @@ export function DashboardPage() {
     <Layout>
       <div className="space-y-6">
         <div className="flex items-center justify-between">
-          <h1 className="text-2xl font-bold">Dashboard</h1>
+          <div>
+            <h1 className="text-2xl font-bold">Dashboard</h1>
+            {principal && (
+              <p
+                className="text-sm text-[var(--color-text-muted)] mt-0.5"
+                title={entityId || undefined}
+              >
+                Signed in as <span className="font-medium text-[var(--color-text)]">{principal}</span>
+              </p>
+            )}
+          </div>
           {status && (
             <StatusBadge
               status={status.sealed ? "error" : "ok"}

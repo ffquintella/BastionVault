@@ -45,6 +45,16 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.5.20] - 2026-05-14
+
+### Added
+
+- **Dashboard shows the signed-in user** (`gui/src/routes/DashboardPage.tsx`) — added a "Signed in as …" subtitle under the Dashboard header that surfaces the auth-store `principal` (with the `entity_id` on hover) and lazily hydrates it via `identity/entity/self` if the user landed straight on the dashboard.
+
+### Fixed
+
+- **"Shared with me" empty for tokens without `entity_id`** (`src/modules/identity/mod.rs`, `src/modules/credential/userpass/path_login.rs`) — `identity/entity/self` now falls back to an alias lookup (`mount_path` + `username`/`role_name`, both of which the token *does* carry) and lazily materializes the entity via `get_or_create_entity` when the metadata-cached `entity_id` is empty. Tokens issued before the login path provisioned `entity_id` no longer get stuck on the "No entity_id on this token. Re-login to provision one." empty state. The userpass login's `resolve_entity_id` also now logs at WARN whenever it can't provision (identity module absent / store uninitialised / storage error) so operators have a breadcrumb when a fresh token still lacks `entity_id`.
+
 ## [0.5.19] - 2026-05-14
 
 ### Fixed

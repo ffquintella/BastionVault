@@ -18,15 +18,32 @@ use crate::{
 /// `entity_id` metadata (and therefore fails any `scopes = ["owner"]`
 /// check, as it should).
 pub(crate) async fn resolve_entity_id(core: &Arc<Core>, mount: &str, name: &str) -> Option<String> {
-    let module = core
+    let Some(module) = core
         .module_manager
-        .get_module::<IdentityModule>("identity")?;
-    let store = module.entity_store()?;
+        .get_module::<IdentityModule>("identity")
+    else {
+        // No identity module wired in — common in minimal builds.
+        // Log once at WARN so operators noticing missing `entity_id`
+        // on tokens have a breadcrumb to follow rather than a
+        // silently-disabled feature.
+        log::warn!(
+            "identity module not loaded — login for {mount}{name} \
+             will issue a token without entity_id"
+        );
+        return None;
+    };
+    let Some(store) = module.entity_store() else {
+        log::warn!(
+            "identity entity_store not initialised — login for {mount}{name} \
+             will issue a token without entity_id"
+        );
+        return None;
+    };
     match store.get_or_create_entity(mount, name).await {
         Ok(entity) => Some(entity.id),
         Err(e) => {
             log::warn!(
-                "entity store unavailable for {mount}/{name}: {e}. \
+                "entity store get_or_create failed for {mount}{name}: {e}. \
                  Login continues without entity_id."
             );
             None

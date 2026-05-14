@@ -1065,10 +1065,36 @@ impl IdentityBackendInner {
             bv_error_response_status!(401, "no authenticated caller")
         })?;
 
-        let entity_id = auth.metadata.get("entity_id").cloned().unwrap_or_default();
+        let mut entity_id = auth.metadata.get("entity_id").cloned().unwrap_or_default();
         let username = auth.metadata.get("username").cloned().unwrap_or_default();
         let mount_path = auth.metadata.get("mount_path").cloned().unwrap_or_default();
         let role_name = auth.metadata.get("role_name").cloned().unwrap_or_default();
+
+        // Lazy alias-fallback: a token issued before `resolve_entity_id`
+        // was wired through the login path carries no `entity_id`
+        // metadata. Look the entity up by alias (mount + login name) so
+        // ownership-aware UI (Sharing > Shared with me, owner-scoped
+        // policies) keeps working without forcing a re-login. If the
+        // alias has never been seen, materialize it now — same semantics
+        // as the login-time `get_or_create_entity` call.
+        if entity_id.is_empty() && !mount_path.is_empty() {
+            let alias_name = if !username.is_empty() { &username } else { &role_name };
+            if !alias_name.is_empty() {
+                if let Some(module) = self
+                    .core
+                    .module_manager
+                    .get_module::<IdentityModule>("identity")
+                {
+                    if let Some(store) = module.entity_store() {
+                        if let Ok(entity) =
+                            store.get_or_create_entity(&mount_path, alias_name).await
+                        {
+                            entity_id = entity.id;
+                        }
+                    }
+                }
+            }
+        }
 
         let mut data = Map::new();
         data.insert("entity_id".into(), Value::String(entity_id.clone()));
