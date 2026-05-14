@@ -1,6 +1,10 @@
 .DEFAULT_GOAL := help
 
+ifeq ($(OS),Windows_NT)
+VERSION := $(shell powershell -NoProfile -ExecutionPolicy Bypass -Command "((Select-String -Path Cargo.toml -Pattern '^version\s*=' -List).Line -replace '[^0-9.]','')")
+else
 VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+endif
 
 # ── Windows: force `openssl-sys`'s vendored build to use Strawberry
 # Perl instead of the MSYS perl that ships with Git for Windows.
@@ -65,7 +69,11 @@ KEEP ?= 3
 # WSL projects checked out under /mnt/c can reject npm's chmod while
 # creating node_modules/.bin links. Avoid bin links there and call the
 # package entrypoints directly; keep normal npx behavior elsewhere.
+ifeq ($(OS),Windows_NT)
+IS_WSL := 0
+else
 IS_WSL := $(shell uname -r 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -q microsoft && echo 1)
+endif
 ifeq ($(IS_WSL),1)
 GUI_NPM_INSTALL := npm install --no-bin-links --no-save
 GUI_TAURI := node node_modules/@tauri-apps/cli/tauri.js
@@ -85,7 +93,11 @@ help: ## List available commands
 	@echo ""
 	@echo "Usage: make <target>"
 	@echo ""
+ifeq ($(OS),Windows_NT)
+	@powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content '$(firstword $(MAKEFILE_LIST))' | ForEach-Object { if ($$_ -match '^([a-zA-Z_-]+):.*##\s*(.*)') { '  {0,-15} {1}' -f $$matches[1], $$matches[2] } }"
+else
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
+endif
 
 prune-stale: ## Trim rustc incremental caches to the last KEEP sessions (default 3). Auto-runs before every compiling target.
 	@KEEP=$(KEEP) bash scripts/prune-incremental.sh
@@ -153,7 +165,11 @@ docs: ## Start the documentation site locally
 # explicit empty backup-suffix argument (`-i ''`); GNU sed (Linux) errors
 # on that and wants either `-i` alone or `-i ''` written without a space.
 # Detect with --version, which BSD sed lacks.
+ifeq ($(OS),Windows_NT)
+SED_INPLACE :=
+else
 SED_INPLACE := $(shell sed --version >/dev/null 2>&1 && echo "sed -i" || echo "sed -i ''")
+endif
 
 # `bump-*` keeps the four version sites in lockstep:
 #   * root `Cargo.toml`               (workspace crate version)
@@ -590,7 +606,11 @@ PLUGINS_PROCESS_TARGET ?=
 # PLUGINS_PROCESS_TARGET. Older make doesn't shell well; fall back
 # to empty if rustc isn't on PATH (and the comparison will treat the
 # target as "not a cross-build", which is correct in that case).
+ifeq ($(OS),Windows_NT)
+PLUGINS_HOST_TARGET := $(shell powershell -NoProfile -ExecutionPolicy Bypass -Command "rustc -vV 2>$$null | ForEach-Object { if ($$_ -match '^host: (.*)') { $$matches[1] } }")
+else
 PLUGINS_HOST_TARGET := $(shell rustc -vV 2>/dev/null | sed -n 's/^host: //p')
+endif
 PLUGINS_IS_CROSS := $(if $(PLUGINS_PROCESS_TARGET),$(if $(filter $(PLUGINS_PROCESS_TARGET),$(PLUGINS_HOST_TARGET)),,1),)
 PLUGINS_HAS_CROSS := $(shell command -v cross >/dev/null 2>&1 && echo 1)
 
