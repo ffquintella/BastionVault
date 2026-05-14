@@ -290,14 +290,34 @@ pub async fn resolve(
     match parse_input(input, cfg)? {
         ParsedInput::Literal(c) => Ok(ResolvedAddress::Literal(c)),
         ParsedInput::Cluster { name, scheme } => {
-            let label = format!("{}.{}", cfg.srv_service, name);
+            // If the input already looks SRV-shaped (starts with `_`,
+            // e.g. `_bvault._tcp.cluster.example` or
+            // `_cofre-html._tcp.esi.fgv.br`), query it verbatim instead
+            // of prepending `cfg.srv_service` — otherwise we'd build a
+            // nonsense double-prefixed label like
+            // `_bvault._tcp._cofre-html._tcp.esi.fgv.br`.
+            let is_srv_shaped = name.starts_with('_');
+            let label = if is_srv_shaped {
+                name.clone()
+            } else {
+                format!("{}.{}", cfg.srv_service, name)
+            };
             let records = resolver.lookup_srv(&label).await.unwrap_or_default();
 
             if records.is_empty() {
-                // SRV NXDOMAIN / empty → fall back to literal
-                // hostname resolution with the default port. The OS
-                // resolver will still handle A/AAAA when we open the
-                // TCP connection later.
+                // SRV NXDOMAIN / empty. For non-SRV-shaped input fall
+                // back to literal hostname resolution with the default
+                // port — the OS resolver will handle A/AAAA at TCP
+                // connect time. For SRV-shaped input there is no
+                // sensible fallback (underscore labels aren't valid
+                // hostnames for `getaddrinfo`), so surface an empty
+                // candidate list and let the caller report it.
+                if is_srv_shaped {
+                    return Ok(ResolvedAddress::Cluster {
+                        name,
+                        candidates: Vec::new(),
+                    });
+                }
                 return Ok(ResolvedAddress::Cluster {
                     name: name.clone(),
                     candidates: vec![SrvCandidate {
@@ -449,6 +469,39 @@ mod tests {
         };
         let r = resolve("vault.corp.example", &cfg(), &resolver).await.unwrap();
         assert_eq!(r.candidates().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn srv_shaped_input_queried_verbatim_no_prefix() {
+        // Input that already starts with `_` is treated as a full SRV
+        // FQDN — we must NOT prepend `cfg.srv_service` on top of it.
+        let resolver = FakeResolver {
+            f: |label| {
+                assert_eq!(label, "_cofre-html._tcp.esi.fgv.br");
+                Ok(vec![SrvRecord {
+                    target: "node1.fgv.br.".into(),
+                    port: 5200,
+                    priority: 10,
+                    weight: 50,
+                }])
+            },
+        };
+        let r = resolve("_cofre-html._tcp.esi.fgv.br", &cfg(), &resolver).await.unwrap();
+        let cands = r.into_candidates();
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].target, "node1.fgv.br");
+        assert_eq!(cands[0].port, 5200);
+    }
+
+    #[tokio::test]
+    async fn srv_shaped_input_with_no_records_yields_empty_no_bogus_literal() {
+        // Underscore labels can't be resolved as A/AAAA, so the
+        // bare-hostname fallback would just produce a guaranteed-broken
+        // candidate. Return empty and let the caller surface the
+        // "no candidates resolved" error instead.
+        let resolver = FakeResolver { f: |_| Ok(vec![]) };
+        let r = resolve("_bvault._tcp.missing.example", &cfg(), &resolver).await.unwrap();
+        assert!(r.candidates().is_empty());
     }
 
     #[test]

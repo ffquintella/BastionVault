@@ -45,6 +45,10 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+
+- **Cluster discovery rejected SRV-shaped cluster names** (`crates/bv-client/src/discovery.rs`) — when an operator entered an already-SRV-formatted FQDN like `_cofre-html._tcp.esi.fgv.br` as the cluster address, `resolve()` blindly prepended `cfg.srv_service` (`_bvault._tcp`) and queried `_bvault._tcp._cofre-html._tcp.esi.fgv.br`, which NXDOMAINs, then fell back to a literal A/AAAA lookup of the underscore-prefixed name — `getaddrinfo` rejects underscore labels, producing the cryptic "nodename nor servname provided" toast. Now: inputs starting with `_` are queried verbatim as the SRV label (no prefix), and SRV-shaped inputs with no records short-circuit to an empty candidate list (so the caller surfaces "no candidates resolved" instead of a guaranteed-broken A/AAAA fallback). Bare-name inputs still get the `srv_service` prefix as before.
+
 ## [0.5.17] - 2026-05-13
 
 ### Fixed
