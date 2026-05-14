@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.5.19] - 2026-05-14
+
 ### Fixed
 
 - **Windows `make` help target** (`Makefile`) -- avoid parse-time `grep`, `sed`, `uname`, and help-pipeline dependencies when running GNU Make from `cmd.exe`, so the default `make` target prints the command list cleanly on Windows.
