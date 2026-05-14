@@ -18,6 +18,7 @@ import {
 } from "../components/ui";
 import type {
   ShareEntry,
+  ShareGranteeKind,
   SharePointer,
   ShareTargetKind,
 } from "../lib/types";
@@ -53,8 +54,14 @@ export function SharingPage() {
   // Add-share modal state
   const [showAdd, setShowAdd] = useState(false);
   const [newGrantee, setNewGrantee] = useState("");
+  const [newGranteeKind, setNewGranteeKind] = useState<ShareGranteeKind>("entity");
   const [newCaps, setNewCaps] = useState<string[]>(["read"]);
   const [newExpires, setNewExpires] = useState("");
+
+  // Status surfaced from `sharing/for-me` so the operator knows whether
+  // group shares are flowing for them; if `false` we hint at the
+  // `group_shared_resources` policy meta tag they need.
+  const [groupSharedEnabled, setGroupSharedEnabled] = useState<boolean>(false);
 
   useEffect(() => {
     if (!entityId) {
@@ -63,17 +70,20 @@ export function SharingPage() {
   }, [entityId, loadEntity]);
 
   useEffect(() => {
-    if (tab === "received" && entityId) {
+    if (tab === "received") {
       loadReceived();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, entityId]);
+  }, [tab]);
 
   async function loadReceived() {
-    if (!entityId) return;
     setReceivedLoading(true);
     try {
-      setReceived(await api.listSharesForGrantee(entityId));
+      // Use the caller-introspecting endpoint so direct shares AND
+      // group shares (when policy meta tag is set) both surface here.
+      const result = await api.listSharesForMe();
+      setReceived(result.entries);
+      setGroupSharedEnabled(result.group_shared_resources);
     } catch (e: unknown) {
       toast("error", extractError(e));
     } finally {
@@ -102,10 +112,12 @@ export function SharingPage() {
         newGrantee.trim(),
         newCaps,
         newExpires.trim(),
+        newGranteeKind,
       );
       toast("success", "Share granted");
       setShowAdd(false);
       setNewGrantee("");
+      setNewGranteeKind("entity");
       setNewCaps(["read"]);
       setNewExpires("");
       loadSharesForTarget();
@@ -120,6 +132,7 @@ export function SharingPage() {
         share.target_kind as ShareTargetKind,
         share.target_path,
         share.grantee_entity_id,
+        share.grantee_kind ?? "entity",
       );
       toast("success", "Share revoked");
       loadSharesForTarget();
@@ -152,20 +165,29 @@ export function SharingPage() {
 
         {tab === "received" && (
           <Card>
-            {!entityId ? (
-              <EmptyState
-                title="No entity_id on this token"
-                description="Sharing is only visible when the token carries an entity_id. Re-login to provision one."
-              />
-            ) : receivedLoading ? (
+            {receivedLoading ? (
               <p className="text-sm text-[var(--color-text-muted)]">Loading...</p>
             ) : received.length === 0 ? (
               <EmptyState
                 title="Nothing shared with you"
-                description="When someone grants you access, it shows up here."
+                description={
+                  groupSharedEnabled
+                    ? "When someone grants you access (directly or via a group you belong to), it shows up here."
+                    : "Direct shares appear here. Group shares additionally require a policy with `metadata { group_shared_resources = \"true\" }` to surface."
+                }
               />
             ) : (
-              <ReceivedTable entries={received} />
+              <>
+                {!groupSharedEnabled && (
+                  <p className="text-xs text-[var(--color-text-muted)] mb-3">
+                    Showing direct shares only. To see shares granted to groups
+                    you belong to, attach a policy with
+                    {" "}
+                    <code className="font-mono">metadata {"{"} group_shared_resources = "true" {"}"}</code>.
+                  </p>
+                )}
+                <ReceivedTable entries={received} />
+              </>
             )}
           </Card>
         )}
@@ -240,13 +262,41 @@ export function SharingPage() {
           }
         >
           <div className="space-y-3">
-            <EntityPicker
-              label="Grantee"
-              value={newGrantee}
-              onChange={(id) => setNewGrantee(id)}
-              placeholder="Search by login or paste entity_id"
-              hint="Type part of a username, mount, or UUID."
-            />
+            <div>
+              <Select
+                label="Grantee kind"
+                value={newGranteeKind}
+                onChange={(e) =>
+                  setNewGranteeKind(e.target.value as ShareGranteeKind)
+                }
+                options={[
+                  { value: "entity", label: "User (entity)" },
+                  { value: "group_user", label: "User group" },
+                  { value: "group_app", label: "App group" },
+                ]}
+              />
+              <p className="text-xs text-[var(--color-text-muted)] mt-1">
+                Group shares only resolve to access for members with a policy
+                that carries <code className="font-mono">metadata.group_shared_resources = "true"</code>.
+              </p>
+            </div>
+            {newGranteeKind === "entity" ? (
+              <EntityPicker
+                label="Grantee"
+                value={newGrantee}
+                onChange={(id) => setNewGrantee(id)}
+                placeholder="Search by login or paste entity_id"
+                hint="Type part of a username, mount, or UUID."
+              />
+            ) : (
+              <Input
+                label={newGranteeKind === "group_user" ? "User group name" : "App group name"}
+                value={newGrantee}
+                onChange={(e) => setNewGrantee(e.target.value)}
+                placeholder={newGranteeKind === "group_user" ? "engineering" : "ci-bots"}
+                hint="Identity group name as configured under Admin → Identity Groups."
+              />
+            )}
             <div>
               <label className="block text-xs font-medium text-[var(--color-text-muted)] mb-1">
                 Capabilities
@@ -289,6 +339,22 @@ export function SharingPage() {
 
 function ReceivedTable({ entries }: { entries: SharePointer[] }) {
   const columns = [
+    {
+      key: "via",
+      header: "Via",
+      render: (p: SharePointer) => {
+        const gk = p.grantee_kind ?? "entity";
+        if (gk === "entity") {
+          return <Badge label="direct" variant="info" />;
+        }
+        return (
+          <Badge
+            label={gk === "group_user" ? "user group" : "app group"}
+            variant="warning"
+          />
+        );
+      },
+    },
     {
       key: "kind",
       header: "Kind",
@@ -348,7 +414,21 @@ function ShareTable({
     {
       key: "grantee",
       header: "Grantee",
-      render: (s: ShareEntry) => <EntityLabel entityId={s.grantee_entity_id} />,
+      render: (s: ShareEntry) => {
+        const gk = s.grantee_kind ?? "entity";
+        if (gk === "entity") {
+          return <EntityLabel entityId={s.grantee_entity_id} />;
+        }
+        return (
+          <div className="flex items-center gap-1">
+            <Badge
+              label={gk === "group_user" ? "user group" : "app group"}
+              variant="warning"
+            />
+            <span className="font-mono text-xs">{s.grantee_entity_id}</span>
+          </div>
+        );
+      },
     },
     {
       key: "caps",

@@ -1,8 +1,3 @@
----
-sidebar_position: 1
-title: Quick Start
----
-
 # BastionVault Quick Start
 
 This guide covers the minimum steps to start a BastionVault server and use it to store secrets.

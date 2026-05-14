@@ -103,10 +103,19 @@ Primary record plus two reverse indexes, all encrypted behind the
 system barrier view:
 
 ```
-sys/asset-group/<name>                         -> AssetGroup (JSON)
-sys/asset-group-by-secret/<base64url(path)>    -> Vec<String>   (group names)
-sys/asset-group-by-resource/<resource_name>    -> Vec<String>
+sys/resource-group/group/<name>                    -> ResourceGroupEntry (JSON)
+sys/resource-group/secret-index/<base64url(path)>  -> Vec<String>   (group names)
+sys/resource-group/member-index/<resource_name>    -> Vec<String>   (group names)
+sys/resource-group/history/<name>/<20-nanos>       -> ResourceGroupHistoryEntry
 ```
+
+> **Naming note.** The on-disk prefix, mount, and struct names all use
+> `resource-group` / `resource_group` for backward-compatibility with
+> the pre-secrets-membership ship — the operator-facing concept is
+> still "asset group", but every storage key and HTTP route uses the
+> internal `resource-group` label. See
+> [`features/resource-groups.md`](resource-groups.md) for the
+> as-implemented surface.
 
 Reverse indexes are maintained by the write handler. Key design points:
 
@@ -119,7 +128,8 @@ Reverse indexes are maintained by the write handler. Key design points:
   write handler retries the index update once; if the retry also
   fails, the index is flagged stale and a background `reindex` job
   rebuilds it from the primary records on next unseal. A
-  `sys/asset-group-reindex` maintenance endpoint triggers it manually.
+  `PUT /v1/resource-group/reindex` maintenance endpoint triggers it
+  manually (admin-only).
 - The store is persisted — no cache layer in v1. Authorization checks
   read the reverse index per request; if this becomes a hotspot a
   small bounded LRU keyed by `(kind, path) -> [group names]` can be
@@ -178,13 +188,13 @@ flow):
 
 - **Rename of a resource** — resources support a delete+create pattern
   today; no in-place rename. If one is added later, the handler must
-  walk `sys/asset-group-by-resource/<old>` and rewrite the affected
+  walk `sys/resource-group/member-index/<old>` and rewrite the affected
   group records. Until then, renames manifest as delete+create from the
   group's perspective.
 - **Move of a KV secret** — same story: delete + create. The group
   membership is addressed by path, so a move drops the old entry from
   all groups and does not auto-add the new path. Document this
-  explicitly; consider a `sys/asset-group/remap` admin tool later.
+  explicitly; consider a `resource-group/remap` admin tool later.
 - **Delete of a member's target** — the write-through handler detects
   a member whose target no longer exists and prunes it from all groups
   containing it, including the reverse index. A soft-deleted KV-v2
@@ -198,7 +208,7 @@ Two-tier edit model:
   per-user-scoping's `EntityStore`) has full CRUD on the group
   including membership edits.
 - **Admins** (callers holding a policy with `manage` capability on
-  `sys/asset-group/*`) can edit any group, including transferring
+  `resource-group/groups/*`) can edit any group, including transferring
   ownership. An admin capability is required to delete a group whose
   owner is not the caller.
 - End users with only read access on a group's underlying objects can
@@ -207,43 +217,44 @@ Two-tier edit model:
   from the membership list — present but labeled `<hidden>` so the
   group's size is accurate without leaking paths they cannot see.
 
-### 6. API surface (all under `v2/` per agent.md)
+### 6. API surface
 
-CRUD:
+Mounted at `resource-group/`. The HTTP version segment (`v1` or `v2`)
+is the standard logical-mount prefix and both work; the canonical form
+used elsewhere in the docs is `/v1/`. See
+[`features/resource-groups.md`](resource-groups.md) for the source of
+truth — it ships with the routes that are actually registered in
+`src/modules/resource_group/mod.rs`.
 
-| Method | Path                                                    | Purpose |
-|--------|---------------------------------------------------------|---------|
-| LIST   | `/v2/asset-groups`                                      | List all group names the caller can see |
-| GET    | `/v2/asset-groups/{name}`                               | Read a group (membership redacted as above) |
-| PUT    | `/v2/asset-groups/{name}`                               | Create or replace (partial updates merge; members list replaces wholesale) |
-| DELETE | `/v2/asset-groups/{name}`                               | Delete a group (owner or admin) |
+CRUD + history:
 
-Membership (fine-grained):
-
-| Method | Path                                                              | Purpose |
-|--------|-------------------------------------------------------------------|---------|
-| POST   | `/v2/asset-groups/{name}/members`                                 | Add one or more members (idempotent) |
-| DELETE | `/v2/asset-groups/{name}/members/{kind}/{path}`                   | Remove a single member |
+| Method | Path                                                       | Purpose |
+|--------|------------------------------------------------------------|---------|
+| LIST   | `/v1/resource-group/groups`                                | List all group names the caller can see |
+| GET    | `/v1/resource-group/groups/{name}`                         | Read a group (membership redacted as above) |
+| PUT    | `/v1/resource-group/groups/{name}`                         | Create or replace (partial updates preserve unspecified fields; full member list replaces wholesale) |
+| DELETE | `/v1/resource-group/groups/{name}`                         | Delete a group (owner or admin) |
+| GET    | `/v1/resource-group/groups/{name}/history`                 | Change history, newest first (before/after membership diffs) |
 
 Reverse-lookup:
 
-| Method | Path                                                              | Purpose |
-|--------|-------------------------------------------------------------------|---------|
-| GET    | `/v2/asset-groups/by-secret/{path}`                               | List groups a KV path belongs to |
-| GET    | `/v2/asset-groups/by-resource/{name}`                             | List groups a resource belongs to |
+| Method | Path                                                       | Purpose |
+|--------|------------------------------------------------------------|---------|
+| GET    | `/v1/resource-group/by-resource/{name}`                    | List groups a resource belongs to |
+| GET    | `/v1/resource-group/by-secret/{b64url_path}`               | List groups a KV path belongs to. `b64url_path` is `base64url(no-pad)` of the canonical path; the server canonicalizes KV-v1/v2 variants. |
 
 Admin:
 
-| Method | Path                                                              | Purpose |
-|--------|-------------------------------------------------------------------|---------|
-| POST   | `/v2/asset-groups/{name}/transfer`                                | Transfer ownership to another entity (admin-only) |
-| POST   | `/v2/sys/asset-group-reindex`                                     | Rebuild reverse indexes from primary records (admin-only) |
+| Method | Path                                                       | Purpose |
+|--------|------------------------------------------------------------|---------|
+| PUT    | `/v1/resource-group/reindex`                               | Rebuild both reverse indexes from primary records (admin-only) |
+| POST   | `/v2/sys/asset-group-owner/transfer`                       | Transfer ownership to another entity (admin-only). Lives on the `sys/` mount; body: `{ name, new_owner_entity_id }`. |
 
-History:
-
-| Method | Path                                                              | Purpose |
-|--------|-------------------------------------------------------------------|---------|
-| GET    | `/v2/asset-groups/{name}/history`                                 | Change history (before/after membership diffs), mirroring identity-group history |
+> Membership edits are folded into the `PUT` body on
+> `/v1/resource-group/groups/{name}` rather than exposed as separate
+> `/members` sub-routes. The body's `resources` and `secrets` arrays
+> replace the stored lists; reverse-index maintenance is handled
+> internally by the write handler.
 
 ### 7. GUI
 
@@ -315,7 +326,7 @@ label is "Group").
   to exhibit literal-string behavior. All existing tests pass without
   modification.
 - **Consistency**: kill the process mid-write between the primary
-  record and reverse index. On restart, `sys/asset-group-reindex`
+  record and reverse index. On restart, `PUT /v1/resource-group/reindex`
   restores the index from primary records.
 
 ## Open Questions

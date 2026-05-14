@@ -1,8 +1,3 @@
----
-sidebar_position: 8
-title: Administration
----
-
 # Administration Guide
 
 This guide covers day-to-day administration of a BastionVault deployment: initialization, seal/unseal operations, secret engine management, policy management, and monitoring.
@@ -152,6 +147,59 @@ path "secret/infra/*" {
 
 Available capabilities: `create`, `read`, `update`, `delete`, `list`, `sudo`, `deny`.
 
+### Scope and group qualifiers
+
+Path rules may additionally carry `scopes = [...]` and/or `groups = [...]`
+qualifiers that gate the rule's capabilities on attributes of the
+*target*, not the path string:
+
+~~~hcl
+# Owner: only entries this token's entity_id owns.
+# `scopes = ["owner", "shared"]` is additive — owner OR explicit share.
+path "secret/data/users/*" {
+  capabilities = ["read", "list", "update"]
+  scopes       = ["owner", "shared"]
+}
+
+# Group: only resources that are members of an asset group named
+# `project-phoenix` or `shared-platform`.
+path "resource/data/*" {
+  capabilities = ["read", "list"]
+  groups       = ["project-phoenix", "shared-platform"]
+}
+~~~
+
+Supported `scopes`: `owner` (caller's `entity_id` matches the
+target's owner record), `shared` (an explicit `SecretShare` exists),
+`any` (default; equivalent to omitting `scopes`). Empty `scopes`
+means legacy unscoped semantics.
+
+`groups` and `scopes` are additive per rule: when both are present
+the rule applies if the group filter *or* the scope filter passes.
+
+### Policy metadata (opt-in feature flags)
+
+A top-level `metadata { key = "value" }` block on a policy carries
+declarative opt-ins that the rest of the system reads back as a flat
+string map. Today one flag is consumed:
+
+~~~hcl
+# Opt the policy-holder into seeing group shares in their
+# "Shared with me" feed.
+name = "group-shared-resources"
+
+metadata {
+  group_shared_resources = "true"
+}
+~~~
+
+Attach this policy (or merge the `metadata` block into an existing
+policy) to anyone who should see resources/secrets that have been
+shared with an identity group they belong to. The flag is a
+*visibility* gate — the actual ACL is still granted by the user's
+existing policies. Without the flag, group shares are invisible to
+the user even when they are a member of the target group.
+
 ### Managing Policies
 
 ~~~bash
@@ -169,6 +217,93 @@ bvault policy delete app-readonly
 ~~~
 
 The `default` and `root` policies are built-in and cannot be deleted.
+
+## Identity Groups
+
+Identity groups attach a set of policies to a *named collection of
+principals* — UserPass usernames (`user` groups) or AppRole role names
+(`app` groups). At login time, the policies attached to every group
+the caller is a member of are unioned with their direct policies.
+
+~~~bash
+# Create a user group with two members and one policy.
+bvault write identity/group/user/engineering \
+  description="Platform engineering team" \
+  members="alice,bob,felipe2" \
+  policies="engineering-shared"
+
+# Read it back.
+bvault read identity/group/user/engineering
+
+# List all user groups.
+bvault list identity/group/user
+
+# AppRole groups live under group/app.
+bvault write identity/group/app/ci-bots \
+  members="github-runner,builder" \
+  policies="ci-readonly"
+~~~
+
+Groups also double as **share targets** — see *Sharing* below.
+
+## Sharing
+
+Sharing grants a named subset of capabilities (`read`, `list`,
+`update`, `delete`, `create`) on a specific target (a KV secret, a
+resource, an asset group, or a file) to a single grantee. Two
+grantee kinds are supported:
+
+- **`entity`** *(default)* — the grantee is a stable `entity_id` UUID
+  (resolved from a userpass login or appRole role at first
+  authentication). The recipient sees the target on their *Shared
+  with me* feed and the rule with `scopes = ["shared"]` resolves to
+  the granted capabilities.
+- **`group_user` / `group_app`** — the grantee is an identity group.
+  Group shares are *visibility-only*: they surface the target on
+  each member's *Shared with me* feed **only when** the member has a
+  policy whose `metadata.group_shared_resources` is `"true"`. The
+  actual ACL is still owned by the member's regular policies, so
+  membership churn cannot escalate access on its own.
+
+### Granting a share
+
+~~~bash
+# Direct entity share — grant read on a resource to alice.
+bvault write identity/sharing/by-target/resource/$(printf 'server-01' | base64 -w0) \
+  /<alice-entity-uuid> \
+  target_kind=resource \
+  target_path=server-01 \
+  grantee_kind=entity \
+  capabilities=read,list
+
+# Group share — grant read on a KV secret to the engineering group.
+bvault write identity/sharing/by-target/kv-secret/$(printf 'secret/app/db' | base64 -w0)/engineering \
+  target_kind=kv-secret \
+  target_path=secret/app/db \
+  grantee_kind=group_user \
+  capabilities=read,list
+~~~
+
+### Listing the caller's shares
+
+~~~bash
+# Returns direct entity shares plus, when group_shared_resources is
+# set on at least one of the caller's policies, group shares the
+# caller is entitled to.
+bvault list identity/sharing/for-me
+~~~
+
+### Revoking a share
+
+~~~bash
+bvault delete identity/sharing/by-target/<kind>/<b64>/<grantee> \
+  grantee_kind=group_user
+~~~
+
+The optional `grantee_kind` body field tells the server which
+by-grantee pointer prefix to clear; omitting it defaults to
+`entity` for compatibility with shares written before group
+grantees existed.
 
 ## Auth Method Management
 

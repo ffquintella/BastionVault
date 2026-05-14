@@ -1,8 +1,3 @@
----
-sidebar_position: 6
-title: CLI Reference
----
-
 # CLI Reference
 
 BastionVault provides the `bvault` command-line tool for interacting with a running server. The CLI is compatible with HashiCorp Vault's command structure.

@@ -634,6 +634,55 @@ async fn sys_health_request_handler(
     Ok(HttpResponse::build(status).json(resp))
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ServerInfoResponse {
+    /// Crate version baked at compile time. Same source as the GUI's
+    /// "Server Info" dialog uses in embedded mode so the two never
+    /// disagree.
+    version: &'static str,
+    started_at: String,
+    uptime_seconds: i64,
+    initialized: bool,
+    sealed: bool,
+    /// Best-effort storage kind label — mirrors the `cluster-status`
+    /// endpoint so operators don't have to consult two routes to
+    /// learn whether they're on file / mysql / hiqlite.
+    storage_type: String,
+}
+
+async fn sys_info_request_handler(
+    _req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    #[cfg(not(feature = "sync_handler"))]
+    let initialized = core.inited().await.unwrap_or(false);
+    #[cfg(feature = "sync_handler")]
+    let initialized = core.inited().unwrap_or(false);
+
+    #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
+    let storage_type = {
+        use crate::storage::hiqlite::HiqliteBackend;
+        let backend_any = core.physical.as_ref() as &dyn std::any::Any;
+        if backend_any.downcast_ref::<HiqliteBackend>().is_some() {
+            "hiqlite"
+        } else {
+            "unknown"
+        }
+    };
+    #[cfg(not(all(not(feature = "sync_handler"), feature = "storage_hiqlite")))]
+    let storage_type = "unknown";
+
+    let resp = ServerInfoResponse {
+        version: crate::server_info::version(),
+        started_at: crate::server_info::started_at().to_rfc3339(),
+        uptime_seconds: crate::server_info::uptime_seconds(),
+        initialized,
+        sealed: core.sealed(),
+        storage_type: storage_type.to_string(),
+    };
+    Ok(HttpResponse::Ok().json(resp))
+}
+
 async fn sys_cluster_status_request_handler(
     req: HttpRequest,
     _core: web::Data<Arc<Core>>,
@@ -2224,6 +2273,7 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
         )
         .service(web::resource("/seal-status").route(web::get().to(sys_seal_status_request_handler)))
         .service(web::resource("/health").route(web::get().to(sys_health_request_handler)))
+        .service(web::resource("/info").route(web::get().to(sys_info_request_handler)))
         .service(web::resource("/cluster-status").route(web::get().to(sys_cluster_status_request_handler)))
         .service(web::resource("/cluster/remove-node").route(web::post().to(sys_cluster_remove_node_request_handler)))
         .service(web::resource("/cluster/leave").route(web::post().to(sys_cluster_leave_request_handler)))

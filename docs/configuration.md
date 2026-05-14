@@ -1,8 +1,3 @@
----
-sidebar_position: 3
-title: Configuration
----
-
 # Configuration Reference
 
 BastionVault is configured using HCL or JSON files. Pass the config file path to the server with `--config`.

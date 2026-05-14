@@ -1,7 +1,3 @@
----
-sidebar_position: 6
-title: Security Structure
----
 # Security Structure
 
 This document describes the security measures applied to BastionVault's data-at-rest and key-management paths across every surface — the vault core, the desktop GUI, the cloud storage targets, and the per-vault keystore.

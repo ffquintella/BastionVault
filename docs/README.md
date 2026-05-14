@@ -1,41 +1,35 @@
-# BastionVault Documentation
+# BastionVault
 
-This website is built using [Docusaurus](https://docusaurus.io/), a modern static website generator.
+A Rust-based secrets management server compatible with HashiCorp Vault's API, with **post-quantum cryptography** (ML-KEM-768 + ML-DSA-65), an embedded **Tauri desktop GUI**, and a **Hiqlite** HA storage backend.
 
-## Quick Start
+> Looking for the source? [github.com/ffquintella/BastionVault](https://github.com/ffquintella/BastionVault)
 
-From the **project root**, run:
+## Start here
 
-```console
-make docs
-```
+- [Quick start](quick-start.md) — boot a vault, init, unseal, write your first secret.
+- [Install](install.md) — build from source, package, or Podman.
+- [Configuration](configuration.md) — storage + listener + cluster config in HCL.
+- [Authentication](authentication.md) — Token, UserPass, AppRole, Certificate, FIDO2, OIDC.
 
-This installs dependencies and starts the local development server at http://localhost:3000. Changes are reflected live without restarting.
+## Operate
 
-## Manual Commands
+- [Administration](administration.md) — seal/unseal, mounts, policies, identity groups, sharing.
+- [API reference](api.md) — every HTTP route the server exposes.
+- [Cluster + client discovery](cluster-client-discovery.md) — SRV records and `/sys/health` scoring.
+- [CLI reference](cli-reference.md) — every `bvault` subcommand.
 
-If you prefer to run commands directly from the `docs/` directory:
+## Architecture
 
-```console
-cd docs
-npm install
-npx docusaurus start
-```
+- [Design](design.md) — Core / Modules / Interface decomposition with diagram.
+- [Security structure](security-structure.md) — barrier, KEK rotation, FIDO2 attestation handling.
+- [Cryptography](crypto.md) — ML-KEM-768 + ML-DSA-65, ChaCha20-Poly1305 barrier.
+- [Requirements](req.md) — the original spec the implementation targets.
 
-### Build
+## Storage backends
 
-```console
-cd docs
-npx docusaurus build
-```
+- [Overview](backend/database/overview.md)
+- [MySQL](backend/database/mysql/mysql.md)
 
-Generates static content into the `build` directory for deployment.
+---
 
-### Deployment
-
-```console
-cd docs
-GIT_USER=<Your GitHub username> USE_SSH=true npx docusaurus deploy
-```
-
-Builds the website and pushes to the `gh-pages` branch for GitHub Pages hosting.
+> This site is rendered with [Docsify](https://docsify.js.org/) — no build step. Edit the `.md` files under [`docs/`](https://github.com/ffquintella/BastionVault/tree/main/docs) and reload; sidebar lives in [`docs/_sidebar.md`](_sidebar.md).

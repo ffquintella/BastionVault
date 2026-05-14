@@ -1,7 +1,3 @@
----
-sidebar_position: 4
-title: Motivation
----
 # Motivation
 
 HashiCorp Vault is the most widely used secret management product in the cloud native space. But in practice, it has some disadvantages:

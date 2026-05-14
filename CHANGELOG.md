@@ -45,7 +45,11 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
-## [0.5.20] - 2026-05-14
+### Added
+
+- **Server Info menu + endpoint** (`src/server_info.rs`, `src/http/sys.rs`, `src/api/sys.rs`, `gui/src-tauri/src/lib.rs`, `gui/src-tauri/src/commands/system.rs`, `gui/src/components/ServerInfoModal.tsx`, `docs/docs/api.md`, `docs/docs/administration.md`) — new `GET /v1/sys/info` endpoint returning `{ version, started_at, uptime_seconds, initialized, sealed, storage_type }`, backed by a process-wide `OnceLock<DateTime<Utc>>` stamped at startup. The Tauri window menu gained a **Server → Server Info...** entry that emits `open-server-info` to the focused webview; a new global `ServerInfoModal` listens for it, calls the `get_server_info` command (embedded mode reads the in-process `Core`; remote mode proxies `/sys/info`), and renders the connection kind, endpoint, version, sealed/initialized badges, storage backend, start time, and human-formatted uptime.
+
+- **Share resources with identity groups** (`src/modules/identity/share_store.rs`, `src/modules/identity/mod.rs`, `src/modules/policy/policy.rs`, `gui/src/routes/SharingPage.tsx`, GUI types + sharing commands, `features/identity-groups.md` §Phase 7, `features/per-user-scoping.md` §5) — `SecretShare` now carries a `grantee_kind` field (`entity` / `group_user` / `group_app`) so an admin can grant a share to an identity group as well as to an individual entity. The HCL policy parser learned a top-level `metadata { ... }` block; setting `metadata { group_shared_resources = "true" }` on a policy opts the holder into seeing group shares on the new `identity/sharing/for-me` endpoint (the GUI "Shared with me" tab uses it). Group shares are *visibility-only* — they surface the resource on the member's shared list without granting capability beyond what the member's existing policies allow, avoiding privilege escalation through group-membership churn. Existing entity-grantee shares deserialize unchanged via `#[serde(default)]` on the new field, so no migration is needed.
 
 ### Added
 

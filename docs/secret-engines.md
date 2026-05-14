@@ -1,8 +1,3 @@
----
-sidebar_position: 10
-title: Secret Engines
----
-
 # How Secret Engines Work
 
 A "secret engine" in BastionVault is a **logical backend** mounted at a path prefix, behind a uniform request/response router, with its own storage namespace inside the encrypted barrier. The model mirrors HashiCorp Vault's: type registration → mount → request routing → backend handler → barrier-encrypted storage.

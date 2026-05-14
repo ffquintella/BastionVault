@@ -97,6 +97,10 @@ impl Sys<'_> {
         self.request_read(format!("{}/sys/health", self.api_prefix()))
     }
 
+    pub fn info(&self) -> Result<HttpResponse, RvError> {
+        self.request_read(format!("{}/sys/info", self.api_prefix()))
+    }
+
     pub fn cluster_status(&self) -> Result<HttpResponse, RvError> {
         self.request_read(format!("{}/sys/cluster-status", self.api_prefix()))
     }

@@ -1,8 +1,3 @@
----
-sidebar_position: 7
-title: API Reference
----
-
 # API Reference
 
 BastionVault exposes a RESTful HTTP API compatible with HashiCorp Vault. All API routes are under the `/v1/` prefix.
@@ -209,6 +204,135 @@ Request body:
 ~~~
 DELETE /v1/sys/policy/{name}
 ~~~
+
+### Server Info
+
+Returns identity + lifecycle facts the GUI's *Server Info* dialog
+also reads. Useful for monitoring tooling that wants a single
+endpoint covering version, uptime, and storage flavour.
+
+~~~
+GET /v1/sys/info
+~~~
+
+Response:
+
+~~~json
+{
+  "version": "0.5.20",
+  "started_at": "2026-05-14T18:00:00Z",
+  "uptime_seconds": 3712,
+  "initialized": true,
+  "sealed": false,
+  "storage_type": "hiqlite"
+}
+~~~
+
+### Identity Groups
+
+User-group and AppRole-group records that fan policies out to every
+member at login time.
+
+~~~
+LIST   /v1/identity/group/user
+GET    /v1/identity/group/user/{name}
+PUT    /v1/identity/group/user/{name}
+DELETE /v1/identity/group/user/{name}
+GET    /v1/identity/group/user/{name}/history
+
+LIST   /v1/identity/group/app
+GET    /v1/identity/group/app/{name}
+PUT    /v1/identity/group/app/{name}
+DELETE /v1/identity/group/app/{name}
+GET    /v1/identity/group/app/{name}/history
+~~~
+
+Write body:
+
+~~~json
+{
+  "description": "Platform engineering",
+  "members": ["alice", "bob", "felipe2"],
+  "policies": ["engineering-shared"]
+}
+~~~
+
+### Sharing
+
+Per-target CRUD plus a caller-introspecting feed. `target` is
+`base64url(no-pad)` of the canonical target path so KV paths
+containing slashes fit a single URL segment.
+
+~~~
+GET    /v1/identity/sharing/by-target/{kind}/{target}/{grantee}
+PUT    /v1/identity/sharing/by-target/{kind}/{target}/{grantee}
+DELETE /v1/identity/sharing/by-target/{kind}/{target}/{grantee}
+LIST   /v1/identity/sharing/by-target/{kind}/{target}
+LIST   /v1/identity/sharing/by-grantee/{grantee}
+LIST   /v1/identity/sharing/for-me
+~~~
+
+Put body:
+
+~~~json
+{
+  "target_kind": "kv-secret",
+  "target_path": "secret/app/db",
+  "grantee_kind": "group_user",
+  "capabilities": ["read", "list"],
+  "expires_at": "2027-01-01T00:00:00Z"
+}
+~~~
+
+- `grantee_kind`: `entity` (default) | `group_user` | `group_app`.
+- `target_kind`: `kv-secret` | `resource` | `asset-group` | `file`.
+
+`identity/sharing/for-me` returns the caller's direct entity shares
+plus group shares the caller is entitled to (group shares only
+surface when at least one of the caller's policies carries
+`metadata.group_shared_resources = "true"`):
+
+~~~json
+{
+  "entity_id": "08c9c6d3-...",
+  "group_shared_resources": true,
+  "entries": [
+    { "target_kind": "resource",   "target_path": "server-01",   "grantee_kind": "entity" },
+    { "target_kind": "kv-secret",  "target_path": "secret/app/db", "grantee_kind": "group_user" }
+  ]
+}
+~~~
+
+### Caller introspection
+
+~~~
+GET /v1/identity/entity/self
+~~~
+
+Returns the caller's `entity_id`, `username`, `mount_path`,
+`role_name`, and (when the entity record exists) `primary_mount`,
+`primary_name`, `created_at`, and `aliases[]`. Lazily resolves the
+entity from the caller's alias if the token's metadata has no
+`entity_id` yet.
+
+### Asset Groups (resource bundles)
+
+Asset groups bundle resources and KV secrets under a single name so
+operators can share, scope, or filter on the bundle.
+
+~~~
+LIST   /v1/resource-group/groups
+GET    /v1/resource-group/groups/{name}
+PUT    /v1/resource-group/groups/{name}
+DELETE /v1/resource-group/groups/{name}
+GET    /v1/resource-group/groups/{name}/history
+GET    /v1/resource-group/by-resource/{name}
+GET    /v1/resource-group/by-secret/{b64url_path}
+PUT    /v1/resource-group/reindex
+~~~
+
+`PUT /v1/resource-group/reindex` rebuilds both reverse indexes
+from primary records — recovery path for torn writes.
 
 ## Secret Operations
 

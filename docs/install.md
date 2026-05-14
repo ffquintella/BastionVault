@@ -1,8 +1,3 @@
----
-sidebar_position: 2
-title: Install
----
-
 # Install BastionVault
 
 BastionVault can be used as a standalone application or as a Rust library:

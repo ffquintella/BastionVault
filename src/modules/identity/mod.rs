@@ -38,7 +38,9 @@ pub mod user_audit_store;
 pub use entity_store::{Entity, EntityStore};
 pub use group_store::{GroupEntry, GroupHistoryEntry, GroupKind, GroupStore};
 pub use owner_store::{OwnerRecord, OwnerStore};
-pub use share_store::{SecretShare, ShareByGranteePointer, ShareStore, ShareTargetKind};
+pub use share_store::{
+    SecretShare, ShareByGranteePointer, ShareGranteeKind, ShareStore, ShareTargetKind,
+};
 pub use user_audit_store::{UserAuditEntry, UserAuditStore};
 
 /// Best-effort caller identity for audit rows.
@@ -126,6 +128,8 @@ impl IdentityBackend {
         let h_share_get = self.inner.clone();
         let h_share_put = self.inner.clone();
         let h_share_delete = self.inner.clone();
+        let h_share_for_me = self.inner.clone();
+        let h_share_for_me2 = self.inner.clone();
 
         // Entity + owner lookup handlers
         let h_entity_self = self.inner.clone();
@@ -263,6 +267,22 @@ impl IdentityBackend {
                     ],
                     help: "List every share granted to this entity."
                 },
+                // Caller-introspection: union of direct entity shares
+                // and group shares the caller is entitled to (group
+                // shares only surface when at least one of the caller's
+                // policies carries `metadata { group_shared_resources
+                // = \"true\" }`). Lazy-resolves the caller's entity_id
+                // by alias when the token has none in metadata, so
+                // pre-existing tokens don't require re-login. See
+                // `features/identity-groups.md` for the policy snippet.
+                {
+                    pattern: r"sharing/for-me/?$",
+                    operations: [
+                        {op: Operation::List, handler: h_share_for_me.handle_share_for_me_list},
+                        {op: Operation::Read, handler: h_share_for_me2.handle_share_for_me_list}
+                    ],
+                    help: "List shares granted to the caller (direct + via groups)."
+                },
                 {
                     pattern: r"sharing/by-target/(?P<kind>[^/]+)/(?P<target>[^/]+)/?$",
                     fields: {
@@ -367,7 +387,12 @@ impl IdentityBackend {
                         "grantee": {
                             field_type: FieldType::Str,
                             required: true,
-                            description: "Grantee entity_id."
+                            description: "Grantee entity_id (for grantee_kind=entity) or identity-group name (for grantee_kind=group_user / group_app)."
+                        },
+                        "grantee_kind": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "entity (default) | group_user | group_app. Group grantees only resolve to access when the caller is both a member of the group and carries a policy with `metadata.group_shared_resources = \"true\"`."
                         },
                         "target_kind": {
                             field_type: FieldType::Str,
@@ -605,6 +630,14 @@ fn share_to_value(share: &SecretShare) -> Value {
     let mut m = Map::new();
     m.insert("target_kind".into(), Value::String(share.target_kind.clone()));
     m.insert("target_path".into(), Value::String(share.target_path.clone()));
+    m.insert(
+        "grantee_kind".into(),
+        Value::String(if share.grantee_kind.is_empty() {
+            "entity".to_string()
+        } else {
+            share.grantee_kind.clone()
+        }),
+    );
     m.insert(
         "grantee_entity_id".into(),
         Value::String(share.grantee_entity_id.clone()),
@@ -903,10 +936,26 @@ impl IdentityBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_share_store()?;
         let grantee = req.get_data("grantee")?.as_str().unwrap_or("").to_string();
-        let ptrs = store.list_shares_for_grantee(&grantee).await?;
+        // Optional body field: `"grantee_kind": "entity" | "group_user" | "group_app"`.
+        // Defaults to entity for backward compatibility with the
+        // original single-tenant by-grantee endpoint.
+        let grantee_kind_str = req
+            .get_data("grantee_kind")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let grantee_kind = ShareGranteeKind::parse(&grantee_kind_str)
+            .ok_or_else(|| bv_error_string!("invalid grantee_kind"))?;
+        let ptrs = store
+            .list_shares_for_grantee_kinded(grantee_kind, &grantee)
+            .await?;
 
         let mut data = Map::new();
         data.insert("grantee".into(), Value::String(grantee));
+        data.insert(
+            "grantee_kind".into(),
+            Value::String(grantee_kind.as_str().to_string()),
+        );
         data.insert(
             "entries".into(),
             Value::Array(
@@ -915,6 +964,182 @@ impl IdentityBackendInner {
                         let mut m = Map::new();
                         m.insert("target_kind".into(), Value::String(p.target_kind.clone()));
                         m.insert("target_path".into(), Value::String(p.target_path.clone()));
+                        m.insert(
+                            "grantee_kind".into(),
+                            Value::String(if p.grantee_kind.is_empty() {
+                                grantee_kind.as_str().to_string()
+                            } else {
+                                p.grantee_kind.clone()
+                            }),
+                        );
+                        Value::Object(m)
+                    })
+                    .collect(),
+            ),
+        );
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// Union of every share the caller is entitled to: direct entity
+    /// shares, plus group shares (`group_user` / `group_app`) when the
+    /// caller's effective policies include `group_shared_resources =
+    /// "true"`. Group membership is determined the same way as the
+    /// userpass-login flow does it (`expand_identity_group_policies`
+    /// in `path_login.rs`): a case-insensitive scan of every group
+    /// looking for the caller's `username` (or `role_name` for app
+    /// grantees).
+    pub async fn handle_share_for_me_list(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_share_store()?;
+        let auth = req
+            .auth
+            .as_ref()
+            .ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
+
+        let mut entity_id = auth
+            .metadata
+            .get("entity_id")
+            .cloned()
+            .unwrap_or_default();
+        let username = auth
+            .metadata
+            .get("username")
+            .cloned()
+            .unwrap_or_default();
+        let role_name = auth
+            .metadata
+            .get("role_name")
+            .cloned()
+            .unwrap_or_default();
+        let mount_path = auth
+            .metadata
+            .get("mount_path")
+            .cloned()
+            .unwrap_or_default();
+        let policies: Vec<String> = auth.policies.clone();
+
+        // Lazy entity-id resolution — matches the alias-fallback in
+        // handle_entity_self so callers with pre-existing tokens still
+        // see their direct shares.
+        if entity_id.is_empty() && !mount_path.is_empty() {
+            let alias_name = if !username.is_empty() { &username } else { &role_name };
+            if !alias_name.is_empty() {
+                if let Some(module) = self
+                    .core
+                    .module_manager
+                    .get_module::<IdentityModule>("identity")
+                {
+                    if let Some(es) = module.entity_store() {
+                        if let Ok(e) = es.get_or_create_entity(&mount_path, alias_name).await {
+                            entity_id = e.id;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Walk the caller's policies looking for the opt-in metadata
+        // tag. The presence of `group_shared_resources = "true"` on
+        // *any* attached policy enables group-share visibility for
+        // this caller; absence keeps the response set narrow.
+        let mut group_shared_enabled = false;
+        if let Some(pmodule) = self
+            .core
+            .module_manager
+            .get_module::<crate::modules::policy::PolicyModule>("policy")
+        {
+            let pstore = pmodule.policy_store.load();
+            for name in &policies {
+                if let Ok(Some(p)) = pstore
+                    .get_policy(name, crate::modules::policy::policy::PolicyType::Acl)
+                    .await
+                {
+                    if p.metadata
+                        .get("group_shared_resources")
+                        .map(|v| v.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false)
+                    {
+                        group_shared_enabled = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut ptrs: Vec<ShareByGranteePointer> = Vec::new();
+        if !entity_id.is_empty() {
+            ptrs.extend(
+                store
+                    .list_shares_for_grantee_kinded(ShareGranteeKind::Entity, &entity_id)
+                    .await?,
+            );
+        }
+
+        if group_shared_enabled {
+            if let Some(imodule) = self
+                .core
+                .module_manager
+                .get_module::<IdentityModule>("identity")
+            {
+                if let Some(gs) = imodule.group_store() {
+                    // User groups keyed by username; app groups keyed
+                    // by role_name. We probe both independently so a
+                    // token that carries either metadata flavour
+                    // resolves correctly.
+                    for (kind, member, gk) in [
+                        (GroupKind::User, &username, ShareGranteeKind::GroupUser),
+                        (GroupKind::App, &role_name, ShareGranteeKind::GroupApp),
+                    ] {
+                        if member.is_empty() {
+                            continue;
+                        }
+                        let names = gs.list_groups(kind).await?;
+                        let m_lc = member.trim().to_lowercase();
+                        for g_name in names {
+                            let Some(g) = gs.get_group(kind, &g_name).await? else {
+                                continue;
+                            };
+                            let is_member =
+                                g.members.iter().any(|m| m.trim().to_lowercase() == m_lc);
+                            if !is_member {
+                                continue;
+                            }
+                            ptrs.extend(
+                                store
+                                    .list_shares_for_grantee_kinded(gk, &g_name)
+                                    .await?,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut data = Map::new();
+        data.insert("entity_id".into(), Value::String(entity_id));
+        data.insert(
+            "group_shared_resources".into(),
+            Value::Bool(group_shared_enabled),
+        );
+        data.insert(
+            "entries".into(),
+            Value::Array(
+                ptrs.iter()
+                    .map(|p| {
+                        let mut m = Map::new();
+                        m.insert("target_kind".into(), Value::String(p.target_kind.clone()));
+                        m.insert("target_path".into(), Value::String(p.target_path.clone()));
+                        m.insert(
+                            "grantee_kind".into(),
+                            Value::String(if p.grantee_kind.is_empty() {
+                                "entity".to_string()
+                            } else {
+                                p.grantee_kind.clone()
+                            }),
+                        );
                         Value::Object(m)
                     })
                     .collect(),
@@ -1020,9 +1245,18 @@ impl IdentityBackendInner {
 
         let granted_by = caller_audit_actor(req);
 
+        let grantee_kind_str = req
+            .get_data("grantee_kind")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let grantee_kind = ShareGranteeKind::parse(&grantee_kind_str)
+            .ok_or_else(|| bv_error_string!("invalid grantee_kind"))?;
+
         let share = SecretShare {
             target_kind: kind.as_str().to_string(),
             target_path,
+            grantee_kind: grantee_kind.as_str().to_string(),
             grantee_entity_id: grantee,
             granted_by_entity_id: granted_by,
             capabilities,
@@ -1044,8 +1278,24 @@ impl IdentityBackendInner {
         let store = self.resolve_share_store()?;
         let (kind, target_path, grantee) = extract_share_identifiers(req)?;
         let actor = caller_audit_actor(req);
+        // Optional `grantee_kind` body field tells us which by-grantee
+        // pointer prefix to clear. Absent = legacy entity grantee.
+        let grantee_kind_str = req
+            .get_data("grantee_kind")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let grantee_kind = ShareGranteeKind::parse(&grantee_kind_str)
+            .ok_or_else(|| bv_error_string!("invalid grantee_kind"))?;
         store
-            .delete_share_audited(kind, &target_path, &grantee, &actor, "revoke")
+            .delete_share_with_kind_audited(
+                kind,
+                &target_path,
+                grantee_kind,
+                &grantee,
+                &actor,
+                "revoke",
+            )
             .await?;
         Ok(None)
     }
@@ -1438,6 +1688,7 @@ mod identity_tests {
         let share = SecretShare {
             target_kind: "kv-secret".into(),
             target_path: "secret/foo".into(),
+            grantee_kind: String::new(),
             grantee_entity_id: "ent-bob".into(),
             granted_by_entity_id: "ent-alice".into(),
             capabilities: vec!["read".into(), "list".into()],

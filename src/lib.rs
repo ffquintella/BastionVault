@@ -71,6 +71,7 @@ pub mod mount;
 pub mod router;
 #[cfg(feature = "storage_mysql")]
 pub mod schema;
+pub mod server_info;
 pub mod shamir;
 pub mod storage;
 pub mod utils;

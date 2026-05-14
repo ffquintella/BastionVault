@@ -174,30 +174,50 @@ and scope checks consume that value.
 The initial cut is one-entity-per-(mount, principal); cross-mount alias
 merging is a follow-up.
 
-### 5. Sharing (future — sketch only)
+### 5. Sharing
 
-Out of scope for the first implementation cut. Rough sketch only:
+Shipped. The on-disk schema is `SecretShare`:
 
 ```
 SecretShare {
-    target_kind:     "kv-secret" | "resource",
-    target_path:     "secret/data/foo" | "resources/server-01",
-    grantee:         entity_id,
-    granted_by:      entity_id,
-    capabilities:    Vec<String>,    // subset of read, list, update, delete
-    granted_at:      RFC3339,
-    expires_at:      Option<RFC3339>,
+    target_kind:         "kv-secret" | "resource" | "asset-group" | "file",
+    target_path:         "secret/foo/bar" | "server-01" | ...,
+    grantee_kind:        "entity" | "group_user" | "group_app",  // default "entity"
+    grantee_entity_id:   entity_id | group_name,
+    granted_by_entity_id: entity_id,
+    capabilities:        Vec<String>,    // subset of read, list, update, delete, create
+    granted_at:          RFC3339,
+    expires_at:          String,         // RFC3339; "" when no expiry
 }
 
-sys/sharing/<target_hash>/<grantee_uuid>   -> SecretShare
-sys/sharing-by-grantee/<grantee_uuid>/<target_hash> -> { target_kind, target_path }
+# All under the system barrier view, owned by ShareStore:
+sys/sharing/primary/<target_hash>/<grantee>      -> SecretShare
+sys/sharing/by-grantee/<grantee>/<target_hash>   -> { target_kind, target_path, grantee_kind }   (entity)
+sys/sharing/by-grantee/g:user:<group>/<hash>     -> { ... }                                      (user group)
+sys/sharing/by-grantee/g:app:<group>/<hash>      -> { ... }                                      (app group)
+sys/sharing/history/<20-nanos>                   -> ShareHistoryEntry                            (append-only audit trail)
 ```
 
-Open sharing questions for the future doc:
-- Can a sharee re-share? (Default: no.)
-- Does `delete` propagate to shares? (Default: yes, share rows are
-  cascaded on target delete.)
-- GUI flow for sharing (resource-level vs secret-level).
+Group grantees are *visibility-only*: the share row surfaces the
+target on each group member's "Shared with me" feed when (and only
+when) the caller carries at least one policy whose
+`metadata.group_shared_resources` is `"true"`. ACL capability comes
+from regular policies — see `features/identity-groups.md` §Phase 7
+for the full design and a sample HCL setup.
+
+Caller-introspection endpoint: `identity/sharing/for-me`. Returns the
+union of direct entity shares + group shares the caller is entitled
+to, plus a `group_shared_resources` boolean so the GUI can render a
+hint when the policy meta tag is missing.
+
+Decisions:
+- A sharee cannot re-share — share creation is gated on the target's
+  owner / sudo-equivalent policies.
+- `delete` propagates: `cascade_delete_target` clears every share on a
+  target when the target itself is deleted, including group shares.
+- GUI flow: per-target Sharing tab on Resources / KV pages, plus a
+  per-user `/sharing` route with `Shared with me` and `Manage target`
+  tabs (`gui/src/routes/SharingPage.tsx`).
 
 ### 6. Baseline seeded policies
 
@@ -245,7 +265,12 @@ scoped compatibility policy for deployments that have not opted into
 ownership-aware ACLs. `load_default_acl_policy` seeds all three but
 does not force a migration on existing policies.
 
-### 7. API surface (all under `v2/` per agent.md)
+### 7. API surface
+
+Identity-mount routes work under either `/v1/identity/...` or
+`/v2/identity/...`; both prefixes resolve to the same logical backend.
+The canonical form used elsewhere is `/v2/identity/...`. System routes
+(transfer-of-ownership) live under `/v2/sys/...`.
 
 Ownership / sharing endpoints introduced by this feature:
 
@@ -255,9 +280,10 @@ Ownership / sharing endpoints introduced by this feature:
 | GET    | `/v2/sys/identity/entity/{id}`                         | Read an entity (privileged) |
 | POST   | `/v2/sys/kv-owner/transfer`                            | Admin-only ownership transfer for a KV entry |
 | POST   | `/v2/sys/resource-owner/transfer`                      | Same for a resource |
-| PUT    | `/v2/sys/sharing/{target_hash}/{grantee}`              | Create a share (future phase) |
-| GET    | `/v2/sys/sharing/by-grantee/{grantee}`                 | List what is shared *with* an entity (future) |
-| DELETE | `/v2/sys/sharing/{target_hash}/{grantee}`              | Revoke a share (future) |
+| PUT    | `/v2/identity/sharing/by-target/{kind}/{b64}/{grantee}` | Create or update a share. Body carries `grantee_kind` (entity / group_user / group_app), `capabilities`, optional `expires_at`. |
+| GET    | `/v2/identity/sharing/by-grantee/{grantee}`             | List what is shared *with* an entity (legacy entity-only). |
+| LIST   | `/v2/identity/sharing/for-me`                           | Caller-introspecting: direct entity shares ∪ group shares (gated by the `group_shared_resources` policy meta tag). |
+| DELETE | `/v2/identity/sharing/by-target/{kind}/{b64}/{grantee}` | Revoke a share. Optional body `grantee_kind` selects which by-grantee pointer prefix to clear. |
 
 All existing `v1/` routes keep working unchanged. When an `owner`- or
 `shared`-scoped policy rules a `v1/` path, authorization consults the

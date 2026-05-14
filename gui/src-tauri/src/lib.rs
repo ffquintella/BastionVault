@@ -109,7 +109,45 @@ pub fn run() {
         // typing the full path.
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
+        .menu(|app_handle| {
+            // Window-level menu. The "Server" submenu hosts the
+            // "Server Info" entry that posts an
+            // `open-server-info` event the frontend listens for to
+            // open the corresponding modal. Built once at startup
+            // and attached to every window the harness opens.
+            use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+            let server_info = MenuItemBuilder::with_id("server_info", "Server Info...")
+                .build(app_handle)?;
+            let server_menu = SubmenuBuilder::new(app_handle, "Server")
+                .item(&server_info)
+                .build()?;
+            MenuBuilder::new(app_handle).item(&server_menu).build()
+        })
+        .on_menu_event(|app_handle, event| {
+            if event.id().as_ref() == "server_info" {
+                use tauri::{Emitter, Manager};
+                // Target the focused webview window when there is
+                // one; fall back to the main window so the modal
+                // also reachable from a stripped-down session
+                // window (RDP / SSH) — those still belong to the
+                // same app instance.
+                let target = app_handle
+                    .webview_windows()
+                    .values()
+                    .find(|w| w.is_focused().unwrap_or(false))
+                    .cloned()
+                    .or_else(|| app_handle.get_webview_window("main"));
+                if let Some(win) = target {
+                    let _ = win.emit("open-server-info", ());
+                }
+            }
+        })
         .setup(|app| {
+            // Stamp the GUI process start time. The embedded-mode
+            // ServerInfo dialog reads from this same OnceLock; the
+            // HTTP server's own `record_start_now()` is a no-op for
+            // the GUI path because there's no HTTP listener.
+            bastion_vault::server_info::record_start_now();
             #[cfg(target_os = "windows")]
             {
                 use tauri::Manager;
@@ -176,6 +214,7 @@ pub fn run() {
             commands::system::recover_unseal_key,
             commands::system::disconnect_vault,
             commands::system::get_vault_status,
+            commands::system::get_server_info,
             commands::system::list_mounts,
             commands::system::list_auth_methods,
             commands::system::list_audit_events,
@@ -441,6 +480,7 @@ pub fn run() {
             commands::sharing::get_kv_owner,
             commands::sharing::get_resource_owner,
             commands::sharing::list_shares_for_grantee,
+            commands::sharing::list_shares_for_me,
             commands::sharing::list_shares_for_target,
             commands::sharing::put_share,
             commands::sharing::delete_share,

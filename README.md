@@ -1,6 +1,6 @@
 # BastionVault
 
-![BastionVault logo](docs/static/img/bastionvault.png)
+![BastionVault logo](docs/img/bastionvault.png)
 
 [![Crates.io Version](https://img.shields.io/crates/v/bastion_vault)](https://crates.io/crates/bastion_vault)
 
@@ -53,4 +53,4 @@ Part of the features provided by BastionVault are as follows:
 
 ## Design
 
-Read the [design](./docs/docs/design.md) document.
+Read the [design](./docs/design.md) document.

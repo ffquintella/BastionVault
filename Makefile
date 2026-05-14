@@ -140,8 +140,9 @@ gui-test: gui-deps ## Run GUI frontend tests (Vitest)
 gui-check: gui-deps ## Type-check and lint the GUI frontend
 	cd gui && $(GUI_TSC) --noEmit && $(GUI_VITE) build
 
-docs: ## Start the documentation site locally
-	cd docs && npm install && npx docusaurus clear && npx docusaurus start
+docs: ## Serve the Docsify-powered documentation site locally on http://localhost:3000
+	@command -v docsify >/dev/null 2>&1 || npm i -g docsify-cli
+	docsify serve docs
 
 # `bump-*` targets bump the workspace version everywhere it lives:
 # - `Cargo.toml` (root crate)
@@ -492,16 +493,12 @@ gui-clean: ## Remove GUI frontend build artefacts (node_modules, dist, vite cach
 	rm -rf gui/src-tauri/gen
 	@echo "gui-clean complete."
 
-docs-clean: ## Remove docs-site build artefacts (node_modules, .docusaurus, build)
-	rm -rf docs/node_modules
-	rm -rf docs/.docusaurus
-	rm -rf docs/build
-	@echo "docs-clean complete."
+docs-clean: ## Docsify has no build step — this target is a no-op kept for compatibility.
+	@echo "docs-clean: Docsify is build-step-free; nothing to remove."
 
 deep-clean: clean gui-clean docs-clean ## Run every clean target + drop cargo lockfiles so the next build resolves from scratch
 	rm -f Cargo.lock
 	rm -f gui/package-lock.json
-	rm -f docs/package-lock.json
 	@echo "deep-clean complete."
 
 target-size: ## Show which target/ subdirectories are eating disk

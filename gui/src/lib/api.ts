@@ -240,6 +240,18 @@ export const yubikeySetPin = (pin: string) =>
 
 export const yubikeyClearPin = () => invoke<void>("yubikey_clear_pin");
 export const getVaultStatus = () => invoke<VaultStatus>("get_vault_status");
+
+export interface ServerInfo {
+  connection_kind: "embedded" | "remote";
+  endpoint: string;
+  version: string;
+  started_at: string;
+  uptime_seconds: number;
+  initialized: boolean;
+  sealed: boolean;
+  storage_type: string;
+}
+export const getServerInfo = () => invoke<ServerInfo>("get_server_info");
 export const listMounts = () => invoke<MountInfo[]>("list_mounts");
 export const listAuthMethods = () => invoke<MountInfo[]>("list_auth_methods");
 export const listAuditEvents = (from: string, to: string, limit?: number) =>
@@ -419,6 +431,14 @@ export const getResourceOwner = (name: string) =>
   invoke<OwnerInfo>("get_resource_owner", { name });
 export const listSharesForGrantee = (grantee: string) =>
   invoke<SharePointer[]>("list_shares_for_grantee", { grantee });
+/** Caller-introspecting share list: direct entity shares + group
+ *  shares the caller is entitled to. The host resolves group
+ *  membership and the `group_shared_resources` policy meta tag — the
+ *  frontend just renders the rows. */
+export const listSharesForMe = () =>
+  invoke<{ entity_id: string; group_shared_resources: boolean; entries: SharePointer[] }>(
+    "list_shares_for_me",
+  );
 export const listSharesForTarget = (kind: ShareTargetKind, targetPath: string) =>
   invoke<ShareEntry[]>("list_shares_for_target", { kind, targetPath });
 export const putShare = (
@@ -427,11 +447,13 @@ export const putShare = (
   grantee: string,
   capabilities: string[],
   expiresAt: string,
+  granteeKind: import("./types").ShareGranteeKind = "entity",
 ) =>
   invoke<ShareEntry>("put_share", {
     kind,
     targetPath,
     grantee,
+    granteeKind,
     capabilities,
     expiresAt,
   });
@@ -439,7 +461,8 @@ export const deleteShare = (
   kind: ShareTargetKind,
   targetPath: string,
   grantee: string,
-) => invoke<void>("delete_share", { kind, targetPath, grantee });
+  granteeKind: import("./types").ShareGranteeKind = "entity",
+) => invoke<void>("delete_share", { kind, targetPath, grantee, granteeKind });
 export const transferKvOwner = (path: string, newOwnerEntityId: string) =>
   invoke<void>("transfer_kv_owner", { path, newOwnerEntityId });
 export const transferResourceOwner = (resource: string, newOwnerEntityId: string) =>

@@ -451,6 +451,7 @@ mod mod_policy_tests {
         // bundled policies, so update it in lock-step with the
         // additions to `policy_store.rs::seed_default_policies`.
         let expected = json!([
+            "administrator",
             "default",
             "ldap-admin",
             "ldap-user",
@@ -486,7 +487,7 @@ mod mod_policy_tests {
         let policies = test_list_api(&core, &root_token, "sys/policy", true).await;
         let policies = policies.unwrap().unwrap().data.unwrap();
         let seeded_after_delete = json!([
-            "default", "ldap-admin", "ldap-user", "pki-admin", "pki-user",
+            "administrator", "default", "ldap-admin", "ldap-user", "pki-admin", "pki-user",
             "secret-author", "standard-user", "standard-user-readonly",
             "totp-admin", "totp-user", "transit-admin", "transit-user", "root"
         ]);
@@ -510,7 +511,7 @@ mod mod_policy_tests {
         let ret = test_http_server.read("sys/policy", None);
         assert!(ret.is_ok());
         let seeded = json!([
-            "default", "ldap-admin", "ldap-user", "pki-admin", "pki-user",
+            "administrator", "default", "ldap-admin", "ldap-user", "pki-admin", "pki-user",
             "secret-author", "standard-user", "standard-user-readonly",
             "totp-admin", "totp-user", "transit-admin", "transit-user", "root"
         ]);
@@ -547,7 +548,7 @@ mod mod_policy_tests {
         let ret = test_http_server.read("sys/policy", None);
         assert!(ret.is_ok());
         let with_policy1 = json!([
-            "default", "ldap-admin", "ldap-user", "pki-admin", "pki-user", "policy1",
+            "administrator", "default", "ldap-admin", "ldap-user", "pki-admin", "pki-user", "policy1",
             "secret-author", "standard-user", "standard-user-readonly",
             "totp-admin", "totp-user", "transit-admin", "transit-user", "root"
         ]);
@@ -564,7 +565,7 @@ mod mod_policy_tests {
         let ret = test_http_server.read("sys/policy", None);
         assert!(ret.is_ok());
         let baseline = json!([
-            "default", "ldap-admin", "ldap-user", "pki-admin", "pki-user",
+            "administrator", "default", "ldap-admin", "ldap-user", "pki-admin", "pki-user",
             "secret-author", "standard-user", "standard-user-readonly",
             "totp-admin", "totp-user", "transit-admin", "transit-user", "root"
         ]);

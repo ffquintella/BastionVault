@@ -187,6 +187,8 @@ pub async fn get_resource_owner(
 pub struct ShareEntry {
     pub target_kind: String,
     pub target_path: String,
+    /// "entity" (default) | "group_user" | "group_app".
+    pub grantee_kind: String,
     pub grantee_entity_id: String,
     pub granted_by_entity_id: String,
     pub capabilities: Vec<String>,
@@ -199,6 +201,8 @@ pub struct ShareEntry {
 pub struct SharePointer {
     pub target_kind: String,
     pub target_path: String,
+    /// "entity" (default) | "group_user" | "group_app".
+    pub grantee_kind: String,
 }
 
 fn parse_share(v: &Value) -> Option<ShareEntry> {
@@ -206,9 +210,14 @@ fn parse_share(v: &Value) -> Option<ShareEntry> {
     fn s(o: &Map<String, Value>, k: &str) -> String {
         o.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string()
     }
+    let grantee_kind = {
+        let s = s(o, "grantee_kind");
+        if s.is_empty() { "entity".to_string() } else { s }
+    };
     Some(ShareEntry {
         target_kind: s(o, "target_kind"),
         target_path: s(o, "target_path"),
+        grantee_kind,
         grantee_entity_id: s(o, "grantee_entity_id"),
         granted_by_entity_id: s(o, "granted_by_entity_id"),
         capabilities: o
@@ -245,6 +254,10 @@ pub async fn list_shares_for_grantee(
         .into_iter()
         .filter_map(|v| {
             let o = v.as_object()?;
+            let gk = o
+                .get("grantee_kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("entity");
             Some(SharePointer {
                 target_kind: o
                     .get("target_kind")
@@ -256,10 +269,78 @@ pub async fn list_shares_for_grantee(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
+                grantee_kind: if gk.is_empty() { "entity".to_string() } else { gk.to_string() },
             })
         })
         .collect();
     Ok(out)
+}
+
+/// Caller-introspecting "Shared with me" feed. Resolves the caller's
+/// entity_id by alias when missing from the token, then unions direct
+/// entity shares with group shares the caller is entitled to via the
+/// `group_shared_resources` policy meta tag. See
+/// `features/identity-groups.md` for the policy snippet.
+#[derive(Serialize, Default)]
+pub struct ShareForMeResponse {
+    pub entity_id: String,
+    pub group_shared_resources: bool,
+    pub entries: Vec<SharePointer>,
+}
+
+#[tauri::command]
+pub async fn list_shares_for_me(
+    state: State<'_, AppState>,
+) -> CmdResult<ShareForMeResponse> {
+    let resp = make_request(
+        &state,
+        Operation::List,
+        "identity/sharing/for-me".into(),
+        None,
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+
+    let entity_id = data
+        .get("entity_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let group_shared_resources = data
+        .get("group_shared_resources")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let arr = data.get("entries").and_then(|v| v.as_array()).cloned();
+    let entries = arr
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| {
+            let o = v.as_object()?;
+            let gk = o
+                .get("grantee_kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("entity");
+            Some(SharePointer {
+                target_kind: o
+                    .get("target_kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                target_path: o
+                    .get("target_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                grantee_kind: if gk.is_empty() { "entity".to_string() } else { gk.to_string() },
+            })
+        })
+        .collect();
+
+    Ok(ShareForMeResponse {
+        entity_id,
+        group_shared_resources,
+        entries,
+    })
 }
 
 #[tauri::command]
@@ -291,13 +372,16 @@ pub async fn put_share(
     kind: String,
     target_path: String,
     grantee: String,
+    grantee_kind: Option<String>,
     capabilities: Vec<String>,
     expires_at: String,
 ) -> CmdResult<ShareEntry> {
     let target = b64url(&target_path);
+    let grantee_kind = grantee_kind.unwrap_or_else(|| "entity".to_string());
     let mut body = Map::new();
     body.insert("target_kind".into(), Value::String(kind.clone()));
     body.insert("target_path".into(), Value::String(target_path));
+    body.insert("grantee_kind".into(), Value::String(grantee_kind));
     body.insert(
         "capabilities".into(),
         Value::Array(capabilities.into_iter().map(Value::String).collect()),
@@ -325,13 +409,18 @@ pub async fn delete_share(
     kind: String,
     target_path: String,
     grantee: String,
+    grantee_kind: Option<String>,
 ) -> CmdResult<()> {
     let target = b64url(&target_path);
+    let mut body = Map::new();
+    if let Some(gk) = grantee_kind {
+        body.insert("grantee_kind".into(), Value::String(gk));
+    }
     make_request(
         &state,
         Operation::Delete,
         format!("identity/sharing/by-target/{kind}/{target}/{grantee}"),
-        None,
+        if body.is_empty() { None } else { Some(body) },
     )
     .await?;
     Ok(())

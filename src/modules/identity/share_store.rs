@@ -81,6 +81,54 @@ impl ShareTargetKind {
     }
 }
 
+/// Discriminator on `SecretShare.grantee_kind`. Defaults to `Entity`
+/// for backward compatibility with shares persisted before this field
+/// existed — those records have `grantee_kind: ""` which deserializes
+/// via `#[serde(default)]` into `Entity` semantics.
+///
+/// Group grantees name a flat identity group; access depends on the
+/// caller being a current member of that group AND carrying at least
+/// one policy whose `metadata.group_shared_resources = "true"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShareGranteeKind {
+    Entity,
+    GroupUser,
+    GroupApp,
+}
+
+impl Default for ShareGranteeKind {
+    fn default() -> Self {
+        ShareGranteeKind::Entity
+    }
+}
+
+impl ShareGranteeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ShareGranteeKind::Entity => "entity",
+            ShareGranteeKind::GroupUser => "group_user",
+            ShareGranteeKind::GroupApp => "group_app",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "" | "entity" => Some(ShareGranteeKind::Entity),
+            "group_user" | "group-user" => Some(ShareGranteeKind::GroupUser),
+            "group_app" | "group-app" => Some(ShareGranteeKind::GroupApp),
+            _ => None,
+        }
+    }
+
+    pub fn is_group(self) -> bool {
+        matches!(
+            self,
+            ShareGranteeKind::GroupUser | ShareGranteeKind::GroupApp
+        )
+    }
+}
+
 /// Explicit share grant. `capabilities` is the subset of operations the
 /// grantee may perform on the target — intersection with the policy
 /// rule's own capability list is the effective grant.
@@ -88,10 +136,19 @@ impl ShareTargetKind {
 /// `expires_at` is optional RFC3339; when set and in the past, the
 /// share is treated as inert by the evaluator and all list/get helpers
 /// below filter it out.
+///
+/// `grantee_kind` distinguishes entity grantees (the original schema,
+/// where `grantee_entity_id` holds an `EntityStore` UUID) from group
+/// grantees (`grantee_entity_id` holds a lowercased identity-group
+/// name). Group grantees only resolve to access when the caller is
+/// both a member of the group *and* carries a policy whose
+/// `metadata.group_shared_resources = "true"`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SecretShare {
     pub target_kind: String,
     pub target_path: String,
+    #[serde(default)]
+    pub grantee_kind: String,
     pub grantee_entity_id: String,
     pub granted_by_entity_id: String,
     pub capabilities: Vec<String>,
@@ -134,6 +191,8 @@ pub struct ShareHistoryEntry {
     pub op: String,
     pub target_kind: String,
     pub target_path: String,
+    #[serde(default)]
+    pub grantee_kind: String,
     pub grantee_entity_id: String,
     pub capabilities: Vec<String>,
     #[serde(default)]
@@ -215,8 +274,21 @@ impl ShareStore {
         format!("{target_hash}/{grantee}")
     }
 
-    fn by_grantee_key(grantee: &str, target_hash: &str) -> String {
-        format!("{grantee}/{target_hash}")
+    /// By-grantee storage prefix for a kind. Entity grantees keep the
+    /// legacy unprefixed `<entity_id>/...` layout so existing shares
+    /// (persisted before group grantees existed) keep resolving with
+    /// no migration. Group grantees use a synthetic two-segment prefix
+    /// that cannot collide with an entity UUID.
+    fn by_grantee_prefix(kind: ShareGranteeKind) -> &'static str {
+        match kind {
+            ShareGranteeKind::Entity => "",
+            ShareGranteeKind::GroupUser => "g:user:",
+            ShareGranteeKind::GroupApp => "g:app:",
+        }
+    }
+
+    fn by_grantee_key(kind: ShareGranteeKind, grantee: &str, target_hash: &str) -> String {
+        format!("{}{grantee}/{target_hash}", Self::by_grantee_prefix(kind))
     }
 
     /// Upsert a share. Validates inputs, canonicalizes the target, and
@@ -225,14 +297,25 @@ impl ShareStore {
     pub async fn set_share(&self, mut share: SecretShare) -> Result<SecretShare, RvError> {
         let kind = ShareTargetKind::parse(&share.target_kind)
             .ok_or_else(|| bv_error_string!(format!("invalid share target_kind: {}", share.target_kind)))?;
+        let grantee_kind = ShareGranteeKind::parse(&share.grantee_kind)
+            .ok_or_else(|| bv_error_string!(format!("invalid grantee_kind: {}", share.grantee_kind)))?;
         let canonical = Self::canonicalize(kind, &share.target_path)
             .ok_or_else(|| bv_error_string!("invalid share target_path"))?;
-        let grantee = share.grantee_entity_id.trim().to_string();
-        if grantee.is_empty() {
+        let grantee_raw = share.grantee_entity_id.trim().to_string();
+        if grantee_raw.is_empty() {
             return Err(bv_error_string!("share grantee_entity_id is required"));
         }
+        // Group grantees are lowercased to match `GroupStore::sanitize_name`
+        // semantics so a share on "Eng" and a share on "eng" land on the
+        // same group row. Entity grantees are UUIDs — leave as-is.
+        let grantee = if grantee_kind.is_group() {
+            grantee_raw.to_lowercase()
+        } else {
+            grantee_raw
+        };
         share.target_kind = kind.as_str().to_string();
         share.target_path = canonical.clone();
+        share.grantee_kind = grantee_kind.as_str().to_string();
         share.grantee_entity_id = grantee.clone();
         share.capabilities = normalize_capabilities(share.capabilities);
         if share.capabilities.is_empty() {
@@ -254,8 +337,9 @@ impl ShareStore {
         let pointer = ShareByGranteePointer {
             target_kind: share.target_kind.clone(),
             target_path: canonical.clone(),
+            grantee_kind: share.grantee_kind.clone(),
         };
-        let p_key = Self::by_grantee_key(&grantee, &target_hash);
+        let p_key = Self::by_grantee_key(grantee_kind, &grantee, &target_hash);
         let p_value = serde_json::to_vec(&pointer)?;
         self.by_grantee_view
             .put(&StorageEntry { key: p_key, value: p_value })
@@ -270,6 +354,7 @@ impl ShareStore {
             op: "grant".to_string(),
             target_kind: share.target_kind.clone(),
             target_path: share.target_path.clone(),
+            grantee_kind: share.grantee_kind.clone(),
             grantee_entity_id: share.grantee_entity_id.clone(),
             capabilities: share.capabilities.clone(),
             expires_at: share.expires_at.clone(),
@@ -303,6 +388,8 @@ impl ShareStore {
 
     /// Remove a single share. Removes both the primary record and the
     /// by-grantee pointer. Idempotent — missing records are not errors.
+    /// Defaults to the legacy entity grantee semantics; use
+    /// [`Self::delete_share_with_kind`] for group grantees.
     pub async fn delete_share(
         &self,
         kind: ShareTargetKind,
@@ -312,14 +399,54 @@ impl ShareStore {
         self.delete_share_audited(kind, target_path, grantee, "", "revoke").await
     }
 
+    /// Group-grantee–aware variant of [`Self::delete_share`].
+    pub async fn delete_share_with_kind(
+        &self,
+        kind: ShareTargetKind,
+        target_path: &str,
+        grantee_kind: ShareGranteeKind,
+        grantee: &str,
+    ) -> Result<(), RvError> {
+        self.delete_share_with_kind_audited(
+            kind,
+            target_path,
+            grantee_kind,
+            grantee,
+            "",
+            "revoke",
+        )
+        .await
+    }
+
     /// Same as `delete_share` but carries an actor `entity_id` (for
     /// audit logging) and lets the caller tag the event op — used by
     /// `cascade_delete_target` to distinguish explicit revokes from
     /// automatic cascade-revokes triggered by target deletion.
+    /// Defaults to Entity grantee kind.
     pub async fn delete_share_audited(
         &self,
         kind: ShareTargetKind,
         target_path: &str,
+        grantee: &str,
+        actor_entity_id: &str,
+        op: &str,
+    ) -> Result<(), RvError> {
+        self.delete_share_with_kind_audited(
+            kind,
+            target_path,
+            ShareGranteeKind::Entity,
+            grantee,
+            actor_entity_id,
+            op,
+        )
+        .await
+    }
+
+    pub async fn delete_share_with_kind_audited(
+        &self,
+        kind: ShareTargetKind,
+        target_path: &str,
+        grantee_kind: ShareGranteeKind,
         grantee: &str,
         actor_entity_id: &str,
         op: &str,
@@ -344,7 +471,7 @@ impl ShareStore {
         };
 
         self.primary_view.delete(&pk).await?;
-        let bg = Self::by_grantee_key(grantee, &target_hash);
+        let bg = Self::by_grantee_key(grantee_kind, grantee, &target_hash);
         self.by_grantee_view.delete(&bg).await?;
 
         if let Some(prior) = prior {
@@ -354,6 +481,7 @@ impl ShareStore {
                 op: op.to_string(),
                 target_kind: prior.target_kind,
                 target_path: prior.target_path,
+                grantee_kind: prior.grantee_kind,
                 grantee_entity_id: prior.grantee_entity_id,
                 capabilities: prior.capabilities,
                 expires_at: prior.expires_at,
@@ -390,23 +518,47 @@ impl ShareStore {
         Ok(out)
     }
 
-    /// Return every target shared with `grantee`. The pointer carries
-    /// the kind+path; caller can load the full record via `get_share`.
+    /// Return every target shared with `grantee` (entity grantee). The
+    /// pointer carries the kind+path; caller can load the full record
+    /// via `get_share`.
     pub async fn list_shares_for_grantee(
         &self,
+        grantee: &str,
+    ) -> Result<Vec<ShareByGranteePointer>, RvError> {
+        self.list_shares_for_grantee_kinded(ShareGranteeKind::Entity, grantee)
+            .await
+    }
+
+    /// Grantee-kind-aware variant. Use this when listing shares
+    /// targeting an identity group (`group_user` / `group_app`).
+    pub async fn list_shares_for_grantee_kinded(
+        &self,
+        grantee_kind: ShareGranteeKind,
         grantee: &str,
     ) -> Result<Vec<ShareByGranteePointer>, RvError> {
         let grantee = grantee.trim();
         if grantee.is_empty() {
             return Ok(Vec::new());
         }
-        let prefix = format!("{grantee}/");
+        let grantee = if grantee_kind.is_group() {
+            grantee.to_lowercase()
+        } else {
+            grantee.to_string()
+        };
+        let prefix = format!("{}{grantee}/", Self::by_grantee_prefix(grantee_kind));
         let keys = self.by_grantee_view.list(&prefix).await?;
         let mut out = Vec::with_capacity(keys.len());
         for k in keys {
             let full = format!("{prefix}{k}");
             if let Some(raw) = self.by_grantee_view.get(&full).await? {
-                if let Ok(ptr) = serde_json::from_slice::<ShareByGranteePointer>(&raw.value) {
+                if let Ok(mut ptr) = serde_json::from_slice::<ShareByGranteePointer>(&raw.value)
+                {
+                    // Older pointers (pre-group-grantee) have an empty
+                    // grantee_kind. Default to the kind we just walked,
+                    // which for an entity-prefix walk is "entity".
+                    if ptr.grantee_kind.is_empty() {
+                        ptr.grantee_kind = grantee_kind.as_str().to_string();
+                    }
                     out.push(ptr);
                 }
             }
@@ -457,9 +609,16 @@ impl ShareStore {
         let shares = self.list_shares_for_target(kind, target_path).await?;
         let count = shares.len();
         for s in shares {
-            self.delete_share_audited(
+            // Use the share's recorded grantee_kind so we tear down
+            // the right by-grantee pointer prefix; legacy rows with no
+            // grantee_kind fall back to Entity, matching the pre-group
+            // schema.
+            let gk = ShareGranteeKind::parse(&s.grantee_kind)
+                .unwrap_or(ShareGranteeKind::Entity);
+            self.delete_share_with_kind_audited(
                 kind,
                 &s.target_path,
+                gk,
                 &s.grantee_entity_id,
                 actor_entity_id,
                 "cascade-revoke",
@@ -514,6 +673,11 @@ fn hist_seq() -> String {
 pub struct ShareByGranteePointer {
     pub target_kind: String,
     pub target_path: String,
+    /// Mirrors `SecretShare.grantee_kind`. Defaults to `"entity"` via
+    /// `serde(default)` semantics on the empty string so legacy pointers
+    /// written before group grantees existed still deserialize cleanly.
+    #[serde(default)]
+    pub grantee_kind: String,
 }
 
 /// Normalize a capabilities list: trim each entry, lowercase, drop

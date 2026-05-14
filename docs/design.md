@@ -1,14 +1,10 @@
----
-sidebar_position: 5
-title: Design
----
 # BastionVault Design
 
 As per: [BastionVault Requirements Document](./req.md). In this document we describe the architecture of BastionVault.
 
 # Architecture Diagram
 
-![BastionVault Architecture](../static/img/BastionVault-arch.svg)
+![BastionVault Architecture](img/BastionVault-arch.svg)
 
 Detailed description:
 

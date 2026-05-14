@@ -560,16 +560,28 @@ export interface OwnerInfo {
   created_at: string;
 }
 
+/** Grantee discriminator on shares. `entity` is the legacy default;
+ *  `group_user` / `group_app` target an identity group and are gated
+ *  by the caller having a policy with `metadata.group_shared_resources`
+ *  set to `"true"`. */
+export type ShareGranteeKind = "entity" | "group_user" | "group_app";
+
 /** A share-pointer — what the `by-grantee` list returns; load the
  *  full record via `getShare` or equivalent if values are needed. */
 export interface SharePointer {
   target_kind: string;
   target_path: string;
+  /** Defaults to "entity" for legacy pointers persisted before group
+   *  grantees existed. */
+  grantee_kind?: ShareGranteeKind;
 }
 
 export interface ShareEntry {
   target_kind: string;
   target_path: string;
+  /** Defaults to "entity" on shares persisted before grantee_kind
+   *  existed. */
+  grantee_kind?: ShareGranteeKind;
   grantee_entity_id: string;
   granted_by_entity_id: string;
   /** Subset of "read" | "list" | "update" | "delete" | "create". */

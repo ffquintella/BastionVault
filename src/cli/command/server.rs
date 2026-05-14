@@ -79,6 +79,10 @@ impl Server {
     }
 
     pub fn main(&self, config_path: &PathBuf) -> Result<(), RvError> {
+        // Stamp the process start time exactly once. Read back from
+        // `crate::server_info::started_at()` by the `/sys/info`
+        // handler and the GUI's Server Info dialog.
+        crate::server_info::record_start_now();
         let config = config::load_config(&config_path.to_string_lossy())?;
 
         if config.storage.len() != 1 {

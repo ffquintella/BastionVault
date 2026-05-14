@@ -1,7 +1,3 @@
----
-sidebar_position: 3
-title: Cryptography
----
 # BastionVault Cryptography
 
 BastionVault uses a post-quantum-ready cryptographic stack built on pure Rust libraries. The legacy OpenSSL-based adaptor layer has been fully retired.

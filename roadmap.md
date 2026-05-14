@@ -14,7 +14,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | Removed | 1 |
 | **Total tracked features** | **56** |
 
-Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-and-distribution.md)) — three new spec files, no code yet, sequenced into four release waves.
+Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-and-distribution.md)) — sequenced into four release waves; Waves 1 + 2 shipped (with Linux GUI bundler caveat), Wave 3 next.
 
 ## How to read this
 
@@ -33,7 +33,7 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | Secret Management (KV CRUD) | Done | KV v1 + KV v2 incl. nested-folder LIST. |
 | Secret Versioning & Soft-Delete | Todo | [spec](features/secret-versioning-and-soft-delete.md) |
 | Access Control (RBAC + path-based ACL) | Done | Path-based policy engine with allow / deny / capabilities. |
-| Identity Groups (user / app groups → policy mapping) | Done | [spec](features/identity-groups.md) — policy union for UserPass / AppRole / FIDO2. |
+| Identity Groups (user / app groups → policy mapping) | Done | [spec](features/identity-groups.md) — policy union for UserPass / AppRole / FIDO2, plus Phase 7 group-shared resources via `metadata { group_shared_resources = "true" }`. |
 | Per-User Scoping (ownership + policy templating + sharing) | Done | [spec](features/per-user-scoping.md) — 10 phases + migration backfill. |
 | Asset Groups (collections of resources + KV paths) | Done | [spec](features/resource-groups.md) — 13 phases incl. ownership, sharing, member redaction. |
 | Audit Logging (tamper-evident, HMAC chain) | Done | Phase 1 file device shipped; syslog / HTTP devices [deferred](#deferred-sub-initiatives). |
@@ -137,7 +137,7 @@ Sequenced together under [`roadmaps/packaging-and-distribution.md`](roadmaps/pac
 
 ## Active Initiatives
 
-- **Packaging & Distribution** ([roadmap](roadmaps/packaging-and-distribution.md)) — server container image + native client installers + client-binary distribution website. Three feature specs drafted, no code yet. Sequenced into four release waves; Wave 1 = standalone server image.
+- **Packaging & Distribution** ([roadmap](roadmaps/packaging-and-distribution.md)) — server container image + native client installers + client-binary distribution website. Sequenced into four release waves. **Wave 1 shipped** (standalone server container image, distroless, GHCR push on `v*.*.*` tags). Wave 2 largely shipped (cluster compose, multi-arch, Cosign keyless, SBOM, Linux CLI installers); GUI Linux bundler + Phase 1.5 trusted-proxy still open. Wave 3 (macOS/Windows installers + downloads website) next.
 
 Next-up `Todo` rows once Packaging & Distribution lands:
 

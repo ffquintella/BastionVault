@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>BastionVault Documentation</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0" />
+  <meta name="description"
+    content="BastionVault — a Rust secrets management server with post-quantum crypto and a Tauri desktop GUI." />
+  <meta name="keywords"
+    content="rust, hashicorp-vault, key-management, secure-storage, secrets-management, key-manager-service, secrets-manager, cloudnative-services" />
+  <link rel="icon" href="img/favicon.ico" />
+  <link rel="stylesheet"
+    href="//cdn.jsdelivr.net/npm/docsify@4/lib/themes/vue.css" />
+  <style>
+    /* Compact sidebar typography; matches the density of the
+       previous Docusaurus theme. */
+    .sidebar-nav li > p { font-weight: 600; margin: 8px 0 4px; }
+    .sidebar-nav ul { padding-left: 1rem; }
+    .markdown-section h1:first-child { margin-top: 1rem; }
+    .markdown-section code { word-break: break-word; }
+  </style>
+</head>
+<body>
+  <div id="app">Loading...</div>
+  <script>
+    window.$docsify = {
+      // ───── Site identity ──────────────────────────────────────
+      name: 'BastionVault',
+      repo: 'https://github.com/ffquintella/BastionVault',
+      logo: 'img/bastionvault-logo.svg',
+      loadSidebar: true,
+      loadNavbar: true,
+      subMaxLevel: 3,
+      auto2top: true,
+      maxLevel: 4,
+      homepage: 'README.md',
+
+      // ───── Search ────────────────────────────────────────────
+      // Indexes every markdown file in the sidebar so operators can
+      // jump from "metadata.group_shared_resources" or "/v1/sys/info"
+      // to the right page without a full-text scan of the repo.
+      search: {
+        maxAge: 86400000,
+        paths: 'auto',
+        placeholder: 'Search docs...',
+        noData: 'No results',
+        depth: 4,
+      },
+
+      // Make the GitHub corner-icon a permanent "Edit on GitHub"
+      // link relative to the docs root. Docsify substitutes the
+      // current page name in for the file part.
+      alias: {
+        '/.*/_sidebar.md': '/_sidebar.md',
+        '/.*/_navbar.md':  '/_navbar.md',
+      },
+
+      // Pretty-print code blocks the same way Docusaurus did. The
+      // language packs below cover the ones the existing docs use
+      // (rust, hcl, json, bash, toml).
+      themeable: { readyTransition: true, responsiveTables: true },
+
+      // Auto-resolve `./foo.md` style links from the old docs without
+      // hardcoded rewrites.
+      relativePath: true,
+
+      // External-link target hardening: every off-site link opens in
+      // a new tab; relative links stay in-app.
+      externalLinkTarget: '_blank',
+      externalLinkRel: 'noopener noreferrer',
+    };
+  </script>
+
+  <!-- Core docsify runtime -->
+  <script src="//cdn.jsdelivr.net/npm/docsify@4"></script>
+  <!-- Search plugin -->
+  <script src="//cdn.jsdelivr.net/npm/docsify@4/lib/plugins/search.min.js"></script>
+  <!-- Copy-to-clipboard on code blocks -->
+  <script src="//cdn.jsdelivr.net/npm/docsify-copy-code@2"></script>
+  <!-- Prism language packs used by the docs -->
+  <script src="//cdn.jsdelivr.net/npm/prismjs@1/components/prism-bash.min.js"></script>
+  <script src="//cdn.jsdelivr.net/npm/prismjs@1/components/prism-rust.min.js"></script>
+  <script src="//cdn.jsdelivr.net/npm/prismjs@1/components/prism-hcl.min.js"></script>
+  <script src="//cdn.jsdelivr.net/npm/prismjs@1/components/prism-json.min.js"></script>
+  <script src="//cdn.jsdelivr.net/npm/prismjs@1/components/prism-toml.min.js"></script>
+</body>
+</html>

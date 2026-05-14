@@ -1,8 +1,3 @@
----
-sidebar_label: Cluster Client Discovery
-sidebar_position: 16
----
-
 # Cluster Client Discovery & Health-Aware Connection
 
 BastionVault clients (the GUI, the `bvault` CLI, anything built on the

@@ -2586,6 +2586,7 @@ mod integration_tests {
         let share = crate::modules::identity::share_store::SecretShare {
             target_kind: "file".to_string(),
             target_path: id.clone(),
+            grantee_kind: String::new(),
             grantee_entity_id: "some-user-entity".to_string(),
             granted_by_entity_id: "root".to_string(),
             capabilities: vec!["read".into()],

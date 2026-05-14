@@ -30,6 +30,7 @@ import { useAuthStore } from "./stores/authStore";
 import { ToastProvider } from "./components/ui";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ConnectPalette } from "./components/ConnectPalette";
+import { ServerInfoModal } from "./components/ServerInfoModal";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
@@ -43,6 +44,12 @@ export default function App() {
   return (
     <ErrorBoundary>
       <ToastProvider>
+        {/* Mounted once at the root so the Tauri window-menu
+            "Server Info..." item can open it from anywhere — the
+            modal listens for `open-server-info` and is otherwise
+            hidden. Cheap to keep here unconditionally; no state
+            until first activation. */}
+        <ServerInfoModal />
         <HashRouter>
           <Routes>
             <Route path="/" element={<Navigate to="/connect" replace />} />

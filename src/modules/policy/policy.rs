@@ -61,6 +61,13 @@ pub struct Policy {
     #[default(PolicyType::Acl)]
     pub policy_type: PolicyType,
     pub templated: bool,
+    /// Free-form tag map populated from the optional top-level
+    /// `metadata { key = "value" ... }` block in HCL. Used for
+    /// declarative opt-ins that the ACL evaluator looks up by key —
+    /// today only `group_shared_resources = "true"` is consumed (see
+    /// `features/identity-groups.md`), but additional flags can land
+    /// here without changing the on-disk format.
+    pub metadata: HashMap<String, String>,
 }
 
 /// Describes rules associated with specific paths in a policy.
@@ -115,6 +122,10 @@ pub struct Permissions {
 struct PolicyConfig {
     pub name: String,
     pub path: HashMap<String, PolicyPathConfig>,
+    /// Top-level `metadata { ... }` block. Captured during parsing
+    /// from a sibling `metadata` HCL block (see `Policy::parse`) and
+    /// surfaced on `Policy::metadata` for downstream consumers.
+    pub metadata: HashMap<String, String>,
 }
 
 // Path-specific configuration used in policy definitions.
@@ -279,6 +290,25 @@ impl Policy {
         }
 
         for block in body.blocks() {
+            if block.identifier() == "metadata" {
+                // `metadata { foo = "bar" ... }`. Coerce every
+                // attribute value into a string — booleans, numbers,
+                // and strings all flatten so `group_shared_resources = true`
+                // and `group_shared_resources = "true"` are both accepted.
+                // Unsupported expression shapes (lists, objects) are
+                // skipped; downstream code looks up flat string keys.
+                for attribute in block.body().attributes() {
+                    let key = attribute.key.as_str().to_string();
+                    let value = match &attribute.expr {
+                        Expression::String(s) => s.clone(),
+                        Expression::Bool(b) => b.to_string(),
+                        Expression::Number(n) => n.to_string(),
+                        _ => continue,
+                    };
+                    policy_config.metadata.insert(key, value);
+                }
+                continue;
+            }
             if block.identifier() == "path" {
                 if let Some(path_label) = block.labels().first() {
                     let path_str = path_label.as_str().to_string();
@@ -444,6 +474,17 @@ impl Policy {
 
             self.paths.push(rules);
         }
+
+        // Copy the parsed top-level metadata onto the Policy. Keys are
+        // lowercased so policy authors can write
+        // `Group_Shared_Resources = true` if they want — matches the
+        // case-insensitive ergonomics already applied to capability /
+        // parameter keys elsewhere.
+        self.metadata = policy_config
+            .metadata
+            .iter()
+            .map(|(k, v)| (k.trim().to_lowercase(), v.clone()))
+            .collect();
 
         Ok(())
     }

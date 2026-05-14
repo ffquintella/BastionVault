@@ -225,3 +225,122 @@ username receive the same unioned policy set.
 - When `identity/` is not yet mounted (older deployments pre-unseal), the
   page shows a neutral empty state pointing the operator at
   reseal/unseal to pick up the default-mount migration.
+
+## Phase 7: Group-shared resources
+
+**Status:** Done (server + GUI + docs).
+
+Identity groups now double as share targets. A share's `grantee_kind`
+field selects between an entity grantee (UUID; the legacy default) and
+a group grantee (lowercased group name, kind = `group_user` or
+`group_app`). Group shares are *informational + gated*: a share that
+points at group `engineering` is visible to every member of that group
+in the "Shared with me" tab **only when** the caller carries at least
+one policy whose `metadata.group_shared_resources` is `"true"`. The
+share itself does not grant ACL capability — the caller's regular
+policies still own the access decision; the share row simply surfaces
+the target on the caller's per-user shared list.
+
+### Why intersection, not union
+
+The simplest design ("group share === policy attached to every
+member") risks privilege escalation when group membership churns: an
+admin adds a user to `engineering` and the user instantly gets `update`
+on every secret previously shared with the group. By treating group
+shares as a *visibility filter* over the caller's existing policy
+capabilities, membership changes never expand a user's effective ACL —
+only the discoverable surface of "what is this group working on."
+Operators who want capability-granting group shares should attach the
+relevant policy to the group itself (`GroupEntry.policies`); the
+login-time `expand_identity_group_policies` flow has unioned those
+policies into the token since Phase 1.
+
+### Wire format
+
+```
+identity/sharing/by-target/<kind>/<base64url(target)>/<grantee>
+  body { target_kind, target_path, grantee_kind, capabilities, expires_at? }
+```
+
+- `grantee_kind = "entity"` (default for back-compat): `grantee` is an
+  entity UUID; existing share rows continue to resolve unchanged.
+- `grantee_kind = "group_user"` or `"group_app"`: `grantee` is the
+  identity-group name (lowercased on write; case-insensitive match).
+
+`identity/sharing/for-me` is a caller-introspecting LIST/READ endpoint
+that returns a single payload:
+
+```json
+{
+  "entity_id": "<resolved-via-alias-if-needed>",
+  "group_shared_resources": true,
+  "entries": [
+    { "target_kind": "resource", "target_path": "teste1", "grantee_kind": "entity" },
+    { "target_kind": "kv-secret", "target_path": "secret/eng/...", "grantee_kind": "group_user" }
+  ]
+}
+```
+
+`group_shared_resources` is `true` iff at least one of the caller's
+attached policies carries the meta tag. The GUI's `SharingPage` reads
+this flag to render a hint when the user is missing the policy meta
+tag rather than silently dropping group entries.
+
+### Sample HCL — opting a user into group shares
+
+Attach a thin policy to anyone who should see group shares in their
+"Shared with me" feed:
+
+```hcl
+# policies/group-shared-resources.hcl
+name = "group-shared-resources"
+
+metadata {
+  group_shared_resources = "true"
+}
+```
+
+That's it — no `path` blocks. The metadata is the entire point; access
+to the underlying resources still flows through whatever policies the
+user (or their groups) already carry.
+
+### Sample HCL — full operator setup
+
+```hcl
+# policies/engineering.hcl — capability policy attached to the group
+name = "engineering-shared"
+
+path "resource/data/engineering/*" {
+  capabilities = ["read", "list"]
+}
+
+path "secret/data/engineering/*" {
+  capabilities = ["read", "list"]
+}
+```
+
+```hcl
+# policies/group-shared-resources.hcl — opt-in to seeing group shares
+name = "group-shared-resources"
+
+metadata {
+  group_shared_resources = "true"
+}
+```
+
+Wiring:
+
+1. `identity/group/user/engineering` — group with members
+   `["alice", "bob", "felipe2"]` and policies
+   `["engineering-shared"]`. At login each member's token has the
+   capability policy unioned in.
+2. Attach `group-shared-resources` to each member (directly on the
+   userpass user, or via a second group dedicated to the meta tag).
+3. Admin grants `identity/sharing/by-target/resource/<b64>/engineering`
+   with `grantee_kind = "group_user"`. The target shows up in
+   `engineering`'s "Shared with me" feed without expanding any ACL.
+
+Operators who want a *capability-granting* group share should attach
+the capabilities to the group's policy list (step 1) — the share row
+in step 3 then serves as the human-visible breadcrumb explaining *why*
+those capabilities exist.

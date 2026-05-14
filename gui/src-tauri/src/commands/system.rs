@@ -228,6 +228,111 @@ pub async fn get_vault_status(state: State<'_, AppState>) -> CmdResult<VaultStat
     })
 }
 
+/// Server identity + lifecycle facts surfaced by the GUI's "Server
+/// Info" dialog. Mirrors the `/v1/sys/info` HTTP response with an
+/// extra `connection_kind` / `endpoint` pair so the dialog can show
+/// "Embedded (this process)" alongside the version stamp without
+/// extra plumbing on the JS side.
+#[derive(Serialize, Default)]
+pub struct ServerInfo {
+    pub connection_kind: String,
+    pub endpoint: String,
+    pub version: String,
+    pub started_at: String,
+    pub uptime_seconds: i64,
+    pub initialized: bool,
+    pub sealed: bool,
+    pub storage_type: String,
+}
+
+#[tauri::command]
+pub async fn get_server_info(state: State<'_, AppState>) -> CmdResult<ServerInfo> {
+    // Embedded mode: the GUI hosts the Core in-process. The
+    // server_info helpers (started_at / uptime_seconds / version)
+    // returned the *current* values for whatever code is running
+    // inside this binary, so we report them directly without an
+    // HTTP roundtrip. Storage_type is inferred from the active
+    // backend handle when we have one.
+    {
+        let vault_guard = state.vault.lock().await;
+        if let Some(vault) = vault_guard.as_ref() {
+            let core = vault.core.load();
+            let initialized = core.inited().await.unwrap_or(false);
+            let sealed = core.sealed();
+            let storage_type = {
+                #[cfg(feature = "storage_hiqlite")]
+                {
+                    use bastion_vault::storage::hiqlite::HiqliteBackend;
+                    let backend_any =
+                        core.physical.as_ref() as &dyn std::any::Any;
+                    if backend_any.downcast_ref::<HiqliteBackend>().is_some() {
+                        "hiqlite".to_string()
+                    } else {
+                        "unknown".to_string()
+                    }
+                }
+                #[cfg(not(feature = "storage_hiqlite"))]
+                {
+                    "unknown".to_string()
+                }
+            };
+            return Ok(ServerInfo {
+                connection_kind: "embedded".to_string(),
+                endpoint: "embedded".to_string(),
+                version: bastion_vault::server_info::version().to_string(),
+                started_at: bastion_vault::server_info::started_at().to_rfc3339(),
+                uptime_seconds: bastion_vault::server_info::uptime_seconds(),
+                initialized,
+                sealed,
+                storage_type,
+            });
+        }
+    }
+
+    // Remote mode: ask the server. `/v1/sys/info` is the
+    // authoritative source — version is the server's, not the GUI
+    // binary's, so a mixed-version operator setup shows the truth.
+    {
+        let client_guard = state.remote_client.lock().await;
+        if let Some(client) = client_guard.as_ref() {
+            let endpoint = client.address.clone();
+            let resp = client.sys().info().map_err(|e| {
+                CommandError::from(format!("sys/info failed: {e}"))
+            })?;
+            let body = resp
+                .response_data
+                .as_ref()
+                .and_then(|v| v.as_object())
+                .ok_or("sys/info: empty response body")?;
+            fn s(o: &serde_json::Map<String, Value>, k: &str) -> String {
+                o.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string()
+            }
+            return Ok(ServerInfo {
+                connection_kind: "remote".to_string(),
+                endpoint,
+                version: s(body, "version"),
+                started_at: s(body, "started_at"),
+                uptime_seconds: body
+                    .get("uptime_seconds")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0),
+                initialized: body
+                    .get("initialized")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                sealed: body
+                    .get("sealed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true),
+                storage_type: s(body, "storage_type"),
+            });
+        }
+    }
+
+    // No backend at all — chooser screen, etc.
+    Err(CommandError::from("no active server connection".to_string()))
+}
+
 /// Blow away the local keystore — the encrypted file that caches
 /// per-vault unseal keys + root tokens alongside the OS keychain
 /// entry that seals it. Leaves ALL vault data intact (the actual

@@ -1,8 +1,3 @@
----
-sidebar_position: 9
-title: Authentication
----
-
 # Authentication Guide
 
 BastionVault supports multiple authentication methods. Each method is mounted at a path and issues tokens that clients use for subsequent requests.
@@ -212,7 +207,16 @@ Every token has a list of attached policies. When authenticating:
 
 1. The auth method determines which policies to attach (based on role, user, or certificate configuration)
 2. The `default` policy is always included
-3. The token inherits the combined capabilities of all its policies
-4. The `root` policy grants unrestricted access
+3. **Identity-group policies are unioned in**: every user group containing the caller's username (UserPass / FIDO2) and every app group containing the caller's role name (AppRole) contributes its `policies` list. Group membership changes take effect on the *next* login.
+4. The token inherits the combined capabilities of all its policies
+5. The `root` policy grants unrestricted access
 
-See the [Administration Guide](./administration.md) for policy syntax and management.
+When a token has no `entity_id` in its metadata (typically because
+it was issued before lazy provisioning landed), the
+`identity/entity/self` endpoint will resolve the entity by alias
+(`mount_path` + `username`/`role_name`) and lazily create it via
+`get_or_create_entity` — owner-scoped and sharing-aware UI keeps
+working without forcing a re-login.
+
+See the [Administration Guide](./administration.md) for policy
+syntax, scope/group qualifiers, identity groups, and sharing.
