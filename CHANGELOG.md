@@ -45,8 +45,11 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.5.18] - 2026-05-14
+
 ### Fixed
 
+- **Hiqlite WAL panicked on any storage write larger than 2 MiB** (`src/storage/hiqlite/mod.rs`) — hiqlite-wal's writer (`writer.rs:194`) issues a hard `panic!` if a single Raft log entry exceeds the WAL segment size, killing RaftCore and freezing the whole cluster (every subsequent request returns `Fatal::Panicked` until restart). We were running with hiqlite's 2 MiB default while accepting files up to `MAX_FILE_BYTES = 32 MiB`, so any file upload above ~2 MiB tripped the panic. Now: set `wal_size = 64 MiB` explicitly in `NodeConfig`, well above any single entry we generate; additionally reject oversized values at the `Backend::put` boundary with a clean `RvError` so a future `MAX_FILE_BYTES` bump can't silently reintroduce the panic. Existing on-disk WAL segments keep their original size, so this is safe on a running cluster (rolling restart required to pick up the new ceiling). Also fix `Backend::get` to route hiqlite errors through `map_hiqlite_error` instead of `RvError::ErrResponse`, so `CheckIsLeaderError` surfaces as HTTP 503 (`Cluster has no leader`) instead of a misleading HTTP 400 with the raw `"CheckIsLeaderError: panicked"` text.
 - **Cluster discovery rejected SRV-shaped cluster names** (`crates/bv-client/src/discovery.rs`) — when an operator entered an already-SRV-formatted FQDN like `_cofre-html._tcp.esi.fgv.br` as the cluster address, `resolve()` blindly prepended `cfg.srv_service` (`_bvault._tcp`) and queried `_bvault._tcp._cofre-html._tcp.esi.fgv.br`, which NXDOMAINs, then fell back to a literal A/AAAA lookup of the underscore-prefixed name — `getaddrinfo` rejects underscore labels, producing the cryptic "nodename nor servname provided" toast. Now: inputs starting with `_` are queried verbatim as the SRV label (no prefix), and SRV-shaped inputs with no records short-circuit to an empty candidate list (so the caller surfaces "no candidates resolved" instead of a guaranteed-broken A/AAAA fallback). Bare-name inputs still get the `srv_service` prefix as before.
 
 ## [0.5.17] - 2026-05-13

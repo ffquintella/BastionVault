@@ -9,6 +9,17 @@ use crate::{
     storage::{Backend, BackendEntry},
 };
 
+/// Hiqlite WAL segment size. Must be larger than any single Raft log entry we
+/// produce — hiqlite-wal panics rather than erroring when an entry exceeds the
+/// segment size. We cap files at 32 MiB; 64 MiB here leaves room for the
+/// encryption envelope and Raft framing.
+const HIQLITE_WAL_SIZE: u32 = 64 * 1024 * 1024;
+
+/// Conservative safe payload ceiling for a single `put`. Slightly below
+/// `HIQLITE_WAL_SIZE` to account for Raft entry framing / serialization
+/// overhead that wraps the raw value before it hits the WAL writer.
+const MAX_PUT_VALUE_BYTES: usize = (HIQLITE_WAL_SIZE as usize) - 1024 * 1024;
+
 fn map_hiqlite_error(e: hiqlite::Error) -> RvError {
     match &e {
         hiqlite::Error::CheckIsLeaderError(_) => RvError::ErrClusterNoLeader,
@@ -122,7 +133,7 @@ impl Backend for HiqliteBackend {
                 vec![Param::from(key)],
             )
             .await
-            .map_err(|e| RvError::ErrResponse(e.to_string()))?
+            .map_err(map_hiqlite_error)?
             .into_iter()
             .next();
 
@@ -138,6 +149,16 @@ impl Backend for HiqliteBackend {
     async fn put(&self, entry: &BackendEntry) -> Result<(), RvError> {
         if entry.key.starts_with('/') {
             return Err(RvError::ErrPhysicalBackendKeyInvalid);
+        }
+
+        // Reject oversized payloads before they reach hiqlite-wal, which
+        // panics (not errors) on any entry larger than the WAL segment.
+        if entry.value.len() > MAX_PUT_VALUE_BYTES {
+            return Err(RvError::ErrString(format!(
+                "storage put: value size {} exceeds raft log segment limit {}",
+                entry.value.len(),
+                MAX_PUT_VALUE_BYTES
+            )));
         }
 
         self.client
@@ -410,6 +431,12 @@ impl HiqliteBackend {
             enc_keys,
             tls_raft,
             tls_api,
+            // Hiqlite's WAL panics (not errors) if any single Raft log entry
+            // exceeds the segment size — see hiqlite-wal writer.rs:194. Default
+            // is 2 MiB, but we accept files up to MAX_FILE_BYTES (32 MiB) plus
+            // encryption/JSON overhead. 64 MiB leaves headroom and keeps the
+            // ceiling well above any single entry we generate.
+            wal_size: HIQLITE_WAL_SIZE,
             ..Default::default()
         };
 
