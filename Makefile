@@ -94,7 +94,7 @@ help: ## List available commands
 	@echo "Usage: make <target>"
 	@echo ""
 ifeq ($(OS),Windows_NT)
-	@powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content '$(firstword $(MAKEFILE_LIST))' | ForEach-Object { if ($$_ -match '^([a-zA-Z_-]+):.*##\s*(.*)') { '  {0,-15} {1}' -f $$matches[1], $$matches[2] } }"
+	@powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content '$(firstword $(MAKEFILE_LIST))' | ForEach-Object { if (\$$_ -match '^([a-zA-Z_-]+):.*##\s*(.*)') { '  {0,-15} {1}' -f \$$matches[1], \$$matches[2] } }"
 else
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 endif
@@ -604,7 +604,7 @@ PLUGINS_PROCESS_TARGET ?=
 # to empty if rustc isn't on PATH (and the comparison will treat the
 # target as "not a cross-build", which is correct in that case).
 ifeq ($(OS),Windows_NT)
-PLUGINS_HOST_TARGET := $(shell powershell -NoProfile -ExecutionPolicy Bypass -Command "rustc -vV 2>$$null | ForEach-Object { if ($$_ -match '^host: (.*)') { $$matches[1] } }")
+PLUGINS_HOST_TARGET := $(shell powershell -NoProfile -ExecutionPolicy Bypass -Command "rustc -vV 2>\$$null | ForEach-Object { if (\$$_ -match '^host: (.*)') { \$$matches[1] } }")
 else
 PLUGINS_HOST_TARGET := $(shell rustc -vV 2>/dev/null | sed -n 's/^host: //p')
 endif
