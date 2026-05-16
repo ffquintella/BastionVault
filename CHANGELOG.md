@@ -55,6 +55,10 @@ EXAMPLE ENTRY:
 
 - **Dashboard shows the signed-in user** (`gui/src/routes/DashboardPage.tsx`) — added a "Signed in as …" subtitle under the Dashboard header that surfaces the auth-store `principal` (with the `entity_id` on hover) and lazily hydrates it via `identity/entity/self` if the user landed straight on the dashboard.
 
+### Security
+
+- **Share management gated to target owners** (`src/modules/identity/mod.rs`) — `PUT`, `DELETE`, `GET` on `identity/sharing/by-target/<kind>/<target>/<grantee>` and the by-target `LIST` now reject callers (HTTP 403) unless they are root *or* their resolved entity_id matches the target's owner record in the `OwnerStore`. Sharing is an authority transfer, so the existing per-path ACL grant is insufficient — only the data owner may grant access to it. Asset-group shares (no per-object owner) remain root-only. Pre-existing shares are unaffected; this only restricts new grants/revocations and target-scoped enumeration.
+
 ### Fixed
 
 - **"Shared with me" returned 403 for normal users** (`src/modules/policy/policy_store.rs`) — added a self-service grant for `identity/sharing/for-me` (read+list) to the bundled `default` policy so every authenticated token can list its own shares. The handler is caller-introspecting (returns only the calling token's shares), so this grant is safe by construction. Also introduced `PolicyStore::force_load_acl_policy` and switched `default` to re-seed on every startup, so existing vaults pick up new self-service grants without operator intervention (other baselines like `standard-user` remain operator-editable).

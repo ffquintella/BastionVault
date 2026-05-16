@@ -929,6 +929,104 @@ impl IdentityBackendInner {
             .ok_or_else(|| bv_error_string!("share store unavailable"))
     }
 
+    /// Authorize the caller to manage shares on `(kind, target_path)`.
+    ///
+    /// A token is allowed when either:
+    ///   1. it carries the root policy, or
+    ///   2. its resolved entity_id matches the owner_store record for
+    ///      the target.
+    ///
+    /// All other tokens are rejected with HTTP 403 -- including those
+    /// whose ACL granted them write access to the underlying resource
+    /// but who do not actually own it. Sharing is an authority transfer
+    /// and must originate from the data owner. Asset-group shares have
+    /// no per-object owner, so only root may manage them.
+    async fn require_share_admin(
+        &self,
+        req: &Request,
+        kind: ShareTargetKind,
+        target_path: &str,
+    ) -> Result<(), RvError> {
+        let auth = req
+            .auth
+            .as_ref()
+            .ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
+
+        if auth.policies.iter().any(|p| p == "root") {
+            return Ok(());
+        }
+
+        // Resolve the caller's entity_id with the same alias-fallback
+        // used by handle_share_for_me_list / handle_entity_self, so
+        // tokens issued before login-time entity provisioning landed
+        // are still recognised as owners of their pre-existing data.
+        let mut entity_id = auth
+            .metadata
+            .get("entity_id")
+            .cloned()
+            .unwrap_or_default();
+        if entity_id.is_empty() {
+            let username = auth.metadata.get("username").cloned().unwrap_or_default();
+            let role_name = auth.metadata.get("role_name").cloned().unwrap_or_default();
+            let mount_path = auth.metadata.get("mount_path").cloned().unwrap_or_default();
+            if !mount_path.is_empty() {
+                let alias_name = if !username.is_empty() { &username } else { &role_name };
+                if !alias_name.is_empty() {
+                    if let Some(module) = self
+                        .core
+                        .module_manager
+                        .get_module::<IdentityModule>("identity")
+                    {
+                        if let Some(es) = module.entity_store() {
+                            if let Ok(e) = es
+                                .get_or_create_entity(mount_path.as_str(), alias_name.as_str())
+                                .await
+                            {
+                                entity_id = e.id;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if entity_id.is_empty() {
+            return Err(bv_error_response_status!(
+                403,
+                "only the target's owner can manage its shares"
+            ));
+        }
+
+        let module = self
+            .core
+            .module_manager
+            .get_module::<IdentityModule>("identity")
+            .ok_or_else(|| bv_error_string!("identity module unavailable"))?;
+        let owner_store = module
+            .owner_store()
+            .ok_or_else(|| bv_error_string!("owner store unavailable"))?;
+
+        let owner = match kind {
+            ShareTargetKind::KvSecret => owner_store.get_kv_owner(target_path).await?,
+            ShareTargetKind::Resource => owner_store.get_resource_owner(target_path).await?,
+            ShareTargetKind::File => owner_store.get_file_owner(target_path).await?,
+            ShareTargetKind::AssetGroup => {
+                return Err(bv_error_response_status!(
+                    403,
+                    "asset-group shares can only be managed by a root token"
+                ));
+            }
+        };
+
+        match owner {
+            Some(rec) if rec.entity_id == entity_id => Ok(()),
+            _ => Err(bv_error_response_status!(
+                403,
+                "only the target's owner can manage its shares"
+            )),
+        }
+    }
+
     pub async fn handle_share_by_grantee_list(
         &self,
         _backend: &dyn Backend,
@@ -1162,6 +1260,8 @@ impl IdentityBackendInner {
         let target_path = decode_b64url_path(&target_b64)
             .ok_or_else(|| bv_error_string!("invalid target segment (expected base64url)"))?;
 
+        self.require_share_admin(req, kind, &target_path).await?;
+
         let shares = store.list_shares_for_target(kind, &target_path).await?;
 
         let mut data = Map::new();
@@ -1181,6 +1281,8 @@ impl IdentityBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_share_store()?;
         let (kind, target_path, grantee) = extract_share_identifiers(req)?;
+
+        self.require_share_admin(req, kind, &target_path).await?;
 
         match store.get_share(kind, &target_path, &grantee).await? {
             Some(share) => Ok(Some(Response::data_response(Some(
@@ -1253,6 +1355,8 @@ impl IdentityBackendInner {
         let grantee_kind = ShareGranteeKind::parse(&grantee_kind_str)
             .ok_or_else(|| bv_error_string!("invalid grantee_kind"))?;
 
+        self.require_share_admin(req, kind, &target_path).await?;
+
         let share = SecretShare {
             target_kind: kind.as_str().to_string(),
             target_path,
@@ -1277,6 +1381,9 @@ impl IdentityBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_share_store()?;
         let (kind, target_path, grantee) = extract_share_identifiers(req)?;
+
+        self.require_share_admin(req, kind, &target_path).await?;
+
         let actor = caller_audit_actor(req);
         // Optional `grantee_kind` body field tells us which by-grantee
         // pointer prefix to clear. Absent = legacy entity grantee.
