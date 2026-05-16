@@ -152,9 +152,9 @@ storage "hiqlite" {
 
 By default, both Raft and API channels use TLS with auto-generated self-signed certificates, providing post-quantum encryption (X25519MLKEM768 hybrid key exchange) for all inter-node traffic. Peer authentication is handled by the shared secrets (`secret_raft`/`secret_api`), while TLS provides confidentiality. Set `tls_raft_disable`/`tls_api_disable` to `true` only for development or testing.
 
-### MySQL
+### MySQL (legacy, opt-in)
 
-MySQL-backed storage using Diesel.
+MySQL-backed storage using Diesel. Off by default — build with `--features storage_mysql` to enable. Kept for existing deployments not yet migrated to Hiqlite, which is now the recommended backend (see [Hiqlite (HA)](#hiqlite-ha) above).
 
 ~~~hcl
 storage "mysql" {

@@ -5,7 +5,6 @@ use crate::errors::RvError;
 
 #[derive(Debug)]
 pub enum DatabaseName {
-    Postgres(String),
     MySql(String),
     Sqlite(String),
 }
@@ -16,17 +15,12 @@ impl DatabaseName {
         let scheme = parsed.scheme();
 
         match scheme {
-            "postgres" | "postgresql" | "mysql" => {
+            "mysql" => {
                 let path = parsed.path().strip_prefix('/').unwrap_or(parsed.path());
                 if path.is_empty() {
                     return Err(RvError::ErrString("Database name is empty".to_string()));
                 }
-
-                if scheme == "postgres" || scheme == "postgresql" {
-                    Ok(DatabaseName::Postgres(path.to_string()))
-                } else {
-                    Ok(DatabaseName::MySql(path.to_string()))
-                }
+                Ok(DatabaseName::MySql(path.to_string()))
             }
             "sqlite" | "sqlite3" => {
                 let path = parsed.path();
@@ -42,13 +36,12 @@ impl DatabaseName {
 
     pub fn name(&self) -> &str {
         match self {
-            DatabaseName::Postgres(name) | DatabaseName::MySql(name) | DatabaseName::Sqlite(name) => name,
+            DatabaseName::MySql(name) | DatabaseName::Sqlite(name) => name,
         }
     }
 
     pub fn scheme(&self) -> &str {
         match self {
-            DatabaseName::Postgres(_) => "postgres",
             DatabaseName::MySql(_) => "mysql",
             DatabaseName::Sqlite(_) => "sqlite",
         }
@@ -66,22 +59,6 @@ pub fn strip_db_name(url: &str) -> String {
 #[cfg(test)]
 mod test {
     use super::*;
-
-    #[test]
-    fn test_postgres_url_parsing() {
-        let url = "postgres://user:password@localhost:5432/mydb";
-        let db_name = DatabaseName::from_url(url).unwrap();
-        assert!(matches!(db_name, DatabaseName::Postgres(_)));
-        assert_eq!(db_name.name(), "mydb");
-    }
-
-    #[test]
-    fn test_postgresql_url_parsing() {
-        let url = "postgresql://user:password@localhost:5432/mydb";
-        let db_name = DatabaseName::from_url(url).unwrap();
-        assert!(matches!(db_name, DatabaseName::Postgres(_)));
-        assert_eq!(db_name.name(), "mydb");
-    }
 
     #[test]
     fn test_mysql_url_parsing() {
@@ -116,31 +93,11 @@ mod test {
     }
 
     #[test]
-    fn test_postgres_with_query_params() {
-        let url = "postgres://user:password@localhost:5432/mydb?sslmode=require";
-        let db_name = DatabaseName::from_url(url).unwrap();
-        assert!(matches!(db_name, DatabaseName::Postgres(_)));
-        assert_eq!(db_name.name(), "mydb");
-    }
-
-    #[test]
     fn test_mysql_with_fragment() {
         let url = "mysql://user:password@localhost:3306/mydb#section";
         let db_name = DatabaseName::from_url(url).unwrap();
         assert!(matches!(db_name, DatabaseName::MySql(_)));
         assert_eq!(db_name.name(), "mydb");
-    }
-
-    #[test]
-    fn test_empty_database_name_postgres() {
-        let url = "postgres://user:password@localhost:5432/";
-        let result = DatabaseName::from_url(url);
-        assert!(result.is_err());
-        if let Err(RvError::ErrString(msg)) = result {
-            assert_eq!(msg, "Database name is empty");
-        } else {
-            panic!("Expected ErrString error");
-        }
     }
 
     #[test]
@@ -156,12 +113,12 @@ mod test {
     }
 
     #[test]
-    fn test_no_path_postgres() {
-        let url = "postgres://user:password@localhost:5432";
+    fn test_postgres_scheme_unsupported() {
+        let url = "postgres://user:password@localhost:5432/mydb";
         let result = DatabaseName::from_url(url);
         assert!(result.is_err());
         if let Err(RvError::ErrString(msg)) = result {
-            assert_eq!(msg, "Database name is empty");
+            assert!(msg.contains("Unsupported database scheme: postgres"));
         } else {
             panic!("Expected ErrString error");
         }
@@ -195,38 +152,11 @@ mod test {
 
     #[test]
     fn test_database_name_method() {
-        // Test Postgres variant
-        let postgres_db = DatabaseName::Postgres("testdb".to_string());
-        assert_eq!(postgres_db.name(), "testdb");
-
-        // Test MySql variant
         let mysql_db = DatabaseName::MySql("testdb".to_string());
         assert_eq!(mysql_db.name(), "testdb");
 
-        // Test Sqlite variant
         let sqlite_db = DatabaseName::Sqlite("test.db".to_string());
         assert_eq!(sqlite_db.name(), "test.db");
-    }
-
-    #[test]
-    fn test_database_name_with_special_characters() {
-        let url = "postgres://user:password@localhost:5432/my-db_123";
-        let db_name = DatabaseName::from_url(url).unwrap();
-        assert_eq!(db_name.name(), "my-db_123");
-    }
-
-    #[test]
-    fn test_sqlite_with_relative_path() {
-        let url = "sqlite://./relative/path/database.db";
-        let db_name = DatabaseName::from_url(url).unwrap();
-        assert_eq!(db_name.name(), "database.db");
-    }
-
-    #[test]
-    fn test_postgres_with_port_and_host() {
-        let url = "postgres://user:password@db.example.com:5432/production_db";
-        let db_name = DatabaseName::from_url(url).unwrap();
-        assert_eq!(db_name.name(), "production_db");
     }
 
     #[test]

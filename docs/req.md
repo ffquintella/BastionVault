@@ -49,10 +49,9 @@ Features:
   * TLS: rustls (TLS 1.2/1.3)
   * Hashing: BLAKE2b, SHA-256
 * Storage
+  * Hiqlite backend (default — embedded Raft SQLite with HA)
   * Encrypted file backend
-  * MySQL backend
-  * SQLx backend (PostgreSQL, SQLite)
-  * Rqlite backend (planned, for HA)
+  * MySQL backend (opt-in legacy, `--features storage_mysql`)
 * Monitoring
   * Prometheus metrics
 * Logging and Audit

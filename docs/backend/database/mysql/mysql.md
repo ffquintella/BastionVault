@@ -1,5 +1,7 @@
 # MySQL Optimization with Diesel CLI in Rust
 
+> **Status: legacy, opt-in.** MySQL is no longer the recommended storage backend. The default is now [Hiqlite](../../../configuration.md#hiqlite-ha) (embedded Raft SQLite with HA). MySQL is off by default and requires building with `--features storage_mysql`. This document is kept for existing deployments not yet migrated.
+
 This document outlines the process of setting up and using `diesel_cli` with MySQL in Rust, and discusses potential areas for optimization.
 
 ## Using Diesel CLI with MySQL in Rust

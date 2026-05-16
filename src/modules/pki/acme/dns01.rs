@@ -19,8 +19,10 @@ use std::{net::SocketAddr, str::FromStr, time::Duration};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64, Engine as _};
 use hickory_resolver::{
-    config::{NameServerConfigGroup, ResolverConfig, ResolverOpts},
-    TokioAsyncResolver,
+    config::{ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts},
+    net::runtime::TokioRuntimeProvider,
+    proto::rr::RData,
+    TokioResolver,
 };
 use sha2::{Digest, Sha256};
 
@@ -80,40 +82,47 @@ async fn txt_lookup_async(qname: &str, resolvers: &[String]) -> Result<Vec<Strin
             Err(_) => (ResolverConfig::default(), ResolverOpts::default()),
         }
     } else {
-        let mut group = NameServerConfigGroup::new();
+        // Build a config with no domain / search list — the operator's pinned
+        // resolvers are the only ones we ask, so the resolver doesn't need any
+        // default suffixes.
+        let mut cfg = ResolverConfig::from_parts(None, Vec::new(), Vec::<NameServerConfig>::new());
         for r in resolvers {
             let sa = parse_resolver(r)
                 .ok_or_else(|| format!("dns: invalid resolver `{r}`"))?;
-            group.merge(NameServerConfigGroup::from_ips_clear(
-                &[sa.ip()],
-                sa.port(),
-                true,
-            ));
+            let mut udp = ConnectionConfig::udp();
+            udp.port = sa.port();
+            let mut tcp = ConnectionConfig::tcp();
+            tcp.port = sa.port();
+            cfg.add_name_server(NameServerConfig::new(sa.ip(), true, vec![udp, tcp]));
         }
-        (
-            ResolverConfig::from_parts(None, Vec::new(), group),
-            ResolverOpts::default(),
-        )
+        (cfg, ResolverOpts::default())
     };
     opts.timeout = Duration::from_secs(5);
     opts.attempts = 2;
 
-    let resolver = TokioAsyncResolver::tokio(config, opts);
+    let mut builder = TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
+    *builder.options_mut() = opts;
+    let resolver = builder
+        .build()
+        .map_err(|e| format!("dns: resolver build: {e}"))?;
     let lookup = resolver
         .txt_lookup(qname)
         .await
         .map_err(|e| format!("dns: txt lookup `{qname}`: {e}"))?;
     let mut out = Vec::new();
-    for record in lookup.iter() {
+    for record in lookup.answers() {
         // A TXT record can be split across multiple character
         // strings; concatenate them per RFC 1035 §3.3.14 before
         // matching.
-        let joined: String = record
-            .iter()
-            .filter_map(|seg| std::str::from_utf8(seg).ok())
-            .collect::<Vec<_>>()
-            .join("");
-        out.push(joined);
+        if let RData::TXT(txt) = &record.data {
+            let joined: String = txt
+                .txt_data
+                .iter()
+                .filter_map(|seg| std::str::from_utf8(seg).ok())
+                .collect::<Vec<_>>()
+                .join("");
+            out.push(joined);
+        }
     }
     Ok(out)
 }

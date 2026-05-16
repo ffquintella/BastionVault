@@ -355,7 +355,7 @@ pub enum RvError {
 
     /// Database Errors Begin
     ///
-    #[error("Database type is not support now. Please try postgressql or mysql again.")]
+    #[error("Database type is not supported. Only mysql is available (build with --features storage_mysql).")]
     ErrDatabaseTypeInvalid,
     #[cfg(feature = "storage_mysql")]
     #[error("Database connection pool ocurrs errors when creating， {:?}", .source)]

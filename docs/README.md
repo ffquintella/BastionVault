@@ -28,7 +28,7 @@ A Rust-based secrets management server compatible with HashiCorp Vault's API, wi
 ## Storage backends
 
 - [Overview](backend/database/overview.md)
-- [MySQL](backend/database/mysql/mysql.md)
+- [MySQL](backend/database/mysql/mysql.md) — opt-in legacy backend (`--features storage_mysql`)
 
 ---
 

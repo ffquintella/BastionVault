@@ -58,7 +58,7 @@ CARGO_TEST_HIQLITE=1 cargo test --test hiqlite_ha_fault_injection
 
 ## Architecture Overview
 
-- **Storage**: File, MySQL, Hiqlite (default, embedded Raft SQLite with HA)
+- **Storage**: Hiqlite (default, embedded Raft SQLite with HA), File, MySQL (opt-in legacy via `--features storage_mysql`)
 - **Crypto**: ChaCha20-Poly1305 barrier, ML-KEM-768 + ML-DSA-65 post-quantum
 - **Auth backends**: Token, UserPass, AppRole, Certificate, FIDO2/WebAuthn
 - **GUI**: Tauri v2 + React 19 + TypeScript + Tailwind CSS 4, embedded vault mode

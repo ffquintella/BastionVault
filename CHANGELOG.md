@@ -45,7 +45,13 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Security
+
+- **Dependency audit: cleared 7 of 11 `cargo audit` vulnerabilities** (`Cargo.toml`, `crates/bv-client/Cargo.toml`, `crates/bv-client/src/discovery.rs`, `src/modules/pki/acme/dns01.rs`). Dropped the redundant `r2d2-diesel 1.0.0` dep (diesel 2.x's built-in `r2d2` feature was already enabled), bumped `diesel 2.3.7 → 2.3.8` (RUSTSEC-2026-0136 COPY command injection + RUSTSEC-2026-0137 unaligned access), bumped `hickory-resolver 0.24 → 0.26` in both the host crate and `bv-client` (RUSTSEC-2026-0119 O(n²) name compression — required a refactor to the new `TokioResolver::builder_with_config` / `RData`-pattern-matching API in the ACME DNS-01 validator and the SRV cluster-discovery resolver), and refreshed `rustls-webpki 0.103.12 → 0.103.13` (RUSTSEC-2026-0104 CRL parse panic). Also bumped the IronRDP submodule to the latest `fix-deps` tip with upstream `master` merged in. The 4 residual advisories are upstream-blocked: `hickory-proto 0.25.2` × 2 (pulled via `sspi 0.20.1`, awaits a sspi release on hickory 0.26) and `rsa 0.9.10` / `0.10.0-rc.17` Marvin timing sidechannel (no fix in any RustCrypto release).
+
 ### Changed
+
+- **Docs: MySQL marked as legacy/opt-in; PostgreSQL claims removed** (`README.md`, `CLAUDE.md`, `docs/README.md`, `docs/quick-start.md`, `docs/design.md`, `docs/configuration.md`, `docs/req.md`, `docs/backend/database/mysql/mysql.md`) — Hiqlite is the default storage backend; MySQL is still supported but off by default (`--features storage_mysql`) and listed as legacy for existing deployments. References to a "PostgreSQL storage backend" / "SQLx backend (Postgres/SQLite)" — never actually shipped, the sqlx backend was removed earlier due to a dependency conflict — are now gone. Also fixed the stale `ErrDatabaseTypeInvalid` error string in `src/errors.rs` (was "Please try postgressql or mysql again.") and removed the unused `DatabaseName::Postgres` variant from `src/utils/db.rs`.
 
 - **`standard-user` policy is now per-user-scoped** (`src/modules/policy/policy_store.rs`) — read/list/update on `secret/*`, `secret/data/*`, `secret/metadata/*`, and `resources/*` now carry `scopes = ["owner", "shared"]`. Callers can still create new objects (the first-write carve-out stamps ownership) and still see what they author or have been explicitly shared, but cross-user visibility of unrelated KV secrets and resources is denied. The baseline is force-loaded on startup so existing vaults migrate without operator intervention; operators who customised `standard-user` should fork it under a new name before upgrading.
 

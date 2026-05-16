@@ -37,9 +37,9 @@ Part of the features provided by BastionVault are as follows:
   * certificate authentication
   * path-based ACL policies
 * Secure Storage
+  * Hiqlite backend (default — embedded Raft SQLite with HA)
   * encrypted file backend
-  * MySQL backend
-  * SQLx backend (Postgres/SQLite)
+  * MySQL backend (opt-in legacy, `--features storage_mysql`)
 * Configuration
   * HCL compatible
 * Key Management

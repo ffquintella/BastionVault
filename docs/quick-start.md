@@ -152,6 +152,6 @@ The examples above are for demonstration only. For production deployments, consi
 
 * **TLS**: Enable TLS with proper certificates instead of `tls_disable = true`.
 * **Authentication methods**: Configure AppRole, userpass, or certificate authentication instead of relying on the root token.
-* **Storage backends**: Use MySQL or PostgreSQL for durable production storage instead of the local file backend.
+* **Storage backends**: Use the default Hiqlite backend (embedded Raft SQLite with HA) for durable production storage instead of the local file backend. MySQL is also available as an opt-in legacy backend (`--features storage_mysql`).
 * **Shamir's Secret Sharing**: Use multiple key shares (`secret_shares > 1`) so that no single person can unseal the vault alone.
 * **Compatibility with HashiCorp Vault**: BastionVault is API-compatible with HashiCorp Vault, so most Vault documentation and tooling applies.

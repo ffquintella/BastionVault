@@ -23,7 +23,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::proto::rr::RData;
+use hickory_resolver::TokioResolver;
 
 use crate::error::ClientError;
 
@@ -103,7 +105,7 @@ pub trait SrvLookup: Send + Sync {
 
 /// Resolver backed by the system DNS configuration.
 pub struct SystemResolver {
-    inner: Arc<TokioAsyncResolver>,
+    inner: Arc<TokioResolver>,
 }
 
 impl SystemResolver {
@@ -112,10 +114,14 @@ impl SystemResolver {
     /// in-process default if the system file is unreadable rather
     /// than failing the connection outright.
     pub fn new() -> Self {
-        let resolver = match hickory_resolver::system_conf::read_system_conf() {
-            Ok((cfg, opts)) => TokioAsyncResolver::tokio(cfg, opts),
-            Err(_) => TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default()),
-        };
+        let (cfg, opts) = hickory_resolver::system_conf::read_system_conf()
+            .unwrap_or_else(|_| (ResolverConfig::default(), ResolverOpts::default()));
+        let mut builder =
+            TokioResolver::builder_with_config(cfg, TokioRuntimeProvider::default());
+        *builder.options_mut() = opts;
+        let resolver = builder
+            .build()
+            .expect("TokioRuntimeProvider build is infallible");
         Self { inner: Arc::new(resolver) }
     }
 }
@@ -131,12 +137,16 @@ impl SrvLookup for SystemResolver {
     async fn lookup_srv(&self, label: &str) -> Result<Vec<SrvRecord>, ClientError> {
         match self.inner.srv_lookup(label).await {
             Ok(resp) => Ok(resp
+                .answers()
                 .iter()
-                .map(|r| SrvRecord {
-                    target: r.target().to_utf8(),
-                    port: r.port(),
-                    priority: r.priority(),
-                    weight: r.weight(),
+                .filter_map(|rec| match &rec.data {
+                    RData::SRV(srv) => Some(SrvRecord {
+                        target: srv.target.to_utf8(),
+                        port: srv.port,
+                        priority: srv.priority,
+                        weight: srv.weight,
+                    }),
+                    _ => None,
                 })
                 .collect()),
             // Treat resolver errors as "no SRV" — caller falls back
