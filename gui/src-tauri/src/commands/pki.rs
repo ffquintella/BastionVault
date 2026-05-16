@@ -67,17 +67,32 @@ pub struct PkiMountInfo {
 }
 
 /// List every mount of `type = "pki"` so the GUI can show a mount
-/// picker. Calls `sys/mounts` and filters; cheap enough to do per-page
-/// load.
+/// picker. Uses `sys/internal/ui/mounts`, which returns the mount
+/// table filtered to entries the caller has any ACL access on —
+/// so a `pki-user` token (no `sys/mounts` read) still gets back
+/// the PKI mounts it is allowed to use. Response shape is
+/// `{ "secret": { "<path>": { "type": "pki", ... }, ... }, "auth": {...} }`,
+/// so we drill into `secret` before filtering on `type == "pki"`.
 #[tauri::command]
 pub async fn pki_list_mounts(state: State<'_, AppState>) -> CmdResult<Vec<PkiMountInfo>> {
-    let resp = make_request(&state, Operation::Read, "sys/mounts".into(), None).await?;
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        "sys/internal/ui/mounts".into(),
+        None,
+    )
+    .await?;
     let map = data_to_map(resp);
     let mut out = Vec::new();
-    for (path, info) in map.iter() {
-        if let Some(t) = info.get("type").and_then(|v| v.as_str()) {
-            if t == "pki" {
-                out.push(PkiMountInfo { path: path.clone(), mount_type: t.to_string() });
+    if let Some(Value::Object(secret)) = map.get("secret") {
+        for (path, info) in secret.iter() {
+            if let Some(t) = info.get("type").and_then(|v| v.as_str()) {
+                if t == "pki" {
+                    out.push(PkiMountInfo {
+                        path: path.clone(),
+                        mount_type: t.to_string(),
+                    });
+                }
             }
         }
     }

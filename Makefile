@@ -128,8 +128,8 @@ run-dev-gui-hiqlite: gui-deps prune-stale ## Run the desktop GUI in dev mode, em
 # the Connect page. Local Vault profiles that depend on those
 # features won't work in this build; that's the trade-off for the
 # faster compile.
-run-dev-gui-only: gui-deps prune-stale ## Run the desktop GUI in dev mode with no backend storage features (lightest compile)
-	cd gui && CARGO_BUILD_JOBS=6 $(GUI_TAURI) dev -- --no-default-features
+run-dev-gui-only: gui-deps prune-stale ## Run the desktop GUI in dev mode with no backend storage features (lightest compile) + MCP bridge
+	cd gui && CARGO_BUILD_JOBS=6 BASTION_TAURI_MCP=1 $(GUI_TAURI) dev -- --no-default-features --features mcp_local_dev
 
 gui-build: gui-deps prune-stale ## Build the desktop GUI for production
 	cd gui && $(GUI_TAURI) build -- --features storage_hiqlite,ssh_pqc

@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
 import { ConnectPage } from "./routes/ConnectPage";
 import { InitPage } from "./routes/InitPage";
@@ -34,6 +35,12 @@ import { ServerInfoModal } from "./components/ServerInfoModal";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const bootstrapping = useAuthStore((s) => s.bootstrapping);
+  // Hold the redirect while the boot-time `bootstrapAuth` call is in
+  // flight. Otherwise a webview reload on a protected route flickers
+  // through `/login` on its way back to itself — and worse, on slow
+  // hosts the route guard wins the race and strands the user there.
+  if (bootstrapping) return null;
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
   }
@@ -41,6 +48,15 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
+  // Rehydrate auth from the Rust-side `AppState` on every mount. The
+  // Rust client retains the access token across webview reloads — so
+  // a tool-driven re-paint (e.g. MCP screenshot), Vite HMR, or any
+  // other `location.reload()` no longer logs the operator out. See
+  // `bootstrapAuth` in `stores/authStore.ts` for the contract.
+  const bootstrapAuth = useAuthStore((s) => s.bootstrapAuth);
+  useEffect(() => {
+    void bootstrapAuth();
+  }, [bootstrapAuth]);
   return (
     <ErrorBoundary>
       <ToastProvider>

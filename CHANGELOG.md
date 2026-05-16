@@ -45,6 +45,14 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Changed
+
+- **`standard-user` policy is now per-user-scoped** (`src/modules/policy/policy_store.rs`) — read/list/update on `secret/*`, `secret/data/*`, `secret/metadata/*`, and `resources/*` now carry `scopes = ["owner", "shared"]`. Callers can still create new objects (the first-write carve-out stamps ownership) and still see what they author or have been explicitly shared, but cross-user visibility of unrelated KV secrets and resources is denied. The baseline is force-loaded on startup so existing vaults migrate without operator intervention; operators who customised `standard-user` should fork it under a new name before upgrading.
+
+### Fixed
+
+- **PKI mount list no longer 403s for `pki-user`** (`gui/src-tauri/src/commands/pki.rs`) — `pki_list_mounts` switched from `sys/mounts` (admin-only) to `sys/internal/ui/mounts` (auth-filtered), so the GUI shows the operator's PKI mounts to any token with `pki/*` capabilities. Fixes the duplicate "HTTP 403: Permission denied" toast that appeared on the PKI page for users with only `pki-user`.
+
 ## [0.5.21] - 2026-05-16
 
 ### Added

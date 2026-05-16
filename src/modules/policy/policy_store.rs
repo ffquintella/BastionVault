@@ -213,6 +213,16 @@ path "sys/wrapping/unwrap" {
 /// operators who need per-user isolation should either adopt a path
 /// convention per user and tighten this policy, or group users via the
 /// identity backend so policy assignment is narrower per group.
+///
+/// Per-user-scoping: read/list capabilities on the shared KV and
+/// resource mounts are gated by `scopes = ["owner", "shared"]` so a
+/// caller only sees objects they authored or that have been explicitly
+/// shared with them (directly, via an identity group when the policy
+/// also opts in via `metadata.group_shared_resources = "true"`, or via
+/// an asset group whose share targets the caller). The author of an
+/// object is stamped on every write through `OwnerStore::record_write`,
+/// so newly-created resources remain visible to their creator while
+/// the same user does not see other users' objects.
 static STANDARD_USER_POLICY_NAME: &str = "standard-user";
 static STANDARD_USER_POLICY: &str = r#"
 # --- Self service (mirrors the relevant parts of the default policy) ---
@@ -233,28 +243,35 @@ path "sys/internal/ui/resultant-acl" {
     capabilities = ["read"]
 }
 
-# --- KV secrets ---
-
-# KV-v1: read and list secrets under the default mount.
+# --- KV secrets (owner/shared-scoped) ---
+#
+# The `owner` scope carries a first-write carve-out: a Write against
+# an unowned target is allowed for any caller with this scope, and
+# the write stamps ownership. Subsequent reads/lists/updates only
+# resolve through the owner record (the caller authored it) or
+# through an active SecretShare. The same pattern applies to
+# resources/* below.
 path "secret/*" {
-    capabilities = ["read", "list"]
+    capabilities = ["create", "read", "list", "update"]
+    scopes       = ["owner", "shared"]
 }
-
-# KV-v2: data + metadata read/list paths.
 path "secret/data/*" {
-    capabilities = ["read", "list"]
+    capabilities = ["create", "read", "list", "update"]
+    scopes       = ["owner", "shared"]
 }
 path "secret/metadata/*" {
     capabilities = ["read", "list"]
+    scopes       = ["owner", "shared"]
 }
 
-# --- Resources ---
-
-# Create new resources and read/list/update existing ones. Delete is
-# intentionally not granted -- destructive operations on the shared
-# resource inventory should require a privileged operator policy.
+# --- Resources (owner/shared-scoped) ---
+#
+# Delete is intentionally not granted -- destructive operations on
+# the shared resource inventory should require a privileged operator
+# policy.
 path "resources/*" {
-    capabilities = ["create", "read", "update", "list"]
+    capabilities = ["create", "read", "list", "update"]
+    scopes       = ["owner", "shared"]
 }
 
 # --- Per-user workspace ---
@@ -967,7 +984,15 @@ impl PolicyStore {
         self.load_acl_policy(ADMINISTRATOR_POLICY_NAME, ADMINISTRATOR_POLICY).await?;
         self.load_acl_policy(RESPONSE_WRAPPING_POLICY_NAME, RESPONSE_WRAPPING_POLICY).await?;
         self.load_acl_policy(CONTROL_GROUP_POLICY_NAME, CONTROL_GROUP_POLICY).await?;
-        self.load_acl_policy(STANDARD_USER_POLICY_NAME, STANDARD_USER_POLICY).await?;
+        // `standard-user` is force-loaded so the per-user-scoping
+        // baseline (added in 0.5.22) propagates to existing vaults
+        // that were seeded under the older broad-grant version. The
+        // change is security-positive — callers can still create
+        // new resources/secrets and read what they author or have
+        // shared with them, but cross-user listing of unrelated
+        // objects is now denied. Operators who deliberately
+        // customised this policy should fork it under a new name.
+        self.force_load_acl_policy(STANDARD_USER_POLICY_NAME, STANDARD_USER_POLICY).await?;
         // Ownership-aware baselines. See `features/per-user-scoping.md`.
         self.load_acl_policy(STANDARD_USER_READONLY_POLICY_NAME, STANDARD_USER_READONLY_POLICY)
             .await?;

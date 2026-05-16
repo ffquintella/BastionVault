@@ -15,6 +15,9 @@
   - [API reference](api.md)
   - [Cluster + client discovery](cluster-client-discovery.md)
 
+- Desktop GUI
+  - [Overview & tour](gui.md)
+
 - Architecture
   - [Design](design.md)
   - [Security structure](security-structure.md)
