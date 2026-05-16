@@ -93,6 +93,15 @@ path "identity/entity/name/{{identity.entity.name}}" {
   capabilities = ["read"]
 }
 
+# Allow a token to list shares granted to it (direct entity shares plus
+# group shares when the assigned policy carries the
+# `group_shared_resources = "true"` metadata tag). This is a
+# caller-introspecting endpoint -- it only returns the caller's own
+# shares -- so it is safe to grant to every authenticated token.
+path "identity/sharing/for-me" {
+  capabilities = ["read", "list"]
+}
+
 
 # Allow a token to look up its resultant ACL from all policies. This is useful
 # for UIs. It is an internal path because the format may change at any time
@@ -929,9 +938,32 @@ impl PolicyStore {
         self.set_policy_internal(Arc::new(policy)).await
     }
 
+    /// Force-load an ACL policy, overwriting any existing definition.
+    ///
+    /// Used for server-managed baselines like `default` whose bundled
+    /// text is the source of truth: when the binary ships a new
+    /// version, the in-store copy must be updated even if a previous
+    /// instance already seeded it. Operators who need to customise
+    /// these baselines should attach an additional policy rather than
+    /// editing the bundled one in place.
+    pub async fn force_load_acl_policy(&self, policy_name: &str, policy_text: &str) -> Result<(), RvError> {
+        let name = self.sanitize_name(policy_name);
+        let existing = self.get_policy(&name, PolicyType::Acl).await?;
+        if matches!(&existing, Some(p) if p.raw == policy_text) {
+            return Ok(());
+        }
+        let mut policy = Policy::from_str(policy_text)?;
+        policy.name.clone_from(&name);
+        policy.policy_type = PolicyType::Acl;
+        self.set_policy_internal(Arc::new(policy)).await
+    }
+
     /// Load default ACL policies into the policy store.
     pub async fn load_default_acl_policy(&self) -> Result<(), RvError> {
-        self.load_acl_policy(DEFAULT_POLICY_NAME, DEFAULT_POLICY).await?;
+        // `default` is server-managed: re-seeded on every startup so
+        // upgrades that add new self-service grants take effect on
+        // existing vaults without operator intervention.
+        self.force_load_acl_policy(DEFAULT_POLICY_NAME, DEFAULT_POLICY).await?;
         self.load_acl_policy(ADMINISTRATOR_POLICY_NAME, ADMINISTRATOR_POLICY).await?;
         self.load_acl_policy(RESPONSE_WRAPPING_POLICY_NAME, RESPONSE_WRAPPING_POLICY).await?;
         self.load_acl_policy(CONTROL_GROUP_POLICY_NAME, CONTROL_GROUP_POLICY).await?;

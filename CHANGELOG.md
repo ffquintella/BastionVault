@@ -57,6 +57,10 @@ EXAMPLE ENTRY:
 
 ### Fixed
 
+- **"Shared with me" returned 403 for normal users** (`src/modules/policy/policy_store.rs`) — added a self-service grant for `identity/sharing/for-me` (read+list) to the bundled `default` policy so every authenticated token can list its own shares. The handler is caller-introspecting (returns only the calling token's shares), so this grant is safe by construction. Also introduced `PolicyStore::force_load_acl_policy` and switched `default` to re-seed on every startup, so existing vaults pick up new self-service grants without operator intervention (other baselines like `standard-user` remain operator-editable).
+
+- **`make help` and `PLUGINS_HOST_TARGET` detection on Windows + git-bash** (`Makefile`) — escaped `$matches`/`$_`/`$null` in the PowerShell command lines so bash (MINGW64) doesn't strip them before PowerShell evaluates the command. Running `make` from a Git Bash shell on Windows now produces the help table without PowerShell parser errors.
+
 - **"Shared with me" empty for tokens without `entity_id`** (`src/modules/identity/mod.rs`, `src/modules/credential/userpass/path_login.rs`) — `identity/entity/self` now falls back to an alias lookup (`mount_path` + `username`/`role_name`, both of which the token *does* carry) and lazily materializes the entity via `get_or_create_entity` when the metadata-cached `entity_id` is empty. Tokens issued before the login path provisioned `entity_id` no longer get stuck on the "No entity_id on this token. Re-login to provision one." empty state. The userpass login's `resolve_entity_id` also now logs at WARN whenever it can't provision (identity module absent / store uninitialised / storage error) so operators have a breadcrumb when a fresh token still lacks `entity_id`.
 
 ## [0.5.19] - 2026-05-14
