@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.5.21] - 2026-05-16
+
 ### Added
 
 - **Server Info menu + endpoint** (`src/server_info.rs`, `src/http/sys.rs`, `src/api/sys.rs`, `gui/src-tauri/src/lib.rs`, `gui/src-tauri/src/commands/system.rs`, `gui/src/components/ServerInfoModal.tsx`, `docs/docs/api.md`, `docs/docs/administration.md`) — new `GET /v1/sys/info` endpoint returning `{ version, started_at, uptime_seconds, initialized, sealed, storage_type }`, backed by a process-wide `OnceLock<DateTime<Utc>>` stamped at startup. The Tauri window menu gained a **Server → Server Info...** entry that emits `open-server-info` to the focused webview; a new global `ServerInfoModal` listens for it, calls the `get_server_info` command (embedded mode reads the in-process `Core`; remote mode proxies `/sys/info`), and renders the connection kind, endpoint, version, sealed/initialized badges, storage backend, start time, and human-formatted uptime.
