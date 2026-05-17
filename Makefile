@@ -282,16 +282,22 @@ container-image: ## Build the server OCI image (auto-detects podman/docker, over
 	@if [ "$(CONTAINER_TOOL)" = "podman" ]; then \
 		if ! podman info >/dev/null 2>&1; then \
 			if podman machine list --format '{{.Name}}' 2>/dev/null | grep -q .; then \
-				running=$$(podman machine list --format '{{.Running}}' 2>/dev/null | grep -c true || true); \
-				if [ "$$running" -eq 0 ]; then \
-					echo "==> Podman machine not running, starting it..."; \
-					podman machine start || { echo "ERROR: failed to start podman machine"; exit 1; }; \
+				echo "==> Podman daemon unreachable, attempting machine start..."; \
+				start_out=$$(podman machine start 2>&1 || true); \
+				if [ -n "$$start_out" ] && ! echo "$$start_out" | grep -qiE 'already running|machine .* is running'; then \
+					echo "$$start_out"; \
 				fi; \
 				for i in 1 2 3 4 5 6 7 8 9 10; do \
 					podman info >/dev/null 2>&1 && break; \
 					sleep 1; \
 				done; \
-				podman info >/dev/null 2>&1 || { echo "ERROR: podman machine started but daemon not responding"; exit 1; }; \
+				podman info >/dev/null 2>&1 || { \
+					echo "ERROR: podman daemon still unreachable after machine start."; \
+					echo "       Output of last 'podman machine start':"; \
+					echo "$$start_out" | sed 's/^/         /'; \
+					echo "       Try: 'podman machine stop && podman machine start' manually."; \
+					exit 1; \
+				}; \
 			else \
 				echo "ERROR: podman is not running and no podman machine is configured."; \
 				echo "       Run 'podman machine init' first, then retry."; \
