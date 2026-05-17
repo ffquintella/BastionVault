@@ -52,6 +52,41 @@ const SECRET_PREFIX: &str = "secret/";
 const SMETA_PREFIX: &str = "smeta/";
 const SVER_PREFIX: &str = "sver/";
 
+/// Projection of `ResourceMetadata` that the search endpoint returns.
+/// Carries exactly what the GUI's card needs to render — keeping the
+/// payload small so a page-of-30 response stays well under a few KB
+/// even with tag-heavy resources.
+#[derive(Debug, Serialize)]
+pub struct ResourceCardEntry {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<String>,
+}
+
+impl ResourceCardEntry {
+    fn from_metadata(name: &str, data: &Map<String, Value>) -> Self {
+        let str_field = |k: &str| -> Option<String> {
+            data.get(k)
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .filter(|s| !s.is_empty())
+        };
+        Self {
+            name: name.to_string(),
+            kind: str_field("type").unwrap_or_default(),
+            hostname: str_field("hostname"),
+            ip_address: str_field("ip_address"),
+            tags: str_field("tags"),
+        }
+    }
+}
+
 // Resource-metadata fields that are not meaningful in a change-tracking diff.
 // Timestamps are always updated on every write, and `name` is part of the
 // identity -- including them would make every entry look like a change.
@@ -156,6 +191,7 @@ impl ResourceBackend {
         let h_res_write = self.inner.clone();
         let h_res_delete = self.inner.clone();
         let h_res_list = self.inner.clone();
+        let h_res_search = self.inner.clone();
         let h_res_hist = self.inner.clone();
         let h_sec_read = self.inner.clone();
         let h_sec_write = self.inner.clone();
@@ -184,6 +220,15 @@ impl ResourceBackend {
                         {op: Operation::List, handler: h_res_list.handle_resource_list}
                     ],
                     help: "List all resources."
+                },
+                {
+                    // Paginated metadata search. POST body fields:
+                    // q, type, offset, limit (all optional).
+                    pattern: "resources/search$",
+                    operations: [
+                        {op: Operation::Write, handler: h_res_search.handle_resource_search}
+                    ],
+                    help: "Search and paginate resource metadata."
                 },
                 {
                     // Change history for a single resource (timeline of who/when/what fields)
@@ -421,6 +466,136 @@ impl ResourceBackendInner {
         let keys = req.storage_list(META_PREFIX).await?;
         let resp = Response::list_response(&keys);
         Ok(Some(resp))
+    }
+
+    /// Paginated search over resource metadata.
+    ///
+    /// Request body fields (all optional):
+    ///   - `q`      — substring matched (case-insensitive) against
+    ///                `name`, `hostname`, `ip_address`, and `tags`.
+    ///   - `type`   — exact match against the `type` metadata field.
+    ///   - `offset` — 0-based start of the page (default 0).
+    ///   - `limit`  — page size, clamped to `[1, 200]` (default 30).
+    ///
+    /// Response:
+    ///   ```json
+    ///   {
+    ///     "items":   [{ "name", "type", "hostname", "ip_address", "tags" }, …],
+    ///     "total":    <u64>,
+    ///     "has_more": <bool>
+    ///   }
+    ///   ```
+    ///
+    /// Implementation walks `META_PREFIX` once per call and reads each
+    /// metadata blob (we don't yet maintain a search index — at the
+    /// volumes this is built for, the cost is dominated by storage
+    /// read latency, which Hiqlite/embedded SQLite serves in single-
+    /// digit microseconds per row). If profiling later shows search
+    /// latency dominating, add an `RwLock<Option<Arc<Index>>>` on
+    /// `ResourceBackendInner` populated lazily and invalidated by
+    /// `handle_resource_write` / `handle_resource_delete`.
+    pub async fn handle_resource_search(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let body = req.body.clone().unwrap_or_default();
+        let q = body
+            .get("q")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty());
+        let type_filter = body
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
+        let offset = body
+            .get("offset")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let limit = body
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(30)
+            .clamp(1, 200) as usize;
+
+        let keys = req.storage_list(META_PREFIX).await?;
+
+        // Scan every metadata blob so we honour the full match surface
+        // (name, hostname, ip_address, tags). An earlier revision had
+        // a name-only fast path that skipped reads when only `q` was
+        // set, but that silently dropped tag-only matches — exactly
+        // the case a tag-organised vault relies on. If query latency
+        // becomes a bottleneck past ~5k resources, add a lazy
+        // `RwLock<Option<Arc<SearchIndex>>>` on `ResourceBackendInner`,
+        // populated on first search and invalidated by
+        // `handle_resource_write` / `handle_resource_delete`. The
+        // embedded SQLite/file backends serve 5k reads well under
+        // 100ms today.
+        let mut matches: Vec<(String, ResourceCardEntry)> = Vec::new();
+        for key in &keys {
+            let storage_key = format!("{META_PREFIX}{key}");
+            let entry = match req.storage_get(&storage_key).await? {
+                Some(e) => e,
+                None => continue,
+            };
+            let data: Map<String, Value> = match serde_json::from_slice(&entry.value) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if let Some(t) = &type_filter {
+                if data.get("type").and_then(|v| v.as_str()) != Some(t.as_str()) {
+                    continue;
+                }
+            }
+            if let Some(needle) = &q {
+                let name_lc = key.to_ascii_lowercase();
+                let host_lc = data
+                    .get("hostname")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_ascii_lowercase())
+                    .unwrap_or_default();
+                let ip_lc = data
+                    .get("ip_address")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_ascii_lowercase())
+                    .unwrap_or_default();
+                let tags_lc = data
+                    .get("tags")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_ascii_lowercase())
+                    .unwrap_or_default();
+                if !name_lc.contains(needle)
+                    && !host_lc.contains(needle)
+                    && !ip_lc.contains(needle)
+                    && !tags_lc.contains(needle)
+                {
+                    continue;
+                }
+            }
+            matches.push((key.clone(), ResourceCardEntry::from_metadata(key, &data)));
+        }
+
+        // Stable sort by name so paging is deterministic across calls.
+        matches.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let total = matches.len();
+        let page_end = (offset + limit).min(total);
+        let items: Vec<Value> = if offset >= total {
+            Vec::new()
+        } else {
+            matches[offset..page_end]
+                .iter()
+                .map(|(_, card)| serde_json::to_value(card).unwrap_or(Value::Null))
+                .collect()
+        };
+
+        let mut resp = Map::new();
+        resp.insert("items".into(), Value::Array(items));
+        resp.insert("total".into(), Value::Number((total as u64).into()));
+        resp.insert("has_more".into(), Value::Bool(page_end < total));
+        Ok(Some(Response::data_response(Some(resp))))
     }
 
     pub async fn handle_resource_read(

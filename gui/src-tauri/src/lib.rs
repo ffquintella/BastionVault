@@ -312,6 +312,7 @@ pub fn run() {
             commands::resources::resource_types_read,
             commands::resources::resource_types_write,
             commands::resources::list_resources,
+            commands::resources::search_resources,
             commands::resources::read_resource,
             commands::resources::write_resource,
             commands::resources::delete_resource,

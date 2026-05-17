@@ -58,6 +58,79 @@ pub async fn resource_types_write(state: State<'_, AppState>, types: Value) -> C
 // ── Resource CRUD ──────────────────────────────────────────────────
 // Uses the dedicated resource engine at resources/
 
+// ── Paginated metadata search ─────────────────────────────────────
+//
+// Routes through the resource backend's `resources/search` POST
+// handler, which scans META_PREFIX and returns a page of card-shaped
+// metadata. Used by the Resources page to avoid the
+// list-then-fan-out-reads pattern that doesn't scale past a few
+// hundred resources.
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceSearchInput {
+    #[serde(default)]
+    pub q: Option<String>,
+    #[serde(default, rename = "type")]
+    pub type_filter: Option<String>,
+    #[serde(default)]
+    pub offset: Option<u64>,
+    #[serde(default)]
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResourceSearchResult {
+    pub items: Vec<Value>,
+    pub total: u64,
+    pub has_more: bool,
+}
+
+#[tauri::command]
+pub async fn search_resources(
+    state: State<'_, AppState>,
+    input: ResourceSearchInput,
+) -> CmdResult<ResourceSearchResult> {
+    let path = format!("{RESOURCE_MOUNT}resources/search");
+    let mut body = Map::new();
+    if let Some(q) = input.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        body.insert("q".into(), Value::String(q.to_string()));
+    }
+    if let Some(t) = input.type_filter.as_deref().filter(|s| !s.is_empty()) {
+        body.insert("type".into(), Value::String(t.to_string()));
+    }
+    body.insert(
+        "offset".into(),
+        Value::Number(input.offset.unwrap_or(0).into()),
+    );
+    body.insert(
+        "limit".into(),
+        Value::Number(input.limit.unwrap_or(30).into()),
+    );
+
+    let resp = make_request(&state, Operation::Write, path, Some(body)).await?;
+    let data = resp
+        .and_then(|r| r.data)
+        .ok_or_else(|| CommandError::from("search returned no data"))?;
+
+    let items = data
+        .get("items")
+        .cloned()
+        .and_then(|v| match v {
+            Value::Array(xs) => Some(xs),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let total = data.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+    let has_more = data.get("has_more").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    Ok(ResourceSearchResult {
+        items,
+        total,
+        has_more,
+    })
+}
+
 #[tauri::command]
 pub async fn list_resources(
     state: State<'_, AppState>,

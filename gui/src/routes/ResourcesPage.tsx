@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { Link } from "react-router-dom";
 import { Layout } from "../components/Layout";
 import {
@@ -62,10 +62,109 @@ function parseTags(tags: unknown): string[] {
   return [];
 }
 
+// Persisted MRU list of resource names the operator has opened from
+// this page. Capped to RECENT_STORE_CAP; the surface shows the top
+// RECENT_DISPLAY_CAP that still exist in the loaded set.
+const RECENT_LS_KEY = "bv:resources:recent";
+const RECENT_STORE_CAP = 24;
+const RECENT_DISPLAY_CAP = 6;
+const PAGE_SIZE = 30;
+
+function loadRecent(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENT_LS_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr.filter((x): x is string => typeof x === "string").slice(0, RECENT_STORE_CAP);
+  } catch {
+    return [];
+  }
+}
+
+function ResourceCard({
+  meta,
+  typeConfig,
+  assetGroups,
+  onSelect,
+  onPickGroup,
+}: {
+  meta: api.ResourceCardEntry;
+  typeConfig: ResourceTypeConfig;
+  assetGroups: string[];
+  onSelect: (name: string) => void;
+  onPickGroup: (group: string) => void;
+}) {
+  // The card-shaped projection from the search endpoint omits
+  // `os_type` and `connection_profiles`, so the inline quick-connect
+  // button isn't available in the list view anymore — the operator
+  // clicks into the resource and uses the Connection tab's launcher.
+  // Tradeoff for being able to render thousands of resources without
+  // shipping full metadata for each.
+  const td = getTypeDef(typeConfig, meta.type);
+  return (
+    <button
+      onClick={() => onSelect(meta.name)}
+      className="p-4 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-xl text-left hover:border-[var(--color-primary)] transition-colors"
+    >
+      <div className="flex items-center gap-2 mb-2">
+        <span className="font-medium truncate flex-1 min-w-0">{meta.name}</span>
+        <ResourceTypeIcon typeDef={td} />
+      </div>
+      {meta.hostname ? (
+        <p className="text-xs text-[var(--color-text-muted)] truncate">
+          {meta.hostname}
+          {meta.ip_address ? ` (${meta.ip_address})` : ""}
+        </p>
+      ) : null}
+      {assetGroups.length > 0 && (
+        <div className="flex flex-wrap gap-1 mt-2">
+          {assetGroups.map((g) => (
+            <span
+              key={g}
+              onClick={(ev) => {
+                ev.stopPropagation();
+                onPickGroup(g);
+              }}
+              className="px-1.5 py-0.5 bg-[var(--color-primary)] text-white rounded text-[10px] cursor-pointer hover:opacity-80"
+              title={`Filter by group "${g}"`}
+            >
+              {g}
+            </span>
+          ))}
+        </div>
+      )}
+      {parseTags(meta.tags).length > 0 && (
+        <div className="flex flex-wrap gap-1 mt-2">
+          {parseTags(meta.tags).slice(0, 4).map((t) => (
+            <span
+              key={t}
+              className="px-1.5 py-0.5 bg-[var(--color-bg)] rounded text-[10px] text-[var(--color-text-muted)]"
+            >
+              {t}
+            </span>
+          ))}
+        </div>
+      )}
+    </button>
+  );
+}
+
+function pushRecent(name: string): string[] {
+  const next = [name, ...loadRecent().filter((n) => n !== name)].slice(0, RECENT_STORE_CAP);
+  try {
+    localStorage.setItem(RECENT_LS_KEY, JSON.stringify(next));
+  } catch {
+    // localStorage may be unavailable (private mode, quota); ignore —
+    // the MRU is a nice-to-have, not load-bearing.
+  }
+  return next;
+}
+
 export function ResourcesPage() {
   const { toast } = useToast();
-  const [, setResources] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [resourceInfo, setResourceInfo] = useState<ResourceMetadata | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -76,14 +175,32 @@ export function ResourcesPage() {
   const [filterType, setFilterType] = useState("");
   const [filterGroup, setFilterGroup] = useState("");
   const [search, setSearch] = useState("");
-  const [allMeta, setAllMeta] = useState<ResourceMetadata[]>([]);
+  // Debounced echo of `search` so we only fire a server query when the
+  // operator pauses typing — typing fast through "production" would
+  // otherwise burn ~10 round trips.
+  const [searchDebounced, setSearchDebounced] = useState("");
+  const [cards, setCards] = useState<api.ResourceCardEntry[]>([]);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
   const [typeConfig, setTypeConfig] = useState<ResourceTypeConfig>(DEFAULT_RESOURCE_TYPES);
+  const [recent, setRecent] = useState<string[]>(() => loadRecent());
+  const [recentCards, setRecentCards] = useState<api.ResourceCardEntry[]>([]);
   const assetGroups = useAssetGroupMap();
+
+  // Each fetch run is tagged with a token. When the user changes a
+  // filter while a fetch is in flight, we bump the token; the stale
+  // response is then dropped on arrival instead of clobbering the
+  // newer fetch's results.
+  const fetchTokenRef = useRef(0);
 
   useEffect(() => {
     loadTypeConfig();
-    loadResources();
   }, []);
+
+  useEffect(() => {
+    const t = setTimeout(() => setSearchDebounced(search), 250);
+    return () => clearTimeout(t);
+  }, [search]);
 
   async function loadTypeConfig() {
     try {
@@ -94,22 +211,134 @@ export function ResourcesPage() {
     }
   }
 
-  async function loadResources() {
-    setLoading(true);
-    try {
-      const result = await api.listResources();
-      setResources(result.resources);
-      const metas = await Promise.all(
-        result.resources.map((name) => api.readResource(name).catch(() => null)),
-      );
-      setAllMeta(metas.filter((m): m is ResourceMetadata => m !== null));
-    } catch {
-      setResources([]);
-      setAllMeta([]);
-    } finally {
-      setLoading(false);
+  // Inverse asset-group lookup: group name -> list of member names.
+  // Built from the byResource map (which is fetched once independently
+  // of the resources page). Used both for the group-filter chip count
+  // and as the source of truth when the operator picks a group filter
+  // (we paginate over its members directly, since the server-side
+  // search endpoint doesn't know about resource-groups).
+  const groupMembers = useMemo(() => {
+    const out: Record<string, string[]> = {};
+    for (const [name, gs] of Object.entries(assetGroups.map.byResource)) {
+      for (const g of gs) {
+        (out[g] ||= []).push(name);
+      }
     }
-  }
+    for (const g of Object.keys(out)) out[g].sort();
+    return out;
+  }, [assetGroups.map.byResource]);
+
+  // Fetch one page. `reset` true means "filter changed — replace the
+  // list"; false means "scrolled to bottom — append".
+  const fetchPage = useCallback(
+    async (reset: boolean) => {
+      const token = ++fetchTokenRef.current;
+      if (reset) {
+        setLoading(true);
+      } else {
+        setLoadingMore(true);
+      }
+      try {
+        const offset = reset ? 0 : cards.length;
+        if (filterGroup) {
+          // Group-filter path: server-side search doesn't model groups,
+          // so we enumerate the group's members (small set, usually
+          // dozens) and batch-read their metadata for just the visible
+          // window.
+          const members = groupMembers[filterGroup] ?? [];
+          const window = members.slice(offset, offset + PAGE_SIZE);
+          const metas = await Promise.all(
+            window.map((n) =>
+              api.readResource(n).catch(() => null),
+            ),
+          );
+          if (fetchTokenRef.current !== token) return;
+          const items: api.ResourceCardEntry[] = [];
+          window.forEach((name, i) => {
+            const m = metas[i];
+            if (!m) return;
+            items.push({
+              name,
+              type: String(m.type || ""),
+              hostname: m.hostname ? String(m.hostname) : undefined,
+              ip_address: m.ip_address ? String(m.ip_address) : undefined,
+              tags: m.tags ? String(m.tags) : undefined,
+            });
+          });
+          setCards(reset ? items : (prev) => [...prev, ...items]);
+          setTotal(members.length);
+          setHasMore(offset + PAGE_SIZE < members.length);
+        } else {
+          const res = await api.searchResources({
+            q: searchDebounced || undefined,
+            type: filterType || undefined,
+            offset,
+            limit: PAGE_SIZE,
+          });
+          if (fetchTokenRef.current !== token) return;
+          setCards(reset ? res.items : (prev) => [...prev, ...res.items]);
+          setTotal(res.total);
+          setHasMore(res.has_more);
+        }
+      } catch {
+        if (fetchTokenRef.current !== token) return;
+        if (reset) {
+          setCards([]);
+          setTotal(0);
+          setHasMore(false);
+        }
+      } finally {
+        if (fetchTokenRef.current === token) {
+          setLoading(false);
+          setLoadingMore(false);
+        }
+      }
+    },
+    [cards.length, filterGroup, filterType, groupMembers, searchDebounced],
+  );
+
+  // Refetch (reset) whenever any filter changes. Note: this depends on
+  // `groupMembers` only when `filterGroup` is set, but listing it in
+  // the deps is fine — `groupMembers` is memoized and stable when the
+  // group map doesn't change.
+  useEffect(() => {
+    void fetchPage(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchDebounced, filterType, filterGroup, groupMembers]);
+
+  // Recently accessed: fetch metadata for the top-N names in the MRU
+  // list directly (cheap — bounded to 6 reads). Refreshes when the
+  // operator opens a new resource (the recent[] state changes).
+  useEffect(() => {
+    let cancelled = false;
+    const wanted = recent.slice(0, RECENT_DISPLAY_CAP);
+    if (wanted.length === 0) {
+      setRecentCards([]);
+      return;
+    }
+    (async () => {
+      const metas = await Promise.all(
+        wanted.map((n) => api.readResource(n).catch(() => null)),
+      );
+      if (cancelled) return;
+      const items: api.ResourceCardEntry[] = [];
+      wanted.forEach((name, i) => {
+        const m = metas[i];
+        if (!m) return;
+        items.push({
+          name,
+          type: String(m.type || ""),
+          hostname: m.hostname ? String(m.hostname) : undefined,
+          ip_address: m.ip_address ? String(m.ip_address) : undefined,
+          tags: m.tags ? String(m.tags) : undefined,
+        });
+      });
+      setRecentCards(items);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [recent]);
 
   async function selectResource(name: string) {
     try {
@@ -117,6 +346,7 @@ export function ResourcesPage() {
       setSelected(name);
       setResourceInfo(info);
       setDetailTab("info");
+      setRecent(pushRecent(name));
     } catch (e: unknown) {
       toast("error", extractError(e));
     }
@@ -129,39 +359,39 @@ export function ResourcesPage() {
       toast("success", `Resource ${deleteTarget} deleted`);
       if (selected === deleteTarget) { setSelected(null); setResourceInfo(null); }
       setDeleteTarget(null);
-      loadResources();
+      void fetchPage(true);
     } catch (e: unknown) {
       toast("error", extractError(e));
     }
   }
 
-  const filteredMeta = allMeta.filter((m) => {
-    if (filterType && m.type !== filterType) return false;
-    if (filterGroup) {
-      const groups = assetGroups.map.byResource[String(m.name)] || [];
-      if (!groups.includes(filterGroup)) return false;
-    }
-    if (search) {
-      const q = search.toLowerCase();
-      const name = String(m.name || "").toLowerCase();
-      const hostname = String(m.hostname || "").toLowerCase();
-      const ip = String(m.ip_address || "");
-      const tags = String(m.tags || "").toLowerCase();
-      return name.includes(q) || hostname.includes(q) || ip.includes(q) || tags.includes(q);
-    }
-    return true;
-  });
+  // IntersectionObserver-driven pagination: when the sentinel at the
+  // end of the grid scrolls into view, request the next page.
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const setSentinel = useCallback((el: HTMLDivElement | null) => {
+    sentinelRef.current = el;
+  }, []);
+  useEffect(() => {
+    if (loading) return;
+    if (!hasMore) return;
+    if (loadingMore) return;
+    const el = sentinelRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            void fetchPage(false);
+          }
+        }
+      },
+      { root: null, rootMargin: "200px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [loading, loadingMore, hasMore, fetchPage]);
 
-  // All group names referenced by the currently loaded resources —
-  // used to populate the filter dropdown so operators only see groups
-  // they can actually filter by.
-  const groupOptionsSet = new Set<string>();
-  for (const m of allMeta) {
-    for (const g of assetGroups.map.byResource[String(m.name)] || []) {
-      groupOptionsSet.add(g);
-    }
-  }
-  const groupOptions = Array.from(groupOptionsSet).sort();
+  const groupOptions = Object.keys(groupMembers).sort();
 
   const typeOptions = Object.values(typeConfig).map((t) => ({ value: t.id, label: t.label }));
   const filterOptions = [{ value: "", label: "All types" }, ...typeOptions];
@@ -277,7 +507,7 @@ export function ResourcesPage() {
         />
 
         <div className="flex gap-3">
-          <Input placeholder="Search by name, hostname" value={search}
+          <Input placeholder="Search by name, hostname, IP, or tag" value={search}
             onChange={(e) => setSearch(e.target.value)} />
           <Select value={filterType} onChange={(e) => setFilterType(e.target.value)}
             options={filterOptions} />
@@ -286,9 +516,7 @@ export function ResourcesPage() {
         <GroupsSection
           groups={groupOptions.map((name) => ({
             name,
-            count: allMeta.filter((m) =>
-              (assetGroups.map.byResource[String(m.name)] || []).includes(name),
-            ).length,
+            count: (groupMembers[name] ?? []).length,
           }))}
           selected={filterGroup || null}
           onSelect={(name) => setFilterGroup(name ?? "")}
@@ -297,64 +525,67 @@ export function ResourcesPage() {
 
         {loading ? (
           <p className="text-sm text-[var(--color-text-muted)]">Loading...</p>
-        ) : filteredMeta.length === 0 ? (
+        ) : cards.length === 0 ? (
           <EmptyState title="No resources"
-            description="Add your first resource to start organizing secrets by infrastructure"
+            description={
+              search || filterType || filterGroup
+                ? "No matches for the current filter."
+                : "Add your first resource to start organizing secrets by infrastructure"
+            }
             action={<Button size="sm" onClick={() => setShowCreate(true)}>Add Resource</Button>} />
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {filteredMeta.map((meta) => {
-              const td = getTypeDef(typeConfig, String(meta.type));
-              const groups = assetGroups.map.byResource[String(meta.name)] || [];
-              const quickProfile = pickQuickLaunchProfile(meta, td);
-              return (
-                <button key={String(meta.name)} onClick={() => selectResource(String(meta.name))}
-                  className="p-4 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-xl text-left hover:border-[var(--color-primary)] transition-colors">
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="font-medium truncate flex-1 min-w-0">{String(meta.name)}</span>
-                    <ResourceTypeIcon typeDef={td} />
-                    {quickProfile && (
-                      <ConnectQuickButton
-                        resource={meta}
-                        profile={quickProfile}
-                        toast={toast}
-                      />
-                    )}
-                  </div>
-                  {meta.hostname ? <p className="text-xs text-[var(--color-text-muted)] truncate">{String(meta.hostname)}{meta.ip_address ? ` (${String(meta.ip_address)})` : ""}</p> : null}
-                  {groups.length > 0 && (
-                    <div className="flex flex-wrap gap-1 mt-2">
-                      {groups.map((g) => (
-                        <span
-                          key={g}
-                          onClick={(ev) => {
-                            ev.stopPropagation();
-                            setFilterGroup((cur) => (cur === g ? "" : g));
-                          }}
-                          className="px-1.5 py-0.5 bg-[var(--color-primary)] text-white rounded text-[10px] cursor-pointer hover:opacity-80"
-                          title={`Filter by group "${g}"`}
-                        >
-                          {g}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  {parseTags(meta.tags).length > 0 && (
-                    <div className="flex flex-wrap gap-1 mt-2">
-                      {parseTags(meta.tags).slice(0, 4).map((t) => (
-                        <span key={t} className="px-1.5 py-0.5 bg-[var(--color-bg)] rounded text-[10px] text-[var(--color-text-muted)]">{t}</span>
-                      ))}
-                    </div>
-                  )}
-                </button>
-              );
-            })}
-          </div>
+          <>
+            {/* Recent strip: only shown when nothing is filtered, so
+                it doesn't fight the user's current intent. Hidden
+                until at least 2 entries would render — a single tile
+                in its own section is just noise. */}
+            {recentCards.length >= 2 && !search && !filterType && !filterGroup && (
+              <div>
+                <div className="text-sm text-[var(--color-text-muted)] mb-2">Recently accessed</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">
+                  {recentCards.map((meta) => (
+                    <ResourceCard
+                      key={`recent-${meta.name}`}
+                      meta={meta}
+                      typeConfig={typeConfig}
+                      assetGroups={assetGroups.map.byResource[meta.name] || []}
+                      onSelect={selectResource}
+                      onPickGroup={(g) => setFilterGroup((cur) => (cur === g ? "" : g))}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {cards.map((meta) => (
+                <ResourceCard
+                  key={meta.name}
+                  meta={meta}
+                  typeConfig={typeConfig}
+                  assetGroups={assetGroups.map.byResource[meta.name] || []}
+                  onSelect={selectResource}
+                  onPickGroup={(g) => setFilterGroup((cur) => (cur === g ? "" : g))}
+                />
+              ))}
+            </div>
+
+            {hasMore && (
+              <div
+                ref={setSentinel}
+                className="py-4 text-center text-xs text-[var(--color-text-muted)]"
+              >
+                {loadingMore
+                  ? `Loading more… (${cards.length} of ${total})`
+                  : `Scroll for more (${cards.length} of ${total})`}
+              </div>
+            )}
+          </>
         )}
 
         <CreateResourceModal open={showCreate} onClose={() => setShowCreate(false)}
           typeConfig={typeConfig}
-          onCreated={() => { setShowCreate(false); loadResources(); }}
+          onCreated={() => { setShowCreate(false); void fetchPage(true); }}
           toast={toast} />
 
         <ConfirmModal open={deleteTarget !== null} onClose={() => setDeleteTarget(null)}
@@ -1020,112 +1251,6 @@ function RecentSessionsList({ resource }: { resource: ResourceMetadata }) {
         ))}
       </ul>
     </details>
-  );
-}
-
-/**
- * Find the profile we'd launch for a one-click "Connect" without
- * any operator prompt. Returns null if none qualifies — used by
- * the inline card-level quick-connect button + the ⌘K palette.
- *
- * Eligibility (mirrors `ConnectionProfilesPanel.launchableProfiles`
- * + the palette's filter, minus LDAP operator-bind which would
- * need a credential prompt the card can't surface inline):
- *   - resource type's Connect policy not disabled
- *   - resource has a usable os_type → protocol mapping
- *   - profile.protocol matches that protocol
- *   - credential_source kind is one we launch today
- *     (Secret / LDAP non-operator-bind / PKI)
- */
-function pickQuickLaunchProfile(
-  resource: ResourceMetadata,
-  typeDef: ResourceTypeDef,
-): ConnectionProfile | null {
-  if (typeDef.connect?.enabled === false) return null;
-  const protocol = protocolForOsType(String(resource["os_type"] ?? ""));
-  if (!protocol) return null;
-  const profiles = readProfiles(resource as Record<string, unknown>);
-  for (const p of profiles) {
-    if (p.protocol !== protocol) continue;
-    const k = p.credential_source.kind;
-    if (k === "ssh-engine") continue;
-    if (
-      k === "ldap" &&
-      "bind_mode" in p.credential_source &&
-      p.credential_source.bind_mode === "operator"
-    ) {
-      // Operator-bind needs a typed credential — handled by the
-      // Connection tab's inline modal, not the card-level button.
-      continue;
-    }
-    return p;
-  }
-  return null;
-}
-
-/**
- * Tiny one-click Connect button rendered on the resource list
- * card. Visible only when `pickQuickLaunchProfile` finds an
- * eligible profile. Click stops propagation so it doesn't also
- * fire the card's `selectResource` navigation. The host enforces
- * the actual permission check; on rejection we surface the error
- * via toast and stay on the list page.
- */
-function ConnectQuickButton({
-  resource,
-  profile,
-  toast,
-}: {
-  resource: ResourceMetadata;
-  profile: ConnectionProfile;
-  toast: (type: "success" | "error" | "info", msg: string) => void;
-}) {
-  const [busy, setBusy] = useState(false);
-  async function handleClick(ev: React.MouseEvent<HTMLButtonElement>) {
-    ev.stopPropagation();
-    if (busy) return;
-    setBusy(true);
-    try {
-      const req = {
-        resource_name: String(resource.name),
-        profile_id: profile.id,
-        operator_credential: undefined,
-      };
-      if (profile.protocol === "ssh") {
-        await api.sessionOpenSsh(req);
-      } else {
-        await api.sessionOpenRdp(req);
-      }
-    } catch (e: unknown) {
-      toast("error", extractError(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <button
-      type="button"
-      onClick={handleClick}
-      disabled={busy}
-      title={`Connect (${profile.protocol.toUpperCase()} · ${profile.name})`}
-      aria-label="Connect"
-      className="shrink-0 inline-flex items-center justify-center w-7 h-7 rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] text-[var(--color-text-muted)] hover:text-[var(--color-primary)] hover:border-[var(--color-primary)] disabled:opacity-50 transition-colors"
-    >
-      {/* Inline SVG — terminal-prompt glyph for SSH, monitor for RDP.
-          Stays crisp at the 14px size and avoids pulling an icon font. */}
-      {profile.protocol === "ssh" ? (
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <polyline points="4 17 10 11 4 5" />
-          <line x1="12" y1="19" x2="20" y2="19" />
-        </svg>
-      ) : (
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <rect x="2" y="4" width="20" height="14" rx="2" ry="2" />
-          <line x1="8" y1="21" x2="16" y2="21" />
-          <line x1="12" y1="17" x2="12" y2="21" />
-        </svg>
-      )}
-    </button>
   );
 }
 

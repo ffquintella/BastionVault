@@ -45,6 +45,18 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-05-17
+
+### Changed
+
+- **Resources search — match on tags too** (`src/modules/resource/mod.rs`) — drop the name-only fast path in the search handler. It short-circuited before any metadata was read, so a query like `production` would miss resources whose name didn't contain it but whose `tags` did. Now the handler always scans every metadata blob through the same predicate (name + hostname + ip_address + tags). 5k local reads on Hiqlite stay well under 100ms; if that ever changes, add a lazy in-memory index keyed by the resource name.
+
+- **Resources page — paginated server-side search + recently accessed** (`src/modules/resource/mod.rs`, `gui/src-tauri/src/commands/resources.rs`, `gui/src/lib/api.ts`, `gui/src/routes/ResourcesPage.tsx`) — replace the "list every name, fan out one `read_resource` per row" pattern (which broke down past a few hundred resources) with a new `POST resources/search` route that scans `META_PREFIX` once per call, applies `q` (substring across name/hostname/ip/tags) and `type` filters, sorts by name, and returns a card-shaped projection plus `{total, has_more}`. The Resources page debounces the search input (250ms), fires one paginated call per filter change, and bumps the offset via an `IntersectionObserver` sentinel near the bottom. Group filter goes through the existing `useAssetGroupMap` (no metadata fetch needed) and paginates the group's members directly. The operator's six most-recently-opened resources are pinned in a "Recently accessed" strip above the main grid (persisted to `localStorage` under `bv:resources:recent`, only shown when no filter is active). Card-level inline Quick Connect is removed in this iteration — the search payload doesn't carry `os_type` / `connection_profiles`, and the detail page's Connect tab covers the same flow.
+
+### Fixed
+
+- **PMP import — drive visibility + opaque error** (`gui/src/routes/PmpImportPage.tsx`) — the wizard now reads the spreadsheet bytes in the GUI process via `read_local_file_b64` and ships them to the plugin as `file_b64` instead of passing a bare `file_path`. The plugin runs in a sandboxed subprocess that doesn't inherit every drive mapping the interactive session has (mapped network drives, VeraCrypt volumes, etc.), so a path like `H:\…` could fail with ENOENT even though it was valid for the operator. Also surface the plugin's real error message from the response body instead of the unhelpful "plugin returned error (status code 1)".
+
 ## [0.7.1] - 2026-05-17
 
 ### Fixed

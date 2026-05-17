@@ -376,6 +376,38 @@ export const resourceTypesWrite = (types: Record<string, unknown>) =>
 // Resources — uses dedicated resource engine (auto-mounted at resources/)
 export const listResources = () =>
   invoke<ResourceListResult>("list_resources", {});
+
+/// Card-shaped projection of a resource returned by the paginated
+/// search endpoint. Just enough to render the list view; the detail
+/// page still uses `readResource` for the full metadata blob.
+export interface ResourceCardEntry {
+  name: string;
+  type: string;
+  hostname?: string;
+  ip_address?: string;
+  tags?: string;
+}
+
+export interface ResourceSearchResult {
+  items: ResourceCardEntry[];
+  total: number;
+  has_more: boolean;
+}
+
+export const searchResources = (input: {
+  q?: string;
+  type?: string;
+  offset?: number;
+  limit?: number;
+}) =>
+  invoke<ResourceSearchResult>("search_resources", {
+    input: {
+      q: input.q,
+      type: input.type,
+      offset: input.offset,
+      limit: input.limit,
+    },
+  });
 export const readResource = (name: string) =>
   invoke<ResourceMetadata>("read_resource", { name });
 export const writeResource = (name: string, metadata: ResourceMetadata) =>

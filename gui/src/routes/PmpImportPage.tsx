@@ -115,14 +115,38 @@ function encodeUtf8B64(text: string): string {
 
 async function invokePmp<T>(input: object): Promise<T> {
   const result = await api.pluginsInvoke(PLUGIN_NAME, encodeUtf8B64(JSON.stringify(input)));
-  if (result.status !== "success") {
-    throw new Error(`plugin returned error (status code ${result.plugin_status_code})`);
+  // The plugin packs its real error message into the response body
+  // (`{"error": "..."}`) and signals failure with `status_code != 0`.
+  // Surface that message instead of a generic "status code N" string,
+  // otherwise the user sees nothing actionable in the toast.
+  let body: unknown = null;
+  try {
+    body = JSON.parse(decodeUtf8B64(result.response_b64));
+  } catch {
+    // fall through — body stays null, handled below
   }
-  const body = JSON.parse(decodeUtf8B64(result.response_b64));
+  if (result.status !== "success") {
+    const msg =
+      body && typeof body === "object" && "error" in body
+        ? String((body as { error: unknown }).error)
+        : `plugin returned error (status code ${result.plugin_status_code})`;
+    throw new Error(msg);
+  }
   if (body && typeof body === "object" && "error" in body) {
     throw new Error(String((body as { error: unknown }).error));
   }
   return body as T;
+}
+
+// Read the operator-picked spreadsheet from the GUI process (which
+// has the user's full drive visibility — including mapped network
+// drives, VeraCrypt volumes, etc.) and ship the bytes to the plugin
+// inline. The plugin runs in a sandboxed subprocess that doesn't
+// inherit every drive mapping the interactive session has, so passing
+// a bare `file_path` like `H:\…` can fail with ENOENT even though the
+// path is valid for the GUI.
+async function readPickedFileB64(filePath: string): Promise<string> {
+  return api.readLocalFileB64(filePath);
 }
 
 export function PmpImportPage() {
@@ -222,7 +246,8 @@ export function PmpImportPage() {
     setBusy(true);
     setValidateReport(null);
     try {
-      const r = await invokePmp<ValidateReport>({ op: "validate", file_path: p });
+      const fileB64 = await readPickedFileB64(p);
+      const r = await invokePmp<ValidateReport>({ op: "validate", file_b64: fileB64 });
       setValidateReport(r);
       if (!r.ok) {
         toast(
@@ -243,9 +268,10 @@ export function PmpImportPage() {
     setBusy(true);
     try {
       const existing = await api.listAssetGroups().then((r) => r.groups).catch(() => []);
+      const fileB64 = await readPickedFileB64(filePath);
       const p = await invokePmp<ImportPlan>({
         op: "preview",
-        file_path: filePath,
+        file_b64: fileB64,
         batch_id: batchId,
         preserve_unknown_columns: preserveUnknown,
         tag_columns: tagColumns,
