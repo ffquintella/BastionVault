@@ -167,7 +167,10 @@ docs: ## Serve the Docsify-powered documentation site locally on http://localhos
 # on that and wants either `-i` alone or `-i ''` written without a space.
 # Detect with --version, which BSD sed lacks.
 ifeq ($(OS),Windows_NT)
-SED_INPLACE :=
+# Git-Bash / MSYS2 ship GNU sed, which supports `-i` without a backup
+# suffix. Native cmd.exe has no sed at all, so this Makefile already
+# assumes a POSIX-ish shell on Windows.
+SED_INPLACE := sed -i
 else
 SED_INPLACE := $(shell sed --version >/dev/null 2>&1 && echo "sed -i" || echo "sed -i ''")
 endif
