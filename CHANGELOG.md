@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-05-17
+
+### Fixed
+
+- **Container build** (`deploy/container/Containerfile`) — export `RUST_MIN_STACK=16777216` before `cargo build` to avoid rustc SIGSEGV in the LLVM thin-LTO worker thread when compiling the `bastion_vault` lib under cross-compile.
+
 ## [0.5.22] - 2026-05-16
 
 ### Added
