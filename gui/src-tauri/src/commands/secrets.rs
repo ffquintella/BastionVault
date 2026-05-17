@@ -318,17 +318,225 @@ pub async fn read_secret_version(
     })
 }
 
+// ── KV-v2 version actions ───────────────────────────────────────────
+//
+// Soft-delete, undelete, and destroy each target one or more specific
+// versions on a single secret. All three are no-ops on `kv-v1` mounts —
+// the underlying KV v1 path layout has no concept of multiple versions
+// or a deletion-time/destroyed flag, so the GUI gates the buttons on
+// `mount_type == "kv-v2"` and these commands simply refuse if called
+// against a v1 mount to keep the server free of surprising writes.
+
+#[tauri::command]
+pub async fn soft_delete_secret_versions(
+    state: State<'_, AppState>,
+    path: String,
+    versions: Vec<u64>,
+    mount: Option<String>,
+    mount_type: Option<String>,
+) -> CmdResult<()> {
+    let m = mount.as_deref().unwrap_or("");
+    let mt = mount_type.as_deref().unwrap_or("kv");
+    if mt != "kv-v2" {
+        return Err("Soft-delete by version is only available on kv-v2 mounts".into());
+    }
+    if versions.is_empty() {
+        return Err("At least one version must be supplied".into());
+    }
+    let actual_path = adjust_kv_path(&path, m, mt, "data");
+    let mut body = Map::new();
+    body.insert(
+        "versions".to_string(),
+        Value::Array(versions.into_iter().map(Value::from).collect()),
+    );
+    make_request(&state, Operation::Delete, actual_path, Some(body)).await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn undelete_secret_versions(
+    state: State<'_, AppState>,
+    path: String,
+    versions: Vec<u64>,
+    mount: Option<String>,
+    mount_type: Option<String>,
+) -> CmdResult<()> {
+    let m = mount.as_deref().unwrap_or("");
+    let mt = mount_type.as_deref().unwrap_or("kv");
+    if mt != "kv-v2" {
+        return Err("Undelete is only available on kv-v2 mounts".into());
+    }
+    if versions.is_empty() {
+        return Err("At least one version must be supplied".into());
+    }
+    let actual_path = adjust_kv_path(&path, m, mt, "undelete");
+    let mut body = Map::new();
+    body.insert(
+        "versions".to_string(),
+        Value::Array(versions.into_iter().map(Value::from).collect()),
+    );
+    make_request(&state, Operation::Write, actual_path, Some(body)).await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn destroy_secret_versions(
+    state: State<'_, AppState>,
+    path: String,
+    versions: Vec<u64>,
+    mount: Option<String>,
+    mount_type: Option<String>,
+) -> CmdResult<()> {
+    let m = mount.as_deref().unwrap_or("");
+    let mt = mount_type.as_deref().unwrap_or("kv");
+    if mt != "kv-v2" {
+        return Err("Destroy is only available on kv-v2 mounts".into());
+    }
+    if versions.is_empty() {
+        return Err("At least one version must be supplied".into());
+    }
+    let actual_path = adjust_kv_path(&path, m, mt, "destroy");
+    let mut body = Map::new();
+    body.insert(
+        "versions".to_string(),
+        Value::Array(versions.into_iter().map(Value::from).collect()),
+    );
+    make_request(&state, Operation::Write, actual_path, Some(body)).await?;
+    Ok(())
+}
+
+// ── CAS-aware write ─────────────────────────────────────────────────
+
+/// Write a new version with check-and-set. `cas` must equal the current
+/// version (0 for the very first write). Returns the freshly-created
+/// version number so the GUI can surface it back to the operator and
+/// avoid an extra round-trip to refresh metadata.
+#[tauri::command]
+pub async fn write_secret_cas(
+    state: State<'_, AppState>,
+    path: String,
+    data: HashMap<String, String>,
+    cas: u64,
+    mount: Option<String>,
+    mount_type: Option<String>,
+) -> CmdResult<u64> {
+    let m = mount.as_deref().unwrap_or("");
+    let mt = mount_type.as_deref().unwrap_or("kv");
+    if mt != "kv-v2" {
+        return Err("CAS writes are only available on kv-v2 mounts".into());
+    }
+    let actual_path = adjust_kv_path(&path, m, mt, "data");
+
+    let mut kv_body = Map::new();
+    for (k, v) in data {
+        kv_body.insert(k, Value::String(v));
+    }
+    let mut options = Map::new();
+    options.insert("cas".to_string(), Value::from(cas));
+    let mut wrapper = Map::new();
+    wrapper.insert("data".to_string(), Value::Object(kv_body));
+    wrapper.insert("options".to_string(), Value::Object(options));
+
+    let resp = make_request(&state, Operation::Write, actual_path, Some(wrapper)).await?;
+    let new_version = resp
+        .and_then(|r| r.data)
+        .and_then(|d| d.get("version").and_then(|v| v.as_u64()))
+        .unwrap_or(0);
+    Ok(new_version)
+}
+
+// ── KV-v2 engine config ─────────────────────────────────────────────
+
+#[derive(Serialize, serde::Deserialize, Default)]
+pub struct KvV2EngineConfig {
+    /// Default max versions retained per secret (0 = unlimited).
+    pub max_versions: u64,
+    /// When true, every write must supply a `cas` value.
+    pub cas_required: bool,
+    /// Duration after which versions are auto-soft-deleted. `"0s"` disables.
+    pub delete_version_after: String,
+}
+
+#[tauri::command]
+pub async fn read_kv_v2_engine_config(
+    state: State<'_, AppState>,
+    mount: String,
+) -> CmdResult<KvV2EngineConfig> {
+    if mount.is_empty() {
+        return Err("mount path is required".into());
+    }
+    let path = format!("{}config", ensure_trailing_slash(&mount));
+    let resp = make_request(&state, Operation::Read, path, None).await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(KvV2EngineConfig {
+        max_versions: data.get("max_versions").and_then(|v| v.as_u64()).unwrap_or(0),
+        cas_required: data
+            .get("cas_required")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        delete_version_after: data
+            .get("delete_version_after")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0s")
+            .to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn write_kv_v2_engine_config(
+    state: State<'_, AppState>,
+    mount: String,
+    config: KvV2EngineConfig,
+) -> CmdResult<()> {
+    if mount.is_empty() {
+        return Err("mount path is required".into());
+    }
+    let path = format!("{}config", ensure_trailing_slash(&mount));
+    let mut body = Map::new();
+    body.insert("max_versions".to_string(), Value::from(config.max_versions));
+    body.insert("cas_required".to_string(), Value::Bool(config.cas_required));
+    body.insert(
+        "delete_version_after".to_string(),
+        Value::String(config.delete_version_after),
+    );
+    make_request(&state, Operation::Write, path, Some(body)).await?;
+    Ok(())
+}
+
+fn ensure_trailing_slash(p: &str) -> String {
+    if p.ends_with('/') {
+        p.to_string()
+    } else {
+        format!("{p}/")
+    }
+}
+
+/// Create a new secret-engine mount. `options` is an optional
+/// engine-level bag stored on the `MountEntry`; for KV v2 the GUI
+/// populates `max_versions` / `cas_required` / `delete_version_after`
+/// here so the new mount is born with the operator's desired defaults
+/// instead of needing an immediate follow-up `config` write.
 #[tauri::command]
 pub async fn mount_engine(
     state: State<'_, AppState>,
     path: String,
     engine_type: String,
     description: String,
+    options: Option<HashMap<String, String>>,
 ) -> CmdResult<()> {
     let mut body = Map::new();
     body.insert("type".to_string(), Value::String(engine_type));
     if !description.is_empty() {
         body.insert("description".to_string(), Value::String(description));
+    }
+    if let Some(opts) = options {
+        if !opts.is_empty() {
+            let mut opt_map = Map::new();
+            for (k, v) in opts {
+                opt_map.insert(k, Value::String(v));
+            }
+            body.insert("options".to_string(), Value::Object(opt_map));
+        }
     }
 
     make_request(

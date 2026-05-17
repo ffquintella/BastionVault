@@ -22,19 +22,15 @@ Both layers are exposed via the **HTTP API** (`/v1/sys/exchange/*`), the **CLI**
 
 ## Current State
 
-- **Existing infrastructure already shipped** ([features/import-export-backup-restore.md](import-export-backup-restore.md)):
-  - `src/backup/format.rs` — BVBK binary format with HMAC-SHA256.
-  - `src/backup/create.rs` / `restore.rs` — full-vault encrypted backup/restore.
-  - `src/backup/export.rs` / `import.rs` — *decrypted* JSON export per-mount; import with `--force`.
-  - CLI: `bvault operator backup/restore/export/import`.
-  - HTTP: `POST /v1/sys/backup`, `POST /v1/sys/restore`, `GET /v1/sys/export/{path}`, `POST /v1/sys/import/{mount}`.
-- **What's missing for the new feature:**
-  - No password-based key derivation in the tree (no `argon2` / `pbkdf2` dep).
-  - No stable, versioned, human-readable JSON schema. The existing export is a mount-specific snapshot, not a portable document.
-  - No conflict-aware import (the existing import is `--force`-only).
-  - No GUI for selective export / preview-before-import.
-  - No way to include resources + file metadata + group memberships + policies + identities in a single document — the existing export is per-mount.
-- **Pure-Rust crypto stack already covers the AEAD half.** XChaCha20-Poly1305 lives in `bv_crypto::aead`; the new feature only needs to add the KDF layer.
+**Status: Done across all four phases.** The user-facing Exchange Module is implemented, exposed through HTTP / CLI / GUI, and exercised by 23 inline unit tests covering canonical encoding, KDF determinism, AEAD round-trip + tampering, preview-store TTL + owner-binding, and scope-resolver round-trip + conflict policies.
+
+What landed:
+
+- **Backend** — `src/exchange/{mod,canonical,envelope,kdf,preview,schema,scope}.rs`. `schema.rs` defines the `bvx.v1` JSON document (KV items, resources, files, asset groups, resource groups). `canonical.rs` produces byte-stable JSON via sorted `BTreeMap`s and LF terminators. `envelope.rs` + `kdf.rs` wrap canonical JSON in an Argon2id-derived XChaCha20-Poly1305 envelope with embedded KDF parameters; tampered ciphertext / salt and wrong passwords all fail closed. `scope.rs` resolves the `kv_path` / `resource` / `asset_group` / `resource_group` / `file` scope kinds, drags in dependent resources and file blobs, and supports `skip` / `overwrite` / `rename` conflict policies on import. `preview.rs` is a single-use, owner-bound, TTL'd preview store keyed by 256-bit random tokens.
+- **HTTP** — `src/http/sys.rs` wires `POST /v1/sys/exchange/export`, `POST /v1/sys/exchange/import`, `POST /v1/sys/exchange/import/preview`, and `POST /v1/sys/exchange/import/apply`. The two-step preview-then-apply flow is mandatory; the password is taken in-body and never logged.
+- **CLI** — `src/cli/command/{exchange,exchange_export,exchange_import}.rs` provide `bvault exchange export` / `preview` / `import` with `--password-stdin`. The `--password=...` flag is intentionally refused.
+- **GUI** — `gui/src/routes/ExchangePage.tsx` (~960 lines) ships Export + Import tabs with the scope picker, the password input + entropy meter, the preview classification table with per-item / bulk-set conflict policies, and the final Apply step with the summary panel.
+- **Adjacent feature** — `src/scheduled_exports/` adds cron-driven scheduled exports on top of the same `.bvx` machinery (its own spec at [features/scheduled-exports.md](scheduled-exports.md)).
 
 ## Design
 

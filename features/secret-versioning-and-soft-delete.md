@@ -1,5 +1,17 @@
 # Feature: Secret Versioning & Soft-Delete
 
+## Current State
+
+**Status: Done.** The KV v2 secret engine is implemented, registered, and exposed through the CLI and GUI. Default new `secret/` mounts use KV v2; the legacy KV v1 module remains in-tree for backward compatibility with existing deployments.
+
+What landed:
+
+- **Backend** — `src/modules/kv_v2/{mod.rs,metadata.rs,version.rs}` implements all path handlers (config, data, metadata, destroy, undelete) per the design below. Versions carry per-write `username` + `operation` audit fields. Sub-prefix listing (`metadata/<prefix>/`) is supported for nested folders.
+- **Errors** — `src/errors.rs` carries `ErrModuleKvV2CasMismatch`, `ErrModuleKvV2CasRequired`, `ErrModuleKvV2VersionDestroyed`, `ErrModuleKvV2VersionNotFound`, `ErrModuleKvV2DataFieldMissing` with appropriate HTTP status mapping.
+- **CLI** — `src/cli/command/{read,write,delete}.rs` auto-detect KV v2 mounts via `kv_util::is_kv_v2` and rewrite the path. `secrets enable -version=2 kv` maps to logical type `kv-v2`.
+- **GUI** — `gui/src/routes/SecretsPage.tsx` surfaces the version timeline via `SecretHistoryPanel` with per-version Restore / Soft-delete / Undelete / Destroy actions (destroy is two-step confirmed). `MountsPage.tsx` accepts KV v2 defaults (`max_versions` / `cas_required` / `delete_version_after`) on the Mount Engine form and shows a per-mount "Config" button that opens a runtime config editor. Six new Tauri commands cover the new actions and the engine-config read/write.
+- **Tests** — `tests/test_default_logical.rs` carries `test_kv_v2_logical_backend` (full lifecycle, soft-delete, undelete, destroy, CAS, max_versions, metadata list, delete-all, config persistence) and `test_kv_v2_version_history_tracking` (username + operation propagation).
+
 ## Summary
 
 Add a KV v2 secret engine that stores multiple versions of each secret, supports soft-delete with recovery, and provides separate metadata and data access paths. This aligns BastionVault with HashiCorp Vault's KV v2 API for compatibility.

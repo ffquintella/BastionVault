@@ -285,9 +285,60 @@ export const readSecretVersion = (
   mountType?: string,
 ) => invoke<SecretVersionData>("read_secret_version", { path, version, mount, mountType });
 
+// KV-v2 per-version actions. All three reject when called against a
+// kv-v1 mount (the GUI gates the buttons on `mountType === "kv-v2"`).
+export const softDeleteSecretVersions = (
+  path: string,
+  versions: number[],
+  mount?: string,
+  mountType?: string,
+) =>
+  invoke<void>("soft_delete_secret_versions", { path, versions, mount, mountType });
+export const undeleteSecretVersions = (
+  path: string,
+  versions: number[],
+  mount?: string,
+  mountType?: string,
+) =>
+  invoke<void>("undelete_secret_versions", { path, versions, mount, mountType });
+export const destroySecretVersions = (
+  path: string,
+  versions: number[],
+  mount?: string,
+  mountType?: string,
+) =>
+  invoke<void>("destroy_secret_versions", { path, versions, mount, mountType });
+
+/** CAS-aware write. `cas` must equal the current version (0 for a brand
+ *  new secret). Returns the freshly-created version number. */
+export const writeSecretCas = (
+  path: string,
+  data: Record<string, string>,
+  cas: number,
+  mount?: string,
+  mountType?: string,
+) =>
+  invoke<number>("write_secret_cas", { path, data, cas, mount, mountType });
+
+// KV-v2 engine config (max_versions / cas_required / delete_version_after)
+export interface KvV2EngineConfig {
+  max_versions: number;
+  cas_required: boolean;
+  delete_version_after: string;
+}
+export const readKvV2EngineConfig = (mount: string) =>
+  invoke<KvV2EngineConfig>("read_kv_v2_engine_config", { mount });
+export const writeKvV2EngineConfig = (mount: string, config: KvV2EngineConfig) =>
+  invoke<void>("write_kv_v2_engine_config", { mount, config });
+
 // Mounts
-export const mountEngine = (path: string, engineType: string, description: string) =>
-  invoke<void>("mount_engine", { path, engineType, description });
+export const mountEngine = (
+  path: string,
+  engineType: string,
+  description: string,
+  options?: Record<string, string>,
+) =>
+  invoke<void>("mount_engine", { path, engineType, description, options });
 export const unmountEngine = (path: string) =>
   invoke<void>("unmount_engine", { path });
 export const enableAuthMethod = (path: string, authType: string, description: string) =>

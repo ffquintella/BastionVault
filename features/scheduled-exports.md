@@ -24,14 +24,14 @@ A scheduled export is intentionally **not** a BVBK replacement. The two coexist:
 
 ## Current State
 
-- **Existing backup pieces**:
-  - `src/backup/{format,create,restore,export,import}.rs` — BVBK binary + plaintext-JSON export. CLI `bvault operator backup/restore/export/import`. HTTP `POST /v1/sys/{backup,restore}` + `GET /v1/sys/export/<path>` + `POST /v1/sys/import/<mount>`.
-  - **No scheduler.** No persisted schedule entries. No leader-elected periodic runner. Operators wire `cron` + the CLI by hand.
-  - **No retention.** Output files accumulate forever unless an operator prunes them externally.
-  - **No verification.** A backup is assumed good until restore time proves otherwise.
-- **Exchange module** ([features/import-export-module.md](import-export-module.md)) is currently a spec, not yet implemented. This feature **depends on** Phase 2 of Exchange (the `.bvx` envelope) being shipped before Phase 1 of this feature can land. The order is documented under "Implementation Scope".
-- **Cloud-storage backend** ([features/cloud-storage-backend.md](cloud-storage-backend.md)) is shipped with `FileTarget` + the four provider implementations. We reuse that trait directly — no new transport code.
-- **Hiqlite leader election** is shipped (HA via Raft consensus is `Done` per [roadmap.md:52](roadmap.md:52)). The scheduler hooks the existing leader-changed signal so only one node runs each schedule.
+**Status: Done.** The scheduler is implemented on top of the shipped Exchange module and exposed through HTTP / Tauri / GUI.
+
+- **Backend** — `src/scheduled_exports/{mod,schedule,store,runner}.rs` (~500 LOC). `schedule.rs` defines the cron-expressed schedule entries with scope, output target, retention policy, and a sealed password reference. `store.rs` is the persisted backing store. `runner.rs` is the tokio-driven, leader-elected scheduler that uses the Hiqlite Raft leader signal so only one node fires each schedule.
+- **HTTP** — `src/http/sys.rs` wires `GET/POST/PUT/DELETE /v1/sys/scheduled-exports/{,id}`, `GET /v1/sys/scheduled-exports/{id}/runs`, `POST /v1/sys/scheduled-exports/{id}/run-now`.
+- **GUI** — exposed as a "Scheduled backups" tab inside the [`/exchange`](../gui/src/routes/ExchangePage.tsx) page with full CRUD, per-schedule run history, and an immediate "Run now" trigger.
+- **Tauri commands + `api.ts`** — `scheduledExportsList/Create/Update/Delete/Runs/RunNow` wrappers.
+
+The feature builds on the shipped Exchange module (its `.bvx` envelope produces the actual backup file) and the cloud-storage `FileTarget` trait (for off-site destinations).
 
 ## Design
 

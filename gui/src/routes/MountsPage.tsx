@@ -158,6 +158,25 @@ export function MountsPage() {
   const [engineType, setEngineType] = useState("kv");
   const [engineDesc, setEngineDesc] = useState("");
 
+  // KV-v2 engine-config knobs. Surfaced on the Mount Engine form when
+  // `engineType === "kv-v2"`, persisted into the `MountEntry.options`
+  // map so the backend's `read_config` sees them on the very first
+  // write — operators don't need a follow-up `config` POST.
+  const [kvV2MaxVersions, setKvV2MaxVersions] = useState("0");
+  const [kvV2CasRequired, setKvV2CasRequired] = useState(false);
+  const [kvV2DeleteAfter, setKvV2DeleteAfter] = useState("0s");
+
+  // Runtime engine-config editor for an existing kv-v2 mount. Distinct
+  // state from the create-form because they're two different surfaces:
+  // creating a mount vs. editing the live config.
+  const [configTarget, setConfigTarget] = useState<string | null>(null);
+  const [configForm, setConfigForm] = useState({
+    max_versions: 0,
+    cas_required: false,
+    delete_version_after: "0s",
+  });
+  const [configBusy, setConfigBusy] = useState(false);
+
   // Enable auth form
   const [showEnableAuth, setShowEnableAuth] = useState(false);
   const [authPath, setAuthPath] = useState("");
@@ -205,14 +224,65 @@ export function MountsPage() {
 
   async function handleMountEngine() {
     try {
-      await api.mountEngine(enginePath, engineType, engineDesc);
+      // For kv-v2, fold the operator's engine-config knobs into the
+      // mount's options bag. The backend reads these on first write.
+      let options: Record<string, string> | undefined;
+      if (engineType === "kv-v2") {
+        const max = parseInt(kvV2MaxVersions, 10);
+        options = {
+          max_versions: Number.isFinite(max) && max >= 0 ? String(max) : "0",
+          cas_required: kvV2CasRequired ? "true" : "false",
+          delete_version_after: kvV2DeleteAfter || "0s",
+        };
+      }
+      await api.mountEngine(enginePath, engineType, engineDesc, options);
       toast("success", `Mounted ${engineType} at ${enginePath}`);
       setShowMountEngine(false);
       setEnginePath("");
       setEngineDesc("");
+      setKvV2MaxVersions("0");
+      setKvV2CasRequired(false);
+      setKvV2DeleteAfter("0s");
       loadAll();
     } catch (e: unknown) {
       toast("error", extractError(e));
+    }
+  }
+
+  /** Open the engine-config editor for an existing kv-v2 mount. We
+   *  fetch the current config from the server rather than trusting the
+   *  mount.options bag, since operators may have changed the config
+   *  via a direct `config` POST after the mount was created. */
+  async function openConfigEditor(mountPath: string) {
+    setConfigTarget(mountPath);
+    try {
+      const cfg = await api.readKvV2EngineConfig(mountPath);
+      setConfigForm({
+        max_versions: cfg.max_versions,
+        cas_required: cfg.cas_required,
+        delete_version_after: cfg.delete_version_after || "0s",
+      });
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+      setConfigTarget(null);
+    }
+  }
+
+  async function handleSaveConfig() {
+    if (!configTarget) return;
+    setConfigBusy(true);
+    try {
+      await api.writeKvV2EngineConfig(configTarget, {
+        max_versions: configForm.max_versions,
+        cas_required: configForm.cas_required,
+        delete_version_after: configForm.delete_version_after || "0s",
+      });
+      toast("success", `Updated KV v2 config for ${configTarget}`);
+      setConfigTarget(null);
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    } finally {
+      setConfigBusy(false);
     }
   }
 
@@ -295,12 +365,23 @@ export function MountsPage() {
     {
       key: "actions",
       header: "",
-      className: "text-right w-24",
+      className: "text-right w-48",
       render: (m: MountInfo) =>
         m.path !== "sys/" ? (
-          <Button variant="danger" size="sm" onClick={() => setDeleteMount(m.path)}>
-            Unmount
-          </Button>
+          <div className="flex justify-end gap-2">
+            {m.mount_type === "kv-v2" && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => openConfigEditor(m.path)}
+              >
+                Config
+              </Button>
+            )}
+            <Button variant="danger" size="sm" onClick={() => setDeleteMount(m.path)}>
+              Unmount
+            </Button>
+          </div>
         ) : null,
     },
   ];
@@ -416,6 +497,101 @@ export function MountsPage() {
               value={engineDesc}
               onChange={(e) => setEngineDesc(e.target.value)}
               placeholder="Optional description"
+            />
+
+            {/* KV-v2 engine config defaults. These get folded into the
+             *   mount's `options` bag so the very first write picks them
+             *   up — no follow-up `config` POST needed. Operators can
+             *   still tweak them later via the per-mount Config button. */}
+            {engineType === "kv-v2" && (
+              <div className="border-t border-[var(--color-border)] pt-3 space-y-3">
+                <p className="text-xs text-[var(--color-text-muted)]">
+                  KV v2 defaults — applied on first write. Editable later
+                  via the per-mount Config action.
+                </p>
+                <Input
+                  label="Max versions"
+                  type="number"
+                  value={kvV2MaxVersions}
+                  onChange={(e) => setKvV2MaxVersions(e.target.value)}
+                  hint="0 = unlimited. Older versions are pruned automatically once exceeded."
+                />
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={kvV2CasRequired}
+                    onChange={(e) => setKvV2CasRequired(e.target.checked)}
+                  />
+                  <span>Require check-and-set (CAS) on every write</span>
+                </label>
+                <Input
+                  label="Auto-soft-delete after"
+                  value={kvV2DeleteAfter}
+                  onChange={(e) => setKvV2DeleteAfter(e.target.value)}
+                  placeholder="0s"
+                  hint='Versions older than this are auto-soft-deleted on access. "0s" disables.'
+                />
+              </div>
+            )}
+          </div>
+        </Modal>
+
+        {/* KV-v2 engine config editor for an existing mount. */}
+        <Modal
+          open={configTarget !== null}
+          onClose={() => setConfigTarget(null)}
+          title={configTarget ? `KV v2 Config — ${configTarget}` : "KV v2 Config"}
+          actions={
+            <>
+              <Button
+                variant="ghost"
+                onClick={() => setConfigTarget(null)}
+                disabled={configBusy}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleSaveConfig}
+                loading={configBusy}
+                disabled={configBusy}
+              >
+                Save
+              </Button>
+            </>
+          }
+        >
+          <div className="space-y-3">
+            <Input
+              label="Max versions"
+              type="number"
+              value={String(configForm.max_versions)}
+              onChange={(e) => {
+                const n = parseInt(e.target.value, 10);
+                setConfigForm({
+                  ...configForm,
+                  max_versions: Number.isFinite(n) && n >= 0 ? n : 0,
+                });
+              }}
+              hint="0 = unlimited."
+            />
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={configForm.cas_required}
+                onChange={(e) =>
+                  setConfigForm({ ...configForm, cas_required: e.target.checked })
+                }
+              />
+              <span>Require check-and-set (CAS) on every write</span>
+            </label>
+            <Input
+              label="Auto-soft-delete after"
+              value={configForm.delete_version_after}
+              onChange={(e) =>
+                setConfigForm({ ...configForm, delete_version_after: e.target.value })
+              }
+              placeholder="0s"
+              hint='Versions older than this are auto-soft-deleted on access. "0s" disables.'
             />
           </div>
         </Modal>

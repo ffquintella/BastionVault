@@ -8,9 +8,9 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 
 | State | Count |
 |---|---|
-| Done | 43 |
+| Done | 46 |
 | Partial | 2 |
-| Todo | 10 |
+| Todo | 7 |
 | Removed | 1 |
 | **Total tracked features** | **56** |
 
@@ -31,7 +31,7 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 |---|---|---|
 | Core Vault Operations (init / seal / unseal / status) | Done | Vault-API-compatible. |
 | Secret Management (KV CRUD) | Done | KV v1 + KV v2 incl. nested-folder LIST. |
-| Secret Versioning & Soft-Delete | Todo | [spec](features/secret-versioning-and-soft-delete.md) |
+| Secret Versioning & Soft-Delete | Done | KV v2 backend, CLI auto-detect, full GUI (history panel + per-version actions + CAS + engine config). [spec](features/secret-versioning-and-soft-delete.md) |
 | Access Control (RBAC + path-based ACL) | Done | Path-based policy engine with allow / deny / capabilities. |
 | Identity Groups (user / app groups → policy mapping) | Done | [spec](features/identity-groups.md) — policy union for UserPass / AppRole / FIDO2, plus Phase 7 group-shared resources via `metadata { group_shared_resources = "true" }`. |
 | Per-User Scoping (ownership + policy templating + sharing) | Done | [spec](features/per-user-scoping.md) — 10 phases + migration backfill. |
@@ -57,9 +57,9 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | Storage Backend: SQLx | Removed | libsqlite3-sys conflict. |
 | Storage Backend: Hiqlite (embedded Raft SQLite, HA) | Done | [roadmap](roadmaps/hiqlite-default-ha-storage.md) — default backend, 6 phases. |
 | Cloud targets for Encrypted File (S3 / OneDrive / Google Drive / Dropbox) | Done | [spec](features/cloud-storage-backend.md) — 8 phases incl. cache decorator + key obfuscation. |
-| Import / Export & Backup / Restore | Done | [spec](features/import-export-backup-restore.md) — BVBK binary format with HMAC-SHA256. |
-| Import / Export Module (`.bvx`) | Todo | [spec](features/import-export-module.md) |
-| Scheduled Exports | Todo | [spec](features/scheduled-exports.md) |
+| Operator Backup / Restore (BVBK) | Done | [spec](features/import-export-backup-restore.md) — full-vault binary archive, HMAC-SHA256, for disaster recovery. |
+| User-facing Exchange Module (`.bvx`) | Done | [spec](features/import-export-module.md) — password-encrypted JSON for "Alice shares N secrets with Bob"; built on top of BVBK but a different threat model. Argon2id + XChaCha20-Poly1305, two-step preview-then-apply import with `skip` / `overwrite` / `rename` conflict policies, full GUI with scope picker + entropy meter. |
+| Scheduled Exports | Done | [spec](features/scheduled-exports.md) — `src/scheduled_exports/` (runner + schedule + store), `POST/GET/PUT/DELETE /v1/sys/scheduled-exports/*`, Tauri commands + GUI tab under `/exchange` (Scheduled backups). Built on top of the `.bvx` Exchange machinery. |
 | Caching | Done | [spec](features/caching.md) — token cache + ciphertext-only secret cache + memory hardening. |
 | Batch Operations | Done | [spec](features/batch-operations.md) — Phase 1 HTTP shipped; CLI + SDK [deferred](#deferred-sub-initiatives). |
 
@@ -141,7 +141,6 @@ Sequenced together under [`roadmaps/packaging-and-distribution.md`](roadmaps/pac
 
 Next-up `Todo` rows once Packaging & Distribution lands:
 
-- Secret Versioning & Soft-Delete
 - Dynamic Secrets framework + first engine plugins
 - HSM Support
 - Kubernetes Integration

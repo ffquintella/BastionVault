@@ -215,6 +215,49 @@ export function SecretsPage() {
     }
   }
 
+  /** Soft-delete a single version. The data stays in storage so the
+   *  operator can recover it via `undelete`. */
+  async function handleSoftDeleteVersion(version: number) {
+    if (!selectedKey) return;
+    await api.softDeleteSecretVersions(
+      currentPath + selectedKey,
+      [version],
+      mountBase,
+      mountType,
+    );
+    toast("success", `Soft-deleted v${version} of ${selectedKey}`);
+    await openHistory();
+  }
+
+  /** Recover a soft-deleted version (clears its `deletion_time`). No-op
+   *  on a destroyed version — the underlying data is already gone. */
+  async function handleUndeleteVersion(version: number) {
+    if (!selectedKey) return;
+    await api.undeleteSecretVersions(
+      currentPath + selectedKey,
+      [version],
+      mountBase,
+      mountType,
+    );
+    toast("success", `Undeleted v${version} of ${selectedKey}`);
+    await openHistory();
+  }
+
+  /** Irreversible — wipes the version's data from storage and flips its
+   *  `destroyed` flag on metadata. Once destroyed, the version cannot be
+   *  recovered even via `undelete`. */
+  async function handleDestroyVersion(version: number) {
+    if (!selectedKey) return;
+    await api.destroySecretVersions(
+      currentPath + selectedKey,
+      [version],
+      mountBase,
+      mountType,
+    );
+    toast("success", `Destroyed v${version} of ${selectedKey}`);
+    await openHistory();
+  }
+
   async function handleDelete(key: string) {
     try {
       await api.deleteSecret(currentPath + key, mountBase, mountType);
@@ -404,6 +447,15 @@ export function SecretsPage() {
                     loadVersion={loadSecretVersionData}
                     onRestore={
                       mountType === "kv-v2" ? handleRestoreVersion : undefined
+                    }
+                    onSoftDelete={
+                      mountType === "kv-v2" ? handleSoftDeleteVersion : undefined
+                    }
+                    onUndelete={
+                      mountType === "kv-v2" ? handleUndeleteVersion : undefined
+                    }
+                    onDestroy={
+                      mountType === "kv-v2" ? handleDestroyVersion : undefined
                     }
                     onClose={() => setShowHistory(false)}
                   />

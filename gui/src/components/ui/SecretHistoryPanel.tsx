@@ -22,6 +22,12 @@ interface SecretHistoryPanelProps {
   /** If provided, the detail view shows a "Restore" button that re-writes
    *  the old values as a new version. */
   onRestore?: (version: number, data: Record<string, unknown>) => Promise<void>;
+  /** KV-v2 only — soft-delete a specific version (recoverable). */
+  onSoftDelete?: (version: number) => Promise<void>;
+  /** KV-v2 only — recover a soft-deleted version. */
+  onUndelete?: (version: number) => Promise<void>;
+  /** KV-v2 only — irreversibly destroy a version's data. */
+  onDestroy?: (version: number) => Promise<void>;
   /** If provided, a Close button returns to the parent view. */
   onClose?: () => void;
 }
@@ -34,6 +40,9 @@ export function SecretHistoryPanel({
   loading = false,
   loadVersion,
   onRestore,
+  onSoftDelete,
+  onUndelete,
+  onDestroy,
   onClose,
 }: SecretHistoryPanelProps) {
   const [selected, setSelected] = useState<SecretHistoryVersion | null>(null);
@@ -41,6 +50,11 @@ export function SecretHistoryPanel({
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [restoring, setRestoring] = useState(false);
+  const [actionBusy, setActionBusy] = useState<null | "soft-delete" | "undelete" | "destroy">(
+    null,
+  );
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [confirmingDestroy, setConfirmingDestroy] = useState(false);
 
   async function openVersion(v: SecretHistoryVersion) {
     setSelected(v);
@@ -71,6 +85,26 @@ export function SecretHistoryPanel({
       closeDetail();
     } finally {
       setRestoring(false);
+    }
+  }
+
+  async function runVersionAction(
+    kind: "soft-delete" | "undelete" | "destroy",
+    fn: ((version: number) => Promise<void>) | undefined,
+  ) {
+    if (!selected || !fn) return;
+    setActionBusy(kind);
+    setActionError(null);
+    try {
+      await fn(selected.version);
+      // Pop back to the timeline; the parent will refresh the version
+      // list so the badge state reflects the new server-side reality.
+      closeDetail();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setActionBusy(null);
+      setConfirmingDestroy(false);
     }
   }
 
@@ -136,13 +170,81 @@ export function SecretHistoryPanel({
           )
         ) : null}
 
-        {onRestore && selectedData && !selected.destroyed && (
-          <div className="flex gap-2 pt-2">
-            <Button size="sm" onClick={handleRestore} loading={restoring} disabled={restoring}>
+        {actionError && (
+          <p className="text-sm text-[var(--color-danger)]">{actionError}</p>
+        )}
+
+        {/* Action bar — only renders for kv-v2 callers (the parent only
+         *   wires onSoftDelete/onUndelete/onDestroy when mountType is
+         *   kv-v2). Each button is conditionally enabled based on the
+         *   version's current state.
+         */}
+        <div className="flex flex-wrap gap-2 pt-2">
+          {onRestore && selectedData && !selected.destroyed && !selected.deletion_time && (
+            <Button
+              size="sm"
+              onClick={handleRestore}
+              loading={restoring}
+              disabled={restoring || actionBusy !== null}
+            >
               Restore this version
             </Button>
-          </div>
-        )}
+          )}
+          {onSoftDelete && !selected.destroyed && !selected.deletion_time && (
+            <Button
+              size="sm"
+              variant="secondary"
+              loading={actionBusy === "soft-delete"}
+              disabled={actionBusy !== null || restoring}
+              onClick={() => runVersionAction("soft-delete", onSoftDelete)}
+            >
+              Soft-delete
+            </Button>
+          )}
+          {onUndelete && selected.deletion_time && !selected.destroyed && (
+            <Button
+              size="sm"
+              variant="secondary"
+              loading={actionBusy === "undelete"}
+              disabled={actionBusy !== null || restoring}
+              onClick={() => runVersionAction("undelete", onUndelete)}
+            >
+              Undelete
+            </Button>
+          )}
+          {onDestroy && !selected.destroyed && (
+            confirmingDestroy ? (
+              <>
+                <Button
+                  size="sm"
+                  variant="danger"
+                  loading={actionBusy === "destroy"}
+                  disabled={actionBusy !== null || restoring}
+                  onClick={() => runVersionAction("destroy", onDestroy)}
+                >
+                  Yes, destroy v{selected.version} permanently
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={actionBusy !== null}
+                  onClick={() => setConfirmingDestroy(false)}
+                >
+                  Cancel
+                </Button>
+              </>
+            ) : (
+              <Button
+                size="sm"
+                variant="danger"
+                disabled={actionBusy !== null || restoring}
+                onClick={() => setConfirmingDestroy(true)}
+              >
+                Destroy permanently…
+              </Button>
+            )
+          )}
+        </div>
       </div>
     );
   }
