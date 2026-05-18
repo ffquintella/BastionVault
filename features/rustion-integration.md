@@ -330,6 +330,117 @@ crates/rustion-server/         // wires the new crate into the main binary
 - Audit events `rustion.policy.global.update`, `rustion.policy.type.update`, `rustion.policy.resource.update` with full before/after.
 - Documentation pass + security-review of the envelope, ticket, replay window, and the policy-lock escalation path (a compromised admin must not be able to *un*-lock a root-locked global).
 
+## Per-side deliverable tables
+
+The two repos are co-developed; each phase below names the files that change on each side. End-to-end demos at the end of every phase require both sides shipped. Rustion's side has its own self-contained spec at [`docs/bastionvault-integration.md`](../../Rustion/docs/bastionvault-integration.md) in the Rustion repo — keep the two in sync.
+
+### Phase 1 — Master cert + Rustion target registry + health monitoring
+
+| Side | Deliverable | Location |
+|---|---|---|
+| BastionVault | PKI slot for the master signing cert (issue, store, export pub) | `src/modules/rustion/master.rs` |
+| BastionVault | `rustion/` mount + `RustionTarget` CRUD (HTTP + CLI) | `src/modules/rustion/{mod,config,http,cli}.rs` |
+| BastionVault | Background health pinger (`GET /v1/health` against every target, 30s default, three-strikes-down debounce, status cache) | `src/modules/rustion/health.rs` |
+| BastionVault | Settings → Rustion Bastions GUI section (enrolment wizard, per-row health dot) | `gui/src/routes/SettingsPage.tsx` + `gui/src/lib/rustion.ts` |
+| BastionVault | Audit events: `rustion.target.enrol`, `rustion.target.health.changed`, `rustion.master.issue` | `src/modules/rustion/audit.rs` |
+| BastionVault | CLI: `bastionvault rustion target add|list|test|health`, `bastionvault rustion master export` | `src/modules/rustion/cli.rs` |
+| Rustion | New `rustion-control-plane` crate scaffold (empty axum service) | `crates/rustion-control-plane/` |
+| Rustion | Authority YAML store + hot reload | `crates/rustion-control-plane/src/authority.rs` |
+| Rustion | `GET /v1/health` with master-signed-nonce verification + per-IP rate limit | `crates/rustion-control-plane/src/routes.rs` |
+| Rustion | Control-plane identity keypair (load / generate / rotate) | `crates/rustion-control-plane/src/identity.rs` |
+| Rustion | TLS listener wired into the server binary, hybrid suite default | `crates/rustion-server/src/main.rs` |
+| Rustion | CLI: `rustion authority list|show|enrol`, `rustion control-plane identity export|rotate` | `crates/rustion-server/src/cli.rs` |
+
+### Phase 2 — BVRG-v1 envelope + Rustion control-plane scaffold
+
+| Side | Deliverable | Location |
+|---|---|---|
+| BastionVault | `bastion-vault-crypto::bvrg::{build, verify}` helpers (hybrid sig + ML-KEM-768 encap + ChaCha20-Poly1305) | `crates/bastion-vault-crypto/src/bvrg.rs` |
+| BastionVault | Envelope-builder unit tests against synthetic Rustion keypair | `crates/bastion-vault-crypto/tests/bvrg_roundtrip.rs` |
+| Rustion | `envelope.rs` verify + decrypt (mirrors BV side; layout frozen by BV spec) | `crates/rustion-control-plane/src/envelope.rs` |
+| Rustion | Replay-protection LRU + skew guard | `crates/rustion-control-plane/src/replay.rs` |
+| Rustion | `/v1/sessions` skeleton: parse envelope, return `501 not_implemented` (validates round-trip) | `crates/rustion-control-plane/src/routes.rs` |
+| Rustion | `rustion authority test-envelope` — synthetic envelope generator + verifier | `crates/rustion-server/src/cli.rs` |
+| Both | Cross-repo integration test: BastionVault builds envelope → Rustion verifies + decrypts | `gui/src-tauri/tests/rustion_envelope.rs` (BV) + corresponding fixture in Rustion |
+
+### Phase 3 — Session open + ticketed SSH proxy + dispatcher
+
+| Side | Deliverable | Location |
+|---|---|---|
+| BastionVault | Dispatcher: pinned-list or random-from-healthy-pool; skip `down`; advance on 5xx, halt on 4xx | `src/modules/rustion/dispatcher.rs` |
+| BastionVault | New connection-profile kind `rustion` with `bastions: string[]` field (empty = global pool) | `gui/src/lib/types.ts` + `gui/src/components/ConnectionProfileEditor.tsx` |
+| BastionVault | `rustion_session_open` Tauri command + envelope builder + dispatcher walk | `gui/src-tauri/src/commands/rustion.rs` |
+| BastionVault | SSH session window grows `transport: { kind: "rustion", host, port, ticket }` mode | `gui/src-tauri/src/session/ssh.rs` + `gui/src/routes/SessionSshWindow.tsx` |
+| BastionVault | Connection-tab dispatcher preview (`Will try: rustion-eu-west-1 → rustion-eu-west-2`) | `gui/src/components/RustionDispatcherPreview.tsx` |
+| BastionVault | `session.open` event extended with `transport`, `bastion_id`, `bastion_selection`, `bastion_candidates_tried`, `rustion_session_id` | `src/modules/rustion/audit.rs` |
+| Rustion | `session.rs` materialises a session record from a verified envelope | `crates/rustion-control-plane/src/session.rs` |
+| Rustion | Ticket vending (single-use, IP-bound, 30s TTL) | `crates/rustion-control-plane/src/session.rs` |
+| Rustion | `rustion-ssh` accepts `Rustion ticket: tkt_…` as first auth step, binds socket to session, dials target with decrypted credential | `crates/rustion-ssh/src/ticket_auth.rs` |
+| Rustion | Recording starts on first byte (existing recorder, new authority field) | `crates/rustion-recording/src/asciicast.rs` |
+| Both | End-to-end demo: BastionVault → Rustion → Linux target through SSH with both pinned-list and random-pool selection | `tests/e2e_rustion_ssh.sh` |
+
+### Phase 4 — RDP through Rustion
+
+| Side | Deliverable | Location |
+|---|---|---|
+| BastionVault | RDP session window takes `transport: rustion` | `gui/src-tauri/src/session/rdp.rs` + `gui/src/routes/SessionRdpWindow.tsx` |
+| BastionVault | ironrdp client connects to bastion TLS+PQC listener instead of the target | `gui/src-tauri/src/session/rdp.rs` |
+| Rustion | `rustion-rdp` accepts ticket in `mstshash` cookie position; same auth flow as SSH | `crates/rustion-rdp/src/ticket_auth.rs` |
+| Rustion | CredSSP / NLA tested against each credential kind (rdp-password, rdp-cert) | `crates/rustion-rdp/tests/credssp.rs` |
+
+### Phase 5 — Renewal + forced termination
+
+| Side | Deliverable | Location |
+|---|---|---|
+| BastionVault | `POST /v1/rustion/sessions/{sid}/renew` builds a renewal envelope; GUI auto-renew at `ttl - 60s` with idle skip | `src/modules/rustion/session.rs` + `gui/src/hooks/useSessionRenewal.ts` |
+| BastionVault | `DELETE /v1/rustion/sessions/{sid}` (force-terminate); Terminate button on active-sessions panel | `gui/src/routes/SessionsPage.tsx` |
+| BastionVault | Master-cert rotation: co-signed envelope to all enrolled bastions | `src/modules/rustion/master.rs` |
+| BastionVault | Audit: `session.renew`, `session.terminate`, `rustion.master.rotate` | `src/modules/rustion/audit.rs` |
+| Rustion | `POST /v1/sessions/{sid}/renew` validates renewal envelope, extends TTL, enforces `max_renewals` and correlation-id guard | `crates/rustion-control-plane/src/routes.rs` |
+| Rustion | `DELETE /v1/sessions/{sid}` tears down the live socket, finalises the recording | `crates/rustion-control-plane/src/routes.rs` + `crates/rustion-control-plane/src/session.rs` |
+
+### Phase 6 — Recording handoff
+
+| Side | Deliverable | Location |
+|---|---|---|
+| BastionVault | Webhook receiver: verify signature against authority's pinned `recording_webhook_pubkey`, write `recording.linked` audit event | `src/modules/rustion/recording.rs` + `src/modules/rustion/http.rs` |
+| BastionVault | 24h fallback poller hitting `GET /v1/sessions/{sid}/recording` on Rustion when the webhook is missed | `src/modules/rustion/recording.rs` |
+| BastionVault | "Open recording" link in audit timeline; signed-URL stream from Rustion to player | `gui/src/routes/AuditPage.tsx` |
+| BastionVault | In-GUI asciicast playback (existing xterm.js + asciinema-player) and `.rdp-rec` wasm decoder | `gui/src/components/RecordingPlayer.tsx` |
+| Rustion | Sidecar JSON on close + signed outbound `recording.ready` webhook (exponential backoff, max 5 retries / ~30 min) | `crates/rustion-control-plane/src/webhook.rs` |
+| Rustion | `GET /v1/recordings/{rid}` returns a 60s signed URL, IP-bound to operator | `crates/rustion-control-plane/src/routes.rs` |
+| Rustion | `GET /v1/sessions/{sid}/recording` serves the sidecar JSON for the 24h fallback window | `crates/rustion-control-plane/src/routes.rs` |
+
+### Phase 7 — Three-tier transport policy + `rustion-required` mode
+
+This phase is **BastionVault-only**. The transport-policy ladder lives entirely on the vault side; Rustion sees no behavioural change.
+
+| Side | Deliverable | Location |
+|---|---|---|
+| BastionVault | Global policy at `sys/config/rustion` (`transport_default`, `transport_lock`), root-gated | `src/modules/rustion/policy.rs` |
+| BastionVault | Per-resource-type `connect.transport` (+ per-type `transport_lock`), admin-gated | `src/modules/resource/types.rs` |
+| BastionVault | Per-resource `connect.transport` override, owner-gated, read-only when upstream tier is locked | `src/modules/resource/mod.rs` |
+| BastionVault | Effective-policy resolver `min(global, type, resource)` under `direct < rustion < rustion-required` | `src/modules/rustion/policy.rs` |
+| BastionVault | Settings → Rustion → Global policy (root-only); Resource Types editor field; resource Connection tab badge when locked | `gui/src/routes/SettingsPage.tsx` + `gui/src/routes/ResourcesPage.tsx` |
+| BastionVault | One-shot "Force all Connect through Rustion" migration action with diff preview, root-only | `gui/src/routes/SettingsPage.tsx` |
+| BastionVault | Audit: `rustion.policy.global.update`, `rustion.policy.type.update`, `rustion.policy.resource.update` with before/after | `src/modules/rustion/audit.rs` |
+| Rustion | (no changes — Rustion does not know or care which policy tier picked `rustion-required` on the vault side) | — |
+
+### Cross-repo testing matrix
+
+| Test | Driver | Verifies |
+|---|---|---|
+| Envelope round-trip | BV unit test against synthetic Rustion keys | Build / verify / decrypt symmetry |
+| Health probe | BV pinger against running Rustion | `GET /v1/health` round-trip + signed-nonce auth |
+| SSH session open | E2E script (Docker compose: BV + Rustion + OpenSSH target) | Full Connect flow, recording on |
+| RDP session open | Manual against Windows Server VM | CredSSP through bastion |
+| Renew + terminate | E2E script | TTL extension, force-disconnect surfaces to operator |
+| Dispatcher fallback | E2E with two Rustion instances; kill the primary | Ordered fallback advances; random pool excludes `down` |
+| Replay rejection | Integration test sending the same envelope twice | Second attempt → `envelope_replay` |
+| Webhook lost | E2E with webhook URL pointing at a black hole | 24h poller eventually links the recording |
+| Force-terminate from BV | E2E + audit-log inspection | Session window receives Tauri event; `session.terminate` recorded on both sides |
+| Policy escalation | Per-tier lock + non-admin attempts to override | `403 transport_locked` from API + greyed-out GUI |
+
 ## Open questions
 
 - **Two-way mTLS on the control plane?** Today the design relies entirely on the envelope signature for auth and uses TLS only for confidentiality / integrity of the transport. Adding mTLS gives belt-and-braces but requires a second cert lifecycle. Probably a Phase 7 follow-up rather than v1.
