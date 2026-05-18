@@ -26,6 +26,7 @@
 
 - Secret engines
   - [Overview](secret-engines.md)
+  - [SSH](ssh-secret-engine.md)
 
 - Storage backends
   - [Overview](backend/database/overview.md)
