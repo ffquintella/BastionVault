@@ -336,8 +336,16 @@ function IssuersTab({ mount }: { mount: string }) {
         const first = detail
           ? result.issuers.find((i) => i.id === detail.id) ?? result.issuers[0]
           : result.issuers[0];
-        const d = await api.pkiReadIssuer(mount, first.id);
-        setDetail(d);
+        // pki-user holders can list issuers but not read full issuer
+        // detail (only /json, /pem, /der, /crl). Auto-select read is
+        // best-effort — swallow ACL errors so the list still renders
+        // without toast spam.
+        try {
+          const d = await api.pkiReadIssuer(mount, first.id);
+          setDetail(d);
+        } catch {
+          setDetail(null);
+        }
       } else {
         setDetail(null);
       }

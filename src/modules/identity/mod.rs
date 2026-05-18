@@ -1230,6 +1230,60 @@ impl IdentityBackendInner {
             }
         }
 
+        // Expand any asset-group pointers into individual
+        // resource/kv-secret/file pointers. Without this the GUI
+        // surfaces an opaque "asset-group" row whose Open link goes to
+        // a non-existent path. The caller's ACL still gates the actual
+        // open; this expansion is purely a visibility step. Asset
+        // groups are read directly from the resource-group store
+        // (bypassing the caller's ACL) — membership in this list
+        // implies the share itself was already authorised, so the
+        // member resources are by definition shared with the caller.
+        if ptrs.iter().any(|p| p.target_kind == "asset-group") {
+            if let Some(rg_module) = self
+                .core
+                .module_manager
+                .get_module::<crate::modules::resource_group::ResourceGroupModule>(
+                    "resource-group",
+                )
+            {
+                if let Some(rg_store) = rg_module.store() {
+                    let mut expanded: Vec<ShareByGranteePointer> = Vec::with_capacity(ptrs.len());
+                    for p in ptrs.drain(..) {
+                        if p.target_kind != "asset-group" {
+                            expanded.push(p);
+                            continue;
+                        }
+                        let Some(g) = rg_store.get_group(&p.target_path).await? else {
+                            continue;
+                        };
+                        for r in g.members {
+                            expanded.push(ShareByGranteePointer {
+                                target_kind: "resource".to_string(),
+                                target_path: r,
+                                grantee_kind: p.grantee_kind.clone(),
+                            });
+                        }
+                        for s in g.secrets {
+                            expanded.push(ShareByGranteePointer {
+                                target_kind: "kv-secret".to_string(),
+                                target_path: s,
+                                grantee_kind: p.grantee_kind.clone(),
+                            });
+                        }
+                        for f in g.files {
+                            expanded.push(ShareByGranteePointer {
+                                target_kind: "file".to_string(),
+                                target_path: f,
+                                grantee_kind: p.grantee_kind.clone(),
+                            });
+                        }
+                    }
+                    ptrs = expanded;
+                }
+            }
+        }
+
         let mut data = Map::new();
         data.insert("entity_id".into(), Value::String(entity_id));
         data.insert(

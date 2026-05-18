@@ -45,6 +45,24 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-05-18
+
+### Fixed
+
+- **Asset-group shares now expand to constituent members in `identity/sharing/for-me`**
+  (`src/modules/identity/mod.rs`). Previously, when a user-group was granted access to an
+  asset group, the recipient's "Shared with me" feed returned a single opaque
+  `target_kind=asset-group` pointer whose Open link went to a non-existent
+  `/secrets/<group-name>` path. The handler now reads the asset group via
+  `ResourceGroupStore` and emits one pointer per resource/kv-secret/file member, carrying
+  the original `grantee_kind`. Expansion bypasses caller ACL (safe because membership in
+  the pointer set already implies the share was authorised).
+- **PKI Issuers tab no longer spams 403 toasts for `pki-user` holders**
+  (`gui/src/routes/PkiPage.tsx`). The auto-select read on first issuer hit
+  `pki/issuer/<ref>`, which `pki-user` policy doesn't grant (only `/json`, `/pem`, `/der`,
+  `/crl` variants). The auto-read is now best-effort: ACL errors are swallowed silently
+  so the issuer list still renders; explicit row clicks still surface real errors.
+
 ## [0.7.6] - 2026-05-18
 
 ### Changed
