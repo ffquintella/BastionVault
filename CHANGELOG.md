@@ -45,6 +45,16 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-05-18
+
+### Added
+
+- **Asset Groups sharing — identity groups and AppRole groups** (`gui/src/routes/AssetGroupsPage.tsx`, `gui/src/components/ui/GroupNamePicker.tsx`) -- the "Grant access" modal on an asset group's Sharing tab now exposes the `grantee_kind` selector (User / User identity group / App group), mirroring the SharingPage flow. Group names use a new typeahead picker backed by `list_groups` (falls back to free-text when the directory lookup is denied). Share rows render a badge when the grantee is a group, and the rowKey now disambiguates entity vs group shares with the same name. `deleteShare` calls pass through the share's `grantee_kind` so revokes work for group grantees.
+
+### Changed
+
+- **Asset-group share management now allowed for admins and owners** (`src/modules/identity/mod.rs::require_share_admin`) -- previously only a root token could grant or revoke asset-group shares (`HTTP 403: asset-group shares can only be managed by a root token`). The check now accepts the `admin` policy (same rule as elsewhere in the resource-group module) and resolves the asset group's `owner_entity_id` via `ResourceGroupStore::get_group`, so non-root owners can manage their own group's shares. Tokens with neither the admin policy nor matching ownership still get a 403 with the generic "only the target's owner can manage its shares" message.
+
 ## [0.7.3] - 2026-05-18
 
 ### Fixed

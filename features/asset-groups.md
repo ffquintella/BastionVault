@@ -306,7 +306,7 @@ Share semantics on asset groups:
 | 6 | Lifecycle hooks: prune group membership on target delete/destroy | Done (resource-delete in the resource module; KV-delete via `PolicyStore::post_route`) |
 | 7 | GUI: Asset Groups page, chips on objects, sidebar filter | Done (Termius-style group cards on Resources and Secrets pages with click-to-filter + breadcrumb; collapsible admin menu) |
 | 8 | Admin ownership-transfer + reindex endpoints and GUI | Done (`POST /v2/sys/asset-group-owner/transfer`; `reindex` is the recovery path for torn writes) |
-| 9 | Sharing integration (gated on per-user-scoping phase 8) | Done (`ShareTargetKind::AssetGroup`; indirect resolution expands shares to the member set at authorize time; member redaction for non-owner / non-admin readers) |
+| 9 | Sharing integration (gated on per-user-scoping phase 8) | Done (`ShareTargetKind::AssetGroup`; indirect resolution expands shares to the member set at authorize time; member redaction for non-owner / non-admin readers; GUI Grant-access modal supports entity / `group_user` / `group_app` grantees, mirroring SharingPage) |
 
 All nine phases shipped. The implementation lives under
 `src/modules/resource_group/` (the module name kept the original

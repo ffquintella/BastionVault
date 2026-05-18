@@ -14,6 +14,8 @@ import {
   EntityLabel,
   EntityPicker,
   GroupHistoryPanel,
+  GroupNamePicker,
+  Select,
   useToast,
 } from "../components/ui";
 import type {
@@ -21,6 +23,7 @@ import type {
   AssetGroupHistoryEntry,
   GroupHistoryEntry,
   ShareEntry,
+  ShareGranteeKind,
 } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
@@ -598,6 +601,7 @@ function AssetGroupSharingCard({
   const canGrant = isOwner || isAdmin;
 
   const [showGrant, setShowGrant] = useState(false);
+  const [granteeKind, setGranteeKind] = useState<ShareGranteeKind>("entity");
   const [grantee, setGrantee] = useState("");
   const [caps, setCaps] = useState<string[]>(["read"]);
   const [expires, setExpires] = useState("");
@@ -630,9 +634,11 @@ function AssetGroupSharingCard({
         grantee.trim(),
         caps,
         expires.trim(),
+        granteeKind,
       );
       toast("success", "Share granted");
       setShowGrant(false);
+      setGranteeKind("entity");
       setGrantee("");
       setCaps(["read"]);
       setExpires("");
@@ -644,7 +650,12 @@ function AssetGroupSharingCard({
 
   async function handleRevoke(s: ShareEntry) {
     try {
-      await api.deleteShare("asset-group", s.target_path, s.grantee_entity_id);
+      await api.deleteShare(
+        "asset-group",
+        s.target_path,
+        s.grantee_entity_id,
+        s.grantee_kind ?? "entity",
+      );
       toast("success", "Share revoked");
       load();
     } catch (e: unknown) {
@@ -726,9 +737,23 @@ function AssetGroupSharingCard({
               {
                 key: "grantee",
                 header: "Grantee",
-                render: (s: ShareEntry) => (
-                  <EntityLabel entityId={s.grantee_entity_id} />
-                ),
+                render: (s: ShareEntry) => {
+                  const gk = s.grantee_kind ?? "entity";
+                  if (gk === "entity") {
+                    return <EntityLabel entityId={s.grantee_entity_id} />;
+                  }
+                  return (
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Badge
+                        label={gk === "group_user" ? "user group" : "app group"}
+                        variant="warning"
+                      />
+                      <span className="font-mono text-xs truncate">
+                        {s.grantee_entity_id}
+                      </span>
+                    </div>
+                  );
+                },
               },
               {
                 key: "caps",
@@ -782,7 +807,9 @@ function AssetGroupSharingCard({
               },
             ]}
             data={shares}
-            rowKey={(s: ShareEntry) => s.grantee_entity_id}
+            rowKey={(s: ShareEntry) =>
+              `${s.grantee_kind ?? "entity"}:${s.grantee_entity_id}`
+            }
           />
         )}
       </Card>
@@ -806,12 +833,54 @@ function AssetGroupSharingCard({
         }
       >
         <div className="space-y-3">
-          <EntityPicker
-            label="Grantee"
-            value={grantee}
-            onChange={(id) => setGrantee(id)}
-            placeholder="Search by login or paste entity_id"
-          />
+          <div>
+            <Select
+              label="Grantee kind"
+              value={granteeKind}
+              onChange={(e) => {
+                setGranteeKind(e.target.value as ShareGranteeKind);
+                setGrantee("");
+              }}
+              options={[
+                { value: "entity", label: "User (entity)" },
+                { value: "group_user", label: "User identity group" },
+                { value: "group_app", label: "Application group (AppRole)" },
+              ]}
+            />
+            {granteeKind !== "entity" && (
+              <p className="text-xs text-[var(--color-text-muted)] mt-1">
+                Group shares only resolve to access for members with a policy
+                that carries{" "}
+                <code className="font-mono">
+                  metadata.group_shared_resources = "true"
+                </code>
+                .
+              </p>
+            )}
+          </div>
+          {granteeKind === "entity" ? (
+            <EntityPicker
+              label="Grantee"
+              value={grantee}
+              onChange={(id) => setGrantee(id)}
+              placeholder="Search by login or paste entity_id"
+            />
+          ) : (
+            <GroupNamePicker
+              kind={granteeKind === "group_user" ? "user" : "app"}
+              value={grantee}
+              onChange={setGrantee}
+              label={
+                granteeKind === "group_user"
+                  ? "User group name"
+                  : "App group name"
+              }
+              placeholder={
+                granteeKind === "group_user" ? "engineering" : "ci-bots"
+              }
+              hint="Pick from existing groups (Admin → Identity Groups) or type a name."
+            />
+          )}
           <div>
             <label className="block text-xs font-medium text-[var(--color-text-muted)] mb-1">
               Capabilities

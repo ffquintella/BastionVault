@@ -28,6 +28,7 @@ export { Badge } from "./Badge";
 export { Tabs } from "./Tabs";
 export { EmptyState } from "./EmptyState";
 export { EntityPicker } from "./EntityPicker";
+export { GroupNamePicker } from "./GroupNamePicker";
 export { EntityLabel } from "./EntityLabel";
 export { TargetPicker } from "./TargetPicker";
 export { GroupsSection } from "./GroupsSection";

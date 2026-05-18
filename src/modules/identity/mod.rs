@@ -932,15 +932,15 @@ impl IdentityBackendInner {
     /// Authorize the caller to manage shares on `(kind, target_path)`.
     ///
     /// A token is allowed when either:
-    ///   1. it carries the root policy, or
+    ///   1. it carries the root or `admin` policy, or
     ///   2. its resolved entity_id matches the owner_store record for
-    ///      the target.
+    ///      the target (for `AssetGroup`, the `ResourceGroupStore`'s
+    ///      `owner_entity_id`).
     ///
     /// All other tokens are rejected with HTTP 403 -- including those
     /// whose ACL granted them write access to the underlying resource
     /// but who do not actually own it. Sharing is an authority transfer
-    /// and must originate from the data owner. Asset-group shares have
-    /// no per-object owner, so only root may manage them.
+    /// and must originate from the data owner.
     async fn require_share_admin(
         &self,
         req: &Request,
@@ -952,7 +952,7 @@ impl IdentityBackendInner {
             .as_ref()
             .ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
 
-        if auth.policies.iter().any(|p| p == "root") {
+        if auth.policies.iter().any(|p| p == "root" || p == "admin") {
             return Ok(());
         }
 
@@ -1011,10 +1011,24 @@ impl IdentityBackendInner {
             ShareTargetKind::Resource => owner_store.get_resource_owner(target_path).await?,
             ShareTargetKind::File => owner_store.get_file_owner(target_path).await?,
             ShareTargetKind::AssetGroup => {
-                return Err(bv_error_response_status!(
-                    403,
-                    "asset-group shares can only be managed by a root token"
-                ));
+                let rg_module = self
+                    .core
+                    .module_manager
+                    .get_module::<crate::modules::resource_group::ResourceGroupModule>(
+                        "resource-group",
+                    )
+                    .ok_or_else(|| bv_error_string!("resource-group module unavailable"))?;
+                let rg_store = rg_module
+                    .store()
+                    .ok_or_else(|| bv_error_string!("resource-group store unavailable"))?;
+                rg_store
+                    .get_group(target_path)
+                    .await?
+                    .filter(|entry| !entry.owner_entity_id.is_empty())
+                    .map(|entry| OwnerRecord {
+                        entity_id: entry.owner_entity_id,
+                        created_at: String::new(),
+                    })
             }
         };
 
