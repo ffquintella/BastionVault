@@ -45,6 +45,33 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.9] - 2026-05-18
+
+### Fixed
+
+- **`identity/entity/self` is now in the default policy**
+  (`src/modules/policy/policy_store.rs`). The default policy granted read on
+  `identity/entity/id/{{identity.entity.id}}` and `.../name/{{...}}` but not
+  the caller-introspecting `entity/self` path, so any token that lacked
+  templating substitution (or whose entity_id wasn't populated yet) got 403
+  on the GUI's auth-store bootstrap. The handler only ever returns the
+  caller's own record, so granting it to every authenticated token is safe.
+
+### Changed
+
+- **PKI page now hides admin operations from non-admin users**
+  (`gui/src/routes/PkiPage.tsx`). Added a `usePkiAdmin()` policy check
+  (`root`/`admin`/`administrator`/`super-admin`/`pki-admin`) and gated:
+  - The "+ Mount PKI engine" header button.
+  - The "Import root CA" / "+ Generate root CA" Issuers-tab actions and
+    the empty-state CTA.
+  - Per-issuer "Set as default", "Rename", "Edit usages", "Delete" buttons.
+  - The "Keys" and "Tidy" tabs (whose endpoints `pki-user` cannot access).
+  - The "Import XCA" tab (admin-only workflow).
+  `pki-user` retains visibility of Issuers (list + Export), Roles, Issue,
+  Certificates, and External CSR — matching what the baseline policy
+  actually allows.
+
 ## [0.7.8] - 2026-05-18
 
 ### Fixed

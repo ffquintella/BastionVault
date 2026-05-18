@@ -27,6 +27,24 @@ import type {
 } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
+import { useAuthStore } from "../stores/authStore";
+
+// Policy names that authorise PKI administration (issuer lifecycle,
+// mount enable, key/tidy management). `pki-user` is intentionally
+// excluded — that baseline grants issuance and read of public material
+// only. Mirrors the server-side `pki-admin` policy in `policy_store.rs`.
+const PKI_ADMIN_POLICIES = new Set([
+  "root",
+  "admin",
+  "administrator",
+  "super-admin",
+  "pki-admin",
+]);
+
+function usePkiAdmin(): boolean {
+  const policies = useAuthStore((s) => s.policies);
+  return policies.some((p) => PKI_ADMIN_POLICIES.has(p));
+}
 
 type TabId =
   | "issuers"
@@ -136,6 +154,7 @@ function extractCn(dn: string): string {
 
 export function PkiPage() {
   const { toast } = useToast();
+  const isAdmin = usePkiAdmin();
   const [mounts, setMounts] = useState<PkiMountInfo[]>([]);
   const [activeMount, setActiveMount] = useState<string>("");
   const [tab, setTab] = useState<TabId>("issuers");
@@ -211,7 +230,9 @@ export function PkiPage() {
       <div className="space-y-4">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <h1 className="text-xl font-semibold">PKI</h1>
-          <Button onClick={() => setShowEnable(true)}>+ Mount PKI engine</Button>
+          {isAdmin && (
+            <Button onClick={() => setShowEnable(true)}>+ Mount PKI engine</Button>
+          )}
         </div>
 
         <Card>
@@ -235,9 +256,15 @@ export function PkiPage() {
           <Card>
             <EmptyState
               title="No PKI engine mounted"
-              description="Mount the PKI engine on a path (typically `pki/`) to manage CAs, roles, and certificate issuance."
+              description={
+                isAdmin
+                  ? "Mount the PKI engine on a path (typically `pki/`) to manage CAs, roles, and certificate issuance."
+                  : "No PKI engine is available. Contact an administrator."
+              }
               action={
-                <Button onClick={() => setShowEnable(true)}>Mount PKI engine</Button>
+                isAdmin ? (
+                  <Button onClick={() => setShowEnable(true)}>Mount PKI engine</Button>
+                ) : undefined
               }
             />
           </Card>
@@ -248,12 +275,20 @@ export function PkiPage() {
                 tabs={[
                   { id: "issuers", label: "Issuers" },
                   { id: "roles", label: "Roles" },
-                  { id: "keys", label: "Keys" },
+                  // Keys and Tidy are admin-only surfaces — pki-user
+                  // doesn't have ACL on `pki/keys` or `pki/tidy*`.
+                  ...(isAdmin
+                    ? ([
+                        { id: "keys", label: "Keys" },
+                      ] as { id: TabId; label: string }[])
+                    : []),
                   { id: "issue", label: "Issue" },
                   { id: "certs", label: "Certificates" },
                   { id: "csr", label: "External CSR" },
-                  { id: "tidy", label: "Tidy" },
-                  ...(xcaPluginPresent
+                  ...(isAdmin
+                    ? ([{ id: "tidy", label: "Tidy" }] as { id: TabId; label: string }[])
+                    : []),
+                  ...(xcaPluginPresent && isAdmin
                     ? [{ id: "xca", label: "Import XCA" }]
                     : []),
                 ]}
@@ -315,6 +350,7 @@ export function PkiPage() {
 
 function IssuersTab({ mount }: { mount: string }) {
   const { toast } = useToast();
+  const isAdmin = usePkiAdmin();
   const [issuers, setIssuers] = useState<PkiIssuerSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [detail, setDetail] = useState<PkiIssuerDetail | null>(null);
@@ -421,12 +457,14 @@ function IssuersTab({ mount }: { mount: string }) {
     <Card
       title="Issuers"
       actions={
-        <>
-          <Button variant="ghost" onClick={() => setShowImportCa(true)}>
-            Import root CA
-          </Button>
-          <Button onClick={() => setShowGenerate(true)}>+ Generate root CA</Button>
-        </>
+        isAdmin ? (
+          <>
+            <Button variant="ghost" onClick={() => setShowImportCa(true)}>
+              Import root CA
+            </Button>
+            <Button onClick={() => setShowGenerate(true)}>+ Generate root CA</Button>
+          </>
+        ) : undefined
       }
     >
       {loading ? (
@@ -434,14 +472,20 @@ function IssuersTab({ mount }: { mount: string }) {
       ) : issuers.length === 0 ? (
         <EmptyState
           title="No issuers configured"
-          description="Generate a root CA to start issuing certificates. The first issuer becomes the mount default automatically."
+          description={
+            isAdmin
+              ? "Generate a root CA to start issuing certificates. The first issuer becomes the mount default automatically."
+              : "No issuers are configured yet. Contact an administrator."
+          }
           action={
-            <div className="flex items-center gap-2">
-              <Button variant="ghost" onClick={() => setShowImportCa(true)}>
-                Import root CA
-              </Button>
-              <Button onClick={() => setShowGenerate(true)}>Generate root CA</Button>
-            </div>
+            isAdmin ? (
+              <div className="flex items-center gap-2">
+                <Button variant="ghost" onClick={() => setShowImportCa(true)}>
+                  Import root CA
+                </Button>
+                <Button onClick={() => setShowGenerate(true)}>Generate root CA</Button>
+              </div>
+            ) : undefined
           }
         />
       ) : (
@@ -493,47 +537,53 @@ function IssuersTab({ mount }: { mount: string }) {
                 )}
               </div>
               <div className="flex gap-2 flex-wrap">
-                {!detail.is_default && (
+                {isAdmin && !detail.is_default && (
                   <Button variant="ghost" onClick={() => setAsDefault(detail.id)}>
                     Set as default
                   </Button>
                 )}
-                <Button
-                  variant="ghost"
-                  onClick={() => {
-                    setRenameValue(detail.name);
-                    setShowRename(true);
-                  }}
-                >
-                  Rename
-                </Button>
-                <Button
-                  variant="ghost"
-                  onClick={() => {
-                    setUsageValues(detail.usage);
-                    setShowUsages(true);
-                  }}
-                >
-                  Edit usages
-                </Button>
+                {isAdmin && (
+                  <Button
+                    variant="ghost"
+                    onClick={() => {
+                      setRenameValue(detail.name);
+                      setShowRename(true);
+                    }}
+                  >
+                    Rename
+                  </Button>
+                )}
+                {isAdmin && (
+                  <Button
+                    variant="ghost"
+                    onClick={() => {
+                      setUsageValues(detail.usage);
+                      setShowUsages(true);
+                    }}
+                  >
+                    Edit usages
+                  </Button>
+                )}
                 <Button
                   variant="ghost"
                   onClick={() => setExportTarget(detail.id)}
                 >
                   Export
                 </Button>
-                <Button
-                  variant="ghost"
-                  onClick={() =>
-                    setDeleteTarget({
-                      id: detail.id,
-                      name: detail.name,
-                      is_default: detail.is_default,
-                    })
-                  }
-                >
-                  Delete
-                </Button>
+                {isAdmin && (
+                  <Button
+                    variant="ghost"
+                    onClick={() =>
+                      setDeleteTarget({
+                        id: detail.id,
+                        name: detail.name,
+                        is_default: detail.is_default,
+                      })
+                    }
+                  >
+                    Delete
+                  </Button>
+                )}
               </div>
               <Textarea
                 label="Certificate (PEM)"

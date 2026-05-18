@@ -93,6 +93,15 @@ path "identity/entity/name/{{identity.entity.name}}" {
   capabilities = ["read"]
 }
 
+# Caller-introspecting self lookup. Resolves the calling token's
+# entity_id without needing path templating substitution, which not
+# every storage backend supports today. Safe to grant to every
+# authenticated token because the handler only ever returns the
+# caller's own record.
+path "identity/entity/self" {
+  capabilities = ["read"]
+}
+
 # Allow a token to list shares granted to it (direct entity shares plus
 # group shares when the assigned policy carries the
 # `group_shared_resources = "true"` metadata tag). This is a
