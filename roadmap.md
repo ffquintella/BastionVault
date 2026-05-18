@@ -70,7 +70,7 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | Resource Management (inventory + grouped secrets) | Done | [spec](features/resources.md) — 14 Tauri commands, full GUI. |
 | File Resources (binary blobs + sync targets) | Done | [spec](features/file-resources.md) — local-FS + SMB + SFTP + SCP + periodic re-sync + sync-on-write. |
 | First-class `firewall` / `switch` types + refined `database` | Done | [spec](features/resource-types-firewall-switch-db.md) — three phases shipped; closed-enum DB engines, vendor / HA-role / layer / firmware fields. |
-| Resource Connect — in-app SSH / RDP for server resources | Done | [spec](features/resource-connect.md) — Phases 1–7 incl. ⌘K palette, recently-connected list, Connect-policy on `ResourceTypeDef`. SSH-engine credential source [deferred](#deferred-sub-initiatives). |
+| Resource Connect — in-app SSH / RDP for server resources | Done | [spec](features/resource-connect.md) — Phases 1–7 incl. ⌘K palette, recently-connected list, Connect-policy on `ResourceTypeDef`. SSH × {Secret, LDAP, PKI, **SSH engine (CA + OTP)**}, RDP × {Secret, LDAP, PKI}. |
 
 ### Networking & TLS
 
@@ -194,9 +194,6 @@ Self-contained follow-ups with no current blocker on the parent feature. Each ca
 - Composite IETF-draft tracking — Phase 3 pins a BastionVault-internal prehash domain; swap point is `composite::bv_prehash` once `draft-ietf-lamps-pq-composite-sigs` locks.
 - Additional composite variants — Phase 3 ships `id-MLDSA65-ECDSA-P256-SHA512`; other pairings (44+P-256, 87+P-384, RSA-PSS) follow the same structure.
 - `plugin-ext` bridge for third-party `CertDeliveryPlugin` deliverers — trait + `DelivererRegistry::register` plug point are stable; runtime bridge is the remaining work.
-
-**Resource Connect**
-- `ssh-engine` credential source — final cell of the launch matrix; SSH × {Secret, LDAP, PKI} all green, the SSH-engine variant is the deferred fourth.
 
 **FIDO2 / WebAuthn**
 - ~~Replace the `openssl-sys` link in `webauthn-rs` 0.5~~ — done. The server now uses an in-tree pure-Rust Relying Party at [`src/modules/credential/fido2/rp/`](src/modules/credential/fido2/rp/); `cargo tree -p bastion_vault -i openssl` is empty. See [tauri-gui-fido2.md](roadmaps/tauri-gui-fido2.md) for the new module layout. Storage compat note: existing FIDO2 enrollments require re-enrollment after the upgrade.

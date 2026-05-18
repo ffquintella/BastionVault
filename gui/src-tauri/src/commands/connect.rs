@@ -101,6 +101,7 @@ pub async fn session_open_ssh(
         &state,
         &request.resource_name,
         &profile,
+        &meta,
         request.operator_credential.as_ref(),
     )
     .await?;
@@ -939,6 +940,7 @@ async fn resolve_ssh_credential(
     state: &State<'_, AppState>,
     resource_name: &str,
     profile: &Value,
+    meta: &Map<String, Value>,
     operator_credential: Option<&OperatorCredential>,
 ) -> Result<ResolvedSshCredential, CommandError> {
     let cs = profile.get("credential_source").ok_or_else(|| {
@@ -949,13 +951,220 @@ async fn resolve_ssh_credential(
         "secret" => resolve_secret_ssh(state, resource_name, cs).await,
         "ldap" => resolve_ldap_ssh(state, cs, operator_credential).await,
         "pki" => resolve_pki_ssh(state, resource_name, cs).await,
-        "ssh-engine" => Err(CommandError::from(
-            "credential source `ssh-engine` lands in a later phase".to_string(),
-        )),
+        "ssh-engine" => resolve_ssh_engine_ssh(state, profile, meta, cs).await,
         other => Err(CommandError::from(format!(
             "unknown credential source `{other}`"
         ))),
     }
+}
+
+/// Resolve an `ssh-engine` source. Two working modes today:
+///
+/// - `ca`: generate a fresh Ed25519 keypair in-process, ask the bound
+///   SSH engine to sign the public half via `<mount>sign/<role>`, and
+///   present `(key, cert)` to russh via `authenticate_openssh_cert`.
+///   The target's `sshd` must trust the BV CA pubkey via
+///   `TrustedUserCAKeys`. Both halves of the credential are ephemeral
+///   to this session and zeroized on drop.
+/// - `otp`: mint a one-time password via `<mount>creds/<role>` with
+///   the resolved target IP + username, present it to russh as a
+///   password. The target host must run `bv-ssh-helper` for the OTP
+///   to validate at PAM time. Caller-supplied `username` overrides
+///   the role's `default_user`.
+///
+/// `pqc` mode is rejected at this layer — russh's `ssh-key` dep does
+/// not yet support `ssh-mldsa65@openssh.com` cert auth, so we can't
+/// hand the protocol library a credential it knows how to use. The
+/// SSH engine still mints PQC certs for out-of-app consumers.
+async fn resolve_ssh_engine_ssh(
+    state: &State<'_, AppState>,
+    profile: &Value,
+    meta: &Map<String, Value>,
+    cs: &Value,
+) -> Result<ResolvedSshCredential, CommandError> {
+    let ssh_mount = ssh_engine_mount_prefix(cs)?;
+    let ssh_role = cs
+        .get("ssh_role")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| CommandError::from("credential_source.ssh_role is required"))?
+        .to_string();
+    let mode = cs
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("ca");
+
+    match mode {
+        "ca" => sign_ssh_engine_ca(state, &ssh_mount, &ssh_role, profile).await,
+        "otp" => mint_ssh_engine_otp(state, &ssh_mount, &ssh_role, profile, meta).await,
+        "pqc" => Err(CommandError::from(
+            "ssh-engine pqc mode is not supported by the in-app SSH client today \
+             (russh's ssh-key dep does not yet implement ssh-mldsa65@openssh.com \
+             cert auth); use a PQC-aware standalone client against ssh/sign/<role>"
+                .to_string(),
+        )),
+        other => Err(CommandError::from(format!(
+            "credential_source.mode `{other}` is not one of ca | otp | pqc"
+        ))),
+    }
+}
+
+fn ssh_engine_mount_prefix(cs: &Value) -> Result<String, CommandError> {
+    let raw = cs
+        .get("ssh_mount")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .ok_or_else(|| CommandError::from("credential_source.ssh_mount is required"))?;
+    if raw.is_empty() {
+        return Err(CommandError::from(
+            "credential_source.ssh_mount must not be empty".to_string(),
+        ));
+    }
+    Ok(format!("{}/", raw.trim_end_matches('/')))
+}
+
+async fn sign_ssh_engine_ca(
+    state: &State<'_, AppState>,
+    ssh_mount: &str,
+    ssh_role: &str,
+    profile: &Value,
+) -> Result<ResolvedSshCredential, CommandError> {
+    use russh::keys::ssh_key::{Algorithm, LineEnding, PrivateKey};
+
+    // Ephemeral Ed25519 keypair — never persisted; lives in
+    // memory for the duration of the session and zeroizes on drop
+    // via Zeroizing<String> wrappers below. ssh-key's `PrivateKey::random`
+    // wants a `rand_core::CryptoRng` 0.10; the gui otherwise uses rand
+    // 0.9, so we pull `rand_v10` solely for this call site.
+    let private_key = PrivateKey::random(&mut rand_v10::rng(), Algorithm::Ed25519)
+        .map_err(|e| CommandError::from(format!("generate ephemeral ssh keypair: {e}")))?;
+    let public_openssh = private_key
+        .public_key()
+        .to_openssh()
+        .map_err(|e| CommandError::from(format!("serialize ephemeral pubkey: {e}")))?;
+    let private_openssh = private_key
+        .to_openssh(LineEnding::LF)
+        .map_err(|e| CommandError::from(format!("serialize ephemeral private key: {e}")))?;
+
+    // Ask the SSH engine to sign it. We don't override the role's
+    // ttl / extensions — operators tune those on the role itself.
+    // `valid_principals` is left to the role's `default_user`.
+    let mut body = Map::new();
+    body.insert("public_key".into(), Value::String(public_openssh));
+    if let Some(user) = profile
+        .get("username")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        body.insert("valid_principals".into(), Value::String(user.to_string()));
+    }
+
+    let path = format!("{ssh_mount}sign/{ssh_role}");
+    let resp = make_request(state, Operation::Write, path, Some(body)).await?;
+    let data: HashMap<String, Value> = resp
+        .and_then(|r| r.data)
+        .map(|m| m.into_iter().collect())
+        .unwrap_or_default();
+    let signed_key = data
+        .get("signed_key")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            CommandError::from(format!(
+                "ssh/{ssh_role} sign response missing `signed_key`"
+            ))
+        })?
+        .to_string();
+
+    Ok(ResolvedSshCredential {
+        credential: SshCredential::Cert {
+            pem: Zeroizing::new(private_openssh.to_string()),
+            cert_openssh: signed_key,
+        },
+        // CA-mode roles enforce `valid_principals` themselves; don't
+        // second-guess the profile's username here.
+        effective_username: None,
+        on_close: None,
+    })
+}
+
+async fn mint_ssh_engine_otp(
+    state: &State<'_, AppState>,
+    ssh_mount: &str,
+    ssh_role: &str,
+    profile: &Value,
+    meta: &Map<String, Value>,
+) -> Result<ResolvedSshCredential, CommandError> {
+    // The OTP record is keyed on the target IP — the helper on the
+    // target host validates `(otp, ip)` against the vault, so the IP
+    // we mint with must match the IP the operator will actually
+    // connect to. Prefer the profile override, then the resource's
+    // ip_address. Hostnames are not accepted: the SSH engine
+    // requires a parseable IpAddr at mint time.
+    let target_ip = profile
+        .get("target_host")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            meta.get("ip_address")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+        })
+        .ok_or_else(|| {
+            CommandError::from(
+                "ssh-engine OTP mode needs an IP — set the resource's ip_address \
+                 (or override target_host on the profile with an IP literal)"
+                    .to_string(),
+            )
+        })?
+        .to_string();
+    // Reject hostnames up front with a clear message rather than
+    // letting the engine bounce a vague parse error back.
+    if target_ip.parse::<std::net::IpAddr>().is_err() {
+        return Err(CommandError::from(format!(
+            "ssh-engine OTP target `{target_ip}` is not an IP literal; OTP mode \
+             matches against the role's cidr_list and requires a numeric address"
+        )));
+    }
+
+    let mut body = Map::new();
+    body.insert("ip".into(), Value::String(target_ip));
+    if let Some(user) = profile
+        .get("username")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        body.insert("username".into(), Value::String(user.to_string()));
+    }
+
+    let path = format!("{ssh_mount}creds/{ssh_role}");
+    let resp = make_request(state, Operation::Write, path, Some(body)).await?;
+    let data: HashMap<String, Value> = resp
+        .and_then(|r| r.data)
+        .map(|m| m.into_iter().collect())
+        .unwrap_or_default();
+    let otp = data
+        .get("key")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            CommandError::from(format!(
+                "ssh/{ssh_role} creds response missing `key`"
+            ))
+        })?
+        .to_string();
+    let effective_username = data
+        .get("username")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .filter(|s| !s.is_empty());
+
+    Ok(ResolvedSshCredential {
+        credential: SshCredential::Password(Zeroizing::new(otp)),
+        effective_username,
+        on_close: None,
+    })
 }
 
 /// Resolve a PKI-source profile for SSH: call `pki/issue/<role>`

@@ -45,6 +45,32 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.11] - 2026-05-18
+
+### Added
+
+- **Resource Connect: `ssh-engine` credential source for SSH sessions**
+  (`gui/src-tauri/src/commands/connect.rs`, `gui/src-tauri/src/session/ssh.rs`).
+  Closes the deferred fourth cell of the launch matrix (SSH × {Secret, LDAP,
+  PKI, **SSH engine**}). Two working modes:
+    - **CA mode** — generates a fresh Ed25519 keypair in-process, posts the
+      pubkey to `<mount>sign/<role>`, presents `(key, cert)` to russh via
+      `authenticate_openssh_cert`. Target `sshd` must trust the BV SSH CA
+      via `TrustedUserCAKeys`. Both halves are session-ephemeral and zeroize
+      on drop; the cert TTL is bounded by the SSH role's `max_ttl`.
+    - **OTP mode** — calls `<mount>creds/<role>` with the resolved target IP
+      + username, presents the returned password to russh as password auth.
+      Target host must run `bv-ssh-helper` for the OTP to validate at PAM
+      time. Hostnames are rejected upfront with a clear error message; the
+      SSH engine matches against `cidr_list` and requires an IP literal.
+  PQC mode (`ssh-mldsa65@openssh.com`) is explicitly rejected at this layer
+  with a documented error — russh's `ssh-key` dep does not yet implement
+  ML-DSA-65 cert auth. Out-of-app PQC-aware clients can still consume
+  `ssh/sign/<role>` directly.
+- New `SshCredential::Cert { pem, cert_openssh }` variant on the session
+  layer wraps an ephemeral keypair + signed OpenSSH cert for the russh
+  `authenticate_openssh_cert` call.
+
 ## [0.7.10] - 2026-05-18
 
 ### Fixed

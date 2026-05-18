@@ -60,6 +60,17 @@ pub enum SshCredential {
         pem: Zeroizing<String>,
         passphrase: Option<Zeroizing<String>>,
     },
+    /// OpenSSH-certificate auth: the caller minted a fresh keypair
+    /// and got the public half signed by the BastionVault SSH engine
+    /// (CA mode). russh authenticates by presenting the certificate
+    /// to the server, which trusts the BV CA via
+    /// `TrustedUserCAKeys`. Both halves are short-lived — the
+    /// keypair is ephemeral to this session and the cert's TTL is
+    /// bounded by the SSH role.
+    Cert {
+        pem: Zeroizing<String>,
+        cert_openssh: String,
+    },
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -143,6 +154,16 @@ pub async fn open_ssh_session(
                 .authenticate_publickey(&args.username, key_arg)
                 .await
                 .map_err(|e| format!("publickey auth: {e}"))?
+        }
+        SshCredential::Cert { pem, cert_openssh } => {
+            let key = decode_secret_key(pem.as_str(), None)
+                .map_err(|e| format!("parse ephemeral private key: {e}"))?;
+            let cert = russh::keys::ssh_key::Certificate::from_openssh(cert_openssh.trim())
+                .map_err(|e| format!("parse signed certificate: {e}"))?;
+            session
+                .authenticate_openssh_cert(&args.username, Arc::new(key), cert)
+                .await
+                .map_err(|e| format!("openssh-cert auth: {e}"))?
         }
     };
     if !auth_result.success() {
