@@ -280,6 +280,16 @@ path "resources/*" {
 path "cubbyhole/*" {
     capabilities = ["create", "read", "update", "delete", "list"]
 }
+
+# Opt the standard user in to group-share resolution. Without this
+# tag, shares whose grantee is an identity group (user or app) are
+# silently filtered out — both from the effective ACL and from
+# `identity/sharing/for-me`. Operators who want to disable group-share
+# visibility for a specific user should attach a custom policy that
+# omits this metadata block.
+metadata {
+    group_shared_resources = "true"
+}
 "#;
 
 /// Read-only ownership-scoped baseline. Grants a user read+list on any
@@ -323,6 +333,10 @@ path "resources/*" {
 path "cubbyhole/*" {
     capabilities = ["create", "read", "update", "delete", "list"]
 }
+
+metadata {
+    group_shared_resources = "true"
+}
 "#;
 
 /// Full-CRUD ownership-scoped role. The user manages what they
@@ -362,6 +376,16 @@ path "resources/*" {
 # --- Private workspace ---
 path "cubbyhole/*" {
     capabilities = ["create", "read", "update", "delete", "list"]
+}
+
+# Opt the standard user in to group-share resolution. Without this
+# tag, shares whose grantee is an identity group (user or app) are
+# silently filtered out — both from the effective ACL and from
+# `identity/sharing/for-me`. Operators who want to disable group-share
+# visibility for a specific user should attach a custom policy that
+# omits this metadata block.
+metadata {
+    group_shared_resources = "true"
 }
 "#;
 

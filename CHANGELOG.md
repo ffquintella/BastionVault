@@ -45,6 +45,16 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-05-18
+
+### Changed
+
+- **Built-in user policies opt in to group-share resolution by default** (`src/modules/policy/policy_store.rs`) -- the `standard-user`, `standard-user-readonly`, and `secret-author` policies now carry `metadata { group_shared_resources = "true" }`. Without this tag the share evaluator silently skipped grants whose grantee was an identity group (user or app), and `identity/sharing/for-me` also omitted them — so resources shared to a group the caller belonged to never showed up. The tag is force-loaded on every unseal, so existing vaults pick up the change automatically; operators who want to opt a specific user out should attach a custom policy that omits the metadata block.
+
+### Fixed
+
+- **Resources page for non-admin callers** (`gui/src/routes/ResourcesPage.tsx`) -- the page called `resources/search`, which non-admin tokens lack capability for, surfacing `HTTP 403: Permission denied` and an empty list even when the caller had shared resources. The page now catches the 403 on first load and transparently falls back to listing the caller's resource shares (via `list_shares_for_me`), reading each resource's metadata and applying `q` / `type` filters client-side. Subsequent paging stays on the fallback path so it never retries the denied endpoint.
+
 ## [0.7.4] - 2026-05-18
 
 ### Added

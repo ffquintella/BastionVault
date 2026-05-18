@@ -193,6 +193,13 @@ export function ResourcesPage() {
   // newer fetch's results.
   const fetchTokenRef = useRef(0);
 
+  // Non-admin fallback: when `resources/search` is denied (403) the
+  // caller has no blanket search capability but may still have access
+  // to a handful of resources via shares. We cache the share-pointer
+  // resource list per session and page over it client-side.
+  const sharedResourcesRef = useRef<string[] | null>(null);
+  const [sharedFallback, setSharedFallback] = useState(false);
+
   useEffect(() => {
     loadTypeConfig();
   }, []);
@@ -227,6 +234,64 @@ export function ResourcesPage() {
     for (const g of Object.keys(out)) out[g].sort();
     return out;
   }, [assetGroups.map.byResource]);
+
+  // Share-fallback paging: client-side filter + slice over the cached
+  // share-pointer list. Used when the server-side search endpoint is
+  // denied (non-admin caller without `resources/search`).
+  async function runSharedFallback(
+    reset: boolean,
+    offset: number,
+    token: number,
+  ) {
+    if (sharedResourcesRef.current === null) {
+      const me = await api.listSharesForMe();
+      const names = Array.from(
+        new Set(
+          me.entries
+            .filter((p) => p.target_kind === "resource")
+            .map((p) => p.target_path),
+        ),
+      ).sort();
+      sharedResourcesRef.current = names;
+    }
+    const all = sharedResourcesRef.current;
+    const q = searchDebounced.trim().toLowerCase();
+
+    // Read metadata for the slice we're about to render. We over-read
+    // a bit when filters are active so the page still fills; a more
+    // principled fix would build a cached card-index, but the share
+    // set is bounded and this keeps the code linear.
+    const scanLimit = q || filterType ? all.length : offset + PAGE_SIZE;
+    const slice = all.slice(0, scanLimit);
+    const metas = await Promise.all(
+      slice.map((n) => api.readResource(n).catch(() => null)),
+    );
+    if (fetchTokenRef.current !== token) return;
+
+    const filtered: api.ResourceCardEntry[] = [];
+    slice.forEach((name, i) => {
+      const m = metas[i];
+      if (!m) return;
+      const type = String(m.type || "");
+      if (filterType && type !== filterType) return;
+      const hostname = m.hostname ? String(m.hostname) : undefined;
+      const ip_address = m.ip_address ? String(m.ip_address) : undefined;
+      const tags = m.tags ? String(m.tags) : undefined;
+      if (q) {
+        const hay = [name, type, hostname, ip_address, tags]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        if (!hay.includes(q)) return;
+      }
+      filtered.push({ name, type, hostname, ip_address, tags });
+    });
+
+    const page = filtered.slice(offset, offset + PAGE_SIZE);
+    setCards(reset ? page : (prev) => [...prev, ...page]);
+    setTotal(filtered.length);
+    setHasMore(offset + PAGE_SIZE < filtered.length);
+  }
 
   // Fetch one page. `reset` true means "filter changed — replace the
   // list"; false means "scrolled to bottom — append".
@@ -268,17 +333,33 @@ export function ResourcesPage() {
           setCards(reset ? items : (prev) => [...prev, ...items]);
           setTotal(members.length);
           setHasMore(offset + PAGE_SIZE < members.length);
+        } else if (sharedFallback) {
+          // Already in fallback mode: page over the cached share list.
+          await runSharedFallback(reset, offset, token);
         } else {
-          const res = await api.searchResources({
-            q: searchDebounced || undefined,
-            type: filterType || undefined,
-            offset,
-            limit: PAGE_SIZE,
-          });
-          if (fetchTokenRef.current !== token) return;
-          setCards(reset ? res.items : (prev) => [...prev, ...res.items]);
-          setTotal(res.total);
-          setHasMore(res.has_more);
+          try {
+            const res = await api.searchResources({
+              q: searchDebounced || undefined,
+              type: filterType || undefined,
+              offset,
+              limit: PAGE_SIZE,
+            });
+            if (fetchTokenRef.current !== token) return;
+            setCards(reset ? res.items : (prev) => [...prev, ...res.items]);
+            setTotal(res.total);
+            setHasMore(res.has_more);
+          } catch (e: unknown) {
+            // Non-admin users without the `resources/search` capability
+            // hit 403 here. Fall back to the share-pointer list so the
+            // page still shows what they actually have access to.
+            if (fetchTokenRef.current !== token) return;
+            if (extractError(e).includes("403")) {
+              setSharedFallback(true);
+              await runSharedFallback(reset, offset, token);
+            } else {
+              throw e;
+            }
+          }
         }
       } catch (e: unknown) {
         if (fetchTokenRef.current !== token) return;
@@ -295,7 +376,7 @@ export function ResourcesPage() {
         }
       }
     },
-    [cards.length, filterGroup, filterType, groupMembers, searchDebounced],
+    [cards.length, filterGroup, filterType, groupMembers, searchDebounced, sharedFallback],
   );
 
   // Refetch (reset) whenever any filter changes. Note: this depends on
