@@ -45,6 +45,20 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.8] - 2026-05-18
+
+### Fixed
+
+- **ACL `scopes = ["shared"]` now resolves identity-group grantees**
+  (`src/modules/policy/policy_store.rs`). `resolve_target_shared_caps` only looked up
+  shares keyed by the caller's `entity_id`, so a share whose grantee was an identity
+  group (e.g. `grp-teste`) never granted capabilities even when the caller was a
+  member of that group. The `for-me` feed surfaced the share but the underlying
+  read/list returned 403. The helper now also walks the caller's user-group and
+  app-group memberships (gated by the same `metadata.group_shared_resources = "true"`
+  opt-in used by the listing endpoint) and unions in both direct shares and
+  asset-group shares granted to each group. Visibility and enforcement now agree.
+
 ## [0.7.7] - 2026-05-18
 
 ### Fixed

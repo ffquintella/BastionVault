@@ -40,7 +40,7 @@ use crate::{
     handler::{AuthHandler, Handler},
     logical::{auth::PolicyResults, Operation, Request, Response},
     modules::{
-        identity::{IdentityModule, OwnerStore, ShareStore, ShareTargetKind},
+        identity::{GroupKind, IdentityModule, OwnerStore, ShareStore, ShareTargetKind},
         resource_group::{ResourceGroupModule, ResourceGroupStore},
     },
     router::Router,
@@ -1517,7 +1517,139 @@ async fn resolve_target_shared_caps(
         }
     }
 
+    // Identity-group grantees: when one of the caller's attached
+    // policies opts in via `metadata.group_shared_resources = "true"`,
+    // also resolve shares whose grantee is an identity group (user or
+    // app) the caller belongs to. Without this expansion, group-
+    // grantee shares show up in the "Shared with me" feed (which has
+    // its own group walk) but the underlying read/list ACL still 403s
+    // because the share is not keyed on the caller's entity_id.
+    let group_shared = caller_policies_opt_in_group_shared(&core, req).await;
+    if group_shared {
+        let username = req
+            .auth
+            .as_ref()
+            .and_then(|a| a.metadata.get("username"))
+            .cloned()
+            .unwrap_or_default();
+        let role_name = req
+            .auth
+            .as_ref()
+            .and_then(|a| a.metadata.get("role_name"))
+            .cloned()
+            .unwrap_or_default();
+
+        if let Some(gs) = module.group_store() {
+            for (kind, member) in [
+                (GroupKind::User, &username),
+                (GroupKind::App, &role_name),
+            ] {
+                if member.is_empty() {
+                    continue;
+                }
+                let m_lc = member.trim().to_lowercase();
+                let Ok(names) = gs.list_groups(kind).await else {
+                    continue;
+                };
+                for g_name in names {
+                    let Ok(Some(g)) = gs.get_group(kind, &g_name).await else {
+                        continue;
+                    };
+                    let is_member =
+                        g.members.iter().any(|m| m.trim().to_lowercase() == m_lc);
+                    if !is_member {
+                        continue;
+                    }
+
+                    // Direct shares granted to this group on the target.
+                    if let Some(name) = resource_name_from_path(&req.path) {
+                        if let Ok(v) = store
+                            .shared_capabilities(ShareTargetKind::Resource, &name, &g_name)
+                            .await
+                        {
+                            merge(v);
+                        }
+                    }
+                    if looks_like_kv_path(&req.path) {
+                        if let Ok(v) = store
+                            .shared_capabilities(
+                                ShareTargetKind::KvSecret,
+                                &req.path,
+                                &g_name,
+                            )
+                            .await
+                        {
+                            merge(v);
+                        }
+                    }
+                    if let Some(id) = file_id_from_path(&req.path) {
+                        if let Ok(v) = store
+                            .shared_capabilities(ShareTargetKind::File, &id, &g_name)
+                            .await
+                        {
+                            merge(v);
+                        }
+                    }
+
+                    // Asset-group shares granted to this group, where
+                    // the target is a member of the asset group.
+                    for ag in &req.asset_groups {
+                        if let Ok(v) = store
+                            .shared_capabilities(
+                                ShareTargetKind::AssetGroup,
+                                ag,
+                                &g_name,
+                            )
+                            .await
+                        {
+                            merge(v);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     caps
+}
+
+/// True when any of the caller's effective policies carries the
+/// `metadata.group_shared_resources = "true"` opt-in tag. Mirrors the
+/// check in `IdentityModule::handle_share_for_me_list` so visibility
+/// (the "Shared with me" feed) and enforcement (the `scopes=["shared"]`
+/// ACL check) agree on whether identity-group shares apply to this
+/// caller. Silent on any policy-store failure (returns `false`,
+/// fail-closed — the absence of group-share resolution just narrows
+/// access rather than widening it).
+async fn caller_policies_opt_in_group_shared(core: &Arc<Core>, req: &Request) -> bool {
+    let Some(auth) = req.auth.as_ref() else {
+        return false;
+    };
+    if auth.policies.is_empty() {
+        return false;
+    }
+    let Some(pmodule) = core
+        .module_manager
+        .get_module::<crate::modules::policy::PolicyModule>("policy")
+    else {
+        return false;
+    };
+    let pstore = pmodule.policy_store.load();
+    for name in &auth.policies {
+        if let Ok(Some(p)) = pstore
+            .get_policy(name, crate::modules::policy::policy::PolicyType::Acl)
+            .await
+        {
+            if p.metadata
+                .get("group_shared_resources")
+                .map(|v| v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Best-effort lookup of the asset-groups that contain the request
