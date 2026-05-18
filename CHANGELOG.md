@@ -45,6 +45,44 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.12] - 2026-05-18
+
+### Added
+
+- **Rustion integration — Phase 1 scaffold** (`src/modules/rustion/`). New
+  top-level `rustion/` mount registers a logical backend exposing five
+  routes: `LIST/POST /v1/rustion/targets`, `READ/WRITE/DELETE /v1/rustion/
+  targets/{id}`, `READ /v1/rustion/targets/health`, `READ/WRITE /v1/rustion/
+  master/config`, and `READ /v1/rustion/master/pubkey`. The module manager
+  spins up a `RustionModule` instance alongside the existing engines.
+    - **Target registry** (`config.rs`, `store.rs`): `RustionTarget` records
+      hold the pinned hybrid pubkey (Ed25519 + ML-DSA-65 — both halves
+      required), endpoint, tags, enabled flag, and timestamps. Storage
+      splits target records from cached health records so identity
+      rotations don't churn health history and vice-versa. IDs are
+      derived deterministically from the lowercased name so an
+      accidental CLI + GUI double-enrolment lands on the same record.
+    - **Health-state machine** (`health.rs`): three-strikes-down /
+      one-success-up debouncing with a `Degraded` intermediate state so
+      the GUI can show a yellow chip on the first failure without the
+      dispatcher treating the target as routable. EWMA-style p50
+      latency. Five unit tests cover the Unknown→Up promotion, Degraded
+      landing on first failure, third-strike Down flip, recovery from
+      Down, and stable-status no-change path.
+    - **Master-cert configuration slot** (`master.rs`): stores the PKI
+      mount / role / issuer the rotation flow will mint from, plus
+      defaults (5y TTL, 1d rotation grace). Pubkey export endpoint
+      stubs the shape it will return — the live issue/rotate state
+      machine rides on Phase 2's BVRG-v1 envelope crate.
+    - **Audit event taxonomy** (`audit.rs`): names fixed for
+      `rustion.target.{enrol, update, rotate, delete}`,
+      `rustion.target.health.changed`, `rustion.master.{issue, rotate}`,
+      plus forward-reservation constants for Phase 2+ events.
+  
+  Module compiles clean against the workspace; the live HTTP probe,
+  background pinger, GUI section, and CLI are pending in the same
+  phase but split across follow-up commits.
+
 ## [0.7.11] - 2026-05-18
 
 ### Added

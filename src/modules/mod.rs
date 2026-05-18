@@ -22,6 +22,7 @@ pub mod pki;
 pub mod policy;
 pub mod resource;
 pub mod resource_group;
+pub mod rustion;
 pub mod ssh;
 pub mod system;
 pub mod totp;

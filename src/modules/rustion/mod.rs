@@ -1,0 +1,740 @@
+//! Rustion integration module.
+//!
+//! Delegates Resource Connect sessions through one or more
+//! [Rustion](https://github.com/ffquintella/Rustion) PQC bastions.
+//! BastionVault remains the source of truth for identity, credentials,
+//! and authorization; Rustion handles transport + recording.
+//!
+//! See `features/rustion-integration.md` for the full design. This
+//! module ships **Phase 1**: the target registry, the health-state
+//! machine, the master-cert configuration slot, the audit event
+//! taxonomy, and the HTTP route surface they sit behind. The
+//! background pinger (real probe), envelope crate, dispatcher,
+//! session lifecycle, and policy ladder land in later phases.
+
+use std::{any::Any, collections::HashMap, sync::Arc, time::Duration};
+
+use arc_swap::ArcSwap;
+use derive_more::Deref;
+use serde_json::{Map, Value};
+
+use super::Module;
+use crate::{
+    context::Context,
+    core::Core,
+    errors::RvError,
+    logical::{
+        secret::Secret, Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation,
+        Request, Response,
+    },
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
+    new_path_internal, new_secret, new_secret_internal,
+    bv_error_response_status, bv_error_string,
+};
+
+pub mod audit;
+pub mod config;
+pub mod health;
+pub mod master;
+pub mod store;
+
+pub use config::{
+    HealthStatus, HybridPubKey, RustionTarget, RustionTargetHealth, RustionTargetInput,
+};
+pub use health::{apply_probe, ProbeOutcome, FAILURE_THRESHOLD};
+pub use master::{MasterConfig, MasterPubKeyExport, MasterStore};
+pub use store::RustionStore;
+
+static RUSTION_BACKEND_HELP: &str = r#"
+The rustion backend manages the registry of enrolled Rustion bastion
+instances, their health, and the master signing-cert configuration
+used to authenticate session-grant envelopes. Resource Connect uses
+this registry to mediate SSH / RDP sessions through one or more PQC
+bastions instead of opening direct connections from the GUI host.
+"#;
+
+#[derive(Default)]
+pub struct RustionModule {
+    pub name: String,
+    pub core: Arc<Core>,
+    pub store: ArcSwap<Option<Arc<RustionStore>>>,
+    pub master_store: ArcSwap<Option<Arc<MasterStore>>>,
+}
+
+pub struct RustionBackendInner {
+    pub core: Arc<Core>,
+}
+
+#[derive(Deref)]
+pub struct RustionBackend {
+    #[deref]
+    pub inner: Arc<RustionBackendInner>,
+}
+
+impl RustionBackend {
+    pub fn new(core: Arc<Core>) -> Self {
+        Self {
+            inner: Arc::new(RustionBackendInner { core }),
+        }
+    }
+
+    pub fn new_backend(&self) -> LogicalBackend {
+        let h_targets_list = self.inner.clone();
+        let h_targets_create = self.inner.clone();
+        let h_target_read = self.inner.clone();
+        let h_target_write = self.inner.clone();
+        let h_target_delete = self.inner.clone();
+        let h_health_all = self.inner.clone();
+        let h_master_read = self.inner.clone();
+        let h_master_write = self.inner.clone();
+        let h_master_pubkey = self.inner.clone();
+        let h_noop1 = self.inner.clone();
+        let h_noop2 = self.inner.clone();
+
+        let backend = new_logical_backend!({
+            paths: [
+                {
+                    // List + create. List returns target ids only; the
+                    // GUI / CLI follow up with reads when it wants the
+                    // full record. Create accepts the input payload as
+                    // JSON body on a POST.
+                    pattern: r"targets/?$",
+                    fields: {
+                        "name": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "Operator-visible name. Unique per deployment."
+                        },
+                        "endpoint": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "Control-plane endpoint, `host:port`. TLS-only."
+                        },
+                        "public_key_ed25519": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "Base64 SPKI of the Ed25519 half of the Rustion identity keypair."
+                        },
+                        "public_key_mldsa65": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "Base64 raw FIPS 204 ML-DSA-65 public key."
+                        },
+                        "description": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "Free-form description shown in the GUI."
+                        },
+                        "tags": {
+                            field_type: FieldType::CommaStringSlice,
+                            required: false,
+                            description: "Operator-set tags, e.g. `region=eu-west-1`."
+                        },
+                        "enabled": {
+                            field_type: FieldType::Bool,
+                            default: true,
+                            description: "When false, the dispatcher skips this target regardless of health."
+                        },
+                        "default_recording_dir": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "Optional: relative directory under the Rustion recordings root for diagnostics."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::List, handler: h_targets_list.handle_targets_list},
+                        {op: Operation::Write, handler: h_targets_create.handle_target_create}
+                    ],
+                    help: "List enrolled Rustion targets, or POST a fresh enrolment."
+                },
+                {
+                    pattern: r"targets/(?P<id>[A-Za-z0-9_\-]+)$",
+                    fields: {
+                        "id": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Stable id allocated by the registry."
+                        },
+                        "name": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "Operator-visible name. Unique per deployment."
+                        },
+                        "endpoint": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "Control-plane endpoint, `host:port`."
+                        },
+                        "public_key_ed25519": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "Base64 SPKI of the Ed25519 half."
+                        },
+                        "public_key_mldsa65": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "Base64 raw ML-DSA-65 public key."
+                        },
+                        "description": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "Free-form description."
+                        },
+                        "tags": {
+                            field_type: FieldType::CommaStringSlice,
+                            required: false,
+                            description: "Operator-set tags."
+                        },
+                        "enabled": {
+                            field_type: FieldType::Bool,
+                            default: true,
+                            description: "Soft toggle."
+                        },
+                        "default_recording_dir": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "Optional diagnostic field."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_target_read.handle_target_read},
+                        {op: Operation::Write, handler: h_target_write.handle_target_update},
+                        {op: Operation::Delete, handler: h_target_delete.handle_target_delete}
+                    ],
+                    help: "Read, update, or delete one Rustion target."
+                },
+                {
+                    pattern: r"targets/health/?$",
+                    operations: [
+                        {op: Operation::Read, handler: h_health_all.handle_health_all}
+                    ],
+                    help: "Cached health for every enrolled target (background-poller view)."
+                },
+                {
+                    pattern: r"master/config$",
+                    fields: {
+                        "pki_mount": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "PKI mount the master cert is minted from (e.g. `pki-internal/`)."
+                        },
+                        "pki_role": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "PKI role under that mount."
+                        },
+                        "issuer_ref": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "Issuer ref under the PKI mount. Empty = mount default."
+                        },
+                        "default_ttl_secs": {
+                            field_type: FieldType::Int,
+                            default: 0,
+                            description: "Default TTL when issuing / rotating. Zero = engine default (5y)."
+                        },
+                        "rotate_grace_secs": {
+                            field_type: FieldType::Int,
+                            default: 0,
+                            description: "Grace window during which the previous cert is accepted. Zero = default (1d)."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_master_read.handle_master_read},
+                        {op: Operation::Write, handler: h_master_write.handle_master_write}
+                    ],
+                    help: "Read or update the master-cert configuration slot."
+                },
+                {
+                    pattern: r"master/pubkey$",
+                    operations: [
+                        {op: Operation::Read, handler: h_master_pubkey.handle_master_pubkey}
+                    ],
+                    help: "Export the master pubkey (one-shot enrolment step for Rustion authorities)."
+                }
+            ],
+            secrets: [{
+                secret_type: "rustion",
+                renew_handler: h_noop1.handle_noop,
+                revoke_handler: h_noop2.handle_noop,
+            }],
+            help: RUSTION_BACKEND_HELP,
+        });
+
+        backend
+    }
+}
+
+#[maybe_async::maybe_async]
+impl RustionBackendInner {
+    fn resolve_store(&self) -> Result<Arc<RustionStore>, RvError> {
+        let module = self
+            .core
+            .module_manager
+            .get_module::<RustionModule>("rustion")
+            .ok_or_else(|| bv_error_string!("rustion module not registered"))?;
+        let store = module.store();
+        store.ok_or_else(|| bv_error_string!("rustion store not initialized"))
+    }
+
+    fn resolve_master_store(&self) -> Result<Arc<MasterStore>, RvError> {
+        let module = self
+            .core
+            .module_manager
+            .get_module::<RustionModule>("rustion")
+            .ok_or_else(|| bv_error_string!("rustion module not registered"))?;
+        let master = module.master_store();
+        master.ok_or_else(|| bv_error_string!("rustion master store not initialized"))
+    }
+
+    fn input_from_req(req: &Request, fallback_name: &str) -> Result<RustionTargetInput, RvError> {
+        let pick = |k: &str| -> String {
+            req.get_data(k)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_default()
+        };
+        let name = if fallback_name.is_empty() {
+            pick("name")
+        } else {
+            // PUT-by-id path lets the operator omit name on update;
+            // the handler patches the existing record with whatever
+            // the caller supplied. Empty name here means "preserve
+            // the current name".
+            let n = pick("name");
+            if n.is_empty() {
+                fallback_name.to_string()
+            } else {
+                n
+            }
+        };
+        let tags = req
+            .get_data("tags")
+            .ok()
+            .and_then(|v| match v {
+                Value::Array(arr) => Some(
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect::<Vec<_>>(),
+                ),
+                Value::String(s) => Some(
+                    s.split(',')
+                        .map(|x| x.trim().to_string())
+                        .filter(|x| !x.is_empty())
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let enabled = req
+            .get_data("enabled")
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        Ok(RustionTargetInput {
+            name,
+            endpoint: pick("endpoint"),
+            public_key: HybridPubKey {
+                ed25519: pick("public_key_ed25519"),
+                mldsa65: pick("public_key_mldsa65"),
+            },
+            description: pick("description"),
+            tags,
+            enabled,
+            default_recording_dir: pick("default_recording_dir"),
+        })
+    }
+
+    pub async fn handle_noop(
+        &self,
+        _b: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        Ok(None)
+    }
+
+    // ─── Targets ────────────────────────────────────────────────────
+
+    pub async fn handle_targets_list(
+        &self,
+        _b: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_store()?;
+        let ids = store.list_target_ids().await?;
+        Ok(Some(Response::list_response(&ids)))
+    }
+
+    pub async fn handle_target_create(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_store()?;
+        let input = Self::input_from_req(req, "")?;
+        let target = store.create_target(input).await?;
+        log::info!(
+            "{}: id={} name={} endpoint={} fingerprint={}",
+            audit::TARGET_ENROL,
+            target.id,
+            target.name,
+            target.endpoint,
+            target.fingerprint
+        );
+        Ok(Some(target_response(&target)))
+    }
+
+    pub async fn handle_target_read(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_store()?;
+        let id = req
+            .get_data("id")?
+            .as_str()
+            .ok_or(RvError::ErrRequestFieldInvalid)?
+            .to_string();
+        match store.get_target(&id).await? {
+            Some(t) => Ok(Some(target_response(&t))),
+            None => Err(bv_error_response_status!(404, &format!(
+                "rustion target `{id}` not found"
+            ))),
+        }
+    }
+
+    pub async fn handle_target_update(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_store()?;
+        let id = req
+            .get_data("id")?
+            .as_str()
+            .ok_or(RvError::ErrRequestFieldInvalid)?
+            .to_string();
+        let existing = store.get_target(&id).await?.ok_or_else(|| {
+            bv_error_response_status!(404, &format!("rustion target `{id}` not found"))
+        })?;
+        // Patch semantics: empty fields preserve existing values.
+        let mut input = Self::input_from_req(req, &existing.name)?;
+        if input.endpoint.is_empty() {
+            input.endpoint = existing.endpoint.clone();
+        }
+        if input.public_key.ed25519.is_empty() {
+            input.public_key.ed25519 = existing.public_key.ed25519.clone();
+        }
+        if input.public_key.mldsa65.is_empty() {
+            input.public_key.mldsa65 = existing.public_key.mldsa65.clone();
+        }
+        if input.description.is_empty() {
+            input.description = existing.description.clone();
+        }
+        if input.default_recording_dir.is_empty() {
+            input.default_recording_dir = existing.default_recording_dir.clone();
+        }
+        let updated = store.update_target(&id, input).await?;
+        let rotated = updated.public_key.ed25519 != existing.public_key.ed25519
+            || updated.public_key.mldsa65 != existing.public_key.mldsa65;
+        log::info!(
+            "{}: id={} name={} endpoint={} fingerprint={}",
+            if rotated {
+                audit::TARGET_ROTATE
+            } else {
+                audit::TARGET_UPDATE
+            },
+            updated.id,
+            updated.name,
+            updated.endpoint,
+            updated.fingerprint
+        );
+        Ok(Some(target_response(&updated)))
+    }
+
+    pub async fn handle_target_delete(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_store()?;
+        let id = req
+            .get_data("id")?
+            .as_str()
+            .ok_or(RvError::ErrRequestFieldInvalid)?
+            .to_string();
+        store.delete_target(&id).await?;
+        log::info!("{}: id={}", audit::TARGET_DELETE, id);
+        Ok(None)
+    }
+
+    // ─── Health ─────────────────────────────────────────────────────
+
+    pub async fn handle_health_all(
+        &self,
+        _b: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_store()?;
+        let ids = store.list_target_ids().await?;
+        let mut entries: Vec<Value> = Vec::with_capacity(ids.len());
+        for id in ids {
+            let health = store.get_health(&id).await?.unwrap_or_default();
+            let target = store.get_target(&id).await?;
+            let mut m = Map::new();
+            m.insert("id".into(), Value::String(id.clone()));
+            if let Some(t) = target.as_ref() {
+                m.insert("name".into(), Value::String(t.name.clone()));
+                m.insert("endpoint".into(), Value::String(t.endpoint.clone()));
+                m.insert("enabled".into(), Value::Bool(t.enabled));
+            }
+            m.insert("status".into(), Value::String(health.status.as_str().into()));
+            if let Some(ts) = health.last_ok_at {
+                m.insert("last_ok_at".into(), Value::String(ts.to_rfc3339()));
+            }
+            m.insert("last_error".into(), Value::String(health.last_error));
+            m.insert(
+                "latency_ms_p50".into(),
+                Value::Number(health.latency_ms_p50.into()),
+            );
+            m.insert(
+                "consecutive_failures".into(),
+                Value::Number(health.consecutive_failures.into()),
+            );
+            m.insert("version".into(), Value::String(health.version));
+            m.insert(
+                "active_sessions".into(),
+                Value::Number(health.active_sessions.into()),
+            );
+            m.insert(
+                "updated_at".into(),
+                Value::String(health.updated_at.to_rfc3339()),
+            );
+            entries.push(Value::Object(m));
+        }
+        let mut data = Map::new();
+        data.insert("targets".into(), Value::Array(entries));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    // ─── Master cert config ────────────────────────────────────────
+
+    pub async fn handle_master_read(
+        &self,
+        _b: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_master_store()?;
+        let cfg = store.get_or_default().await?;
+        Ok(Some(master_config_response(&cfg)))
+    }
+
+    pub async fn handle_master_write(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_master_store()?;
+        let mut cfg = store.get_or_default().await?;
+        let mut touched = false;
+        if let Some(v) = req.get_data("pki_mount").ok().and_then(|v| v.as_str().map(String::from))
+        {
+            if !v.is_empty() && v != cfg.pki_mount {
+                cfg.pki_mount = v;
+                touched = true;
+            }
+        }
+        if let Some(v) = req.get_data("pki_role").ok().and_then(|v| v.as_str().map(String::from))
+        {
+            if !v.is_empty() && v != cfg.pki_role {
+                cfg.pki_role = v;
+                touched = true;
+            }
+        }
+        if let Some(v) = req
+            .get_data("issuer_ref")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+        {
+            if v != cfg.issuer_ref {
+                cfg.issuer_ref = v;
+                touched = true;
+            }
+        }
+        if let Some(n) = req
+            .get_data("default_ttl_secs")
+            .ok()
+            .and_then(|v| v.as_u64())
+        {
+            if n > 0 && n != cfg.default_ttl_secs {
+                cfg.default_ttl_secs = n;
+                touched = true;
+            }
+        }
+        if let Some(n) = req
+            .get_data("rotate_grace_secs")
+            .ok()
+            .and_then(|v| v.as_u64())
+        {
+            if n > 0 && n != cfg.rotate_grace_secs {
+                cfg.rotate_grace_secs = n;
+                touched = true;
+            }
+        }
+        if touched {
+            cfg.updated_at = chrono::Utc::now();
+            store.put(&cfg).await?;
+        }
+        Ok(Some(master_config_response(&cfg)))
+    }
+
+    pub async fn handle_master_pubkey(
+        &self,
+        _b: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        // Phase 1 stub: the actual pubkey export reads the issued cert
+        // out of the PKI engine and projects it into the hybrid shape
+        // Rustion's authority record wants. That wiring lands in
+        // Phase 2 alongside the envelope crate. For now we surface the
+        // config + an empty pubkey envelope so the GUI can render the
+        // "configure me first" state.
+        let store = self.resolve_master_store()?;
+        let cfg = store.get_or_default().await?;
+        let export = MasterPubKeyExport {
+            algorithm: cfg.algorithm.clone(),
+            ed25519_pem: String::new(),
+            mldsa65_pem: String::new(),
+            fingerprint: String::new(),
+            current_serial: cfg.current_serial.clone(),
+            current_not_after: cfg.current_not_after,
+        };
+        let mut data = Map::new();
+        data.insert("algorithm".into(), Value::String(export.algorithm));
+        data.insert("ed25519_pem".into(), Value::String(export.ed25519_pem));
+        data.insert("mldsa65_pem".into(), Value::String(export.mldsa65_pem));
+        data.insert("fingerprint".into(), Value::String(export.fingerprint));
+        data.insert(
+            "current_serial".into(),
+            Value::String(export.current_serial),
+        );
+        if let Some(ts) = export.current_not_after {
+            data.insert("current_not_after".into(), Value::String(ts.to_rfc3339()));
+        }
+        data.insert(
+            "issued".into(),
+            Value::Bool(!cfg.current_serial.is_empty()),
+        );
+        Ok(Some(Response::data_response(Some(data))))
+    }
+}
+
+fn target_response(t: &RustionTarget) -> Response {
+    let mut data: HashMap<String, Value> = HashMap::new();
+    data.insert("id".into(), Value::String(t.id.clone()));
+    data.insert("name".into(), Value::String(t.name.clone()));
+    data.insert("endpoint".into(), Value::String(t.endpoint.clone()));
+    let mut pk = Map::new();
+    pk.insert("ed25519".into(), Value::String(t.public_key.ed25519.clone()));
+    pk.insert("mldsa65".into(), Value::String(t.public_key.mldsa65.clone()));
+    data.insert("public_key".into(), Value::Object(pk));
+    data.insert("fingerprint".into(), Value::String(t.fingerprint.clone()));
+    data.insert("description".into(), Value::String(t.description.clone()));
+    data.insert(
+        "tags".into(),
+        Value::Array(t.tags.iter().cloned().map(Value::String).collect()),
+    );
+    data.insert("enabled".into(), Value::Bool(t.enabled));
+    data.insert(
+        "default_recording_dir".into(),
+        Value::String(t.default_recording_dir.clone()),
+    );
+    data.insert("created_at".into(), Value::String(t.created_at.to_rfc3339()));
+    data.insert("updated_at".into(), Value::String(t.updated_at.to_rfc3339()));
+    let map: Map<String, Value> = data.into_iter().collect();
+    Response::data_response(Some(map))
+}
+
+fn master_config_response(cfg: &MasterConfig) -> Response {
+    let mut data = Map::new();
+    data.insert("pki_mount".into(), Value::String(cfg.pki_mount.clone()));
+    data.insert("pki_role".into(), Value::String(cfg.pki_role.clone()));
+    data.insert("issuer_ref".into(), Value::String(cfg.issuer_ref.clone()));
+    data.insert("algorithm".into(), Value::String(cfg.algorithm.clone()));
+    data.insert(
+        "default_ttl_secs".into(),
+        Value::Number(cfg.default_ttl_secs.into()),
+    );
+    data.insert(
+        "rotate_grace_secs".into(),
+        Value::Number(cfg.rotate_grace_secs.into()),
+    );
+    data.insert(
+        "current_serial".into(),
+        Value::String(cfg.current_serial.clone()),
+    );
+    if let Some(ts) = cfg.current_not_after {
+        data.insert("current_not_after".into(), Value::String(ts.to_rfc3339()));
+    }
+    data.insert(
+        "updated_at".into(),
+        Value::String(cfg.updated_at.to_rfc3339()),
+    );
+    data.insert("configured".into(), Value::Bool(
+        !cfg.pki_mount.is_empty() && !cfg.pki_role.is_empty(),
+    ));
+    Response::data_response(Some(data))
+}
+
+impl RustionModule {
+    pub fn new(core: Arc<Core>) -> Self {
+        Self {
+            name: "rustion".to_string(),
+            core,
+            store: ArcSwap::new(Arc::new(None)),
+            master_store: ArcSwap::new(Arc::new(None)),
+        }
+    }
+
+    pub fn store(&self) -> Option<Arc<RustionStore>> {
+        self.store.load().as_ref().clone()
+    }
+
+    pub fn master_store(&self) -> Option<Arc<MasterStore>> {
+        self.master_store.load().as_ref().clone()
+    }
+}
+
+#[maybe_async::maybe_async]
+impl Module for RustionModule {
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
+    }
+
+    fn setup(&self, core: &Core) -> Result<(), RvError> {
+        let backend_new_func = move |c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
+            let mut b = RustionBackend::new(c).new_backend();
+            b.init()?;
+            Ok(Arc::new(b))
+        };
+        core.add_logical_backend("rustion", Arc::new(backend_new_func))
+    }
+
+    async fn init(&self, core: &Core) -> Result<(), RvError> {
+        let store = RustionStore::new(core).await?;
+        self.store.store(Arc::new(Some(store)));
+        let master = MasterStore::new(core).await?;
+        self.master_store.store(Arc::new(Some(master)));
+        Ok(())
+    }
+
+    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
+        self.store.store(Arc::new(None));
+        self.master_store.store(Arc::new(None));
+        core.delete_logical_backend("rustion")
+    }
+}

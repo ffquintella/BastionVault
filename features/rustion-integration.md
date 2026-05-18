@@ -363,7 +363,9 @@ crates/rustion-server/         // wires the new crate into the main binary
 
 ## Phases
 
-### Phase 1 — Master cert + Rustion target registry + health monitoring — **Todo**
+### Phase 1 — Master cert + Rustion target registry + health monitoring — **In progress**
+
+Module scaffold + storage + state machine landed in [`src/modules/rustion/`](../src/modules/rustion/) (0.7.12). Routes: `LIST/POST /v1/rustion/targets`, `READ/WRITE/DELETE /v1/rustion/targets/{id}`, `READ /v1/rustion/targets/health`, `READ/WRITE /v1/rustion/master/config`, `READ /v1/rustion/master/pubkey`. The health-state machine ships with five unit tests covering the Unknown→Up promotion, Degraded landing on first failure, three-strikes-to-Down, one-success recovery, and stable-status no-change. The master-cert slot ships its storage shape and config CRUD; the actual cert issue/rotate hooks into the PKI engine and the live background pinger (HTTP probe + signed nonce) ride on Phase 2's envelope crate. GUI + CLI still pending.
 
 - PKI slot for the master cert (issue, store, export pub).
 - `rustion/` mount + `RustionTarget` CRUD on the API and GUI, supporting **multiple enrolled instances**.
