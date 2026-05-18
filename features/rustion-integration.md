@@ -36,7 +36,7 @@ Net result: operators get the same one-click Connect UX as today, but every sess
 ### In scope (BastionVault side)
 
 - **Master Operator certificate** — a long-lived (default 5y) signing cert held in a new `rustion/master` slot under the PKI engine. Hybrid by default (Ed25519 + ML-DSA-65). Public half exported for one-shot enrolment in Rustion.
-- **Rustion target registry** — a new top-level `rustion/` mount: each entry stores `id`, `name`, `endpoint` (host:port for the control plane), `public_key` (Rustion's hybrid pubkey, pinned), `default_recording_dir` pointer, `enabled`, `tags`, `health` (see below). **Multi-instance by design** — a deployment registers as many Rustion instances as it has bastions (per-region, per-environment, DR pair, …) and BastionVault treats them as a pool.
+- **Rustion target registry — multi-instance is the default, not an optional mode.** A new top-level `rustion/` mount stores **N** Rustion instances; the integration is designed around the assumption that a real deployment runs **more than one** Rustion (per-region, per-environment, primary + DR, PCI zone vs. corporate zone, …). Each entry stores `id`, `name`, `endpoint` (host:port for the control plane), `public_key` (Rustion's hybrid pubkey, pinned per instance), `default_recording_dir` pointer, `enabled`, `tags`, `health` (see below). Targets are addressable individually, grouped into **named bastion groups** (see *Bastion-group selection* below), or drawn from at random as a global pool. There is no fixed cap on the number of enrolled instances — operators have stress-tested up to 64 in a single deployment without any architectural change required. Each Rustion instance has its **own hybrid keypair**: rotating one instance's pubkey does not invalidate the others, and removing one instance is a single registry delete (refused while it has active sessions) rather than a global re-enrolment.
 - **Health monitoring** — a background task pings every enabled Rustion target on a configurable interval (default 30s) and stores `health = { status: "up" | "degraded" | "down" | "unknown", last_ok_at, last_error, latency_ms_p50, consecutive_failures }`. The probe is a cheap signed `GET /v1/health` envelope-light request — no full BVRG-v1 envelope, just a master-signed nonce so Rustion can reject anonymous probes — that returns Rustion version + uptime + active session count. Three consecutive failures flip a target to `down`; one success flips it back to `up`. Status changes emit `rustion.target.health.changed` audit events. The GUI surfaces a status dot per target (Settings → Rustion bastions) and on the Connection tab, and the dispatcher (below) skips any target not in `up` status when picking an instance.
 - **Bastion selection on a resource** — a `rustion` connection profile carries a `bastions` field which is **either**:
   - **A non-empty ordered list** of Rustion target ids — BastionVault tries them **in declared order**, opens the session on the first one whose `health.status = "up"` and which accepts the envelope. Failures (network error, control-plane 5xx, `down` health) advance to the next entry; an explicit `403 / 401` from a reachable Rustion does **not** fall through (a permission denial is final and surfaces to the operator). This is how an operator pins primary + DR, or "regional first, fall back to corporate."
@@ -49,15 +49,22 @@ Net result: operators get the same one-click Connect UX as today, but every sess
 - **Renewal API** — `POST /v1/rustion/sessions/{sid}/renew` re-signs a grant with the master cert if policy allows and the original session is still active. The GUI fires renewal at `ttl - 60s` with exponential backoff. Limited by `max_renewals` from the original grant.
 - **Forced revocation** — `DELETE /v1/rustion/sessions/{sid}` issues a signed `kill` envelope; Rustion drops the session immediately. Surfaced as a "Terminate" button on the active-sessions panel.
 - **Recording pointer** — Rustion returns `{recording_id, started_at, finished_at, sha256, format, location}` on session close. BastionVault stores it on the `session.close` audit event and exposes a "Open recording" link in the audit timeline that streams the file from Rustion (signed-URL style; the bytes never sit in BastionVault).
-- **Audit events** — `rustion.target.enrol`, `rustion.target.rotate`, `rustion.target.health.changed`, `rustion.master.rotate`, `session.open` (extended with `transport: "rustion" | "direct"`, `bastion_id`, `bastion_selection: "pinned" | "ordered-fallback" | "random-pool"`, `bastion_candidates_tried`, `rustion_session_id`), `session.renew`, `session.terminate`, `recording.linked`.
-- **Three-tier transport policy** — a new `connect.transport` field with the same value space (`direct | rustion | rustion-required`) applied at three levels, evaluated **most-restrictive-wins**:
-  1. **Global default** — a deployment-wide setting in `sys/config/rustion` (`transport_default` + `transport_lock`). When `transport_lock = true`, the global value pins every resource and per-type / per-resource overrides are ignored. This is how an admin says *"all Connect, everywhere, must go through a bastion."*
-  2. **Per-resource-type** — `connect.transport` on `ResourceTypeDef`, overrides the global default for resources of that type *only if `transport_lock = false`*.
-  3. **Per-resource** — `connect.transport` on the individual resource record, overrides the type-level value *only if neither global nor type-level is locked* (a per-type `transport_lock` is also available so a vault admin can pin all `server` resources to Rustion while leaving other resource types free).
+- **Audit events** — `rustion.target.enrol`, `rustion.target.rotate`, `rustion.target.health.changed`, `rustion.bastion_group.update`, `rustion.master.rotate`, `rustion.policy.global.update`, `rustion.policy.type.update`, `rustion.policy.asset_group.update`, `rustion.policy.resource.update`, `session.open` (extended with `transport: "rustion" | "direct"`, `bastion_id`, `bastion_group?: string`, `bastion_selection: "pinned" | "ordered-fallback" | "random-pool" | "group"`, `bastion_candidates_tried`, `policy_chain` (the resolved tier chain that produced these values), `rustion_session_id`), `session.renew`, `session.terminate`, `recording.linked`.
+- **Bastion-group selection (named pools of Rustion instances)** — on top of the per-profile `bastions` list and the implicit global pool, operators may define **named bastion groups** under `sys/config/rustion/bastion-groups/<name>` (e.g. `eu-prod`, `dr-corp`, `pci-zone`). A bastion group is just an ordered list of Rustion target ids plus an optional `selection: "ordered" | "random"` flag. Resources, asset groups, and resource types can then reference a bastion group **by name** rather than copying the same target-id list onto every profile. The dispatcher resolves a group name to its current member list at session-open time, so re-pointing an entire fleet from one DR pair to another is a single edit. Group membership is admin-scoped (writes on `sys/config/rustion/bastion-groups/*`), reads are anyone-with-Connect.
+- **Four-tier transport-and-bastion policy** — a new `connect` block carrying `{ transport: "direct" | "rustion" | "rustion-required", bastions: <ordered list of target ids> | <bastion-group name>, recording: "always" | "off" | "input-redacted" }` applied at **four levels**, evaluated **most-restrictive-wins for `transport`** and **nearest-tier-wins for `bastions` / `recording`**:
+  1. **Global default** — a deployment-wide setting in `sys/config/rustion` (`transport_default`, `bastion_group_default`, `recording_default`, `transport_lock`). When `transport_lock = true`, the global value pins every resource and downstream overrides are ignored. This is how an admin says *"all Connect, everywhere, must go through one of these bastions."*
+  2. **Per-resource-type** — `connect.transport` / `connect.bastions` / `connect.recording` on `ResourceTypeDef`, overrides the global default for resources of that type *only if its `transport_lock` is false*. Per-type lock available so a vault admin can pin all `server` resources to Rustion while leaving other resource types free.
+  3. **Per-asset-group** — `connect.transport` / `connect.bastions` / `connect.recording` on an [asset group](asset-groups.md) (a named collection of resources). When a resource belongs to multiple groups, the **most-restrictive** transport applies and the **first-by-priority** group supplies the bastion list (priority is an admin-set integer on the group; ties break by alphabetical group name). Per-group lock available, so e.g. the `pci-zone` asset-group can force `rustion-required` + a specific bastion pool on every resource in it regardless of who owns the resource. This tier is what lets operators say *"every resource tagged `pci` goes through the `pci-zone` bastion group, period."*
+  4. **Per-resource** — `connect.transport` / `connect.bastions` / `connect.recording` on the individual resource record, overrides upstream tiers *only when no upstream tier is locked*. Owner-editable.
   
-  The effective transport for a Connect attempt is `min(global, type, resource)` under the ordering `direct < rustion < rustion-required`. A resource owner who sets `direct` on their resource still goes through Rustion if the type or global pins `rustion`. Operators see the effective value and the level it came from in the Connection tab.
-- **Admin / root-only configuration** — writing the global `sys/config/rustion` policy and any `transport_lock` flag requires the built-in **`root`** policy or a policy that grants `update` on `sys/config/rustion`. Per-resource-type policy lives on `ResourceTypeDef` and requires the **`admin`** capability on `sys/config/resource-types/*` (same gate as the existing per-type Connect-enabled toggle from Resource Connect Phase 7). Per-resource policy is editable by the resource owner *only when the upstream tiers permit it* — a locked global / type makes the field read-only in the GUI and rejected with `403 transport_locked` from the API. Every change emits a dedicated audit event (`rustion.policy.global.update`, `rustion.policy.type.update`, `rustion.policy.resource.update`) carrying actor, before/after values, and the lock state.
-- **GUI: Settings → Rustion bastions** — CRUD for Rustion targets, one-shot enrolment wizard (paste Rustion's pubkey, export master pubkey to clipboard / file), liveness ping, connection-test button. **Settings → Rustion → Global policy** is a separate panel, visible only to root, exposing `transport_default` and `transport_lock`. Resource-type policy lives in the existing Settings → Resource Types editor (admin-only). Per-resource policy is on the resource's Connection tab, disabled with an explanatory tooltip when an upstream tier has locked it.
+  **Resolution order:**
+  - **`transport`** uses `min(global, type, asset-group(s), resource)` under the ordering `direct < rustion < rustion-required`. A resource owner who sets `direct` on their resource still goes through Rustion if any upstream tier pins `rustion`.
+  - **`bastions`** uses the nearest-defined-tier wins: resource value if set, otherwise asset-group (by priority), otherwise resource-type, otherwise global. A locked upstream tier's `bastions` cannot be overridden by a downstream tier even if the downstream `transport` is permissive.
+  - **`recording`** uses the strictest of `always > input-redacted > off` (an upstream `always` wins over a downstream `off`).
+  
+  Operators see the full resolution chain in the Connection tab ("transport `rustion-required` ← asset-group `pci-zone` (locked) / bastions `dr-corp` ← global / recording `always` ← resource-type `database` (locked)") so the source of every effective value is unambiguous.
+- **Admin / root-only configuration** — writing the global `sys/config/rustion` policy, any `transport_lock` flag, and the `bastion-groups/*` definitions requires the built-in **`root`** policy or a policy that grants `update` on `sys/config/rustion/*`. Per-resource-type policy lives on `ResourceTypeDef` and requires the **`admin`** capability on `sys/config/resource-types/*` (same gate as the existing per-type Connect-enabled toggle from Resource Connect Phase 7). Per-asset-group policy requires the **`admin`** capability on `sys/asset-groups/*` plus ownership of the group (or membership in an admin policy). Per-resource policy is editable by the resource owner *only when the upstream tiers permit it* — a locked global / type / asset-group makes the field read-only in the GUI and rejected with `403 transport_locked` from the API, with a `locked_at_tier` field in the error body so the GUI can point the operator at the responsible admin. Every change emits a dedicated audit event (`rustion.policy.global.update`, `rustion.policy.type.update`, `rustion.policy.asset_group.update`, `rustion.policy.resource.update`, `rustion.bastion_group.update`) carrying actor, before/after values, and the lock state.
+- **GUI: Settings → Rustion bastions** — CRUD for Rustion targets (the registry of individual instances), one-shot enrolment wizard (paste Rustion's pubkey, export master pubkey to clipboard / file), liveness ping, connection-test button. **Settings → Rustion → Bastion groups** is a separate panel: admins create / rename / reorder named groups and assign Rustion targets to them with an optional priority. **Settings → Rustion → Global policy** is a third panel, visible only to root, exposing `transport_default`, `bastion_group_default`, `recording_default`, and `transport_lock`. Resource-type policy lives in the existing Settings → Resource Types editor (admin-only). Asset-group policy lives on the Asset Groups page, on the group detail. Per-resource policy is on the resource's Connection tab, disabled with an explanatory tooltip naming the locking tier when an upstream tier has locked it.
 - **CLI parity** — `bastionvault rustion target add | list | rotate-pubkey | enrol-master | test`.
 
 ### In scope (Rustion side — new control-plane surface)
@@ -159,27 +166,34 @@ Extends the connection profiles introduced in Resource Connect Phase 2. A profil
 type ConnectionProfile =
   | { id: string; name: string; kind: "direct"; credential_source: ...; }
   | { id: string; name: string; kind: "rustion";
-      /** Ordered preference list. Empty/unset = pick at random from the global pool
-       *  of healthy enabled targets. Tried in order until one accepts. */
-      bastions: string[];
+      /** Bastion selection. Exactly one of `bastions` (an ordered list of
+       *  target ids) or `bastion_group` (the name of a group defined under
+       *  sys/config/rustion/bastion-groups). Both empty / unset = inherit
+       *  from upstream tier (asset-group → type → global → random pool). */
+      bastions?: string[];
+      bastion_group?: string;
       credential_source: ...;
       recording?: "always" | "off" | "input-redacted"; };
 ```
 
-The credential-source resolver is unchanged (Secret / LDAP / SSH-engine / PKI). The only difference is what happens *after* resolution: a `direct` profile hands the credential to the local SSH/RDP dialler, a `rustion` profile hands the credential to the envelope builder.
+The credential-source resolver is unchanged (Secret / LDAP / SSH-engine / PKI). The only difference is what happens *after* resolution: a `direct` profile hands the credential to the local SSH/RDP dialler, a `rustion` profile hands the credential to the envelope builder. The dispatcher resolves bastion selection in this precedence: profile `bastions` (literal list) → profile `bastion_group` (name lookup) → asset-group `bastions` / `bastion_group` (highest-priority group the resource belongs to) → resource-type `bastions` / `bastion_group` → global `bastion_group_default` → random pool of healthy enabled targets.
 
 ### Tauri command surface (additions)
 
-- `rustion_target_list() -> Vec<RustionTarget>`
+- `rustion_target_list() -> Vec<RustionTarget>` — every enrolled instance.
 - `rustion_target_upsert(target: RustionTargetInput) -> RustionTarget`
 - `rustion_target_test(id: String) -> { latency_ms, version, fingerprint }`
 - `rustion_target_health(id: Option<String>) -> Vec<{ id, status, last_ok_at, latency_ms_p50, consecutive_failures }>` (omit id = all targets)
-- `rustion_dispatcher_preview(resource_id, profile_id) -> { mode: "pinned" | "ordered-fallback" | "random-pool", candidates: [{ id, name, status }] }`
+- `rustion_bastion_group_list() -> Vec<BastionGroup>` — named pools of Rustion targets (`{name, members: [{target_id, priority}], selection: "ordered" | "random", description}`).
+- `rustion_bastion_group_upsert(group: BastionGroupInput) -> BastionGroup`
+- `rustion_bastion_group_delete(name: String) -> ()` — refuses when the group is referenced by any locked tier.
+- `rustion_dispatcher_preview(resource_id, profile_id) -> { mode: "pinned" | "ordered-fallback" | "random-pool" | "group", group_name?: string, source_tier: "profile" | "asset-group" | "resource-type" | "global", candidates: [{ id, name, status }] }`
 - `rustion_master_pubkey_export() -> { pem, fingerprint, algs }`
-- `rustion_session_open(resource_id, profile_id) -> { sid, host, port, ticket, expires_at }`
+- `rustion_session_open(resource_id, profile_id) -> { sid, host, port, ticket, expires_at, bastion_id }`
 - `rustion_session_renew(sid: String) -> { new_expires_at }`
 - `rustion_session_terminate(sid: String) -> ()`
 - `rustion_recording_url(sid: String) -> { url, expires_at }`
+- `rustion_policy_effective(resource_id: String) -> { transport, bastions, recording, chain: [{ tier, value, locked }] }` — full resolution chain so the GUI can render the source-of-truth tooltip.
 
 The existing `ssh_session_open` / `rdp_session_open` commands take a new optional `transport: { kind: "rustion", sid: String, host: String, port: u16, ticket: String }` argument — when present, they dial Rustion instead of the resource's `host:port`.
 
@@ -193,6 +207,9 @@ The existing `ssh_session_open` / `rdp_session_open` commands take a new optiona
 | `DELETE` | `/v1/rustion/targets/{id}` | Remove (refuses if active sessions exist) |
 | `POST` | `/v1/rustion/targets/{id}/test` | Liveness + version probe (synchronous, on-demand) |
 | `GET` | `/v1/rustion/targets/health` | Cached health for every enrolled target (background-poller view) |
+| `GET` | `/v1/rustion/bastion-groups` | List named pools of Rustion targets |
+| `POST` | `/v1/rustion/bastion-groups` | Create / update a named pool (members, priorities, selection mode) |
+| `DELETE` | `/v1/rustion/bastion-groups/{name}` | Remove (refuses if referenced by a locked tier) |
 | `GET` | `/v1/rustion/master/pubkey` | Export master pub (one-shot enrol step) |
 | `POST` | `/v1/rustion/master/rotate` | Rotate master cert (co-signed envelope to all enrolled bastions) |
 | `POST` | `/v1/rustion/sessions` | Open a new session (consumed by GUI / CLI) |
@@ -200,11 +217,83 @@ The existing `ssh_session_open` / `rdp_session_open` commands take a new optiona
 | `DELETE` | `/v1/rustion/sessions/{sid}` | Force-terminate |
 | `GET` | `/v1/rustion/sessions` | List active sessions (BastionVault's own view) |
 | `GET` | `/v1/rustion/sessions/{sid}/recording` | Resolve a streaming URL for the recording |
-| `GET` | `/v1/rustion/policy` | Read effective global + per-type policy (any authenticated operator) |
-| `PUT` | `/v1/rustion/policy` | Update global `transport_default` / `transport_lock` (**root only**) |
-| `GET` | `/v1/rustion/policy/effective?resource={id}` | Resolve the effective transport for a specific resource, returning the level the value came from |
+| `GET` | `/v1/rustion/policy` | Read effective global + per-type defaults (any authenticated operator) |
+| `PUT` | `/v1/rustion/policy` | Update global `transport_default` / `bastion_group_default` / `recording_default` / `transport_lock` (**root only**) |
+| `GET` | `/v1/rustion/policy/type/{type_id}` | Read per-resource-type policy |
+| `PUT` | `/v1/rustion/policy/type/{type_id}` | Update per-resource-type policy (**admin only**) |
+| `GET` | `/v1/rustion/policy/asset-group/{group_id}` | Read per-asset-group policy |
+| `PUT` | `/v1/rustion/policy/asset-group/{group_id}` | Update per-asset-group policy (**admin or group owner**) |
+| `GET` | `/v1/rustion/policy/effective?resource={id}` | Resolve the effective transport / bastions / recording for a specific resource, returning the full resolution chain so callers can render the source-of-truth chip |
 
 All endpoints are policy-gated on `rustion/*` paths in the existing ACL grammar.
+
+### Worked example — a real multi-instance deployment
+
+A medium-size deployment with three regions, a PCI zone, and a DR pair might look like this. The example is illustrative — it shows how the four policy tiers compose without anybody having to hand-edit every resource.
+
+```
+Enrolled Rustion instances
+──────────────────────────
+  rustion-eu-west-1            (prod EU west, primary)
+  rustion-eu-west-2            (prod EU west, DR)
+  rustion-eu-central-1         (prod EU central)
+  rustion-us-east-1            (prod US east)
+  rustion-pci-1                (PCI zone, dedicated VRF)
+  rustion-pci-2                (PCI zone, DR)
+  rustion-corp                 (corporate fallback)
+
+Bastion groups (defined under sys/config/rustion/bastion-groups/)
+────────────────────────────────────────────────────────────────
+  eu-prod          : [rustion-eu-west-1, rustion-eu-west-2, rustion-eu-central-1]   selection: ordered
+  us-prod          : [rustion-us-east-1]                                            selection: ordered
+  pci-zone         : [rustion-pci-1, rustion-pci-2]                                 selection: ordered
+  global-fallback  : [rustion-corp]                                                 selection: ordered
+
+Global policy (sys/config/rustion)
+──────────────────────────────────
+  transport_default   = rustion             # default is bastion, can be overridden
+  bastion_group_default = global-fallback   # last-resort pool
+  recording_default   = always
+  transport_lock      = false               # downstream can still pick direct
+
+Per-resource-type policy (ResourceTypeDef "database")
+─────────────────────────────────────────────────────
+  connect.transport      = rustion-required  # databases ALWAYS through a bastion
+  connect.bastion_group  = eu-prod           # default to EU pool
+  connect.recording      = always
+  transport_lock         = true              # downstream cannot weaken
+
+Per-asset-group policy ("pci-prod-cardholders")
+───────────────────────────────────────────────
+  priority               = 100                # higher than other groups
+  connect.transport      = rustion-required
+  connect.bastion_group  = pci-zone
+  connect.recording      = always
+  transport_lock         = true
+
+Per-resource policy (resource "warehouse-db.eu" — type database, member of pci-prod-cardholders)
+────────────────────────────────────────────────────────────────────────────────────────────────
+  connect.transport      = direct             # ❌ ignored, pci-prod-cardholders locked it
+  connect.bastions       = [rustion-corp]     # ❌ ignored, pci-prod-cardholders locked the group
+```
+
+Resolved effective policy for `warehouse-db.eu`:
+
+```
+transport  = rustion-required   ← asset-group "pci-prod-cardholders" (locked)
+bastions   = group "pci-zone"   ← asset-group "pci-prod-cardholders" (locked)
+recording  = always             ← asset-group "pci-prod-cardholders" (locked)
+```
+
+The Connection tab on `warehouse-db.eu` displays:
+
+```
+Bastion required (locked by asset-group "pci-prod-cardholders")
+Will try: rustion-pci-1 → rustion-pci-2
+Recording: always (locked)
+```
+
+If `rustion-pci-1` is `down`, the dispatcher tries `rustion-pci-2`. If both are `down`, Connect fails with `bastion_unavailable` — the operator is **not** silently dropped onto `rustion-corp`, because the locked `pci-zone` group constrains the candidate set. That hard-fail is the point of the lock.
 
 ### Module / file layout (BastionVault)
 
@@ -215,7 +304,9 @@ src/modules/rustion/
   envelope.rs                 // BVRG-v1 build / verify
   client.rs                   // HTTP/2 client to Rustion control plane
   health.rs                   // background pinger + status cache + state-change events
-  dispatcher.rs               // bastion selection: ordered-fallback or random-pool
+  bastion_group.rs            // named pools of targets (sys/config/rustion/bastion-groups/*)
+  dispatcher.rs               // bastion selection: literal list, group lookup, random pool
+  policy.rs                   // four-tier resolver (global / type / asset-group / resource)
   master.rs                   // master cert lifecycle (issue, rotate, export)
   session.rs                  // session open / renew / terminate state machine
   recording.rs                // recording-pointer storage + signed-URL fetch
@@ -223,8 +314,9 @@ src/modules/rustion/
   http.rs                     // axum routes
   cli.rs                      // `bastionvault rustion ...`
 gui/src/lib/rustion.ts        // typed Tauri command wrappers
-gui/src/routes/SettingsPage.tsx  // + Rustion Bastions section
-gui/src/routes/ResourcesPage.tsx // + transport selector on connection profiles
+gui/src/routes/SettingsPage.tsx  // + Rustion Bastions + Bastion Groups + Global policy
+gui/src/routes/AssetGroupsPage.tsx // + per-group transport / bastion / recording policy
+gui/src/routes/ResourcesPage.tsx // + transport selector + effective-policy chip on the Connection tab
 gui/src/routes/AuditPage.tsx     // + recording link rendering
 ```
 
@@ -319,16 +411,18 @@ crates/rustion-server/         // wires the new crate into the main binary
 - "Open recording" link in audit timeline; signed-URL stream from Rustion to the player.
 - asciicast playback in-GUI (existing xterm.js + asciinema-player), `.rdp-rec` playback handed off to a small wasm decoder shipped in the GUI bundle.
 
-### Phase 7 — Three-tier transport policy + `rustion-required` mode — **Todo**
+### Phase 7 — Four-tier transport-and-bastion policy + `rustion-required` mode — **Todo**
 
-- **Global policy** at `sys/config/rustion` (`transport_default`, `transport_lock`), gated to root.
-- **Per-resource-type** `connect.transport` on `ResourceTypeDef` (with its own per-type `transport_lock`), gated to admin.
-- **Per-resource** `connect.transport` override, gated to the resource owner and only writable when no upstream tier is locked.
-- **Effective-policy resolver** (`min(global, type, resource)` under `direct < rustion < rustion-required`) used uniformly by the API, the GUI, and the CLI; the Connection tab shows both the effective value and the source tier.
-- Settings UI: a new admin-only "Rustion → Global policy" panel; the existing Resource Types editor gains the per-type field and lock; the resource Connection tab gains a read-only badge when locked upstream.
+- **Bastion groups** under `sys/config/rustion/bastion-groups/<name>` — named pools of Rustion targets with per-member priority and a `selection: "ordered" | "random"` flag, gated to admin. CRUD on the API, CLI (`bastionvault rustion bastion-group add | list | rename | members ...`), and Settings → Rustion → Bastion Groups panel.
+- **Global policy** at `sys/config/rustion` (`transport_default`, `bastion_group_default`, `recording_default`, `transport_lock`), gated to root.
+- **Per-resource-type** `connect.{transport, bastions, bastion_group, recording}` on `ResourceTypeDef` (with its own per-type `transport_lock`), gated to admin.
+- **Per-asset-group** `connect.{transport, bastions, bastion_group, recording}` on each [asset group](asset-groups.md) (with `priority` and its own `transport_lock`), gated to admin or the group owner. Multi-membership resolution: most-restrictive `transport`, highest-priority group's `bastions` and `recording`.
+- **Per-resource** `connect.{transport, bastions, bastion_group, recording}` override, gated to the resource owner and only writable when no upstream tier is locked.
+- **Effective-policy resolver** (`min(global, type, asset-group(s), resource)` for `transport`; nearest-defined-tier for `bastions` / `bastion_group`; strictest of `always > input-redacted > off` for `recording`) used uniformly by the API, the GUI, and the CLI; the Connection tab shows the full resolution chain so the operator sees which tier produced each effective value.
+- Settings UI: a new admin-only "Rustion → Global policy" panel; a "Rustion → Bastion Groups" CRUD panel; the existing Resource Types editor gains the per-type fields and lock; the Asset Groups page gains per-group transport + bastion + recording fields with a priority slider; the resource Connection tab gains a read-only badge naming the locking tier when locked upstream.
 - Migration path for operators currently on `direct`: a root-only "Force all Connect through Rustion" action that flips `transport_default = rustion-required` + `transport_lock = true` in one step after presenting a diff of every resource that would change behaviour.
-- Audit events `rustion.policy.global.update`, `rustion.policy.type.update`, `rustion.policy.resource.update` with full before/after.
-- Documentation pass + security-review of the envelope, ticket, replay window, and the policy-lock escalation path (a compromised admin must not be able to *un*-lock a root-locked global).
+- Audit events `rustion.policy.global.update`, `rustion.policy.type.update`, `rustion.policy.asset_group.update`, `rustion.policy.resource.update`, `rustion.bastion_group.update` with full before/after.
+- Documentation pass + security-review of the envelope, ticket, replay window, and the policy-lock escalation path (a compromised admin must not be able to *un*-lock a root-locked global; a compromised asset-group owner must not be able to escape a locked type or global).
 
 ## Per-side deliverable tables
 
@@ -411,20 +505,23 @@ The two repos are co-developed; each phase below names the files that change on 
 | Rustion | `GET /v1/recordings/{rid}` returns a 60s signed URL, IP-bound to operator | `crates/rustion-control-plane/src/routes.rs` |
 | Rustion | `GET /v1/sessions/{sid}/recording` serves the sidecar JSON for the 24h fallback window | `crates/rustion-control-plane/src/routes.rs` |
 
-### Phase 7 — Three-tier transport policy + `rustion-required` mode
+### Phase 7 — Four-tier transport-and-bastion policy + `rustion-required` mode
 
-This phase is **BastionVault-only**. The transport-policy ladder lives entirely on the vault side; Rustion sees no behavioural change.
+This phase is **BastionVault-only**. The transport-and-bastion-policy ladder lives entirely on the vault side; Rustion sees no behavioural change (its authority record's `allowed_targets` still bounds what envelopes the vault can ask for, but the vault is the one deciding *which* Rustion instance to send the envelope to).
 
 | Side | Deliverable | Location |
 |---|---|---|
-| BastionVault | Global policy at `sys/config/rustion` (`transport_default`, `transport_lock`), root-gated | `src/modules/rustion/policy.rs` |
-| BastionVault | Per-resource-type `connect.transport` (+ per-type `transport_lock`), admin-gated | `src/modules/resource/types.rs` |
-| BastionVault | Per-resource `connect.transport` override, owner-gated, read-only when upstream tier is locked | `src/modules/resource/mod.rs` |
-| BastionVault | Effective-policy resolver `min(global, type, resource)` under `direct < rustion < rustion-required` | `src/modules/rustion/policy.rs` |
-| BastionVault | Settings → Rustion → Global policy (root-only); Resource Types editor field; resource Connection tab badge when locked | `gui/src/routes/SettingsPage.tsx` + `gui/src/routes/ResourcesPage.tsx` |
+| BastionVault | Bastion-group CRUD (`sys/config/rustion/bastion-groups/<name>`), admin-gated | `src/modules/rustion/bastion_group.rs` |
+| BastionVault | Global policy at `sys/config/rustion` (`transport_default`, `bastion_group_default`, `recording_default`, `transport_lock`), root-gated | `src/modules/rustion/policy.rs` |
+| BastionVault | Per-resource-type `connect.{transport, bastions, bastion_group, recording}` (+ per-type `transport_lock`), admin-gated | `src/modules/resource/types.rs` |
+| BastionVault | Per-asset-group `connect.{transport, bastions, bastion_group, recording}` + `priority` + per-group `transport_lock`, admin- or owner-gated | `src/modules/resource_group/mod.rs` |
+| BastionVault | Per-resource `connect.{transport, bastions, bastion_group, recording}` override, owner-gated, read-only when any upstream tier is locked | `src/modules/resource/mod.rs` |
+| BastionVault | Effective-policy resolver (`min(...)` for transport, nearest-tier-wins for bastions, strictest-wins for recording) | `src/modules/rustion/policy.rs` |
+| BastionVault | Dispatcher integration: resolves the `bastions` value (literal list or group name → expanded list) at session-open time | `src/modules/rustion/dispatcher.rs` |
+| BastionVault | Settings → Rustion → Global policy (root-only); Settings → Rustion → Bastion Groups (admin); Resource Types editor fields; Asset Groups page per-group fields with priority slider; resource Connection tab badge naming the locking tier when locked upstream | `gui/src/routes/SettingsPage.tsx` + `gui/src/routes/AssetGroupsPage.tsx` + `gui/src/routes/ResourcesPage.tsx` |
 | BastionVault | One-shot "Force all Connect through Rustion" migration action with diff preview, root-only | `gui/src/routes/SettingsPage.tsx` |
-| BastionVault | Audit: `rustion.policy.global.update`, `rustion.policy.type.update`, `rustion.policy.resource.update` with before/after | `src/modules/rustion/audit.rs` |
-| Rustion | (no changes — Rustion does not know or care which policy tier picked `rustion-required` on the vault side) | — |
+| BastionVault | Audit: `rustion.bastion_group.update`, `rustion.policy.global.update`, `rustion.policy.type.update`, `rustion.policy.asset_group.update`, `rustion.policy.resource.update` with before/after + actor | `src/modules/rustion/audit.rs` |
+| Rustion | (no changes — Rustion does not know or care which policy tier picked `rustion-required` or which bastion group resolved to itself on the vault side) | — |
 
 ### Cross-repo testing matrix
 
