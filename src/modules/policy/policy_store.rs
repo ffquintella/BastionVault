@@ -283,6 +283,21 @@ path "resources/*" {
     scopes       = ["owner", "shared"]
 }
 
+# --- Asset groups (owner/shared-scoped) ---
+#
+# List returns every group name (the handler narrows the response set
+# to groups the caller owns or has been shared on — see
+# `ResourceGroupBackend::handle_list`). Read on a specific group is
+# gated by ownership or an active asset-group share, resolved via the
+# `scopes = ["shared"]` rule against the share store.
+path "resource-group/groups" {
+    capabilities = ["list"]
+}
+path "resource-group/groups/+" {
+    capabilities = ["read"]
+    scopes       = ["owner", "shared"]
+}
+
 # --- Per-user workspace ---
 
 # Each token gets its own private cubbyhole for scratch storage.
@@ -434,6 +449,7 @@ path "pki/certs"         { capabilities = ["list"] }
 path "pki/crl"           { capabilities = ["read"] }
 path "pki/crl/pem"       { capabilities = ["read"] }
 path "pki/issuers"       { capabilities = ["list", "read"] }
+path "pki/issuer/+"      { capabilities = ["read"] }
 path "pki/issuer/+/json" { capabilities = ["read"] }
 path "pki/issuer/+/pem"  { capabilities = ["read"] }
 path "pki/issuer/+/der"  { capabilities = ["read"] }
@@ -1385,6 +1401,22 @@ fn file_id_from_metadata_path(req_path: &str) -> Option<String> {
     Some(rest.to_lowercase())
 }
 
+/// Extract an asset-group name from a `resource-group/groups/<name>`
+/// path. Returns `None` for the list path itself, the history
+/// sub-path, or any non-matching shape. Names are lowercased to match
+/// `ResourceGroupStore::sanitize_name` so the lookup key matches what
+/// the store persists.
+fn asset_group_name_from_path(req_path: &str) -> Option<String> {
+    let p = req_path.strip_prefix('/').unwrap_or(req_path);
+    let rest = p.strip_prefix("resource-group/groups/")?;
+    // Reject the trailing slash list form and the per-group sub-paths
+    // (`<name>/history`); only the bare leaf matches.
+    if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    Some(rest.trim().to_lowercase())
+}
+
 /// Does `request_path` look like a KV (v1 or v2) request? The routing
 /// layer puts KV mounts under their operator-chosen path (default
 /// `secret/`). We can't enumerate mounts from here cheaply, so we use
@@ -1436,6 +1468,22 @@ async fn resolve_asset_owner(core: &Weak<Core>, req_path: &str) -> String {
     if looks_like_kv_path(req_path) {
         if let Ok(Some(rec)) = store.get_kv_owner(req_path).await {
             return rec.entity_id;
+        }
+    }
+    // Asset group: the owner is captured on first write to
+    // `resource-group/groups/<name>` and lives on the group entry
+    // (not the identity OwnerStore). Pull from the resource-group
+    // store directly.
+    if let Some(name) = asset_group_name_from_path(req_path) {
+        if let Some(rg_module) = core
+            .module_manager
+            .get_module::<ResourceGroupModule>("resource-group")
+        {
+            if let Some(rg_store) = rg_module.store() {
+                if let Ok(Some(g)) = rg_store.get_group(&name).await {
+                    return g.owner_entity_id;
+                }
+            }
         }
     }
     String::new()
@@ -1504,6 +1552,17 @@ async fn resolve_target_shared_caps(
     if let Some(id) = file_id_from_path(&req.path) {
         if let Ok(v) = store
             .shared_capabilities(ShareTargetKind::File, &id, &caller_id)
+            .await
+        {
+            merge(v);
+        }
+    }
+    // Direct: the request targets an asset-group path itself
+    // (`resource-group/groups/<name>`). Look up any asset-group share
+    // addressed to the caller entity for this group.
+    if let Some(name) = asset_group_name_from_path(&req.path) {
+        if let Ok(v) = store
+            .shared_capabilities(ShareTargetKind::AssetGroup, &name, &caller_id)
             .await
         {
             merge(v);
@@ -1607,6 +1666,24 @@ async fn resolve_target_shared_caps(
                             .shared_capabilities(
                                 ShareTargetKind::AssetGroup,
                                 ag,
+                                &g_name,
+                            )
+                            .await
+                        {
+                            merge(v);
+                        }
+                    }
+
+                    // Asset-group share where the request path itself
+                    // is `resource-group/groups/<name>` and the share
+                    // grantee is this identity group. Lets a member
+                    // of grp-teste read the do-tic-esi group metadata
+                    // when the share grants it.
+                    if let Some(ag_name) = asset_group_name_from_path(&req.path) {
+                        if let Ok(v) = store
+                            .shared_capabilities(
+                                ShareTargetKind::AssetGroup,
+                                &ag_name,
                                 &g_name,
                             )
                             .await

@@ -449,11 +449,127 @@ impl ResourceGroupBackendInner {
     pub async fn handle_list(
         &self,
         _backend: &dyn Backend,
-        _req: &mut Request,
+        req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let keys = store.list_groups().await?;
-        Ok(Some(Response::list_response(&keys)))
+
+        // Admins and root see every group. Non-admin callers see only
+        // groups they own or have an active share on (direct entity
+        // share or share to an identity group they belong to). The
+        // group-list endpoint shouldn't leak group names a caller has
+        // no read access on — those would 403 on follow-up read and
+        // pollute the GUI's group picker with un-openable rows.
+        let auth = match req.auth.as_ref() {
+            Some(a) => a.clone(),
+            None => return Ok(Some(Response::list_response(&keys))),
+        };
+        let is_admin = auth
+            .policies
+            .iter()
+            .any(|p| p == "root" || p == "admin" || p == "administrator" || p == "super-admin");
+        if is_admin {
+            return Ok(Some(Response::list_response(&keys)));
+        }
+
+        let caller_id = auth.metadata.get("entity_id").cloned().unwrap_or_default();
+        let username = auth.metadata.get("username").cloned().unwrap_or_default();
+        let role_name = auth.metadata.get("role_name").cloned().unwrap_or_default();
+
+        let id_module = self
+            .core
+            .module_manager
+            .get_module::<crate::modules::identity::IdentityModule>("identity");
+        let share_store = id_module.as_ref().and_then(|m| m.share_store());
+        let group_store = id_module.as_ref().and_then(|m| m.group_store());
+
+        // Identity groups the caller belongs to (used to resolve
+        // group-grantee shares against the asset group).
+        let mut caller_groups: Vec<(crate::modules::identity::ShareGranteeKind, String)> =
+            Vec::new();
+        if let Some(gs) = &group_store {
+            for (kind, member, gk) in [
+                (
+                    crate::modules::identity::GroupKind::User,
+                    &username,
+                    crate::modules::identity::ShareGranteeKind::GroupUser,
+                ),
+                (
+                    crate::modules::identity::GroupKind::App,
+                    &role_name,
+                    crate::modules::identity::ShareGranteeKind::GroupApp,
+                ),
+            ] {
+                if member.is_empty() {
+                    continue;
+                }
+                let m_lc = member.trim().to_lowercase();
+                if let Ok(names) = gs.list_groups(kind).await {
+                    for g_name in names {
+                        if let Ok(Some(g)) = gs.get_group(kind, &g_name).await {
+                            if g.members.iter().any(|m| m.trim().to_lowercase() == m_lc) {
+                                caller_groups.push((gk, g_name));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut visible: Vec<String> = Vec::new();
+        for name in keys {
+            // Owner pass: cheap, single read against the group entry.
+            let owned = match store.get_group(&name).await {
+                Ok(Some(g)) => !g.owner_entity_id.is_empty() && g.owner_entity_id == caller_id,
+                _ => false,
+            };
+            if owned {
+                visible.push(name);
+                continue;
+            }
+
+            // Share pass: direct entity share OR share to any of the
+            // caller's identity groups.
+            let mut has_share = false;
+            if let Some(ss) = &share_store {
+                if !caller_id.is_empty() {
+                    if let Ok(Some(s)) = ss
+                        .get_share(
+                            crate::modules::identity::ShareTargetKind::AssetGroup,
+                            &name,
+                            &caller_id,
+                        )
+                        .await
+                    {
+                        if !s.is_expired() {
+                            has_share = true;
+                        }
+                    }
+                }
+                if !has_share {
+                    for (_gk, g_name) in &caller_groups {
+                        if let Ok(Some(s)) = ss
+                            .get_share(
+                                crate::modules::identity::ShareTargetKind::AssetGroup,
+                                &name,
+                                g_name,
+                            )
+                            .await
+                        {
+                            if !s.is_expired() {
+                                has_share = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if has_share {
+                visible.push(name);
+            }
+        }
+
+        Ok(Some(Response::list_response(&visible)))
     }
 
     pub async fn handle_read(

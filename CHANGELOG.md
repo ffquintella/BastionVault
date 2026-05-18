@@ -45,6 +45,30 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.10] - 2026-05-18
+
+### Fixed
+
+- **pki-user can now read bare issuer detail** (`src/modules/policy/policy_store.rs`).
+  Added `path "pki/issuer/+" { capabilities = ["read"] }` to the baseline `pki-user`
+  policy. Previously only the `/json`, `/pem`, `/der`, `/crl` sub-paths were granted,
+  so the GUI's IssuersTab clicked-detail panel (which hits the bare path returning
+  name, CN, cert PEM, usages, not_after — no private key material) 403'd. The new
+  rule restores parity with what the GUI surface actually needs.
+- **Asset-group list is now filtered to caller-accessible groups**
+  (`src/modules/resource_group/mod.rs`). `handle_list` previously returned every
+  group name regardless of caller. Non-admin callers now see only groups they own
+  or have an active share on (direct entity share or share to any identity group
+  they belong to). Admin / root tokens still see every group.
+- **ACL `scopes` now resolves asset-group paths**
+  (`src/modules/policy/policy_store.rs`). Added `asset_group_name_from_path` plus
+  asset-group-share lookups in both `resolve_asset_owner` (so `scopes=["owner"]`
+  rules match group owners) and `resolve_target_shared_caps` (so `scopes=["shared"]`
+  rules match direct + identity-group shares on the group itself). The `standard-user`
+  policy gained `path "resource-group/groups/+" { capabilities = ["read"], scopes =
+  ["owner", "shared"] }` plus list on the parent, so the Resources-page Groups
+  section can render group cards for shared groups.
+
 ## [0.7.9] - 2026-05-18
 
 ### Fixed
