@@ -45,6 +45,18 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-05-18
+
+### Changed
+
+- **CI: temporarily disable `cargo audit` workflow** (`.github/workflows/rust.yml`) --
+  switched trigger from `on: push` to `on: workflow_dispatch`. Vanilla `russh 0.60.3`
+  and `sspi 0.20.x / 0.21.x` pin incompatible RustCrypto pre-release versions
+  (`ed25519-dalek`, `p256`, `ml-kem`), so `cargo generate-lockfile` fails in CI and
+  the audit cannot run. A monthly scheduled routine watches crates.io and will
+  signal when upstream Devolutions converges on the pre.7 RustCrypto slice; restore
+  `on: push` then.
+
 ## [0.7.5] - 2026-05-18
 
 ### Changed

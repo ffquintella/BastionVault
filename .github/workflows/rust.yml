@@ -11,8 +11,18 @@ name: Vulnerability Audit
 # only is the right scope. PRs from this repo merge to a branch that
 # then triggers this workflow.
 
+# TEMPORARILY DISABLED: cargo-audit currently fails to resolve the
+# workspace because vanilla `russh 0.60.3` and `sspi 0.20.x/0.21.x`
+# pin incompatible RustCrypto pre-release versions
+# (`ed25519-dalek`, `p256`, `ml-kem`). Until upstream Devolutions
+# bumps picky/sspi to the pre.7 RustCrypto slice (tracked by the
+# monthly "Check if russh/sspi patch can be reverted" routine at
+# https://claude.ai/code/routines), the audit job cannot generate a
+# lockfile to scan and would fail every push. Re-enable by switching
+# `on: workflow_dispatch` back to `on: push` once that routine
+# reports READY TO REVERT.
 on:
-  push:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
