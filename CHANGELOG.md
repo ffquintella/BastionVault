@@ -45,6 +45,16 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-05-18
+
+### Fixed
+
+- **Asset-group filter showed "No resources" for imported groups** (`src/modules/resource/mod.rs`, `gui/src/routes/AssetGroupsPage.tsx`) — the resource-group store has always lowercased member names on write (`group_store.rs::sanitize_member`), while the resource module preserved case in its storage keys. PMP-imported groups therefore stored members like `apl-puppetenterprise` against a resources mount that held `APL-PuppetEnterprise`, so `read_resource` returned 404 for every member and the Resources page rendered the group as empty. Resolve the URL `name` segment through a new `resolve_resource_name` helper across every read/write/delete/history/secret handler: prefer the lowercase key (now the canonical form for new writes), fall back to the supplied case, and CI-scan `META_PREFIX` as a last resort. Net effect: new resources land at a lowercase key so future imports never duplicate, existing mixed-case records resolve regardless of caller case, and a re-write of `APL-PuppetEnterprise` updates the existing record in place instead of creating a sibling.
+
+### Changed
+
+- **Asset Groups resource picker — dual-list with search** (`gui/src/routes/AssetGroupsPage.tsx`) — the chip grid in the Edit Group modal scaled badly past ~50 resources (target mount has 5k+). Replace it with an available/selected dual-list panel: per-side search, count badges, `>` / `>>` / `<` / `<<` move buttons, Cmd/Ctrl-click toggle, Shift-click range selection, double-click to move a single row. Members not present in the resources mount (legacy data, deleted resources) appear italicized with a `*` marker in the Selected pane instead of in a separate "Other resources" section.
+
 ## [0.7.2] - 2026-05-17
 
 ### Changed

@@ -280,13 +280,14 @@ export function ResourcesPage() {
           setTotal(res.total);
           setHasMore(res.has_more);
         }
-      } catch {
+      } catch (e: unknown) {
         if (fetchTokenRef.current !== token) return;
         if (reset) {
           setCards([]);
           setTotal(0);
           setHasMore(false);
         }
+        toast("error", `Resource search failed: ${extractError(e)}`);
       } finally {
         if (fetchTokenRef.current === token) {
           setLoading(false);

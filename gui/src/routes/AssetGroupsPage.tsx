@@ -53,6 +53,8 @@ export function AssetGroupsPage() {
   const [formDescription, setFormDescription] = useState("");
   const [formMembers, setFormMembers] = useState<string[]>([]);
   const [freeformMembers, setFreeformMembers] = useState("");
+  const [availSearch, setAvailSearch] = useState("");
+  const [selectedSearch, setSelectedSearch] = useState("");
   const [formSecrets, setFormSecrets] = useState<string[]>([]);
   const [freeformSecret, setFreeformSecret] = useState("");
 
@@ -127,12 +129,6 @@ export function AssetGroupsPage() {
     setFreeformMembers("");
     setFormSecrets([]);
     setFreeformSecret("");
-  }
-
-  function toggleMember(m: string) {
-    setFormMembers((prev) =>
-      prev.includes(m) ? prev.filter((x) => x !== m) : [...prev, m],
-    );
   }
 
   function addSecretFromFreeform() {
@@ -316,68 +312,17 @@ export function AssetGroupsPage() {
             />
 
             {/* Resource members */}
-            <div>
-              <label className="block text-sm text-[var(--color-text-muted)] mb-1">
-                Resources
-              </label>
-              <p className="text-xs text-[var(--color-text-muted)] mb-2">
-                Resource names from the resources mount that belong to this group.
-              </p>
-              {availableResources.length > 0 ? (
-                <div className="flex flex-wrap gap-2">
-                  {availableResources.map((m) => {
-                    const sel = formMembers.includes(m);
-                    return (
-                      <button
-                        key={m}
-                        type="button"
-                        onClick={() => toggleMember(m)}
-                        className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
-                          sel
-                            ? "bg-[var(--color-primary)] border-[var(--color-primary)] text-white"
-                            : "bg-[var(--color-bg)] border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-text-muted)]"
-                        }`}
-                      >
-                        {m}
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p className="text-xs text-[var(--color-text-muted)]">
-                  No resources available. Create resources first from the Resources page.
-                </p>
-              )}
-              {formMembers.filter((m) => !availableResources.includes(m)).length > 0 && (
-                <div className="mt-2">
-                  <p className="text-xs text-[var(--color-text-muted)] mb-1">
-                    Other resources (not in the current resources mount):
-                  </p>
-                  <div className="flex flex-wrap gap-1">
-                    {formMembers
-                      .filter((m) => !availableResources.includes(m))
-                      .map((m) => (
-                        <button
-                          key={m}
-                          type="button"
-                          onClick={() => toggleMember(m)}
-                          className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs border bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] border-[var(--color-border)] hover:text-[var(--color-danger)]"
-                          title="Remove"
-                        >
-                          {m}
-                          <span>&times;</span>
-                        </button>
-                      ))}
-                  </div>
-                </div>
-              )}
-              <Input
-                label=""
-                value={freeformMembers}
-                onChange={(e) => setFreeformMembers(e.target.value)}
-                placeholder="Add extra resources, comma-separated"
-              />
-            </div>
+            <ResourcePicker
+              available={availableResources}
+              selected={formMembers}
+              setSelected={setFormMembers}
+              availSearch={availSearch}
+              setAvailSearch={setAvailSearch}
+              selectedSearch={selectedSearch}
+              setSelectedSearch={setSelectedSearch}
+              freeform={freeformMembers}
+              setFreeform={setFreeformMembers}
+            />
 
             {/* KV secrets */}
             <div>
@@ -939,6 +884,274 @@ function AssetGroupSharingCard({
         </div>
       </Modal>
     </>
+  );
+}
+
+interface ResourcePickerProps {
+  available: string[];
+  selected: string[];
+  setSelected: React.Dispatch<React.SetStateAction<string[]>>;
+  availSearch: string;
+  setAvailSearch: (v: string) => void;
+  selectedSearch: string;
+  setSelectedSearch: (v: string) => void;
+  freeform: string;
+  setFreeform: (v: string) => void;
+}
+
+function ResourcePicker({
+  available,
+  selected,
+  setSelected,
+  availSearch,
+  setAvailSearch,
+  selectedSearch,
+  setSelectedSearch,
+  freeform,
+  setFreeform,
+}: ResourcePickerProps) {
+  const [availActive, setAvailActive] = useState<string[]>([]);
+  const [selectedActive, setSelectedActive] = useState<string[]>([]);
+
+  const selectedSet = new Set(selected);
+  const availFiltered = available
+    .filter((r) => !selectedSet.has(r))
+    .filter((r) => r.toLowerCase().includes(availSearch.toLowerCase()));
+  const selectedFiltered = selected.filter((r) =>
+    r.toLowerCase().includes(selectedSearch.toLowerCase()),
+  );
+  const availableSet = new Set(available);
+
+  function toggleActive(
+    item: string,
+    list: string[],
+    setter: React.Dispatch<React.SetStateAction<string[]>>,
+    e: React.MouseEvent,
+  ) {
+    if (e.shiftKey && list.length > 0) {
+      // Range select within the current filtered view
+      const view =
+        list === availActive ? availFiltered : selectedFiltered;
+      const last = list[list.length - 1];
+      const a = view.indexOf(last);
+      const b = view.indexOf(item);
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        setter(view.slice(lo, hi + 1));
+        return;
+      }
+    }
+    if (e.metaKey || e.ctrlKey) {
+      setter(
+        list.includes(item) ? list.filter((x) => x !== item) : [...list, item],
+      );
+      return;
+    }
+    setter([item]);
+  }
+
+  function moveToSelected() {
+    if (availActive.length === 0) return;
+    setSelected((prev) => Array.from(new Set([...prev, ...availActive])));
+    setAvailActive([]);
+  }
+
+  function moveToAvailable() {
+    if (selectedActive.length === 0) return;
+    const toRemove = new Set(selectedActive);
+    setSelected((prev) => prev.filter((x) => !toRemove.has(x)));
+    setSelectedActive([]);
+  }
+
+  function moveAllToSelected() {
+    setSelected((prev) => Array.from(new Set([...prev, ...availFiltered])));
+    setAvailActive([]);
+  }
+
+  function moveAllToAvailable() {
+    const toRemove = new Set(selectedFiltered);
+    setSelected((prev) => prev.filter((x) => !toRemove.has(x)));
+    setSelectedActive([]);
+  }
+
+  function addFreeformNow() {
+    const extras = freeform
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (extras.length === 0) return;
+    setSelected((prev) => Array.from(new Set([...prev, ...extras])));
+    setFreeform("");
+  }
+
+  return (
+    <div>
+      <label className="block text-sm text-[var(--color-text-muted)] mb-1">
+        Resources
+      </label>
+      <p className="text-xs text-[var(--color-text-muted)] mb-2">
+        Resource names from the resources mount that belong to this group.
+        Cmd/Ctrl-click or Shift-click for multi-select.
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_1fr] gap-2 items-stretch">
+        {/* Available list */}
+        <div className="flex flex-col min-w-0 border border-[var(--color-border)] rounded-lg bg-[var(--color-bg)]">
+          <div className="px-2 py-1.5 text-xs text-[var(--color-text-muted)] border-b border-[var(--color-border)] flex items-center justify-between">
+            <span>Available ({availFiltered.length})</span>
+          </div>
+          <div className="p-2 border-b border-[var(--color-border)]">
+            <Input
+              label=""
+              value={availSearch}
+              onChange={(e) => setAvailSearch(e.target.value)}
+              placeholder="Search available…"
+            />
+          </div>
+          <ul className="overflow-y-auto max-h-64 min-h-32 text-sm">
+            {availFiltered.length === 0 ? (
+              <li className="px-2 py-2 text-xs text-[var(--color-text-muted)]">
+                {available.length === 0 ? "No resources available." : "No matches."}
+              </li>
+            ) : (
+              availFiltered.map((r) => {
+                const active = availActive.includes(r);
+                return (
+                  <li
+                    key={r}
+                    onClick={(e) => toggleActive(r, availActive, setAvailActive, e)}
+                    onDoubleClick={() => {
+                      setSelected((prev) => Array.from(new Set([...prev, r])));
+                      setAvailActive([]);
+                    }}
+                    className={`px-2 py-1 cursor-pointer truncate ${
+                      active
+                        ? "bg-[var(--color-primary)] text-white"
+                        : "hover:bg-[var(--color-surface-hover)]"
+                    }`}
+                    title={r}
+                  >
+                    {r}
+                  </li>
+                );
+              })
+            )}
+          </ul>
+        </div>
+
+        {/* Move buttons */}
+        <div className="flex sm:flex-col gap-2 items-center justify-center px-1">
+          <button
+            type="button"
+            onClick={moveToSelected}
+            disabled={availActive.length === 0}
+            className="px-2 py-1 rounded border border-[var(--color-border)] text-sm hover:border-[var(--color-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
+            title="Add selected"
+          >
+            &gt;
+          </button>
+          <button
+            type="button"
+            onClick={moveAllToSelected}
+            disabled={availFiltered.length === 0}
+            className="px-2 py-1 rounded border border-[var(--color-border)] text-sm hover:border-[var(--color-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
+            title="Add all (filtered)"
+          >
+            &gt;&gt;
+          </button>
+          <button
+            type="button"
+            onClick={moveToAvailable}
+            disabled={selectedActive.length === 0}
+            className="px-2 py-1 rounded border border-[var(--color-border)] text-sm hover:border-[var(--color-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
+            title="Remove selected"
+          >
+            &lt;
+          </button>
+          <button
+            type="button"
+            onClick={moveAllToAvailable}
+            disabled={selectedFiltered.length === 0}
+            className="px-2 py-1 rounded border border-[var(--color-border)] text-sm hover:border-[var(--color-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
+            title="Remove all (filtered)"
+          >
+            &lt;&lt;
+          </button>
+        </div>
+
+        {/* Selected list */}
+        <div className="flex flex-col min-w-0 border border-[var(--color-border)] rounded-lg bg-[var(--color-bg)]">
+          <div className="px-2 py-1.5 text-xs text-[var(--color-text-muted)] border-b border-[var(--color-border)]">
+            Selected ({selectedFiltered.length}
+            {selectedFiltered.length !== selected.length ? ` of ${selected.length}` : ""})
+          </div>
+          <div className="p-2 border-b border-[var(--color-border)]">
+            <Input
+              label=""
+              value={selectedSearch}
+              onChange={(e) => setSelectedSearch(e.target.value)}
+              placeholder="Search selected…"
+            />
+          </div>
+          <ul className="overflow-y-auto max-h-64 min-h-32 text-sm">
+            {selectedFiltered.length === 0 ? (
+              <li className="px-2 py-2 text-xs text-[var(--color-text-muted)]">
+                {selected.length === 0 ? "Nothing selected yet." : "No matches."}
+              </li>
+            ) : (
+              selectedFiltered.map((r) => {
+                const active = selectedActive.includes(r);
+                const orphan = !availableSet.has(r);
+                return (
+                  <li
+                    key={r}
+                    onClick={(e) =>
+                      toggleActive(r, selectedActive, setSelectedActive, e)
+                    }
+                    onDoubleClick={() => {
+                      setSelected((prev) => prev.filter((x) => x !== r));
+                      setSelectedActive([]);
+                    }}
+                    className={`px-2 py-1 cursor-pointer truncate ${
+                      active
+                        ? "bg-[var(--color-primary)] text-white"
+                        : "hover:bg-[var(--color-surface-hover)]"
+                    } ${orphan && !active ? "italic text-[var(--color-text-muted)]" : ""}`}
+                    title={orphan ? `${r} (not in resources mount)` : r}
+                  >
+                    {r}
+                    {orphan && <span className="ml-1 text-xs">*</span>}
+                  </li>
+                );
+              })
+            )}
+          </ul>
+        </div>
+      </div>
+      {selected.some((r) => !availableSet.has(r)) && (
+        <p className="text-xs text-[var(--color-text-muted)] mt-1">
+          <span className="font-mono">*</span> Not present in the current resources mount.
+        </p>
+      )}
+      <div className="flex gap-2 mt-2">
+        <div className="flex-1">
+          <Input
+            label=""
+            value={freeform}
+            onChange={(e) => setFreeform(e.target.value)}
+            placeholder="Add extra resources, comma-separated"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                addFreeformNow();
+              }
+            }}
+          />
+        </div>
+        <Button type="button" variant="secondary" onClick={addFreeformNow}>
+          Add
+        </Button>
+      </div>
+    </div>
   );
 }
 

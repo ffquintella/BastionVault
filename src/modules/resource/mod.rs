@@ -420,6 +420,48 @@ fn diff_field_names(old: Option<&Map<String, Value>>, new: &Map<String, Value>) 
     changed
 }
 
+/// Resolve a resource name from the request URL into the actual storage
+/// key in use. New resources are written under their lowercase form; for
+/// new writes this is the canonical name. Legacy data, however, was
+/// written with mixed case (the resource module preserved case while the
+/// resource-group store always lowercased its member references), so a
+/// lowercase probe alone would 404 on every PMP-imported resource.
+///
+/// Lookup order:
+///   1. Exact lowercase `meta/<lower>` — the canonical form going forward.
+///   2. Exact as-supplied `meta/<raw>` — covers a caller that already
+///      passes the legacy mixed-case form.
+///   3. Case-insensitive scan of `meta/` — resolves legacy mixed-case
+///      keys when the caller passes lowercase (the common path from
+///      asset-group filtering, since group members are stored lowercase).
+///
+/// If nothing matches, returns the lowercase form so a fresh write lands
+/// at the canonical key — i.e., new resources are always lowercase, and
+/// any existing CI-equal record is updated in place rather than
+/// duplicated.
+async fn resolve_resource_name(
+    req: &mut Request,
+    raw: &str,
+) -> Result<String, RvError> {
+    let trimmed = raw.trim();
+    let lower = trimmed.to_ascii_lowercase();
+
+    if req.storage_get(&format!("{META_PREFIX}{lower}")).await?.is_some() {
+        return Ok(lower);
+    }
+    if trimmed != lower
+        && req.storage_get(&format!("{META_PREFIX}{trimmed}")).await?.is_some()
+    {
+        return Ok(trimmed.to_string());
+    }
+    for k in req.storage_list(META_PREFIX).await? {
+        if k.eq_ignore_ascii_case(trimmed) {
+            return Ok(k);
+        }
+    }
+    Ok(lower)
+}
+
 // ── Handlers ───────────────────────────────────────────────────────
 
 #[maybe_async::maybe_async]
@@ -603,7 +645,8 @@ impl ResourceBackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let name = req.get_data("name")?.as_str().unwrap().to_string();
+        let raw = req.get_data("name")?.as_str().unwrap().to_string();
+        let name = resolve_resource_name(req, &raw).await?;
         let key = format!("{META_PREFIX}{name}");
         let entry = req.storage_get(&key).await?;
         match entry {
@@ -620,7 +663,12 @@ impl ResourceBackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let name = req.get_data("name")?.as_str().unwrap().to_string();
+        let raw = req.get_data("name")?.as_str().unwrap().to_string();
+        // Resolve to either the existing storage key (any case) or the
+        // canonical lowercase form for a fresh write. This collapses
+        // would-be duplicates from PMP-style imports that send mixed
+        // case after we've already standardized on lowercase.
+        let name = resolve_resource_name(req, &raw).await?;
         let body = req.body.as_ref().ok_or(RvError::ErrRequestNoDataField)?.clone();
         let key = format!("{META_PREFIX}{name}");
 
@@ -690,7 +738,8 @@ impl ResourceBackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let name = req.get_data("name")?.as_str().unwrap().to_string();
+        let raw = req.get_data("name")?.as_str().unwrap().to_string();
+        let name = resolve_resource_name(req, &raw).await?;
 
         // Record the delete in the history log *before* wiping it. The
         // entry stays available for audit even after the resource is gone
@@ -768,7 +817,8 @@ impl ResourceBackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let name = req.get_data("name")?.as_str().unwrap().to_string();
+        let raw = req.get_data("name")?.as_str().unwrap().to_string();
+        let name = resolve_resource_name(req, &raw).await?;
         let prefix = format!("{HIST_PREFIX}{name}/");
 
         let mut keys = req.storage_list(&prefix).await?;
@@ -800,7 +850,8 @@ impl ResourceBackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let resource = req.get_data("resource")?.as_str().unwrap().to_string();
+        let raw = req.get_data("resource")?.as_str().unwrap().to_string();
+        let resource = resolve_resource_name(req, &raw).await?;
         let prefix = format!("{SECRET_PREFIX}{resource}/");
         let keys = req.storage_list(&prefix).await?;
         let resp = Response::list_response(&keys);
@@ -812,7 +863,8 @@ impl ResourceBackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let resource = req.get_data("resource")?.as_str().unwrap().to_string();
+        let raw = req.get_data("resource")?.as_str().unwrap().to_string();
+        let resource = resolve_resource_name(req, &raw).await?;
         let key_name = req.get_data("key")?.as_str().unwrap().to_string();
         let key = format!("{SECRET_PREFIX}{resource}/{key_name}");
         let entry = req.storage_get(&key).await?;
@@ -843,7 +895,8 @@ impl ResourceBackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let resource = req.get_data("resource")?.as_str().unwrap().to_string();
+        let raw = req.get_data("resource")?.as_str().unwrap().to_string();
+        let resource = resolve_resource_name(req, &raw).await?;
         let key_name = req.get_data("key")?.as_str().unwrap().to_string();
         let body = req.body.as_ref().ok_or(RvError::ErrRequestNoDataField)?.clone();
 
@@ -908,7 +961,8 @@ impl ResourceBackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let resource = req.get_data("resource")?.as_str().unwrap().to_string();
+        let raw = req.get_data("resource")?.as_str().unwrap().to_string();
+        let resource = resolve_resource_name(req, &raw).await?;
         let key_name = req.get_data("key")?.as_str().unwrap().to_string();
 
         // Delete current value.
@@ -933,7 +987,8 @@ impl ResourceBackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let resource = req.get_data("resource")?.as_str().unwrap().to_string();
+        let raw = req.get_data("resource")?.as_str().unwrap().to_string();
+        let resource = resolve_resource_name(req, &raw).await?;
         let key_name = req.get_data("key")?.as_str().unwrap().to_string();
 
         let smeta_key = format!("{SMETA_PREFIX}{resource}/{key_name}");
@@ -982,7 +1037,8 @@ impl ResourceBackendInner {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let resource = req.get_data("resource")?.as_str().unwrap().to_string();
+        let raw = req.get_data("resource")?.as_str().unwrap().to_string();
+        let resource = resolve_resource_name(req, &raw).await?;
         let key_name = req.get_data("key")?.as_str().unwrap().to_string();
         let version_str = req.get_data("version")?.as_str().unwrap().to_string();
         let version: u64 = version_str
