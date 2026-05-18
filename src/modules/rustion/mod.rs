@@ -36,6 +36,7 @@ pub mod audit;
 pub mod config;
 pub mod health;
 pub mod master;
+pub mod probe;
 pub mod store;
 
 pub use config::{
@@ -43,6 +44,9 @@ pub use config::{
 };
 pub use health::{apply_probe, ProbeOutcome, FAILURE_THRESHOLD};
 pub use master::{MasterConfig, MasterPubKeyExport, MasterStore};
+pub use probe::{
+    probe_target_now, run_probe_pass, start_pinger, PROBE_AUTHORITY, PROBE_TIMEOUT, TICK_INTERVAL,
+};
 pub use store::RustionStore;
 
 static RUSTION_BACKEND_HELP: &str = r#"
@@ -85,6 +89,8 @@ impl RustionBackend {
         let h_target_write = self.inner.clone();
         let h_target_delete = self.inner.clone();
         let h_health_all = self.inner.clone();
+        let h_probe_all = self.inner.clone();
+        let h_probe_one = self.inner.clone();
         let h_master_read = self.inner.clone();
         let h_master_write = self.inner.clone();
         let h_master_pubkey = self.inner.clone();
@@ -209,6 +215,36 @@ impl RustionBackend {
                         {op: Operation::Read, handler: h_health_all.handle_health_all}
                     ],
                     help: "Cached health for every enrolled target (background-poller view)."
+                },
+                {
+                    // Force a full probe sweep across every enabled
+                    // target — same routine the background pinger
+                    // runs on its 30s tick, exposed for operators who
+                    // just changed an endpoint and want immediate
+                    // feedback instead of waiting for the next tick.
+                    pattern: r"targets/probe$",
+                    operations: [
+                        {op: Operation::Write, handler: h_probe_all.handle_probe_all}
+                    ],
+                    help: "Trigger an immediate health probe sweep across every enabled Rustion target."
+                },
+                {
+                    // Per-target probe + read. The Write path probes,
+                    // persists the result, then returns the fresh
+                    // health record so the GUI's enrolment wizard
+                    // can show "test connection" feedback synchronously.
+                    pattern: r"targets/(?P<id>[A-Za-z0-9_\-]+)/probe$",
+                    fields: {
+                        "id": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Target id to probe."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_probe_one.handle_probe_one}
+                    ],
+                    help: "Probe a single Rustion target and return its fresh health record."
                 },
                 {
                     pattern: r"master/config$",
@@ -514,6 +550,73 @@ impl RustionBackendInner {
         }
         let mut data = Map::new();
         data.insert("targets".into(), Value::Array(entries));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    // ─── Probe (manual trigger) ────────────────────────────────────
+
+    pub async fn handle_probe_all(
+        &self,
+        _b: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let core = self.core.clone();
+        probe::run_probe_pass(&core).await?;
+        // Surface the freshened cache straight back so the caller
+        // doesn't need a follow-up read.
+        self.handle_health_all(_b, _req).await
+    }
+
+    pub async fn handle_probe_one(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let id = req
+            .get_data("id")?
+            .as_str()
+            .ok_or(RvError::ErrRequestFieldInvalid)?
+            .to_string();
+        let store = self.resolve_store()?;
+        let target = store
+            .get_target(&id)
+            .await?
+            .ok_or_else(|| bv_error_response_status!(404, &format!(
+                "rustion target `{id}` not found"
+            )))?;
+        // Reuse the same client + state-machine path the background
+        // pinger uses so single-target test = exactly one tick of
+        // the regular probe loop.
+        probe::probe_target_now(&store, &target).await;
+        let health = store.get_health(&id).await?.unwrap_or_default();
+        let mut data = Map::new();
+        data.insert("id".into(), Value::String(target.id.clone()));
+        data.insert("name".into(), Value::String(target.name.clone()));
+        data.insert(
+            "status".into(),
+            Value::String(health.status.as_str().to_string()),
+        );
+        data.insert("last_error".into(), Value::String(health.last_error));
+        data.insert(
+            "latency_ms_p50".into(),
+            Value::Number(health.latency_ms_p50.into()),
+        );
+        data.insert("version".into(), Value::String(health.version));
+        data.insert(
+            "active_sessions".into(),
+            Value::Number(health.active_sessions.into()),
+        );
+        data.insert(
+            "consecutive_failures".into(),
+            Value::Number(health.consecutive_failures.into()),
+        );
+        if let Some(ts) = health.last_ok_at {
+            data.insert("last_ok_at".into(), Value::String(ts.to_rfc3339()));
+        }
+        data.insert(
+            "updated_at".into(),
+            Value::String(health.updated_at.to_rfc3339()),
+        );
         Ok(Some(Response::data_response(Some(data))))
     }
 

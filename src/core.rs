@@ -644,6 +644,14 @@ impl Core {
             let _ = crate::modules::pki::scheduler::start_pki_tidy_scheduler(core_arc);
         }
 
+        // Boot the Rustion target-health pinger. Same lifecycle
+        // pattern as the schedulers above. Ticks every 30s; an empty
+        // target registry is a no-op so it's safe to start
+        // unconditionally before any operator enrols a bastion.
+        if let Some(core_arc) = self.self_ptr.upgrade() {
+            let _ = crate::modules::rustion::probe::start_pinger(core_arc);
+        }
+
         // Boot the OpenLDAP / AD static-role auto-rotation scheduler
         // (Phase 3). Same lifecycle pattern: detached task, self-skip
         // when sealed, single-process scheduler. Tick fires every 60s;

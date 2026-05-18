@@ -45,6 +45,41 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.13] - 2026-05-18
+
+### Added
+
+- **Rustion integration — Phase 1 live HTTP pinger**
+  (`src/modules/rustion/probe.rs`). A tokio-spawned background task
+  walks every enabled `RustionTarget` on a 30-second tick, sends
+  `GET /v1/health` against its control-plane endpoint with the
+  spec'd authority + nonce headers, feeds the outcome through the
+  Phase 1 state machine, and persists the fresh health record.
+  Status transitions log `rustion.target.health.changed`; stable
+  verdicts only refresh the cache. Per-probe timeout 5s, redirects
+  disabled.
+    - Signature header (`X-Rustion-Sig`) is sent empty until Phase 2's
+      master signing key lands; the nonce and authority headers are
+      live so a Rustion authority record can match the probe in audit.
+    - Disabled targets skip probing entirely — operators staging a
+      drain rely on this so flipping `enabled=false` doesn't churn
+      audit events.
+- **`POST /v1/rustion/targets/probe`** — force an immediate full
+  probe sweep across every enabled target. Returns the freshened
+  health view in the same response. Same routine the background
+  pinger runs on its 30-second tick.
+- **`POST /v1/rustion/targets/{id}/probe`** — single-target probe
+  for the enrolment wizard's "test connection" affordance. Returns
+  the fresh per-target health record (status, latency, version,
+  active sessions, error).
+- **`reqwest` listed as a direct dep** in the workspace Cargo.toml
+  with `rustls-tls` + `json` features. Already transitively present
+  via openidconnect + hiqlite; promoting to direct pins the feature
+  set explicitly and stays off the OpenSSL surface.
+- **Pinger boots on first unseal** (`src/core.rs`) alongside the
+  PKI / LDAP / file-resource schedulers. Same lifecycle pattern:
+  detached task, self-skip while sealed, ticks every 30s.
+
 ## [0.7.12] - 2026-05-18
 
 ### Added

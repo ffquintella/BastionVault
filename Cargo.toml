@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.7.12"
+version = "0.7.13"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -157,6 +157,12 @@ hmac = "0.13"
 # in the tree (hiqlite), so the marginal dep cost is the openidconnect
 # crate itself + a small jwt transitive closure.
 openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
+# Reqwest as a direct dep so the Rustion target-health pinger can hit
+# the bastion's control-plane `/v1/health` endpoint. Already in the
+# tree transitively via openidconnect + hiqlite; listing it here pins
+# the feature set explicitly. Rustls-only (no native-tls) so we stay
+# off the OpenSSL surface.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 sha1 = "0.11"
 sha2 = "0.11"
 # SAML 2.0 auth backend (Phase 3) — pure-Rust stack instead of
