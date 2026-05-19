@@ -501,6 +501,7 @@ pub fn run() {
             commands::rustion::rustion_recording_blob,
             commands::rustion::rustion_recording_replay_log,
             commands::rustion::rustion_deployment_id_read,
+            commands::rustion::rustion_open_replay_window,
             commands::rustion::rustion_policy_global_read,
             commands::rustion::rustion_policy_global_write,
             commands::rustion::rustion_bastion_group_list,

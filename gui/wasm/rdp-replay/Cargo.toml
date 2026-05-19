@@ -1,0 +1,24 @@
+[workspace]
+# This is a standalone wasm crate built independently from BV's main
+# workspace — its target is wasm32-unknown-unknown and its deps don't
+# need to be locked against the host crate's. Keep it on its own.
+
+[package]
+name = "rustion-rdp-replay-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "WASM frame walker for Rustion `.rdp-rec` recordings — Phase 8.3 of features/rustion-integration.md. Build with `wasm-pack build --target web`. The visual MS-RDPBCGR bitmap decoder is a separate codec project — this crate only parses the .rdp-rec frame stream + reports event counts so the GUI can show metadata without re-implementing the parser in JS."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+
+[profile.release]
+opt-level = "s"
+lto = true

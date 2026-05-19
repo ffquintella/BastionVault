@@ -739,6 +739,47 @@ pub async fn rustion_recording_replay_log(
     Ok(())
 }
 
+/// Phase 8.3 — open a full-screen replay window. Spawns a separate
+/// Tauri WebviewWindow pointed at the SessionReplayWindow route. The
+/// new window calls `rustion_recording_blob` itself; we don't pass
+/// the bytes via the spawn channel because they can be many MB.
+#[tauri::command]
+pub async fn rustion_open_replay_window(
+    app: tauri::AppHandle,
+    recording_id: String,
+) -> CmdResult<()> {
+    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+    if recording_id.is_empty() {
+        return Err(crate::error::CommandError::from(
+            "recording_id is required".to_string(),
+        ));
+    }
+    let window_label = format!("replay-{}", sanitize_label(&recording_id));
+    // If a window for this recording is already open, focus it
+    // instead of duplicating.
+    if let Some(existing) = app.get_webview_window(&window_label) {
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+    let url = format!(
+        "index.html#/session-replay?recording={}",
+        urlencoding::encode(&recording_id),
+    );
+    WebviewWindowBuilder::new(&app, &window_label, WebviewUrl::App(url.into()))
+        .title(format!("BastionVault — Replay {recording_id}"))
+        .inner_size(1200.0, 800.0)
+        .resizable(true)
+        .build()
+        .map_err(|e| crate::error::CommandError::from(format!("spawn replay window: {e}")))?;
+    Ok(())
+}
+
+fn sanitize_label(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect()
+}
+
 #[tauri::command]
 pub async fn rustion_recording_blob(
     state: State<'_, AppState>,

@@ -16,6 +16,7 @@ import { SharingPage } from "./routes/SharingPage";
 import { AuditPage } from "./routes/AuditPage";
 import { RecordingsPage } from "./routes/RecordingsPage";
 import { RustionLiveSessionsPage } from "./routes/RustionLiveSessionsPage";
+import { SessionReplayWindow } from "./routes/SessionReplayWindow";
 import { PoliciesPage } from "./routes/PoliciesPage";
 import { MountsPage } from "./routes/MountsPage";
 import { SettingsPage } from "./routes/SettingsPage";
@@ -184,6 +185,7 @@ export default function App() {
             */}
             <Route path="/session/ssh" element={<SessionSshWindow />} />
             <Route path="/session/rdp" element={<SessionRdpWindow />} />
+            <Route path="/session-replay" element={<SessionReplayWindow />} />
           </Routes>
           {/* Phase 7 — global ⌘K Connect palette. Sits above the
               router so the shortcut is armed everywhere post-auth. */}

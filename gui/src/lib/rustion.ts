@@ -451,6 +451,11 @@ export const rustionRecordingReplayLog = (
 export const rustionDeploymentIdRead = () =>
   invoke<string>("rustion_deployment_id_read");
 
+/** Phase 8.3 — spawn a separate WebviewWindow for full-screen
+ *  replay of one recording. Resolves once the window is open. */
+export const rustionOpenReplayWindow = (recordingId: string) =>
+  invoke<void>("rustion_open_replay_window", { recordingId });
+
 export const rustionTelemetryList = () =>
   invoke<RustionTelemetryTarget[]>("rustion_telemetry_list");
 

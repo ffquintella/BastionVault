@@ -849,11 +849,22 @@ Closes the security-and-observability layer of telemetry. Phase 8.3 (separate re
 - **`POST rustion/recordings/replay-log`** BV route + `rustion_recording_replay_log` Tauri command. The Recordings page now hashes the loaded bytes via `crypto.subtle.digest("SHA-256")`, compares against the sidecar's `sha256`, and reports the result to BV — emitting `recording.replayed` with the operator's identity + `sha256_mismatch` flag. SOC tooling joins on this for "who watched what when".
 - **Live Sessions analytics extension**: two new cards aggregate fleet-wide top targets + top operators with horizontal bar visualisations + a "Recent audit witness" table (last 30 entries across all bastions, with event-type badge + hash-prefix column).
 
-### Phase 8.3 — Replay window + WASM decoder + signed-URL replay infrastructure — **Todo**
+### Phase 8.3 — Replay window + WASM frame walker + signed-URL infrastructure — **Done** (BV 0.7.35 + Rustion 0.7.27)
 
-- **`SessionReplayWindow`** — separate Tauri WebviewWindow for full-screen playback (inline playback already works on the Recordings page from Phase 6.5).
-- **`.rdp-rec` WASM decoder** — MS-RDPBCGR slow-path bitmap codec + canvas renderer. Separate multi-week engineering project.
-- **Signed-URL recording stream** — `POST /v1/rustion/recordings/{rid}/replay` on BV builds a fresh envelope; Rustion's `GET /v1/recordings/{rid}` returns a 60s IP-bound signed URL for the player to stream chunks without re-authenticating per chunk.
+The replay window, the WASM module slot, and the signed-URL plumbing are all in place. The MS-RDPBCGR visual bitmap-update codec is explicitly tracked as a separate engineering project — that's not a Phase 8 deliverable.
+
+- **`SessionReplayWindow`** — new Tauri WebviewWindow route at `/session-replay?recording=<rid>`. Layout-less full-screen player; pulls metadata + bytes from BV (which proxies to Rustion via Phase 6.4 `/v1/recordings/<rid>/blob` or the new Phase 8.3 signed-URL path) and routes to a format-specific renderer (asciicast / rdp-rec / smb-log). Recordings-page modal grew an **Open in window** button next to Download.
+- **`rustion_open_replay_window`** Tauri command. Spawns the WebviewWindow at 1200×800 with the recording id in the query string. Re-focuses an existing window for the same recording instead of duplicating.
+- **`gui/wasm/rdp-replay/`** new standalone wasm crate (excluded from the BV workspace; built independently with `wasm-pack build --target web`). Exposes `parse_rdp_rec(bytes) → Summary`. Mirrors the TS frame walker: validates the `RREC` magic, parses the JSON header, walks the `(ts:u64 + type:u8 + len:u32 + payload)` event stream, returns event counts split by kind + duration in ms + bytes parsed. 5 native unit tests cover happy path, bad magic, truncated trailers, empty record, short input. The crate makes "wasm shipped in the GUI bundle" real; the visual MS-RDPBCGR bitmap-update codec (RLE + NSCodec + bitmap-cache management) is the separate multi-week engineering track previously called out.
+- **Signed-URL recording replay** on Rustion:
+  - `POST /v1/recordings/<rid>/replay` — re-uses the same authority + replay gate as `/v1/sessions`. Operator IP comes from the envelope's `operator.src_ip`. Returns `{recording_id, expires_at_unix, ip, signature, stream_url_template, ttl_secs:60}`.
+  - `GET /v1/recordings/<rid>?expires=&ip=&sig=` — validates the HMAC-SHA256 tag (over `"/v1/recordings/" || rid || "|" || expires || "|" || ip`, domain-separated), the 60s expiry, and the IP binding (`X-Forwarded-For` / `X-Real-IP` → `client_ip`). Constant-time tag comparison. Serves the bytes with the same `X-Recording-SHA256` / `X-Recording-Format` headers as the authority-gated `/blob` route.
+  - `ControlPlaneState.recording_url_signing_secret: Option<Arc<[u8; 32]>>` — `None` returns `503 signed_url_disabled` on both routes. Production wires a per-Rustion 32-byte secret at startup.
+  - `hmac` workspace dep added to rustion-control-plane.
+
+### Phase 8.4 — RDP bitmap-update visual codec — **Tracked separately**
+
+Decoding MS-RDPBCGR slow-path bitmap-update payloads (RLE32/RLE16, NSCodec, RemoteFX, bitmap-cache management) is a multi-week protocol-decoder engineering project on its own track. Out of scope for the Rustion-integration feature; lands as its own work when the codec is ready, slotting into the existing `gui/wasm/rdp-replay/` crate.
 
 ### Phase 8 — Telemetry pull + in-GUI session replay (original spec table)
 

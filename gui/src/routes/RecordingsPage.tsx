@@ -31,6 +31,7 @@ import {
 } from "../components/ui";
 import { extractError } from "../lib/error";
 import {
+  rustionOpenReplayWindow,
   rustionRecordingBlob,
   rustionRecordingPull,
   rustionRecordingRead,
@@ -411,7 +412,19 @@ function RecordingPlayerModal({
             )}
             {blob.format === "rdp-rec" && <RdpRecSummary bytes={bytes} />}
             {blob.format === "smb-log" && <SmbLogSummary bytes={bytes} />}
-            <div className="flex justify-end">
+            <div className="flex justify-end gap-2">
+              <Button
+                onClick={async () => {
+                  try {
+                    await rustionOpenReplayWindow(entry.recordingId);
+                  } catch (e) {
+                    toast.toast("error", `Open replay window: ${extractError(e)}`);
+                  }
+                }}
+                variant="secondary"
+              >
+                Open in window
+              </Button>
               <Button onClick={handleDownload} variant="secondary">
                 Download {blob.format === "rdp-rec" ? "(.rdp-rec)" : ""}
               </Button>

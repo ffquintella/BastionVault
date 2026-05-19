@@ -45,6 +45,48 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.35] - 2026-05-19
+
+### Added
+
+- **Rustion integration — Phase 8.3: SessionReplayWindow + WASM frame
+  walker + signed-URL replay** (paired with Rustion 0.7.27). The
+  separate replay window, the wasm-decoder slot, and the signed-URL
+  plumbing are all in place.
+    - **`SessionReplayWindow`** new route at
+      `/session-replay?recording=<rid>`. Layout-less full-screen
+      player; pulls metadata + bytes via Tauri commands, routes to
+      format-specific renderer (asciicast / rdp-rec / smb-log).
+    - **`rustion_open_replay_window`** Tauri command spawning a
+      separate Tauri WebviewWindow at 1200×800. Re-focuses an
+      existing window for the same recording instead of duplicating.
+    - **Recordings-page modal** grew an "Open in window" button.
+    - **`gui/wasm/rdp-replay/`** new standalone wasm crate
+      (workspace-excluded; built with `wasm-pack build --target web`).
+      Exposes `parse_rdp_rec(bytes) → Summary` — validates the RREC
+      magic, parses header, walks the event stream, returns counts +
+      duration. 5 native unit tests. The visual MS-RDPBCGR bitmap
+      codec (RLE + NSCodec + bitmap-cache management) is the
+      separate multi-week engineering project tracked as Phase 8.4.
+    - **Signed-URL replay infrastructure**:
+      `POST /v1/recordings/<rid>/replay` on Rustion (re-uses the
+      authority + replay gate) returns a 60s HMAC-bound URL with
+      IP-binding from the envelope's `operator.src_ip`.
+      `GET /v1/recordings/<rid>?expires=&ip=&sig=` validates the
+      HMAC + expiry + IP and serves bytes (constant-time tag
+      compare, domain-separated tag with literal
+      `"/v1/recordings/"` prefix). `ControlPlaneState` grew a
+      `recording_url_signing_secret: Option<Arc<[u8; 32]>>` field;
+      `None` → `503 signed_url_disabled`. `hmac` workspace dep
+      added.
+
+### Changed
+
+- `features/rustion-integration.md`: Phase 8.3 marked Done; Phase 8.4
+  carved out for the RDP bitmap-update visual codec (separate
+  engineering track that slots into the existing `gui/wasm/rdp-replay/`
+  crate when ready).
+
 ## [0.7.34] - 2026-05-19
 
 ### Added
