@@ -34,10 +34,11 @@ operator-shell
 ## Requirements
 
 - Docker + docker-compose v2
-- `bvault` CLI built (`cargo build --release --bin bvault` in the repo root)
-- `rustion` binary from the Rustion sibling repo built into `/usr/local/bin`
-  inside the rustion container (see `Dockerfile.rustion` once it lands —
-  not part of this scaffold)
+- The BV repo at `/Users/felipe/Dev/BastionVault` (or wherever you cloned it)
+- The Rustion repo as a sibling directory (the compose file references
+  `../../../Rustion` as the build context for the rustion service)
+- `bvault` CLI installed on the host (for the run.sh driver — falls back
+  to `docker compose exec bv bvault` when missing)
 
 ## Driver
 
@@ -46,12 +47,11 @@ operator-shell
 then walks an SSH session through the full pipeline (steps 1 → 6 in
 the diagram).
 
-Today the script stops after step 4 with a clear log line — the
-full bytes-proxy via the SSH listener is wired in `rustion-ssh::server`
-but exercising it end-to-end through a real Docker network needs a
-`Dockerfile.bastionvault` and `Dockerfile.rustion` that aren't yet in
-either repo. The compose file is structured so adding those two
-Dockerfiles is a one-line `build:` change per service.
+The Phase 3.2 Dockerfiles land at `Dockerfile` in each repo's root:
+multi-stage builds (rust:1.82-bookworm builder + distroless cc-debian12
+runtime) that ship just the `bvault` / `rustion-server` binaries.
+The compose file builds both images on first `up`; subsequent runs
+reuse the cached layers.
 
 ## Layout
 

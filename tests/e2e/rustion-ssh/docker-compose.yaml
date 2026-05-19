@@ -16,14 +16,10 @@ version: "3.9"
 
 services:
   bastion-vault:
-    # Phase 3.1 scaffold — the actual `bastion-vault` Dockerfile
-    # lives at the repo root in a follow-up; today the run.sh script
-    # builds the host crate locally and points its data dir at a
-    # bind-mount under ./var/bv/.
-    image: bastion-vault:phase31-scaffold
-    # build:
-    #   context: ../../..
-    #   dockerfile: Dockerfile
+    build:
+      context: ../../..
+      dockerfile: Dockerfile
+    image: bastion-vault:phase32
     container_name: bv
     networks:
       - rustion-e2e
@@ -38,10 +34,10 @@ services:
       - BASTION_VAULT_LOCAL_DEV=1
 
   rustion:
-    image: rustion:phase31-scaffold
-    # build:
-    #   context: ../../../Rustion  # sibling repo
-    #   dockerfile: Dockerfile
+    build:
+      context: ../../../Rustion
+      dockerfile: Dockerfile
+    image: rustion:phase32
     container_name: rustion
     networks:
       - rustion-e2e

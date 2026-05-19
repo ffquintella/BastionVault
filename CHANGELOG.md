@@ -45,6 +45,26 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.20] - 2026-05-19
+
+### Added
+
+- **Rustion integration — Phase 3.2 close-out** (paired with Rustion
+  0.7.16). The last two deferred items land: SSH-key/SSH-cert
+  credential dialing in the BV-bypass branch, and the `Dockerfile`
+  for the e2e harness.
+    - **`Dockerfile`** at the repo root: multi-stage build
+      (rust:1.82-bookworm builder + distroless cc-debian12 runtime)
+      shipping just the `bvault` binary. The
+      `tests/e2e/rustion-ssh/docker-compose.yaml` now references it
+      via `build:` so `docker compose up` builds the stack from
+      source — no pre-built image dependency.
+    - On the Rustion side, the proxy loop's BV-bypass branch routes
+      `session.credential.kind` (ssh-password / ssh-key / ssh-cert)
+      onto the right `TargetCredential` variant. SSH-engine CA
+      certs and PKI-issued private keys now actually authenticate
+      at the target.
+
 ## [0.7.19] - 2026-05-19
 
 ### Added
