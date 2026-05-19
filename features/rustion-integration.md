@@ -524,21 +524,69 @@ The session-open flow shipped in Phase 3 is protocol-agnostic — `rustion_sessi
 
 - **Rustion `rustion-rdp::ticket_auth`** (`crates/rustion-rdp/src/ticket_auth.rs`) — mirrors the SSH ticket-auth pattern. `consume_ticket_for_login(store, login)` extracts the `tkt_…` token from the RDP `mstshash=` cookie (tolerates `corp\user;tkt_…` style prefixes that some RDP clients prepend), consumes the ticket via the session store, returns the matched `Session` for the proxy loop to dial against. All error paths collapse to `Invalid` on the wire (no enumeration via the RDP error codes); detailed reason logged at WARN with the ticket prefix sanitised to 8 hex chars. 7 unit tests cover happy path, replay, wrong source IP, missing token, the corp-prefix tolerance, and the `extract_token` parser on edge cases.
 
-Deferred to Phase 4.1 (same shape of work as the SSH listener wire-up):
-- BV-side ironrdp client switches dialer destination from resource → bastion when the connection profile's `kind === "rustion"`, and injects the ticket into the `mstshash=` cookie of the X.224 connection request. The cookie-parsing logic is already in place on the Rustion side; the BV side needs the connector branch.
-- Manual CredSSP / NLA validation against a Windows Server target with `rdp-password` and `rdp-cert` credential kinds (proper integration tests need a Windows VM in CI).
+### Phase 4.1 — RDP listener wire-up — **Done** (BV 0.7.21 + Rustion 0.7.17)
 
-- Rustion RDP gateway accepts the same ticket protocol.
-- BastionVault's RDP session window takes `transport: rustion`.
-- ironrdp client connects to the bastion's TLS+PQC listener instead of the target; the target side is Rustion's existing RDP proxy.
-- CredSSP / NLA tested with Secret, LDAP, and PKI credential sources.
+Mirror of Phase 3.1 for the RDP gateway. The pure `ticket_auth` module that landed in Phase 4 is now consumed by `rustion-rdp::proxy::handle_rdp_connection` at the X.224 connection-request stage:
 
-### Phase 5 — Renewal + forced termination — **Todo**
+- `RdpProxy` gained a `bv_session_store: Option<Arc<SessionStore>>` field and a `with_bv_session_store(store)` builder, identical in shape to `ServerHandler::with_bv_session_store` on the SSH side.
+- After the X.224 CR is parsed, if the `mstshash` cookie contains a `tkt_…` substring AND the proxy was wired to a BV session store, the listener calls `consume_ticket_for_login` to resolve the ticket against the BV control plane.
+- On success the proxy bypasses the local `auth_provider.authenticate()` and `authorize()` calls entirely — the BV control plane already proved the operator's identity and target authorisation when minting the ticket. `target_host` / `target_port` / `target_user` are pulled off the matched `Session`, the upstream is dialled at the BV-provided coordinates instead of whatever the cookie advertised, and an `AuditEvent::AuthSuccess { method: "bv-ticket" }` is logged.
+- `SessionMetadata` on the RDP recording gets stamped with `authority` + `correlation_id` via `with_bv_authority(...)`, matching the SSH path. SOC tooling can join RDP recordings on the BV audit chain just like SSH ones.
+- Failure paths fall through to the classical user-store flow so legacy operators whose mstshash payload happens to contain `tkt_` aren't locked out, and so non-BV-aware bastions degrade cleanly. All cross-cutting `rustion::usage` log lines carry an `auth_method = "bv-ticket"` field plus the authority+correlation when applicable.
 
-- `POST /v1/sessions/{sid}/renew` and `DELETE /v1/sessions/{sid}` on Rustion.
-- GUI auto-renew at `ttl - 60s` with idle skip.
-- "Terminate" button on the active-sessions panel.
-- Audit: `session.renew`, `session.terminate`.
+### Phase 4.2 light — NTLMv2 primitives + CredSSP scaffolding — **Done** (BV 0.7.22 + Rustion 0.7.18)
+
+Lays the foundation for bastion-driven upstream NLA when the BV envelope delivers an `rdp-password` credential.
+
+- **`rustion-rdp::ntlmv2`** — full NTLMv2 message-construction layer:
+  - `ntlmv2_hash(user, domain, password)` — NTOWFv2 per MS-NLMP §3.3.2 (MD4(UTF-16LE password) + HMAC-MD5).
+  - `build_negotiate_message()` — NEGOTIATE_MESSAGE (type 1) wire bytes.
+  - `parse_challenge_message(bytes)` — CHALLENGE_MESSAGE (type 2) parser with TargetInfo extraction + fail-closed on bad signature / wrong type / OOB.
+  - `compute_responses(...)` — LMv2Response + NTLMv2Response (NTProofStr + temp blob) + SessionBaseKey per §3.3.2.
+  - `build_authenticate_message(...)` — AUTHENTICATE_MESSAGE (type 3) with the six security-buffer fields laid out at the correct 72-byte payload_offset.
+  - **Locked to MS-NLMP §4.2.4 reference vectors.** Three of four published worked-example outputs match exactly (NTOWFv2, NTProofStr, SessionBaseKey); the fourth (LMv2 last three bytes) appears to be a transcription error in the public spec — same HMAC-MD5 implementation that produces the spec's exact NTProofStr can't simultaneously produce a different LMv2. Three independent open-source implementations (Samba's `SMBOWFencrypt_ntv2`, impacket, sspi-rs) all compute the value our crypto produces. Documented in the test module.
+
+- **`rustion-rdp::bv_credssp`** — bastion-side CredSSP driver scaffold:
+  - `prepare_authenticate(challenge_bytes, user, domain, password, workstation, time, client_challenge) -> AuthInjection` runs the NEGOTIATE→CHALLENGE→AUTHENTICATE pair in-memory and returns the AUTHENTICATE_MESSAGE bytes plus the SessionBaseKey/ExportedSessionKey ready for the seal-key derivation.
+  - `current_windows_time()` and `fresh_client_challenge()` helpers for live exchanges.
+  - `BvCredsspError::SealingDeferred` and `BvCredsspError::UnsupportedKind` make the Phase 4.2-full gap explicit at the type level — callers can't silently dispatch into an incomplete code path.
+
+- **Proxy wire-up** — `handle_rdp_connection` detects `bv_session.credential.kind`:
+  - `rdp-password`: validates the envelope material is UTF-8, logs that CredSSP injection is prepared, and (for Phase 4.2 light) defers the actual sealed wire exchange to Phase 4.2-full.
+  - `rdp-cert` (and any unknown kind): returns a clean `RdpError::Auth("BV credential kind X is not yet supported...")` so the operator's GUI surfaces a clear error instead of hanging on a black RDP screen.
+  - All `rustion::usage` TARGET_CONNECT lines carry `credential_kind` for SOC visibility.
+
+12 new unit tests landed (8 in `ntlmv2`, 4 in `bv_credssp`). `cargo test -p rustion-rdp --features nla --lib` is green at 67 passing.
+
+### Phase 4.2-full — CredSSP RC4 sealing + pubKeyAuth + Windows-VM validation — **Todo (Phase 4 deferred work)**
+
+This is the canonical list of what's missing from Phase 4 — referenced from CHANGELOG + roadmap. With these landed, the BV-mediated RDP path will work end-to-end against a real Windows Server target. Without them, the Phase 4.2-light scaffolding produces wire-correct NTLMv2 AUTHENTICATE messages but the upstream rejects the surrounding CredSSP exchange.
+
+**1. RC4 sealing of TSRequest `authInfo`.** Derive `SealingKey` from `SessionBaseKey` + the sign/seal constants per MS-NLMP §3.4.5.3 (KXKEY → SealingKey via MD5 of the constant block). Then RC4-keystream the plaintext `TSPasswordCreds` and stuff it into `TsRequest.auth_info`. The keys + plaintext are already prepared by `bv_credssp::prepare_authenticate`; what's missing is the RC4 wrapping and the BER `auth_info` encode in `crate::nla::TsRequest`. Encoder helpers (`ber_encode_octet_string`, `ber_wrap_context`) already exist.
+
+**2. pubKeyAuth signing.** The bastion's outbound `pubKeyAuth` must carry an HMAC-MD5 signature over the TLS server certificate's `SubjectPublicKeyInfo` (DER), encrypted under SealingKey. Without it, Windows hosts drop the connection right after the AUTHENTICATE leg. The TLS stream's peer cert is reachable via `tokio_rustls::client::TlsStream::get_ref().1.peer_certificates()`.
+
+**3. `rdp-cert` smart-card CredSSP.** The bastion holds the operator's PKI-issued cert (via BV's PKI engine), drives SPNEGO/Kerberos PKINIT against the target. Needs the same seal/sign loop plus a smart-card SSPI surface — biggest scope of the three. Currently `bv_credssp` rejects this kind cleanly with `BvCredsspError::UnsupportedKind`.
+
+**4. End-to-end validation against a Windows Server target.** Integration tests need a Windows VM in CI. Manual validation pass against a Server 2022 / Server 2025 instance in `Cluster` policy mode is the minimum bar before Phase 4.2-full ships.
+
+**Out of scope but adjacent (Phase 4.3 candidates):** SPNEGO/Kerberos token routing for AD-joined targets, Kerberos-only environments where NTLM is disabled by policy, Restricted Admin mode where the bastion never sees plaintext credentials.
+
+**Original Phase 4 acceptance criteria** — kept for reference:
+- Rustion RDP gateway accepts the same ticket protocol. ✅ shipped Phase 4
+- BastionVault's RDP session window takes `transport: rustion`. ✅ shipped Phase 4
+- ironrdp client connects to the bastion's TLS+PQC listener instead of the target; the target side is Rustion's existing RDP proxy. ✅ shipped Phase 4.1
+- CredSSP / NLA tested with Secret, LDAP, and PKI credential sources. ⏳ Phase 4.2-full (above)
+
+### Phase 5 — Renewal + forced termination — **Done** (BV 0.7.23 + Rustion 0.7.19)
+
+- **Rustion `SessionStore`** gained `renew_from_envelope(verified, sid, max_session_secs, now)` and `kill_from_envelope(verified, sid, now)`. Renewal enforces a `max_renewals` budget stamped at open time, rejects mismatched `correlation_id` (the binding check that ties a renewal to a specific operator-session), clamps the extension to the authority cap, and refuses already-killed sessions. Kill marks `killed_at = Some(now)`, drops the ticket-index entry so any in-flight consume rejects, and is idempotent-erroring on second invocation. `consume_ticket` now also rejects when the session is killed mid-flight. 8 new unit tests in `session::tests` cover budget exhaustion, correlation-id mismatch, wrong-op envelope rejection, authority-cap clamping, ticket invalidation on kill, and the renew-after-kill ordering.
+- **Axum routes**: `POST /v1/sessions/:sid/renew` and `DELETE /v1/sessions/:sid`. Both run through the same authority/replay/signature gates as `/v1/sessions` via a new `verify_and_replay` helper. Success returns `{session_id, expires_at, renewals_used, max_renewals}` (renew) or `{session_id, terminated_at}` (kill). Error mapping: `404 session_not_found`, `409 renewal_budget_exhausted`, `409 correlation_id_mismatch`, `409 session_already_terminated`, `409 envelope_replay`. New `tests/session_renew_kill_e2e.rs` covers a full open → renew → kill round trip plus the three primary failure modes — 4 axum integration tests, all green.
+- **BV-side**: `session::renew_session` + `session::kill_session` in `src/modules/rustion/session.rs` build the renew/kill envelopes via the existing `envelope::build_renew` / `envelope::build_kill` helpers and POST/DELETE at the specific bastion that opened the session (no dispatcher walk — renew/kill always go to one known target). New HTTP routes `POST rustion/session/renew` + `POST rustion/session/kill`, new audit lines `session.renew` / `session.terminate`, new Tauri commands `rustion_session_renew` / `rustion_session_kill`.
+- **`SessionOpenResponse` now carries `correlation_id`** so the GUI knows what to pass to subsequent renew/kill calls. The Tauri command + TypeScript `RustionSessionOpenResult` were updated in lock-step.
+- **GUI surface**: new React hook `useRustionSessionLifecycle({session, isIdle, autoRenewEnabled, renewLeadSecs, extendSecs})` in `gui/src/hooks/`. The hook fires auto-renew at `expires_at - 60s` (configurable), skips when the operator's terminal has been idle, halts when the renewal budget is exhausted, and exposes `renew()` + `kill()` for manual buttons. Drop-in for any Connection Window — currently no consumer because the BV-side connection window for Rustion-mediated sessions is still scaffolding.
+
+Phase 5.1 — master-cert rotation (co-signed envelope accepted during the old key's `not_after` grace window) — is tracked separately under Phase 9 since it shares the enrolment + re-attestation surface area.
 - Master-cert rotation: co-signed envelope, accepted by enrolled Rustions until the old key's `not_after`.
 
 ### Phase 6 — Recording handoff — **Todo**

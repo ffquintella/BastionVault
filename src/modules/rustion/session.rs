@@ -88,6 +88,12 @@ pub struct SessionOpenResponse {
     /// IDs the dispatcher tried (in order) before this one
     /// accepted. Empty on a first-candidate success.
     pub bastion_candidates_tried: Vec<String>,
+    /// The correlation id BV picked when building the `open` envelope.
+    /// The GUI needs this verbatim to issue subsequent `renew` / `kill`
+    /// requests — Rustion verifies that the renew/kill envelope's
+    /// correlation_id matches the one stamped on the session at open
+    /// time. Phase 5.
+    pub correlation_id: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -337,6 +343,7 @@ pub async fn open_session_v2(
                     .take(tried_ids.len() - 1)
                     .cloned()
                     .collect(),
+                correlation_id: built.correlation_id.clone(),
             });
         }
 
@@ -420,6 +427,182 @@ async fn post_envelope(
         }
         Err(e) => OpenAttemptOutcome::Transport(format!("{e}")),
     }
+}
+
+// ─── Phase 5: renew + kill ───────────────────────────────────────────
+
+/// Caller payload for `POST rustion/session/renew`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionRenewRequest {
+    pub bastion_id: String,
+    pub session_id: String,
+    pub correlation_id: String,
+    pub extend_secs: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionRenewResponse {
+    pub session_id: String,
+    pub expires_at: String,
+    pub renewals_used: u8,
+    pub max_renewals: u8,
+    pub bastion_id: String,
+}
+
+/// Caller payload for `DELETE rustion/session/kill`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionKillRequest {
+    pub bastion_id: String,
+    pub session_id: String,
+    pub correlation_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionKillResponse {
+    pub session_id: String,
+    pub terminated_at: String,
+    pub bastion_id: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SessionRenewError {
+    #[error("bastion `{0}` not found in target registry")]
+    BastionNotFound(String),
+    #[error("master signing-key: {0}")]
+    Master(String),
+    #[error("envelope build: {0}")]
+    Envelope(String),
+    #[error("transport: {0}")]
+    Transport(String),
+    #[error("rustion returned HTTP {status}: {body}")]
+    Http { status: u16, body: String },
+}
+
+/// Build a `renew` envelope and POST it at the bastion that opened the
+/// session. Phase 5.
+#[maybe_async::maybe_async]
+pub async fn renew_session(
+    store: &RustionStore,
+    master: &BvrgMasterSigningKey,
+    operator: &OperatorContext,
+    request: &SessionRenewRequest,
+) -> Result<SessionRenewResponse, SessionRenewError> {
+    let target = store
+        .get_target(&request.bastion_id)
+        .await
+        .map_err(|e| SessionRenewError::Master(format!("{e}")))?
+        .ok_or_else(|| SessionRenewError::BastionNotFound(request.bastion_id.clone()))?;
+
+    let built = envelope::build_renew(
+        master,
+        &target,
+        operator,
+        &request.correlation_id,
+        request.extend_secs,
+    )
+    .map_err(|e| SessionRenewError::Envelope(format!("{e}")))?;
+
+    let client = build_http_client().map_err(|e| SessionRenewError::Transport(e))?;
+    let url = format!(
+        "https://{}/v1/sessions/{}/renew",
+        target.endpoint.trim_end_matches('/'),
+        request.session_id
+    );
+    let resp = client
+        .post(&url)
+        .header("X-Rustion-Authority", "bastion-vault")
+        .header("Content-Type", "application/octet-stream")
+        .body(built.bytes)
+        .send()
+        .await
+        .map_err(|e| SessionRenewError::Transport(format!("{e}")))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(SessionRenewError::Http {
+            status: status.as_u16(),
+            body,
+        });
+    }
+
+    #[derive(Deserialize)]
+    struct Body {
+        session_id: String,
+        expires_at: String,
+        renewals_used: u8,
+        max_renewals: u8,
+    }
+    let body: Body = resp
+        .json()
+        .await
+        .map_err(|e| SessionRenewError::Envelope(format!("body parse: {e}")))?;
+
+    Ok(SessionRenewResponse {
+        session_id: body.session_id,
+        expires_at: body.expires_at,
+        renewals_used: body.renewals_used,
+        max_renewals: body.max_renewals,
+        bastion_id: request.bastion_id.clone(),
+    })
+}
+
+/// Build a `kill` envelope and DELETE it at the bastion that opened
+/// the session. Phase 5.
+#[maybe_async::maybe_async]
+pub async fn kill_session(
+    store: &RustionStore,
+    master: &BvrgMasterSigningKey,
+    operator: &OperatorContext,
+    request: &SessionKillRequest,
+) -> Result<SessionKillResponse, SessionRenewError> {
+    let target = store
+        .get_target(&request.bastion_id)
+        .await
+        .map_err(|e| SessionRenewError::Master(format!("{e}")))?
+        .ok_or_else(|| SessionRenewError::BastionNotFound(request.bastion_id.clone()))?;
+
+    let built = envelope::build_kill(master, &target, operator, &request.correlation_id)
+        .map_err(|e| SessionRenewError::Envelope(format!("{e}")))?;
+
+    let client = build_http_client().map_err(|e| SessionRenewError::Transport(e))?;
+    let url = format!(
+        "https://{}/v1/sessions/{}",
+        target.endpoint.trim_end_matches('/'),
+        request.session_id
+    );
+    let resp = client
+        .delete(&url)
+        .header("X-Rustion-Authority", "bastion-vault")
+        .header("Content-Type", "application/octet-stream")
+        .body(built.bytes)
+        .send()
+        .await
+        .map_err(|e| SessionRenewError::Transport(format!("{e}")))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(SessionRenewError::Http {
+            status: status.as_u16(),
+            body,
+        });
+    }
+
+    #[derive(Deserialize)]
+    struct Body {
+        session_id: String,
+        terminated_at: String,
+    }
+    let body: Body = resp
+        .json()
+        .await
+        .map_err(|e| SessionRenewError::Envelope(format!("body parse: {e}")))?;
+    Ok(SessionKillResponse {
+        session_id: body.session_id,
+        terminated_at: body.terminated_at,
+        bastion_id: request.bastion_id.clone(),
+    })
 }
 
 fn build_http_client() -> Result<reqwest::Client, String> {

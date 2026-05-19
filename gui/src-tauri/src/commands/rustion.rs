@@ -376,6 +376,10 @@ pub struct RustionSessionOpenResult {
     pub bastion_name: String,
     pub bastion_selection: String,
     pub bastion_candidates_tried: Vec<String>,
+    /// Correlation id BV stamped on the open envelope. Required input
+    /// for subsequent `rustion_session_renew` / `rustion_session_kill`
+    /// calls. Phase 5.
+    pub correlation_id: String,
 }
 
 #[tauri::command]
@@ -450,6 +454,112 @@ pub async fn rustion_session_open(
         bastion_name: s(&data, "bastion_name"),
         bastion_selection: s(&data, "bastion_selection"),
         bastion_candidates_tried: tried,
+        correlation_id: s(&data, "correlation_id"),
+    })
+}
+
+// ─── Phase 5: renew + kill ─────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionSessionRenewRequest {
+    pub bastion_id: String,
+    pub session_id: String,
+    pub correlation_id: String,
+    pub extend_secs: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionSessionRenewResult {
+    pub session_id: String,
+    pub expires_at: String,
+    pub renewals_used: u32,
+    pub max_renewals: u32,
+    pub bastion_id: String,
+}
+
+#[tauri::command]
+pub async fn rustion_session_renew(
+    state: State<'_, AppState>,
+    request: RustionSessionRenewRequest,
+) -> CmdResult<RustionSessionRenewResult> {
+    let mut body = Map::new();
+    body.insert("bastion_id".into(), Value::String(request.bastion_id));
+    body.insert("session_id".into(), Value::String(request.session_id));
+    body.insert(
+        "correlation_id".into(),
+        Value::String(request.correlation_id),
+    );
+    body.insert(
+        "extend_secs".into(),
+        Value::Number(request.extend_secs.into()),
+    );
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}session/renew"),
+        Some(body),
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(RustionSessionRenewResult {
+        session_id: s(&data, "session_id"),
+        expires_at: s(&data, "expires_at"),
+        renewals_used: data
+            .get("renewals_used")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
+            .unwrap_or(0),
+        max_renewals: data
+            .get("max_renewals")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
+            .unwrap_or(0),
+        bastion_id: s(&data, "bastion_id"),
+    })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionSessionKillRequest {
+    pub bastion_id: String,
+    pub session_id: String,
+    pub correlation_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionSessionKillResult {
+    pub session_id: String,
+    pub terminated_at: String,
+    pub bastion_id: String,
+}
+
+#[tauri::command]
+pub async fn rustion_session_kill(
+    state: State<'_, AppState>,
+    request: RustionSessionKillRequest,
+) -> CmdResult<RustionSessionKillResult> {
+    let mut body = Map::new();
+    body.insert("bastion_id".into(), Value::String(request.bastion_id));
+    body.insert("session_id".into(), Value::String(request.session_id));
+    body.insert(
+        "correlation_id".into(),
+        Value::String(request.correlation_id),
+    );
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}session/kill"),
+        Some(body),
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(RustionSessionKillResult {
+        session_id: s(&data, "session_id"),
+        terminated_at: s(&data, "terminated_at"),
+        bastion_id: s(&data, "bastion_id"),
     })
 }
 

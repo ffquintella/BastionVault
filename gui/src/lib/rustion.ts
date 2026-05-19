@@ -163,7 +163,46 @@ export interface RustionSessionOpenResult {
   bastion_selection: string;
   /** IDs the dispatcher tried in order before this one accepted. */
   bastion_candidates_tried: string[];
+  /** Correlation id BV stamped on the open envelope — required input
+   *  for subsequent `rustionSessionRenew` / `rustionSessionKill`
+   *  calls. Phase 5. */
+  correlation_id: string;
 }
 
 export const rustionSessionOpen = (request: RustionSessionOpenRequest) =>
   invoke<RustionSessionOpenResult>("rustion_session_open", { request });
+
+// ─── Session renew + kill (Phase 5) ──────────────────────────────
+
+export interface RustionSessionRenewRequest {
+  bastionId: string;
+  sessionId: string;
+  correlationId: string;
+  extendSecs: number;
+}
+
+export interface RustionSessionRenewResult {
+  sessionId: string;
+  expiresAt: string;
+  renewalsUsed: number;
+  maxRenewals: number;
+  bastionId: string;
+}
+
+export const rustionSessionRenew = (request: RustionSessionRenewRequest) =>
+  invoke<RustionSessionRenewResult>("rustion_session_renew", { request });
+
+export interface RustionSessionKillRequest {
+  bastionId: string;
+  sessionId: string;
+  correlationId: string;
+}
+
+export interface RustionSessionKillResult {
+  sessionId: string;
+  terminatedAt: string;
+  bastionId: string;
+}
+
+export const rustionSessionKill = (request: RustionSessionKillRequest) =>
+  invoke<RustionSessionKillResult>("rustion_session_kill", { request });

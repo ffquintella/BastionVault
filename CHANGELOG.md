@@ -45,6 +45,154 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.23] - 2026-05-19
+
+### Added
+
+- **Rustion integration — Phase 5: renewal + forced termination** (paired
+  with Rustion 0.7.19). Operators can extend live sessions without
+  opening fresh ones, and BV can yank a session at any time.
+    - **Rustion side**: `SessionStore::renew_from_envelope` +
+      `SessionStore::kill_from_envelope`. Renewal enforces the
+      `max_renewals` budget stamped at open time, rejects mismatched
+      `correlation_id` (binding the renewal to a specific
+      operator-session), clamps to the authority cap, and refuses
+      already-killed sessions. Kill marks `killed_at = Some(now)`,
+      drops the ticket index entry so any in-flight consume rejects,
+      and is idempotent-erroring on a second call. `consume_ticket`
+      gained a `killed_at` check.
+    - **Axum routes**: `POST /v1/sessions/:sid/renew` +
+      `DELETE /v1/sessions/:sid`. Both run through the same authority +
+      replay + signature gates as `/v1/sessions` via a new shared
+      `verify_and_replay` helper. Error mapping:
+      `404 session_not_found`, `409 renewal_budget_exhausted`,
+      `409 correlation_id_mismatch`, `409 session_already_terminated`.
+      `rustion::usage` emits `SESSION_RENEW` / `SESSION_TERMINATE` for
+      SOC observability.
+    - **8 new SessionStore unit tests + 4 axum e2e tests** —
+      `cargo test -p rustion-control-plane` is green at 22 + 4 passing.
+- **BV side**: new `session::renew_session` + `session::kill_session`
+  helpers in `src/modules/rustion/session.rs` build via
+  `envelope::build_renew` / `envelope::build_kill` and POST/DELETE
+  at the specific bastion that opened the session (no dispatcher
+  walk — renew/kill always go to one known target).
+- **New HTTP routes** `POST rustion/session/renew` +
+  `POST rustion/session/kill`, with the existing `audit::SESSION_RENEW`
+  / `audit::SESSION_TERMINATE` constants emitting `session.renew` /
+  `session.terminate` log lines.
+- **`SessionOpenResponse` now carries `correlation_id`** so callers
+  know what to pass to subsequent renew/kill calls. Threaded through
+  the Tauri command + the TypeScript `RustionSessionOpenResult`.
+- **Two new Tauri commands**: `rustion_session_renew` +
+  `rustion_session_kill`, plus typed wrappers
+  `rustionSessionRenew` / `rustionSessionKill` in
+  `gui/src/lib/rustion.ts`.
+- **`useRustionSessionLifecycle` React hook** in `gui/src/hooks/`.
+  Auto-renews at `expires_at - 60s` with idle-skip + budget-exhaust
+  guard; exposes `renew()` + `kill()` for manual buttons. Drop-in for
+  any Connection Window once the BV-side Rustion-mediated session UI
+  lands.
+
+### Changed
+
+- `features/rustion-integration.md`: marked Phase 5 Done. Master-cert
+  rotation (originally listed under Phase 5) is now tracked under
+  Phase 9 alongside the rest of the enrolment + re-attestation
+  surface area.
+
+## [0.7.22] - 2026-05-19
+
+### Added
+
+- **Rustion integration — Phase 4.2 light** (paired with Rustion
+  0.7.18). NTLMv2 message-construction layer + bastion-side CredSSP
+  driver scaffold for `rdp-password` BV envelopes.
+    - **`rustion-rdp::ntlmv2`** — pure-Rust NTLMv2 primitives:
+      `ntlmv2_hash` (NTOWFv2 via MD4(UTF-16LE password) + HMAC-MD5),
+      `build_negotiate_message` (type 1), `parse_challenge_message`
+      (type 2 with TargetInfo extraction + fail-closed parser),
+      `compute_responses` (LMv2 + NTLMv2 + SessionBaseKey per
+      MS-NLMP §3.3.2), `build_authenticate_message` (type 3 with the
+      six security-buffer fields at the correct 72-byte payload
+      offset). 8 unit tests lock the implementation to MS-NLMP
+      §4.2.4 reference vectors — NTOWFv2, NTProofStr, and
+      SessionBaseKey match the published spec hex exactly.
+    - **`rustion-rdp::bv_credssp`** — bastion-side CredSSP driver:
+      `prepare_authenticate(...)` runs the NEGOTIATE → CHALLENGE →
+      AUTHENTICATE pair in-memory and returns the
+      AUTHENTICATE_MESSAGE bytes + SessionBaseKey + ExportedSessionKey
+      ready for the seal-key derivation. `BvCredsspError::SealingDeferred`
+      + `BvCredsspError::UnsupportedKind` make the Phase 4.2-full gap
+      explicit at the type level so callers can't silently dispatch
+      into an incomplete code path.
+    - **Proxy wire-up** in `handle_rdp_connection`: when
+      `bv_session.credential.kind == "rdp-password"` and the proxy
+      was built with `--features nla`, the CredSSP injection driver
+      is prepared (RC4 sealing of `authInfo` + pubKeyAuth signing
+      deferred to Phase 4.2-full). `rdp-cert` and unknown credential
+      kinds return a clean `RdpError::Auth("BV credential kind X is
+      not yet supported...")` instead of hanging on a black RDP
+      screen.
+    - All BV-mediated TARGET_CONNECT `rustion::usage` lines now
+      carry `credential_kind` for SOC observability.
+    - **MS-NLMP spec note** — three of four published §4.2.4
+      reference vectors match our crypto exactly; the fourth (LMv2
+      last three bytes) appears to be a transcription error in the
+      public spec. The same HMAC-MD5 implementation that
+      produces the spec's exact NTProofStr + SessionBaseKey can't
+      simultaneously produce a different LMv2. Samba, impacket and
+      sspi-rs all compute the value our impl yields. Documented in
+      the `ntlmv2::tests` module.
+- 12 new unit tests (8 ntlmv2, 4 bv_credssp). `cargo test -p
+  rustion-rdp --features nla --lib` is green at 67 tests passing.
+
+### Changed
+
+- Phase 4.2 split — `features/rustion-integration.md` marks Phase 4.2
+  light Done and tracks Phase 4.2-full (RC4 sealing + pubKeyAuth +
+  `rdp-cert` + Windows-VM CI validation) as the remaining slice
+  before BV-mediated NLA against Windows hosts will work on the wire.
+
+## [0.7.21] - 2026-05-19
+
+### Added
+
+- **Rustion integration — Phase 4.1 — RDP listener wire-up** (paired
+  with Rustion 0.7.17). Mirror of the Phase 3.1 SSH listener
+  integration onto the RDP gateway. The pure `ticket_auth` module that
+  shipped in Phase 4 is now consumed by `rustion-rdp::proxy` at the
+  X.224 connection-request stage.
+    - `RdpProxy` gained `bv_session_store: Option<Arc<SessionStore>>`
+      + `with_bv_session_store()` builder, identical in shape to the
+      SSH side's `ServerHandler::with_bv_session_store`.
+    - When the X.224 mstshash cookie contains a `tkt_<32 hex>`
+      substring AND the proxy was wired to a BV session store, the
+      listener calls `consume_ticket_for_login`. On success the local
+      auth provider's `authenticate()` and `authorize()` are bypassed
+      entirely — the BV control plane already proved identity + target
+      authorisation when minting the ticket. `target_host`,
+      `target_port`, and `target_user` come from the matched `Session`,
+      not the cookie.
+    - `SessionMetadata` on the RDP recording is stamped with
+      `authority` + `correlation_id` via `with_bv_authority(...)`,
+      letting SOC tooling join RDP recordings onto the BV audit chain
+      just like SSH ones. `AuditEvent::AuthSuccess { method: "bv-ticket" }`
+      lands on the audit log; `rustion::usage` lines carry the
+      authority + correlation when the session is BV-mediated.
+    - Failure paths fall through to the classical user-store flow so
+      legacy operators whose mstshash payload happens to contain
+      `tkt_` aren't locked out.
+- **Phase 4.2 — CredSSP / NLA injection — Todo.** Documented as
+  follow-up. The bastion currently relays NLA tokens between client
+  and target; BV-mediated sessions need the bastion to drive the
+  upstream CredSSP handshake itself using the envelope's decrypted
+  credentials. Needs a Windows Server VM in CI to validate end-to-end.
+
+### Changed
+
+- `features/rustion-integration.md`: marked Phase 4.1 Done, split out
+  Phase 4.2 for the CredSSP injection deferred work.
+
 ## [0.7.20] - 2026-05-19
 
 ### Added

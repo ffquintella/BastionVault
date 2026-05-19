@@ -98,6 +98,8 @@ impl RustionBackend {
         let h_master_write = self.inner.clone();
         let h_master_pubkey = self.inner.clone();
         let h_session_open = self.inner.clone();
+        let h_session_renew = self.inner.clone();
+        let h_session_kill = self.inner.clone();
         let h_noop1 = self.inner.clone();
         let h_noop2 = self.inner.clone();
 
@@ -301,6 +303,33 @@ impl RustionBackend {
                         {op: Operation::Read, handler: h_master_pubkey.handle_master_pubkey}
                     ],
                     help: "Export the master pubkey (one-shot enrolment step for Rustion authorities)."
+                },
+                {
+                    // POST rustion/session/renew — Phase 5.
+                    pattern: r"session/renew$",
+                    fields: {
+                        "bastion_id": { field_type: FieldType::Str, default: "", description: "Bastion id that opened the session." },
+                        "session_id": { field_type: FieldType::Str, default: "", description: "Session id returned by /session/open." },
+                        "correlation_id": { field_type: FieldType::Str, default: "", description: "Correlation id from the original /session/open response." },
+                        "extend_secs": { field_type: FieldType::Int, default: 1800, description: "Requested renewal duration in seconds." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_session_renew.handle_session_renew}
+                    ],
+                    help: "Renew a Rustion-mediated session, extending its TTL and consuming one renewal slot."
+                },
+                {
+                    // DELETE rustion/session/kill — Phase 5.
+                    pattern: r"session/kill$",
+                    fields: {
+                        "bastion_id": { field_type: FieldType::Str, default: "", description: "Bastion id that opened the session." },
+                        "session_id": { field_type: FieldType::Str, default: "", description: "Session id returned by /session/open." },
+                        "correlation_id": { field_type: FieldType::Str, default: "", description: "Correlation id from the original /session/open response." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_session_kill.handle_session_kill}
+                    ],
+                    help: "Forcibly terminate a Rustion-mediated session."
                 },
                 {
                     // POST rustion/session/open — run dispatcher,
@@ -854,6 +883,10 @@ impl RustionBackendInner {
                             .collect(),
                     ),
                 );
+                data.insert(
+                    "correlation_id".into(),
+                    Value::String(resp.correlation_id),
+                );
                 log::info!(
                     "{}: session_id={} bastion={} candidates_tried={}",
                     audit::SESSION_OPEN,
@@ -887,6 +920,159 @@ impl RustionBackendInner {
             }
             Err(e) => Err(bv_error_string!(&format!("{e}"))),
         }
+    }
+
+    // ─── Phase 5: renew + kill ──────────────────────────────────────
+
+    pub async fn handle_session_renew(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_store()?;
+        let master_store = self.resolve_master_store()?;
+        let master = master_store
+            .get_or_init_signing_key()
+            .await
+            .map_err(|e| bv_error_string!(&format!("master signing key: {e}")))?;
+
+        let pick = |k: &str| -> String {
+            req.get_data(k)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_default()
+        };
+        let extend_secs = req
+            .get_data("extend_secs")
+            .ok()
+            .and_then(|v| v.as_u64())
+            .map(|n| u32::try_from(n).unwrap_or(1800))
+            .unwrap_or(1800);
+
+        let operator = self.operator_context(req)?;
+        let request = session::SessionRenewRequest {
+            bastion_id: pick("bastion_id"),
+            session_id: pick("session_id"),
+            correlation_id: pick("correlation_id"),
+            extend_secs,
+        };
+
+        match session::renew_session(&store, &master, &operator, &request).await {
+            Ok(resp) => {
+                let mut data = Map::new();
+                data.insert("session_id".into(), Value::String(resp.session_id.clone()));
+                data.insert("expires_at".into(), Value::String(resp.expires_at));
+                data.insert("renewals_used".into(), Value::Number(resp.renewals_used.into()));
+                data.insert("max_renewals".into(), Value::Number(resp.max_renewals.into()));
+                data.insert("bastion_id".into(), Value::String(resp.bastion_id.clone()));
+                log::info!(
+                    "{}: session_id={} bastion={} renewals_used={}/{}",
+                    audit::SESSION_RENEW,
+                    resp.session_id,
+                    resp.bastion_id,
+                    resp.renewals_used,
+                    resp.max_renewals,
+                );
+                Ok(Some(Response::data_response(Some(data))))
+            }
+            Err(session::SessionRenewError::BastionNotFound(id)) => Err(bv_error_response_status!(
+                404,
+                &format!("bastion_not_found: {id}")
+            )),
+            Err(session::SessionRenewError::Http { status, body }) => {
+                Err(bv_error_response_status!(
+                    status,
+                    &format!("bastion_rejected: {body}")
+                ))
+            }
+            Err(e) => Err(bv_error_string!(&format!("{e}"))),
+        }
+    }
+
+    pub async fn handle_session_kill(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_store()?;
+        let master_store = self.resolve_master_store()?;
+        let master = master_store
+            .get_or_init_signing_key()
+            .await
+            .map_err(|e| bv_error_string!(&format!("master signing key: {e}")))?;
+
+        let pick = |k: &str| -> String {
+            req.get_data(k)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_default()
+        };
+        let operator = self.operator_context(req)?;
+        let request = session::SessionKillRequest {
+            bastion_id: pick("bastion_id"),
+            session_id: pick("session_id"),
+            correlation_id: pick("correlation_id"),
+        };
+
+        match session::kill_session(&store, &master, &operator, &request).await {
+            Ok(resp) => {
+                let mut data = Map::new();
+                data.insert("session_id".into(), Value::String(resp.session_id.clone()));
+                data.insert("terminated_at".into(), Value::String(resp.terminated_at));
+                data.insert("bastion_id".into(), Value::String(resp.bastion_id.clone()));
+                log::info!(
+                    "{}: session_id={} bastion={}",
+                    audit::SESSION_TERMINATE,
+                    resp.session_id,
+                    resp.bastion_id,
+                );
+                Ok(Some(Response::data_response(Some(data))))
+            }
+            Err(session::SessionRenewError::BastionNotFound(id)) => Err(bv_error_response_status!(
+                404,
+                &format!("bastion_not_found: {id}")
+            )),
+            Err(session::SessionRenewError::Http { status, body }) => {
+                Err(bv_error_response_status!(
+                    status,
+                    &format!("bastion_rejected: {body}")
+                ))
+            }
+            Err(e) => Err(bv_error_string!(&format!("{e}"))),
+        }
+    }
+
+    /// Extract OperatorContext from the caller's auth metadata.
+    /// Phase 5: factored out so renew + kill share the open path's
+    /// identity-stamping logic.
+    fn operator_context(&self, req: &Request) -> Result<envelope::OperatorContext, RvError> {
+        let auth = req
+            .auth
+            .as_ref()
+            .ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
+        Ok(envelope::OperatorContext {
+            vault_user_id: auth
+                .metadata
+                .get("entity_id")
+                .cloned()
+                .unwrap_or_default(),
+            vault_user_name: auth
+                .metadata
+                .get("username")
+                .cloned()
+                .unwrap_or_default(),
+            vault_session_id: auth
+                .metadata
+                .get("session_id")
+                .cloned()
+                .unwrap_or_default(),
+            src_ip: req.client_token.clone(),
+            deployment_id: auth
+                .metadata
+                .get("deployment_id")
+                .cloned()
+                .unwrap_or_default(),
+        })
     }
 
     pub async fn handle_master_pubkey(
