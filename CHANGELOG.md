@@ -45,6 +45,49 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.28] - 2026-05-19
+
+### Added
+
+- **Rustion integration — Phase 6.5: Recordings page + inline
+  playback**. Closes Phase 6 end-to-end on the recording handoff loop.
+    - **BV recording-bytes proxy**: `GET rustion/recordings/<rid>/blob`
+      routes through `recordings::fetch_blob` to the bastion's
+      `GET /v1/recordings/<rid>/blob`, returns bytes base64-wrapped.
+      New Tauri command `rustion_recording_blob(rid)` + typed TS
+      wrapper.
+    - **`/recordings` route + sidebar entry**: new `RecordingsPage`.
+      Lists every `RustionRecordingEntry` from the recordings index
+      with format/delivery/search filters; surfaces bastion-pull
+      from the same page.
+    - **`RecordingPlayerModal`** opens on row click. Loads bytes,
+      decodes base64 → `Uint8Array`, dispatches to a format-specific
+      renderer.
+    - **`AsciicastPlayer`** (SSH): native xterm.js renderer (no
+      `asciinema-player` dep — saves ~80 KB in the bundle). Parses
+      asciicast v2 + drives an xterm with the spec-mandated rows/cols,
+      schedules writes off `performance.now()`.
+    - **`RdpRecSummary`** (RDP): walks the `.rdp-rec` frame stream
+      natively in TS (magic `"RREC"` + JSON header + `(ts:u64 +
+      type:u8 + len:u32 + payload)` iteration). Shows header,
+      graphics/keyboard/mouse event counts, total duration. The
+      inline visual replay path is gated on a real MS-RDPBCGR
+      bitmap-update codec (slow-path bitmap + raster ops + NSCodec)
+      — that's a multi-week protocol-decoder project tracked as a
+      separate UI/codec engineering track. The page surfaces this
+      explicitly and the download button hands the operator the raw
+      `.rdp-rec` for external viewers.
+    - **`SmbLogSummary`** (SMB): plain-text op log preview + download.
+
+### Changed
+
+- `features/rustion-integration.md`: Phase 6.5 marked Done — Phase 6
+  is fully closed (1 → 6.5). The remaining Rustion-integration work is
+  Phase 4.2-full (RC4 sealing + pubKeyAuth + Windows VM), Phase 7
+  (policy tiers), Phase 8 (telemetry + in-GUI replay extension),
+  Phase 9 (enrolment-approval + re-attestation + master-cert rotation
+  + tombstones).
+
 ## [0.7.27] - 2026-05-19
 
 ### Added

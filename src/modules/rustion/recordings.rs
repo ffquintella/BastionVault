@@ -262,3 +262,65 @@ pub async fn pull_recording(
     let _ = recordings.pending_remove(&entry.session_id).await;
     Ok(entry)
 }
+
+/// Phase 6.5: fetch the recording artifact bytes from the bastion's
+/// `GET /v1/recordings/{rid}/blob` endpoint. Returns the raw bytes
+/// + the format string from the `X-Recording-Format` header so the
+/// caller (the GUI) can route to the right player.
+#[maybe_async::maybe_async]
+pub async fn fetch_blob(
+    targets: &super::store::RustionStore,
+    recordings: &RecordingsStore,
+    recording_id: &str,
+) -> Result<(Vec<u8>, String, String), RvError> {
+    let entry = recordings
+        .get(recording_id)
+        .await?
+        .ok_or_else(|| bv_error_string!(&format!("recording `{recording_id}` not in index")))?;
+    let target = targets
+        .get_target(&entry.bastion_id)
+        .await?
+        .ok_or_else(|| {
+            bv_error_string!(&format!("bastion `{}` not enrolled", entry.bastion_id))
+        })?;
+
+    let url = format!(
+        "https://{}/v1/recordings/{}/blob",
+        target.endpoint.trim_end_matches('/'),
+        recording_id
+    );
+    let client = reqwest::ClientBuilder::new()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| bv_error_string!(&format!("http client: {e}")))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| bv_error_string!(&format!("transport: {e}")))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(bv_error_string!(&format!(
+            "bastion returned HTTP {status}: {body}"
+        )));
+    }
+    let format = resp
+        .headers()
+        .get("x-recording-format")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or(&entry.format)
+        .to_string();
+    let sha256 = resp
+        .headers()
+        .get("x-recording-sha256")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or(&entry.sha256)
+        .to_string();
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| bv_error_string!(&format!("read body: {e}")))?;
+    Ok((bytes.to_vec(), format, sha256))
+}

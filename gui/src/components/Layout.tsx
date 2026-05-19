@@ -115,6 +115,7 @@ const adminNav: NavItem[] = [
   { path: "/policies", label: "Policies" },
   { path: "/mounts", label: "Mounts" },
   { path: "/audit", label: "Audit" },
+  { path: "/recordings", label: "Recordings" },
   { path: "/plugins", label: "Plugins" },
   { path: "/exchange", label: "Import / Export" },
   { path: "/settings", label: "Settings" },

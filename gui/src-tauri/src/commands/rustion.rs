@@ -666,6 +666,43 @@ pub async fn rustion_recording_pull(
     Ok(recording_from_map(&data))
 }
 
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionRecordingBlob {
+    pub recording_id: String,
+    pub format: String,
+    pub sha256: String,
+    /// Base64-encoded recording bytes. The frontend decodes via
+    /// `atob` into a Uint8Array before handing to the player. Kept
+    /// as base64 over the Tauri boundary because the IPC layer
+    /// flattens binary into JSON anyway — avoiding the array→JSON
+    /// blow-up.
+    pub bytes_b64: String,
+    pub size_bytes: u64,
+}
+
+#[tauri::command]
+pub async fn rustion_recording_blob(
+    state: State<'_, AppState>,
+    recording_id: String,
+) -> CmdResult<RustionRecordingBlob> {
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("{RUSTION_MOUNT}recordings/{recording_id}/blob"),
+        None,
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(RustionRecordingBlob {
+        recording_id: s(&data, "recording_id"),
+        format: s(&data, "format"),
+        sha256: s(&data, "sha256"),
+        bytes_b64: s(&data, "bytes_b64"),
+        size_bytes: u64_field(&data, "size_bytes"),
+    })
+}
+
 #[tauri::command]
 pub async fn rustion_master_pubkey_export(
     state: State<'_, AppState>,

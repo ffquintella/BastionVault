@@ -108,6 +108,7 @@ impl RustionBackend {
         let h_recordings_list = self.inner.clone();
         let h_recording_read = self.inner.clone();
         let h_recording_pull = self.inner.clone();
+        let h_recording_blob = self.inner.clone();
         let h_noop1 = self.inner.clone();
         let h_noop2 = self.inner.clone();
 
@@ -392,6 +393,18 @@ impl RustionBackend {
                         {op: Operation::Read, handler: h_recording_read.handle_recording_read}
                     ],
                     help: "Read a single recording entry by id (Phase 6.2)."
+                },
+                {
+                    // GET rustion/recordings/<rid>/blob — Phase 6.5.
+                    // Proxies through to the bastion's
+                    // GET /v1/recordings/<rid>/blob endpoint and
+                    // returns the recording bytes (base64-wrapped so
+                    // the BV response shape stays JSON-friendly).
+                    pattern: r"recordings/(?P<rid>[A-Za-z0-9_\-]+)/blob$",
+                    operations: [
+                        {op: Operation::Read, handler: h_recording_blob.handle_recording_blob}
+                    ],
+                    help: "Phase 6.5 — fetch a recording artifact's bytes (base64) for in-GUI playback."
                 },
                 {
                     // POST rustion/recordings/pull — Phase 6.3
@@ -1275,6 +1288,41 @@ impl RustionBackendInner {
         let json = serde_json::to_value(&entry)
             .map_err(|e| bv_error_string!(&format!("encode recording: {e}")))?;
         let data = json.as_object().cloned().unwrap_or_default();
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_recording_blob(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let store = self.resolve_store()?;
+        let recordings = self.resolve_recordings_store()?;
+        // Path looks like `recordings/<rid>/blob` after the mount
+        // strip. Pull the rid out by walking the components.
+        let rid = req
+            .path
+            .strip_prefix("recordings/")
+            .and_then(|s| s.strip_suffix("/blob"))
+            .unwrap_or("")
+            .to_string();
+        if rid.is_empty() {
+            return Err(bv_error_response_status!(400, "recording_id is required"));
+        }
+        let (bytes, format, sha256) =
+            recordings::fetch_blob(&store, &recordings, &rid)
+                .await
+                .map_err(|e| bv_error_string!(&format!("{e}")))?;
+        let mut data = Map::new();
+        data.insert("recording_id".into(), Value::String(rid));
+        data.insert("format".into(), Value::String(format));
+        data.insert("sha256".into(), Value::String(sha256));
+        data.insert("bytes_b64".into(), Value::String(STANDARD.encode(&bytes)));
+        data.insert(
+            "size_bytes".into(),
+            Value::Number((bytes.len() as u64).into()),
+        );
         Ok(Some(Response::data_response(Some(data))))
     }
 

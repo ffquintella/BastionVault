@@ -240,3 +240,16 @@ export interface RustionRecordingPullRequest {
 
 export const rustionRecordingPull = (request: RustionRecordingPullRequest) =>
   invoke<RustionRecordingEntry>("rustion_recording_pull", { request });
+
+export interface RustionRecordingBlob {
+  recordingId: string;
+  format: string;
+  sha256: string;
+  /** Base64-encoded recording bytes. Decode via `atob` →
+   *  Uint8Array before handing to the player. */
+  bytesB64: string;
+  sizeBytes: number;
+}
+
+export const rustionRecordingBlob = (recordingId: string) =>
+  invoke<RustionRecordingBlob>("rustion_recording_blob", { recordingId });

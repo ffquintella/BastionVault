@@ -498,6 +498,7 @@ pub fn run() {
             commands::rustion::rustion_recordings_list,
             commands::rustion::rustion_recording_read,
             commands::rustion::rustion_recording_pull,
+            commands::rustion::rustion_recording_blob,
             // Per-user scoping: entity, owner, sharing, transfer
             commands::sharing::get_entity_self,
             commands::sharing::list_entity_aliases,

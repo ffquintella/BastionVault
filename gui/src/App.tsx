@@ -14,6 +14,7 @@ import { GroupsPage } from "./routes/GroupsPage";
 import { AssetGroupsPage } from "./routes/AssetGroupsPage";
 import { SharingPage } from "./routes/SharingPage";
 import { AuditPage } from "./routes/AuditPage";
+import { RecordingsPage } from "./routes/RecordingsPage";
 import { PoliciesPage } from "./routes/PoliciesPage";
 import { MountsPage } from "./routes/MountsPage";
 import { SettingsPage } from "./routes/SettingsPage";
@@ -115,6 +116,10 @@ export default function App() {
             <Route
               path="/audit"
               element={<ProtectedRoute><AuditPage /></ProtectedRoute>}
+            />
+            <Route
+              path="/recordings"
+              element={<ProtectedRoute><RecordingsPage /></ProtectedRoute>}
             />
             <Route
               path="/policies"

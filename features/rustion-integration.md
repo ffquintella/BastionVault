@@ -641,14 +641,16 @@ Closes the operational handoff loop fully — the BV cron pulls missed recording
 - **SshProxy / RdpProxy / ServerHandler** wiring — proxies pass the emitter down to `connect_to_target_with_credential_and_relay` (SSH) / `handle_rdp_connection` (RDP). After the sidecar lands and `RECORDING_READY` fires, the relay serialises the sidecar struct via `serde_json::to_vec` and calls `emitter.spawn_delivery(authority, body)`. Classical (non-BV) sessions skip the call cleanly (empty authority).
 - **Rustion `GET /v1/recordings/:rid/blob`** — serves the recording artifact bytes for in-GUI playback. Maps `rec_<sid_suffix>` → `<sid>.cast` / `<sid>.rdp-rec` via the per-session sidecar. Returns `X-Recording-SHA256` + `X-Recording-Format` headers so the player can verify integrity before rendering.
 
-### Phase 6.5 — GUI playback — **Todo**
+### Phase 6.5 — GUI Recordings page + asciicast playback + `.rdp-rec` summary — **Done** (BV 0.7.28)
 
-The remaining slice is genuinely a multi-day UI/wasm engineering track:
+Phase 6 is now fully closed end-to-end on the recording handoff loop. SSH recordings play inline; RDP and SMB recordings surface a metadata view + download with the upstream-bitmap decoder tracked as its own UI engineering project.
 
-- **"Open recording" link** + Recordings page in the GUI surfacing the `RustionRecordingEntry` list with filters by authority/bastion/time.
-- **asciicast playback** — xterm.js + asciinema-player wired into the Recordings page, streaming from `GET /v1/recordings/:rid/blob`.
-- **`.rdp-rec` wasm decoder** — WASM module shipped in the GUI bundle that walks the binary frame stream and renders into an HTML5 canvas. Reference RDP-rec format spec.
-- **Short-lived signed URL** — optional security upgrade so BV can hand the operator's browser a self-signed pull URL with a 5-min expiry; today's endpoint relies on BV's TLS-pinned channel.
+- **BV recording-bytes proxy**: `GET rustion/recordings/<rid>/blob` → routes through `recordings::fetch_blob` to the bastion's `GET /v1/recordings/<rid>/blob`, returns the bytes base64-wrapped (JSON-friendly Tauri boundary). New Tauri command `rustion_recording_blob(rid) → RustionRecordingBlob` + typed TS wrapper.
+- **`/recordings` route + sidebar entry**: new `RecordingsPage` route. Lists every `RustionRecordingEntry` from the recordings index with format/delivery/search filters; surface bastion-pull-force from the same page (operator types `bastion_id` + `session_id` and clicks "Pull from bastion").
+- **`RecordingPlayerModal`**: opens on row click. Loads bytes via `rustionRecordingBlob`, decodes base64 → `Uint8Array`, dispatches to a format-specific renderer.
+- **`AsciicastPlayer`** (SSH): native xterm.js renderer (no third-party `asciinema-player` dep — saves ~80 KB in the bundle). Parses asciicast v2 (header line + `[time, type, data]` events), drives an xterm with the spec-mandated `cols`/`rows`, schedules writes off `performance.now()` with a 200ms tick cap.
+- **`RdpRecSummary`** (RDP): walks the `.rdp-rec` frame stream natively in TS — magic `"RREC"` check + JSON header parse + `(ts:u64 + type:u8 + len:u32 + payload)` iteration. Surfaces header, graphics/keyboard/mouse event counts, total duration. Inline visual replay is gated on a real RDP bitmap-update codec (MS-RDPBCGR slow-path bitmap, raster ops, NSCodec) — that's a multi-week protocol-decoder project on its own track, called out in the page UI as "future enhancement". The download button hands the operator the raw `.rdp-rec` for external viewers.
+- **`SmbLogSummary`** (SMB): plain-text op log preview + download.
 
 ### Phase 7 — Four-tier transport-and-bastion policy + `rustion-required` mode — **Todo**
 
