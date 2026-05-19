@@ -34,6 +34,7 @@ import {
   rustionRecordingBlob,
   rustionRecordingPull,
   rustionRecordingRead,
+  rustionRecordingReplayLog,
   rustionRecordingsList,
   type RustionRecordingBlob,
   type RustionRecordingEntry,
@@ -308,6 +309,35 @@ function RecordingPlayerModal({
         const arr = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
         setBytes(arr);
+        // Phase 8.2 — sha256 integrity check + recording.replayed
+        // audit event. Hash the bytes locally and report a mismatch
+        // to the audit chain if they don't match the sidecar.
+        try {
+          const expectedHex = (b.sha256 || entry.sha256 || "").toLowerCase();
+          let mismatch = false;
+          if (expectedHex && typeof crypto.subtle?.digest === "function") {
+            const digest = await crypto.subtle.digest(
+              "SHA-256",
+              arr.buffer as ArrayBuffer,
+            );
+            const got = Array.from(new Uint8Array(digest))
+              .map((b) => b.toString(16).padStart(2, "0"))
+              .join("");
+            mismatch = got !== expectedHex;
+            if (mismatch) {
+              toast.toast(
+                "error",
+                `Recording sha256 mismatch — got ${got.slice(0, 12)}…, expected ${expectedHex.slice(0, 12)}…`,
+              );
+            }
+          }
+          await rustionRecordingReplayLog(entry.recordingId, mismatch);
+        } catch (e) {
+          // Best-effort: a missing crypto.subtle (older webviews) or
+          // a network blip on the replay-log post should not break
+          // playback.
+          console.warn("recording replay-log failed:", e);
+        }
       } catch (e) {
         toast.toast("error", `Failed to fetch recording: ${extractError(e)}`);
       } finally {

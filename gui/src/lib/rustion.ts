@@ -415,6 +415,17 @@ export interface RustionTelemetryStats {
   topOperators: Array<[string, number]>;
 }
 
+export interface RustionAuditEntry {
+  sequence: number;
+  timestamp: string;
+  actor: string;
+  sessionId: string | null;
+  sourceAddr: string | null;
+  event: unknown;
+  hash: string;
+  targetId: string;
+}
+
 export interface RustionTelemetryTarget {
   targetId: string;
   targetName: string;
@@ -424,7 +435,16 @@ export interface RustionTelemetryTarget {
   active: RustionTelemetrySession[];
   history: RustionTelemetrySession[];
   stats: RustionTelemetryStats;
+  recentAudit: RustionAuditEntry[];
 }
+
+export const rustionRecordingReplayLog = (
+  recordingId: string,
+  sha256Mismatch: boolean,
+) =>
+  invoke<void>("rustion_recording_replay_log", {
+    input: { recordingId, sha256Mismatch },
+  });
 
 export const rustionTelemetryList = () =>
   invoke<RustionTelemetryTarget[]>("rustion_telemetry_list");

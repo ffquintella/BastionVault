@@ -130,12 +130,35 @@ export function RustionLiveSessionsPage() {
     let active = 0;
     let total = 0;
     let totalDuration = 0;
+    const topTargets = new Map<string, number>();
+    const topOperators = new Map<string, number>();
     for (const t of targets) {
       active += t.stats.active;
       total += t.stats.total;
       totalDuration += t.stats.totalDurationSecs;
+      for (const [k, v] of t.stats.topTargets) {
+        topTargets.set(k, (topTargets.get(k) ?? 0) + v);
+      }
+      for (const [k, v] of t.stats.topOperators) {
+        topOperators.set(k, (topOperators.get(k) ?? 0) + v);
+      }
     }
-    return { active, total, totalDuration };
+    const sortDesc = (m: Map<string, number>) =>
+      [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
+    return {
+      active,
+      total,
+      totalDuration,
+      topTargets: sortDesc(topTargets),
+      topOperators: sortDesc(topOperators),
+    };
+  }, [targets]);
+
+  // Recent audit witness rows (across all bastions, most recent first).
+  const recentAudit = useMemo(() => {
+    const all = targets.flatMap((t) => t.recentAudit);
+    all.sort((a, b) => b.sequence - a.sequence);
+    return all.slice(0, 30);
   }, [targets]);
 
   return (
@@ -170,6 +193,57 @@ export function RustionLiveSessionsPage() {
             <div className="text-xs text-[var(--color-text-muted)] mt-1">
               summed across the fleet
             </div>
+          </Card>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+          <Card title="Top targets (fleet)">
+            {aggregateStats.topTargets.length === 0 ? (
+              <div className="text-xs text-[var(--color-text-muted)]">
+                No data yet.
+              </div>
+            ) : (
+              <ul className="space-y-1.5">
+                {aggregateStats.topTargets.map(([host, count]) => (
+                  <li key={host} className="flex items-center gap-2 text-xs">
+                    <span className="font-mono min-w-0 truncate flex-1">{host}</span>
+                    <span className="text-[var(--color-text-muted)]">
+                      {count} session{count === 1 ? "" : "s"}
+                    </span>
+                    <div
+                      className="bg-blue-500/60 h-2 rounded"
+                      style={{
+                        width: `${Math.max(8, (count / aggregateStats.topTargets[0][1]) * 60)}px`,
+                      }}
+                    />
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Card>
+          <Card title="Top operators (fleet)">
+            {aggregateStats.topOperators.length === 0 ? (
+              <div className="text-xs text-[var(--color-text-muted)]">
+                No data yet.
+              </div>
+            ) : (
+              <ul className="space-y-1.5">
+                {aggregateStats.topOperators.map(([user, count]) => (
+                  <li key={user} className="flex items-center gap-2 text-xs">
+                    <span className="font-mono min-w-0 truncate flex-1">{user}</span>
+                    <span className="text-[var(--color-text-muted)]">
+                      {count} session{count === 1 ? "" : "s"}
+                    </span>
+                    <div
+                      className="bg-green-500/60 h-2 rounded"
+                      style={{
+                        width: `${Math.max(8, (count / aggregateStats.topOperators[0][1]) * 60)}px`,
+                      }}
+                    />
+                  </li>
+                ))}
+              </ul>
+            )}
           </Card>
         </div>
 
@@ -320,6 +394,72 @@ export function RustionLiveSessionsPage() {
                     >
                       Terminate
                     </Button>
+                  ),
+                },
+              ]}
+            />
+          )}
+        </Card>
+
+        <Card title={`Recent audit witness (${recentAudit.length})`}>
+          <p className="text-xs text-[var(--color-text-muted)] mb-2">
+            Hash-chain entries pulled from every enrolled bastion's audit
+            log. Each row's <code>hash</code> chains forward; BV stores the
+            full set under <code>rustion/audit_witness/</code> for SOC tooling.
+          </p>
+          {recentAudit.length === 0 ? (
+            <EmptyState
+              title="No audit entries yet"
+              description="The 60s telemetry poller will pull audit entries from every bastion's hash chain on the next tick."
+            />
+          ) : (
+            <Table
+              data={recentAudit}
+              rowKey={(e) => `${e.targetId}/${e.hash}`}
+              columns={[
+                {
+                  key: "seq",
+                  header: "Seq",
+                  render: (e) => (
+                    <span className="font-mono text-xs">{e.sequence}</span>
+                  ),
+                },
+                {
+                  key: "ts",
+                  header: "Timestamp",
+                  render: (e) => (
+                    <span className="text-xs">{formatDate(e.timestamp)}</span>
+                  ),
+                },
+                {
+                  key: "bastion",
+                  header: "Bastion",
+                  render: (e) => (
+                    <span className="font-mono text-xs">{e.targetId}</span>
+                  ),
+                },
+                {
+                  key: "actor",
+                  header: "Actor",
+                  render: (e) => <span className="font-mono text-xs">{e.actor}</span>,
+                },
+                {
+                  key: "event",
+                  header: "Event",
+                  render: (e) => {
+                    const ev = e.event as { type?: string } | null;
+                    return (
+                      <Badge variant="info" label={ev?.type ?? "(unknown)"} />
+                    );
+                  },
+                },
+                {
+                  key: "hash",
+                  header: "Hash",
+                  render: (e) => (
+                    <span className="font-mono text-[10px] text-[var(--color-text-muted)]">
+                      {e.hash.slice(0, 12)}…
+                    </span>
                   ),
                 },
               ]}

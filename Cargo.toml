@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.7.32"
+version = "0.7.33"
 edition = "2021"
 license = "Apache-2.0"
 description = """

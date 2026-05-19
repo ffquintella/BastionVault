@@ -45,6 +45,49 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.33] - 2026-05-19
+
+### Added
+
+- **Rustion integration — Phase 8.2: audit witness + rate limiting +
+  replay-log + analytics** (paired with Rustion 0.7.25). Closes the
+  security-and-observability layer of telemetry.
+    - **Rustion `/v1/sessions/audit?since=&limit=`** paginated
+      hash-chain entries read directly via the existing `AuditStore`
+      trait. Returns `503 audit_chain_unavailable` when no store is
+      wired.
+    - **Rustion `rate_limit::TokenBucket`** new module — per-(IP,
+      authority) bucket with 60-token capacity + 4 tok/sec refill.
+      Gates all telemetry endpoints. 2 unit tests.
+    - **`ControlPlaneState`** grew `audit_store` +
+      `telemetry_rate_limiter` fields (both `Option`, default `None`).
+    - **BV telemetry poller** now pulls `/v1/sessions/audit` after
+      the active/history/stats fan-out. Persists every row at
+      `rustion/audit_witness/<target_id>/<hash>`. Emits
+      `rustion.audit.witness` per entry on the BV audit chain.
+      Cursor's `last_audit_seq` advances by Rustion's `next_seq`.
+      In-memory `recent_audit` capped at 200.
+    - **Two new audit constants**: `RUSTION_AUDIT_WITNESS`,
+      `RECORDING_REPLAYED`.
+    - **`POST rustion/recordings/replay-log`** + new
+      `rustion_recording_replay_log` Tauri command. The Recordings
+      page hashes the loaded bytes via `crypto.subtle.digest` and
+      compares against the sidecar's `sha256`, reporting the result
+      to BV which emits `recording.replayed` with operator id +
+      mismatch flag.
+    - **Live Sessions analytics extension**: two new fleet-wide
+      Top Targets + Top Operators cards with bar viz, plus a
+      "Recent audit witness" table (last 30 entries, event-type
+      badge + hash-prefix column).
+
+### Changed
+
+- `features/rustion-integration.md`: Phase 8.2 marked Done; Phase 8.3
+  carved out for the separate replay WebviewWindow + `.rdp-rec` WASM
+  decoder + signed-URL recording-stream infrastructure (the wasm
+  decoder is a multi-week protocol-codec engineering track separate
+  from this feature, deferred consistently with Phase 6.5).
+
 ## [0.7.32] - 2026-05-19
 
 ### Added

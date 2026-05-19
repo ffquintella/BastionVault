@@ -53,6 +53,28 @@ pub struct SessionSummary {
     pub killed_at: Option<String>,
 }
 
+/// One row from Rustion's `/v1/sessions/audit` endpoint. The
+/// `hash` field is lowercase-hex of the chain-link SHA-256; BV uses
+/// it as the deduplication key in the local witness store.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEntry {
+    pub sequence: u64,
+    pub timestamp: String,
+    pub actor: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub source_addr: Option<String>,
+    #[serde(default)]
+    pub event: serde_json::Value,
+    pub hash: String,
+    /// Filled in by the BV-side witness path. Empty on the wire shape;
+    /// BV stamps the target_id this came from before persisting so
+    /// SOC tooling can join the witness back onto a specific bastion.
+    #[serde(default)]
+    pub target_id: String,
+}
+
 /// `/v1/stats` body.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AuthorityStats {
@@ -80,6 +102,11 @@ pub struct TargetSnapshot {
     pub active: Vec<SessionSummary>,
     pub history: Vec<SessionSummary>,
     pub stats: AuthorityStats,
+    /// Phase 8.2 — most recently witnessed audit entries (capped at
+    /// 200). Full persistence lives under
+    /// `rustion/audit_witness/<target_id>/<hash>` for SOC tooling.
+    #[serde(default)]
+    pub recent_audit: Vec<AuditEntry>,
 }
 
 #[derive(Debug, Default)]
@@ -115,6 +142,10 @@ impl TelemetryCache {
 pub struct TargetCursor {
     pub last_pull_at: Option<DateTime<Utc>>,
     pub last_history_cursor: Option<String>,
+    /// Phase 8.2 — high-water sequence number from the last
+    /// `/v1/sessions/audit` pull. Next pull starts at `since=this`.
+    #[serde(default)]
+    pub last_audit_seq: u64,
 }
 
 #[maybe_async::maybe_async]
@@ -268,6 +299,7 @@ async fn tick(core: &Arc<Core>) -> Result<(), RvError> {
                     let new_cursor = TargetCursor {
                         last_pull_at: Some(Utc::now()),
                         last_history_cursor: b.next_cursor,
+                        last_audit_seq: cursor.last_audit_seq,
                     };
                     let _ = write_cursor(&cursors_view, &id, &new_cursor).await;
                 }
@@ -297,10 +329,89 @@ async fn tick(core: &Arc<Core>) -> Result<(), RvError> {
             }
             Ok(_) | Err(_) => {} // soft fail; stats are best-effort
         }
+
+        // Phase 8.2 — audit witness pull. Reads entries since the
+        // last cursor; the per-entry hash chains forward, so BV
+        // gets tamper-evident replication.
+        let audit_url = format!(
+            "{base}/v1/sessions/audit?since={}&limit=500",
+            cursor.last_audit_seq
+        );
+        match client
+            .get(&audit_url)
+            .header("X-Rustion-Authority", auth_header)
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => {
+                #[derive(Deserialize)]
+                struct Body {
+                    entries: Vec<AuditEntry>,
+                    next_seq: u64,
+                }
+                if let Ok(b) = r.json::<Body>().await {
+                    let mut stamped: Vec<AuditEntry> = b
+                        .entries
+                        .into_iter()
+                        .map(|mut e| {
+                            e.target_id = id.clone();
+                            e
+                        })
+                        .collect();
+                    // Cap the in-memory recent_audit at 200 latest
+                    // entries — the persistent witness store keeps the
+                    // full set under rustion/audit_witness/.
+                    let mut combined = std::mem::take(&mut snap.recent_audit);
+                    combined.append(&mut stamped.clone());
+                    if combined.len() > 200 {
+                        let drop = combined.len() - 200;
+                        combined.drain(0..drop);
+                    }
+                    snap.recent_audit = combined;
+
+                    // Persistent witness store + audit-log emission.
+                    let witness_view = std::sync::Arc::new(
+                        system_view.new_sub_view(AUDIT_WITNESS_SUB_PATH),
+                    );
+                    for e in &stamped {
+                        let key = format!("{}/{}", id, e.hash);
+                        let v = serde_json::to_vec(e)
+                            .unwrap_or_default();
+                        let _ = witness_view
+                            .put(&StorageEntry { key, value: v })
+                            .await;
+                        log::info!(
+                            "{}: bastion={} seq={} hash={} actor={}",
+                            super::audit::RUSTION_AUDIT_WITNESS,
+                            id,
+                            e.sequence,
+                            e.hash,
+                            e.actor,
+                        );
+                    }
+
+                    let new_cursor = TargetCursor {
+                        last_pull_at: cursor.last_pull_at,
+                        last_history_cursor: cursor.last_history_cursor.clone(),
+                        last_audit_seq: b.next_seq,
+                    };
+                    let _ = write_cursor(&cursors_view, &id, &new_cursor).await;
+                }
+            }
+            Ok(r) if r.status().as_u16() == 429 => {
+                let _ = snap
+                    .last_pull_error
+                    .get_or_insert("audit: rate-limited".into());
+            }
+            Ok(_) | Err(_) => {} // soft fail; audit is best-effort
+        }
+
         cache.put(snap).await;
     }
     Ok(())
 }
+
+const AUDIT_WITNESS_SUB_PATH: &str = "rustion/audit_witness/";
 
 fn urlencode(s: &str) -> String {
     // Lightweight URL-encoder: just the chars we know matter in an

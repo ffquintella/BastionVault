@@ -47,3 +47,5 @@ pub const SESSION_OPEN: &str = "session.open";
 pub const SESSION_RENEW: &str = "session.renew";
 pub const SESSION_TERMINATE: &str = "session.terminate";
 pub const RECORDING_LINKED: &str = "recording.linked";
+pub const RECORDING_REPLAYED: &str = "recording.replayed";
+pub const RUSTION_AUDIT_WITNESS: &str = "rustion.audit.witness";

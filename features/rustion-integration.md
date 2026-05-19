@@ -836,17 +836,24 @@ Lays the cross-fleet observability foundation: a 60s pull loop, authority-scoped
 - **2 new Tauri commands + TS wrappers**: `rustionTelemetryList`, `rustionTelemetryPoll`.
 - **New GUI page `/rustion-sessions`**: cross-bastion Live Sessions view with 5s auto-refresh, search + per-bastion filter, three summary cards (active fleet sessions / lifetime rolling / total session time), one row per active session with operator + src-ip + target + opened/expires/renewals, and a per-row **Terminate** button calling `rustionSessionKill`. Sidebar entry "Live Sessions" added under the existing "Recordings" link.
 
-### Phase 8.2 — Signed audit witness + replay window + analytics — **Todo**
+### Phase 8.2 — Audit witness + rate limiting + replay-log + analytics — **Done** (BV 0.7.33 + Rustion 0.7.25)
 
-What's left of Phase 8:
+Closes the security-and-observability layer of telemetry. Phase 8.3 (separate replay WebviewWindow + `.rdp-rec` WASM decoder + signed-URL replay infrastructure) is the remaining slice.
 
-- **`GET /v1/sessions/audit?since=&limit=`** on Rustion — paginated hash-chain audit entries scoped to the authority, with the chain's signature on each row so BV can re-verify before re-witnessing.
-- **`rustion.audit.witness`** audit event on BV emitted for every re-witnessed entry.
-- **Rate limiting** (per IP + per authority) on the telemetry endpoints so a runaway puller can't saturate the bastion.
-- **`POST /v1/rustion/recordings/{rid}/replay`** signed-envelope route on BV + 60s IP-bound signed URL on Rustion (`GET /v1/recordings/{rid}`) for the player to stream from.
-- **`SessionReplayWindow`** — separate Tauri WebviewWindow with asciinema-player for `.cast` + the future `.rdp-rec` WASM decoder.
-- **`recording.replayed`** audit event on every in-GUI playback (operator id + recording id + sha256 mismatch flag).
-- **Analytics dashboard** reading from the persisted aggregate (sessions/hour, top operators, top targets) — extends the existing Live Sessions page or adds a new `/rustion-analytics` route.
+- **Rustion `/v1/sessions/audit?since=&limit=`** — paginated hash-chain entries read directly from the existing `AuditStore` trait. Wire shape per row: `{sequence, timestamp, actor, session_id, source_addr, event, hash}` where `hash` is lowercase-hex sha256 chain-link. Returns `503 audit_chain_unavailable` if the host didn't wire an `audit_store` into `ControlPlaneState`.
+- **Rustion `rate_limit::TokenBucket`** new module — per-(client_ip, authority) token bucket; defaults to 60 token capacity + 4 tokens/sec refill (60s burst). Gates `/v1/sessions/{active,history,audit}` + `/v1/stats` via `require_authority_rate_limited`. Soft GC of stale buckets at the 10k-key cap. 2 unit tests.
+- **`client_ip` helper** — reads `X-Forwarded-For` (first hop) or `X-Real-IP` so a reverse proxy can pass the operator's IP through; falls back to `"unknown"`.
+- **`ControlPlaneState`** grew `audit_store: Option<Arc<dyn AuditStore>>` and `telemetry_rate_limiter: Option<Arc<TokenBucket>>` fields. Both `None` in tests; production wires them at startup.
+- **BV `telemetry::AuditEntry`** new wire-shape struct. The poller pulls `/v1/sessions/audit?since=<last_audit_seq>&limit=500` after the active/history/stats pulls, stamps `target_id` on each row, caps `recent_audit` at 200 in-memory entries, persists every row at `rustion/audit_witness/<target_id>/<hash>`, and emits `rustion.audit.witness` for each as `log::info!` on the BV audit chain. The cursor's `last_audit_seq` advances by Rustion's `next_seq`.
+- **`audit::RUSTION_AUDIT_WITNESS = "rustion.audit.witness"`** + **`audit::RECORDING_REPLAYED = "recording.replayed"`** new constants.
+- **`POST rustion/recordings/replay-log`** BV route + `rustion_recording_replay_log` Tauri command. The Recordings page now hashes the loaded bytes via `crypto.subtle.digest("SHA-256")`, compares against the sidecar's `sha256`, and reports the result to BV — emitting `recording.replayed` with the operator's identity + `sha256_mismatch` flag. SOC tooling joins on this for "who watched what when".
+- **Live Sessions analytics extension**: two new cards aggregate fleet-wide top targets + top operators with horizontal bar visualisations + a "Recent audit witness" table (last 30 entries across all bastions, with event-type badge + hash-prefix column).
+
+### Phase 8.3 — Replay window + WASM decoder + signed-URL replay infrastructure — **Todo**
+
+- **`SessionReplayWindow`** — separate Tauri WebviewWindow for full-screen playback (inline playback already works on the Recordings page from Phase 6.5).
+- **`.rdp-rec` WASM decoder** — MS-RDPBCGR slow-path bitmap codec + canvas renderer. Separate multi-week engineering project.
+- **Signed-URL recording stream** — `POST /v1/rustion/recordings/{rid}/replay` on BV builds a fresh envelope; Rustion's `GET /v1/recordings/{rid}` returns a 60s IP-bound signed URL for the player to stream chunks without re-authenticating per chunk.
 
 ### Phase 8 — Telemetry pull + in-GUI session replay (original spec table)
 

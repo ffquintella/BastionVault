@@ -705,6 +705,40 @@ pub struct RustionRecordingBlob {
     pub size_bytes: u64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionRecordingReplayLog {
+    pub recording_id: String,
+    /// Set to true when the blob's recomputed sha256 didn't match
+    /// the sidecar's. The audit event surfaces this so SOC tooling
+    /// can flag tampered downloads.
+    pub sha256_mismatch: bool,
+}
+
+#[tauri::command]
+pub async fn rustion_recording_replay_log(
+    state: State<'_, AppState>,
+    input: RustionRecordingReplayLog,
+) -> CmdResult<()> {
+    let mut body = Map::new();
+    body.insert(
+        "recording_id".into(),
+        Value::String(input.recording_id),
+    );
+    body.insert(
+        "sha256_mismatch".into(),
+        Value::Bool(input.sha256_mismatch),
+    );
+    make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}recordings/replay-log"),
+        Some(body),
+    )
+    .await?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn rustion_recording_blob(
     state: State<'_, AppState>,
@@ -1236,6 +1270,19 @@ pub struct RustionTelemetryStats {
 
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct RustionAuditEntry {
+    pub sequence: u64,
+    pub timestamp: String,
+    pub actor: String,
+    pub session_id: Option<String>,
+    pub source_addr: Option<String>,
+    pub event: Value,
+    pub hash: String,
+    pub target_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct RustionTelemetryTarget {
     pub target_id: String,
     pub target_name: String,
@@ -1245,6 +1292,7 @@ pub struct RustionTelemetryTarget {
     pub active: Vec<RustionTelemetrySession>,
     pub history: Vec<RustionTelemetrySession>,
     pub stats: RustionTelemetryStats,
+    pub recent_audit: Vec<RustionAuditEntry>,
 }
 
 fn session_from_value(v: &Value) -> RustionTelemetrySession {
@@ -1331,6 +1379,11 @@ fn target_from_value(v: &Value) -> RustionTelemetryTarget {
             })
             .unwrap_or_default(),
     };
+    let recent_audit = obj
+        .get("recent_audit")
+        .and_then(|x| x.as_array())
+        .map(|a| a.iter().map(audit_entry_from_value).collect())
+        .unwrap_or_default();
     RustionTelemetryTarget {
         target_id: s(&obj, "target_id"),
         target_name: s(&obj, "target_name"),
@@ -1346,6 +1399,27 @@ fn target_from_value(v: &Value) -> RustionTelemetryTarget {
         active,
         history,
         stats,
+        recent_audit,
+    }
+}
+
+fn audit_entry_from_value(v: &Value) -> RustionAuditEntry {
+    let obj = v.as_object().cloned().unwrap_or_default();
+    RustionAuditEntry {
+        sequence: u64_field(&obj, "sequence"),
+        timestamp: s(&obj, "timestamp"),
+        actor: s(&obj, "actor"),
+        session_id: obj
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        source_addr: obj
+            .get("source_addr")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        event: obj.get("event").cloned().unwrap_or(Value::Null),
+        hash: s(&obj, "hash"),
+        target_id: s(&obj, "target_id"),
     }
 }
 

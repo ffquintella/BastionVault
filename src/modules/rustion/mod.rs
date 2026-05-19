@@ -207,6 +207,7 @@ impl RustionBackend {
         let h_recording_read = self.inner.clone();
         let h_recording_pull = self.inner.clone();
         let h_recording_blob = self.inner.clone();
+        let h_recording_replay_log = self.inner.clone();
         let h_policy_global_read = self.inner.clone();
         let h_policy_global_write = self.inner.clone();
         let h_bastion_groups_list = self.inner.clone();
@@ -649,6 +650,21 @@ impl RustionBackend {
                         {op: Operation::Delete, handler: h_bastion_group_delete.handle_bastion_group_delete}
                     ],
                     help: "Phase 7 — Bastion group CRUD by name."
+                },
+                {
+                    // POST rustion/recordings/replay-log — Phase 8.2.
+                    // Emits a `recording.replayed` audit event when the
+                    // GUI player loads an artifact. SOC tooling joins
+                    // on this for "who watched what when".
+                    pattern: r"recordings/replay-log$",
+                    fields: {
+                        "recording_id": { field_type: FieldType::Str, default: "", description: "rec_<sid_suffix> identifier." },
+                        "sha256_mismatch": { field_type: FieldType::Bool, default: false, description: "Set when the player's recomputed sha256 disagreed with the sidecar's." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_recording_replay_log.handle_recording_replay_log}
+                    ],
+                    help: "Phase 8.2 — Log a recording.replayed audit event from the GUI player."
                 },
                 {
                     // POST rustion/recordings/pull — Phase 6.3
@@ -1735,6 +1751,42 @@ impl RustionBackendInner {
             Value::Number((bytes.len() as u64).into()),
         );
         Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_recording_replay_log(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let recording_id = req
+            .get_data("recording_id")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        if recording_id.is_empty() {
+            return Err(bv_error_response_status!(400, "recording_id is required"));
+        }
+        let sha256_mismatch = req
+            .get_data("sha256_mismatch")
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        // The caller's identity is already in the audit chain via the
+        // BV token; we just emit the structured log line that SOC
+        // tooling joins on.
+        let actor = req
+            .auth
+            .as_ref()
+            .and_then(|a| a.metadata.get("username").cloned())
+            .unwrap_or_else(|| "(unauthenticated)".into());
+        log::info!(
+            "{}: recording_id={} actor={} sha256_mismatch={}",
+            audit::RECORDING_REPLAYED,
+            recording_id,
+            actor,
+            sha256_mismatch
+        );
+        Ok(Some(Response::data_response(Some(Map::new()))))
     }
 
     pub async fn handle_recording_pull(
