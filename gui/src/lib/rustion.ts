@@ -253,3 +253,57 @@ export interface RustionRecordingBlob {
 
 export const rustionRecordingBlob = (recordingId: string) =>
   invoke<RustionRecordingBlob>("rustion_recording_blob", { recordingId });
+
+// ─── Phase 7: policy + bastion groups ─────────────────────────────
+
+export type Transport = "" | "direct" | "rustion-preferred" | "rustion-required";
+export type Recording = "" | "always" | "input-redacted" | "off";
+export type Selection = "ordered" | "random";
+
+export interface RustionPolicyTier {
+  transport: Transport;
+  bastions: string[];
+  bastionGroup: string;
+  recording: Recording;
+  lock: boolean;
+}
+
+export const rustionPolicyGlobalRead = () =>
+  invoke<RustionPolicyTier>("rustion_policy_global_read");
+
+export const rustionPolicyGlobalWrite = (input: RustionPolicyTier) =>
+  invoke<void>("rustion_policy_global_write", { input });
+
+export interface RustionBastionGroup {
+  name: string;
+  members: string[];
+  selection: Selection;
+  description: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RustionBastionGroupInput {
+  name: string;
+  members: string[];
+  selection: Selection;
+  description: string;
+}
+
+export const rustionBastionGroupList = () =>
+  invoke<string[]>("rustion_bastion_group_list");
+
+export const rustionBastionGroupRead = (name: string) =>
+  invoke<RustionBastionGroup>("rustion_bastion_group_read", { name });
+
+export const rustionBastionGroupCreate = (input: RustionBastionGroupInput) =>
+  invoke<RustionBastionGroup>("rustion_bastion_group_create", { input });
+
+export const rustionBastionGroupUpdate = (
+  name: string,
+  input: RustionBastionGroupInput,
+) =>
+  invoke<RustionBastionGroup>("rustion_bastion_group_update", { name, input });
+
+export const rustionBastionGroupDelete = (name: string) =>
+  invoke<void>("rustion_bastion_group_delete", { name });

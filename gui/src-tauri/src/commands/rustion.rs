@@ -703,6 +703,206 @@ pub async fn rustion_recording_blob(
     })
 }
 
+// ─── Phase 7: policy + bastion groups ────────────────────────────
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionPolicyTier {
+    pub transport: String,
+    pub bastions: Vec<String>,
+    pub bastion_group: String,
+    pub recording: String,
+    pub lock: bool,
+}
+
+#[tauri::command]
+pub async fn rustion_policy_global_read(
+    state: State<'_, AppState>,
+) -> CmdResult<RustionPolicyTier> {
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("{RUSTION_MOUNT}policy/global"),
+        None,
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(RustionPolicyTier {
+        transport: s(&data, "transport"),
+        bastions: data
+            .get("bastions")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        bastion_group: s(&data, "bastion_group"),
+        recording: s(&data, "recording"),
+        lock: data.get("lock").and_then(|v| v.as_bool()).unwrap_or(false),
+    })
+}
+
+#[tauri::command]
+pub async fn rustion_policy_global_write(
+    state: State<'_, AppState>,
+    input: RustionPolicyTier,
+) -> CmdResult<()> {
+    let mut body = Map::new();
+    if !input.transport.is_empty() {
+        body.insert("transport".into(), Value::String(input.transport));
+    }
+    body.insert(
+        "bastions".into(),
+        Value::Array(input.bastions.into_iter().map(Value::String).collect()),
+    );
+    if !input.bastion_group.is_empty() {
+        body.insert("bastion_group".into(), Value::String(input.bastion_group));
+    }
+    if !input.recording.is_empty() {
+        body.insert("recording".into(), Value::String(input.recording));
+    }
+    body.insert("lock".into(), Value::Bool(input.lock));
+    make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}policy/global"),
+        Some(body),
+    )
+    .await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionBastionGroup {
+    pub name: String,
+    pub members: Vec<String>,
+    pub selection: String,
+    pub description: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+fn group_from_map(data: &Map<String, Value>) -> RustionBastionGroup {
+    RustionBastionGroup {
+        name: s(data, "name"),
+        members: data
+            .get("members")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        selection: s(data, "selection"),
+        description: s(data, "description"),
+        created_at: s(data, "created_at"),
+        updated_at: s(data, "updated_at"),
+    }
+}
+
+#[tauri::command]
+pub async fn rustion_bastion_group_list(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<String>> {
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("{RUSTION_MOUNT}bastion-groups"),
+        None,
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(data
+        .get("groups")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default())
+}
+
+#[tauri::command]
+pub async fn rustion_bastion_group_read(
+    state: State<'_, AppState>,
+    name: String,
+) -> CmdResult<RustionBastionGroup> {
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("{RUSTION_MOUNT}bastion-groups/{name}"),
+        None,
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(group_from_map(&data))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionBastionGroupInput {
+    pub name: String,
+    pub members: Vec<String>,
+    pub selection: String,
+    pub description: String,
+}
+
+#[tauri::command]
+pub async fn rustion_bastion_group_create(
+    state: State<'_, AppState>,
+    input: RustionBastionGroupInput,
+) -> CmdResult<RustionBastionGroup> {
+    let mut body = Map::new();
+    body.insert("name".into(), Value::String(input.name));
+    body.insert(
+        "members".into(),
+        Value::Array(input.members.into_iter().map(Value::String).collect()),
+    );
+    body.insert("selection".into(), Value::String(input.selection));
+    body.insert("description".into(), Value::String(input.description));
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}bastion-groups"),
+        Some(body),
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(group_from_map(&data))
+}
+
+#[tauri::command]
+pub async fn rustion_bastion_group_update(
+    state: State<'_, AppState>,
+    name: String,
+    input: RustionBastionGroupInput,
+) -> CmdResult<RustionBastionGroup> {
+    let mut body = Map::new();
+    body.insert(
+        "members".into(),
+        Value::Array(input.members.into_iter().map(Value::String).collect()),
+    );
+    body.insert("selection".into(), Value::String(input.selection));
+    body.insert("description".into(), Value::String(input.description));
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}bastion-groups/{name}"),
+        Some(body),
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(group_from_map(&data))
+}
+
+#[tauri::command]
+pub async fn rustion_bastion_group_delete(
+    state: State<'_, AppState>,
+    name: String,
+) -> CmdResult<()> {
+    make_request(
+        &state,
+        Operation::Delete,
+        format!("{RUSTION_MOUNT}bastion-groups/{name}"),
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn rustion_master_pubkey_export(
     state: State<'_, AppState>,

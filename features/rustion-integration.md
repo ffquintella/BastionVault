@@ -652,7 +652,42 @@ Phase 6 is now fully closed end-to-end on the recording handoff loop. SSH record
 - **`RdpRecSummary`** (RDP): walks the `.rdp-rec` frame stream natively in TS — magic `"RREC"` check + JSON header parse + `(ts:u64 + type:u8 + len:u32 + payload)` iteration. Surfaces header, graphics/keyboard/mouse event counts, total duration. Inline visual replay is gated on a real RDP bitmap-update codec (MS-RDPBCGR slow-path bitmap, raster ops, NSCodec) — that's a multi-week protocol-decoder project on its own track, called out in the page UI as "future enhancement". The download button hands the operator the raw `.rdp-rec` for external viewers.
 - **`SmbLogSummary`** (SMB): plain-text op log preview + download.
 
-### Phase 7 — Four-tier transport-and-bastion policy + `rustion-required` mode — **Todo**
+### Phase 7.1 — Policy data model + resolver + global/bastion-groups CRUD — **Done** (BV 0.7.29)
+
+The foundation layer of the four-tier policy: data model, storage, the effective-policy resolver, and the global + bastion-groups CRUD surface (HTTP + Tauri + TS).
+
+- **`src/modules/rustion/policy.rs`** new module:
+  - **Enums**: `Transport ∈ {Direct, RustionPreferred, RustionRequired}`, `Recording ∈ {Off, InputRedacted, Always}`, `Selection ∈ {Ordered, Random}`.
+  - **Per-tier struct** `PolicyTier { transport, bastions, bastion_group, recording, lock }` — all `Option` so undefined knobs fall through.
+  - **Wrappers** `GlobalPolicy`, `TypePolicy`, `AssetGroupPolicy { priority }`, `ResourcePolicy`.
+  - **`BastionGroup { name, members[], selection, description, timestamps }`**.
+  - **`resolve(global, type_, asset_groups[], resource) → EffectivePolicy`** implements the spec's resolution rules:
+    - `transport`: **most-restrictive wins** (rank: required > preferred > direct).
+    - `recording`: **strictest wins** (rank: always > input-redacted > off).
+    - `bastions` / `bastion_group`: **nearest-defined-tier wins**.
+    - **Asset-group priority**: high priority wins via low-first overwrite ordering.
+    - **Locking**: a tier with `lock = true` snapshots its knobs; lower tiers may match-or-strengthen but never weaken. Violations surface as `EffectivePolicy.lock_violation = Some(LockViolation { locking_tier, field, detail })`.
+  - **`PolicyStore`** with five storage views (`rustion/bastion-groups/`, `rustion/policy/global`, `rustion/policy/type/`, `rustion/policy/asset-group/`, `rustion/policy/resource/`) and CRUD helpers for each.
+  - **8 unit tests**: default-when-no-tiers, resource-can-raise-transport, transport-most-restrictive-wins, lock-prevents-weakening-transport, recording-strictest-wins, locked-recording-prevents-off-override, bastions-nearest-tier-wins, asset-group-priority-breaks-ties.
+- **HTTP routes**:
+  - `GET/PUT rustion/policy/global` — root-gated.
+  - `GET rustion/bastion-groups` (list) + `POST rustion/bastion-groups` (create).
+  - `GET/PUT/DELETE rustion/bastion-groups/<name>` (CRUD).
+- **Audit constants** already existed in `audit.rs` from Phase 1 spec — `POLICY_GLOBAL_UPDATE`, `POLICY_TYPE_UPDATE`, `POLICY_ASSET_GROUP_UPDATE`, `POLICY_RESOURCE_UPDATE`, `BASTION_GROUP_UPDATE`. The new handlers emit `POLICY_GLOBAL_UPDATE` and `BASTION_GROUP_UPDATE` (the other three light up in Phase 7.2 alongside the per-tier editors).
+- **Tauri commands + TS wrappers**: `rustionPolicyGlobal{Read,Write}`, `rustionBastionGroup{List,Read,Create,Update,Delete}`.
+
+### Phase 7.2 — Per-type / per-asset-group / per-resource editors + session/open integration — **Todo**
+
+The resolver is ready to consume policy from all four tiers but the lower-three-tier editors aren't wired into the GUI yet. Remaining work:
+
+- **HTTP routes + Tauri commands** for `rustion/policy/type/<name>`, `rustion/policy/asset-group/<id>`, `rustion/policy/resource/<id>` (CRUD shape identical to global).
+- **Settings UI**: "Rustion → Global policy" panel (root-only), "Rustion → Bastion Groups" CRUD panel (already plumbable via the existing `/settings` route + the new Tauri commands).
+- **Resource Types editor** gains the per-type fields + `transport_lock` toggle.
+- **Asset Groups page** gains per-group transport/bastion/recording + priority slider + lock.
+- **Resource Connection tab** gains the per-resource override (gated to resource owner, writable only when no upstream tier is locked) + a read-only badge naming the locking tier when locked upstream.
+- **`session/open` calls the resolver**: walk the resource → owning AGs → resource type → global chain, compute `EffectivePolicy`, refuse on `lock_violation`, refuse on `transport == RustionRequired` when no bastions are reachable. Stamp the resolution chain on the `session.open` audit event for SOC visibility.
+- **Migration action**: root-only "Force all Connect through Rustion" toggle that flips `transport_default = rustion-required` + `lock = true` in one step after a diff preview of every resource that would change behaviour.
+- **Audit events** for `rustion.policy.type.update`, `rustion.policy.asset_group.update`, `rustion.policy.resource.update` (constants exist; emit sites added with each editor).
 
 - **Bastion groups** under `sys/config/rustion/bastion-groups/<name>` — named pools of Rustion targets with per-member priority and a `selection: "ordered" | "random"` flag, gated to admin. CRUD on the API, CLI (`bastionvault rustion bastion-group add | list | rename | members ...`), and Settings → Rustion → Bastion Groups panel.
 - **Global policy** at `sys/config/rustion` (`transport_default`, `bastion_group_default`, `recording_default`, `transport_lock`), gated to root.

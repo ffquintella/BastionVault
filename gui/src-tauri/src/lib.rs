@@ -499,6 +499,13 @@ pub fn run() {
             commands::rustion::rustion_recording_read,
             commands::rustion::rustion_recording_pull,
             commands::rustion::rustion_recording_blob,
+            commands::rustion::rustion_policy_global_read,
+            commands::rustion::rustion_policy_global_write,
+            commands::rustion::rustion_bastion_group_list,
+            commands::rustion::rustion_bastion_group_read,
+            commands::rustion::rustion_bastion_group_create,
+            commands::rustion::rustion_bastion_group_update,
+            commands::rustion::rustion_bastion_group_delete,
             // Per-user scoping: entity, owner, sharing, transfer
             commands::sharing::get_entity_self,
             commands::sharing::list_entity_aliases,

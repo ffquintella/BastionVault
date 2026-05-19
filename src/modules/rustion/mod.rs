@@ -39,8 +39,65 @@ pub mod envelope;
 pub mod health;
 pub mod master;
 pub mod poller;
+pub mod policy;
 pub mod probe;
 pub mod recordings;
+
+fn read_string_list(req: &Request, key: &str) -> Vec<String> {
+    match req.get_data(key) {
+        Ok(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect(),
+        Ok(Value::String(s)) => s
+            .split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn read_tier_fields(req: &Request) -> policy::PolicyTier {
+    let pick = |k: &str| -> Option<String> {
+        req.get_data(k)
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .filter(|s| !s.is_empty())
+    };
+    let transport = pick("transport").and_then(|s| match s.as_str() {
+        "direct" => Some(policy::Transport::Direct),
+        "rustion-preferred" => Some(policy::Transport::RustionPreferred),
+        "rustion-required" => Some(policy::Transport::RustionRequired),
+        _ => None,
+    });
+    let recording = pick("recording").and_then(|s| match s.as_str() {
+        "off" => Some(policy::Recording::Off),
+        "input-redacted" => Some(policy::Recording::InputRedacted),
+        "always" => Some(policy::Recording::Always),
+        _ => None,
+    });
+    let bastion_group = pick("bastion_group");
+    let lock = req
+        .get_data("lock")
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    policy::PolicyTier {
+        transport,
+        bastions: read_string_list(req, "bastions"),
+        bastion_group,
+        recording,
+        lock,
+    }
+}
+
+fn group_to_map(g: &policy::BastionGroup) -> Map<String, Value> {
+    serde_json::to_value(g)
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
 pub mod session;
 pub mod store;
 pub mod webhook_verify;
@@ -70,6 +127,7 @@ pub struct RustionModule {
     pub store: ArcSwap<Option<Arc<RustionStore>>>,
     pub master_store: ArcSwap<Option<Arc<MasterStore>>>,
     pub recordings_store: ArcSwap<Option<Arc<recordings::RecordingsStore>>>,
+    pub policy_store: ArcSwap<Option<Arc<policy::PolicyStore>>>,
 }
 
 pub struct RustionBackendInner {
@@ -109,6 +167,13 @@ impl RustionBackend {
         let h_recording_read = self.inner.clone();
         let h_recording_pull = self.inner.clone();
         let h_recording_blob = self.inner.clone();
+        let h_policy_global_read = self.inner.clone();
+        let h_policy_global_write = self.inner.clone();
+        let h_bastion_groups_list = self.inner.clone();
+        let h_bastion_groups_create = self.inner.clone();
+        let h_bastion_group_read = self.inner.clone();
+        let h_bastion_group_update = self.inner.clone();
+        let h_bastion_group_delete = self.inner.clone();
         let h_noop1 = self.inner.clone();
         let h_noop2 = self.inner.clone();
 
@@ -407,6 +472,52 @@ impl RustionBackend {
                     help: "Phase 6.5 — fetch a recording artifact's bytes (base64) for in-GUI playback."
                 },
                 {
+                    // GET/PUT rustion/policy/global — Phase 7. Root-gated.
+                    pattern: r"policy/global$",
+                    fields: {
+                        "transport": { field_type: FieldType::Str, required: false, description: "direct | rustion-preferred | rustion-required" },
+                        "bastions": { field_type: FieldType::CommaStringSlice, required: false, description: "Pinned bastion ids (mutually exclusive with bastion_group)." },
+                        "bastion_group": { field_type: FieldType::Str, required: false, description: "Named bastion group." },
+                        "recording": { field_type: FieldType::Str, required: false, description: "always | input-redacted | off" },
+                        "lock": { field_type: FieldType::Bool, required: false, description: "Freeze these settings against lower tiers." }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_policy_global_read.handle_policy_global_read},
+                        {op: Operation::Write, handler: h_policy_global_write.handle_policy_global_write}
+                    ],
+                    help: "Phase 7 — Global Rustion transport-and-bastion policy. Read + write the deployment-wide defaults."
+                },
+                {
+                    // List + create bastion groups.
+                    pattern: r"bastion-groups/?$",
+                    fields: {
+                        "name": { field_type: FieldType::Str, default: "", description: "Group name (case-insensitive unique)." },
+                        "members": { field_type: FieldType::CommaStringSlice, required: false, description: "Bastion target ids in this group." },
+                        "selection": { field_type: FieldType::Str, default: "ordered", description: "ordered | random" },
+                        "description": { field_type: FieldType::Str, default: "", description: "Operator-visible description." }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_bastion_groups_list.handle_bastion_groups_list},
+                        {op: Operation::Write, handler: h_bastion_groups_create.handle_bastion_groups_create}
+                    ],
+                    help: "Phase 7 — Bastion groups: named pools of Rustion targets used by the policy resolver."
+                },
+                {
+                    // Read / update / delete a single bastion group.
+                    pattern: r"bastion-groups/(?P<name>[A-Za-z0-9_\-]+)$",
+                    fields: {
+                        "members": { field_type: FieldType::CommaStringSlice, required: false, description: "Replace member list." },
+                        "selection": { field_type: FieldType::Str, required: false, description: "ordered | random" },
+                        "description": { field_type: FieldType::Str, required: false, description: "Operator-visible description." }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_bastion_group_read.handle_bastion_group_read},
+                        {op: Operation::Write, handler: h_bastion_group_update.handle_bastion_group_update},
+                        {op: Operation::Delete, handler: h_bastion_group_delete.handle_bastion_group_delete}
+                    ],
+                    help: "Phase 7 — Bastion group CRUD by name."
+                },
+                {
                     // POST rustion/recordings/pull — Phase 6.3
                     // pull-fallback: GET the sidecar from the bastion
                     // and stuff it into the local recordings index.
@@ -463,6 +574,16 @@ impl RustionBackendInner {
             .ok_or_else(|| bv_error_string!("rustion module not registered"))?;
         let recs = module.recordings_store();
         recs.ok_or_else(|| bv_error_string!("rustion recordings store not initialized"))
+    }
+
+    fn resolve_policy_store(&self) -> Result<Arc<policy::PolicyStore>, RvError> {
+        let module = self
+            .core
+            .module_manager
+            .get_module::<RustionModule>("rustion")
+            .ok_or_else(|| bv_error_string!("rustion module not registered"))?;
+        let pol = module.policy_store();
+        pol.ok_or_else(|| bv_error_string!("rustion policy store not initialized"))
     }
 
     fn input_from_req(req: &Request, fallback_name: &str) -> Result<RustionTargetInput, RvError> {
@@ -1363,6 +1484,180 @@ impl RustionBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
+    // ─── Phase 7: policy + bastion groups ──────────────────────────
+
+    pub async fn handle_policy_global_read(
+        &self,
+        _b: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let pol = self.resolve_policy_store()?;
+        let g = pol.get_global().await?;
+        let data = serde_json::to_value(&g)
+            .map_err(|e| bv_error_string!(&format!("encode: {e}")))?
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_policy_global_write(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let pol = self.resolve_policy_store()?;
+        let tier = read_tier_fields(req);
+        let g = policy::GlobalPolicy {
+            tier,
+            updated_at: Some(chrono::Utc::now()),
+        };
+        pol.put_global(&g).await?;
+        log::info!("{}: lock={}", audit::POLICY_GLOBAL_UPDATE, g.tier.lock);
+        Ok(Some(Response::data_response(Some(Map::new()))))
+    }
+
+    pub async fn handle_bastion_groups_list(
+        &self,
+        _b: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let pol = self.resolve_policy_store()?;
+        let names = pol.list_groups().await?;
+        let mut data = Map::new();
+        data.insert(
+            "groups".into(),
+            Value::Array(names.into_iter().map(Value::String).collect()),
+        );
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_bastion_groups_create(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let pol = self.resolve_policy_store()?;
+        let pick = |k: &str| -> String {
+            req.get_data(k)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_default()
+        };
+        let name = pick("name");
+        if name.is_empty() {
+            return Err(bv_error_response_status!(400, "name is required"));
+        }
+        let members = read_string_list(req, "members");
+        let selection = match pick("selection").as_str() {
+            "random" => policy::Selection::Random,
+            _ => policy::Selection::Ordered,
+        };
+        if pol.get_group(&name).await?.is_some() {
+            return Err(bv_error_response_status!(
+                409,
+                &format!("bastion group `{name}` already exists")
+            ));
+        }
+        let now = chrono::Utc::now();
+        let g = policy::BastionGroup {
+            name: name.clone(),
+            members,
+            selection,
+            description: pick("description"),
+            created_at: now,
+            updated_at: now,
+        };
+        pol.put_group(&g).await?;
+        log::info!("{}: name={}", audit::BASTION_GROUP_UPDATE, name);
+        Ok(Some(Response::data_response(Some(group_to_map(&g)))))
+    }
+
+    pub async fn handle_bastion_group_read(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let pol = self.resolve_policy_store()?;
+        let name = req
+            .path
+            .strip_prefix("bastion-groups/")
+            .unwrap_or("")
+            .to_string();
+        let Some(g) = pol.get_group(&name).await? else {
+            return Err(bv_error_response_status!(404, &format!("bastion group `{name}` not found")));
+        };
+        Ok(Some(Response::data_response(Some(group_to_map(&g)))))
+    }
+
+    pub async fn handle_bastion_group_update(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let pol = self.resolve_policy_store()?;
+        let name = req
+            .path
+            .strip_prefix("bastion-groups/")
+            .unwrap_or("")
+            .to_string();
+        let Some(mut g) = pol.get_group(&name).await? else {
+            return Err(bv_error_response_status!(404, &format!("bastion group `{name}` not found")));
+        };
+        if let Ok(members) = req.get_data("members") {
+            if let Value::Array(arr) = members {
+                g.members = arr
+                    .iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect();
+            } else if let Value::String(s) = members {
+                g.members = s
+                    .split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect();
+            }
+        }
+        if let Some(s) = req
+            .get_data("selection")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+        {
+            g.selection = match s.as_str() {
+                "random" => policy::Selection::Random,
+                "ordered" => policy::Selection::Ordered,
+                _ => g.selection,
+            };
+        }
+        if let Some(d) = req
+            .get_data("description")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+        {
+            g.description = d;
+        }
+        g.updated_at = chrono::Utc::now();
+        pol.put_group(&g).await?;
+        log::info!("{}: name={}", audit::BASTION_GROUP_UPDATE, name);
+        Ok(Some(Response::data_response(Some(group_to_map(&g)))))
+    }
+
+    pub async fn handle_bastion_group_delete(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let pol = self.resolve_policy_store()?;
+        let name = req
+            .path
+            .strip_prefix("bastion-groups/")
+            .unwrap_or("")
+            .to_string();
+        pol.delete_group(&name).await?;
+        log::info!("{}: name={} (deleted)", audit::BASTION_GROUP_UPDATE, name);
+        Ok(Some(Response::data_response(Some(Map::new()))))
+    }
+
     /// Extract OperatorContext from the caller's auth metadata.
     /// Phase 5: factored out so renew + kill share the open path's
     /// identity-stamping logic.
@@ -1506,6 +1801,7 @@ impl RustionModule {
             store: ArcSwap::new(Arc::new(None)),
             master_store: ArcSwap::new(Arc::new(None)),
             recordings_store: ArcSwap::new(Arc::new(None)),
+            policy_store: ArcSwap::new(Arc::new(None)),
         }
     }
 
@@ -1519,6 +1815,10 @@ impl RustionModule {
 
     pub fn recordings_store(&self) -> Option<Arc<recordings::RecordingsStore>> {
         self.recordings_store.load().as_ref().clone()
+    }
+
+    pub fn policy_store(&self) -> Option<Arc<policy::PolicyStore>> {
+        self.policy_store.load().as_ref().clone()
     }
 }
 
@@ -1548,6 +1848,8 @@ impl Module for RustionModule {
         self.master_store.store(Arc::new(Some(master)));
         let recs = recordings::RecordingsStore::new(core).await?;
         self.recordings_store.store(Arc::new(Some(recs)));
+        let pol = policy::PolicyStore::new(core).await?;
+        self.policy_store.store(Arc::new(Some(pol)));
         Ok(())
     }
 
@@ -1555,6 +1857,7 @@ impl Module for RustionModule {
         self.store.store(Arc::new(None));
         self.master_store.store(Arc::new(None));
         self.recordings_store.store(Arc::new(None));
+        self.policy_store.store(Arc::new(None));
         core.delete_logical_backend("rustion")
     }
 }

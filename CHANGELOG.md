@@ -45,6 +45,52 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.29] - 2026-05-19
+
+### Added
+
+- **Rustion integration — Phase 7.1: four-tier policy foundation**.
+  Data model + storage + resolver + global/bastion-groups CRUD. The
+  per-resource-type / per-asset-group / per-resource editors and the
+  `session/open` integration land in Phase 7.2.
+    - **`src/modules/rustion/policy.rs`** new module:
+        - `Transport`, `Recording`, `Selection` enums.
+        - `PolicyTier { transport, bastions, bastion_group, recording, lock }`
+          + per-tier wrappers (`GlobalPolicy`, `TypePolicy`,
+          `AssetGroupPolicy { priority }`, `ResourcePolicy`).
+        - `BastionGroup` for named bastion pools.
+        - `resolve(global, type_, asset_groups[], resource) → EffectivePolicy`
+          implements: transport = most-restrictive wins; recording =
+          strictest wins; bastions/bastion_group = nearest-defined-tier
+          wins; asset-group priority breaks ties (high wins via
+          low-first overwrite). Lock semantics: a locked tier
+          snapshots its knobs; lower tiers may match-or-strengthen but
+          never weaken — violations surface as
+          `EffectivePolicy.lock_violation`.
+        - `PolicyStore` with five storage views (bastion groups,
+          global, per-type, per-AG, per-resource).
+        - **8 unit tests** cover default, raise-from-resource, lock
+          violations on both transport and recording, nearest-tier
+          bastions, asset-group priority resolution.
+    - **HTTP routes**:
+        - `GET/PUT rustion/policy/global`.
+        - `GET rustion/bastion-groups` (list) + `POST` (create).
+        - `GET/PUT/DELETE rustion/bastion-groups/<name>`.
+    - **Tauri commands + TS wrappers**: `rustionPolicyGlobal{Read,Write}`,
+      `rustionBastionGroup{List,Read,Create,Update,Delete}`.
+    - Existing audit constants `POLICY_GLOBAL_UPDATE` +
+      `BASTION_GROUP_UPDATE` (from Phase 1) now emit on the new
+      handlers; `POLICY_TYPE_UPDATE`, `POLICY_ASSET_GROUP_UPDATE`,
+      `POLICY_RESOURCE_UPDATE` light up in Phase 7.2 alongside the
+      per-tier editors.
+
+### Changed
+
+- `features/rustion-integration.md`: Phase 7 split — 7.1 marked Done;
+  7.2 carved out for the per-type / per-AG / per-resource editor
+  surface, the `session/open` resolver integration, and the
+  "Force all Connect through Rustion" migration action.
+
 ## [0.7.28] - 2026-05-19
 
 ### Added
