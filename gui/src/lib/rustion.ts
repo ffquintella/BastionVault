@@ -206,3 +206,37 @@ export interface RustionSessionKillResult {
 
 export const rustionSessionKill = (request: RustionSessionKillRequest) =>
   invoke<RustionSessionKillResult>("rustion_session_kill", { request });
+
+// ─── Recordings (Phase 6.2 / 6.3) ────────────────────────────────
+
+export interface RustionRecordingEntry {
+  recordingId: string;
+  sessionId: string;
+  authority: string;
+  format: string;
+  sha256: string;
+  sizeBytes: number;
+  startedAt: string;
+  finishedAt: string;
+  targetHost: string;
+  targetUser: string;
+  correlationId: string;
+  bastionId: string;
+  receivedAt: string;
+  /** "webhook" (delivered) or "pull" (fetched via the 24h fallback). */
+  deliveryMode: string;
+}
+
+export const rustionRecordingsList = () =>
+  invoke<string[]>("rustion_recordings_list");
+
+export const rustionRecordingRead = (recordingId: string) =>
+  invoke<RustionRecordingEntry>("rustion_recording_read", { recordingId });
+
+export interface RustionRecordingPullRequest {
+  bastionId: string;
+  sessionId: string;
+}
+
+export const rustionRecordingPull = (request: RustionRecordingPullRequest) =>
+  invoke<RustionRecordingEntry>("rustion_recording_pull", { request });

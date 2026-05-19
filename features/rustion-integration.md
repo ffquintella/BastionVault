@@ -622,13 +622,24 @@ The signed-handoff loop between Rustion and BV — sidecar payload travels with 
     - `GET rustion/recordings` — list known recording ids.
     - `GET rustion/recordings/<rid>` — fetch one entry.
 
-### Phase 6.3 — Webhook retry loop + 24h fallback poller + playback — **Todo**
+### Phase 6.3 — Retry loop + pull-fallback + recording surface — **Done** (BV 0.7.26 + Rustion 0.7.22)
 
-- Exponential-backoff delivery loop on the Rustion side (max 5 retries over ~30 min) as specified in `docs/bastionvault-integration.md` §Recording handoff. Today's `deliver()` is one-shot — callers compose retry on top until 6.3 lands.
-- 24h fallback poller on BV that walks active-session correlations and pulls sidecars Rustion failed to webhook via `GET /v1/sessions/{sid}/recording`.
-- Proxy-to-`deliver()` orchestration glue on Rustion (where the `WebhookSigningKey` lives + how the proxy's finish-path reaches the per-authority webhook URL). The primitives are in place; the binary-level wiring follows the same pattern as the SSH/RDP listener `bv_session_store` injection from Phase 3.1/4.1.
-- "Open recording" link in audit timeline; signed-URL stream from Rustion to the player.
-- asciicast playback in-GUI (existing xterm.js + asciinema-player), `.rdp-rec` playback handed off to a small wasm decoder shipped in the GUI bundle.
+Closes the operational handoff loop: webhooks survive transient failures with bounded backoff, BV can force-pull a missed recording, and the GUI has the API surface it needs to query the recordings index.
+
+- **`rustion-control-plane::webhook::deliver_with_retry`** — wraps the one-shot `deliver()` with an exponential-backoff schedule. `RETRY_DELAYS_SECS = [30, 60, 240, 600, 900]` matches the spec's "5 retries over ~30 min" target (1830 s total = 30m 30s). Each attempt logs `rustion::usage` `RECORDING_WEBHOOK_RETRY` (failure) or `RECORDING_WEBHOOK_DELIVERED` (success) so SOC tooling can see the delivery shape. The inner `deliver_with_retry_impl` accepts a `sleep_fn` for fast deterministic tests; 2 new unit tests cover schedule total + walking-then-giving-up against `127.0.0.1:1`.
+- **BV `recordings::pull_recording(targets, recordings, bastion_id, session_id)`** — GETs the bastion's `/v1/sessions/{sid}/recording` endpoint, parses the sidecar, stores it with `delivery_mode = "pull"`. Signature check is *not* required on this path because the sidecar comes back over the bastion's TLS-pinned channel (no third-party hop the way the webhook has). Emits `audit::RECORDING_LINKED` with `mode=pull`.
+- **New BV HTTP route**: `POST rustion/recordings/pull` driving the pull helper. Operator-triggered or scheduler-driven.
+- **Tauri commands**: `rustion_recordings_list`, `rustion_recording_read`, `rustion_recording_pull`. Typed TypeScript wrappers in `gui/src/lib/rustion.ts`. The Connection Window can now display "Recording: ready" once the entry lands, and offer a "Refresh from bastion" button that calls `rustionRecordingPull`.
+
+### Phase 6.4 — Scheduler + GUI playback — **Todo**
+
+The slice that needs UI work and BV scheduler infrastructure:
+
+- **24h fallback cron** on BV — periodic timer that walks `audit::SESSION_TERMINATE` events whose `recording_id` never landed in the recordings index, and calls `pull_recording` for each. Needs a generic BV background-task scheduler (the existing `rustion::probe` 30s pinger is a precedent; the recording poller will share that scheduling primitive).
+- **"Open recording" link** in the audit timeline (Recordings page in the GUI surfacing the `RustionRecordingEntry` list + filters by authority/bastion/time).
+- **Signed-URL bytes endpoint** on Rustion: `GET /v1/recordings/{rid}/blob` serving the actual `.cast` / `.rdp-rec` payload with a short-lived signed URL (so BV can stream to the player without re-authenticating each chunk).
+- **asciicast playback** in-GUI — xterm.js + asciinema-player wired into the Recordings page.
+- **`.rdp-rec` wasm decoder** — small WASM module shipped in the GUI bundle that walks the binary frame stream and renders into an HTML5 canvas.
 
 ### Phase 7 — Four-tier transport-and-bastion policy + `rustion-required` mode — **Todo**
 

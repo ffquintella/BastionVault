@@ -45,6 +45,45 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.26] - 2026-05-19
+
+### Added
+
+- **Rustion integration — Phase 6.3: retry loop + pull-fallback +
+  recordings surface** (paired with Rustion 0.7.22). Closes the
+  operational handoff loop so webhooks survive transient failures
+  with bounded backoff, BV can force-pull a missed recording, and
+  the GUI has the API surface to query the recordings index.
+    - **Rustion `webhook::deliver_with_retry`** wraps `deliver()`
+      with `RETRY_DELAYS_SECS = [30, 60, 240, 600, 900]` (1830 s
+      total = 30m 30s) — matches the spec's "5 retries over ~30 min"
+      target. Each attempt emits `rustion::usage`
+      `RECORDING_WEBHOOK_RETRY` (failure) or
+      `RECORDING_WEBHOOK_DELIVERED` (success). 2 new unit tests
+      (schedule total + walking-then-giving-up against
+      `127.0.0.1:1`).
+    - **BV `recordings::pull_recording`** — GETs the bastion's
+      `/v1/sessions/{sid}/recording` endpoint, parses the sidecar,
+      stores with `delivery_mode = "pull"`. No signature check on
+      this path because the sidecar arrives over the bastion's
+      TLS-pinned channel. Emits `audit::RECORDING_LINKED` with
+      `mode=pull`.
+    - **New HTTP route** `POST rustion/recordings/pull` driving the
+      helper. Operator-triggered or (Phase 6.4) scheduler-driven.
+    - **Three new Tauri commands**: `rustion_recordings_list`,
+      `rustion_recording_read`, `rustion_recording_pull`. Typed
+      TypeScript wrappers `rustionRecordingsList`,
+      `rustionRecordingRead`, `rustionRecordingPull` in
+      `gui/src/lib/rustion.ts` with the `RustionRecordingEntry`
+      shape mirroring the BV-side struct.
+
+### Changed
+
+- `features/rustion-integration.md`: Phase 6.3 marked Done; Phase 6.4
+  carved out for the 24h cron scheduler, GUI playback (xterm.js +
+  asciinema-player + `.rdp-rec` wasm decoder), and the signed-URL
+  bytes endpoint on Rustion.
+
 ## [0.7.25] - 2026-05-19
 
 ### Added

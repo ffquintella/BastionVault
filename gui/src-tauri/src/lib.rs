@@ -495,6 +495,9 @@ pub fn run() {
             commands::rustion::rustion_session_open,
             commands::rustion::rustion_session_renew,
             commands::rustion::rustion_session_kill,
+            commands::rustion::rustion_recordings_list,
+            commands::rustion::rustion_recording_read,
+            commands::rustion::rustion_recording_pull,
             // Per-user scoping: entity, owner, sharing, transfer
             commands::sharing::get_entity_self,
             commands::sharing::list_entity_aliases,

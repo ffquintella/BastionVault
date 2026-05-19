@@ -106,3 +106,99 @@ fn sanitize(id: &str) -> Result<String, RvError> {
     }
     Ok(t.to_string())
 }
+
+// ─── Phase 6.3: pull-fallback ───────────────────────────────────────
+
+/// Pull a recording sidecar from a bastion's 24h pull-fallback
+/// endpoint and persist it into the recordings index. Used when the
+/// webhook delivery missed (no `recording.ready` arrived within the
+/// expected window), and also exposed via a Tauri command so the
+/// operator can force-refresh from the GUI.
+///
+/// Returns the freshly-stored entry. Phase 6.3.
+#[maybe_async::maybe_async]
+pub async fn pull_recording(
+    targets: &super::store::RustionStore,
+    recordings: &RecordingsStore,
+    bastion_id: &str,
+    session_id: &str,
+) -> Result<RecordingEntry, RvError> {
+    let target = targets
+        .get_target(bastion_id)
+        .await?
+        .ok_or_else(|| bv_error_string!(&format!("bastion `{bastion_id}` not enrolled")))?;
+
+    let url = format!(
+        "https://{}/v1/sessions/{}/recording",
+        target.endpoint.trim_end_matches('/'),
+        session_id
+    );
+    let client = reqwest::ClientBuilder::new()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| bv_error_string!(&format!("http client: {e}")))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| bv_error_string!(&format!("transport: {e}")))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(bv_error_string!(&format!(
+            "bastion returned HTTP {status}: {body}"
+        )));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| bv_error_string!(&format!("read body: {e}")))?;
+
+    // Pull-fallback skips the signature check — the sidecar comes
+    // over the bastion's TLS-pinned channel, not a third-party hop.
+    // The webhook path retains hybrid-sig verification because
+    // there's no transport-level guarantee about who sent the POST.
+    let sidecar: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| bv_error_string!(&format!("sidecar parse: {e}")))?;
+    let sd = sidecar.as_object().ok_or_else(|| {
+        bv_error_string!("pull sidecar must be a JSON object")
+    })?;
+    let s = |k: &str| -> String {
+        sd.get(k)
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_default()
+    };
+    let u = |k: &str| -> u64 { sd.get(k).and_then(|v| v.as_u64()).unwrap_or(0) };
+    let parse_iso = |k: &str| -> chrono::DateTime<chrono::Utc> {
+        sd.get(k)
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.with_timezone(&chrono::Utc))
+            .unwrap_or_else(chrono::Utc::now)
+    };
+
+    let recording_id = s("recording_id");
+    if recording_id.is_empty() {
+        return Err(bv_error_string!("pulled sidecar missing recording_id"));
+    }
+    let entry = RecordingEntry {
+        recording_id,
+        session_id: s("session_id"),
+        authority: s("authority"),
+        format: s("format"),
+        sha256: s("sha256"),
+        size_bytes: u("size_bytes"),
+        started_at: parse_iso("started_at"),
+        finished_at: parse_iso("finished_at"),
+        target_host: s("target_host"),
+        target_user: s("target_user"),
+        correlation_id: s("correlation_id"),
+        bastion_id: bastion_id.to_string(),
+        received_at: chrono::Utc::now(),
+        delivery_mode: "pull".into(),
+    };
+    recordings.put(&entry).await?;
+    Ok(entry)
+}

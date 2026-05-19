@@ -106,6 +106,7 @@ impl RustionBackend {
         let h_webhook_recording = self.inner.clone();
         let h_recordings_list = self.inner.clone();
         let h_recording_read = self.inner.clone();
+        let h_recording_pull = self.inner.clone();
         let h_noop1 = self.inner.clone();
         let h_noop2 = self.inner.clone();
 
@@ -390,6 +391,20 @@ impl RustionBackend {
                         {op: Operation::Read, handler: h_recording_read.handle_recording_read}
                     ],
                     help: "Read a single recording entry by id (Phase 6.2)."
+                },
+                {
+                    // POST rustion/recordings/pull — Phase 6.3
+                    // pull-fallback: GET the sidecar from the bastion
+                    // and stuff it into the local recordings index.
+                    pattern: r"recordings/pull$",
+                    fields: {
+                        "bastion_id": { field_type: FieldType::Str, default: "", description: "Bastion id that holds the recording." },
+                        "session_id": { field_type: FieldType::Str, default: "", description: "Session id whose recording we want." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_recording_pull.handle_recording_pull}
+                    ],
+                    help: "Phase 6.3 — force-pull a recording sidecar from a bastion when the recording.ready webhook missed. Stores into the recordings index with delivery_mode=pull."
                 }
             ],
             secrets: [{
@@ -1226,6 +1241,43 @@ impl RustionBackendInner {
         let Some(entry) = recordings.get(&rid).await? else {
             return Err(bv_error_response_status!(404, &format!("recording `{rid}` not found")));
         };
+        let json = serde_json::to_value(&entry)
+            .map_err(|e| bv_error_string!(&format!("encode recording: {e}")))?;
+        let data = json.as_object().cloned().unwrap_or_default();
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_recording_pull(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_store()?;
+        let recordings = self.resolve_recordings_store()?;
+        let pick = |k: &str| -> String {
+            req.get_data(k)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_default()
+        };
+        let bastion_id = pick("bastion_id");
+        let session_id = pick("session_id");
+        if bastion_id.is_empty() || session_id.is_empty() {
+            return Err(bv_error_response_status!(
+                400,
+                "bastion_id and session_id are required"
+            ));
+        }
+        let entry = recordings::pull_recording(&store, &recordings, &bastion_id, &session_id)
+            .await
+            .map_err(|e| bv_error_string!(&format!("{e}")))?;
+        log::info!(
+            "{}: recording_id={} session_id={} bastion={} mode=pull",
+            audit::RECORDING_LINKED,
+            entry.recording_id,
+            entry.session_id,
+            entry.bastion_id
+        );
         let json = serde_json::to_value(&entry)
             .map_err(|e| bv_error_string!(&format!("encode recording: {e}")))?;
         let data = json.as_object().cloned().unwrap_or_default();

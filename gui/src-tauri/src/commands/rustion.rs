@@ -563,6 +563,109 @@ pub async fn rustion_session_kill(
     })
 }
 
+// ─── Phase 6.2/6.3: recordings ──────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionRecordingEntry {
+    pub recording_id: String,
+    pub session_id: String,
+    pub authority: String,
+    pub format: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub started_at: String,
+    pub finished_at: String,
+    pub target_host: String,
+    pub target_user: String,
+    pub correlation_id: String,
+    pub bastion_id: String,
+    pub received_at: String,
+    pub delivery_mode: String,
+}
+
+fn recording_from_map(data: &Map<String, Value>) -> RustionRecordingEntry {
+    RustionRecordingEntry {
+        recording_id: s(data, "recording_id"),
+        session_id: s(data, "session_id"),
+        authority: s(data, "authority"),
+        format: s(data, "format"),
+        sha256: s(data, "sha256"),
+        size_bytes: u64_field(data, "size_bytes"),
+        started_at: s(data, "started_at"),
+        finished_at: s(data, "finished_at"),
+        target_host: s(data, "target_host"),
+        target_user: s(data, "target_user"),
+        correlation_id: s(data, "correlation_id"),
+        bastion_id: s(data, "bastion_id"),
+        received_at: s(data, "received_at"),
+        delivery_mode: s(data, "delivery_mode"),
+    }
+}
+
+#[tauri::command]
+pub async fn rustion_recordings_list(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("{RUSTION_MOUNT}recordings"),
+        None,
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(data
+        .get("recordings")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+#[tauri::command]
+pub async fn rustion_recording_read(
+    state: State<'_, AppState>,
+    recording_id: String,
+) -> CmdResult<RustionRecordingEntry> {
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("{RUSTION_MOUNT}recordings/{recording_id}"),
+        None,
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(recording_from_map(&data))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionRecordingPullRequest {
+    pub bastion_id: String,
+    pub session_id: String,
+}
+
+#[tauri::command]
+pub async fn rustion_recording_pull(
+    state: State<'_, AppState>,
+    request: RustionRecordingPullRequest,
+) -> CmdResult<RustionRecordingEntry> {
+    let mut body = Map::new();
+    body.insert("bastion_id".into(), Value::String(request.bastion_id));
+    body.insert("session_id".into(), Value::String(request.session_id));
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}recordings/pull"),
+        Some(body),
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(recording_from_map(&data))
+}
+
 #[tauri::command]
 pub async fn rustion_master_pubkey_export(
     state: State<'_, AppState>,
