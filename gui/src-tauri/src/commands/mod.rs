@@ -72,6 +72,7 @@ pub mod plugin_surface;
 pub mod scheduled_exports;
 pub mod policies;
 pub mod resources;
+pub mod rustion;
 pub mod secrets;
 pub mod ssh;
 pub mod sso_admin;

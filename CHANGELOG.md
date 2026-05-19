@@ -45,6 +45,38 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.14] - 2026-05-18
+
+### Added
+
+- **Rustion integration — Phase 1 close-out.** CLI subcommands and a
+  GUI Settings → Rustion Bastions section land alongside the registry
+  + pinger from earlier in the phase. With this release Phase 1 of
+  `features/rustion-integration.md` is **Done**; Phase 2 (BVRG-v1
+  envelope crate + master-cert lifecycle hooks) is next.
+    - **CLI** (`src/cli/command/rustion*.rs`): `bvault rustion target
+      add|list|read|test|health|delete` and `bvault rustion master
+      read|export`. The `target add` command takes both halves of the
+      hybrid pubkey as separate `--ed25519` / `--mldsa65` flags so
+      copy-paste from `rustion control-plane identity export` is a
+      one-shot. `target test` accepts an optional `--id` for a
+      single-target probe; omitting it runs the full sweep.
+    - **Tauri command surface** (`gui/src-tauri/src/commands/rustion.rs`,
+      `gui/src/lib/rustion.ts`): typed wrappers for target CRUD, health
+      view, probe (single + all), master-cert config read/write, and
+      master pubkey export. All commands forward through the existing
+      `make_request` dispatcher so they ride the same auth + audit
+      path as the rest of the GUI.
+    - **GUI Settings → Rustion** (`gui/src/components/RustionBastionsTab.tsx`):
+      target table with a per-row health dot (green/yellow/red/grey)
+      driven by the background pinger's cached verdict, plus latency,
+      version, and active-session columns. Per-row "Test", "Edit", and
+      "Delete" buttons. Enrolment wizard validates the hybrid pubkey
+      (both halves required, classical-only refused) and surfaces a
+      clear error for missing port literals. Master-cert configuration
+      panel with PKI mount / role / issuer-ref editor and a pubkey
+      export viewer (populated once Phase 2 lands the issue flow).
+
 ## [0.7.13] - 2026-05-18
 
 ### Added

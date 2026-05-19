@@ -481,6 +481,17 @@ pub fn run() {
             commands::asset_groups::list_asset_group_history,
             commands::asset_groups::asset_groups_for_resource,
             commands::asset_groups::asset_groups_for_secret,
+            // Rustion bastion integration (Phase 1: registry, health,
+            // master-cert config slot)
+            commands::rustion::rustion_target_list,
+            commands::rustion::rustion_target_read,
+            commands::rustion::rustion_target_upsert,
+            commands::rustion::rustion_target_delete,
+            commands::rustion::rustion_target_health_all,
+            commands::rustion::rustion_target_probe,
+            commands::rustion::rustion_master_read,
+            commands::rustion::rustion_master_write,
+            commands::rustion::rustion_master_pubkey_export,
             // Per-user scoping: entity, owner, sharing, transfer
             commands::sharing::get_entity_self,
             commands::sharing::list_entity_aliases,

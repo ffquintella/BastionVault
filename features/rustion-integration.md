@@ -363,11 +363,11 @@ crates/rustion-server/         // wires the new crate into the main binary
 
 ## Phases
 
-### Phase 1 — Master cert + Rustion target registry + health monitoring — **In progress**
+### Phase 1 — Master cert + Rustion target registry + health monitoring — **Done**
 
 - 0.7.12 — Module scaffold + storage + state machine in [`src/modules/rustion/`](../src/modules/rustion/). Routes: `LIST/POST /v1/rustion/targets`, `READ/WRITE/DELETE /v1/rustion/targets/{id}`, `READ /v1/rustion/targets/health`, `READ/WRITE /v1/rustion/master/config`, `READ /v1/rustion/master/pubkey`. Health-state machine ships with five unit tests covering the Unknown→Up promotion, Degraded landing on first failure, three-strikes-to-Down, one-success recovery, and stable-status no-change. Master-cert slot ships storage shape + config CRUD.
 - 0.7.13 — Live HTTP pinger ([`src/modules/rustion/probe.rs`](../src/modules/rustion/probe.rs)) hitting `GET /v1/health` every 30s against every enabled target. Status transitions emit `rustion.target.health.changed`. New `POST /v1/rustion/targets/probe` (full sweep) and `POST /v1/rustion/targets/{id}/probe` (single-target test, returns fresh health record) for the enrolment wizard's test-connection affordance. `X-Rustion-Sig` header stays empty until Phase 2's master signing key lands; the nonce + authority headers are live.
-- Remaining in Phase 1: GUI Settings → Rustion Bastions section (enrolment wizard, per-row health dot, "Test connection" button wiring), dedicated CLI subcommands (`bastionvault rustion target add|list|test|health`, `bastionvault rustion master export`). Master-cert actual issue/rotate hooks ride on Phase 2's envelope crate.
+- 0.7.14 — CLI subcommands (`bvault rustion target add|list|read|test|health|delete`, `bvault rustion master read|export`) and GUI Settings → Rustion Bastions section (target table with per-row health dot, enrolment wizard validating hybrid pubkey, Test Connection button, edit + delete modals, master-cert config + pubkey export panel). Tauri command wrappers + typed TS surface at [`gui/src/lib/rustion.ts`](../gui/src/lib/rustion.ts). Phase closed; master-cert issue/rotate ride on Phase 2's BVRG-v1 envelope crate.
 
 - PKI slot for the master cert (issue, store, export pub).
 - `rustion/` mount + `RustionTarget` CRUD on the API and GUI, supporting **multiple enrolled instances**.

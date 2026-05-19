@@ -37,6 +37,7 @@ pub enum Commands {
     Policy(command::policy::Policy),
     Secrets(command::secrets::Secrets),
     Exchange(command::exchange::Exchange),
+    Rustion(command::rustion::Rustion),
 }
 
 impl Commands {
@@ -55,6 +56,7 @@ impl Commands {
             Commands::Policy(policy) => policy.execute(),
             Commands::Secrets(secrets) => secrets.execute(),
             Commands::Exchange(exchange) => exchange.execute(),
+            Commands::Rustion(rustion) => rustion.execute(),
         }
     }
 }

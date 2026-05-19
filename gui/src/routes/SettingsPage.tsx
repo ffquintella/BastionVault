@@ -20,6 +20,7 @@ import type {
 } from "../lib/api";
 import { DEFAULT_RESOURCE_TYPES, mergeTypeConfig } from "../lib/resourceTypes";
 import { CloudStorageCard } from "../components/CloudStorageCard";
+import { RustionBastionsTab } from "../components/RustionBastionsTab";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 
@@ -52,6 +53,7 @@ export function SettingsPage() {
     { id: "security", label: "Security" },
     { id: "identity", label: "Identity" },
     { id: "resources", label: "Resources" },
+    { id: "rustion", label: "Rustion" },
     { id: "storage", label: "Storage" },
   ];
   // Effective data location for the currently-default Local profile.
@@ -962,6 +964,13 @@ export function SettingsPage() {
         {/* Cloud Storage Targets — OAuth connect flow. Phase 7 of
             features/cloud-storage-backend.md. */}
         <CloudStorageCard />
+        </>)}
+
+        {activeTab === "rustion" && (<>
+        {/* Rustion bastion integration — Phase 1: target registry,
+            health view, master-cert config slot. See
+            features/rustion-integration.md. */}
+        <RustionBastionsTab />
         </>)}
 
         {activeTab === "general" && (<>
