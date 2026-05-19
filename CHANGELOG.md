@@ -45,6 +45,44 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.31] - 2026-05-19
+
+### Added
+
+- **Rustion integration — Phase 7.3: per-tier editor integration +
+  full resolver chain**. Phase 7 fully closed end-to-end. The
+  four-tier policy is now end-to-end configurable from the GUI and
+  the resolver consults every tier on `session/open`.
+    - **`RustionPolicyTierEditor`** new reusable component handling
+      all three lower tiers (`type` | `asset-group` | `resource`).
+      Shared shape (transport / bastions / bastion_group / recording
+      / lock — hidden on `resource`) + tier-specific affordances
+      (priority slider for `asset-group`). Manages its own
+      load/save state via the typed wrappers.
+    - **AssetGroupsPage** embeds the editor in each AG's detail
+      card next to Resources/Secrets.
+    - **ResourcesPage** Connection tab embeds the editor next to
+      ConnectionProfilesPanel. The component hides the lock toggle;
+      the API refuses lock=true + writes that weaken an upstream
+      lock via probe-resolve.
+    - **Settings → Rustion → Policy** grew a "Resource type policy"
+      subcard so admins can manage per-type policy without a
+      dedicated Resource Types editor.
+    - **`session/open` full resolver chain**: handler reads three new
+      optional request fields (`resource_id`, `resource_type`,
+      `asset_group_ids`), looks them up in `PolicyStore`, calls
+      `policy::resolve(global, type, asset_groups, resource)`. The
+      Tauri `RustionSessionOpenRequest` + TS wrapper grew the
+      matching fields. Existing callers that omit them keep
+      Phase-7.2 global-only behaviour (backward-compatible).
+
+### Changed
+
+- `features/rustion-integration.md`: Phase 7.3 marked Done. Phase 7
+  fully closed (1 → 7.3). Remaining Rustion-integration work is
+  Phase 4.2-full (RC4 sealing + Windows VM), Phase 8 (telemetry +
+  in-GUI replay extensions), Phase 9 (enrolment lifecycle).
+
 ## [0.7.30] - 2026-05-19
 
 ### Added

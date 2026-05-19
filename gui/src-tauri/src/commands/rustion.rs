@@ -361,6 +361,15 @@ pub struct RustionSessionOpenRequest {
     pub recording: String,
     #[serde(default)]
     pub bastions: Option<Vec<String>>,
+    /// Phase 7.3 — hints the BV policy resolver uses to look up the
+    /// full per-tier chain. Optional; resolver falls back to global
+    /// when omitted.
+    #[serde(default)]
+    pub resource_id: Option<String>,
+    #[serde(default)]
+    pub resource_type: Option<String>,
+    #[serde(default)]
+    pub asset_group_ids: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Default)]
@@ -419,6 +428,21 @@ pub async fn rustion_session_open(
         body.insert(
             "bastions".into(),
             Value::Array(list.into_iter().map(Value::String).collect()),
+        );
+    }
+    // Phase 7.3 — policy resolver hints. BV looks these up in its
+    // policy store to walk the full type → asset-group → resource
+    // tier chain on top of the global policy.
+    if let Some(rid) = request.resource_id {
+        body.insert("resource_id".into(), Value::String(rid));
+    }
+    if let Some(rt) = request.resource_type {
+        body.insert("resource_type".into(), Value::String(rt));
+    }
+    if let Some(ags) = request.asset_group_ids {
+        body.insert(
+            "asset_group_ids".into(),
+            Value::Array(ags.into_iter().map(Value::String).collect()),
         );
     }
     let resp = make_request(

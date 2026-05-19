@@ -147,6 +147,12 @@ export interface RustionSessionOpenRequest {
   recording: string;
   /** Pinned ordered bastion-target ids. `null`/empty = global pool. */
   bastions?: string[];
+  /** Phase 7.3 — policy resolver hints. The BV session-open handler
+   *  looks these up in its policy store to walk the full type →
+   *  asset-group → resource tier chain on top of the global policy. */
+  resourceId?: string;
+  resourceType?: string;
+  assetGroupIds?: string[];
 }
 
 export interface RustionSessionOpenResult {

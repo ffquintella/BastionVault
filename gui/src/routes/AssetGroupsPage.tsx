@@ -28,6 +28,7 @@ import type {
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 import { useAuthStore } from "../stores/authStore";
+import { RustionPolicyTierEditor } from "../components/RustionPolicyTierEditor";
 
 // Asset Groups page: named collections of resources + KV secrets. The
 // backend is the "resource-group" mount — see features/resource-groups.md.
@@ -555,6 +556,10 @@ function AssetGroupDetail({ info, onEdit, onDelete, onReload }: AssetGroupDetail
               </p>
             )}
           </Card>
+
+          {/* Phase 7.3 — per-asset-group Rustion policy editor. The
+              underlying handler is admin/owner-gated on the API side. */}
+          <RustionPolicyTierEditor tier="asset-group" id={info.name} />
         </>
       )}
 

@@ -55,6 +55,7 @@ import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 import { useAuthStore } from "../stores/authStore";
 import { useAssetGroupMap } from "../hooks/useAssetGroupMap";
+import { RustionPolicyTierEditor } from "../components/RustionPolicyTierEditor";
 
 function parseTags(tags: unknown): string[] {
   if (Array.isArray(tags)) return tags.filter(Boolean);
@@ -537,11 +538,19 @@ export function ResourcesPage() {
           )}
 
           {detailTab === "connection" && (
-            <ConnectionProfilesPanel
-              resource={resourceInfo}
-              onUpdated={() => selectResource(selected)}
-              toast={toast}
-            />
+            <>
+              <ConnectionProfilesPanel
+                resource={resourceInfo}
+                onUpdated={() => selectResource(selected)}
+                toast={toast}
+              />
+              {/* Phase 7.3 — per-resource Rustion policy override.
+                  Gated to the resource owner on the API side. */}
+              <RustionPolicyTierEditor
+                tier="resource"
+                id={String(resourceInfo.name)}
+              />
+            </>
           )}
 
           {detailTab === "sharing" && (

@@ -466,7 +466,10 @@ impl RustionBackend {
                         "ttl_secs": { field_type: FieldType::Int, default: 3600, description: "Requested session TTL." },
                         "max_renewals": { field_type: FieldType::Int, default: 3, description: "Max renewal count." },
                         "recording": { field_type: FieldType::Str, default: "always", description: "always | off | input-redacted" },
-                        "bastions": { field_type: FieldType::CommaStringSlice, required: false, description: "Pinned ordered target ids; empty = random global pool." }
+                        "bastions": { field_type: FieldType::CommaStringSlice, required: false, description: "Pinned ordered target ids; empty = random global pool." },
+                        "resource_id": { field_type: FieldType::Str, required: false, description: "Phase 7.3 — resource id for per-resource policy lookup." },
+                        "resource_type": { field_type: FieldType::Str, required: false, description: "Phase 7.3 — resource type for per-type policy lookup." },
+                        "asset_group_ids": { field_type: FieldType::CommaStringSlice, required: false, description: "Phase 7.3 — asset group ids the resource belongs to (for per-AG resolution)." }
                     },
                     operations: [
                         {op: Operation::Write, handler: h_session_open.handle_session_open}
@@ -1132,7 +1135,56 @@ impl RustionBackendInner {
         // be bypassed by an operator passing their own `bastions`).
         let policy_store = self.resolve_policy_store()?;
         let global_policy = policy_store.get_global().await?;
-        let effective = policy::resolve(&global_policy, None, &[], None);
+
+        // Phase 7.3: full resolver chain. Look up the per-type +
+        // per-asset-group + per-resource tiers from the request hints.
+        // Callers (GUI / CLI) pass the resource record's `type_name`,
+        // owning asset-group ids, and `resource_id` so the resolver
+        // can walk all four tiers.
+        let resource_type_hint = pick("resource_type");
+        let resource_id_hint = pick("resource_id");
+        let asset_group_ids = req
+            .get_data("asset_group_ids")
+            .ok()
+            .and_then(|v| match v {
+                Value::Array(arr) => Some(
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect::<Vec<_>>(),
+                ),
+                Value::String(s) => Some(
+                    s.split(',')
+                        .map(|x| x.trim().to_string())
+                        .filter(|x| !x.is_empty())
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        let type_policy = if resource_type_hint.is_empty() {
+            None
+        } else {
+            policy_store.get_type(&resource_type_hint).await?
+        };
+        let mut ag_policies: Vec<policy::AssetGroupPolicy> = Vec::new();
+        for ag_id in &asset_group_ids {
+            if let Some(p) = policy_store.get_asset_group(ag_id).await? {
+                ag_policies.push(p);
+            }
+        }
+        let resource_policy = if resource_id_hint.is_empty() {
+            None
+        } else {
+            policy_store.get_resource(&resource_id_hint).await?
+        };
+
+        let effective = policy::resolve(
+            &global_policy,
+            type_policy.as_ref(),
+            &ag_policies,
+            resource_policy.as_ref(),
+        );
         if let Some(ref lv) = effective.lock_violation {
             return Err(bv_error_response_status!(
                 403,

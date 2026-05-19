@@ -24,6 +24,7 @@ import {
   Textarea,
   useToast,
 } from "./ui";
+import { RustionPolicyTierEditor } from "./RustionPolicyTierEditor";
 import { extractError } from "../lib/error";
 import {
   rustionBastionGroupCreate,
@@ -43,6 +44,7 @@ export function RustionPolicyPanel() {
     <div className="space-y-4">
       <GlobalPolicyCard />
       <BastionGroupsCard />
+      <ResourceTypePolicyCard />
       <ForceRustionCard />
     </div>
   );
@@ -408,6 +410,55 @@ function BastionGroupEditor({
         </div>
       </div>
     </Modal>
+  );
+}
+
+// ─── Resource Type policy subpanel ──────────────────────────────────
+
+function ResourceTypePolicyCard() {
+  const toast = useToast();
+  const [typeName, setTypeName] = useState("");
+  const [committed, setCommitted] = useState<string | null>(null);
+
+  const handleLoad = () => {
+    const t = typeName.trim();
+    if (!t) {
+      toast.toast("error", "Enter a resource type name");
+      return;
+    }
+    setCommitted(t);
+  };
+
+  return (
+    <Card title="Resource type policy">
+      <div className="space-y-3">
+        <p className="text-sm text-[var(--color-text-muted)]">
+          Per-resource-type policy. Admin-gated on the API. Enter a type
+          name (the same identifier resources use as their{" "}
+          <code>type_name</code>) to load + edit its policy.
+        </p>
+        <div className="flex items-end gap-2">
+          <div className="flex-1">
+            <Input
+              label="Resource type"
+              value={typeName}
+              onChange={(e) => setTypeName(e.target.value)}
+              placeholder="ssh-host, mysql, rdp-host, …"
+            />
+          </div>
+          <Button variant="primary" onClick={handleLoad}>
+            Load
+          </Button>
+        </div>
+        {committed && (
+          <RustionPolicyTierEditor
+            key={committed}
+            tier="type"
+            id={committed}
+          />
+        )}
+      </div>
+    </Card>
   );
 }
 
