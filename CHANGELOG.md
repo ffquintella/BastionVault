@@ -45,6 +45,45 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.17] - 2026-05-19
+
+### Added
+
+- **Rustion integration — Phase 3 close-out.** Pairs with Rustion 0.7.13
+  to complete Phase 3 of `features/rustion-integration.md`. The
+  dispatcher + session table from 0.7.16/0.7.12 now feed an end-to-end
+  session-open HTTP flow.
+    - **`RustionTarget.kem_public_key`** field (`src/modules/rustion/
+      config.rs`). Separate ML-KEM-768 pubkey field on the registry
+      record — distinct from the existing Ed25519 + ML-DSA-65 signing
+      pubkey because the encrypt-to-Rustion direction uses a different
+      keypair on the Rustion identity side. Threaded through the store
+      validation, HTTP route, Tauri command surface, GUI enrolment
+      wizard, and CLI `--kem-pubkey` flag. Existing records gracefully
+      degrade — `kem_public_key` is `serde(default)` empty, and the
+      session-open path refuses such records with a clear error
+      pointing the operator at the enrolment wizard.
+    - **BV `POST rustion/session/open` route** (`src/modules/rustion/
+      session.rs::open_session_v2`). Pulls the registry + health
+      cache, runs the dispatcher, walks candidates building a BVRG-v1
+      `open` envelope per try via the master-key stub, POSTs at each
+      candidate's `/v1/sessions` over reqwest+rustls, advances on
+      transport/5xx, halts on 4xx, returns the session ticket bundle
+      + the dispatcher's bastion-selection trail on success.
+      Surfaces `503 bastion_unavailable` when no candidates qualify,
+      `502 bastion_rejected` with the per-target error list when every
+      candidate refused.
+    - **`rustion_session_open` Tauri command** (`gui/src-tauri/src/
+      commands/rustion.rs`) wraps the route; TS wrappers in
+      `gui/src/lib/rustion.ts`. `RustionSessionOpenResult` carries
+      `bastion_selection` (`"ordered-fallback" | "random-pool"`) and
+      `bastion_candidates_tried` for audit + diagnostic UI.
+    - **GUI `ConnectionProfile.kind = "direct" | "rustion"`** type
+      (`gui/src/lib/types.ts`), with optional `bastions: string[]`
+      (pinned ordered list, empty = global pool) and `recording`
+      override field. Backwards-compatible — existing profiles
+      without `kind` default to `"direct"`.
+
 ## [0.7.16] - 2026-05-19
 
 ### Added

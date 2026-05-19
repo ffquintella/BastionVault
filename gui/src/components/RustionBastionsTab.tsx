@@ -392,6 +392,7 @@ function EnrolWizardModal({
   const [endpoint, setEndpoint] = useState("");
   const [ed25519, setEd25519] = useState("");
   const [mldsa65, setMldsa65] = useState("");
+  const [kemPub, setKemPub] = useState("");
   const [description, setDescription] = useState("");
   const [tags, setTags] = useState("");
   const [enabled, setEnabled] = useState(true);
@@ -403,6 +404,7 @@ function EnrolWizardModal({
       setEndpoint(target?.endpoint ?? "");
       setEd25519(target?.public_key_ed25519 ?? "");
       setMldsa65(target?.public_key_mldsa65 ?? "");
+      setKemPub(target?.kem_public_key ?? "");
       setDescription(target?.description ?? "");
       setTags(target?.tags.join(", ") ?? "");
       setEnabled(target?.enabled ?? true);
@@ -415,8 +417,9 @@ function EnrolWizardModal({
       endpoint.trim() &&
       endpoint.includes(":") &&
       ed25519.trim() &&
-      mldsa65.trim(),
-    [name, endpoint, ed25519, mldsa65],
+      mldsa65.trim() &&
+      kemPub.trim(),
+    [name, endpoint, ed25519, mldsa65, kemPub],
   );
 
   async function handleSave() {
@@ -429,6 +432,7 @@ function EnrolWizardModal({
           endpoint: endpoint.trim(),
           public_key_ed25519: ed25519.trim(),
           public_key_mldsa65: mldsa65.trim(),
+          kem_public_key: kemPub.trim(),
           description: description.trim(),
           tags: tags
             .split(",")
@@ -498,6 +502,13 @@ function EnrolWizardModal({
           label="public_key.mldsa65 (base64 raw)"
           value={mldsa65}
           onChange={(e) => setMldsa65(e.target.value)}
+          rows={3}
+          className="font-mono text-xs"
+        />
+        <Textarea
+          label="kem_public_key (base64 raw ML-KEM-768)"
+          value={kemPub}
+          onChange={(e) => setKemPub(e.target.value)}
           rows={3}
           className="font-mono text-xs"
         />

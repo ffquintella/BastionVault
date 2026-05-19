@@ -35,10 +35,24 @@ pub struct RustionTarget {
     pub name: String,
     /// Control-plane endpoint, `host:port`. TLS-only.
     pub endpoint: String,
-    /// Pinned hybrid pubkey of the Rustion identity keypair. Operators
-    /// rotate via `rustion control-plane identity rotate` on the
-    /// Rustion side, then re-paste here.
+    /// Pinned hybrid **signing** pubkey of the Rustion identity
+    /// keypair. Rustion signs its outbound `recording.ready` webhook
+    /// + signed-nonce health responses with the matching private
+    /// key; BV verifies inbound payloads from Rustion with this.
+    /// Operators rotate via `rustion control-plane identity rotate`
+    /// on the Rustion side, then re-paste here.
     pub public_key: HybridPubKey,
+    /// Pinned **KEM** pubkey of the Rustion identity keypair.
+    /// Base64-encoded ML-KEM-768 public key (1184 bytes raw → 1580
+    /// chars base64). Distinct from `public_key` because the
+    /// signing + KEM halves are independent on the Rustion side —
+    /// rotating one does not invalidate the other, and the wire
+    /// formats are different (FIPS 204 vs FIPS 203). Empty on
+    /// records created before this field landed; the session-open
+    /// path refuses such records with a `kem_pubkey_missing` error
+    /// pointing the operator at the enrolment wizard.
+    #[serde(default)]
+    pub kem_public_key: String,
     /// SHA-256 of the canonical concatenation `ed25519 || mldsa65`,
     /// rendered as `sha256:xx:xx…`. Computed at write time so the GUI
     /// can show it without re-parsing the keys.
@@ -148,6 +162,9 @@ pub struct RustionTargetInput {
     pub name: String,
     pub endpoint: String,
     pub public_key: HybridPubKey,
+    /// Base64-encoded ML-KEM-768 public key.
+    #[serde(default)]
+    pub kem_public_key: String,
     #[serde(default)]
     pub description: String,
     #[serde(default)]

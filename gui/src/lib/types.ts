@@ -274,6 +274,15 @@ export interface ConnectionProfile {
   /** Operator-visible label (e.g. "Default", "Break-glass"). */
   name: string;
   protocol: SessionProtocol;
+  /**
+   * Transport: `direct` opens an SSH/RDP socket from the GUI host
+   * straight to the target (the original Resource Connect path),
+   * `rustion` mediates the session through one of the operator's
+   * enrolled PQC bastions per features/rustion-integration.md.
+   * Optional + defaults to `direct` for backwards-compatibility with
+   * profiles minted before this field landed.
+   */
+  kind?: "direct" | "rustion";
   /** Overrides the resource's hostname/ip when set. */
   target_host?: string;
   /** Overrides the resource's port / protocol default. */
@@ -293,6 +302,21 @@ export interface ConnectionProfile {
    * traffic. Has no effect for SSH profiles.
    */
   rdp_aggressive_performance?: boolean;
+  /**
+   * `kind === "rustion"` only — ordered list of Rustion target ids
+   * to try. Empty/unset = pick at random from the global pool of
+   * healthy enabled targets. Tried in order; advances on transport/
+   * 5xx failures, halts on auth (4xx) refusals. See
+   * features/rustion-integration.md § Bastion selection.
+   */
+  bastions?: string[];
+  /**
+   * `kind === "rustion"` only — recording policy override. Strictest
+   * wins under the policy ladder (always > input-redacted > off);
+   * the resource's asset-group / type / global tier can still tighten
+   * a per-profile `off` upward.
+   */
+  recording?: "always" | "off" | "input-redacted";
 }
 
 /**

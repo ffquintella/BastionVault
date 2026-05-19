@@ -22,6 +22,10 @@ export interface RustionTargetSummary {
   public_key_ed25519: string;
   /** Base64 raw FIPS 204 ML-DSA-65 public key. */
   public_key_mldsa65: string;
+  /** Base64 raw FIPS 203 ML-KEM-768 public key — used to encrypt
+   *  session-grant envelopes to this Rustion instance. Empty for
+   *  records enrolled before this field landed. */
+  kem_public_key: string;
 }
 
 export interface RustionTargetHealth {
@@ -80,6 +84,7 @@ export interface RustionTargetInput {
   endpoint: string;
   public_key_ed25519: string;
   public_key_mldsa65: string;
+  kem_public_key: string;
   description: string;
   tags: string[];
   enabled: boolean;
@@ -120,3 +125,45 @@ export const rustionMasterWrite = (input: RustionMasterConfig) =>
 
 export const rustionMasterPubkeyExport = () =>
   invoke<RustionMasterPubkey>("rustion_master_pubkey_export");
+
+// ─── Session open ────────────────────────────────────────────────
+
+export interface RustionSessionOpenRequest {
+  target_host: string;
+  target_port: number;
+  /** "ssh" | "rdp" */
+  target_protocol: string;
+  target_hostkey_pin?: string;
+  /** "ssh-key" | "ssh-password" | "rdp-password" | "rdp-cert" | ... */
+  credential_kind: string;
+  credential_username: string;
+  /** Base64-encoded credential bytes. The GUI never sees the raw
+   *  material — it's resolved on the host side and forwarded as a
+   *  single string here. */
+  credential_material_b64: string;
+  ttl_secs: number;
+  max_renewals: number;
+  /** "always" | "off" | "input-redacted" */
+  recording: string;
+  /** Pinned ordered bastion-target ids. `null`/empty = global pool. */
+  bastions?: string[];
+}
+
+export interface RustionSessionOpenResult {
+  session_id: string;
+  host: string;
+  port: number;
+  ticket: string;
+  expires_at: string;
+  protocol: string;
+  recording_id: string;
+  bastion_id: string;
+  bastion_name: string;
+  /** "ordered-fallback" | "random-pool" */
+  bastion_selection: string;
+  /** IDs the dispatcher tried in order before this one accepted. */
+  bastion_candidates_tried: string[];
+}
+
+export const rustionSessionOpen = (request: RustionSessionOpenRequest) =>
+  invoke<RustionSessionOpenResult>("rustion_session_open", { request });

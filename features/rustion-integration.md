@@ -485,23 +485,24 @@ Three guard-rails make this safe even if part of the mechanism fails:
 - New `rustion-control-plane` crate in `/Users/felipe/Dev/Rustion`. Authority YAML store + hot reload + `/v1/sessions` skeleton that verifies envelopes and returns canned `not_implemented`.
 - Round-trip test from BastionVault → Rustion that a syntactically-correct envelope verifies and decrypts; no real session opens yet.
 
-### Phase 3 — Session open + ticketed SSH proxy + dispatcher — **In progress**
+### Phase 3 — Session open + ticketed SSH proxy + dispatcher — **Done** (BV 0.7.17 + Rustion 0.7.13)
 
-Shipped in 0.7.16 (BV) + 0.7.12 (Rustion):
+Shipped across 0.7.16/0.7.12 (dispatcher + session table + master stub) and 0.7.17/0.7.13 (KEM-pubkey schema + session-open route + ticket-auth module + GUI types):
 
-- **BV dispatcher** (`src/modules/rustion/dispatcher.rs`) — pinned-list and random-from-healthy-pool modes, drops disabled/down/unknown targets, surfaces dropped reasons on the plan output. `should_advance` policy: transport / 5xx → advance, 4xx → halt. 7 unit tests covering both modes + the advance/halt rules.
-- **Rustion session table** (`crates/rustion-control-plane/src/session.rs`) — materialises a session record from a verified envelope, mints a single-use IP-bound 30s ticket, persists the session + ticket-index in memory under `RwLock`. Capacity cap (default 512), TTL clamping against authority's `max_session_secs`, reap-expired sweep. 8 unit tests.
-- **Rustion `/v1/sessions`** now returns `201 Created` with `{session_id, host, port, ticket, expires_at, protocol, recording_id}` after a verified envelope passes replay protection. HTTP error mapping for the session-state machine: `envelope_op_unsupported` → 400, `capacity` → 503. 3 in-process end-to-end integration tests confirm BV-side build → Rustion-side verify+materialise round-trips.
-- **BV master signing-key stub** (`src/modules/rustion/master.rs::MasterStore::get_or_init_signing_key`) — mints + persists an ephemeral hybrid keypair on first call so the session-open path is testable end-to-end before Phase 9's PKI-issued master cert lands. Stored at `rustion/master/signing-key` with a `stub: true` sentinel so Phase 9 can audit + replace.
+- **BV dispatcher** (`src/modules/rustion/dispatcher.rs`) — pinned-list and random-from-healthy-pool modes, drops disabled/down/unknown targets with reason annotations, `should_advance` policy (transport/5xx advance, 4xx halt). 7 unit tests.
+- **Rustion session table** (`crates/rustion-control-plane/src/session.rs`) — session record + single-use IP-bound 30s ticket, in-memory `RwLock<HashMap>` with capacity cap, TTL clamping, reap-expired sweep. 8 unit tests.
+- **Rustion `/v1/sessions`** returns `201 Created` with the session bundle after envelope verification + replay protection. 3 in-process E2E integration tests.
+- **BV master signing-key stub** (`src/modules/rustion/master.rs::get_or_init_signing_key`) — ephemeral hybrid keypair persisted at `rustion/master/signing-key` with a `stub: true` sentinel so Phase 9 can audit + replace.
+- **`RustionTarget` schema gains `kem_public_key`** — separate ML-KEM-768 pubkey field on the registry record, threaded through the store, HTTP route, Tauri command, GUI enrolment wizard, and CLI `--kem-pubkey` flag.
+- **BV `POST rustion/session/open` route** (`src/modules/rustion/session.rs::open_session_v2`) — pulls the registry + health cache, runs the dispatcher, walks candidates building a BVRG-v1 `open` envelope per try, POSTs at each candidate's `/v1/sessions`, advances on transport/5xx, halts on 4xx, returns the session bundle + dispatcher trail on success. Surfaces `503 bastion_unavailable` when no candidates qualify, `502 bastion_rejected` with per-target error list when every candidate refused.
+- **BV `rustion_session_open` Tauri command** wraps the route; result type carries the session ticket bundle + the dispatcher's `bastion_selection` + `bastion_candidates_tried`.
+- **GUI `ConnectionProfile.kind = "direct" | "rustion"`** discriminator on `gui/src/lib/types.ts`, with optional `bastions: string[]` (pinned ordered list, empty = global pool) and `recording: "always" | "off" | "input-redacted"` (strictest-wins override). Backwards-compatible — existing profiles without `kind` default to `"direct"`.
+- **Rustion `rustion-ssh::ticket_auth`** — pure logic that consumes a `tkt_…` string + client IP via the SessionStore. All error paths collapse to `Invalid` from the caller's POV (no enumeration on the wire); detailed reason is logged at WARN with the ticket prefix sanitised to 8 hex chars for audit-chain correlation. 4 unit tests cover happy path, replay, wrong source IP, unknown ticket.
 
-Remaining for Phase 3 (next slices):
-
-- BV-side server route `POST rustion/session/open` that runs the dispatcher, builds the envelope, POSTs at Rustion, and returns the ticket bundle. Blocked on the `RustionTarget` schema gaining a real `kem_public_key` field (today the registry only stores the signing pubkey).
-- BV Tauri command `rustion_session_open` that wraps the server route.
-- BV connection-profile kind `rustion` + the GUI's Connection-tab dispatcher preview ("Will try: rustion-eu-west-1 → rustion-eu-west-2").
-- BV SSH session window gains `transport: { kind: "rustion", host, port, ticket }` mode.
-- Rustion `rustion-ssh` accepts `Rustion ticket: tkt_…` as the first auth step and proxies to the target with the decrypted credential.
-- End-to-end demo against a real Linux target through a real Rustion process.
+Deferred to Phase 3.1 (separate slice):
+- **russh listener wire-up of `consume_ticket_for_login`** in `rustion-ssh::server` — the ticket-auth module is unit-tested today; bolting it onto the SSH banner exchange + connecting the russh proxy loop is the remaining mechanical step.
+- **Recording start-on-first-byte** wiring in `rustion-recording` to consume the new authority field.
+- **End-to-end demo against a real Linux target** via docker-compose (BV + Rustion + OpenSSH target).
 
 - Rustion `/v1/sessions` materialises a session, mints a ticket, returns connection coordinates.
 - Rustion SSH listener accepts `ticket@<sid>` as the first auth step and proxies to the target with the decrypted credential.

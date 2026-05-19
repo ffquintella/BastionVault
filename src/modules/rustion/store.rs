@@ -97,6 +97,7 @@ impl RustionStore {
             name: normalized.name,
             endpoint: normalized.endpoint,
             public_key: normalized.public_key.clone(),
+            kem_public_key: normalized.kem_public_key,
             fingerprint: fingerprint(&normalized.public_key),
             description: normalized.description,
             tags: normalized.tags,
@@ -144,6 +145,7 @@ impl RustionStore {
         existing.name = normalized.name;
         existing.endpoint = normalized.endpoint;
         existing.public_key = normalized.public_key.clone();
+        existing.kem_public_key = normalized.kem_public_key;
         existing.fingerprint = fingerprint(&normalized.public_key);
         existing.description = normalized.description;
         existing.tags = normalized.tags;
@@ -248,6 +250,7 @@ fn validate_input(input: &RustionTargetInput) -> Result<RustionTargetInput, RvEr
             ed25519: input.public_key.ed25519.trim().to_string(),
             mldsa65: input.public_key.mldsa65.trim().to_string(),
         },
+        kem_public_key: input.kem_public_key.trim().to_string(),
         description: input.description.trim().to_string(),
         tags: input
             .tags

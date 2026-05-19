@@ -36,6 +36,7 @@ pub struct RustionTargetSummary {
     pub updated_at: String,
     pub public_key_ed25519: String,
     pub public_key_mldsa65: String,
+    pub kem_public_key: String,
 }
 
 #[derive(Serialize, Default)]
@@ -99,6 +100,8 @@ pub struct RustionTargetInput {
     pub endpoint: String,
     pub public_key_ed25519: String,
     pub public_key_mldsa65: String,
+    #[serde(default)]
+    pub kem_public_key: String,
     #[serde(default)]
     pub description: String,
     #[serde(default)]
@@ -176,6 +179,10 @@ pub async fn rustion_target_upsert(
     body.insert(
         "public_key_mldsa65".into(),
         Value::String(input.public_key_mldsa65),
+    );
+    body.insert(
+        "kem_public_key".into(),
+        Value::String(input.kem_public_key),
     );
     body.insert("description".into(), Value::String(input.description));
     body.insert(
@@ -334,6 +341,118 @@ pub async fn rustion_master_write(
     })
 }
 
+// ─── Session open ────────────────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+pub struct RustionSessionOpenRequest {
+    pub target_host: String,
+    pub target_port: u16,
+    pub target_protocol: String,
+    #[serde(default)]
+    pub target_hostkey_pin: Option<String>,
+    pub credential_kind: String,
+    pub credential_username: String,
+    /// Base64-encoded credential bytes — the GUI never sees the raw
+    /// material; it pulls it from a resolved credential source on the
+    /// host side and forwards as a single string here.
+    pub credential_material_b64: String,
+    pub ttl_secs: u32,
+    pub max_renewals: u8,
+    pub recording: String,
+    #[serde(default)]
+    pub bastions: Option<Vec<String>>,
+}
+
+#[derive(Serialize, Default)]
+pub struct RustionSessionOpenResult {
+    pub session_id: String,
+    pub host: String,
+    pub port: u16,
+    pub ticket: String,
+    pub expires_at: String,
+    pub protocol: String,
+    pub recording_id: String,
+    pub bastion_id: String,
+    pub bastion_name: String,
+    pub bastion_selection: String,
+    pub bastion_candidates_tried: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn rustion_session_open(
+    state: State<'_, AppState>,
+    request: RustionSessionOpenRequest,
+) -> CmdResult<RustionSessionOpenResult> {
+    let mut body = Map::new();
+    body.insert("target_host".into(), Value::String(request.target_host));
+    body.insert("target_port".into(), Value::Number(request.target_port.into()));
+    body.insert(
+        "target_protocol".into(),
+        Value::String(request.target_protocol),
+    );
+    if let Some(pin) = request.target_hostkey_pin {
+        body.insert("target_hostkey_pin".into(), Value::String(pin));
+    }
+    body.insert(
+        "credential_kind".into(),
+        Value::String(request.credential_kind),
+    );
+    body.insert(
+        "credential_username".into(),
+        Value::String(request.credential_username),
+    );
+    body.insert(
+        "credential_material".into(),
+        Value::String(request.credential_material_b64),
+    );
+    body.insert("ttl_secs".into(), Value::Number(request.ttl_secs.into()));
+    body.insert(
+        "max_renewals".into(),
+        Value::Number(request.max_renewals.into()),
+    );
+    body.insert("recording".into(), Value::String(request.recording));
+    if let Some(list) = request.bastions {
+        body.insert(
+            "bastions".into(),
+            Value::Array(list.into_iter().map(Value::String).collect()),
+        );
+    }
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}session/open"),
+        Some(body),
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    let tried = data
+        .get("bastion_candidates_tried")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(RustionSessionOpenResult {
+        session_id: s(&data, "session_id"),
+        host: s(&data, "host"),
+        port: data
+            .get("port")
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u16::try_from(n).ok())
+            .unwrap_or(0),
+        ticket: s(&data, "ticket"),
+        expires_at: s(&data, "expires_at"),
+        protocol: s(&data, "protocol"),
+        recording_id: s(&data, "recording_id"),
+        bastion_id: s(&data, "bastion_id"),
+        bastion_name: s(&data, "bastion_name"),
+        bastion_selection: s(&data, "bastion_selection"),
+        bastion_candidates_tried: tried,
+    })
+}
+
 #[tauri::command]
 pub async fn rustion_master_pubkey_export(
     state: State<'_, AppState>,
@@ -422,6 +541,7 @@ fn target_summary_from_map(data: &Map<String, Value>) -> RustionTargetSummary {
         updated_at: s(data, "updated_at"),
         public_key_ed25519: ed25519,
         public_key_mldsa65: mldsa65,
+        kem_public_key: s(data, "kem_public_key"),
     }
 }
 

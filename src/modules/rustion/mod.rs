@@ -39,6 +39,7 @@ pub mod envelope;
 pub mod health;
 pub mod master;
 pub mod probe;
+pub mod session;
 pub mod store;
 
 pub use config::{
@@ -96,6 +97,7 @@ impl RustionBackend {
         let h_master_read = self.inner.clone();
         let h_master_write = self.inner.clone();
         let h_master_pubkey = self.inner.clone();
+        let h_session_open = self.inner.clone();
         let h_noop1 = self.inner.clone();
         let h_noop2 = self.inner.clone();
 
@@ -127,6 +129,11 @@ impl RustionBackend {
                             field_type: FieldType::Str,
                             default: "",
                             description: "Base64 raw FIPS 204 ML-DSA-65 public key."
+                        },
+                        "kem_public_key": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "Base64 raw FIPS 203 ML-KEM-768 public key — used to encrypt session-grant envelopes to this Rustion instance."
                         },
                         "description": {
                             field_type: FieldType::Str,
@@ -182,6 +189,11 @@ impl RustionBackend {
                             field_type: FieldType::Str,
                             default: "",
                             description: "Base64 raw ML-DSA-65 public key."
+                        },
+                        "kem_public_key": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "Base64 raw FIPS 203 ML-KEM-768 public key — used to encrypt session-grant envelopes to this Rustion instance."
                         },
                         "description": {
                             field_type: FieldType::Str,
@@ -289,6 +301,28 @@ impl RustionBackend {
                         {op: Operation::Read, handler: h_master_pubkey.handle_master_pubkey}
                     ],
                     help: "Export the master pubkey (one-shot enrolment step for Rustion authorities)."
+                },
+                {
+                    // POST rustion/session/open — run dispatcher,
+                    // build envelope, POST at Rustion, return ticket.
+                    pattern: r"session/open$",
+                    fields: {
+                        "target_host": { field_type: FieldType::Str, default: "", description: "Target SSH/RDP destination host." },
+                        "target_port": { field_type: FieldType::Int, default: 22, description: "Target SSH/RDP destination port." },
+                        "target_protocol": { field_type: FieldType::Str, default: "ssh", description: "ssh | rdp" },
+                        "target_hostkey_pin": { field_type: FieldType::Str, default: "", description: "Optional TOFU host-key fingerprint." },
+                        "credential_kind": { field_type: FieldType::Str, default: "", description: "ssh-key | ssh-password | rdp-password | rdp-cert | ..." },
+                        "credential_username": { field_type: FieldType::Str, default: "", description: "Username on the target host." },
+                        "credential_material": { field_type: FieldType::Str, default: "", description: "Base64-encoded credential bytes." },
+                        "ttl_secs": { field_type: FieldType::Int, default: 3600, description: "Requested session TTL." },
+                        "max_renewals": { field_type: FieldType::Int, default: 3, description: "Max renewal count." },
+                        "recording": { field_type: FieldType::Str, default: "always", description: "always | off | input-redacted" },
+                        "bastions": { field_type: FieldType::CommaStringSlice, required: false, description: "Pinned ordered target ids; empty = random global pool." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_session_open.handle_session_open}
+                    ],
+                    help: "Open a Rustion-mediated SSH/RDP session. Runs the dispatcher, builds a BVRG-v1 envelope, POSTs at the chosen Rustion target, and returns the session ticket bundle."
                 }
             ],
             secrets: [{
@@ -376,6 +410,7 @@ impl RustionBackendInner {
                 ed25519: pick("public_key_ed25519"),
                 mldsa65: pick("public_key_mldsa65"),
             },
+            kem_public_key: pick("kem_public_key"),
             description: pick("description"),
             tags,
             enabled,
@@ -465,6 +500,9 @@ impl RustionBackendInner {
         }
         if input.public_key.mldsa65.is_empty() {
             input.public_key.mldsa65 = existing.public_key.mldsa65.clone();
+        }
+        if input.kem_public_key.is_empty() {
+            input.kem_public_key = existing.kem_public_key.clone();
         }
         if input.description.is_empty() {
             input.description = existing.description.clone();
@@ -693,6 +731,164 @@ impl RustionBackendInner {
         Ok(Some(master_config_response(&cfg)))
     }
 
+    pub async fn handle_session_open(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let store = self.resolve_store()?;
+        let master_store = self.resolve_master_store()?;
+        let master = master_store
+            .get_or_init_signing_key()
+            .await
+            .map_err(|e| bv_error_string!(&format!("master signing key: {e}")))?;
+
+        let pick = |k: &str| -> String {
+            req.get_data(k)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_default()
+        };
+        let pick_u = |k: &str, default: u64| -> u64 {
+            req.get_data(k)
+                .ok()
+                .and_then(|v| v.as_u64())
+                .unwrap_or(default)
+        };
+
+        let credential_material_b64 = pick("credential_material");
+        let credential_material = STANDARD
+            .decode(credential_material_b64.as_bytes())
+            .map_err(|e| bv_error_string!(&format!("credential_material base64 decode: {e}")))?;
+
+        let bastions_raw = req
+            .get_data("bastions")
+            .ok()
+            .and_then(|v| match v {
+                Value::Array(arr) => Some(
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect::<Vec<_>>(),
+                ),
+                Value::String(s) => Some(
+                    s.split(',')
+                        .map(|x| x.trim().to_string())
+                        .filter(|x| !x.is_empty())
+                        .collect(),
+                ),
+                _ => None,
+            });
+
+        let hostkey_pin = pick("target_hostkey_pin");
+        let request = session::SessionOpenRequest {
+            target_host: pick("target_host"),
+            target_port: u16::try_from(pick_u("target_port", 22)).unwrap_or(22),
+            target_protocol: pick("target_protocol"),
+            target_hostkey_pin: if hostkey_pin.is_empty() {
+                None
+            } else {
+                Some(hostkey_pin)
+            },
+            credential_kind: pick("credential_kind"),
+            credential_username: pick("credential_username"),
+            credential_material,
+            ttl_secs: u32::try_from(pick_u("ttl_secs", 3600)).unwrap_or(3600),
+            max_renewals: u8::try_from(pick_u("max_renewals", 3)).unwrap_or(3),
+            recording: pick("recording"),
+            bastions: bastions_raw.filter(|v| !v.is_empty()),
+        };
+
+        // Operator context from the calling token's metadata. Source-IP
+        // is pulled from the request's remote-addr field; the rest
+        // come from the auth metadata stamped at login.
+        let auth = req.auth.as_ref().ok_or_else(|| {
+            bv_error_response_status!(401, "no authenticated caller")
+        })?;
+        let operator = envelope::OperatorContext {
+            vault_user_id: auth
+                .metadata
+                .get("entity_id")
+                .cloned()
+                .unwrap_or_default(),
+            vault_user_name: auth
+                .metadata
+                .get("username")
+                .cloned()
+                .unwrap_or_default(),
+            vault_session_id: auth
+                .metadata
+                .get("session_id")
+                .cloned()
+                .unwrap_or_default(),
+            src_ip: req.client_token.clone(), // placeholder; the route layer doesn't currently surface remote addr
+            deployment_id: auth
+                .metadata
+                .get("deployment_id")
+                .cloned()
+                .unwrap_or_default(),
+        };
+
+        match session::open_session_v2(&store, &master, &operator, &request).await {
+            Ok(resp) => {
+                let mut data = Map::new();
+                data.insert("session_id".into(), Value::String(resp.session_id));
+                data.insert("host".into(), Value::String(resp.host));
+                data.insert("port".into(), Value::Number(resp.port.into()));
+                data.insert("ticket".into(), Value::String(resp.ticket));
+                data.insert("expires_at".into(), Value::String(resp.expires_at));
+                data.insert("protocol".into(), Value::String(resp.protocol));
+                data.insert("recording_id".into(), Value::String(resp.recording_id));
+                data.insert("bastion_id".into(), Value::String(resp.bastion_id));
+                data.insert("bastion_name".into(), Value::String(resp.bastion_name));
+                data.insert(
+                    "bastion_selection".into(),
+                    Value::String(resp.bastion_selection.to_string()),
+                );
+                data.insert(
+                    "bastion_candidates_tried".into(),
+                    Value::Array(
+                        resp.bastion_candidates_tried
+                            .into_iter()
+                            .map(Value::String)
+                            .collect(),
+                    ),
+                );
+                log::info!(
+                    "{}: session_id={} bastion={} candidates_tried={}",
+                    audit::SESSION_OPEN,
+                    data.get("session_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                    data.get("bastion_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                    data.get("bastion_candidates_tried")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0)
+                );
+                Ok(Some(Response::data_response(Some(data))))
+            }
+            Err(session::SessionOpenError::NoCandidates) => Err(bv_error_response_status!(
+                503,
+                "bastion_unavailable: no candidate Rustion targets — every target is unhealthy, disabled, or unregistered"
+            )),
+            Err(session::SessionOpenError::AllRejected { attempts }) => {
+                let detail = attempts
+                    .iter()
+                    .map(|a| format!("{}: {}", a.bastion_name, a.outcome))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                Err(bv_error_response_status!(
+                    502,
+                    &format!("bastion_rejected: {detail}")
+                ))
+            }
+            Err(e) => Err(bv_error_string!(&format!("{e}"))),
+        }
+    }
+
     pub async fn handle_master_pubkey(
         &self,
         _b: &dyn Backend,
@@ -743,6 +939,10 @@ fn target_response(t: &RustionTarget) -> Response {
     pk.insert("ed25519".into(), Value::String(t.public_key.ed25519.clone()));
     pk.insert("mldsa65".into(), Value::String(t.public_key.mldsa65.clone()));
     data.insert("public_key".into(), Value::Object(pk));
+    data.insert(
+        "kem_public_key".into(),
+        Value::String(t.kem_public_key.clone()),
+    );
     data.insert("fingerprint".into(), Value::String(t.fingerprint.clone()));
     data.insert("description".into(), Value::String(t.description.clone()));
     data.insert(

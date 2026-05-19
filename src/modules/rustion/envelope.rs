@@ -269,46 +269,23 @@ pub fn build_attest(
 /// BV master pubkey) and encrypts the payload to Rustion (so the
 /// sender needs Rustion's KEM pubkey). The two are independent
 /// keypairs on the Rustion identity side — the authority record
-/// pins the signing pubkey for the recording webhook, and the
-/// target's `public_key` field on the BV side pins the KEM pubkey.
+/// pins the signing pubkey for the recording webhook + signed-nonce
+/// health responses, and the dedicated `kem_public_key` field on
+/// the registry pins the ML-KEM-768 pubkey for envelope encryption.
 ///
-/// Today the target registry stores the **Ed25519 + ML-DSA-65 hybrid
-/// signing pubkey** Rustion uses for outbound `recording.ready`
-/// webhooks. The KEM pubkey is a future extension: the Phase 2 spec
-/// notes that each Rustion instance has "its own hybrid keypair" for
-/// envelope encryption, distinct from the signing pubkey. Until the
-/// registry grows a dedicated `kem_public_key` field, we synthesise
-/// the KEM pubkey from a deterministic transform on the signing
-/// pubkey so tests and integration scaffolding compile end-to-end.
-/// **This MUST be replaced before Phase 2 closes** with a real KEM
-/// pubkey field on `RustionTarget`.
-///
-/// TODO(phase2): add `kem_public_key: Vec<u8>` to RustionTarget and
-/// have the enrolment wizard collect it alongside the signing pubkey.
+/// Decode the base64 pubkey bytes; an empty field means the
+/// enrolment never collected the KEM half (registry record predates
+/// the schema extension or operator skipped the wizard step). In
+/// both cases we refuse the envelope build with a clear error
+/// pointing the operator at the enrolment wizard.
 fn resolve_kem_pubkey(target: &RustionTarget) -> Result<Vec<u8>, BvrgError> {
-    // Decode the base64 Ed25519 + ML-DSA-65 halves. The KEM pubkey is
-    // a separate slot once the registry schema lands; for now we use
-    // the signing pubkey concatenation as a placeholder so the test
-    // surface compiles.
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    let ed25519 = STANDARD
-        .decode(target.public_key.ed25519.as_bytes())
-        .map_err(|_| BvrgError::PublicKeyLength)?;
-    let mldsa65 = STANDARD
-        .decode(target.public_key.mldsa65.as_bytes())
-        .map_err(|_| BvrgError::PublicKeyLength)?;
-    // The signing-pubkey bytes are NOT a valid ML-KEM-768 pubkey —
-    // this synthesis path will fail at `KemDemEnvelopeV1::seal` time
-    // with a coerced error. That's intentional: until the registry
-    // gets a real KEM-pubkey field, build_open / build_renew /
-    // build_kill / build_attest must be exercised against synthetic
-    // targets in tests (which supply a freshly-generated ML-KEM-768
-    // pubkey). Production callers will see a clear
-    // `PublicKeyLength` error pointing them at the missing field.
-    let mut concat = Vec::with_capacity(ed25519.len() + mldsa65.len());
-    concat.extend_from_slice(&ed25519);
-    concat.extend_from_slice(&mldsa65);
-    Ok(concat)
+    if target.kem_public_key.trim().is_empty() {
+        return Err(BvrgError::PublicKeyLength);
+    }
+    STANDARD
+        .decode(target.kem_public_key.as_bytes())
+        .map_err(|_| BvrgError::PublicKeyLength)
 }
 
 /// Compute the same SHA-256(magic || ct_len || ct) the verify path
@@ -362,19 +339,15 @@ mod tests {
 
     fn synthetic_target_with_kem_pub(kem_pub: &[u8]) -> RustionTarget {
         use base64::{engine::general_purpose::STANDARD, Engine as _};
-        // For the test scaffold, the legacy registry's hybrid pubkey
-        // field is repurposed to carry the KEM pubkey (ed25519 slot
-        // empty, mldsa65 slot = base64(kem_pub)). resolve_kem_pubkey
-        // currently concatenates ed25519 || mldsa65 so we land at
-        // the requested kem_pub on the wire.
         RustionTarget {
             id: "rt_test".into(),
             name: "test-bastion".into(),
             endpoint: "rustion-test.internal:9443".into(),
             public_key: crate::modules::rustion::config::HybridPubKey {
-                ed25519: String::new(),
-                mldsa65: STANDARD.encode(kem_pub),
+                ed25519: STANDARD.encode([7u8; 32]), // synthetic — unused by KEM path
+                mldsa65: STANDARD.encode([7u8; 16]),
             },
+            kem_public_key: STANDARD.encode(kem_pub),
             fingerprint: String::new(),
             description: String::new(),
             tags: vec![],
