@@ -42,6 +42,7 @@ pub mod poller;
 pub mod policy;
 pub mod probe;
 pub mod recordings;
+pub mod telemetry;
 
 fn read_string_list(req: &Request, key: &str) -> Vec<String> {
     match req.get_data(key) {
@@ -166,6 +167,7 @@ pub struct RustionModule {
     pub master_store: ArcSwap<Option<Arc<MasterStore>>>,
     pub recordings_store: ArcSwap<Option<Arc<recordings::RecordingsStore>>>,
     pub policy_store: ArcSwap<Option<Arc<policy::PolicyStore>>>,
+    pub telemetry_cache: ArcSwap<Option<Arc<telemetry::TelemetryCache>>>,
 }
 
 pub struct RustionBackendInner {
@@ -220,6 +222,8 @@ impl RustionBackend {
         let h_policy_res_read = self.inner.clone();
         let h_policy_res_write = self.inner.clone();
         let h_policy_force_rustion = self.inner.clone();
+        let h_telemetry_all = self.inner.clone();
+        let h_telemetry_poll = self.inner.clone();
         let h_noop1 = self.inner.clone();
         let h_noop2 = self.inner.clone();
 
@@ -507,6 +511,23 @@ impl RustionBackend {
                         {op: Operation::Read, handler: h_recording_read.handle_recording_read}
                     ],
                     help: "Read a single recording entry by id (Phase 6.2)."
+                },
+                {
+                    // GET rustion/telemetry — Phase 8.1. Returns the
+                    // last-pulled snapshot from every enrolled bastion.
+                    pattern: r"telemetry/?$",
+                    operations: [
+                        {op: Operation::Read, handler: h_telemetry_all.handle_telemetry_all}
+                    ],
+                    help: "Phase 8.1 — Returns the cached telemetry snapshot from every enrolled Rustion bastion (60s refresh)."
+                },
+                {
+                    // POST rustion/telemetry/poll — force a sync pass.
+                    pattern: r"telemetry/poll$",
+                    operations: [
+                        {op: Operation::Write, handler: h_telemetry_poll.handle_telemetry_poll}
+                    ],
+                    help: "Phase 8.1 — Force a synchronous telemetry pull pass."
                 },
                 {
                     // GET rustion/recordings/<rid>/blob — Phase 6.5.
@@ -2196,6 +2217,39 @@ impl RustionBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
+    // ─── Phase 8.1: telemetry ──────────────────────────────────────
+
+    pub async fn handle_telemetry_all(
+        &self,
+        _b: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let module = self
+            .core
+            .module_manager
+            .get_module::<RustionModule>("rustion")
+            .ok_or_else(|| bv_error_string!("rustion module not registered"))?;
+        let cache = module
+            .telemetry_cache()
+            .ok_or_else(|| bv_error_string!("telemetry cache not initialized"))?;
+        let snaps = cache.list_snapshots().await;
+        let mut data = Map::new();
+        let json = serde_json::to_value(&snaps)
+            .map_err(|e| bv_error_string!(&format!("encode telemetry: {e}")))?;
+        data.insert("targets".into(), json);
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_telemetry_poll(
+        &self,
+        _b: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let core = self.core.clone();
+        telemetry::run_pass(&core).await?;
+        self.handle_telemetry_all(_b, _req).await
+    }
+
     /// Extract OperatorContext from the caller's auth metadata.
     /// Phase 5: factored out so renew + kill share the open path's
     /// identity-stamping logic.
@@ -2340,6 +2394,7 @@ impl RustionModule {
             master_store: ArcSwap::new(Arc::new(None)),
             recordings_store: ArcSwap::new(Arc::new(None)),
             policy_store: ArcSwap::new(Arc::new(None)),
+            telemetry_cache: ArcSwap::new(Arc::new(None)),
         }
     }
 
@@ -2357,6 +2412,10 @@ impl RustionModule {
 
     pub fn policy_store(&self) -> Option<Arc<policy::PolicyStore>> {
         self.policy_store.load().as_ref().clone()
+    }
+
+    pub fn telemetry_cache(&self) -> Option<Arc<telemetry::TelemetryCache>> {
+        self.telemetry_cache.load().as_ref().clone()
     }
 }
 
@@ -2388,6 +2447,8 @@ impl Module for RustionModule {
         self.recordings_store.store(Arc::new(Some(recs)));
         let pol = policy::PolicyStore::new(core).await?;
         self.policy_store.store(Arc::new(Some(pol)));
+        let tel = std::sync::Arc::new(telemetry::TelemetryCache::new());
+        self.telemetry_cache.store(Arc::new(Some(tel)));
         Ok(())
     }
 
@@ -2396,6 +2457,7 @@ impl Module for RustionModule {
         self.master_store.store(Arc::new(None));
         self.recordings_store.store(Arc::new(None));
         self.policy_store.store(Arc::new(None));
+        self.telemetry_cache.store(Arc::new(None));
         core.delete_logical_backend("rustion")
     }
 }

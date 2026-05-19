@@ -654,7 +654,11 @@ impl Core {
             // pattern; ticks every hour, falls back to GET
             // /v1/sessions/{sid}/recording for sessions whose
             // recording.ready webhook didn't land.
-            let _ = crate::modules::rustion::poller::start_poller(core_arc);
+            let _ = crate::modules::rustion::poller::start_poller(core_arc.clone());
+            // Phase 8.1: 60s telemetry poller pulling
+            // /v1/sessions/{active,history} + /v1/stats from every
+            // enabled bastion into the in-memory cache the GUI reads.
+            let _ = crate::modules::rustion::telemetry::start_poller(core_arc);
         }
 
         // Boot the OpenLDAP / AD static-role auto-rotation scheduler

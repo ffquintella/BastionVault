@@ -1203,6 +1203,190 @@ pub async fn rustion_policy_force_rustion(
     })
 }
 
+// ─── Phase 8.1: telemetry ────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionTelemetrySession {
+    pub session_id: String,
+    pub authority: String,
+    pub protocol: String,
+    pub target_host: String,
+    pub target_port: u16,
+    pub target_user: String,
+    pub operator_vault_user: String,
+    pub operator_src_ip: String,
+    pub correlation_id: String,
+    pub opened_at: String,
+    pub expires_at: String,
+    pub renewals_used: u32,
+    pub max_renewals: u32,
+    pub killed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionTelemetryStats {
+    pub active: u64,
+    pub total: u64,
+    pub total_duration_secs: u64,
+    pub top_targets: Vec<(String, u64)>,
+    pub top_operators: Vec<(String, u64)>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionTelemetryTarget {
+    pub target_id: String,
+    pub target_name: String,
+    pub authority: String,
+    pub last_pull_at: Option<String>,
+    pub last_pull_error: Option<String>,
+    pub active: Vec<RustionTelemetrySession>,
+    pub history: Vec<RustionTelemetrySession>,
+    pub stats: RustionTelemetryStats,
+}
+
+fn session_from_value(v: &Value) -> RustionTelemetrySession {
+    let obj = v.as_object().cloned().unwrap_or_default();
+    RustionTelemetrySession {
+        session_id: s(&obj, "session_id"),
+        authority: s(&obj, "authority"),
+        protocol: s(&obj, "protocol"),
+        target_host: s(&obj, "target_host"),
+        target_port: obj
+            .get("target_port")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u16)
+            .unwrap_or(0),
+        target_user: s(&obj, "target_user"),
+        operator_vault_user: s(&obj, "operator_vault_user"),
+        operator_src_ip: s(&obj, "operator_src_ip"),
+        correlation_id: s(&obj, "correlation_id"),
+        opened_at: s(&obj, "opened_at"),
+        expires_at: s(&obj, "expires_at"),
+        renewals_used: obj
+            .get("renewals_used")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
+            .unwrap_or(0),
+        max_renewals: obj
+            .get("max_renewals")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
+            .unwrap_or(0),
+        killed_at: obj
+            .get("killed_at")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+    }
+}
+
+fn target_from_value(v: &Value) -> RustionTelemetryTarget {
+    let obj = v.as_object().cloned().unwrap_or_default();
+    let active = obj
+        .get("active")
+        .and_then(|x| x.as_array())
+        .map(|a| a.iter().map(session_from_value).collect())
+        .unwrap_or_default();
+    let history = obj
+        .get("history")
+        .and_then(|x| x.as_array())
+        .map(|a| a.iter().map(session_from_value).collect())
+        .unwrap_or_default();
+    let stats_v = obj.get("stats").cloned().unwrap_or(Value::Null);
+    let stats_obj = stats_v.as_object().cloned().unwrap_or_default();
+    let stats = RustionTelemetryStats {
+        active: u64_field(&stats_obj, "active"),
+        total: u64_field(&stats_obj, "total"),
+        total_duration_secs: u64_field(&stats_obj, "total_duration_secs"),
+        top_targets: stats_obj
+            .get("top_targets")
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|pair| {
+                        let p = pair.as_array()?;
+                        Some((
+                            p.first()?.as_str()?.to_string(),
+                            p.get(1)?.as_u64().unwrap_or(0),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        top_operators: stats_obj
+            .get("top_operators")
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|pair| {
+                        let p = pair.as_array()?;
+                        Some((
+                            p.first()?.as_str()?.to_string(),
+                            p.get(1)?.as_u64().unwrap_or(0),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    RustionTelemetryTarget {
+        target_id: s(&obj, "target_id"),
+        target_name: s(&obj, "target_name"),
+        authority: s(&obj, "authority"),
+        last_pull_at: obj
+            .get("last_pull_at")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        last_pull_error: obj
+            .get("last_pull_error")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        active,
+        history,
+        stats,
+    }
+}
+
+#[tauri::command]
+pub async fn rustion_telemetry_list(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<RustionTelemetryTarget>> {
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("{RUSTION_MOUNT}telemetry"),
+        None,
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(data
+        .get("targets")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().map(target_from_value).collect())
+        .unwrap_or_default())
+}
+
+#[tauri::command]
+pub async fn rustion_telemetry_poll(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<RustionTelemetryTarget>> {
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}telemetry/poll"),
+        None,
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(data
+        .get("targets")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().map(target_from_value).collect())
+        .unwrap_or_default())
+}
+
 #[tauri::command]
 pub async fn rustion_master_pubkey_export(
     state: State<'_, AppState>,

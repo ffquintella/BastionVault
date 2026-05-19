@@ -45,6 +45,47 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.32] - 2026-05-19
+
+### Added
+
+- **Rustion integration — Phase 8.1: telemetry pull + Live Sessions
+  page** (paired with Rustion 0.7.24). Cross-fleet observability:
+  60s pull loop + authority-scoped telemetry endpoints + new GUI page.
+    - **Rustion side**: three new authority-scoped GET endpoints
+      `/v1/sessions/active`, `/v1/sessions/history?since=&limit=`,
+      `/v1/stats`. `SessionStore::snapshot_by_authority` +
+      `stats_for_authority` new helpers. `require_authority` helper
+      gates telemetry on the existing X-Rustion-Authority header.
+    - **BV `src/modules/rustion/telemetry.rs`** new module: 60s
+      detached poller spawned at boot from `core.rs` alongside the
+      probe pinger + the 24h recording poller. `TelemetryCache`
+      keeps an in-memory `HashMap<target_id, TargetSnapshot>` behind
+      a `tokio::sync::RwLock`. Per-target cursor persistence at
+      `rustion/telemetry/<target_id>/cursor` so restarts resume.
+    - **BV HTTP routes**: `GET rustion/telemetry` returns the cache
+      snapshot; `POST rustion/telemetry/poll` forces a synchronous
+      pass and returns the fresh snapshot.
+    - **Two new Tauri commands + TS wrappers**:
+      `rustionTelemetryList`, `rustionTelemetryPoll`.
+    - **New GUI `/rustion-sessions` page** + sidebar entry:
+      cross-bastion Live Sessions view with 5s auto-refresh,
+      search + per-bastion filter, three summary cards (active
+      fleet sessions / lifetime rolling / total session time), one
+      row per active session with operator + src-ip + target +
+      opened/expires/renewals, and a per-row **Terminate** button
+      calling `rustionSessionKill`.
+
+### Changed
+
+- `features/rustion-integration.md`: Phase 8.1 marked Done. Phase
+  8.2 carves out the remaining slice — signed audit-witness pull
+  (`/v1/sessions/audit` + `rustion.audit.witness` event), rate
+  limiting on telemetry endpoints, signed-URL recording replay
+  (`POST rustion/recordings/<rid>/replay` + `GET /v1/recordings/<rid>`
+  on Rustion), a separate `SessionReplayWindow` WebviewWindow, the
+  `recording.replayed` audit event, and an analytics dashboard.
+
 ## [0.7.31] - 2026-05-19
 
 ### Added

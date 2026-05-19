@@ -15,6 +15,7 @@ import { AssetGroupsPage } from "./routes/AssetGroupsPage";
 import { SharingPage } from "./routes/SharingPage";
 import { AuditPage } from "./routes/AuditPage";
 import { RecordingsPage } from "./routes/RecordingsPage";
+import { RustionLiveSessionsPage } from "./routes/RustionLiveSessionsPage";
 import { PoliciesPage } from "./routes/PoliciesPage";
 import { MountsPage } from "./routes/MountsPage";
 import { SettingsPage } from "./routes/SettingsPage";
@@ -120,6 +121,10 @@ export default function App() {
             <Route
               path="/recordings"
               element={<ProtectedRoute><RecordingsPage /></ProtectedRoute>}
+            />
+            <Route
+              path="/rustion-sessions"
+              element={<ProtectedRoute><RustionLiveSessionsPage /></ProtectedRoute>}
             />
             <Route
               path="/policies"

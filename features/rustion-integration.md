@@ -818,7 +818,37 @@ This phase is **BastionVault-only**. The transport-and-bastion-policy ladder liv
 | BastionVault | Audit: `rustion.bastion_group.update`, `rustion.policy.global.update`, `rustion.policy.type.update`, `rustion.policy.asset_group.update`, `rustion.policy.resource.update` with before/after + actor | `src/modules/rustion/audit.rs` |
 | Rustion | (no changes — Rustion does not know or care which policy tier picked `rustion-required` or which bastion group resolved to itself on the vault side) | — |
 
-### Phase 8 — Telemetry pull + in-GUI session replay
+### Phase 8.1 — Telemetry pull + Live Sessions page — **Done** (BV 0.7.32 + Rustion 0.7.24)
+
+Lays the cross-fleet observability foundation: a 60s pull loop, authority-scoped read-only telemetry endpoints on Rustion, and a new "Live Sessions" page in the GUI.
+
+- **Rustion `/v1/sessions/active`** — authority-scoped (via `X-Rustion-Authority` header). Returns every active (not-killed, not-expired) session that opened under that authority. Read-only; no envelope required since this is metadata only.
+- **Rustion `/v1/sessions/history?since=&limit=`** — paginated rolling history with most-recent-first ordering and a `next_cursor` field. `limit` caps at 1000.
+- **Rustion `/v1/stats`** — aggregate metrics per authority: `{active, total, total_duration_secs, top_targets, top_operators}` (top-10 each). Computed on the fly from the in-memory session table; cheap.
+- **`SessionStore::snapshot_by_authority` + `stats_for_authority`** new helpers.
+- **`require_authority` helper** in `routes.rs` extracts + validates the `X-Rustion-Authority` header for telemetry routes (rejects unknown / revoked authorities with `401`/`403`).
+- **BV `src/modules/rustion/telemetry.rs`** new module:
+    - `TelemetryCache` — in-memory `HashMap<target_id, TargetSnapshot>` behind a `tokio::sync::RwLock`.
+    - `start_poller(core)` — detached 60s `tokio::time::interval` loop spawned at boot from `core.rs` alongside the probe pinger + the 24h recording poller. Mirrors the same lifecycle pattern.
+    - Per-target cursor persistence at `rustion/telemetry/<target_id>/cursor` so restarts pick up history from the last pull.
+    - Pulls `/v1/sessions/active`, `/v1/sessions/history` (with cursor), `/v1/stats` from every *enabled* enrolled target.
+- **BV HTTP routes** `GET rustion/telemetry` (cache snapshot) + `POST rustion/telemetry/poll` (force a synchronous pass + return the fresh snapshot).
+- **2 new Tauri commands + TS wrappers**: `rustionTelemetryList`, `rustionTelemetryPoll`.
+- **New GUI page `/rustion-sessions`**: cross-bastion Live Sessions view with 5s auto-refresh, search + per-bastion filter, three summary cards (active fleet sessions / lifetime rolling / total session time), one row per active session with operator + src-ip + target + opened/expires/renewals, and a per-row **Terminate** button calling `rustionSessionKill`. Sidebar entry "Live Sessions" added under the existing "Recordings" link.
+
+### Phase 8.2 — Signed audit witness + replay window + analytics — **Todo**
+
+What's left of Phase 8:
+
+- **`GET /v1/sessions/audit?since=&limit=`** on Rustion — paginated hash-chain audit entries scoped to the authority, with the chain's signature on each row so BV can re-verify before re-witnessing.
+- **`rustion.audit.witness`** audit event on BV emitted for every re-witnessed entry.
+- **Rate limiting** (per IP + per authority) on the telemetry endpoints so a runaway puller can't saturate the bastion.
+- **`POST /v1/rustion/recordings/{rid}/replay`** signed-envelope route on BV + 60s IP-bound signed URL on Rustion (`GET /v1/recordings/{rid}`) for the player to stream from.
+- **`SessionReplayWindow`** — separate Tauri WebviewWindow with asciinema-player for `.cast` + the future `.rdp-rec` WASM decoder.
+- **`recording.replayed`** audit event on every in-GUI playback (operator id + recording id + sha256 mismatch flag).
+- **Analytics dashboard** reading from the persisted aggregate (sessions/hour, top operators, top targets) — extends the existing Live Sessions page or adds a new `/rustion-analytics` route.
+
+### Phase 8 — Telemetry pull + in-GUI session replay (original spec table)
 
 | Side | Deliverable | Location |
 |---|---|---|

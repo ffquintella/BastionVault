@@ -387,3 +387,47 @@ export const rustionPolicyForceRustion = (confirm: boolean) =>
   invoke<RustionForceRustionResult>("rustion_policy_force_rustion", {
     confirm,
   });
+
+// ─── Phase 8.1: telemetry ────────────────────────────────────────
+
+export interface RustionTelemetrySession {
+  sessionId: string;
+  authority: string;
+  protocol: string;
+  targetHost: string;
+  targetPort: number;
+  targetUser: string;
+  operatorVaultUser: string;
+  operatorSrcIp: string;
+  correlationId: string;
+  openedAt: string;
+  expiresAt: string;
+  renewalsUsed: number;
+  maxRenewals: number;
+  killedAt: string | null;
+}
+
+export interface RustionTelemetryStats {
+  active: number;
+  total: number;
+  totalDurationSecs: number;
+  topTargets: Array<[string, number]>;
+  topOperators: Array<[string, number]>;
+}
+
+export interface RustionTelemetryTarget {
+  targetId: string;
+  targetName: string;
+  authority: string;
+  lastPullAt: string | null;
+  lastPullError: string | null;
+  active: RustionTelemetrySession[];
+  history: RustionTelemetrySession[];
+  stats: RustionTelemetryStats;
+}
+
+export const rustionTelemetryList = () =>
+  invoke<RustionTelemetryTarget[]>("rustion_telemetry_list");
+
+export const rustionTelemetryPoll = () =>
+  invoke<RustionTelemetryTarget[]>("rustion_telemetry_poll");
