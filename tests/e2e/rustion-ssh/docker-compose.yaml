@@ -1,0 +1,79 @@
+version: "3.9"
+
+# Three-service stack exercising Rustion-mediated SSH end-to-end.
+# Maps the four steps from features/rustion-integration.md § Trust
+# model onto a docker network:
+#
+#   bastion-vault   — sources the BVRG-v1 envelope, exposes the
+#                     `rustion/session/open` route on :8200
+#   rustion         — verifies envelopes, mints tickets, proxies SSH
+#                     to the openssh-target on :2222
+#   openssh-target  — vanilla OpenSSH server on :22 the operator
+#                     eventually shells into
+#
+# Driver script `run.sh` walks the stack from cold-start to opened
+# session.
+
+services:
+  bastion-vault:
+    # Phase 3.1 scaffold — the actual `bastion-vault` Dockerfile
+    # lives at the repo root in a follow-up; today the run.sh script
+    # builds the host crate locally and points its data dir at a
+    # bind-mount under ./var/bv/.
+    image: bastion-vault:phase31-scaffold
+    # build:
+    #   context: ../../..
+    #   dockerfile: Dockerfile
+    container_name: bv
+    networks:
+      - rustion-e2e
+    ports:
+      - "8200:8200"  # HTTP API
+      - "8201:8201"  # Hiqlite raft (single-node test mode)
+    volumes:
+      - ./var/bv:/var/lib/bastion-vault
+      - ./config/bv-policy.hcl:/etc/bastion-vault/policies/admin.hcl:ro
+    environment:
+      - VAULT_LOG_LEVEL=info
+      - BASTION_VAULT_LOCAL_DEV=1
+
+  rustion:
+    image: rustion:phase31-scaffold
+    # build:
+    #   context: ../../../Rustion  # sibling repo
+    #   dockerfile: Dockerfile
+    container_name: rustion
+    networks:
+      - rustion-e2e
+    ports:
+      - "2222:2222"  # SSH listener (the bastion's user-facing port)
+      - "9443:9443"  # Control-plane HTTP (where /v1/sessions lives)
+    volumes:
+      - ./config/rustion.toml:/etc/rustion/rustion.toml:ro
+      - ./config/rustion-authorities:/etc/rustion/authorities:ro
+      - ./var/rustion:/var/lib/rustion
+    depends_on:
+      - openssh-target
+
+  openssh-target:
+    # Lightweight Alpine + OpenSSH; password auth allowed for the
+    # `deploy` user so the BV-mediated session reaches it.
+    image: linuxserver/openssh-server:latest
+    container_name: openssh-target
+    networks:
+      rustion-e2e:
+        aliases:
+          - target
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - USER_NAME=deploy
+      - USER_PASSWORD=hunter2
+      - PASSWORD_ACCESS=true
+      - SUDO_ACCESS=false
+    expose:
+      - "22"
+
+networks:
+  rustion-e2e:
+    driver: bridge

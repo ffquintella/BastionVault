@@ -45,6 +45,38 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.19] - 2026-05-19
+
+### Added
+
+- **Rustion integration — Phase 3.1 close-out** (paired with Rustion
+  0.7.15). The russh listener-loop wire-up of `consume_ticket_for_login`,
+  the recording authority/correlation_id stamping, and the e2e
+  docker-compose scaffold all land in this slice.
+    - **End-to-end SSH BV-mediated session path now works** on the
+      Rustion side: `ServerHandler.auth_password` detects `tkt_…`
+      passwords, runs ticket auth via the BV `SessionStore`, stashes
+      the session, and accepts. `shell_request` learned a fast path
+      that bypasses the user-store target ACL + interactive menu and
+      dials the session's `target_host:target_port` with the
+      decrypted `ssh-password` credential.
+    - **Recording chain-of-custody**: `SessionMetadata.authority` +
+      `SessionMetadata.correlation_id` populated for BV-mediated
+      sessions; asciicast header carries them under
+      `rustion.{authority,correlation_id}` so SOC tooling can join
+      recordings against the BV audit chain. `auth_method` records as
+      `bv_ticket` to distinguish from classical `password` sessions.
+    - **`tests/e2e/rustion-ssh/`** docker-compose scaffold + `run.sh`
+      driver walking the full pipeline cold-start → enrolment →
+      probe → session-open → ticket-validated SSH to an OpenSSH
+      target. Configs (`bv-policy.hcl`, `rustion.toml`,
+      authorities/) included. The Dockerfiles for BV + Rustion
+      themselves land in Phase 3.2.
+    - Deferred to Phase 3.2: `Dockerfile.bastion-vault` +
+      `Dockerfile.rustion`, plus `ssh-key` / `ssh-cert` credential-
+      kind dialing in `connect_to_target` (today only password is
+      plumbed through).
+
 ## [0.7.18] - 2026-05-19
 
 ### Added

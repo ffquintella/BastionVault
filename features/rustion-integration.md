@@ -499,10 +499,15 @@ Shipped across 0.7.16/0.7.12 (dispatcher + session table + master stub) and 0.7.
 - **GUI `ConnectionProfile.kind = "direct" | "rustion"`** discriminator on `gui/src/lib/types.ts`, with optional `bastions: string[]` (pinned ordered list, empty = global pool) and `recording: "always" | "off" | "input-redacted"` (strictest-wins override). Backwards-compatible — existing profiles without `kind` default to `"direct"`.
 - **Rustion `rustion-ssh::ticket_auth`** — pure logic that consumes a `tkt_…` string + client IP via the SessionStore. All error paths collapse to `Invalid` from the caller's POV (no enumeration on the wire); detailed reason is logged at WARN with the ticket prefix sanitised to 8 hex chars for audit-chain correlation. 4 unit tests cover happy path, replay, wrong source IP, unknown ticket.
 
-Deferred to Phase 3.1 (separate slice):
-- **russh listener wire-up of `consume_ticket_for_login`** in `rustion-ssh::server` — the ticket-auth module is unit-tested today; bolting it onto the SSH banner exchange + connecting the russh proxy loop is the remaining mechanical step.
-- **Recording start-on-first-byte** wiring in `rustion-recording` to consume the new authority field.
-- **End-to-end demo against a real Linux target** via docker-compose (BV + Rustion + OpenSSH target).
+Phase 3.1 follow-up shipped in 0.7.19 (BV) + 0.7.15 (Rustion):
+
+- **russh listener wire-up of `consume_ticket_for_login`** — `ServerHandler.auth_password` recognises `tkt_<32 hex>` passwords when wired up to a BV `SessionStore`, runs `consume_ticket_for_login`, stashes the matched session, and accepts auth. `ServerHandler::with_bv_session_store(store)` builder method opts into the path. `shell_request` learned a BV-session fast path that bypasses the user-store target ACL + interactive menu and dials the session's `target_host:target_port` with the decrypted `ssh-password` credential. Falls back to the classical user-store auth if the ticket lookup misses, so a Rustion user whose password happens to start with `tkt_` isn't locked out.
+- **Recording authority field** — `SessionMetadata` gained `authority` + `correlation_id` fields. `connect_to_target_and_relay` accepts an `Option<(String, String)>` and stamps them on the asciicast `rustion.{authority,correlation_id}` header. `auth_method` records as `bv_ticket` for BV-mediated sessions, distinguishing them from `password` in SOC tooling. Recording start-on-first-byte was already the default (the recorder buffers until the proxy loop starts dialing the target); the only change was making the header carry the BV chain-of-custody fields.
+- **E2E docker-compose scaffold** at [`tests/e2e/rustion-ssh/`](../tests/e2e/rustion-ssh/) — three-service stack (BV + Rustion + OpenSSH target) with a `run.sh` driver that walks the full pipeline cold-start → enrolment → probe → session-open → ticket-validated SSH to the target. The compose file references `bastion-vault:phase31-scaffold` + `rustion:phase31-scaffold` images that aren't yet committed (the Dockerfile slices land in a follow-up); the configs + driver + the `ssh-key` / `ssh-cert` credential-kind support for the proxy loop are the remaining gaps to demo against a real target.
+
+Deferred to Phase 3.2:
+- `Dockerfile.bastion-vault` + `Dockerfile.rustion` so the e2e driver actually builds the stack from source instead of pre-built images.
+- `ssh-key` and `ssh-cert` credential kinds in the BV-bypass branch (`connect_to_target` only accepts password today; private-key auth needs the russh-client-side decode + sign).
 
 - Rustion `/v1/sessions` materialises a session, mints a ticket, returns connection coordinates.
 - Rustion SSH listener accepts `ticket@<sid>` as the first auth step and proxies to the target with the decrypted credential.

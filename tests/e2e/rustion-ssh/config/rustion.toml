@@ -1,0 +1,36 @@
+# Rustion config for the Phase 3.1 e2e driver.
+# Minimal: control-plane HTTP listener + SSH proxy listener,
+# `authorities/` mounted from `./config/rustion-authorities/` on
+# the host so the BV-issued master pubkey can be pasted in
+# without rebuilding the image.
+
+[control_plane]
+enabled        = true
+bind           = "0.0.0.0:9443"
+authorities_dir = "/etc/rustion/authorities/"
+# Identity keypair persisted on the bind-mount so it survives
+# container restarts. Auto-generated on first start.
+identity_pub   = "/var/lib/rustion/identity.pub"
+identity_priv  = "/var/lib/rustion/identity.key"
+recording_fetch_enabled = true
+active_session_cap = 64
+max_envelope_bytes = 16384
+
+[control_plane.health]
+rate_per_source_per_sec   = 4
+rate_per_authority_per_sec = 10
+
+[ssh]
+bind          = "0.0.0.0:2222"
+host_key      = "/var/lib/rustion/ssh_host_ed25519_key"
+# BV-mediated sessions don't require a host-side Rustion user —
+# the ticket-auth path bypasses the user store entirely.
+allow_bv_ticket = true
+
+[recording]
+root_dir      = "/var/lib/rustion/recordings"
+format        = "asciicast"
+
+[audit]
+log_path      = "/var/lib/rustion/audit.log"
+checkpoint_interval_secs = 300
