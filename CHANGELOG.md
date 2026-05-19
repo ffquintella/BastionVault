@@ -45,6 +45,53 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.30] - 2026-05-19
+
+### Added
+
+- **Rustion integration — Phase 7.2: per-tier CRUD + session/open
+  resolver + Settings UI + migration**. Brings the four-tier policy
+  from "data model + global CRUD" up to a usable governance surface.
+    - **HTTP routes** for the three remaining tiers:
+      `GET/PUT/DELETE rustion/policy/type/<name>`,
+      `GET/PUT rustion/policy/asset-group/<id>` (with priority),
+      `GET/PUT rustion/policy/resource/<id>`,
+      `POST rustion/policy/force-rustion`. The per-resource handler
+      refuses `lock=true` (only higher tiers may lock) and refuses
+      writes that would weaken a higher-tier lock via probe-resolve.
+    - **8 new Tauri commands + TS wrappers**:
+      `rustionPolicyType{Read,Write,Delete}`,
+      `rustionPolicyAssetGroup{Read,Write}`,
+      `rustionPolicyResource{Read,Write}`,
+      `rustionPolicyForceRustion`.
+    - **`session/open` resolver wiring**: loads global, calls
+      `policy::resolve`, refuses on `lock_violation` (403), refuses on
+      `transport=rustion-required` without enrolled bastions (403),
+      overrides caller-supplied `bastions` with policy-pinned list or
+      bastion-group members, forces `recording` to the resolver's
+      strictest value. Stamps `policy_transport`,
+      `policy_transport_source`, `policy_recording`,
+      `policy_recording_source`, `policy_bastions_source`,
+      `policy_locked_by` on the session-open response.
+    - **Settings → Rustion → Policy panel**: new
+      `RustionPolicyPanel` component mounted alongside
+      `RustionBastionsTab` under the "Rustion" tab. Three cards —
+      Global Policy editor, Bastion Groups CRUD (list + create/edit/
+      delete with member list + ordered/random selection +
+      description), and "Force all Connect through Rustion" with a
+      preview→confirm dry-run flow.
+    - **Audit emission**: `POLICY_TYPE_UPDATE`,
+      `POLICY_ASSET_GROUP_UPDATE`, `POLICY_RESOURCE_UPDATE` light up
+      at their respective write sites. `POLICY_GLOBAL_UPDATE`
+      doubles as the audit event for the force-rustion migration.
+
+### Changed
+
+- `features/rustion-integration.md`: Phase 7.2 marked Done; Phase 7.3
+  carved out for the per-tier editor integration into existing
+  Resource Types / Asset Groups / Resource Connection pages + the
+  full type/asset-group resolver chain in `session/open`.
+
 ## [0.7.29] - 2026-05-19
 
 ### Added

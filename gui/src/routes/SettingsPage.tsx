@@ -21,6 +21,7 @@ import type {
 import { DEFAULT_RESOURCE_TYPES, mergeTypeConfig } from "../lib/resourceTypes";
 import { CloudStorageCard } from "../components/CloudStorageCard";
 import { RustionBastionsTab } from "../components/RustionBastionsTab";
+import { RustionPolicyPanel } from "../components/RustionPolicyPanel";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 
@@ -971,6 +972,8 @@ export function SettingsPage() {
             health view, master-cert config slot. See
             features/rustion-integration.md. */}
         <RustionBastionsTab />
+        {/* Phase 7: four-tier policy + bastion groups. */}
+        <RustionPolicyPanel />
         </>)}
 
         {activeTab === "general" && (<>

@@ -307,3 +307,77 @@ export const rustionBastionGroupUpdate = (
 
 export const rustionBastionGroupDelete = (name: string) =>
   invoke<void>("rustion_bastion_group_delete", { name });
+
+export interface RustionTypePolicy {
+  name: string;
+  transport: Transport;
+  bastions: string[];
+  bastionGroup: string;
+  recording: Recording;
+  lock: boolean;
+  updatedAt: string;
+}
+
+export const rustionPolicyTypeRead = (typeName: string) =>
+  invoke<RustionTypePolicy>("rustion_policy_type_read", { typeName });
+
+export const rustionPolicyTypeWrite = (
+  typeName: string,
+  input: RustionPolicyTier,
+) => invoke<void>("rustion_policy_type_write", { typeName, input });
+
+export const rustionPolicyTypeDelete = (typeName: string) =>
+  invoke<void>("rustion_policy_type_delete", { typeName });
+
+export interface RustionAssetGroupPolicy {
+  priority: number;
+  transport: Transport;
+  bastions: string[];
+  bastionGroup: string;
+  recording: Recording;
+  lock: boolean;
+  updatedAt: string;
+}
+
+export interface RustionAssetGroupPolicyInput {
+  priority: number;
+  transport: Transport;
+  bastions: string[];
+  bastionGroup: string;
+  recording: Recording;
+  lock: boolean;
+}
+
+export const rustionPolicyAssetGroupRead = (assetGroupId: string) =>
+  invoke<RustionAssetGroupPolicy>("rustion_policy_asset_group_read", {
+    assetGroupId,
+  });
+
+export const rustionPolicyAssetGroupWrite = (
+  assetGroupId: string,
+  input: RustionAssetGroupPolicyInput,
+) =>
+  invoke<void>("rustion_policy_asset_group_write", { assetGroupId, input });
+
+export const rustionPolicyResourceRead = (resourceId: string) =>
+  invoke<RustionPolicyTier>("rustion_policy_resource_read", { resourceId });
+
+export const rustionPolicyResourceWrite = (
+  resourceId: string,
+  input: RustionPolicyTier,
+) =>
+  invoke<void>("rustion_policy_resource_write", { resourceId, input });
+
+export interface RustionForceRustionResult {
+  currentTransport: string;
+  currentLock: boolean;
+  proposedTransport: string;
+  proposedLock: boolean;
+  applied: boolean;
+  note: string;
+}
+
+export const rustionPolicyForceRustion = (confirm: boolean) =>
+  invoke<RustionForceRustionResult>("rustion_policy_force_rustion", {
+    confirm,
+  });

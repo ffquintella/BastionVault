@@ -676,18 +676,36 @@ The foundation layer of the four-tier policy: data model, storage, the effective
 - **Audit constants** already existed in `audit.rs` from Phase 1 spec — `POLICY_GLOBAL_UPDATE`, `POLICY_TYPE_UPDATE`, `POLICY_ASSET_GROUP_UPDATE`, `POLICY_RESOURCE_UPDATE`, `BASTION_GROUP_UPDATE`. The new handlers emit `POLICY_GLOBAL_UPDATE` and `BASTION_GROUP_UPDATE` (the other three light up in Phase 7.2 alongside the per-tier editors).
 - **Tauri commands + TS wrappers**: `rustionPolicyGlobal{Read,Write}`, `rustionBastionGroup{List,Read,Create,Update,Delete}`.
 
-### Phase 7.2 — Per-type / per-asset-group / per-resource editors + session/open integration — **Todo**
+### Phase 7.2 — Per-tier CRUD + session/open resolver + Settings UI + migration — **Done** (BV 0.7.30)
 
-The resolver is ready to consume policy from all four tiers but the lower-three-tier editors aren't wired into the GUI yet. Remaining work:
+Brings the four-tier policy from "data model + global CRUD" up to a usable governance surface: type/AG/resource CRUD, `session/open` consults the resolver, the migration action ships, and a Settings panel lets root + admins configure the deployment policy.
 
-- **HTTP routes + Tauri commands** for `rustion/policy/type/<name>`, `rustion/policy/asset-group/<id>`, `rustion/policy/resource/<id>` (CRUD shape identical to global).
-- **Settings UI**: "Rustion → Global policy" panel (root-only), "Rustion → Bastion Groups" CRUD panel (already plumbable via the existing `/settings` route + the new Tauri commands).
-- **Resource Types editor** gains the per-type fields + `transport_lock` toggle.
-- **Asset Groups page** gains per-group transport/bastion/recording + priority slider + lock.
-- **Resource Connection tab** gains the per-resource override (gated to resource owner, writable only when no upstream tier is locked) + a read-only badge naming the locking tier when locked upstream.
-- **`session/open` calls the resolver**: walk the resource → owning AGs → resource type → global chain, compute `EffectivePolicy`, refuse on `lock_violation`, refuse on `transport == RustionRequired` when no bastions are reachable. Stamp the resolution chain on the `session.open` audit event for SOC visibility.
-- **Migration action**: root-only "Force all Connect through Rustion" toggle that flips `transport_default = rustion-required` + `lock = true` in one step after a diff preview of every resource that would change behaviour.
-- **Audit events** for `rustion.policy.type.update`, `rustion.policy.asset_group.update`, `rustion.policy.resource.update` (constants exist; emit sites added with each editor).
+- **HTTP routes** for the three remaining tiers:
+  - `GET/PUT/DELETE rustion/policy/type/<type_name>` — admin-gated.
+  - `GET/PUT rustion/policy/asset-group/<asset_group_id>` (with `priority`) — admin or group-owner.
+  - `GET/PUT rustion/policy/resource/<resource_id>` — resource owner. Refuses `lock=true` from this tier (per-resource cannot lock). Refuses a write that would weaken a lock from a higher tier (probe-resolve at write time).
+  - `POST rustion/policy/force-rustion?confirm=true|false` — Root-only migration: flips global to `transport=rustion-required + lock=true`. Without `confirm` returns a diff preview.
+- **8 new Tauri commands + TS wrappers**: `rustionPolicyType{Read,Write,Delete}`, `rustionPolicyAssetGroup{Read,Write}`, `rustionPolicyResource{Read,Write}`, `rustionPolicyForceRustion`.
+- **`session/open` resolver wiring** in `src/modules/rustion/mod.rs::handle_session_open`:
+  - Loads the global tier from `PolicyStore`.
+  - Calls `policy::resolve(global, None, &[], None)` — Phase 7.3 wires per-resource / asset-group / type lookups once the editor surface attaches them to resource records.
+  - Refuses on `lock_violation` (403).
+  - Refuses on `transport=rustion-required` when no bastions are enrolled (403 `rustion-required policy: no bastions enrolled`).
+  - Overrides caller-supplied `bastions` with the policy's pinned list or the resolved bastion-group's members when those are set (so a policy-pinned group can't be silently bypassed).
+  - Forces the `recording` field to the resolver's value (strictest-wins).
+  - Stamps `policy_transport`, `policy_transport_source`, `policy_recording`, `policy_recording_source`, `policy_bastions_source`, `policy_locked_by` on the response so the GUI can show the resolution chain.
+- **Settings → Rustion → Policy panel**: new `RustionPolicyPanel` component mounted under the existing "Rustion" tab alongside `RustionBastionsTab`. Three cards: Global Policy editor (transport / recording / bastions / bastion_group / lock), Bastion Groups CRUD (list + create/edit/delete modals with member list + selection mode + description), and "Force all Connect through Rustion" with preview→confirm dry-run flow.
+- **Audit emission**: `POLICY_TYPE_UPDATE`, `POLICY_ASSET_GROUP_UPDATE`, `POLICY_RESOURCE_UPDATE` now light up at their respective write sites. `POLICY_GLOBAL_UPDATE` doubles as the audit event for the force-rustion migration.
+
+### Phase 7.3 — Per-tier editor integration into existing pages — **Todo**
+
+The Settings panel surfaces the global tier; the per-tier editors still need to be attached to their natural homes:
+
+- **Resource Types editor** (`gui/src/routes/...`) — adds the per-type policy fields + lock toggle next to the existing type definition.
+- **Asset Groups page** — adds the per-group transport/bastion/recording + priority slider + lock toggle.
+- **Resource Connection tab** — adds the per-resource override (gated to resource owner) + a read-only "Locked by: <tier>" badge surfacing `policy_locked_by` from `session/open`.
+- **Connection-tab dispatcher preview** — extends the existing `RustionDispatcherPreview` to show the resolution chain ("transport from `type`, bastions from `asset-group:pci`, recording from `resource`").
+- **session/open** resolver call gets type + asset-group lookups (today only consults global).
 
 - **Bastion groups** under `sys/config/rustion/bastion-groups/<name>` — named pools of Rustion targets with per-member priority and a `selection: "ordered" | "random"` flag, gated to admin. CRUD on the API, CLI (`bastionvault rustion bastion-group add | list | rename | members ...`), and Settings → Rustion → Bastion Groups panel.
 - **Global policy** at `sys/config/rustion` (`transport_default`, `bastion_group_default`, `recording_default`, `transport_lock`), gated to root.

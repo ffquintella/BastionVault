@@ -903,6 +903,282 @@ pub async fn rustion_bastion_group_delete(
     Ok(())
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionTypePolicy {
+    pub name: String,
+    pub transport: String,
+    pub bastions: Vec<String>,
+    pub bastion_group: String,
+    pub recording: String,
+    pub lock: bool,
+    pub updated_at: String,
+}
+
+fn type_policy_from_map(data: &Map<String, Value>) -> RustionTypePolicy {
+    RustionTypePolicy {
+        name: s(data, "name"),
+        transport: s(data, "transport"),
+        bastions: data
+            .get("bastions")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        bastion_group: s(data, "bastion_group"),
+        recording: s(data, "recording"),
+        lock: data.get("lock").and_then(|v| v.as_bool()).unwrap_or(false),
+        updated_at: s(data, "updated_at"),
+    }
+}
+
+#[tauri::command]
+pub async fn rustion_policy_type_read(
+    state: State<'_, AppState>,
+    type_name: String,
+) -> CmdResult<RustionTypePolicy> {
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("{RUSTION_MOUNT}policy/type/{type_name}"),
+        None,
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(type_policy_from_map(&data))
+}
+
+#[tauri::command]
+pub async fn rustion_policy_type_write(
+    state: State<'_, AppState>,
+    type_name: String,
+    input: RustionPolicyTier,
+) -> CmdResult<()> {
+    let mut body = Map::new();
+    if !input.transport.is_empty() {
+        body.insert("transport".into(), Value::String(input.transport));
+    }
+    body.insert(
+        "bastions".into(),
+        Value::Array(input.bastions.into_iter().map(Value::String).collect()),
+    );
+    if !input.bastion_group.is_empty() {
+        body.insert("bastion_group".into(), Value::String(input.bastion_group));
+    }
+    if !input.recording.is_empty() {
+        body.insert("recording".into(), Value::String(input.recording));
+    }
+    body.insert("lock".into(), Value::Bool(input.lock));
+    make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}policy/type/{type_name}"),
+        Some(body),
+    )
+    .await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn rustion_policy_type_delete(
+    state: State<'_, AppState>,
+    type_name: String,
+) -> CmdResult<()> {
+    make_request(
+        &state,
+        Operation::Delete,
+        format!("{RUSTION_MOUNT}policy/type/{type_name}"),
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionAssetGroupPolicy {
+    pub priority: i32,
+    pub transport: String,
+    pub bastions: Vec<String>,
+    pub bastion_group: String,
+    pub recording: String,
+    pub lock: bool,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionAssetGroupPolicyInput {
+    pub priority: i32,
+    pub transport: String,
+    pub bastions: Vec<String>,
+    pub bastion_group: String,
+    pub recording: String,
+    pub lock: bool,
+}
+
+#[tauri::command]
+pub async fn rustion_policy_asset_group_read(
+    state: State<'_, AppState>,
+    asset_group_id: String,
+) -> CmdResult<RustionAssetGroupPolicy> {
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("{RUSTION_MOUNT}policy/asset-group/{asset_group_id}"),
+        None,
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(RustionAssetGroupPolicy {
+        priority: data
+            .get("priority")
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32)
+            .unwrap_or(0),
+        transport: s(&data, "transport"),
+        bastions: data
+            .get("bastions")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        bastion_group: s(&data, "bastion_group"),
+        recording: s(&data, "recording"),
+        lock: data.get("lock").and_then(|v| v.as_bool()).unwrap_or(false),
+        updated_at: s(&data, "updated_at"),
+    })
+}
+
+#[tauri::command]
+pub async fn rustion_policy_asset_group_write(
+    state: State<'_, AppState>,
+    asset_group_id: String,
+    input: RustionAssetGroupPolicyInput,
+) -> CmdResult<()> {
+    let mut body = Map::new();
+    body.insert("priority".into(), Value::Number(input.priority.into()));
+    if !input.transport.is_empty() {
+        body.insert("transport".into(), Value::String(input.transport));
+    }
+    body.insert(
+        "bastions".into(),
+        Value::Array(input.bastions.into_iter().map(Value::String).collect()),
+    );
+    if !input.bastion_group.is_empty() {
+        body.insert("bastion_group".into(), Value::String(input.bastion_group));
+    }
+    if !input.recording.is_empty() {
+        body.insert("recording".into(), Value::String(input.recording));
+    }
+    body.insert("lock".into(), Value::Bool(input.lock));
+    make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}policy/asset-group/{asset_group_id}"),
+        Some(body),
+    )
+    .await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn rustion_policy_resource_read(
+    state: State<'_, AppState>,
+    resource_id: String,
+) -> CmdResult<RustionPolicyTier> {
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("{RUSTION_MOUNT}policy/resource/{resource_id}"),
+        None,
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(RustionPolicyTier {
+        transport: s(&data, "transport"),
+        bastions: data
+            .get("bastions")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        bastion_group: s(&data, "bastion_group"),
+        recording: s(&data, "recording"),
+        lock: false, // per-resource cannot lock
+    })
+}
+
+#[tauri::command]
+pub async fn rustion_policy_resource_write(
+    state: State<'_, AppState>,
+    resource_id: String,
+    input: RustionPolicyTier,
+) -> CmdResult<()> {
+    let mut body = Map::new();
+    if !input.transport.is_empty() {
+        body.insert("transport".into(), Value::String(input.transport));
+    }
+    body.insert(
+        "bastions".into(),
+        Value::Array(input.bastions.into_iter().map(Value::String).collect()),
+    );
+    if !input.bastion_group.is_empty() {
+        body.insert("bastion_group".into(), Value::String(input.bastion_group));
+    }
+    if !input.recording.is_empty() {
+        body.insert("recording".into(), Value::String(input.recording));
+    }
+    body.insert("lock".into(), Value::Bool(false));
+    make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}policy/resource/{resource_id}"),
+        Some(body),
+    )
+    .await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionForceRustionResult {
+    pub current_transport: String,
+    pub current_lock: bool,
+    pub proposed_transport: String,
+    pub proposed_lock: bool,
+    pub applied: bool,
+    pub note: String,
+}
+
+#[tauri::command]
+pub async fn rustion_policy_force_rustion(
+    state: State<'_, AppState>,
+    confirm: bool,
+) -> CmdResult<RustionForceRustionResult> {
+    let mut body = Map::new();
+    body.insert("confirm".into(), Value::Bool(confirm));
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}policy/force-rustion"),
+        Some(body),
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(RustionForceRustionResult {
+        current_transport: s(&data, "current_transport"),
+        current_lock: data
+            .get("current_lock")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        proposed_transport: s(&data, "proposed_transport"),
+        proposed_lock: data
+            .get("proposed_lock")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        applied: data.get("applied").and_then(|v| v.as_bool()).unwrap_or(false),
+        note: s(&data, "note"),
+    })
+}
+
 #[tauri::command]
 pub async fn rustion_master_pubkey_export(
     state: State<'_, AppState>,

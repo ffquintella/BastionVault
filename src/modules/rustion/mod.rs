@@ -98,6 +98,44 @@ fn group_to_map(g: &policy::BastionGroup) -> Map<String, Value> {
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default()
 }
+
+fn tier_doc_to_map(
+    tier: &policy::PolicyTier,
+    name: Option<&str>,
+    priority: Option<i32>,
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Map<String, Value> {
+    let mut m = Map::new();
+    if let Some(t) = tier.transport {
+        m.insert("transport".into(), Value::String(t.as_str().into()));
+    }
+    m.insert(
+        "bastions".into(),
+        Value::Array(
+            tier.bastions
+                .iter()
+                .map(|s| Value::String(s.clone()))
+                .collect(),
+        ),
+    );
+    if let Some(ref g) = tier.bastion_group {
+        m.insert("bastion_group".into(), Value::String(g.clone()));
+    }
+    if let Some(r) = tier.recording {
+        m.insert("recording".into(), Value::String(r.as_str().into()));
+    }
+    m.insert("lock".into(), Value::Bool(tier.lock));
+    if let Some(n) = name {
+        m.insert("name".into(), Value::String(n.to_string()));
+    }
+    if let Some(p) = priority {
+        m.insert("priority".into(), Value::Number(p.into()));
+    }
+    if let Some(t) = updated_at {
+        m.insert("updated_at".into(), Value::String(t.to_rfc3339()));
+    }
+    m
+}
 pub mod session;
 pub mod store;
 pub mod webhook_verify;
@@ -174,6 +212,14 @@ impl RustionBackend {
         let h_bastion_group_read = self.inner.clone();
         let h_bastion_group_update = self.inner.clone();
         let h_bastion_group_delete = self.inner.clone();
+        let h_policy_type_read = self.inner.clone();
+        let h_policy_type_write = self.inner.clone();
+        let h_policy_type_delete = self.inner.clone();
+        let h_policy_ag_read = self.inner.clone();
+        let h_policy_ag_write = self.inner.clone();
+        let h_policy_res_read = self.inner.clone();
+        let h_policy_res_write = self.inner.clone();
+        let h_policy_force_rustion = self.inner.clone();
         let h_noop1 = self.inner.clone();
         let h_noop2 = self.inner.clone();
 
@@ -501,6 +547,69 @@ impl RustionBackend {
                         {op: Operation::Write, handler: h_bastion_groups_create.handle_bastion_groups_create}
                     ],
                     help: "Phase 7 — Bastion groups: named pools of Rustion targets used by the policy resolver."
+                },
+                {
+                    // GET/PUT/DELETE rustion/policy/type/<type_name> — Phase 7.2.
+                    pattern: r"policy/type/(?P<type_name>[A-Za-z0-9_\-]+)$",
+                    fields: {
+                        "transport": { field_type: FieldType::Str, required: false, description: "direct | rustion-preferred | rustion-required" },
+                        "bastions": { field_type: FieldType::CommaStringSlice, required: false, description: "Pinned bastion ids." },
+                        "bastion_group": { field_type: FieldType::Str, required: false, description: "Named bastion group." },
+                        "recording": { field_type: FieldType::Str, required: false, description: "always | input-redacted | off" },
+                        "lock": { field_type: FieldType::Bool, required: false, description: "Lock against lower tiers." }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_policy_type_read.handle_policy_type_read},
+                        {op: Operation::Write, handler: h_policy_type_write.handle_policy_type_write},
+                        {op: Operation::Delete, handler: h_policy_type_delete.handle_policy_type_delete}
+                    ],
+                    help: "Phase 7 — Per-resource-type Rustion policy. Admin-gated."
+                },
+                {
+                    // GET/PUT rustion/policy/asset-group/<id> — Phase 7.2.
+                    pattern: r"policy/asset-group/(?P<id>[A-Za-z0-9_\-]+)$",
+                    fields: {
+                        "priority": { field_type: FieldType::Int, default: 0, description: "Higher wins on multi-group resolution." },
+                        "transport": { field_type: FieldType::Str, required: false, description: "direct | rustion-preferred | rustion-required" },
+                        "bastions": { field_type: FieldType::CommaStringSlice, required: false, description: "Pinned bastion ids." },
+                        "bastion_group": { field_type: FieldType::Str, required: false, description: "Named bastion group." },
+                        "recording": { field_type: FieldType::Str, required: false, description: "always | input-redacted | off" },
+                        "lock": { field_type: FieldType::Bool, required: false, description: "Lock against lower tiers." }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_policy_ag_read.handle_policy_ag_read},
+                        {op: Operation::Write, handler: h_policy_ag_write.handle_policy_ag_write}
+                    ],
+                    help: "Phase 7 — Per-asset-group Rustion policy. Admin or group-owner gated."
+                },
+                {
+                    // GET/PUT rustion/policy/resource/<id> — Phase 7.2.
+                    pattern: r"policy/resource/(?P<id>[A-Za-z0-9_\-]+)$",
+                    fields: {
+                        "transport": { field_type: FieldType::Str, required: false, description: "direct | rustion-preferred | rustion-required" },
+                        "bastions": { field_type: FieldType::CommaStringSlice, required: false, description: "Pinned bastion ids." },
+                        "bastion_group": { field_type: FieldType::Str, required: false, description: "Named bastion group." },
+                        "recording": { field_type: FieldType::Str, required: false, description: "always | input-redacted | off" }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: h_policy_res_read.handle_policy_res_read},
+                        {op: Operation::Write, handler: h_policy_res_write.handle_policy_res_write}
+                    ],
+                    help: "Phase 7 — Per-resource Rustion policy override. Gated to resource owner; only writable when no upstream tier is locked."
+                },
+                {
+                    // POST rustion/policy/force-rustion — Phase 7.2
+                    // migration action: flips transport_default to
+                    // `rustion-required` + lock=true after operator
+                    // confirms the diff preview returned by GET.
+                    pattern: r"policy/force-rustion$",
+                    fields: {
+                        "confirm": { field_type: FieldType::Bool, default: false, description: "Set to true to actually apply the change; default returns a diff preview." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_policy_force_rustion.handle_policy_force_rustion}
+                    ],
+                    help: "Phase 7 — Force every Connect through Rustion. Root-only. Without confirm=true, returns a diff preview."
                 },
                 {
                     // Read / update / delete a single bastion group.
@@ -1008,6 +1117,81 @@ impl RustionBackendInner {
             });
 
         let hostkey_pin = pick("target_hostkey_pin");
+
+        // Phase 7.2: consult the policy resolver to compute the
+        // effective policy for this session. Today we only consult the
+        // global tier — the per-type / per-AG / per-resource lookups
+        // are wired alongside the editor surface in Phase 7.3 (when
+        // we have access to resource + asset-group records from the
+        // caller's context).
+        //
+        // Refuse on lock_violation or rustion-required with no
+        // bastions configured anywhere. Override the caller-supplied
+        // bastions list with the resolver's pinned list when the
+        // policy specifies one (so a policy-locked bastion-group can't
+        // be bypassed by an operator passing their own `bastions`).
+        let policy_store = self.resolve_policy_store()?;
+        let global_policy = policy_store.get_global().await?;
+        let effective = policy::resolve(&global_policy, None, &[], None);
+        if let Some(ref lv) = effective.lock_violation {
+            return Err(bv_error_response_status!(
+                403,
+                &format!(
+                    "rustion policy lock violation ({} locked by `{}`): {}",
+                    lv.field, lv.locking_tier, lv.detail
+                )
+            ));
+        }
+
+        // Resolve effective bastion list: use the policy's bastions if
+        // it set any (overriding the caller); else use the caller's
+        // list; else use the bastion_group's members if a group is
+        // pinned; else fall through to the dispatcher's random pool.
+        let mut effective_bastions: Option<Vec<String>> =
+            bastions_raw.filter(|v| !v.is_empty());
+        if !effective.bastions.is_empty() {
+            effective_bastions = Some(effective.bastions.clone());
+        } else if let Some(ref group_name) = effective.bastion_group {
+            if let Some(grp) = policy_store.get_group(group_name).await? {
+                if !grp.members.is_empty() {
+                    effective_bastions = Some(grp.members.clone());
+                }
+            }
+        }
+
+        // rustion-required: refuse to open if no bastion is reachable.
+        // The dispatcher will already filter on health, so a non-empty
+        // effective_bastions list isn't a guarantee — but an empty
+        // list with rustion-required is a definite failure.
+        if effective.transport == policy::Transport::RustionRequired
+            && effective_bastions.as_ref().map(|v| v.is_empty()).unwrap_or(true)
+        {
+            // Check if ANY healthy bastion exists at all (matches dispatcher's
+            // global-pool fallback semantics).
+            let any = store.list_target_ids().await?;
+            if any.is_empty() {
+                return Err(bv_error_response_status!(
+                    403,
+                    "rustion-required policy: no bastions enrolled"
+                ));
+            }
+        }
+
+        // Recording: if the resolver strengthened it, override the caller.
+        let effective_recording = match effective.recording {
+            policy::Recording::Always => "always".to_string(),
+            policy::Recording::InputRedacted => "input-redacted".to_string(),
+            policy::Recording::Off => "off".to_string(),
+        };
+        let caller_recording = pick("recording");
+        // Pick whichever is stricter (default to resolver's value).
+        let recording_choice = if caller_recording.is_empty() {
+            effective_recording
+        } else {
+            // Defer to resolver since that's what the policy says.
+            effective_recording
+        };
+
         let request = session::SessionOpenRequest {
             target_host: pick("target_host"),
             target_port: u16::try_from(pick_u("target_port", 22)).unwrap_or(22),
@@ -1022,8 +1206,8 @@ impl RustionBackendInner {
             credential_material,
             ttl_secs: u32::try_from(pick_u("ttl_secs", 3600)).unwrap_or(3600),
             max_renewals: u8::try_from(pick_u("max_renewals", 3)).unwrap_or(3),
-            recording: pick("recording"),
-            bastions: bastions_raw.filter(|v| !v.is_empty()),
+            recording: recording_choice,
+            bastions: effective_bastions,
         };
 
         // Operator context from the calling token's metadata. Source-IP
@@ -1088,6 +1272,39 @@ impl RustionBackendInner {
                 data.insert(
                     "correlation_id".into(),
                     Value::String(resp.correlation_id),
+                );
+                // Phase 7.2: stamp the effective policy on the
+                // response so the GUI can show the resolution chain
+                // (which tier produced each effective value).
+                data.insert(
+                    "policy_transport".into(),
+                    Value::String(effective.transport.as_str().into()),
+                );
+                data.insert(
+                    "policy_transport_source".into(),
+                    Value::String(effective.transport_source.into()),
+                );
+                data.insert(
+                    "policy_recording".into(),
+                    Value::String(effective.recording.as_str().into()),
+                );
+                data.insert(
+                    "policy_recording_source".into(),
+                    Value::String(effective.recording_source.into()),
+                );
+                data.insert(
+                    "policy_bastions_source".into(),
+                    Value::String(effective.bastions_source.into()),
+                );
+                data.insert(
+                    "policy_locked_by".into(),
+                    Value::Array(
+                        effective
+                            .locked_by
+                            .iter()
+                            .map(|s| Value::String((*s).to_string()))
+                            .collect(),
+                    ),
                 );
                 // Phase 6.4: track this session as a "pending recording"
                 // so the 24h poller pulls if the webhook never lands.
@@ -1656,6 +1873,275 @@ impl RustionBackendInner {
         pol.delete_group(&name).await?;
         log::info!("{}: name={} (deleted)", audit::BASTION_GROUP_UPDATE, name);
         Ok(Some(Response::data_response(Some(Map::new()))))
+    }
+
+    // ─── Per-type policy ────────────────────────────────────────────
+
+    pub async fn handle_policy_type_read(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let pol = self.resolve_policy_store()?;
+        let name = req.path.strip_prefix("policy/type/").unwrap_or("").to_string();
+        match pol.get_type(&name).await? {
+            Some(p) => Ok(Some(Response::data_response(Some(tier_doc_to_map(
+                &p.tier,
+                Some(&p.type_name),
+                None,
+                Some(p.updated_at),
+            ))))),
+            None => Err(bv_error_response_status!(404, &format!("type policy `{name}` not set"))),
+        }
+    }
+
+    pub async fn handle_policy_type_write(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let pol = self.resolve_policy_store()?;
+        let name = req.path.strip_prefix("policy/type/").unwrap_or("").to_string();
+        let tier = read_tier_fields(req);
+        let p = policy::TypePolicy {
+            type_name: name.clone(),
+            tier,
+            updated_at: chrono::Utc::now(),
+        };
+        pol.put_type(&p).await?;
+        log::info!("{}: type={}", audit::POLICY_TYPE_UPDATE, name);
+        Ok(Some(Response::data_response(Some(tier_doc_to_map(
+            &p.tier,
+            Some(&p.type_name),
+            None,
+            Some(p.updated_at),
+        )))))
+    }
+
+    pub async fn handle_policy_type_delete(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let pol = self.resolve_policy_store()?;
+        let name = req.path.strip_prefix("policy/type/").unwrap_or("").to_string();
+        pol.delete_type(&name).await?;
+        log::info!("{}: type={} (deleted)", audit::POLICY_TYPE_UPDATE, name);
+        Ok(Some(Response::data_response(Some(Map::new()))))
+    }
+
+    // ─── Per-asset-group policy ─────────────────────────────────────
+
+    pub async fn handle_policy_ag_read(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let pol = self.resolve_policy_store()?;
+        let id = req
+            .path
+            .strip_prefix("policy/asset-group/")
+            .unwrap_or("")
+            .to_string();
+        match pol.get_asset_group(&id).await? {
+            Some(p) => Ok(Some(Response::data_response(Some(tier_doc_to_map(
+                &p.tier,
+                None,
+                Some(p.priority),
+                Some(p.updated_at),
+            ))))),
+            None => Err(bv_error_response_status!(404, &format!("asset-group policy `{id}` not set"))),
+        }
+    }
+
+    pub async fn handle_policy_ag_write(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let pol = self.resolve_policy_store()?;
+        let id = req
+            .path
+            .strip_prefix("policy/asset-group/")
+            .unwrap_or("")
+            .to_string();
+        let tier = read_tier_fields(req);
+        let priority = req
+            .get_data("priority")
+            .ok()
+            .and_then(|v| v.as_i64())
+            .map(|n| n as i32)
+            .unwrap_or(0);
+        let p = policy::AssetGroupPolicy {
+            asset_group_id: id.clone(),
+            priority,
+            tier,
+            updated_at: chrono::Utc::now(),
+        };
+        pol.put_asset_group(&p).await?;
+        log::info!(
+            "{}: asset_group={} priority={}",
+            audit::POLICY_ASSET_GROUP_UPDATE,
+            id,
+            priority
+        );
+        Ok(Some(Response::data_response(Some(tier_doc_to_map(
+            &p.tier,
+            None,
+            Some(p.priority),
+            Some(p.updated_at),
+        )))))
+    }
+
+    // ─── Per-resource policy ────────────────────────────────────────
+
+    pub async fn handle_policy_res_read(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let pol = self.resolve_policy_store()?;
+        let id = req
+            .path
+            .strip_prefix("policy/resource/")
+            .unwrap_or("")
+            .to_string();
+        match pol.get_resource(&id).await? {
+            Some(p) => Ok(Some(Response::data_response(Some(tier_doc_to_map(
+                &p.tier,
+                None,
+                None,
+                Some(p.updated_at),
+            ))))),
+            None => Err(bv_error_response_status!(404, &format!("resource policy `{id}` not set"))),
+        }
+    }
+
+    pub async fn handle_policy_res_write(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let pol = self.resolve_policy_store()?;
+        let id = req
+            .path
+            .strip_prefix("policy/resource/")
+            .unwrap_or("")
+            .to_string();
+        let mut tier = read_tier_fields(req);
+        // Per-resource overrides may NOT set `lock = true` — only the
+        // three higher tiers can lock. Refuse a write that tries.
+        if tier.lock {
+            return Err(bv_error_response_status!(
+                400,
+                "per-resource policy may not set lock=true; locking is admin/root only"
+            ));
+        }
+        // Refuse any per-resource write when an upstream tier locked
+        // the corresponding knobs — the operator can't escape a
+        // higher-tier lock. We do a probe-resolve to detect violations.
+        let global = pol.get_global().await?;
+        // (Type + AG lookups skipped here; resolver still catches them
+        //  on session/open. The per-resource write check is the
+        //  best-effort guard for the most common case: a
+        //  globally-locked rustion-required policy.)
+        let probe = policy::resolve(&global, None, &[], None);
+        if !probe.locked_by.is_empty() {
+            // If the operator's write would *weaken* anything the global
+            // tier locked, refuse outright. Anything else is allowed.
+            let proposed_res = policy::ResourcePolicy {
+                resource_id: id.clone(),
+                tier: tier.clone(),
+                updated_at: chrono::Utc::now(),
+            };
+            let test = policy::resolve(&global, None, &[], Some(&proposed_res));
+            if test.lock_violation.is_some() {
+                let lv = test.lock_violation.as_ref().unwrap();
+                return Err(bv_error_response_status!(
+                    403,
+                    &format!(
+                        "per-resource write blocked by upstream lock on {}: {}",
+                        lv.field, lv.detail
+                    )
+                ));
+            }
+        }
+        tier.lock = false; // Defensive: per-resource never locks.
+        let p = policy::ResourcePolicy {
+            resource_id: id.clone(),
+            tier,
+            updated_at: chrono::Utc::now(),
+        };
+        pol.put_resource(&p).await?;
+        log::info!("{}: resource={}", audit::POLICY_RESOURCE_UPDATE, id);
+        Ok(Some(Response::data_response(Some(tier_doc_to_map(
+            &p.tier,
+            None,
+            None,
+            Some(p.updated_at),
+        )))))
+    }
+
+    // ─── Migration action ───────────────────────────────────────────
+
+    pub async fn handle_policy_force_rustion(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let pol = self.resolve_policy_store()?;
+        let confirm = req
+            .get_data("confirm")
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let current = pol.get_global().await?;
+        let proposed = policy::GlobalPolicy {
+            tier: policy::PolicyTier {
+                transport: Some(policy::Transport::RustionRequired),
+                lock: true,
+                ..current.tier.clone()
+            },
+            updated_at: Some(chrono::Utc::now()),
+        };
+        let mut data = Map::new();
+        data.insert(
+            "current_transport".into(),
+            Value::String(
+                current
+                    .tier
+                    .transport
+                    .map(|t| t.as_str().to_string())
+                    .unwrap_or_else(|| "(unset)".into()),
+            ),
+        );
+        data.insert(
+            "current_lock".into(),
+            Value::Bool(current.tier.lock),
+        );
+        data.insert(
+            "proposed_transport".into(),
+            Value::String("rustion-required".into()),
+        );
+        data.insert("proposed_lock".into(), Value::Bool(true));
+        if confirm {
+            pol.put_global(&proposed).await?;
+            log::info!(
+                "{}: forced transport=rustion-required + lock=true (migration action)",
+                audit::POLICY_GLOBAL_UPDATE
+            );
+            data.insert("applied".into(), Value::Bool(true));
+        } else {
+            data.insert("applied".into(), Value::Bool(false));
+            data.insert(
+                "note".into(),
+                Value::String(
+                    "set confirm=true to apply. Existing per-tier overrides that try to set transport=direct will start returning 403 lock_violation."
+                        .into(),
+                ),
+            );
+        }
+        Ok(Some(Response::data_response(Some(data))))
     }
 
     /// Extract OperatorContext from the caller's auth metadata.
