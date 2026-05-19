@@ -476,7 +476,10 @@ Three guard-rails make this safe even if part of the mechanism fails:
 - Audit: `rustion.target.enrol`, `rustion.target.health.changed`, `rustion.master.issue`.
 - No session traffic yet; this phase is plumbing + a green/red status indicator the dispatcher will key off in Phase 3.
 
-### Phase 2 — BVRG-v1 envelope + Rustion control-plane scaffold — **In progress** (BV side shipped in 0.7.15; Rustion side next)
+### Phase 2 — BVRG-v1 envelope + Rustion control-plane scaffold — **Done** (BV 0.7.15 + Rustion 0.7.11)
+
+- BV 0.7.15: `bv_crypto::bvrg::{build, verify}` + 11 round-trip + tamper tests + 4 adapter integration tests in `src/modules/rustion/envelope.rs`.
+- Rustion 0.7.11: `crates/rustion-control-plane/` with envelope verify path, replay LRU + skew guard, axum `/v1/sessions` + `/v1/health` (sessions returns `501 not_implemented` after verify succeeds, exactly what Phase 2 calls for). 8 envelope tests + 5 replay tests + 2 cross-implementation tests proving `fips204`-produced ML-DSA-65 signatures verify under RustCrypto `ml-dsa` (the only crypto-library asymmetry between the two sides).
 
 - `bastion-vault-crypto` gains the `bvrg::{build, verify}` helpers.
 - New `rustion-control-plane` crate in `/Users/felipe/Dev/Rustion`. Authority YAML store + hot reload + `/v1/sessions` skeleton that verifies envelopes and returns canned `not_implemented`.
