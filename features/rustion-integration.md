@@ -476,7 +476,7 @@ Three guard-rails make this safe even if part of the mechanism fails:
 - Audit: `rustion.target.enrol`, `rustion.target.health.changed`, `rustion.master.issue`.
 - No session traffic yet; this phase is plumbing + a green/red status indicator the dispatcher will key off in Phase 3.
 
-### Phase 2 — BVRG-v1 envelope + Rustion control-plane scaffold — **Todo**
+### Phase 2 — BVRG-v1 envelope + Rustion control-plane scaffold — **In progress** (BV side shipped in 0.7.15; Rustion side next)
 
 - `bastion-vault-crypto` gains the `bvrg::{build, verify}` helpers.
 - New `rustion-control-plane` crate in `/Users/felipe/Dev/Rustion`. Authority YAML store + hot reload + `/v1/sessions` skeleton that verifies envelopes and returns canned `not_implemented`.

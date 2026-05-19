@@ -34,6 +34,7 @@ use crate::{
 
 pub mod audit;
 pub mod config;
+pub mod envelope;
 pub mod health;
 pub mod master;
 pub mod probe;

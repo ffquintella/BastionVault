@@ -24,6 +24,17 @@ rand = "0.10"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
+# Ed25519 half of the hybrid signature used by the Rustion-integration
+# BVRG-v1 envelope (see src/bvrg.rs). Pure-Rust, already in the workspace
+# dep tree via the host crate's transit + SSH stacks.
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core", "zeroize"] }
+# CBOR encoder/decoder for the BVRG-v1 payload. Small, pure-Rust,
+# no-build-script — picked over the deprecated `serde_cbor` and the
+# serde-less `minicbor`.
+ciborium = "0.2"
+# SHA-256 over the BVRG-v1 ciphertext for the signature's "tbs"
+# message. Mirrors the workspace's `sha2` pin.
+sha2 = "0.11"
 
 [lints.clippy]
 result_large_err = "allow"

@@ -45,6 +45,55 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.15] - 2026-05-18
+
+### Added
+
+- **Rustion integration — Phase 2 (BastionVault side).** New BVRG-v1
+  envelope crate inside `bv_crypto` + matching adapter wired through
+  `src/modules/rustion/envelope.rs`. Closes the envelope-builder cell
+  of the Phase 2 deliverable table; Rustion's verify+decrypt side
+  lands next in the Rustion repo.
+    - **`bv_crypto::bvrg`** (`crates/bv_crypto/src/bvrg.rs`): hybrid
+      Ed25519 + ML-DSA-65 signature over the frame's SHA-256
+      `sha256(magic || ct_len || ct)`, ML-KEM-768 + ChaCha20-Poly1305
+      ciphertext via the existing `KemDemEnvelopeV1`, CBOR payload
+      via ciborium. Wire-format constants and length budgets match
+      `features/rustion-integration.md § Envelope format` exactly so
+      the Rustion-side decoder is a byte-for-byte mirror. Fail-closed
+      verify path: magic-mismatch, length-mismatch, hybrid-downgrade,
+      either signature half failing, AEAD tag failure, or CBOR parse
+      failure all surface as distinct `BvrgError` variants.
+    - **`BvrgMasterSigningKey` / `BvrgMasterPublicKey`**: hybrid
+      keypair wrappers. Construction refuses classical-only public
+      keys with `PublicKeyLength`, so a downstream caller can't
+      accidentally enrol a half-key as a trust anchor.
+    - **`build_open` / `build_renew` / `build_kill` / `build_attest`**
+      adapters at `src/modules/rustion/envelope.rs` stamp the standard
+      operator/correlation/deployment-id metadata, mint a fresh nonce
+      per call, and return the wire bytes + SHA-256 fingerprint
+      audit handlers fold into the chain. `attest` lays the
+      groundwork for Phase 9's weekly re-attestation.
+    - **Tests**: 11 round-trip + tamper-rejection unit tests in
+      `crates/bv_crypto/tests/bvrg_roundtrip.rs` covering well-formed
+      round-trip, magic tamper, truncation, Ed25519-half tamper,
+      ML-DSA-65-half tamper, hybrid downgrade (dropping the ML-DSA
+      half), ciphertext tamper, wrong KEM secret, wrong master
+      pubkey, classical-only pubkey construction refusal, nonce
+      uniqueness. 4 adapter integration tests in
+      `src/modules/rustion/envelope.rs` covering build → verify
+      symmetry for all four operations.
+    - `reqwest` + `ciborium` + `ed25519-dalek` + `sha2` deps added to
+      `bv_crypto/Cargo.toml`; all already in the workspace transitive
+      tree, listing them direct pins the feature set.
+    - **Note**: the registry's KEM-pubkey field lands alongside
+      Phase 9's enrolment wizard; the current `resolve_kem_pubkey`
+      synthesises bytes from the signing-pubkey slot and is marked
+      `TODO(phase2)` in the source. Production builds against the
+      synthetic path will fail at `seal()` with a clear
+      `PublicKeyLength` error pointing at the missing field; tests
+      supply a fresh ML-KEM-768 keypair directly.
+
 ## [0.7.14] - 2026-05-18
 
 ### Added
