@@ -446,6 +446,11 @@ export const rustionRecordingReplayLog = (
     input: { recordingId, sha256Mismatch },
   });
 
+// ─── Phase 9.1: deployment_id ───────────────────────────────────
+
+export const rustionDeploymentIdRead = () =>
+  invoke<string>("rustion_deployment_id_read");
+
 export const rustionTelemetryList = () =>
   invoke<RustionTelemetryTarget[]>("rustion_telemetry_list");
 

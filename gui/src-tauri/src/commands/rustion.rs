@@ -1461,6 +1461,23 @@ pub async fn rustion_telemetry_poll(
         .unwrap_or_default())
 }
 
+// ─── Phase 9.1: deployment_id ───────────────────────────────────
+
+#[tauri::command]
+pub async fn rustion_deployment_id_read(
+    state: State<'_, AppState>,
+) -> CmdResult<String> {
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("{RUSTION_MOUNT}deployment-id"),
+        None,
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(s(&data, "deployment_id"))
+}
+
 #[tauri::command]
 pub async fn rustion_master_pubkey_export(
     state: State<'_, AppState>,

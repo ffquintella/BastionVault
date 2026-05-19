@@ -49,3 +49,15 @@ pub const SESSION_TERMINATE: &str = "session.terminate";
 pub const RECORDING_LINKED: &str = "recording.linked";
 pub const RECORDING_REPLAYED: &str = "recording.replayed";
 pub const RUSTION_AUDIT_WITNESS: &str = "rustion.audit.witness";
+/// Phase 9.1 — fired by `rustion_enrol_submit` when the operator
+/// submits a fresh enrolment request to a bastion.
+pub const TARGET_ENROL_SUBMITTED: &str = "rustion.target.enrol.submitted";
+/// Phase 9.1 — fired when an operator's enrolment-status check
+/// shows the bastion has approved a pending submission.
+pub const TARGET_ENROL_APPROVED: &str = "rustion.target.enrol.approved";
+/// Phase 9.2 — fires on `rustion_target_deenrol` before the local
+/// registry delete.
+pub const TARGET_DEENROLLED: &str = "rustion.target.deenrolled";
+/// Phase 9.2 — weekly re-attestation timer + on-demand
+/// `rustion_authority_attest` Tauri command.
+pub const MASTER_ATTEST: &str = "rustion.master.attest";

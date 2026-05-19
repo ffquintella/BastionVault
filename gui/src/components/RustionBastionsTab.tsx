@@ -43,15 +43,19 @@ export function RustionBastionsTab() {
   const [masterCfg, setMasterCfg] = useState<RustionMasterConfig | null>(null);
   const [masterPub, setMasterPub] = useState<RustionMasterPubkey | null>(null);
   const [showMasterEdit, setShowMasterEdit] = useState(false);
+  // Phase 9.1: this BV deployment's stable UUID. Pasted into the
+  // bastion's authority record at enrolment time.
+  const [deploymentId, setDeploymentId] = useState<string>("");
 
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [ts, hs, mc, mp] = await Promise.all([
+      const [ts, hs, mc, mp, depId] = await Promise.all([
         rustion.rustionTargetList(),
         rustion.rustionTargetHealthAll(),
         rustion.rustionMasterRead(),
         rustion.rustionMasterPubkeyExport(),
+        rustion.rustionDeploymentIdRead().catch(() => ""),
       ]);
       setTargets(ts);
       const map: Record<string, RustionTargetHealth> = {};
@@ -59,6 +63,7 @@ export function RustionBastionsTab() {
       setHealth(map);
       setMasterCfg(mc);
       setMasterPub(mp);
+      setDeploymentId(depId);
     } catch (e) {
       toast("error", extractError(e));
     } finally {
@@ -292,6 +297,23 @@ export function RustionBastionsTab() {
             <div className="text-xs text-[var(--color-text-muted)] mt-1">
               Fingerprint: <span className="font-mono">{masterPub.fingerprint}</span>
             </div>
+          </div>
+        )}
+        {/* Phase 9.1 — deployment_id. Operators paste this into the
+            bastion's authority record at enrolment time. Rustion pins
+            it on approval and refuses envelopes from a different
+            deployment with `403 attestation_mismatch`. */}
+        {deploymentId && (
+          <div className="mt-4 pt-4 border-t border-[var(--color-border)]">
+            <h3 className="text-sm font-semibold mb-2">Deployment ID</h3>
+            <p className="text-xs text-[var(--color-text-muted)] mb-1">
+              Paste into the bastion's <code>authority.deployment_id</code> at
+              enrolment time. Rustion pins this on approval and refuses
+              envelopes from any other deployment.
+            </p>
+            <code className="font-mono text-xs select-all break-all">
+              {deploymentId}
+            </code>
           </div>
         )}
       </Card>

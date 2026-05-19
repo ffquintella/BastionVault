@@ -200,6 +200,7 @@ impl RustionBackend {
         let h_master_write = self.inner.clone();
         let h_master_pubkey = self.inner.clone();
         let h_session_open = self.inner.clone();
+        let h_deployment_id = self.inner.clone();
         let h_session_renew = self.inner.clone();
         let h_session_kill = self.inner.clone();
         let h_webhook_recording = self.inner.clone();
@@ -428,6 +429,14 @@ impl RustionBackend {
                         {op: Operation::Read, handler: h_master_pubkey.handle_master_pubkey}
                     ],
                     help: "Export the master pubkey (one-shot enrolment step for Rustion authorities)."
+                },
+                {
+                    // GET rustion/deployment-id — Phase 9.1.
+                    pattern: r"deployment-id$",
+                    operations: [
+                        {op: Operation::Read, handler: h_deployment_id.handle_deployment_id}
+                    ],
+                    help: "Phase 9.1 — Export this BV deployment's stable UUID for enrolment."
                 },
                 {
                     // POST rustion/session/renew — Phase 5.
@@ -1322,10 +1331,14 @@ impl RustionBackendInner {
                 .cloned()
                 .unwrap_or_default(),
             src_ip: req.client_token.clone(), // placeholder; the route layer doesn't currently surface remote addr
-            deployment_id: auth
-                .metadata
-                .get("deployment_id")
-                .cloned()
+            // Phase 9.1 — the deployment_id field is sourced from BV's
+            // master store (a stable UUID minted on first PKI init),
+            // not from the caller's auth metadata. Rustion authorities
+            // pin this at approval time and refuse envelopes whose
+            // deployment_id doesn't match.
+            deployment_id: master_store
+                .get_or_init_deployment_id()
+                .await
                 .unwrap_or_default(),
         };
 
@@ -1480,7 +1493,7 @@ impl RustionBackendInner {
             .map(|n| u32::try_from(n).unwrap_or(1800))
             .unwrap_or(1800);
 
-        let operator = self.operator_context(req)?;
+        let operator = self.operator_context(req).await?;
         let request = session::SessionRenewRequest {
             bastion_id: pick("bastion_id"),
             session_id: pick("session_id"),
@@ -1538,7 +1551,7 @@ impl RustionBackendInner {
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_default()
         };
-        let operator = self.operator_context(req)?;
+        let operator = self.operator_context(req).await?;
         let request = session::SessionKillRequest {
             bastion_id: pick("bastion_id"),
             session_id: pick("session_id"),
@@ -2304,8 +2317,9 @@ impl RustionBackendInner {
 
     /// Extract OperatorContext from the caller's auth metadata.
     /// Phase 5: factored out so renew + kill share the open path's
-    /// identity-stamping logic.
-    fn operator_context(&self, req: &Request) -> Result<envelope::OperatorContext, RvError> {
+    /// identity-stamping logic. Phase 9.1: deployment_id comes from
+    /// the master store, not the auth metadata.
+    async fn operator_context(&self, req: &Request) -> Result<envelope::OperatorContext, RvError> {
         let auth = req
             .auth
             .as_ref()
@@ -2327,12 +2341,27 @@ impl RustionBackendInner {
                 .cloned()
                 .unwrap_or_default(),
             src_ip: req.client_token.clone(),
-            deployment_id: auth
-                .metadata
-                .get("deployment_id")
-                .cloned()
+            deployment_id: self
+                .resolve_master_store()?
+                .get_or_init_deployment_id()
+                .await
                 .unwrap_or_default(),
         })
+    }
+
+    pub async fn handle_deployment_id(
+        &self,
+        _b: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let master_store = self.resolve_master_store()?;
+        let id = master_store
+            .get_or_init_deployment_id()
+            .await
+            .map_err(|e| bv_error_string!(&format!("deployment_id: {e}")))?;
+        let mut data = Map::new();
+        data.insert("deployment_id".into(), Value::String(id));
+        Ok(Some(Response::data_response(Some(data))))
     }
 
     pub async fn handle_master_pubkey(

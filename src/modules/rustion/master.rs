@@ -109,6 +109,12 @@ pub struct StubSigningKey {
 }
 
 const SIGNING_KEY: &str = "signing-key";
+/// Phase 9.1 — stable deployment UUID minted on first access and
+/// stamped into every BVRG-v1 envelope's `operator.deployment_id`
+/// field. Rustion authorities pin this at approval time; envelopes
+/// from a different deployment_id are refused with
+/// `403 attestation_mismatch`.
+const DEPLOYMENT_ID: &str = "deployment-id";
 
 /// Exported pubkey shape, mirrors the authority record on the Rustion
 /// side so the operator can paste it directly into
@@ -230,5 +236,29 @@ impl MasterStore {
             ed25519: ed25519_dalek::SigningKey::from_bytes(&ed_seed),
             mldsa65_seed: zeroize::Zeroizing::new(ml_seed),
         })
+    }
+
+    /// Phase 9.1 — return the deployment's stable UUID, minting +
+    /// persisting on first call. Stamped into every BVRG-v1 envelope's
+    /// `operator.deployment_id` so Rustion authorities can pin BV to
+    /// a specific deployment at approval time and refuse envelopes
+    /// from a different deployment_id thereafter.
+    pub async fn get_or_init_deployment_id(&self) -> Result<String, RvError> {
+        if let Some(entry) = self.view.get(DEPLOYMENT_ID).await? {
+            let s = String::from_utf8(entry.value)
+                .map_err(|e| bv_error_string!(&format!("deployment_id not utf8: {e}")))?;
+            return Ok(s);
+        }
+        // Mint a fresh v4 UUID. The uuid crate is already in the
+        // workspace deps for SessionId; reuse it here.
+        let id = uuid::Uuid::new_v4().to_string();
+        self.view
+            .put(&StorageEntry {
+                key: DEPLOYMENT_ID.to_string(),
+                value: id.as_bytes().to_vec(),
+            })
+            .await?;
+        log::info!("rustion: minted fresh deployment_id={}", id);
+        Ok(id)
     }
 }

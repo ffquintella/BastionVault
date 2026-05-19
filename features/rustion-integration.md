@@ -875,7 +875,32 @@ Closes the security-and-observability layer of telemetry. Phase 8.3 (separate re
 | Rustion | `GET /v1/recordings/{rid}` returns a 60s signed URL bound to the operator's IP for the in-GUI player to stream from | `crates/rustion-control-plane/src/routes.rs` |
 | Rustion | Rate-limit telemetry endpoints (per IP + per authority) so a runaway puller can't saturate the bastion | `crates/rustion-control-plane/src/rate_limit.rs` |
 
-### Phase 9 — Explicit enrolment-approval handshake + re-attestation + tombstones
+### Phase 9.1 — Deployment-id + pending-authority holding pen — **Done** (BV 0.7.34 + Rustion 0.7.26)
+
+Lays the trust-establishment foundation: stable BV deployment id, pending-authority holding pen on Rustion, approval workflow, deployment_id binding enforcement.
+
+- **BV `master::get_or_init_deployment_id`** — stable v4 UUID minted on first access and persisted at `sys/rustion/master/deployment-id`. Stamped into every BVRG-v1 envelope's `operator.deployment_id` (via `OperatorContext`) on session-open, renew, and kill paths. Replaces the previous "read from auth.metadata" placeholder which was always empty in practice.
+- **BV `GET rustion/deployment-id`** + `rustion_deployment_id_read` Tauri command. The Settings → Rustion → Bastions card now surfaces the deployment id alongside the master pubkey export with a "paste this into the bastion's authority record" note.
+- **Rustion `AuthorityStore`** grew two parallel maps: `pending: HashMap<String, PendingAuthority>` and `tombstones: HashMap<String, TombstoneEntry>`. CRUD: `submit_pending` (refuses if already approved or tombstoned), `list_pending`, `get_pending`, `approve_pending(name, max_session_secs, replay_policy) → AuthorityRecord` (deployment_id from the pending record pins onto the new active record), `reject_pending(name, reason)` (drops to tombstones), `list_tombstones`, `is_pending`, `is_tombstoned`. New `PendingAuthority` + `TombstoneEntry` structs.
+- **Envelope-verify path** now distinguishes three not-active cases:
+  - `403 authority_pending_approval` if the authority has an active enrolment submission.
+  - `403 authority_tombstoned` if the name was rejected or deenrolled.
+  - `401 unknown_authority` only when none of the above apply.
+- **Deployment_id binding check** in the envelope-verify prelude: when the authority record's `deployment_id` is non-empty, envelopes whose `operator.deployment_id` doesn't match are refused with `403 attestation_mismatch`. Empty pinned id = "approved before Phase 9.1 shipped" → accept any (backward-compat); operators upgrade by re-approving.
+- **Five new audit constants** on BV: `TARGET_ENROL_SUBMITTED`, `TARGET_ENROL_APPROVED`, `TARGET_DEENROLLED`, `MASTER_ATTEST`, plus the existing `RUSTION_AUDIT_WITNESS` carries the bastion-side authority-lifecycle echoes once the witness puller picks them up.
+
+### Phase 9.2 — Disk-backed pending + approval CLI + deenrol + tombstone CLI + re-attestation timer — **Todo**
+
+The in-memory pending/tombstone maps need disk persistence + the operator-facing CLI surface + the weekly re-attestation loop:
+
+- **`authorities-pending/<name>.yaml`** + **`tombstoned/<name>.yaml`** on-disk holding pens with hot-reload.
+- **Rustion CLI**: `rustion authority list-pending` / `approve --name` / `reject --name` / `list-tombstones` / `untombstone <name>`.
+- **Admin web UI** on Rustion (single-page admin for the approval workflow).
+- **BV `rustion_target_deenrol` Tauri command + `bvault rustion target deenrol --id`** CLI: sends a `deenrol` envelope before the local registry delete; emits `rustion.target.deenrolled` audit.
+- **Weekly re-attestation timer** on BV + `rustion_authority_attest` Tauri command. Emits `rustion.master.attest`.
+- **Hash-chain entries on Rustion** for `authority.approval_pending`, `authority.approved`, `authority.rejected`, `authority.attested`, `authority.tombstoned`, `authority.untombstoned`, `authority.deenrolled`.
+
+### Phase 9 — Explicit enrolment-approval handshake + re-attestation + tombstones (original spec table)
 
 | Side | Deliverable | Location |
 |---|---|---|

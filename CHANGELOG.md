@@ -45,6 +45,46 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.34] - 2026-05-19
+
+### Added
+
+- **Rustion integration — Phase 9.1: deployment_id + pending-authority
+  holding pen** (paired with Rustion 0.7.26). Trust-establishment
+  foundation.
+    - **BV `master::get_or_init_deployment_id`** — stable v4 UUID
+      minted on first access, persisted at
+      `sys/rustion/master/deployment-id`. Stamped into every BVRG-v1
+      envelope's `operator.deployment_id` via `OperatorContext` on
+      open/renew/kill. Replaces the previous (always-empty)
+      "read from auth.metadata" placeholder.
+    - **BV `GET rustion/deployment-id`** route +
+      `rustion_deployment_id_read` Tauri command. Settings →
+      Rustion → Bastions surfaces the id with a paste-into-bastion
+      note.
+    - **Rustion `AuthorityStore`** grew `pending` + `tombstones`
+      maps. CRUD: `submit_pending`, `list_pending`, `get_pending`,
+      `approve_pending`, `reject_pending` (drops to tombstones),
+      `list_tombstones`, `is_pending`, `is_tombstoned`. New
+      `PendingAuthority` + `TombstoneEntry` structs.
+    - **Envelope-verify** now distinguishes pending/tombstoned/unknown
+      with 403 codes `authority_pending_approval` /
+      `authority_tombstoned` / 401 `unknown_authority`.
+    - **Deployment_id binding** in the verify prelude: envelopes
+      whose `operator.deployment_id` doesn't match the authority's
+      pinned value are refused with `403 attestation_mismatch`.
+      Empty pinned id = backward-compat path.
+    - **Five new audit constants**: `TARGET_ENROL_SUBMITTED`,
+      `TARGET_ENROL_APPROVED`, `TARGET_DEENROLLED`, `MASTER_ATTEST`,
+      plus existing `RUSTION_AUDIT_WITNESS` for echoes.
+
+### Changed
+
+- `features/rustion-integration.md`: Phase 9.1 marked Done; Phase 9.2
+  carves out disk-backed pending/tombstone YAML + approval CLI on
+  Rustion + admin web UI + BV deenrol command + weekly
+  re-attestation timer + hash-chain entries for the lifecycle events.
+
 ## [0.7.33] - 2026-05-19
 
 ### Added
