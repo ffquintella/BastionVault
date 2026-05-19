@@ -49,7 +49,22 @@ Net result: operators get the same one-click Connect UX as today, but every sess
 - **Renewal API** — `POST /v1/rustion/sessions/{sid}/renew` re-signs a grant with the master cert if policy allows and the original session is still active. The GUI fires renewal at `ttl - 60s` with exponential backoff. Limited by `max_renewals` from the original grant.
 - **Forced revocation** — `DELETE /v1/rustion/sessions/{sid}` issues a signed `kill` envelope; Rustion drops the session immediately. Surfaced as a "Terminate" button on the active-sessions panel.
 - **Recording pointer** — Rustion returns `{recording_id, started_at, finished_at, sha256, format, location}` on session close. BastionVault stores it on the `session.close` audit event and exposes a "Open recording" link in the audit timeline that streams the file from Rustion (signed-URL style; the bytes never sit in BastionVault).
-- **Audit events** — `rustion.target.enrol`, `rustion.target.rotate`, `rustion.target.health.changed`, `rustion.bastion_group.update`, `rustion.master.rotate`, `rustion.policy.global.update`, `rustion.policy.type.update`, `rustion.policy.asset_group.update`, `rustion.policy.resource.update`, `session.open` (extended with `transport: "rustion" | "direct"`, `bastion_id`, `bastion_group?: string`, `bastion_selection: "pinned" | "ordered-fallback" | "random-pool" | "group"`, `bastion_candidates_tried`, `policy_chain` (the resolved tier chain that produced these values), `rustion_session_id`), `session.renew`, `session.terminate`, `recording.linked`.
+- **Session replay in-GUI** — the audit timeline's "Open recording" link launches an in-app player rather than handing the operator a raw file. For asciicast v3 (SSH) the GUI mounts an `asciinema-player` instance and streams the cast bytes from Rustion via `GET /v1/recordings/{rid}` with a per-request signed envelope. For `.rdp-rec` (RDP) the GUI ships a small WASM decoder that decompresses the bitmap-event stream into a `<canvas>`-rendered replay. Both players surface scrub bar + play/pause + per-event metadata; neither caches the raw bytes outside the WebviewWindow's memory.
+- **Telemetry pull from Rustion** — BastionVault polls four read-only Rustion endpoints (per authority, so each BV instance only ever sees its own sessions and audit entries):
+  - `GET /v1/sessions/active` — live sessions Rustion is currently mediating *for this authority*: `{session_id, operator_vault_user, target, opened_at, expires_at, bytes_in, bytes_out, recording_id}`. Drives a new **"Live sessions"** page (admin-gated) in the GUI that auto-refreshes every 5s. The "Terminate" button hits `DELETE /v1/rustion/sessions/{sid}` from Phase 5.
+  - `GET /v1/sessions/history?since=<ts>&limit=<n>` — closed-session metadata for the audit timeline: open + close timestamps, target, operator, duration, total bytes, terminate-reason, recording link. Cursor-paged so a fresh BastionVault can backfill the history of a long-running Rustion at first sync.
+  - `GET /v1/sessions/audit?since=<ts>&limit=<n>` — Rustion's own hash-chain entries scoped to this authority (`session.open`, `session.renew`, `session.terminate`, `envelope.rejected`, `authority.reload`). BastionVault verifies each entry's signature against the pinned Rustion pubkey and folds it into its **own** hash-chain log under a `rustion.audit.witness` event. The two chains become independent witnesses of the same session — losing either still lets an auditor reconstruct what happened.
+  - `GET /v1/stats?bucket=hour&since=<ts>` — aggregate metrics buckets: `{authority, avg_session_secs, max_session_secs, sessions_opened, sessions_terminated_by_user, sessions_terminated_by_admin, sessions_expired, bytes_total, top_targets, top_operators}`. Surfaces in a **"Rustion analytics"** dashboard (admin-gated): a chart of sessions-per-hour, top-10 operators by session count, top-10 targets, average session length, and an envelope-rejection breakdown.
+  All four endpoints use the same lightweight signed-nonce auth as `GET /v1/health` so each poll cycle is cheap. Pull cadence is configurable (`sys/config/rustion.telemetry_interval_secs`, default 60s); a manual "Sync now" button on the Live sessions page forces an immediate refresh.
+- **Trust establishment — explicit Rustion-side approval of BastionVault installations** — enrolling a BastionVault as a Rustion authority is intentionally a **two-sided handshake**, not a one-way pubkey paste:
+  1. Operator on the BastionVault side exports the master pubkey via `bvault rustion master export` (or the GUI button) and submits it to the Rustion side. The submission carries the BV master pubkey, BV deployment id (a stable UUID minted on first PKI init), display name, requested `allowed_targets` glob list, and requested `allowed_actions`.
+  2. The submission lands in Rustion's **pending-authorities** holding pen (`/etc/rustion/authorities-pending/`, not the active `authorities/` directory). It is **inert** — Rustion refuses envelopes signed by a pending authority with `403 authority_pending_approval`.
+  3. A Rustion admin reviews the request via TUI (`rustion authority approve --name <n>`), CLI, or the admin web UI, optionally tightening `allowed_targets` / `allowed_actions` / `max_session_secs`. Approval moves the YAML from the holding pen into `authorities/` and is logged in Rustion's hash chain as `authority.approved`. Rejecting writes an `authority.rejected` entry and leaves a stamped tombstone for audit.
+  4. After approval, BastionVault re-attempts the next envelope — Rustion's hot-reloader has picked up the new authority record, the envelope verifies, and traffic flows.
+  - **Periodic re-attestation** — every authority record carries an `attestation_renew_at` timestamp. On read, Rustion checks the BV deployment id matches the one recorded on enrolment; if it doesn't, the envelope is refused with `403 attestation_mismatch` (this catches a stolen master keypair being re-used by a different vault). BastionVault re-attests via a signed envelope listing its current deployment id once per week; Rustion bumps the timestamp on acceptance.
+  - **Revocation propagation** — when an operator deletes / revokes a Rustion target on the BastionVault side, BastionVault sends a final `op = "deenrol"` envelope to Rustion. Rustion's handler moves the authority into a `tombstoned/` directory (still indexed for audit-replay) and rejects any further envelope from that pubkey with `403 authority_tombstoned`, even before the next hot-reload. Symmetrical revocation on the Rustion side (admin deletes the authority record) immediately stops accepting traffic; BastionVault detects the failure mode via the standard health-probe path and surfaces `bastion_rejected_authority` in the GUI.
+  - **Net result** — a Rustion that has *not* approved a given BastionVault will silently refuse every operation from it, even if the master pubkey was somehow pasted into its config. There is no "trust on first signed envelope" path; the human-in-the-loop approval is a hard gate.
+- **Audit events** — `rustion.target.enrol`, `rustion.target.rotate`, `rustion.target.health.changed`, `rustion.target.deenrol`, `rustion.bastion_group.update`, `rustion.master.issue`, `rustion.master.rotate`, `rustion.master.attest`, `rustion.authority.approval_pending` (submission queued on Rustion's side), `rustion.authority.approved`, `rustion.authority.rejected`, `rustion.authority.tombstoned`, `rustion.authority.untombstoned`, `rustion.policy.global.update`, `rustion.policy.type.update`, `rustion.policy.asset_group.update`, `rustion.policy.resource.update`, `rustion.audit.witness` (re-attested Rustion hash-chain entry mirrored into BV's chain), `session.open` (extended with `transport: "rustion" | "direct"`, `bastion_id`, `bastion_group?: string`, `bastion_selection: "pinned" | "ordered-fallback" | "random-pool" | "group"`, `bastion_candidates_tried`, `policy_chain` (the resolved tier chain that produced these values), `rustion_session_id`), `session.renew`, `session.terminate`, `session.replicated` (telemetry-derived from Rustion's history endpoint), `recording.linked`, `recording.replayed` (in-GUI playback opened; carries operator id + recording id + access window).
 - **Bastion-group selection (named pools of Rustion instances)** — on top of the per-profile `bastions` list and the implicit global pool, operators may define **named bastion groups** under `sys/config/rustion/bastion-groups/<name>` (e.g. `eu-prod`, `dr-corp`, `pci-zone`). A bastion group is just an ordered list of Rustion target ids plus an optional `selection: "ordered" | "random"` flag. Resources, asset groups, and resource types can then reference a bastion group **by name** rather than copying the same target-id list onto every profile. The dispatcher resolves a group name to its current member list at session-open time, so re-pointing an entire fleet from one DR pair to another is a single edit. Group membership is admin-scoped (writes on `sys/config/rustion/bastion-groups/*`), reads are anyone-with-Connect.
 - **Four-tier transport-and-bastion policy** — a new `connect` block carrying `{ transport: "direct" | "rustion" | "rustion-required", bastions: <ordered list of target ids> | <bastion-group name>, recording: "always" | "off" | "input-redacted" }` applied at **four levels**, evaluated **most-restrictive-wins for `transport`** and **nearest-tier-wins for `bastions` / `recording`**:
   1. **Global default** — a deployment-wide setting in `sys/config/rustion` (`transport_default`, `bastion_group_default`, `recording_default`, `transport_lock`). When `transport_lock = true`, the global value pins every resource and downstream overrides are ignored. This is how an admin says *"all Connect, everywhere, must go through one of these bastions."*
@@ -193,7 +208,14 @@ The credential-source resolver is unchanged (Secret / LDAP / SSH-engine / PKI). 
 - `rustion_session_renew(sid: String) -> { new_expires_at }`
 - `rustion_session_terminate(sid: String) -> ()`
 - `rustion_recording_url(sid: String) -> { url, expires_at }`
+- `rustion_recording_replay(rid: String) -> { url, format, sha256, expires_at }` — signed-URL the in-GUI player streams from.
 - `rustion_policy_effective(resource_id: String) -> { transport, bastions, recording, chain: [{ tier, value, locked }] }` — full resolution chain so the GUI can render the source-of-truth tooltip.
+- `rustion_sessions_active() -> Vec<LiveSession>` — drives the "Live sessions" admin page (5s auto-refresh).
+- `rustion_sessions_history(since: Option<String>, limit: u32) -> Page<ClosedSession>` — backfill the audit timeline; cursor-paged.
+- `rustion_sessions_audit(since: Option<String>, limit: u32) -> Page<RustionAuditEntry>` — hash-chain entries from Rustion, signature-verified server-side before being handed to the GUI.
+- `rustion_stats(bucket: "hour" | "day", since: String) -> RustionStats` — analytics dashboard data.
+- `rustion_authority_attest() -> { attested_at, expires_at }` — manual trigger for the periodic re-attestation (also runs on a weekly background timer).
+- `rustion_target_deenrol(id: String) -> ()` — send the `deenrol` envelope and delete the local registry entry in one step.
 
 The existing `ssh_session_open` / `rdp_session_open` commands take a new optional `transport: { kind: "rustion", sid: String, host: String, port: u16, ticket: String }` argument — when present, they dial Rustion instead of the resource's `host:port`.
 
@@ -217,6 +239,13 @@ The existing `ssh_session_open` / `rdp_session_open` commands take a new optiona
 | `DELETE` | `/v1/rustion/sessions/{sid}` | Force-terminate |
 | `GET` | `/v1/rustion/sessions` | List active sessions (BastionVault's own view) |
 | `GET` | `/v1/rustion/sessions/{sid}/recording` | Resolve a streaming URL for the recording |
+| `GET` | `/v1/rustion/sessions/active` | Live sessions across every enrolled bastion (proxies `GET /v1/sessions/active` per target, merged + de-duped) |
+| `GET` | `/v1/rustion/sessions/history?since=<ts>` | Closed-session metadata across every enrolled bastion (audit-timeline backfill) |
+| `GET` | `/v1/rustion/sessions/audit?since=<ts>` | Rustion's hash-chain entries scoped to this BV authority, signature-verified and re-witnessed into BV's own chain |
+| `GET` | `/v1/rustion/stats?bucket=hour` | Aggregate session metrics (sessions/hour, top operators, top targets, durations) |
+| `POST` | `/v1/rustion/recordings/{rid}/replay` | Mint a one-shot signed URL the GUI player streams from; bytes never traverse BastionVault |
+| `POST` | `/v1/rustion/master/attest` | Periodic re-attestation: BV announces its current deployment id, refreshes Rustion's `attestation_renew_at` |
+| `DELETE` | `/v1/rustion/targets/{id}/enrolment` | Send a `deenrol` envelope so Rustion tombstones this BV authority (called automatically when the target is deleted; surfaced standalone for `bvault rustion target deenrol`) |
 | `GET` | `/v1/rustion/policy` | Read effective global + per-type defaults (any authenticated operator) |
 | `PUT` | `/v1/rustion/policy` | Update global `transport_default` / `bastion_group_default` / `recording_default` / `transport_lock` (**root only**) |
 | `GET` | `/v1/rustion/policy/type/{type_id}` | Read per-resource-type policy |
@@ -300,24 +329,29 @@ If `rustion-pci-1` is `down`, the dispatcher tries `rustion-pci-2`. If both are 
 ```
 src/modules/rustion/
   mod.rs                      // mount point, route registration
-  config.rs                   // RustionTarget, RustionMaster
+  config.rs                   // RustionTarget, RustionMaster, deployment-id slot
   envelope.rs                 // BVRG-v1 build / verify
   client.rs                   // HTTP/2 client to Rustion control plane
   health.rs                   // background pinger + status cache + state-change events
+  telemetry.rs                // background sessions / audit / stats puller + cursor store
   bastion_group.rs            // named pools of targets (sys/config/rustion/bastion-groups/*)
   dispatcher.rs               // bastion selection: literal list, group lookup, random pool
   policy.rs                   // four-tier resolver (global / type / asset-group / resource)
-  master.rs                   // master cert lifecycle (issue, rotate, export)
+  master.rs                   // master cert lifecycle (issue, rotate, export, re-attest)
+  enrolment.rs                // submit / pending / approval / tombstone state machine
   session.rs                  // session open / renew / terminate state machine
-  recording.rs                // recording-pointer storage + signed-URL fetch
-  audit.rs                    // event taxonomy
+  recording.rs                // recording-pointer storage + signed-URL fetch + replay shim
+  audit.rs                    // event taxonomy (incl. rustion.audit.witness)
   http.rs                     // axum routes
   cli.rs                      // `bastionvault rustion ...`
 gui/src/lib/rustion.ts        // typed Tauri command wrappers
-gui/src/routes/SettingsPage.tsx  // + Rustion Bastions + Bastion Groups + Global policy
-gui/src/routes/AssetGroupsPage.tsx // + per-group transport / bastion / recording policy
-gui/src/routes/ResourcesPage.tsx // + transport selector + effective-policy chip on the Connection tab
-gui/src/routes/AuditPage.tsx     // + recording link rendering
+gui/src/routes/SettingsPage.tsx        // + Rustion Bastions + Bastion Groups + Global policy
+gui/src/routes/AssetGroupsPage.tsx     // + per-group transport / bastion / recording policy
+gui/src/routes/ResourcesPage.tsx       // + transport selector + effective-policy chip on the Connection tab
+gui/src/routes/AuditPage.tsx           // + recording link rendering + session.replicated rows
+gui/src/routes/RustionLiveSessionsPage.tsx  // admin-only live sessions across the fleet
+gui/src/routes/RustionAnalyticsPage.tsx     // admin-only sessions-per-hour / top-N dashboard
+gui/src/routes/SessionReplayWindow.tsx      // asciicast / .rdp-rec player (isolated WebviewWindow)
 ```
 
 ### Module / file layout (Rustion)
@@ -340,6 +374,71 @@ crates/rustion-server/         // wires the new crate into the main binary
 2. On close, Rustion writes the sidecar JSON and POSTs a signed `recording.ready` webhook to the URL in the authority config.
 3. BastionVault's webhook handler verifies the signature against the same trust anchor (Rustion's pinned pubkey) and writes a `recording.linked` audit event, attaching `{sid, recording_id, sha256, format, location}` to the existing `session.close` event.
 4. When the operator clicks "Open recording" in the audit UI, BastionVault calls `GET /v1/recordings/{rid}` on Rustion with a freshly-signed envelope; Rustion returns a 60-second signed URL that the GUI streams from. The bytes never traverse BastionVault.
+
+### Telemetry pull
+
+A background task (`src/modules/rustion/telemetry.rs`) loops every `telemetry_interval_secs` (default 60s, configurable under `sys/config/rustion`) and, for every target with `health.status = "up"`:
+
+1. Hits `GET /v1/sessions/active` with the same lightweight signed-nonce auth the health pinger uses. Result merged into an in-memory cache the **Live sessions** page renders. De-dupes on `session_id` (which is unique per Rustion instance, prefixed implicitly by the bastion id) so a single operator session never shows twice.
+2. Tracks per-target `since_history_at` and `since_audit_at` cursors. On every cycle, calls `GET /v1/sessions/history?since=<since_history_at>` and `GET /v1/sessions/audit?since=<since_audit_at>` to page through everything new; updates the cursor on success, retries on next cycle on failure. New history rows are written to BV's audit timeline as `session.replicated` events linking back to the Rustion `session_id` + recording id; new audit entries are written as `rustion.audit.witness` after verifying their signature against the pinned Rustion pubkey.
+3. Hits `GET /v1/stats?bucket=hour&since=<since_stats_at>` and folds the bucket into a sparse persisted aggregate at `rustion/stats/<authority>/<bucket>/<ts>`. The analytics dashboard reads from this aggregate, not directly from Rustion, so a temporarily-unreachable bastion doesn't blank out the chart.
+
+The cache + cursors persist under `rustion/telemetry/<target_id>/` so a restart of BastionVault doesn't refetch the entire history. A new field `telemetry_paused_at` lets an operator pause polling per target (the GUI button surfaces in the target row when a bastion is in `down` for >5min, since continued polling against a known-dead endpoint just bloats the cache).
+
+### Session replay
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Audit timeline → row clicked                           │
+│                                                          │
+│  GUI calls rustion_recording_replay(rid)                │
+│   → POST /v1/rustion/recordings/{rid}/replay            │
+│   → BV constructs a fresh signed envelope (op="replay") │
+│   → POSTs it at the Rustion instance that owns the rec  │
+│   → Rustion returns {url, sha256, expires_at, format}   │
+│                                                          │
+│  GUI opens a SessionReplayWindow (separate Tauri        │
+│  WebviewWindow, isolated context)                       │
+│   - asciicast: asciinema-player streams from `url`      │
+│   - .rdp-rec : in-tree WASM decoder paints to <canvas>  │
+│  Player tears down on close; bytes never persist locally│
+└─────────────────────────────────────────────────────────┘
+```
+
+Bytes never traverse BastionVault. The signed URL is 60-second TTL, IP-bound to the requesting operator's source IP, and refused after first stream-end so a leaked URL is useless. SHA-256 is returned alongside so the player can verify integrity at end-of-stream and surface a tampered-recording banner if it ever fails.
+
+The audit timeline shows a chain-of-custody trail: `session.replicated` (the close metadata Rustion pushed), `recording.linked` (when BV first stored the pointer), and `rustion.audit.witness` (Rustion's own hash-chain entry for the same session). The replay window header surfaces all three so the operator playing back the cast knows the metadata stack underneath it.
+
+### Trust establishment & enrolment lifecycle
+
+```
+   BastionVault                                  Rustion
+   ────────────                                  ───────
+1. operator clicks Enrol                            │
+2. bvault rustion master export ──────submit──────▶ pending-authorities/
+                                                     │  (inert; envelopes 403)
+3. (waits)                                            │
+                                              4. admin reviews via:
+                                                 rustion authority list-pending
+                                                 rustion authority approve --name <n>
+                                              5. YAML moves authorities/<n>.yaml
+                                                 hash-chain: authority.approved
+6. next BVRG-v1 envelope ────────────────────────▶ verify, decrypt, accept
+                                                 hash-chain: session.open
+
+Periodic re-attestation (weekly):
+   POST /v1/rustion/master/attest  →  refreshes attestation_renew_at
+
+Revocation:
+   delete target on BV side  →  signed `deenrol` envelope  →  Rustion tombstones
+   delete authority on Rustion side  →  immediate refusal, BV picks up via health probe
+```
+
+Three guard-rails make this safe even if part of the mechanism fails:
+
+- **Pubkey alone is not enough.** A master pubkey dropped into `authorities/<n>.yaml` by hand is still inert until paired with a `deployment_id` and `approved_at` — both stamped by Rustion at approval time, not by the submitter.
+- **Deployment-id binding.** Every envelope carries the issuing BV's `deployment_id`. Rustion compares it against the value recorded at approval; a mismatch means the pubkey is being replayed from a *different* vault instance (cloning attack) and the envelope is refused. Operators rotating master keys re-submit through the same approval workflow — Rustion treats it as a key rotation, not a fresh enrolment, and updates `current_pubkey` while preserving `deployment_id`.
+- **Tombstones outlive the record.** A deleted authority's `deployment_id` lives in `tombstoned/<n>.yaml` forever. Re-submitting the same `deployment_id` after a tombstone requires an admin's explicit `rustion authority untombstone <n>` action and writes both `authority.untombstoned` and `authority.approved` to the chain. This catches a compromised admin trying to silently re-add a previously-revoked vault.
 
 ### Renewal semantics
 
@@ -527,6 +626,42 @@ This phase is **BastionVault-only**. The transport-and-bastion-policy ladder liv
 | BastionVault | Audit: `rustion.bastion_group.update`, `rustion.policy.global.update`, `rustion.policy.type.update`, `rustion.policy.asset_group.update`, `rustion.policy.resource.update` with before/after + actor | `src/modules/rustion/audit.rs` |
 | Rustion | (no changes — Rustion does not know or care which policy tier picked `rustion-required` or which bastion group resolved to itself on the vault side) | — |
 
+### Phase 8 — Telemetry pull + in-GUI session replay
+
+| Side | Deliverable | Location |
+|---|---|---|
+| BastionVault | Telemetry background task: 60s loop polling `/v1/sessions/active`, `/v1/sessions/history`, `/v1/sessions/audit`, `/v1/stats` per healthy target | `src/modules/rustion/telemetry.rs` |
+| BastionVault | Cursor persistence (`rustion/telemetry/<target_id>/cursors`) so restarts don't refetch | `src/modules/rustion/telemetry.rs` |
+| BastionVault | Signature verification on every `audit` entry before re-witnessing into BV's hash chain as `rustion.audit.witness` | `src/modules/rustion/audit.rs` + `envelope.rs` |
+| BastionVault | Live sessions page (admin-only, 5s auto-refresh) + Terminate button | `gui/src/routes/RustionLiveSessionsPage.tsx` |
+| BastionVault | Analytics dashboard reading from the persisted aggregate (sessions/hour, top operators, top targets) | `gui/src/routes/RustionAnalyticsPage.tsx` |
+| BastionVault | Audit timeline rows for `session.replicated` linking to the recording + the matching `rustion.audit.witness` entry | `gui/src/routes/AuditPage.tsx` |
+| BastionVault | Session replay window: separate Tauri WebviewWindow, asciicast via `asciinema-player`, `.rdp-rec` via in-tree WASM decoder | `gui/src/routes/SessionReplayWindow.tsx` + `gui/wasm/rdp-replay/` |
+| BastionVault | `rustion_recording_replay` Tauri command + `POST /v1/rustion/recordings/{rid}/replay` HTTP route signing a fresh envelope and returning the per-stream URL | `gui/src-tauri/src/commands/rustion.rs` + `src/modules/rustion/recording.rs` |
+| BastionVault | `recording.replayed` audit event on every in-GUI playback (operator id + recording id + sha256 mismatch flag if integrity check fails) | `src/modules/rustion/audit.rs` |
+| Rustion | `GET /v1/sessions/active` returns the live sessions scoped to the calling authority | `crates/rustion-control-plane/src/routes.rs` |
+| Rustion | `GET /v1/sessions/history?since=&limit=` returns paginated closed-session metadata, authority-scoped | `crates/rustion-control-plane/src/routes.rs` |
+| Rustion | `GET /v1/sessions/audit?since=&limit=` returns Rustion's hash-chain entries scoped to the authority, each row carrying the chain's signature so BV can re-verify | `crates/rustion-control-plane/src/routes.rs` |
+| Rustion | `GET /v1/stats?bucket=&since=` returns aggregate metrics (sessions/hour, top operators, top targets, durations) per authority | `crates/rustion-control-plane/src/routes.rs` |
+| Rustion | `GET /v1/recordings/{rid}` returns a 60s signed URL bound to the operator's IP for the in-GUI player to stream from | `crates/rustion-control-plane/src/routes.rs` |
+| Rustion | Rate-limit telemetry endpoints (per IP + per authority) so a runaway puller can't saturate the bastion | `crates/rustion-control-plane/src/rate_limit.rs` |
+
+### Phase 9 — Explicit enrolment-approval handshake + re-attestation + tombstones
+
+| Side | Deliverable | Location |
+|---|---|---|
+| BastionVault | Deployment-id slot: stable UUID minted on first PKI init, included in every BVRG-v1 envelope (`operator.deployment_id`) | `src/modules/rustion/enrolment.rs` + `src/modules/rustion/envelope.rs` |
+| BastionVault | Enrolment submit flow: `bvault rustion enrol --target rt_<id>` packages master pubkey + deployment id + requested scope and POSTs the submission envelope | `src/cli/command/rustion_enrol.rs` + `gui/src/components/RustionBastionsTab.tsx` |
+| BastionVault | Pending status visible in GUI: target row shows "Awaiting approval" until Rustion flips the authority to active | `gui/src/components/RustionBastionsTab.tsx` |
+| BastionVault | Weekly re-attestation timer + `rustion_authority_attest` Tauri command | `src/modules/rustion/master.rs` |
+| BastionVault | `rustion_target_deenrol` command sends a `deenrol` envelope before the local registry delete | `src/cli/command/rustion_target_delete.rs` + `gui/src-tauri/src/commands/rustion.rs` |
+| BastionVault | Audit: `rustion.master.attest`, `rustion.target.deenrol`, `rustion.authority.*` echoes (reflected from Rustion's witness stream) | `src/modules/rustion/audit.rs` |
+| Rustion | `authorities-pending/` holding pen + hot reloader (envelopes signed by pending pubkeys 403 with `authority_pending_approval`) | `crates/rustion-control-plane/src/authority.rs` |
+| Rustion | Approval workflow: `rustion authority list-pending`, `rustion authority approve --name`, `rustion authority reject --name` + admin web UI button | `crates/rustion-server/src/cli.rs` + `crates/rustion-server/src/admin/` |
+| Rustion | Deployment-id binding: stored at approval time, compared on every envelope; mismatch → `403 attestation_mismatch` | `crates/rustion-control-plane/src/envelope.rs` |
+| Rustion | Tombstone directory: deleted authorities live in `tombstoned/<name>.yaml` with frozen deployment id; `rustion authority untombstone <n>` requires explicit admin action | `crates/rustion-control-plane/src/authority.rs` |
+| Rustion | Hash-chain entries: `authority.approval_pending`, `authority.approved`, `authority.rejected`, `authority.attested`, `authority.tombstoned`, `authority.untombstoned`, `authority.deenrolled` | `crates/rustion-control-plane/src/authority.rs` |
+
 ### Cross-repo testing matrix
 
 | Test | Driver | Verifies |
@@ -541,6 +676,15 @@ This phase is **BastionVault-only**. The transport-and-bastion-policy ladder liv
 | Webhook lost | E2E with webhook URL pointing at a black hole | 24h poller eventually links the recording |
 | Force-terminate from BV | E2E + audit-log inspection | Session window receives Tauri event; `session.terminate` recorded on both sides |
 | Policy escalation | Per-tier lock + non-admin attempts to override | `403 transport_locked` from API + greyed-out GUI |
+| Telemetry cursor resume | Restart BV mid-page; confirm next loop continues from the persisted cursor | No history rows lost or duplicated across restart |
+| Audit witness verification | Tamper one byte of a returned audit entry's signature | BV's `rustion.audit.witness` write refuses; entry surfaces in a `tampered_audit` red banner |
+| Replay URL leak | Capture the signed URL, retry from a different source IP | Rustion refuses with `403 ip_bound` |
+| Replay integrity check | Mid-stream byte flip in transit | Player's end-of-stream SHA-256 fails; UI shows "recording integrity check failed" |
+| Pending authority refusal | Submit a master pubkey; send an envelope before approval | `403 authority_pending_approval`; BV GUI shows "Awaiting approval" |
+| Deployment-id mismatch | Approve enrolment, then re-submit with same pubkey + different deployment id | `403 attestation_mismatch`; chain shows `authority.attestation_mismatch` |
+| Tombstone resurrection | Delete an authority, re-submit | Refused with `authority_tombstoned`; only `untombstone` action unblocks |
+| Periodic re-attestation lapse | Stop BV's attest timer; let `attestation_renew_at` expire | Next envelope refused with `attestation_expired`; manual `rustion authority refresh-attestation` re-approves |
+| Live sessions de-dupe | Two Rustion instances mediate concurrent sessions for the same operator | GUI's Live sessions page shows two rows, not four; session_id uniqueness holds |
 
 ## Open questions
 
