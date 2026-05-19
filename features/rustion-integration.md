@@ -485,7 +485,23 @@ Three guard-rails make this safe even if part of the mechanism fails:
 - New `rustion-control-plane` crate in `/Users/felipe/Dev/Rustion`. Authority YAML store + hot reload + `/v1/sessions` skeleton that verifies envelopes and returns canned `not_implemented`.
 - Round-trip test from BastionVault → Rustion that a syntactically-correct envelope verifies and decrypts; no real session opens yet.
 
-### Phase 3 — Session open + ticketed SSH proxy + dispatcher — **Todo**
+### Phase 3 — Session open + ticketed SSH proxy + dispatcher — **In progress**
+
+Shipped in 0.7.16 (BV) + 0.7.12 (Rustion):
+
+- **BV dispatcher** (`src/modules/rustion/dispatcher.rs`) — pinned-list and random-from-healthy-pool modes, drops disabled/down/unknown targets, surfaces dropped reasons on the plan output. `should_advance` policy: transport / 5xx → advance, 4xx → halt. 7 unit tests covering both modes + the advance/halt rules.
+- **Rustion session table** (`crates/rustion-control-plane/src/session.rs`) — materialises a session record from a verified envelope, mints a single-use IP-bound 30s ticket, persists the session + ticket-index in memory under `RwLock`. Capacity cap (default 512), TTL clamping against authority's `max_session_secs`, reap-expired sweep. 8 unit tests.
+- **Rustion `/v1/sessions`** now returns `201 Created` with `{session_id, host, port, ticket, expires_at, protocol, recording_id}` after a verified envelope passes replay protection. HTTP error mapping for the session-state machine: `envelope_op_unsupported` → 400, `capacity` → 503. 3 in-process end-to-end integration tests confirm BV-side build → Rustion-side verify+materialise round-trips.
+- **BV master signing-key stub** (`src/modules/rustion/master.rs::MasterStore::get_or_init_signing_key`) — mints + persists an ephemeral hybrid keypair on first call so the session-open path is testable end-to-end before Phase 9's PKI-issued master cert lands. Stored at `rustion/master/signing-key` with a `stub: true` sentinel so Phase 9 can audit + replace.
+
+Remaining for Phase 3 (next slices):
+
+- BV-side server route `POST rustion/session/open` that runs the dispatcher, builds the envelope, POSTs at Rustion, and returns the ticket bundle. Blocked on the `RustionTarget` schema gaining a real `kem_public_key` field (today the registry only stores the signing pubkey).
+- BV Tauri command `rustion_session_open` that wraps the server route.
+- BV connection-profile kind `rustion` + the GUI's Connection-tab dispatcher preview ("Will try: rustion-eu-west-1 → rustion-eu-west-2").
+- BV SSH session window gains `transport: { kind: "rustion", host, port, ticket }` mode.
+- Rustion `rustion-ssh` accepts `Rustion ticket: tkt_…` as the first auth step and proxies to the target with the decrypted credential.
+- End-to-end demo against a real Linux target through a real Rustion process.
 
 - Rustion `/v1/sessions` materialises a session, mints a ticket, returns connection coordinates.
 - Rustion SSH listener accepts `ticket@<sid>` as the first auth step and proxies to the target with the decrypted credential.

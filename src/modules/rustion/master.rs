@@ -89,6 +89,27 @@ fn default_rotate_grace_secs() -> u64 {
     24 * 3600
 }
 
+/// Hybrid signing-key material persisted alongside the master config.
+/// Phase 2 stub: until Phase 9 wires the PKI engine into the issue
+/// flow, the keypair is **minted ephemerally** on first need and
+/// stored verbatim under `rustion/master/signing-key`. Each cluster
+/// node mints its own, which is fine for the development /
+/// integration-test path; production deployments wait for Phase 9
+/// to land the PKI-issued + cluster-replicated key story.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StubSigningKey {
+    /// Base64 of the Ed25519 32-byte secret seed.
+    pub ed25519_seed_b64: String,
+    /// Base64 of the ML-DSA-65 32-byte secret seed.
+    pub mldsa65_seed_b64: String,
+    /// Wallclock the keypair was minted.
+    pub created_at: DateTime<Utc>,
+    /// Sentinel flagging the stub origin so Phase 9 can audit + replace.
+    pub stub: bool,
+}
+
+const SIGNING_KEY: &str = "signing-key";
+
 /// Exported pubkey shape, mirrors the authority record on the Rustion
 /// side so the operator can paste it directly into
 /// `authorities/<name>.yaml`.
@@ -149,6 +170,65 @@ impl MasterStore {
             default_ttl_secs: default_ttl_secs(),
             rotate_grace_secs: default_rotate_grace_secs(),
             ..Default::default()
+        })
+    }
+
+    /// Load the persisted signing-key stub, minting + persisting a
+    /// fresh keypair on first call. Phase 9 replaces this with the
+    /// PKI-engine-issued cert flow; until then the stub gets
+    /// real-enough end-to-end coverage that Phase 3's session-open
+    /// path can run.
+    pub async fn get_or_init_signing_key(
+        &self,
+    ) -> Result<bv_crypto::BvrgMasterSigningKey, RvError> {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use rand::Rng;
+
+        if let Some(entry) = self.view.get(SIGNING_KEY).await? {
+            let stub: StubSigningKey = serde_json::from_slice(&entry.value)
+                .map_err(|e| bv_error_string!(&format!("decode rustion master signing-key: {e}")))?;
+            let ed_seed: [u8; 32] = STANDARD
+                .decode(stub.ed25519_seed_b64.as_bytes())
+                .map_err(|e| bv_error_string!(&format!("decode ed25519 seed: {e}")))?
+                .try_into()
+                .map_err(|_| bv_error_string!("ed25519 seed has wrong length"))?;
+            let ml_seed: [u8; 32] = STANDARD
+                .decode(stub.mldsa65_seed_b64.as_bytes())
+                .map_err(|e| bv_error_string!(&format!("decode mldsa65 seed: {e}")))?
+                .try_into()
+                .map_err(|_| bv_error_string!("mldsa65 seed has wrong length"))?;
+            return Ok(bv_crypto::BvrgMasterSigningKey {
+                ed25519: ed25519_dalek::SigningKey::from_bytes(&ed_seed),
+                mldsa65_seed: zeroize::Zeroizing::new(ml_seed),
+            });
+        }
+
+        // First call — mint + persist.
+        let mut ed_seed = [0u8; 32];
+        rand::rng().fill_bytes(&mut ed_seed);
+        let mut ml_seed = [0u8; 32];
+        rand::rng().fill_bytes(&mut ml_seed);
+        let stub = StubSigningKey {
+            ed25519_seed_b64: STANDARD.encode(ed_seed),
+            mldsa65_seed_b64: STANDARD.encode(ml_seed),
+            created_at: Utc::now(),
+            stub: true,
+        };
+        let value = serde_json::to_vec(&stub)
+            .map_err(|e| bv_error_string!(&format!("encode rustion master signing-key stub: {e}")))?;
+        self.view
+            .put(&StorageEntry {
+                key: SIGNING_KEY.to_string(),
+                value,
+            })
+            .await?;
+        log::warn!(
+            "rustion master signing-key minted as Phase 2 stub (ephemeral, per-node); \
+             Phase 9 replaces this with PKI-issued + cluster-replicated material"
+        );
+        Ok(bv_crypto::BvrgMasterSigningKey {
+            ed25519: ed25519_dalek::SigningKey::from_bytes(&ed_seed),
+            mldsa65_seed: zeroize::Zeroizing::new(ml_seed),
         })
     }
 }

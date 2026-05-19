@@ -45,6 +45,32 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.16] - 2026-05-19
+
+### Added
+
+- **Rustion integration — Phase 3 dispatcher + session-open scaffold.**
+  Pairs with Rustion 0.7.12 to close the dispatcher cell + session-table
+  cells of the Phase 3 deliverable table; the remaining cells (HTTP
+  route, GUI integration, real SSH proxy ticket-auth) land in
+  follow-up slices.
+    - **Dispatcher** (`src/modules/rustion/dispatcher.rs`): given a
+      connection profile + the registry's health cache, returns the
+      ordered candidate list. Two modes: `OrderedFallback` (profile
+      pinned a list — preserve order, drop disabled/down/unknown
+      targets, surface reason on each drop) and `RandomPool` (empty
+      pin — uniform random shuffle of all healthy enabled targets;
+      caller supplies the RNG so tests can pin the choice).
+      `should_advance` policy: transport / 5xx → advance, 4xx →
+      halt (a permission denial is final and shouldn't burn auth
+      attempts on every host in the pool). 7 unit tests.
+    - **Master signing-key stub** (`MasterStore::get_or_init_signing_key`)
+      mints + persists an ephemeral hybrid keypair on first call so
+      the session-open path is testable end-to-end before Phase 9's
+      PKI-issued master cert lands. Persisted at
+      `rustion/master/signing-key` with a `stub: true` sentinel and a
+      `WARN` log on creation so Phase 9 can audit + replace.
+
 ## [0.7.15] - 2026-05-18
 
 ### Added
