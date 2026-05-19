@@ -589,10 +589,26 @@ This is the canonical list of what's missing from Phase 4 — referenced from CH
 Phase 5.1 — master-cert rotation (co-signed envelope accepted during the old key's `not_after` grace window) — is tracked separately under Phase 9 since it shares the enrolment + re-attestation surface area.
 - Master-cert rotation: co-signed envelope, accepted by enrolled Rustions until the old key's `not_after`.
 
-### Phase 6 — Recording handoff — **Todo**
+### Phase 6.1 — Recording sidecar baseline — **Done** (BV 0.7.24 + Rustion 0.7.20)
 
-- Sidecar JSON + outbound signed `recording.ready` webhook from Rustion.
-- BastionVault webhook receiver + 24h fallback poller.
+The chain-of-custody artifact BV needs to attach a recording to the right audit-chain entry, without parsing the recording itself.
+
+- **`rustion-recording::sidecar`** new module:
+  - `RecordingSidecar` wire-format struct matching `docs/bastionvault-integration.md` §Recording handoff verbatim: `recording_id`, `session_id`, `authority`, `format` (`asciicast` | `rdp-rec` | `smb-log`), `sha256`, `size_bytes`, `started_at`, `finished_at`, `target_host`, `target_user`, `correlation_id`.
+  - `from_handle_and_metadata(handle, metadata, session_id)` — streams the recording file through sha2 (64 KiB buffered, bounded memory for multi-GB recordings) and merges in the session metadata.
+  - `write_next_to(recording_path)` — drops `<rec>.json` next to `<rec>.cast` / `<rec>.rdp-rec`.
+  - `read(path)` — round-trip for the future `GET /v1/sessions/{sid}/recording` endpoint (Phase 6.2).
+- **SSH + RDP proxies** both emit the sidecar at `recorder.finish()` time, right after the recording-index entry is updated. Best-effort — a failed sidecar write WARNs but never sinks the user's session. `rustion::usage` emits `RECORDING_READY` carrying `session_id`, `recording_id`, `authority`, `correlation_id`, and `size_bytes` for SOC observability.
+- For classical (non-BV) sessions the sidecar lands with empty `authority` + `correlation_id` strings — the `serde(default)` tags keep parsing clean either way.
+- **5 unit tests** in `sidecar::tests` (extension swap, sha256 known-vector, BV round-trip, classical session empty-fields, protocol→format mapping).
+
+### Phase 6.2 — Recording webhook + receiver + playback — **Todo**
+
+- Outbound signed `recording.ready` webhook from Rustion to `authority.recording_webhook_url`. Hybrid Ed25519 + ML-DSA-65 signature over the sidecar bytes, key pinned at enrolment time (the same hybrid pair used to sign envelopes addressed *from* Rustion *to* BV — separate from the authority pubkey BV signs envelopes addressed *to* Rustion with).
+- Exponential-backoff delivery loop (max 5 retries over ~30 min) as specified in `docs/bastionvault-integration.md` §Recording handoff.
+- `GET /v1/sessions/{sid}/recording` on Rustion serving the sidecar for the 24h pull-fallback window.
+- BV webhook receiver route: signed-payload verification, per-authority recordings index, `audit::RECORDING_LINKED` event.
+- 24h fallback poller on BV that walks active-session correlations and pulls sidecars Rustion failed to webhook.
 - "Open recording" link in audit timeline; signed-URL stream from Rustion to the player.
 - asciicast playback in-GUI (existing xterm.js + asciinema-player), `.rdp-rec` playback handed off to a small wasm decoder shipped in the GUI bundle.
 

@@ -45,6 +45,49 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.24] - 2026-05-19
+
+### Added
+
+- **Rustion integration — Phase 6.1: recording sidecar baseline**
+  (paired with Rustion 0.7.20). The chain-of-custody artifact BV needs
+  to attach a recording to the right audit-chain entry, without
+  parsing the recording itself.
+    - **`rustion-recording::sidecar`** new module on the Rustion side:
+        - `RecordingSidecar` wire-format struct matching
+          `docs/bastionvault-integration.md` §Recording handoff verbatim:
+          `recording_id`, `session_id`, `authority`, `format`
+          (`asciicast` | `rdp-rec` | `smb-log`), `sha256`, `size_bytes`,
+          `started_at`, `finished_at`, `target_host`, `target_user`,
+          `correlation_id`.
+        - `from_handle_and_metadata(handle, metadata, session_id)`
+          streams the recording file through sha2 (64 KiB buffered) to
+          keep memory bounded for multi-GB recordings, and merges in
+          the session metadata.
+        - `write_next_to(rec_path)` drops `<rec>.json` next to
+          `<rec>.cast` / `<rec>.rdp-rec`.
+        - `read(path)` round-trip for the future
+          `GET /v1/sessions/{sid}/recording` endpoint (Phase 6.2).
+    - **SSH + RDP proxies** both emit the sidecar at
+      `recorder.finish()` time, right after the recording-index entry
+      is updated. Best-effort — a failed sidecar write WARNs but never
+      sinks the user's session. `rustion::usage` emits a
+      `RECORDING_READY` event carrying `session_id`, `recording_id`,
+      `authority`, `correlation_id`, and `size_bytes` for SOC
+      observability.
+    - Classical (non-BV) sessions emit the sidecar with empty
+      `authority` + `correlation_id` strings — the `serde(default)`
+      tags keep parsing clean either way.
+- **5 sidecar unit tests** (extension swap, sha256 known-vector, BV
+  round-trip, classical empty-fields, protocol→format mapping). 89 ssh
+  + 22 control-plane + 67 rdp + 56 recording lib tests still green.
+
+### Changed
+
+- `features/rustion-integration.md`: Phase 6 split — 6.1 sidecar
+  baseline marked Done, 6.2 (webhook + BV receiver + 24h poller +
+  playback) called out as the remaining slice.
+
 ## [0.7.23] - 2026-05-19
 
 ### Added
