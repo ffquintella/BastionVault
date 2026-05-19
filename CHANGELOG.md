@@ -45,6 +45,20 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.18] - 2026-05-19
+
+### Added
+
+- **Rustion integration — Phase 4 RDP through Rustion** (paired with
+  Rustion 0.7.14). The Phase-3 session-open flow is protocol-agnostic
+  — `rustion_session_open` already accepts `target_protocol: "rdp"`
+  and Rustion routes RDP envelopes at its `rdp_advertise` listener.
+  Phase 4 closes the remaining RDP-specific gap: the `mstshash=`
+  cookie ticket consumer on the Rustion side (see Rustion 0.7.14).
+  The BV-side ironrdp client modification (switch dialer to the
+  bastion + inject ticket into the cookie) is deferred to Phase 4.1
+  alongside the SSH russh listener-loop wire-up.
+
 ## [0.7.17] - 2026-05-19
 
 ### Added

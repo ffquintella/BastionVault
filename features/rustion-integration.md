@@ -512,7 +512,15 @@ Deferred to Phase 3.1 (separate slice):
 - `session.open` + `session.close` events on both sides include `bastion_selection` + `bastion_candidates_tried`; recording on but pointer not yet fetched.
 - End-to-end: Linux target reachable through Rustion with multiple instances enrolled — random selection works in the empty-list case, ordered fallback works when one instance is down.
 
-### Phase 4 — RDP through Rustion — **Todo**
+### Phase 4 — RDP through Rustion — **Done** (BV 0.7.18 + Rustion 0.7.14)
+
+The session-open flow shipped in Phase 3 is protocol-agnostic — `rustion_session_open` accepts `target_protocol: "rdp"` and the Rustion `/v1/sessions` response routes the operator at the `rdp_advertise` SocketCoord. Phase 4 closes the remaining RDP-specific gap: the cookie-format ticket consumer on Rustion.
+
+- **Rustion `rustion-rdp::ticket_auth`** (`crates/rustion-rdp/src/ticket_auth.rs`) — mirrors the SSH ticket-auth pattern. `consume_ticket_for_login(store, login)` extracts the `tkt_…` token from the RDP `mstshash=` cookie (tolerates `corp\user;tkt_…` style prefixes that some RDP clients prepend), consumes the ticket via the session store, returns the matched `Session` for the proxy loop to dial against. All error paths collapse to `Invalid` on the wire (no enumeration via the RDP error codes); detailed reason logged at WARN with the ticket prefix sanitised to 8 hex chars. 7 unit tests cover happy path, replay, wrong source IP, missing token, the corp-prefix tolerance, and the `extract_token` parser on edge cases.
+
+Deferred to Phase 4.1 (same shape of work as the SSH listener wire-up):
+- BV-side ironrdp client switches dialer destination from resource → bastion when the connection profile's `kind === "rustion"`, and injects the ticket into the `mstshash=` cookie of the X.224 connection request. The cookie-parsing logic is already in place on the Rustion side; the BV side needs the connector branch.
+- Manual CredSSP / NLA validation against a Windows Server target with `rdp-password` and `rdp-cert` credential kinds (proper integration tests need a Windows VM in CI).
 
 - Rustion RDP gateway accepts the same ticket protocol.
 - BastionVault's RDP session window takes `transport: rustion`.
