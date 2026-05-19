@@ -45,6 +45,52 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.27] - 2026-05-19
+
+### Added
+
+- **Rustion integration — Phase 6.4: cron + bytes endpoint + proxy
+  emit glue** (paired with Rustion 0.7.23). Closes the operational
+  handoff loop fully — the BV cron pulls missed recordings on
+  schedule, Rustion serves recording bytes for playback, and the
+  SSH/RDP proxies actually fire webhook deliveries on
+  `recorder.finish()`.
+    - **BV `recordings::PendingRecording`** + `pending_view`:
+      every `session/open` stamps a marker carrying `session_id`,
+      `bastion_id`, `correlation_id`, `expected_by = expires_at + 5
+      min`. Webhook delivery + pull-fallback both clear the marker.
+    - **BV `poller` module**: detached background task spawned at
+      boot alongside `rustion::probe::start_pinger`. Mirrors the
+      pinger shape; ticks every 1 h; walks the pending view and
+      calls `pull_recording` for entries past `expected_by`. Past
+      `MAX_RETENTION = 24 h` they're dropped as unrecoverable
+      (operators can still pull manually).
+    - **Rustion `webhook::WebhookEmitter`**: shared handle that
+      looks up the per-authority webhook URL via `AuthorityStore`,
+      signs the sidecar bytes, and spawns a detached
+      `deliver_with_retry` task. Emitter is `Arc<>`-shared,
+      constructed once at `rustion-server` startup; injected into
+      `SshProxy::with_webhook_emitter` and
+      `RdpProxy::with_webhook_emitter`.
+    - **SshProxy / RdpProxy / ServerHandler glue**: emitter
+      threaded down to `connect_to_target_with_credential_and_relay`
+      (SSH) / `handle_rdp_connection` (RDP). When the sidecar lands
+      and `RECORDING_READY` fires, the relay serialises the sidecar
+      and calls `emitter.spawn_delivery(authority, body)`. Classical
+      (non-BV) sessions skip the call cleanly (empty authority).
+    - **Rustion `GET /v1/recordings/:rid/blob`**: serves the
+      recording artifact bytes for in-GUI playback. Maps
+      `rec_<sid_suffix>` → `<sid>.cast` / `<sid>.rdp-rec` via the
+      per-session sidecar. Returns `X-Recording-SHA256` +
+      `X-Recording-Format` headers for integrity verification.
+
+### Changed
+
+- `features/rustion-integration.md`: Phase 6.4 marked Done; Phase 6.5
+  carved out for the remaining GUI playback work (Recordings page,
+  asciinema-player wiring, `.rdp-rec` wasm decoder, optional
+  short-lived signed-URL upgrade).
+
 ## [0.7.26] - 2026-05-19
 
 ### Added

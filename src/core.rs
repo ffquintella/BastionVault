@@ -649,7 +649,12 @@ impl Core {
         // target registry is a no-op so it's safe to start
         // unconditionally before any operator enrols a bastion.
         if let Some(core_arc) = self.self_ptr.upgrade() {
-            let _ = crate::modules::rustion::probe::start_pinger(core_arc);
+            let _ = crate::modules::rustion::probe::start_pinger(core_arc.clone());
+            // Phase 6.4: 24h recording-fallback poller. Same lifecycle
+            // pattern; ticks every hour, falls back to GET
+            // /v1/sessions/{sid}/recording for sessions whose
+            // recording.ready webhook didn't land.
+            let _ = crate::modules::rustion::poller::start_poller(core_arc);
         }
 
         // Boot the OpenLDAP / AD static-role auto-rotation scheduler

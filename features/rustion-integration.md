@@ -631,15 +631,24 @@ Closes the operational handoff loop: webhooks survive transient failures with bo
 - **New BV HTTP route**: `POST rustion/recordings/pull` driving the pull helper. Operator-triggered or scheduler-driven.
 - **Tauri commands**: `rustion_recordings_list`, `rustion_recording_read`, `rustion_recording_pull`. Typed TypeScript wrappers in `gui/src/lib/rustion.ts`. The Connection Window can now display "Recording: ready" once the entry lands, and offer a "Refresh from bastion" button that calls `rustionRecordingPull`.
 
-### Phase 6.4 — Scheduler + GUI playback — **Todo**
+### Phase 6.4 — Cron + bytes endpoint + proxy emit glue — **Done** (BV 0.7.27 + Rustion 0.7.23)
 
-The slice that needs UI work and BV scheduler infrastructure:
+Closes the operational handoff loop fully — the BV cron pulls missed recordings on schedule, Rustion serves recording bytes for playback, and the SSH/RDP proxies actually fire webhook deliveries on `recorder.finish()`.
 
-- **24h fallback cron** on BV — periodic timer that walks `audit::SESSION_TERMINATE` events whose `recording_id` never landed in the recordings index, and calls `pull_recording` for each. Needs a generic BV background-task scheduler (the existing `rustion::probe` 30s pinger is a precedent; the recording poller will share that scheduling primitive).
-- **"Open recording" link** in the audit timeline (Recordings page in the GUI surfacing the `RustionRecordingEntry` list + filters by authority/bastion/time).
-- **Signed-URL bytes endpoint** on Rustion: `GET /v1/recordings/{rid}/blob` serving the actual `.cast` / `.rdp-rec` payload with a short-lived signed URL (so BV can stream to the player without re-authenticating each chunk).
-- **asciicast playback** in-GUI — xterm.js + asciinema-player wired into the Recordings page.
-- **`.rdp-rec` wasm decoder** — small WASM module shipped in the GUI bundle that walks the binary frame stream and renders into an HTML5 canvas.
+- **BV `recordings::PendingRecording` + `pending_view`** — every successful `session/open` now stamps a pending-recording marker carrying `session_id`, `bastion_id`, `correlation_id`, `expected_by = expires_at + 5 min`. Webhook delivery and pull-fallback both clear the marker.
+- **BV `poller` module** — detached background task spawned at boot from `core.rs` alongside `rustion::probe::start_pinger`. Mirrors the pinger's `tokio::time::interval` shape; ticks every `TICK_INTERVAL` (1 h); walks the pending view and calls `pull_recording` for every entry past its `expected_by` deadline. Entries past `MAX_RETENTION = 24 h` are dropped as unrecoverable (operators can still pull manually via `POST rustion/recordings/pull`).
+- **Rustion `webhook::WebhookEmitter`** — shared handle that looks up the per-authority webhook URL via the `AuthorityStore`, signs the sidecar bytes, and spawns a detached `deliver_with_retry` task. Emitter is `Arc<>`-shared, constructed once at `rustion-server` startup; injected into both `SshProxy::with_webhook_emitter` and `RdpProxy::with_webhook_emitter`.
+- **SshProxy / RdpProxy / ServerHandler** wiring — proxies pass the emitter down to `connect_to_target_with_credential_and_relay` (SSH) / `handle_rdp_connection` (RDP). After the sidecar lands and `RECORDING_READY` fires, the relay serialises the sidecar struct via `serde_json::to_vec` and calls `emitter.spawn_delivery(authority, body)`. Classical (non-BV) sessions skip the call cleanly (empty authority).
+- **Rustion `GET /v1/recordings/:rid/blob`** — serves the recording artifact bytes for in-GUI playback. Maps `rec_<sid_suffix>` → `<sid>.cast` / `<sid>.rdp-rec` via the per-session sidecar. Returns `X-Recording-SHA256` + `X-Recording-Format` headers so the player can verify integrity before rendering.
+
+### Phase 6.5 — GUI playback — **Todo**
+
+The remaining slice is genuinely a multi-day UI/wasm engineering track:
+
+- **"Open recording" link** + Recordings page in the GUI surfacing the `RustionRecordingEntry` list with filters by authority/bastion/time.
+- **asciicast playback** — xterm.js + asciinema-player wired into the Recordings page, streaming from `GET /v1/recordings/:rid/blob`.
+- **`.rdp-rec` wasm decoder** — WASM module shipped in the GUI bundle that walks the binary frame stream and renders into an HTML5 canvas. Reference RDP-rec format spec.
+- **Short-lived signed URL** — optional security upgrade so BV can hand the operator's browser a self-signed pull URL with a 5-min expiry; today's endpoint relies on BV's TLS-pinned channel.
 
 ### Phase 7 — Four-tier transport-and-bastion policy + `rustion-required` mode — **Todo**
 

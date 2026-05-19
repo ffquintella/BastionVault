@@ -38,6 +38,7 @@ pub mod dispatcher;
 pub mod envelope;
 pub mod health;
 pub mod master;
+pub mod poller;
 pub mod probe;
 pub mod recordings;
 pub mod session;
@@ -924,6 +925,10 @@ impl RustionBackendInner {
         match session::open_session_v2(&store, &master, &operator, &request).await {
             Ok(resp) => {
                 let mut data = Map::new();
+                let session_id_owned = resp.session_id.clone();
+                let bastion_id_owned = resp.bastion_id.clone();
+                let expires_at_owned = resp.expires_at.clone();
+                let correlation_id_owned = resp.correlation_id.clone();
                 data.insert("session_id".into(), Value::String(resp.session_id));
                 data.insert("host".into(), Value::String(resp.host));
                 data.insert("port".into(), Value::Number(resp.port.into()));
@@ -950,6 +955,29 @@ impl RustionBackendInner {
                     "correlation_id".into(),
                     Value::String(resp.correlation_id),
                 );
+                // Phase 6.4: track this session as a "pending recording"
+                // so the 24h poller pulls if the webhook never lands.
+                // Best-effort — failure here doesn't fail session-open.
+                if let Ok(recs) = self.resolve_recordings_store() {
+                    let now = chrono::Utc::now();
+                    let expected_by = chrono::DateTime::parse_from_rfc3339(&expires_at_owned)
+                        .map(|d| d.with_timezone(&chrono::Utc) + chrono::Duration::minutes(5))
+                        .unwrap_or_else(|_| now + chrono::Duration::hours(2));
+                    let pr = recordings::PendingRecording {
+                        session_id: session_id_owned.clone(),
+                        bastion_id: bastion_id_owned.clone(),
+                        authority: String::new(),
+                        correlation_id: correlation_id_owned,
+                        opened_at: now,
+                        expected_by,
+                    };
+                    if let Err(e) = recs.pending_insert(&pr).await {
+                        log::warn!(
+                            "rustion: failed to insert pending recording for {}: {e}",
+                            session_id_owned
+                        );
+                    }
+                }
                 log::info!(
                     "{}: session_id={} bastion={} candidates_tried={}",
                     audit::SESSION_OPEN,
@@ -1196,6 +1224,9 @@ impl RustionBackendInner {
             delivery_mode: "webhook".into(),
         };
         recordings.put(&entry).await?;
+        // Clear the pending-recording marker so the 24h poller drops
+        // this session from its sweep list. Phase 6.4.
+        let _ = recordings.pending_remove(&entry.session_id).await;
 
         log::info!(
             "{}: recording_id={} session_id={} bastion={} correlation_id={}",

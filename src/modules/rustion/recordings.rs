@@ -28,6 +28,12 @@ use crate::storage::{barrier_view::BarrierView, Storage, StorageEntry};
 use crate::bv_error_string;
 
 const RECORDINGS_SUB_PATH: &str = "rustion/recordings/";
+/// Sub-view for the 24h fallback poller's "pending recordings"
+/// tracker. Populated on `session.open` (so the poller knows BV is
+/// expecting a recording from a specific bastion+session), and
+/// emptied either when the webhook delivers OR when the poller's
+/// pull-fallback succeeds. Phase 6.4.
+const PENDING_SUB_PATH: &str = "rustion/recordings_pending/";
 
 /// One recording entry. Mirrors `RecordingSidecar` on the Rustion
 /// side plus the BV-only fields that record the chain-of-custody at
@@ -58,8 +64,31 @@ pub struct RecordingEntry {
     pub delivery_mode: String,
 }
 
+/// One "pending recording" entry — BV expects this recording to land
+/// (either via webhook or via the 24h poller). The poller's task tick
+/// walks this view, checks each pending entry's `expected_by` deadline,
+/// and calls `pull_recording` if the deadline has passed without the
+/// recording appearing in the main index.
+///
+/// Cleared either by webhook delivery (`handle_webhook_recording_ready`
+/// removes the pending entry) or by a successful pull
+/// (`pull_recording` calls `pending_remove`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingRecording {
+    pub session_id: String,
+    pub bastion_id: String,
+    pub authority: String,
+    pub correlation_id: String,
+    pub opened_at: DateTime<Utc>,
+    /// When BV expects the recording to be available. Typically
+    /// `session.opened_at + session.ttl_secs + 5 min` so the poller
+    /// doesn't pull a session that's still active.
+    pub expected_by: DateTime<Utc>,
+}
+
 pub struct RecordingsStore {
     view: Arc<BarrierView>,
+    pending_view: Arc<BarrierView>,
 }
 
 #[maybe_async::maybe_async]
@@ -69,7 +98,35 @@ impl RecordingsStore {
             return Err(RvError::ErrBarrierSealed);
         };
         let view = Arc::new(system_view.new_sub_view(RECORDINGS_SUB_PATH));
-        Ok(Arc::new(Self { view }))
+        let pending_view = Arc::new(system_view.new_sub_view(PENDING_SUB_PATH));
+        Ok(Arc::new(Self { view, pending_view }))
+    }
+
+    // ─── Pending recordings (Phase 6.4 cron) ────────────────────────
+
+    pub async fn pending_list(&self) -> Result<Vec<PendingRecording>, RvError> {
+        let mut out = Vec::new();
+        let keys = self.pending_view.get_keys().await?;
+        for k in keys {
+            if let Some(entry) = self.pending_view.get(&k).await? {
+                if let Ok(pr) = serde_json::from_slice::<PendingRecording>(&entry.value) {
+                    out.push(pr);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    pub async fn pending_insert(&self, pr: &PendingRecording) -> Result<(), RvError> {
+        let id = sanitize(&pr.session_id)?;
+        let value = serde_json::to_vec(pr)
+            .map_err(|e| bv_error_string!(&format!("encode pending recording: {e}")))?;
+        self.pending_view.put(&StorageEntry { key: id, value }).await
+    }
+
+    pub async fn pending_remove(&self, session_id: &str) -> Result<(), RvError> {
+        let id = sanitize(session_id)?;
+        self.pending_view.delete(&id).await
     }
 
     pub async fn list_ids(&self) -> Result<Vec<String>, RvError> {
@@ -200,5 +257,8 @@ pub async fn pull_recording(
         delivery_mode: "pull".into(),
     };
     recordings.put(&entry).await?;
+    // Clear the pending-recording marker so the 24h poller doesn't
+    // re-attempt this session.
+    let _ = recordings.pending_remove(&entry.session_id).await;
     Ok(entry)
 }
