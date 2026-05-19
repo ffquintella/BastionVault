@@ -602,13 +602,31 @@ The chain-of-custody artifact BV needs to attach a recording to the right audit-
 - For classical (non-BV) sessions the sidecar lands with empty `authority` + `correlation_id` strings — the `serde(default)` tags keep parsing clean either way.
 - **5 unit tests** in `sidecar::tests` (extension swap, sha256 known-vector, BV round-trip, classical session empty-fields, protocol→format mapping).
 
-### Phase 6.2 — Recording webhook + receiver + playback — **Todo**
+### Phase 6.2 — Recording webhook + receiver + index — **Done** (BV 0.7.25 + Rustion 0.7.21)
 
-- Outbound signed `recording.ready` webhook from Rustion to `authority.recording_webhook_url`. Hybrid Ed25519 + ML-DSA-65 signature over the sidecar bytes, key pinned at enrolment time (the same hybrid pair used to sign envelopes addressed *from* Rustion *to* BV — separate from the authority pubkey BV signs envelopes addressed *to* Rustion with).
-- Exponential-backoff delivery loop (max 5 retries over ~30 min) as specified in `docs/bastionvault-integration.md` §Recording handoff.
-- `GET /v1/sessions/{sid}/recording` on Rustion serving the sidecar for the 24h pull-fallback window.
-- BV webhook receiver route: signed-payload verification, per-authority recordings index, `audit::RECORDING_LINKED` event.
-- 24h fallback poller on BV that walks active-session correlations and pulls sidecars Rustion failed to webhook.
+The signed-handoff loop between Rustion and BV — sidecar payload travels with a detached hybrid signature, both endpoints reject classical-only as a downgrade, and BV persists the resulting recording entry on its side of the audit chain.
+
+- **`rustion-control-plane::webhook`** new module:
+  - `WebhookSigningKey` (Ed25519 + ML-DSA-65 keypair, generate or load-from-bytes) and `WebhookVerifyingKey` (verify path mirror).
+  - `sign_header(body) → "ed25519=<base64> mldsa65=<base64>"` — signs `sha256(body)` with both halves; same hash-then-sign shape as the BVRG-v1 envelope path.
+  - `deliver(client, url, body, signature_header)` one-shot POST helper for proxies to call after the sidecar lands.
+  - `verify_header(header, body)` rejects malformed headers, classical-only downgrades, and pubkey-length mismatches via `WebhookError`.
+  - 8 unit tests: round trip, body tamper, wrong-pubkey, malformed header, classical-only downgrade, from-bytes round trip, token-order parsing.
+- **`GET /v1/sessions/{sid}/recording`** on the axum router serves the sidecar JSON for the 24h pull-fallback window. `ControlPlaneState.recordings_base_dir` configures the lookup root; absent → endpoint responds 404 with `recording_storage_disabled`.
+- **`AuthorityRecord.recording_webhook_url`** added to the per-authority record so the orchestration layer knows where to POST.
+- **BV side**:
+  - `src/modules/rustion/webhook_verify.rs` — mirror of the Rustion verifier in-tree, validated against the same crate's signer with 4 round-trip tests (including classical-only downgrade rejection). Uses `fips204` (already a BV dep for outbound BVRG-v1 signing) for the PQC half so no extra crypto crate.
+  - `src/modules/rustion/recordings.rs` — `RecordingsStore` over `rustion/recordings/<rid>` under the system view. `RecordingEntry` carries every field from the sidecar plus `bastion_id`, `received_at`, and `delivery_mode` ∈ {`webhook` | `pull` (Phase 6.3)}.
+  - New routes:
+    - `POST rustion/webhooks/recording-ready` — verifies the X-Rustion-Signature against the pinned `RustionTarget.public_key`, parses the sidecar, persists the entry, emits `audit::RECORDING_LINKED`.
+    - `GET rustion/recordings` — list known recording ids.
+    - `GET rustion/recordings/<rid>` — fetch one entry.
+
+### Phase 6.3 — Webhook retry loop + 24h fallback poller + playback — **Todo**
+
+- Exponential-backoff delivery loop on the Rustion side (max 5 retries over ~30 min) as specified in `docs/bastionvault-integration.md` §Recording handoff. Today's `deliver()` is one-shot — callers compose retry on top until 6.3 lands.
+- 24h fallback poller on BV that walks active-session correlations and pulls sidecars Rustion failed to webhook via `GET /v1/sessions/{sid}/recording`.
+- Proxy-to-`deliver()` orchestration glue on Rustion (where the `WebhookSigningKey` lives + how the proxy's finish-path reaches the per-authority webhook URL). The primitives are in place; the binary-level wiring follows the same pattern as the SSH/RDP listener `bv_session_store` injection from Phase 3.1/4.1.
 - "Open recording" link in audit timeline; signed-URL stream from Rustion to the player.
 - asciicast playback in-GUI (existing xterm.js + asciinema-player), `.rdp-rec` playback handed off to a small wasm decoder shipped in the GUI bundle.
 

@@ -45,6 +45,59 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.25] - 2026-05-19
+
+### Added
+
+- **Rustion integration — Phase 6.2: recording webhook + receiver + index**
+  (paired with Rustion 0.7.21). Closes the signed-handoff loop between
+  Rustion and BV — Rustion can POST a signed sidecar over the wire,
+  BV verifies + stores + audits it, and either side can pull the
+  sidecar back as JSON if the webhook dropped.
+    - **Rustion `crates/rustion-control-plane/src/webhook.rs`** — new
+      module: `WebhookSigningKey` (Ed25519 + ML-DSA-65 hybrid keypair,
+      generate or from-bytes), `WebhookVerifyingKey` (mirror verify
+      path), `sign_header(body)` produces
+      `"ed25519=<base64> mldsa65=<base64>"`, `verify_header(...)`
+      rejects malformed / classical-only / wrong-pubkey. Wire-format
+      identical to the BVRG-v1 sign path (sha256 → both halves).
+      `deliver(client, url, body, sig)` one-shot POST helper. 8 new
+      unit tests including the classical-only downgrade-rejection
+      case.
+    - **`GET /v1/sessions/{sid}/recording`** on the axum router for
+      the 24h pull-fallback window. `ControlPlaneState.recordings_base_dir`
+      configures the lookup root.
+    - **`AuthorityRecord.recording_webhook_url`** so the per-authority
+      orchestration layer knows where to POST.
+- **BV side**:
+    - `src/modules/rustion/webhook_verify.rs` — verifier mirror of
+      the Rustion signer, validated against the same crate. Uses
+      `fips204` (already a BV dep) for the PQC half so no extra
+      crypto crate. 4 round-trip + downgrade-rejection unit tests.
+    - `src/modules/rustion/recordings.rs` — `RecordingsStore` +
+      `RecordingEntry` over `rustion/recordings/<rid>` under the
+      system view. Tracks every sidecar field plus `bastion_id`,
+      `received_at`, and `delivery_mode` ∈ {`webhook` | `pull`
+      (Phase 6.3)}.
+    - **New routes**:
+        - `POST rustion/webhooks/recording-ready` — verifies the
+          X-Rustion-Signature against the pinned
+          `RustionTarget.public_key`, parses the sidecar JSON,
+          persists the entry, emits `audit::RECORDING_LINKED`.
+        - `GET rustion/recordings` — list known recording ids.
+        - `GET rustion/recordings/<rid>` — fetch one entry.
+- **Pre-existing test bug fixed**: `src/modules/rustion/dispatcher.rs`
+  test fixture was missing the `kem_public_key` field that landed in
+  0.7.16 — added now so `cargo test --lib` compiles on the rustion
+  module.
+
+### Changed
+
+- `features/rustion-integration.md`: Phase 6.2 marked Done; Phase 6.3
+  carved out for the retry loop, 24h fallback poller, proxy
+  orchestration glue, and the in-GUI playback (asciicast +
+  `.rdp-rec` wasm decoder).
+
 ## [0.7.24] - 2026-05-19
 
 ### Added

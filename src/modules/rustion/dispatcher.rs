@@ -227,6 +227,7 @@ mod tests {
             name: name.into(),
             endpoint: format!("{name}.test:9443"),
             public_key: HybridPubKey::default(),
+            kem_public_key: String::new(),
             fingerprint: String::new(),
             description: String::new(),
             tags: vec![],
