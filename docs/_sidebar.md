@@ -28,6 +28,9 @@
   - [Overview](secret-engines.md)
   - [SSH](ssh-secret-engine.md)
 
+- Resource Connect
+  - [Rustion bastion integration](rustion-integration.md)
+
 - Storage backends
   - [Overview](backend/database/overview.md)
   - [MySQL](backend/database/mysql/mysql.md)
