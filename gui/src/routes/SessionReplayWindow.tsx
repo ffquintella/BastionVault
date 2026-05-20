@@ -11,6 +11,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { Badge, Button } from "../components/ui";
+import { RdpReplayCanvas } from "../components/RdpReplayCanvas";
 import { extractError } from "../lib/error";
 import {
   rustionRecordingBlob,
@@ -124,7 +125,7 @@ export function SessionReplayWindow() {
       </header>
       <main className="p-4">
         {blob.format === "asciicast" && <ReplayAsciicast bytes={bytes} />}
-        {blob.format === "rdp-rec" && <ReplayRdpSummary bytes={bytes} />}
+        {blob.format === "rdp-rec" && <ReplayRdp bytes={bytes} />}
         {blob.format === "smb-log" && <ReplaySmbSummary bytes={bytes} />}
       </main>
       <footer className="px-4 py-2 border-t border-[var(--color-border)] flex justify-between items-center text-xs text-[var(--color-text-muted)]">
@@ -248,19 +249,36 @@ function ReplayAsciicast({ bytes }: { bytes: Uint8Array }) {
   );
 }
 
-// ─── RDP summary (full screen) ──────────────────────────────────────
+// ─── RDP playback (full screen) ─────────────────────────────────────
+
+function ReplayRdp({ bytes }: { bytes: Uint8Array }) {
+  const [showDetails, setShowDetails] = useState(false);
+  return (
+    <div className="space-y-4 max-w-[1600px] mx-auto">
+      <RdpReplayCanvas bytes={bytes} />
+      <div>
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={() => setShowDetails((v) => !v)}
+        >
+          {showDetails ? "Hide details" : "Show details"}
+        </Button>
+      </div>
+      {showDetails && <ReplayRdpSummary bytes={bytes} />}
+    </div>
+  );
+}
 
 function ReplayRdpSummary({ bytes }: { bytes: Uint8Array }) {
   const summary = useMemo(() => walkRdpRec(bytes), [bytes]);
   return (
-    <div className="space-y-4 max-w-5xl mx-auto">
-      <div className="bg-amber-950/40 border border-amber-800 rounded p-3 text-xs text-amber-200">
-        <strong>Visual RDP playback is a separate codec project.</strong>{" "}
-        Decoding MS-RDPBCGR slow-path bitmap-update payloads (RLE + NSCodec +
-        bitmap-cache management) is a multi-week protocol-decoder track and
-        ships independently. The summary below comes from a wasm frame-walker
-        included in this build; use the download below to view the raw{" "}
-        <code>.rdp-rec</code> in an external player.
+    <div className="space-y-4">
+      <div className="bg-neutral-900/60 border border-neutral-800 rounded p-3 text-xs text-[var(--color-text-muted)]">
+        <strong>Phase 8.4 bitmap codec:</strong> uncompressed 16/24/32 bpp +
+        RLE16/RLE24 are rendered to canvas. NSCodec, RemoteFX, 8 bpp RLE, and
+        bitmap-cache references remain out of scope — frames that hit those
+        paths show in the "skipped" counter above.
       </div>
       <div className="bg-neutral-900/60 border border-neutral-800 rounded p-3 text-xs">
         <div className="font-semibold mb-2 text-neutral-300">Header</div>

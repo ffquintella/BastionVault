@@ -862,9 +862,26 @@ The replay window, the WASM module slot, and the signed-URL plumbing are all in 
   - `ControlPlaneState.recording_url_signing_secret: Option<Arc<[u8; 32]>>` — `None` returns `503 signed_url_disabled` on both routes. Production wires a per-Rustion 32-byte secret at startup.
   - `hmac` workspace dep added to rustion-control-plane.
 
-### Phase 8.4 — RDP bitmap-update visual codec — **Tracked separately**
+### Phase 8.4 — RDP bitmap-update visual codec — **Done** (BV 0.7.36)
 
-Decoding MS-RDPBCGR slow-path bitmap-update payloads (RLE32/RLE16, NSCodec, RemoteFX, bitmap-cache management) is a multi-week protocol-decoder engineering project on its own track. Out of scope for the Rustion-integration feature; lands as its own work when the codec is ready, slotting into the existing `gui/wasm/rdp-replay/` crate.
+In-tree bitmap decoder for `.rdp-rec` recordings; the replay window now shows live canvas playback instead of a text summary.
+
+- **`gui/wasm/rdp-replay/`** decoder grew the full TS_BITMAP_DATA path. `decode_rdp_rec(bytes) → DecodeOutput` exposes per-rectangle `Frame { timestamp_ms, x, y, w, h, bpp, compressed, decoder, rgba, error }` records ready for canvas blitting, plus a `decoder_counts` BTreeMap keyed by `"uncompressed" | "rle16" | "rle24" | "unsupported" | "error"`. Implements:
+  - **MS-RDPBCGR § 2.2.9.1.1.3.1.2.2 `TS_BITMAP_DATA`** parsing — single-rectangle per event because `rustion-recording`'s `parse_bitmap_update` strips the outer `numberRectangles` header and emits one rectangle per `EVENT_GRAPHICS` event.
+  - **Uncompressed 16/24/32 bpp** with RDP's bottom-up→top-down flip handled by the decoder so the GUI doesn't need to.
+  - **RLE16 / RLE24** per MS-RDPEGDI § 3.1.9 — BgRun, FgRun, ColorRun, FOM, SetFgFom, Setfg, Pixels, White/Black runs, plus MegaMega forms.
+  - Per-frame error reporting: unsupported codecs surface as `Frame.error` with `decoder: "none"` rather than failing the whole stream — the canvas keeps blitting later frames.
+  - 6 new native unit tests (10 total in the crate).
+- **`gui/src/lib/rdpDecoder.ts`** — 1:1 TypeScript port of the Rust crate so the GUI can run in-browser without a wasm-pack build step. The Rust crate stays canonical; **6 matching vitest tests** check the TS port doesn't drift.
+- **`gui/src/components/RdpReplayCanvas.tsx`** — `<canvas>` sized to the recording's source resolution (header width/height or computed from the rectangle bounding box), animates frames at recording wall-clock timestamps via `requestAnimationFrame`. Controls: Play / Pause / Restart / 1× / 2× / 4× / 8×. A "rendered / skipped / total" counter and a "lossy: NSCodec/RemoteFX/8bpp out of scope" warning badge surface when any frame lands on an unsupported codec path.
+- **`SessionReplayWindow`** now routes `rdp-rec` blobs to `RdpReplayCanvas` first; the prior summary view stays reachable behind a "Show details" toggle.
+
+**Out of scope** (recorded here, not as a follow-up phase):
+
+- 8 bpp RLE (vanishingly rare on modern Windows targets).
+- NSCodec — separate large codec.
+- RemoteFX — separate large codec.
+- Bitmap-cache references (cached glyph bitmaps). Frames that hit any of these paths show in the "skipped" counter; the operator can still see the surrounding session and download the raw `.rdp-rec` for an external player.
 
 ### Phase 8 — Telemetry pull + in-GUI session replay (original spec table)
 

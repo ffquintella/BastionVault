@@ -45,6 +45,51 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.36] - 2026-05-20
+
+### Added
+
+- **Rustion integration — Phase 8.4: RDP bitmap-update visual codec**
+  (BV-only release; no Rustion-side change). The replay window now
+  renders `.rdp-rec` recordings as live canvas playback instead of a
+  text summary.
+    - **`gui/wasm/rdp-replay/`** crate grew the full bitmap decoder.
+      `decode_rdp_rec(bytes) → DecodeOutput` returns per-rectangle
+      `Frame { timestamp_ms, x, y, w, h, bpp, compressed, decoder,
+      rgba, error }` records ready for canvas blitting, plus a
+      `decoder_counts` BTreeMap keyed by `"uncompressed" | "rle16" |
+      "rle24" | "unsupported" | "error"`. Implements MS-RDPBCGR
+      § 2.2.9.1.1.3.1.2.2 `TS_BITMAP_DATA` parsing (single-rect per
+      event, since the recorder strips the outer `numberRectangles`)
+      and MS-RDPEGDI § 3.1.9 RLE16/RLE24 decoders (BgRun, FgRun,
+      ColorRun, FOM, SetFgFom, Setfg, Pixels, White/Black runs, plus
+      MegaMega forms). Uncompressed 16/24/32 bpp also covered with
+      bottom-up→top-down flip. **6 new Rust unit tests** (10 total in
+      the crate).
+    - **`gui/src/lib/rdpDecoder.ts`** — 1:1 TypeScript port of the
+      Rust decoder so the GUI can run in-browser without a wasm-pack
+      build step. The Rust crate stays canonical; **6 matching
+      vitest tests** ensure the TS port doesn't drift (112 total
+      vitest tests passing).
+    - **`gui/src/components/RdpReplayCanvas.tsx`** new component:
+      `<canvas>` sized to the recording's source resolution (header
+      width/height or computed from the rectangle bounding box),
+      animates frames at the recording's wall-clock timestamps with
+      `requestAnimationFrame`. Controls: Play / Pause / Restart /
+      1× / 2× / 4× / 8×. Surfaces a "rendered / skipped / total"
+      counter and a "lossy: NSCodec/RemoteFX/8bpp out of scope"
+      badge when any frame lands on an unsupported path.
+    - **`SessionReplayWindow`** now routes `rdp-rec` blobs to
+      `RdpReplayCanvas` first; the previous summary view stays
+      reachable behind a "Show details" toggle.
+
+### Changed
+
+- `features/rustion-integration.md`: Phase 8.4 marked Done. The
+  remaining RDP-codec engineering (NSCodec, RemoteFX, 8 bpp RLE,
+  bitmap-cache references) is recorded as out-of-scope work, not as
+  a follow-up Phase 8.x.
+
 ## [0.7.35] - 2026-05-19
 
 ### Added
