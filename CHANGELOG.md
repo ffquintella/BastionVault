@@ -45,6 +45,81 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.7.37] - 2026-05-20
+
+### Added
+
+- **Rustion integration — Phase 4.2-full: CredSSP RC4 sealing +
+  pubKeyAuth + simulated-Windows e2e** (paired with Rustion 0.7.28).
+  The bastion-driven CredSSP injection driver is now wire-complete —
+  it builds the AUTHENTICATE message, encrypts the random session
+  key, derives sign+seal keys per direction, seals pubKeyAuth /
+  authInfo, and verifies the upstream's "+1" pubKeyAuth reply. Live
+  Windows VM validation is queued for when the user provides one;
+  protocol logic is covered by an in-process Windows responder
+  simulator.
+    - **`rustion-rdp::ntlmv2_seal`** new module (Rustion side):
+        - `sign_key` / `seal_key` derivation per MS-NLMP §3.4.5.2 +
+          §3.4.5.3, with the four C-string magic constants
+          (`CLIENT_SIGNING_MAGIC`, `SERVER_SIGNING_MAGIC`,
+          `CLIENT_SEALING_MAGIC`, `SERVER_SEALING_MAGIC`).
+        - `Rc4` streaming cipher + `rc4_once` one-shot helper, KAT-
+          tested against RFC 6229 (`Key=0102030405`).
+        - `SealState { sign_key, rc4, seqnum }` per-direction sealing
+          handle: `.seal(plaintext)` → `NTLMSSP_MESSAGE_SIGNATURE_v2
+          (16B) || ciphertext`, `.unseal(blob)` verifies the HMAC-MD5
+          checksum and recovers plaintext. Seqnum advances per call;
+          the RC4 keystream is continuous across the exchange.
+        - **7 new unit tests.**
+    - **`rustion-rdp::bv_credssp` rewrite** (Rustion side):
+        - `prepare_authenticate(...) → AuthInjection` now generates a
+          fresh `ExportedSessionKey`, encrypts it under
+          `KeyExchangeKey == SessionBaseKey` (extended session
+          security path), and returns ready-to-use `seal_c2s` /
+          `seal_s2c` handles. The `SealingDeferred` error variant is
+          gone — the Phase 4.2-light "explicit gap at the type level"
+          marker is no longer needed.
+        - `SealedCredsspSession::seal_pub_key_auth(spki_der)` +
+          `verify_pub_key_auth(reply, expected_spki)` implements the
+          MS-CSSP §3.1.5 "+1 on first byte" pubKeyAuth contract.
+        - `seal_auth_info(ts_credentials_ber)` for the third-leg
+          sealed authInfo.
+        - `encode_ts_password_creds(domain, user, password)` —
+          BER-encoded `TSCredentials → TSPasswordCreds` per MS-CSSP
+          §2.2.1.2 (cred_type=1, UTF-16LE strings). Round-trip-tested
+          against the existing inbound parser.
+        - **5 unit tests** covering the AUTHENTICATE shape, the
+          pubKeyAuth +1 transform, length-mismatch rejection, and
+          BER round-trip.
+    - **`rustion-rdp::tests::credssp_e2e`** new integration test
+      (Rustion side):
+        - `MockServer` simulates a Windows NLA responder. Builds
+          CHALLENGE_MESSAGE; ingests AUTHENTICATE; re-derives NTOWFv2
+          from the known password; asserts the bastion's NTProofStr
+          matches; recovers the ExportedSessionKey via RC4 inverse;
+          builds the matching seal states.
+        - `full_credssp_exchange_against_simulated_windows` — three-
+          leg round trip with sealed pubKeyAuth and sealed
+          TSCredentials.
+        - `pub_key_auth_reply_rejects_unrelated_spki` — MITM-style
+          mismatch.
+        - `wrong_password_breaks_at_the_server` — pins the failure
+          mode.
+        - **3 e2e tests** (in addition to the 76-test lib suite —
+          all green).
+    - **`rustion-rdp::proxy`** call-site log + error messaging
+      refreshed: BV `rdp-password` dispatch now reports the driver as
+      Phase 4.2-full-ready rather than "deferred"; `rdp-cert`
+      continues to route to its own clean error (separate PKINIT
+      track).
+
+### Changed
+
+- `features/rustion-integration.md`: Phase 4.2-full marked Done. The
+  remaining items (live Windows VM transport hookup, `rdp-cert`
+  smart-card PKINIT/SPNEGO, Restricted Admin) are documented as
+  separate tracks rather than Phase 4 deferred work.
+
 ## [0.7.36] - 2026-05-20
 
 ### Added

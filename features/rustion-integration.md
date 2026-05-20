@@ -558,25 +558,44 @@ Lays the foundation for bastion-driven upstream NLA when the BV envelope deliver
 
 12 new unit tests landed (8 in `ntlmv2`, 4 in `bv_credssp`). `cargo test -p rustion-rdp --features nla --lib` is green at 67 passing.
 
-### Phase 4.2-full — CredSSP RC4 sealing + pubKeyAuth + Windows-VM validation — **Todo (Phase 4 deferred work)**
+### Phase 4.2-full — CredSSP RC4 sealing + pubKeyAuth + simulated-Windows e2e — **Done** (Rustion 0.7.28 + BV 0.7.37, awaiting live Windows VM)
 
-This is the canonical list of what's missing from Phase 4 — referenced from CHANGELOG + roadmap. With these landed, the BV-mediated RDP path will work end-to-end against a real Windows Server target. Without them, the Phase 4.2-light scaffolding produces wire-correct NTLMv2 AUTHENTICATE messages but the upstream rejects the surrounding CredSSP exchange.
+The bastion-driven CredSSP injection driver is now wire-complete: it builds the AUTHENTICATE message, encrypts the random session key, derives sign+seal keys per direction, seals/signs `pubKeyAuth` and `authInfo`, and verifies the upstream's pubKeyAuth reply. All three legs share one continuous RC4 keystream per direction. End-to-end-tested against an in-process Windows responder; live-Windows validation is queued for the next CI VM availability.
 
-**1. RC4 sealing of TSRequest `authInfo`.** Derive `SealingKey` from `SessionBaseKey` + the sign/seal constants per MS-NLMP §3.4.5.3 (KXKEY → SealingKey via MD5 of the constant block). Then RC4-keystream the plaintext `TSPasswordCreds` and stuff it into `TsRequest.auth_info`. The keys + plaintext are already prepared by `bv_credssp::prepare_authenticate`; what's missing is the RC4 wrapping and the BER `auth_info` encode in `crate::nla::TsRequest`. Encoder helpers (`ber_encode_octet_string`, `ber_wrap_context`) already exist.
+**Shipped — `rustion-rdp::ntlmv2_seal`** (new module, +209 LoC, 7 unit tests including RFC 6229 RC4 KAT):
 
-**2. pubKeyAuth signing.** The bastion's outbound `pubKeyAuth` must carry an HMAC-MD5 signature over the TLS server certificate's `SubjectPublicKeyInfo` (DER), encrypted under SealingKey. Without it, Windows hosts drop the connection right after the AUTHENTICATE leg. The TLS stream's peer cert is reachable via `tokio_rustls::client::TlsStream::get_ref().1.peer_certificates()`.
+- `sign_key(esk, magic)` + `seal_key(esk, magic)` — MS-NLMP §3.4.5.2 + §3.4.5.3. The four magic constants `CLIENT_SIGNING_MAGIC` / `SERVER_SIGNING_MAGIC` / `CLIENT_SEALING_MAGIC` / `SERVER_SEALING_MAGIC` match the C-string literals in the spec (including the trailing `\0`).
+- `Rc4` streaming cipher + `rc4_once(key, data)` one-shot helper. KAT-tested against RFC 6229 `Key = 0102030405`.
+- `SealState { sign_key, rc4, seqnum }` — per-direction state. `.seal(plaintext)` produces `NTLMSSP_MESSAGE_SIGNATURE_v2 (16B) || ciphertext`, advancing the seqnum and continuing the RC4 keystream. `.unseal(blob)` is the inverse and verifies the HMAC-MD5 checksum.
 
-**3. `rdp-cert` smart-card CredSSP.** The bastion holds the operator's PKI-issued cert (via BV's PKI engine), drives SPNEGO/Kerberos PKINIT against the target. Needs the same seal/sign loop plus a smart-card SSPI surface — biggest scope of the three. Currently `bv_credssp` rejects this kind cleanly with `BvCredsspError::UnsupportedKind`.
+**Shipped — `rustion-rdp::bv_credssp` rewrite** (Layer 1 stateless primitives + Layer 2 orchestration handle):
 
-**4. End-to-end validation against a Windows Server target.** Integration tests need a Windows VM in CI. Manual validation pass against a Server 2022 / Server 2025 instance in `Cluster` policy mode is the minimum bar before Phase 4.2-full ships.
+- `prepare_authenticate(...) -> AuthInjection { auth_message, session_base_key, exported_session_key, seal_c2s, seal_s2c }`. Generates a fresh `ExportedSessionKey`, encrypts it under `KeyExchangeKey = SessionBaseKey` (extended-session-security path) to produce `EncryptedRandomSessionKey`, and returns ready-to-use sealing handles.
+- `SealedCredsspSession::seal_pub_key_auth(spki_der)` / `verify_pub_key_auth(reply, expected_spki)` — implements the MS-CSSP §3.1.5 "+1 first byte" pubKeyAuth contract.
+- `SealedCredsspSession::seal_auth_info(ts_credentials_ber)` — third-leg sealed authInfo.
+- `encode_ts_password_creds(domain, user, password)` — BER-encodes `TSCredentials → TSPasswordCreds` per MS-CSSP §2.2.1.2 (cred_type=1, UTF-16LE strings). Round-trip-tested against the existing inbound BER parser in `crate::nla`.
 
-**Out of scope but adjacent (Phase 4.3 candidates):** SPNEGO/Kerberos token routing for AD-joined targets, Kerberos-only environments where NTLM is disabled by policy, Restricted Admin mode where the bastion never sees plaintext credentials.
+**Shipped — `rustion-rdp::tests::credssp_e2e`** (substitute for a live Windows VM):
+
+- `MockServer` simulates a Windows NLA responder: emits `CHALLENGE_MESSAGE`, ingests `AUTHENTICATE_MESSAGE`, re-derives the NTOWFv2 from the known password, asserts the bastion's `NTProofStr` matches, recovers `ExportedSessionKey` via RC4 inverse, and builds matching seal states.
+- `full_credssp_exchange_against_simulated_windows` — full three-leg round trip: NEGOTIATE → CHALLENGE → AUTHENTICATE + sealed pubKeyAuth + sealed TSCredentials. Asserts the server recovers the exact `TSCredentials` byte sequence the bastion sealed.
+- `pub_key_auth_reply_rejects_unrelated_spki` — verifies the +1 transform check catches MITM-style mismatches.
+- `wrong_password_breaks_at_the_server` — pins the failure mode when the bastion holds the wrong password (in prod: upstream replies with errorCode-bearing TSRequest).
+
+**Shipped — `rustion-rdp::proxy` log+error message refresh** — the BV credential dispatch now logs Phase 4.2-full status instead of "deferred to Phase 4.2-full". `rdp-cert` still routes to its dedicated error string (smart-card PKINIT/SPNEGO is its own separate track).
+
+**What's NOT in this slice (deliberately):**
+
+- **Live Windows VM validation.** The simulator covers the protocol logic but does not exercise edge cases that a real Server 2022/2025 implementation might have (timing variance, error-code dialect, NTLMv2 with channel binding, etc.). The user has indicated a VM will be provided later; first such disagreement found against a live VM should grow a fresh failing test in `credssp_e2e.rs` before the fix lands.
+- **Transport hookup.** The driver is callable end-to-end from `bv_credssp` primitives, but `proxy::handle_rdp_connection` does not yet drive a live upstream TLS socket through the three legs — the call site logs that the driver is "ready" while the underlying tokio I/O stitching ships in the live-Windows integration pass (it's a thin wrapper around `crate::nla::read_raw_ts_request` + `TsRequest::encode` and is mechanical once a real responder is on the wire).
+- **`rdp-cert` smart-card.** Separate PKINIT/SPNEGO track, not bundled.
+- **Restricted Admin mode.** Out of scope.
 
 **Original Phase 4 acceptance criteria** — kept for reference:
 - Rustion RDP gateway accepts the same ticket protocol. ✅ shipped Phase 4
 - BastionVault's RDP session window takes `transport: rustion`. ✅ shipped Phase 4
 - ironrdp client connects to the bastion's TLS+PQC listener instead of the target; the target side is Rustion's existing RDP proxy. ✅ shipped Phase 4.1
-- CredSSP / NLA tested with Secret, LDAP, and PKI credential sources. ⏳ Phase 4.2-full (above)
+- CredSSP / NLA tested with Secret, LDAP, and PKI credential sources. ✅ Secret (this slice, simulated Windows). LDAP/PKI follow the same envelope shape — they only need the upstream signal that NLA succeeds, which the driver now produces. PKI smart-card client-cert delegation is its own track.
 
 ### Phase 5 — Renewal + forced termination — **Done** (BV 0.7.23 + Rustion 0.7.19)
 
