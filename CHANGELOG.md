@@ -45,6 +45,29 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-05-20
+
+Patch release: the `rustion/` logical mount was never auto-created on
+install or upgrade, so every Phase 7 policy / bastion-group request on
+a fresh-or-upgraded 0.8.0 deployment returned `404 Router mount not
+found`. Existing installs pick it up via the default-mounts upgrade
+path on next start; new installs get it as a core mount alongside
+`sys/`, `identity/`, `resources/`, `files/`, `resource-group/`,
+`secret/`.
+
+### Fixed
+- **Auto-mount `rustion/`** (`src/mount.rs`) -- added the Rustion
+  logical backend to `DEFAULT_CORE_MOUNTS`, so `rustion/targets`,
+  `rustion/policy/*`, `rustion/bastion-groups`, and the master / recording
+  routes are reachable without operator-driven `sys/mounts` enable.
+- **GUI: graceful empty state for missing Rustion mount**
+  (`gui/src/components/RustionPolicyPanel.tsx`, `gui/src/lib/error.ts`)
+  -- Global Rustion policy and Bastion groups cards now render an
+  "unavailable on this server build" empty state when the API returns
+  `404 mount not found`, instead of spamming a toast on every reload.
+  Defense-in-depth for older server builds that predate the
+  auto-mount.
+
 ## [0.8.0] - 2026-05-20
 
 Minor-version bump closing Phase 9 of the Rustion integration:

@@ -90,6 +90,15 @@ lazy_static! {
             logical_type: "system".to_string(),
             description: "system endpoints used for control, policy and debugging".to_string(),
             ..Default::default()
+        },
+        MountEntry {
+            table: MOUNT_TABLE_TYPE.to_string(),
+            tainted: false,
+            uuid: generate_uuid(),
+            path: "rustion/".to_string(),
+            logical_type: "rustion".to_string(),
+            description: "Rustion PQC bastion fleet — targets, master cert, recordings, policy".to_string(),
+            ..Default::default()
         }
     ];
 }

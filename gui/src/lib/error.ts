@@ -23,3 +23,15 @@ export function isNodeUnavailable(e: unknown): boolean {
   return extractError(e).includes("is unavailable:");
 }
 
+/**
+ * True when the backend returned 404 because the targeted mount or
+ * route is not registered on this server — e.g. an older server build
+ * that predates a newer GUI's Phase 7 Rustion policy routes. Lets the
+ * UI render an "unavailable on this server" empty state instead of a
+ * generic error toast.
+ */
+export function isMountNotFound(e: unknown): boolean {
+  const msg = extractError(e);
+  return msg.includes("404") && /mount not found|no handler for route/i.test(msg);
+}
+

@@ -25,7 +25,7 @@ import {
   useToast,
 } from "./ui";
 import { RustionPolicyTierEditor } from "./RustionPolicyTierEditor";
-import { extractError } from "../lib/error";
+import { extractError, isMountNotFound } from "../lib/error";
 import {
   rustionBastionGroupCreate,
   rustionBastionGroupDelete,
@@ -58,6 +58,7 @@ function GlobalPolicyCard() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [bastionList, setBastionList] = useState("");
+  const [unavailable, setUnavailable] = useState(false);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -65,8 +66,13 @@ function GlobalPolicyCard() {
       const p = await rustionPolicyGlobalRead();
       setPolicy(p);
       setBastionList(p.bastions.join(", "));
+      setUnavailable(false);
     } catch (e) {
-      toast.toast("error", `Failed to load global policy: ${extractError(e)}`);
+      if (isMountNotFound(e)) {
+        setUnavailable(true);
+      } else {
+        toast.toast("error", `Failed to load global policy: ${extractError(e)}`);
+      }
     } finally {
       setLoading(false);
     }
@@ -99,7 +105,12 @@ function GlobalPolicyCard() {
 
   return (
     <Card title="Global Rustion policy">
-      {loading || !policy ? (
+      {unavailable ? (
+        <EmptyState
+          title="Rustion policy unavailable"
+          description="This server build does not expose the Rustion policy routes. Upgrade the BastionVault server to enable global / per-tier policy editing."
+        />
+      ) : loading || !policy ? (
         <div className="py-4 text-sm text-[var(--color-text-muted)]">
           Loading…
         </div>
@@ -196,6 +207,7 @@ function BastionGroupsCard() {
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<RustionBastionGroup | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -206,8 +218,13 @@ function BastionGroupsCard() {
         ids.map((n) => rustionBastionGroupRead(n).catch(() => null)),
       );
       setGroups(rows.filter((g): g is RustionBastionGroup => g !== null));
+      setUnavailable(false);
     } catch (e) {
-      toast.toast("error", `Failed to load bastion groups: ${extractError(e)}`);
+      if (isMountNotFound(e)) {
+        setUnavailable(true);
+      } else {
+        toast.toast("error", `Failed to load bastion groups: ${extractError(e)}`);
+      }
     } finally {
       setLoading(false);
     }
@@ -231,6 +248,13 @@ function BastionGroupsCard() {
 
   return (
     <Card title={`Bastion groups (${names.length})`}>
+      {unavailable ? (
+        <EmptyState
+          title="Bastion groups unavailable"
+          description="This server build does not expose the Rustion bastion-group routes. Upgrade the BastionVault server to manage named bastion pools."
+        />
+      ) : (
+        <>
       <div className="flex justify-end mb-3">
         <Button variant="primary" onClick={() => setCreating(true)}>
           Create group
@@ -310,6 +334,8 @@ function BastionGroupsCard() {
           onClose={() => setDeleting(null)}
           onConfirm={handleDelete}
         />
+      )}
+        </>
       )}
     </Card>
   );
