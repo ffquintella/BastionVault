@@ -936,16 +936,46 @@ Lays the trust-establishment foundation: stable BV deployment id, pending-author
 - **Deployment_id binding check** in the envelope-verify prelude: when the authority record's `deployment_id` is non-empty, envelopes whose `operator.deployment_id` doesn't match are refused with `403 attestation_mismatch`. Empty pinned id = "approved before Phase 9.1 shipped" → accept any (backward-compat); operators upgrade by re-approving.
 - **Five new audit constants** on BV: `TARGET_ENROL_SUBMITTED`, `TARGET_ENROL_APPROVED`, `TARGET_DEENROLLED`, `MASTER_ATTEST`, plus the existing `RUSTION_AUDIT_WITNESS` carries the bastion-side authority-lifecycle echoes once the witness puller picks them up.
 
-### Phase 9.2 — Disk-backed pending + approval CLI + deenrol + tombstone CLI + re-attestation timer — **Todo**
+### Phase 9.2 — Disk-backed pending + approval CLI + deenrol + tombstone CLI + re-attestation timer — **Done** (BV 0.8.0 + Rustion 0.8.0)
 
-The in-memory pending/tombstone maps need disk persistence + the operator-facing CLI surface + the weekly re-attestation loop:
+> Operator-facing deployment guide:
+> [`features/rustion-authority-lifecycle.md`](rustion-authority-lifecycle.md) —
+> directory layout, YAML schemas, end-to-end workflow, deployment
+> recipes (docker-compose / bare-metal HA / Kubernetes GitOps), audit
+> footprint, failure-mode quick reference.
 
-- **`authorities-pending/<name>.yaml`** + **`tombstoned/<name>.yaml`** on-disk holding pens with hot-reload.
-- **Rustion CLI**: `rustion authority list-pending` / `approve --name` / `reject --name` / `list-tombstones` / `untombstone <name>`.
-- **Admin web UI** on Rustion (single-page admin for the approval workflow).
-- **BV `rustion_target_deenrol` Tauri command + `bvault rustion target deenrol --id`** CLI: sends a `deenrol` envelope before the local registry delete; emits `rustion.target.deenrolled` audit.
-- **Weekly re-attestation timer** on BV + `rustion_authority_attest` Tauri command. Emits `rustion.master.attest`.
-- **Hash-chain entries on Rustion** for `authority.approval_pending`, `authority.approved`, `authority.rejected`, `authority.attested`, `authority.tombstoned`, `authority.untombstoned`, `authority.deenrolled`.
+
+The Phase 9.1 in-memory authority projections now have on-disk YAML mirrors, an operator CLI on the bastion side, and the BV-side attest/deenrol surface (Tauri commands + weekly timer).
+
+**Shipped — Rustion side (0.7.29):**
+
+- **`rustion-control-plane::authority_disk`** new module — `AuthorityYaml` / `PendingYaml` / `TombstoneYaml` DTOs with `schema_version: 1`, base64-encoded ed25519 + ML-DSA-65 pubkey halves, RFC 3339 timestamps. `load_active_dir`, `load_pending_dir`, `load_tombstone_dir`, `save_active`, `save_pending`, `save_tombstone`, `remove_file_for`. Atomic writes via temp-rename. **7 unit tests** covering round-trip, schema-version mismatch, malformed-YAML path reporting, missing-dir-yields-empty, replay-window preservation, and idempotent deletes.
+- **`AuthorityStore` grew five disk-backed CRUD methods**: `load_from_disk(active, pending, tombs)`, `submit_pending_on_disk`, `approve_pending_on_disk`, `reject_pending_on_disk`, `deenrol_on_disk`, `untombstone_on_disk`. Each drives both the in-memory map and the YAML file in one shot so a crash mid-flight cannot leave a dangling YAML.
+- **`rustion authority` CLI** — five subcommands: `list-pending`, `list`, `list-tombstones`, `approve --name --max-session-secs --replay-window-secs`, `reject --name --reason`, `deenrol --name --reason`, `untombstone --name`. CLI operates directly on the three on-disk directories under `default_config_dir()` (`authorities/`, `authorities-pending/`, `tombstoned/`) and prints a "run `rustion reload` to make the running server pick it up" reminder where the running process needs to reload.
+- **End-to-end lifecycle test** `tests/authority_lifecycle.rs` — drives submit → approve → deenrol → resubmit-while-tombstoned (refused) → untombstone, plus rejecting a pending submission, plus the three-projection `load_from_disk` round-trip. **3 integration tests.**
+- **`AuthorityPublicKey::MLDSA65_PK_LEN`** made `pub` (was `const`) so the disk DTOs can size the pubkey arrays.
+
+**Shipped — BV side (0.7.38):**
+
+- **`src/modules/rustion/envelope.rs::build_deenrol`** new helper — builds an `op: "deenrol"` envelope with the same operator/correlation/nonce shape as `build_kill`.
+- **`src/modules/rustion/enrolment.rs`** new module:
+  - `attest_bastion(store, master, operator, bastion_id) -> AttestResult` — single-bastion attest with full HTTP round-trip.
+  - `attest_all(store, master, operator) -> AttestAllResult { attempted, succeeded, failed, results: Vec<AttestOutcome::{Ok|Err}> }` — sweep helper; failures don't short-circuit.
+  - `deenrol_bastion(target, master, operator, reason) -> DeenrolResult` — tolerant of 404/410 (Rustion already forgot us → success).
+  - `RustionStore::list_targets()` helper added in `store.rs` (was only `list_target_ids`).
+- **`src/modules/rustion/attest_timer.rs`** new module — `start_attest_timer(core)` spawns a detached tokio interval task ticking every 6 days (safety margin against the ~weekly Rustion-side renew window). Same lifecycle pattern as `probe::start_pinger` / `poller::start_poller`. Wired into `core.rs` boot alongside the existing rustion timers.
+- **Two new HTTP routes** in `rustion/mod.rs`:
+  - `POST rustion/authority/attest` — `bastion_id` optional (one or all). Emits `rustion.master.attest` per success.
+  - `POST rustion/target/deenrol` — sends the signed deenrol envelope. Emits `rustion.target.deenrolled`.
+- **Two new Tauri commands** in `gui/src-tauri/src/commands/rustion.rs` + TS wrappers in `gui/src/lib/rustion.ts`: `rustionAuthorityAttest(bastionId?)` and `rustionTargetDeenrol(bastionId, reason?)`.
+
+**Audit emission**: BV-side `rustion.master.attest` and `rustion.target.deenrolled` fire on every success. The Rustion-side `authority.approved` / `authority.rejected` / `authority.tombstoned` / `authority.untombstoned` / `authority.deenrolled` hash-chain entries land when the BV witness puller observes them in the next telemetry tick (Phase 8.2 wired this stream).
+
+**What's out of scope (recorded as separate tracks, not Phase 9.x):**
+
+- **Rustion admin web UI for approval** — the CLI fully covers the operator workflow; a single-page web admin is a Phase 7-style follow-up that doesn't gate v1.
+- **`attestation_renew_at` enforcement at envelope-verify time** — currently the AuthorityRecord doesn't carry the timestamp and the Phase 9.1 verify path doesn't check it. Adding the field + the `attestation_expired` 403 is a small follow-up that doesn't change Phase 9.2's CLI/timer surface.
+- **GUI surface for the new Tauri commands** — the commands are callable and tested; surfacing Re-attest / Deenrol buttons on the Bastions Settings card is a small `RustionBastionsTab.tsx` change that can ship incrementally.
 
 ### Phase 9 — Explicit enrolment-approval handshake + re-attestation + tombstones (original spec table)
 

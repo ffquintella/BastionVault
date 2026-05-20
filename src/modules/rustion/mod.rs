@@ -32,9 +32,11 @@ use crate::{
     bv_error_response_status, bv_error_string,
 };
 
+pub mod attest_timer;
 pub mod audit;
 pub mod config;
 pub mod dispatcher;
+pub mod enrolment;
 pub mod envelope;
 pub mod health;
 pub mod master;
@@ -203,6 +205,8 @@ impl RustionBackend {
         let h_deployment_id = self.inner.clone();
         let h_session_renew = self.inner.clone();
         let h_session_kill = self.inner.clone();
+        let h_authority_attest = self.inner.clone();
+        let h_target_deenrol = self.inner.clone();
         let h_webhook_recording = self.inner.clone();
         let h_recordings_list = self.inner.clone();
         let h_recording_read = self.inner.clone();
@@ -464,6 +468,34 @@ impl RustionBackend {
                         {op: Operation::Write, handler: h_session_kill.handle_session_kill}
                     ],
                     help: "Forcibly terminate a Rustion-mediated session."
+                },
+                {
+                    // POST rustion/authority/attest — Phase 9.2. Runs
+                    // the re-attestation sweep across every enrolled
+                    // bastion (or one if bastion_id is supplied).
+                    pattern: r"authority/attest$",
+                    fields: {
+                        "bastion_id": { field_type: FieldType::Str, default: "", description: "Optional — attest a single bastion. Omit to attest all." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_authority_attest.handle_authority_attest}
+                    ],
+                    help: "Re-attest BV's deployment id with one or all enrolled bastions."
+                },
+                {
+                    // POST rustion/target/deenrol — Phase 9.2. Sends a
+                    // signed `deenrol` envelope to the named bastion
+                    // so it can tombstone the authority in lock-step
+                    // with the BV-side delete.
+                    pattern: r"target/deenrol$",
+                    fields: {
+                        "bastion_id": { field_type: FieldType::Str, default: "", description: "Bastion id to deenrol." },
+                        "reason": { field_type: FieldType::Str, default: "operator-deleted", description: "Human-readable reason recorded in the BV audit row." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_target_deenrol.handle_target_deenrol}
+                    ],
+                    help: "Send a deenrol envelope to a bastion before deleting the local target record."
                 },
                 {
                     // POST rustion/session/open — run dispatcher,
@@ -1584,6 +1616,134 @@ impl RustionBackendInner {
             }
             Err(e) => Err(bv_error_string!(&format!("{e}"))),
         }
+    }
+
+    // ─── Phase 9.2: attest + deenrol ───────────────────────────────
+
+    /// POST rustion/authority/attest — runs the periodic re-attestation
+    /// sweep across every enrolled bastion (or one if `bastion_id` is
+    /// supplied). Returns the per-target outcome list; emits a
+    /// `rustion.master.attest` audit row for each success.
+    pub async fn handle_authority_attest(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_store()?;
+        let master_store = self.resolve_master_store()?;
+        let master = master_store
+            .get_or_init_signing_key()
+            .await
+            .map_err(|e| bv_error_string!(&format!("master signing key: {e}")))?;
+        let operator = self.operator_context(req).await?;
+        let bastion_id = req
+            .get_data("bastion_id")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .filter(|s| !s.is_empty());
+
+        let outcomes = if let Some(id) = bastion_id {
+            match enrolment::attest_bastion(&store, &master, &operator, &id).await {
+                Ok(r) => {
+                    log::info!(
+                        "{}: bastion={} correlation={}",
+                        audit::MASTER_ATTEST,
+                        r.bastion_id,
+                        r.correlation_id
+                    );
+                    enrolment::AttestAllResult {
+                        attempted: 1,
+                        succeeded: 1,
+                        failed: 0,
+                        results: vec![enrolment::AttestOutcome::Ok(r)],
+                    }
+                }
+                Err(e) => enrolment::AttestAllResult {
+                    attempted: 1,
+                    succeeded: 0,
+                    failed: 1,
+                    results: vec![enrolment::AttestOutcome::Err {
+                        bastion_id: id,
+                        error: e.to_string(),
+                    }],
+                },
+            }
+        } else {
+            let r = enrolment::attest_all(&store, &master, &operator)
+                .await
+                .map_err(|e| bv_error_string!(&format!("attest_all: {e}")))?;
+            for o in &r.results {
+                if let enrolment::AttestOutcome::Ok(ok) = o {
+                    log::info!(
+                        "{}: bastion={} correlation={}",
+                        audit::MASTER_ATTEST,
+                        ok.bastion_id,
+                        ok.correlation_id
+                    );
+                }
+            }
+            r
+        };
+        let value = serde_json::to_value(&outcomes)
+            .map_err(|e| bv_error_string!(&format!("encode: {e}")))?;
+        let data = match value {
+            Value::Object(m) => m,
+            _ => Map::new(),
+        };
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// POST rustion/target/deenrol — send a signed `deenrol` envelope
+    /// to the named bastion. Idempotent: a 404/410 from the bastion is
+    /// treated as success (it already forgot us). Emits a
+    /// `rustion.target.deenrolled` audit row on success. The caller is
+    /// expected to subsequently delete the local target registry entry.
+    pub async fn handle_target_deenrol(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_store()?;
+        let master_store = self.resolve_master_store()?;
+        let master = master_store
+            .get_or_init_signing_key()
+            .await
+            .map_err(|e| bv_error_string!(&format!("master signing key: {e}")))?;
+        let operator = self.operator_context(req).await?;
+        let bastion_id = req
+            .get_data("bastion_id")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let reason = req
+            .get_data("reason")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "operator-deleted".to_string());
+        let target = store
+            .get_target(&bastion_id)
+            .await?
+            .ok_or_else(|| {
+                bv_error_response_status!(404, &format!("bastion_not_found: {bastion_id}"))
+            })?;
+        let result = enrolment::deenrol_bastion(&target, &master, &operator, &reason)
+            .await
+            .map_err(|e| bv_error_string!(&format!("{e}")))?;
+        log::info!(
+            "{}: bastion={} correlation={} reason={}",
+            audit::TARGET_DEENROLLED,
+            result.bastion_id,
+            result.correlation_id,
+            reason,
+        );
+        let mut data = Map::new();
+        data.insert("bastion_id".into(), Value::String(result.bastion_id));
+        data.insert(
+            "correlation_id".into(),
+            Value::String(result.correlation_id),
+        );
+        data.insert("reason".into(), Value::String(reason));
+        Ok(Some(Response::data_response(Some(data))))
     }
 
     // ─── Phase 6.2: recording webhook + index ──────────────────────

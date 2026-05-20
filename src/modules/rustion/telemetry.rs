@@ -350,7 +350,7 @@ async fn tick(core: &Arc<Core>) -> Result<(), RvError> {
                     next_seq: u64,
                 }
                 if let Ok(b) = r.json::<Body>().await {
-                    let mut stamped: Vec<AuditEntry> = b
+                    let stamped: Vec<AuditEntry> = b
                         .entries
                         .into_iter()
                         .map(|mut e| {

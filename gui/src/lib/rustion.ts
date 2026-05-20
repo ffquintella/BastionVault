@@ -213,6 +213,38 @@ export interface RustionSessionKillResult {
 export const rustionSessionKill = (request: RustionSessionKillRequest) =>
   invoke<RustionSessionKillResult>("rustion_session_kill", { request });
 
+// ─── Phase 9.2: attest + deenrol ────────────────────────────────
+
+export interface RustionAttestOutcome {
+  status: "ok" | "err" | string;
+  bastionId: string;
+  correlationId: string;
+  attestedAt: string;
+  expiresAt: string;
+  error: string;
+}
+
+export interface RustionAttestResult {
+  attempted: number;
+  succeeded: number;
+  failed: number;
+  results: RustionAttestOutcome[];
+}
+
+/** Re-attest a single bastion (or all if bastionId is omitted). */
+export const rustionAuthorityAttest = (bastionId?: string) =>
+  invoke<RustionAttestResult>("rustion_authority_attest", { bastionId });
+
+export interface RustionDeenrolResult {
+  bastionId: string;
+  correlationId: string;
+  reason: string;
+}
+
+/** Send a deenrol envelope to a bastion before deleting the local target. */
+export const rustionTargetDeenrol = (bastionId: string, reason?: string) =>
+  invoke<RustionDeenrolResult>("rustion_target_deenrol", { bastionId, reason });
+
 // ─── Recordings (Phase 6.2 / 6.3) ────────────────────────────────
 
 export interface RustionRecordingEntry {

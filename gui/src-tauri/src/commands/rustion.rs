@@ -1633,3 +1633,118 @@ fn health_from_value(v: Value) -> RustionTargetHealth {
         updated_at: s(&data, "updated_at"),
     }
 }
+
+// ─── Phase 9.2: attest + deenrol ────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionAttestOutcome {
+    pub status: String, // "ok" | "err"
+    pub bastion_id: String,
+    pub correlation_id: String,
+    pub attested_at: String,
+    pub expires_at: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionAttestResult {
+    pub attempted: u32,
+    pub succeeded: u32,
+    pub failed: u32,
+    pub results: Vec<RustionAttestOutcome>,
+}
+
+#[tauri::command]
+pub async fn rustion_authority_attest(
+    state: State<'_, AppState>,
+    bastion_id: Option<String>,
+) -> CmdResult<RustionAttestResult> {
+    let mut body = Map::new();
+    if let Some(id) = bastion_id {
+        body.insert("bastion_id".into(), Value::String(id));
+    }
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}authority/attest"),
+        Some(body),
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+
+    let results: Vec<RustionAttestOutcome> = data
+        .get("results")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.as_object())
+                .map(|o| {
+                    let status = s(o, "status");
+                    RustionAttestOutcome {
+                        status: status.clone(),
+                        bastion_id: s(o, "bastion_id"),
+                        correlation_id: s(o, "correlation_id"),
+                        attested_at: s(o, "attested_at"),
+                        expires_at: s(o, "expires_at"),
+                        error: s(o, "error"),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(RustionAttestResult {
+        attempted: data
+            .get("attempted")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
+            .unwrap_or(0),
+        succeeded: data
+            .get("succeeded")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
+            .unwrap_or(0),
+        failed: data
+            .get("failed")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
+            .unwrap_or(0),
+        results,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionDeenrolResult {
+    pub bastion_id: String,
+    pub correlation_id: String,
+    pub reason: String,
+}
+
+#[tauri::command]
+pub async fn rustion_target_deenrol(
+    state: State<'_, AppState>,
+    bastion_id: String,
+    reason: Option<String>,
+) -> CmdResult<RustionDeenrolResult> {
+    let mut body = Map::new();
+    body.insert("bastion_id".into(), Value::String(bastion_id));
+    if let Some(r) = reason {
+        body.insert("reason".into(), Value::String(r));
+    }
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}target/deenrol"),
+        Some(body),
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(RustionDeenrolResult {
+        bastion_id: s(&data, "bastion_id"),
+        correlation_id: s(&data, "correlation_id"),
+        reason: s(&data, "reason"),
+    })
+}

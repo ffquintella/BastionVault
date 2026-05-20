@@ -619,6 +619,7 @@ fn build_http_client() -> Result<reqwest::Client, String> {
 mod serde_bytes_compat {
     use serde::{Deserialize, Deserializer, Serializer};
 
+    #[allow(dead_code)]
     pub fn serialize<S: Serializer>(bytes: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_bytes(bytes)
     }

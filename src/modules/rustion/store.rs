@@ -56,6 +56,19 @@ impl RustionStore {
         Ok(keys)
     }
 
+    /// Resolve every target id into a full `RustionTarget`. Used by
+    /// the Phase 9.2 re-attestation sweep + the deenrol-all surface
+    /// where the caller wants endpoint addresses, not just ids.
+    pub async fn list_targets(&self) -> Result<Vec<RustionTarget>, RvError> {
+        let mut out = Vec::new();
+        for id in self.list_target_ids().await? {
+            if let Some(t) = self.get_target(&id).await? {
+                out.push(t);
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn get_target(&self, id: &str) -> Result<Option<RustionTarget>, RvError> {
         let id = sanitize_id(id)?;
         let Some(entry) = self.targets_view.get(&id).await? else {

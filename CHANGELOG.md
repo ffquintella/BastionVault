@@ -45,6 +45,87 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-20
+
+Minor-version bump closing Phase 9 of the Rustion integration:
+disk-backed authority lifecycle + operator CLI on the bastion side,
+weekly re-attestation timer + deenrol Tauri command on the BV side,
+plus a dedicated deployment guide. Zero compiler warnings across
+both repos.
+
+### Added
+
+- **Rustion integration — Phase 9.2: disk-backed pending + approval
+  CLI + deenrol + tombstone + re-attestation timer** (paired with
+  Rustion 0.8.0).
+    - **Rustion `authority_disk` module** — `AuthorityYaml` /
+      `PendingYaml` / `TombstoneYaml` DTOs with `schema_version: 1`,
+      base64-encoded ed25519 + ML-DSA-65 pubkey halves, atomic
+      rename-then-replace writes. **7 new unit tests** covering
+      round-trip, schema-version mismatch, malformed-YAML path
+      reporting, missing-dir → empty map, replay-window preservation,
+      idempotent deletes.
+    - **Rustion `AuthorityStore` disk-backed CRUD** —
+      `load_from_disk(active, pending, tombs)`,
+      `submit_pending_on_disk`, `approve_pending_on_disk`,
+      `reject_pending_on_disk`, `deenrol_on_disk`,
+      `untombstone_on_disk`. Each drives both the in-memory map and
+      the YAML file so a crash mid-flight can't leave a dangling
+      record.
+    - **Rustion CLI** — new `rustion authority` subcommand with
+      `list-pending`, `list`, `list-tombstones`,
+      `approve --name --max-session-secs --replay-window-secs`,
+      `reject --name --reason`, `deenrol --name --reason`,
+      `untombstone --name`. Operates directly on
+      `<config_dir>/{authorities,authorities-pending,tombstoned}/` and
+      reminds the operator to `rustion reload` for live pickup.
+    - **Rustion lifecycle integration test** — `tests/authority_lifecycle.rs`
+      drives submit → approve → deenrol → resubmit-while-tombstoned
+      (refused) → untombstone, plus reject-writes-tombstone, plus
+      three-projection `load_from_disk`. **3 e2e tests.**
+    - **BV `envelope::build_deenrol`** — new helper building an
+      `op: "deenrol"` envelope.
+    - **BV `src/modules/rustion/enrolment.rs`** new module —
+      `attest_bastion`, `attest_all`, `deenrol_bastion`, plus
+      `AttestAllResult` / `AttestOutcome` shapes. `RustionStore::list_targets`
+      added in `store.rs`.
+    - **BV `src/modules/rustion/attest_timer.rs`** — detached tokio
+      task ticking every 6 days; wired into core boot alongside the
+      existing rustion timers.
+    - **BV HTTP routes** — `POST rustion/authority/attest` (optional
+      `bastion_id`) emits `rustion.master.attest`;
+      `POST rustion/target/deenrol` emits `rustion.target.deenrolled`.
+    - **BV Tauri commands** — `rustion_authority_attest`,
+      `rustion_target_deenrol`, plus matching TS wrappers
+      (`rustionAuthorityAttest`, `rustionTargetDeenrol`).
+- **Deployment guide** — new
+  [`features/rustion-authority-lifecycle.md`](features/rustion-authority-lifecycle.md)
+  walks operators through directory layout, YAML schemas, full
+  end-to-end submit → approve → attest → deenrol → resurrection-guard
+  flow, plus deployment recipes for docker-compose / bare-metal HA /
+  Kubernetes GitOps. Includes the failure-mode quick reference table.
+
+### Fixed
+
+- **Build warnings cleared on both repos** —
+    - BV: removed unused `mut` on `telemetry::stamped`; marked the
+      unused `serde_bytes_compat::serialize` helper `#[allow(dead_code)]`
+      (kept for symmetry with the deserialize path).
+    - Rustion: scoped `BvrgPayload` import in `control-plane::session`
+      to `#[cfg(test)]`; allowed `unused_assignments` on the
+      webhook-retry `last_err` sentinel.
+
+### Changed
+
+- `features/rustion-integration.md`: Phase 9.2 marked Done. Phase 9
+  is now fully closed; remaining items (`attestation_renew_at`
+  enforcement at envelope-verify, Rustion admin web UI, BV-side
+  GUI buttons for the new Tauri commands) recorded as separate
+  tracks rather than Phase 9 deferred work.
+- **Minor-version bump** to 0.8.0 across BV (`Cargo.toml`,
+  `gui/src-tauri/Cargo.toml`, `gui/src-tauri/tauri.conf.json`,
+  `gui/package.json`) and Rustion (`Cargo.toml` workspace.package).
+
 ## [0.7.37] - 2026-05-20
 
 ### Added

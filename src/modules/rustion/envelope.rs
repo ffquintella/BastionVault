@@ -219,6 +219,54 @@ pub fn build_kill(
     })
 }
 
+/// Build a `deenrol` envelope. Phase 9.2 — BV sends this just before
+/// deleting a target locally so Rustion can tombstone the authority
+/// in lock-step rather than discovering the deletion via timeout.
+pub fn build_deenrol(
+    master: &BvrgMasterSigningKey,
+    target: &RustionTarget,
+    operator: &OperatorContext,
+    reason: &str,
+) -> Result<BuiltEnvelope, BvrgError> {
+    let nonce = bvrg::fresh_nonce();
+    let correlation_id = Uuid::new_v4().to_string();
+    let issued_at = bvrg::unix_now();
+    let mut extra = std::collections::BTreeMap::new();
+    extra.insert("reason".to_string(), reason.to_string());
+    let payload = BvrgPayload {
+        v: 1,
+        op: "deenrol".to_string(),
+        nonce: nonce.clone(),
+        issued_at,
+        not_after: issued_at + 5 * 60,
+        target: None,
+        credential: None,
+        session: None,
+        operator: BvrgOperator {
+            vault_user_id: operator.vault_user_id.clone(),
+            vault_user_name: operator.vault_user_name.clone(),
+            vault_session_id: operator.vault_session_id.clone(),
+            src_ip: operator.src_ip.clone(),
+            deployment_id: operator.deployment_id.clone(),
+        },
+        correlation_id: correlation_id.clone(),
+    };
+
+    let rustion_pub = resolve_kem_pubkey(target)?;
+    let bytes = bvrg::build(&payload, master, &rustion_pub)?;
+    let fingerprint = envelope_fingerprint(&bytes)?;
+    // `extra` isn't carried inside `BvrgPayload` directly; the reason is
+    // surfaced only in the BV-side audit. Rustion infers the deenrol
+    // intent from `op = "deenrol"`.
+    let _ = extra;
+    Ok(BuiltEnvelope {
+        bytes,
+        fingerprint,
+        nonce,
+        correlation_id,
+    })
+}
+
 /// Build an `attest` envelope. Phase 9's weekly re-attestation timer
 /// calls this once per enrolled target; Rustion bumps the authority
 /// record's `attestation_renew_at` on acceptance.

@@ -658,7 +658,12 @@ impl Core {
             // Phase 8.1: 60s telemetry poller pulling
             // /v1/sessions/{active,history} + /v1/stats from every
             // enabled bastion into the in-memory cache the GUI reads.
-            let _ = crate::modules::rustion::telemetry::start_poller(core_arc);
+            let _ = crate::modules::rustion::telemetry::start_poller(core_arc.clone());
+            // Phase 9.2: weekly re-attestation sweep. Walks every
+            // enrolled bastion and sends a signed `attest` envelope
+            // so Rustion can bump the authority record's
+            // attestation_renew_at deadline.
+            let _ = crate::modules::rustion::attest_timer::start_attest_timer(core_arc);
         }
 
         // Boot the OpenLDAP / AD static-role auto-rotation scheduler
