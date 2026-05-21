@@ -284,7 +284,18 @@ impl HttpOptions {
                 self.tls_server_name, override_addr
             );
         }
-        let mut client = Client::new().with_addr(&effective_url).with_token(&self.token);
+        // Token resolution order: explicit --client-token / VAULT_TOKEN (both
+        // populated into self.token by clap), else the on-disk token helper
+        // ($BVAULT_TOKEN_FILE or ~/.vault-token) written by `bvault login`.
+        let token: std::borrow::Cow<'_, str> = if self.token.is_empty() {
+            match crate::cli::util::read_persisted_token() {
+                Some(t) => std::borrow::Cow::Owned(t),
+                None => std::borrow::Cow::Borrowed(""),
+            }
+        } else {
+            std::borrow::Cow::Borrowed(self.token.as_str())
+        };
+        let mut client = Client::new().with_addr(&effective_url).with_token(&token);
         if let Some(addr) = override_addr {
             client = client.with_override_socket_addr(addr);
         }

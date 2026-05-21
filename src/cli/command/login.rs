@@ -97,6 +97,17 @@ the TYPE of method (e.g. userpass -> userpass/)."#
 configured token helper. The default is false"#
     )]
     no_print: bool,
+
+    #[arg(
+        long,
+        next_line_help = true,
+        default_value_t = false,
+        long_help = r#"Do not persist the issued token to the on-disk token helper
+($BVAULT_TOKEN_FILE if set, otherwise ~/.vault-token). The token is still
+printed unless --no-print is also passed. Useful for one-off invocations
+where the caller already has a token-management strategy."#
+    )]
+    no_store: bool,
 }
 
 impl CommandExecutor for Login {
@@ -145,10 +156,27 @@ impl CommandExecutor for Login {
         let response_value = ret.response_data.ok_or(RvError::ErrResponseDataInvalid)?;
 
         let secret: Secret = serde_json::from_value(response_value)?;
-        if secret.auth.is_none() {
-            println!("BastionVault returned a secret, but the secret has no authentication information attached. ");
-            println!("This should never happen and is likely a bug.");
-            std::process::exit(2);
+        let auth = match &secret.auth {
+            Some(a) => a,
+            None => {
+                println!("BastionVault returned a secret, but the secret has no authentication information attached. ");
+                println!("This should never happen and is likely a bug.");
+                std::process::exit(2);
+            }
+        };
+
+        // Persist the issued token to the on-disk token helper so subsequent
+        // commands in this shell can find it without VAULT_TOKEN gymnastics.
+        // Failures are non-fatal — the token already printed below is still
+        // usable by passing it explicitly.
+        if !self.options.no_store && !auth.client_token.is_empty() {
+            match util::write_persisted_token(&auth.client_token) {
+                Ok(path) => log::debug!("persisted client token to {}", path.display()),
+                Err(e) => eprintln!(
+                    "warning: could not persist token to helper file: {e}. \
+                     Re-run with --no-store to suppress this warning."
+                ),
+            }
         }
 
         if self.options.no_print {

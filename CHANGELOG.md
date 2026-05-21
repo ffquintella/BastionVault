@@ -45,6 +45,26 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-05-21
+
+### Added
+- `bvault login` now persists the issued token to an on-disk helper file
+  (`$BVAULT_TOKEN_FILE` if set, otherwise `~/.vault-token`) on success.
+  All subsequent commands in the same shell pick it up automatically
+  when `--client-token` / `VAULT_TOKEN` aren't set, matching HashiCorp
+  Vault CLI behavior. New `--no-store` flag opts out per invocation.
+- New `cli::util::{token_helper_path, read_persisted_token,
+  write_persisted_token}` helpers, used both by login (write side) and
+  `HttpOptions::client_at` (read fallback). Unix builds chmod 0600 the
+  token file.
+
+### Changed
+- `HttpOptions::client_at` token-resolution order is now: `--client-token`
+  / `VAULT_TOKEN` (existing) → token-helper file (new) → empty. Empty
+  still produces an unauthenticated request, which the server rejects
+  with HTTP 400 for token-gated endpoints — so the error surfaces the
+  same way it did pre-0.8.6 when no auth source is configured.
+
 ## [0.8.5] - 2026-05-21
 
 ### Changed
