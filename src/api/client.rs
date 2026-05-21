@@ -237,6 +237,12 @@ impl Client {
             format!("{}/{}", self.address, path)
         };
         log::debug!("request url: {url}, method: {method}");
+        if std::env::var("BVAULT_TLS_DEBUG").is_ok() {
+            eprintln!(
+                "[bvault tls-debug] dispatch method={method} url={url} client.address={} override={:?}",
+                self.address, self.override_socket_addr
+            );
+        }
 
         let method_upper = method.to_uppercase();
         let build_request = |builder: http::request::Builder| -> http::request::Builder {

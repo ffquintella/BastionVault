@@ -278,6 +278,12 @@ impl HttpOptions {
             Some(name) if !name.is_empty() => rewrite_url_for_sni(url, name)?,
             _ => (url.to_string(), None),
         };
+        if std::env::var("BVAULT_TLS_DEBUG").is_ok() {
+            eprintln!(
+                "[bvault tls-debug] input_url={url} server_name={:?} effective_url={effective_url} override_addr={:?}",
+                self.tls_server_name, override_addr
+            );
+        }
         let mut client = Client::new().with_addr(&effective_url).with_token(&self.token);
         if let Some(addr) = override_addr {
             client = client.with_override_socket_addr(addr);
@@ -527,6 +533,19 @@ mod sni_rewrite_tests {
     #[test]
     fn rejects_malformed_url() {
         assert!(rewrite_url_for_sni("not-a-url", "vault.example").is_err());
+    }
+
+    /// Belt-and-braces: confirm the rewritten URL still parses as an http::Uri
+    /// with the host we expect (this is what ureq's RustlsConnector reads via
+    /// `details.uri.authority().host()` for the SNI / certificate name).
+    #[test]
+    fn rewritten_url_parses_as_http_uri_with_dns_host() {
+        let (url, _) =
+            rewrite_url_for_sni("https://127.0.0.1:8200/v1/sys/unseal", "vault.example").unwrap();
+        let uri: ureq::http::Uri = url.parse().expect("URL must parse as http::Uri");
+        let authority = uri.authority().expect("authority present");
+        assert_eq!(authority.host(), "vault.example");
+        assert_eq!(authority.port_u16(), Some(8200));
     }
 }
 

@@ -45,6 +45,15 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-05-21
+
+### Changed
+- Added `BVAULT_TLS_DEBUG=1` env-gated stderr tracing of the URL rewrite +
+  request dispatch path, so deployments that hit `--tls-server-name`
+  edge cases can see exactly what URL clap parsed, what the rewriter
+  produced, and what the request layer dispatched to ureq. No behavior
+  change when the env var is unset.
+
 ## [0.8.4] - 2026-05-21
 
 ### Fixed
