@@ -45,6 +45,17 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-05-21
+
+### Fixed
+- 0.8.3's `--tls-server-name` plumbing panicked at request time:
+  `StaticAddrResolver::resolve` built its `ResolvedSocketAddrs` via
+  `ArrayVec::from_fn`, which populates the backing array but leaves the
+  logical length at zero. The follow-up `truncate(1)` then asserted
+  `1 <= 0` and aborted the process with "assertion failed: len <=
+  self.len". Switched to `push` so the resolver actually returns a
+  populated `ArrayVec` and the resolver's first call succeeds.
+
 ## [0.8.3] - 2026-05-21
 
 ### Fixed

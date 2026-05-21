@@ -74,10 +74,12 @@ impl Resolver for StaticAddrResolver {
         _config: &ureq::config::Config,
         _timeout: NextTimeout,
     ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        // ureq's ArrayVec::from_fn populates the backing array but leaves
+        // `len = 0` — the only way to make entries visible is `push`. Start
+        // from the trait's default empty vec (also len=0) and push our one
+        // address.
         let mut out: ResolvedSocketAddrs = ArrayVec::from_fn(|_| self.0);
-        // ArrayVec::from_fn fills every slot; trim back to a single entry so
-        // the connector doesn't retry against ghost duplicates.
-        out.truncate(1);
+        out.push(self.0);
         Ok(out)
     }
 }
