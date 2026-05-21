@@ -273,7 +273,9 @@ impl HttpOptions {
 
         if url.starts_with("https://") {
             let mut tls_config_builder = TLSConfigBuilder::new().with_insecure(self.tls_skip_verify);
-            if let Some(ca_cert) = &self.ca_cert {
+            let auto_ca = self.discovered_ca_cert();
+            let ca_cert = self.ca_cert.as_ref().or(auto_ca.as_ref());
+            if let Some(ca_cert) = ca_cert {
                 tls_config_builder = tls_config_builder.with_server_ca_path(ca_cert)?;
             }
             if let (Some(client_cert), Some(client_key)) = (&self.client_cert, &self.client_key) {
@@ -332,15 +334,17 @@ impl HttpOptions {
     fn bv_tls_for_probe(&self) -> Result<Option<bv_client::tls::ClientTlsConfig>, RvError> {
         // No HTTPS hint and no skip-verify? Then probes can go in
         // the clear, matching what `client()` would have built.
+        let auto_ca = self.discovered_ca_cert();
         let likely_tls = self.tls_skip_verify
             || self.ca_cert.is_some()
+            || auto_ca.is_some()
             || self.client_cert.is_some()
             || self.address.starts_with("https://");
         if !likely_tls {
             return Ok(None);
         }
         let mut b = bv_client::tls::TLSConfigBuilder::new().with_insecure(self.tls_skip_verify);
-        if let Some(ca) = &self.ca_cert {
+        if let Some(ca) = self.ca_cert.as_ref().or(auto_ca.as_ref()) {
             b = b
                 .with_server_ca_path(ca)
                 .map_err(|e| RvError::ErrString(format!("ca cert: {e}")))?;
@@ -358,6 +362,44 @@ impl HttpOptions {
 
     pub fn address_raw(&self) -> &str {
         &self.address
+    }
+
+    /// Look for a server-published serving certificate at a small set of
+    /// conventional paths, used as a fallback when the user did not pass
+    /// `--ca-cert` / `VAULT_CACERT`. Lets `bvault foo` against a TLS-enabled
+    /// local (or bind-mounted-from-container) server work without
+    /// `--tls-skip-verify`.
+    ///
+    /// Discovery order:
+    /// 1. `$BVAULT_CACERT_AUTO` (explicit override).
+    /// 2. `~/.bvault/ca.pem`.
+    /// 3. `/etc/bvault/ca.pem` — populated by bare-metal installs that set the
+    ///    listener's `tls_publish_ca_path` (see `publish_ca_for_local_clients`
+    ///    in `cli::command::server`).
+    /// 4. `/srv/application-config/bastionvault/tls/server.crt` — the
+    ///    puppet-bastionvault layout where the serving cert is rendered
+    ///    world-readable on the host and bind-mounted read-only into the
+    ///    rootless podman container. The container itself cannot write
+    ///    `ca.pem` back into that read-only mount, so we point straight at the
+    ///    cert puppet already placed.
+    fn discovered_ca_cert(&self) -> Option<PathBuf> {
+        if self.tls_skip_verify {
+            return None;
+        }
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Ok(env_path) = std::env::var("BVAULT_CACERT_AUTO") {
+            if !env_path.is_empty() {
+                candidates.push(PathBuf::from(env_path));
+            }
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            candidates.push(PathBuf::from(home).join(".bvault").join("ca.pem"));
+        }
+        candidates.push(PathBuf::from("/etc/bvault/ca.pem"));
+        candidates.push(PathBuf::from(
+            "/srv/application-config/bastionvault/tls/server.crt",
+        ));
+        candidates.into_iter().find(|p| p.is_file())
     }
 }
 

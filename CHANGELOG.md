@@ -45,6 +45,28 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-05-21
+
+### Added
+- CLI: `HttpOptions` auto-discovers a CA cert when none was passed via
+  `--ca-cert` / `VAULT_CACERT`. Discovery order: `$BVAULT_CACERT_AUTO`,
+  `~/.bvault/ca.pem`, `/etc/bvault/ca.pem`,
+  `/srv/application-config/bastionvault/tls/server.crt` (the
+  puppet-bastionvault layout). Means `bvault` against a TLS-enabled local
+  server stops needing `--tls-skip-verify` on every invocation.
+- Server listener config: `tls_publish_ca_path` copies the serving cert to a
+  caller-supplied path on bind (e.g. `/etc/bvault/ca.pem`). Intended for
+  bare-metal installs where the server can write to a host-readable dir;
+  containerised deployments (puppet-bastionvault's rootless podman) instead
+  rely on the puppet module's `cli_trust_path` to publish a world-readable
+  copy alongside the read-only TLS bind-mount.
+
+### Fixed
+- `bvault login` no longer panics with "no entry found for key" when invoked
+  without a token argument. The token-auth handler was indexing the args map
+  with `data["token"]` (panics on missing key) instead of `.get()`, blocking
+  the interactive prompt path.
+
 ## [0.8.1] - 2026-05-20
 
 Patch release: the `rustion/` logical mount was never auto-created on

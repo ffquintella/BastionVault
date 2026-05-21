@@ -151,6 +151,14 @@ pub struct Listener {
     pub tls_max_version: TlsVersion,
     #[serde(default = "default_tls_cipher_suites")]
     pub tls_cipher_suites: String,
+    /// Optional path where the server publishes its serving certificate (PEM)
+    /// on startup, so local CLI invocations can pick it up as a trust anchor
+    /// without `--tls-skip-verify` or an explicit `--ca-cert` on every call.
+    /// Empty disables publishing. The CLI reads `/etc/bvault/ca.pem` and
+    /// `~/.bvault/ca.pem` by default — point this at one of those (or a path
+    /// you bind-mount out of a container) to opt in.
+    #[serde(default)]
+    pub tls_publish_ca_path: String,
 }
 
 /// A struct that contains several configurable options for storage stuffs

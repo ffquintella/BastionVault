@@ -21,7 +21,7 @@ pub struct TokenCliHandler;
 
 impl LoginHandler for TokenCliHandler {
     fn auth(&self, client: &Client, data: &Map<String, Value>) -> Result<HttpResponse, RvError> {
-        let mut token = data["token"].as_str().unwrap_or("").to_string();
+        let mut token = data.get("token").and_then(Value::as_str).unwrap_or("").to_string();
         if token.is_empty() {
             let mut writer = io::stdout();
             write!(writer, "Token (will be hidden): ")?;

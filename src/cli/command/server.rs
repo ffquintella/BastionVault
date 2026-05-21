@@ -273,6 +273,7 @@ impl Server {
             http_server = http_server.bind(listener.address)?;
         } else {
             let rustls_config = build_rustls_server_config(&listener)?;
+            publish_ca_for_local_clients(&listener);
             http_server = http_server.bind_rustls_0_23(listener.address, rustls_config)?;
         }
 
@@ -343,6 +344,39 @@ fn rustls_versions(
     };
 
     Ok(versions)
+}
+
+/// Publish the serving certificate to `tls_publish_ca_path` (if configured)
+/// so local CLI invocations can find it as a trust anchor — see
+/// `HttpOptions::client_at` in the CLI for the discovery side. Failures here
+/// are logged but never block server start: the path is a convenience, not a
+/// dependency.
+fn publish_ca_for_local_clients(listener: &config::Listener) {
+    let dest = listener.tls_publish_ca_path.trim();
+    if dest.is_empty() {
+        return;
+    }
+    let dest = Path::new(dest);
+    if let Some(parent) = dest.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                log::warn!("tls_publish_ca_path: cannot create {}: {}", parent.display(), e);
+                return;
+            }
+        }
+    }
+    match fs::copy(&listener.tls_cert_file, dest) {
+        Ok(_) => log::info!(
+            "published serving cert to {} for local CLI trust",
+            dest.display()
+        ),
+        Err(e) => log::warn!(
+            "tls_publish_ca_path: failed to copy {} -> {}: {}",
+            listener.tls_cert_file,
+            dest.display(),
+            e
+        ),
+    }
 }
 
 fn load_rustls_cert_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>, RvError> {
