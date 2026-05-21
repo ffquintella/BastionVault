@@ -201,6 +201,8 @@ impl RustionBackend {
         let h_master_read = self.inner.clone();
         let h_master_write = self.inner.clone();
         let h_master_pubkey = self.inner.clone();
+        let h_master_issue = self.inner.clone();
+        let h_master_rotate = self.inner.clone();
         let h_session_open = self.inner.clone();
         let h_deployment_id = self.inner.clone();
         let h_session_renew = self.inner.clone();
@@ -433,6 +435,20 @@ impl RustionBackend {
                         {op: Operation::Read, handler: h_master_pubkey.handle_master_pubkey}
                     ],
                     help: "Export the master pubkey (one-shot enrolment step for Rustion authorities)."
+                },
+                {
+                    pattern: r"master/issue$",
+                    operations: [
+                        {op: Operation::Write, handler: h_master_issue.handle_master_issue}
+                    ],
+                    help: "Phase 2 — issue the hybrid Ed25519 + ML-DSA-65 master keypair. Refuses if a master is already issued (use rotate)."
+                },
+                {
+                    pattern: r"master/rotate$",
+                    operations: [
+                        {op: Operation::Write, handler: h_master_rotate.handle_master_rotate}
+                    ],
+                    help: "Phase 2 — rotate the master keypair. Archives the current as previous with a grace window so in-flight envelopes remain valid."
                 },
                 {
                     // GET rustion/deployment-id — Phase 9.1.
@@ -2529,22 +2545,8 @@ impl RustionBackendInner {
         _b: &dyn Backend,
         _req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        // Phase 1 stub: the actual pubkey export reads the issued cert
-        // out of the PKI engine and projects it into the hybrid shape
-        // Rustion's authority record wants. That wiring lands in
-        // Phase 2 alongside the envelope crate. For now we surface the
-        // config + an empty pubkey envelope so the GUI can render the
-        // "configure me first" state.
         let store = self.resolve_master_store()?;
-        let cfg = store.get_or_default().await?;
-        let export = MasterPubKeyExport {
-            algorithm: cfg.algorithm.clone(),
-            ed25519_pem: String::new(),
-            mldsa65_pem: String::new(),
-            fingerprint: String::new(),
-            current_serial: cfg.current_serial.clone(),
-            current_not_after: cfg.current_not_after,
-        };
+        let export = store.export_pubkey().await?;
         let mut data = Map::new();
         data.insert("algorithm".into(), Value::String(export.algorithm));
         data.insert("ed25519_pem".into(), Value::String(export.ed25519_pem));
@@ -2557,12 +2559,60 @@ impl RustionBackendInner {
         if let Some(ts) = export.current_not_after {
             data.insert("current_not_after".into(), Value::String(ts.to_rfc3339()));
         }
-        data.insert(
-            "issued".into(),
-            Value::Bool(!cfg.current_serial.is_empty()),
-        );
+        data.insert("issued".into(), Value::Bool(export.issued));
         Ok(Some(Response::data_response(Some(data))))
     }
+
+    pub async fn handle_master_issue(
+        &self,
+        _b: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_master_store()?;
+        let outcome = store
+            .issue()
+            .await
+            .map_err(|e| bv_error_response_status!(400, &format!("master issue: {e}")))?;
+        Ok(Some(Response::data_response(Some(issue_outcome_to_map(
+            &outcome,
+        )))))
+    }
+
+    pub async fn handle_master_rotate(
+        &self,
+        _b: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_master_store()?;
+        let outcome = store
+            .rotate()
+            .await
+            .map_err(|e| bv_error_response_status!(400, &format!("master rotate: {e}")))?;
+        Ok(Some(Response::data_response(Some(issue_outcome_to_map(
+            &outcome,
+        )))))
+    }
+}
+
+fn issue_outcome_to_map(outcome: &master::IssueOutcome) -> Map<String, Value> {
+    let mut data = Map::new();
+    data.insert("serial".into(), Value::String(outcome.serial.clone()));
+    data.insert(
+        "not_after".into(),
+        Value::String(outcome.not_after.to_rfc3339()),
+    );
+    data.insert(
+        "algorithm".into(),
+        Value::String(outcome.algorithm.clone()),
+    );
+    data.insert("rotated".into(), Value::Bool(outcome.rotated));
+    if let Some(ts) = outcome.previous_grace_until {
+        data.insert(
+            "previous_grace_until".into(),
+            Value::String(ts.to_rfc3339()),
+        );
+    }
+    data
 }
 
 fn target_response(t: &RustionTarget) -> Response {
@@ -2615,6 +2665,18 @@ fn master_config_response(cfg: &MasterConfig) -> Response {
     );
     if let Some(ts) = cfg.current_not_after {
         data.insert("current_not_after".into(), Value::String(ts.to_rfc3339()));
+    }
+    if let Some(ref s) = cfg.previous_serial {
+        data.insert("previous_serial".into(), Value::String(s.clone()));
+    }
+    if let Some(ts) = cfg.previous_not_after {
+        data.insert("previous_not_after".into(), Value::String(ts.to_rfc3339()));
+    }
+    if let Some(ts) = cfg.previous_grace_until {
+        data.insert(
+            "previous_grace_until".into(),
+            Value::String(ts.to_rfc3339()),
+        );
     }
     data.insert(
         "updated_at".into(),

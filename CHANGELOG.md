@@ -45,6 +45,31 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+- **Rustion master authority lifecycle Phase 2** — `rustion/master/issue`
+  and `rustion/master/rotate` HTTP endpoints plus matching CLI subcommands
+  (`bvault rustion master issue` and `bvault rustion master rotate`).
+  `issue` mints a hybrid Ed25519 + ML-DSA-65 master keypair, allocates a
+  serial, and persists current + public PEMs + `not_after` under the
+  encrypted barrier view. `rotate` archives the current keypair as
+  `previous_*`, arms `rotate_grace_secs` (default 1d), and mints a fresh
+  current. Envelopes signed by the outgoing key remain valid until the
+  grace window closes. (`features/rustion-authority-lifecycle.md`,
+  `src/modules/rustion/master.rs`)
+- `MasterStore::load_active_keys` + `envelope::verify_with_grace` —
+  ordered verify against current first, previous within grace. Phase 2
+  decision: keep a single `pki_role` configuration field (no parallel
+  `pki_role_pqc`); the cross-engine PKI emission round-trip is deferred
+  to Phase 9 alongside the cluster-replicated master path. Documented
+  inline in `master.rs`.
+
+### Changed
+- `rustion/master/pubkey` returns real Ed25519 / ML-DSA-65 public PEMs
+  plus a SHA-256 fingerprint over the canonical `ed25519 || mldsa65`
+  concatenation once the master has been issued, replacing the Phase-1
+  empty-pubkey stub. `master/config` response now surfaces
+  `previous_serial`, `previous_not_after`, and `previous_grace_until`.
+
 ## [0.8.6] - 2026-05-21
 
 ### Added

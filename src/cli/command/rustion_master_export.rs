@@ -13,12 +13,14 @@ use crate::{
     about = "Export the master public key (one-shot enrolment on Rustion)",
     long_about = r#"Print the master public key in the shape Rustion's authority records
 expect: separate `ed25519` and `mldsa65` halves plus a SHA-256
-fingerprint. Paste the two pubkey halves into
-`authorities/<name>.yaml` on each enrolled Rustion bastion.
+fingerprint over the canonical `ed25519 || mldsa65` concatenation.
+Paste the two pubkey halves into `authorities/<name>.yaml` on each
+enrolled Rustion bastion.
 
-Before the master cert has been issued, this command returns the
-algorithm marker but empty pubkey halves and `issued = false`. Phase 2
-adds the issue + rotate flow that populates the real key material.
+Before the master keypair has been issued, this command returns the
+algorithm marker but empty pubkey halves and `issued = false`. Run
+`bvault rustion master issue` first to mint the keypair, then
+`rotate` to cut over to a fresh one with a grace window.
 
   $ bvault rustion master export
   $ bvault rustion master export --format yaml      # ready to paste"#

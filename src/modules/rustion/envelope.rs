@@ -380,6 +380,38 @@ pub fn load_master_public_key() -> Result<BvrgMasterPublicKey, BvrgError> {
     Err(BvrgError::PublicKeyLength) // sentinel — replaced in Phase 9
 }
 
+/// Verify an envelope against an ordered list of acceptable master
+/// pubkeys. Tries each in turn; on first success returns the
+/// verified payload + the index of the key that matched (so callers
+/// can audit "this envelope was accepted by the previous master").
+///
+/// Phase 2 grace-window contract: `master_pubs[0]` is the current
+/// master, `master_pubs[1..]` is the previous master while it is
+/// still inside the rotate-grace window. `MasterStore::load_active_keys`
+/// only emits the previous key when `now < previous_grace_until`,
+/// so a stale previous key is never even offered to this helper.
+///
+/// All-failure case returns the error from the **last** attempt —
+/// the current master — so the operator-facing message stays focused
+/// on the live binding rather than the previous one.
+pub fn verify_with_grace(
+    envelope: &[u8],
+    master_pubs: &[BvrgMasterPublicKey],
+    rustion_kem_secret: &[u8],
+) -> Result<(bv_crypto::bvrg::VerifiedEnvelope, usize), BvrgError> {
+    if master_pubs.is_empty() {
+        return Err(BvrgError::PublicKeyLength);
+    }
+    let mut last_err: Option<BvrgError> = None;
+    for (idx, pk) in master_pubs.iter().enumerate() {
+        match bvrg::verify(envelope, pk, rustion_kem_secret) {
+            Ok(v) => return Ok((v, idx)),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or(BvrgError::PublicKeyLength))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,6 +511,47 @@ mod tests {
         assert_eq!(verified.payload.op, "kill");
         assert!(verified.payload.credential.is_none());
         assert!(verified.payload.target.is_none());
+    }
+
+    #[test]
+    fn verify_with_grace_accepts_previous_master() {
+        let prev = BvrgMasterSigningKey::generate().unwrap();
+        let curr = BvrgMasterSigningKey::generate().unwrap();
+        let curr_pub = curr.public_key();
+        let prev_pub = prev.public_key();
+        let kp = MlKem768Provider.generate_keypair().unwrap();
+        let target = synthetic_target_with_kem_pub(kp.public_key());
+
+        // Signed by the *previous* master.
+        let built = build_attest(&prev, &target, &op_ctx()).unwrap();
+
+        // Current alone refuses.
+        assert!(bvrg::verify(&built.bytes, &curr_pub, kp.secret_key()).is_err());
+
+        // Current + previous accepts and reports the previous index.
+        let (verified, idx) = verify_with_grace(
+            &built.bytes,
+            &[curr_pub.clone(), prev_pub.clone()],
+            kp.secret_key(),
+        )
+        .expect("verify_with_grace");
+        assert_eq!(verified.payload.op, "attest");
+        assert_eq!(idx, 1);
+    }
+
+    #[test]
+    fn verify_with_grace_rejects_when_only_current_offered() {
+        // Simulates the post-grace state: load_active_keys drops the
+        // previous master, so verify_with_grace gets only [current].
+        let prev = BvrgMasterSigningKey::generate().unwrap();
+        let curr = BvrgMasterSigningKey::generate().unwrap();
+        let curr_pub = curr.public_key();
+        let kp = MlKem768Provider.generate_keypair().unwrap();
+        let target = synthetic_target_with_kem_pub(kp.public_key());
+
+        let built = build_attest(&prev, &target, &op_ctx()).unwrap();
+        let err = verify_with_grace(&built.bytes, &[curr_pub], kp.secret_key());
+        assert!(err.is_err(), "previous-master envelope must be refused once grace ends");
     }
 
     #[test]

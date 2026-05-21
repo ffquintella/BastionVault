@@ -2,8 +2,9 @@ use clap::{Parser, Subcommand};
 use sysexits::ExitCode;
 
 use super::{
-    rustion_master_export, rustion_master_read, rustion_target_add, rustion_target_delete,
-    rustion_target_health, rustion_target_list, rustion_target_read, rustion_target_test,
+    rustion_master_export, rustion_master_issue, rustion_master_read, rustion_master_rotate,
+    rustion_target_add, rustion_target_delete, rustion_target_health, rustion_target_list,
+    rustion_target_read, rustion_target_test,
 };
 use crate::{cli::command::CommandExecutor, EXIT_CODE_INSUFFICIENT_PARAMS};
 
@@ -81,6 +82,10 @@ pub struct Master {
 pub enum MasterCommands {
     Read(rustion_master_read::RustionMasterRead),
     Export(rustion_master_export::RustionMasterExport),
+    /// Issue the master signing keypair (Phase 2 lifecycle).
+    Issue(rustion_master_issue::RustionMasterIssue),
+    /// Rotate the master signing keypair with a grace window.
+    Rotate(rustion_master_rotate::RustionMasterRotate),
 }
 
 impl Commands {
@@ -118,6 +123,8 @@ impl Master {
         match cmd {
             MasterCommands::Read(c) => c.execute(),
             MasterCommands::Export(c) => c.execute(),
+            MasterCommands::Issue(c) => c.execute(),
+            MasterCommands::Rotate(c) => c.execute(),
         }
     }
 }
