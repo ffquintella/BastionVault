@@ -405,7 +405,12 @@ impl RustionBackend {
                         "pki_role": {
                             field_type: FieldType::Str,
                             default: "",
-                            description: "PKI role under that mount."
+                            description: "PKI role under that mount used for the Ed25519 leaf."
+                        },
+                        "pki_role_pqc": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "PKI role under that mount used for the ML-DSA-65 leaf. Required for issue / rotate."
                         },
                         "issuer_ref": {
                             field_type: FieldType::Str,
@@ -1124,6 +1129,20 @@ impl RustionBackendInner {
         {
             if !v.is_empty() && v != cfg.pki_role {
                 cfg.pki_role = v;
+                touched = true;
+            }
+        }
+        if let Some(v) = req
+            .get_data("pki_role_pqc")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+        {
+            // Empty string clears the binding; non-empty sets it. Compare
+            // against the current value so we don't churn `updated_at` on
+            // a no-op write.
+            let new_val = if v.is_empty() { None } else { Some(v) };
+            if new_val != cfg.pki_role_pqc {
+                cfg.pki_role_pqc = new_val;
                 touched = true;
             }
         }
@@ -2566,11 +2585,15 @@ impl RustionBackendInner {
     pub async fn handle_master_issue(
         &self,
         _b: &dyn Backend,
-        _req: &mut Request,
+        req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_master_store()?;
+        let issuer = master::CoreMasterCertIssuer {
+            core: self.core.clone(),
+            client_token: req.client_token.clone(),
+        };
         let outcome = store
-            .issue()
+            .issue(&issuer)
             .await
             .map_err(|e| bv_error_response_status!(400, &format!("master issue: {e}")))?;
         Ok(Some(Response::data_response(Some(issue_outcome_to_map(
@@ -2581,11 +2604,15 @@ impl RustionBackendInner {
     pub async fn handle_master_rotate(
         &self,
         _b: &dyn Backend,
-        _req: &mut Request,
+        req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_master_store()?;
+        let issuer = master::CoreMasterCertIssuer {
+            core: self.core.clone(),
+            client_token: req.client_token.clone(),
+        };
         let outcome = store
-            .rotate()
+            .rotate(&issuer)
             .await
             .map_err(|e| bv_error_response_status!(400, &format!("master rotate: {e}")))?;
         Ok(Some(Response::data_response(Some(issue_outcome_to_map(
@@ -2649,6 +2676,10 @@ fn master_config_response(cfg: &MasterConfig) -> Response {
     let mut data = Map::new();
     data.insert("pki_mount".into(), Value::String(cfg.pki_mount.clone()));
     data.insert("pki_role".into(), Value::String(cfg.pki_role.clone()));
+    data.insert(
+        "pki_role_pqc".into(),
+        Value::String(cfg.pki_role_pqc.clone().unwrap_or_default()),
+    );
     data.insert("issuer_ref".into(), Value::String(cfg.issuer_ref.clone()));
     data.insert("algorithm".into(), Value::String(cfg.algorithm.clone()));
     data.insert(
@@ -2683,7 +2714,9 @@ fn master_config_response(cfg: &MasterConfig) -> Response {
         Value::String(cfg.updated_at.to_rfc3339()),
     );
     data.insert("configured".into(), Value::Bool(
-        !cfg.pki_mount.is_empty() && !cfg.pki_role.is_empty(),
+        !cfg.pki_mount.is_empty()
+            && !cfg.pki_role.is_empty()
+            && cfg.pki_role_pqc.as_deref().map(|s| !s.is_empty()).unwrap_or(false),
     ));
     Response::data_response(Some(data))
 }

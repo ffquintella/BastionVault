@@ -11,9 +11,9 @@ how a clean deenrolment works at end-of-life.
 | Phase | Status | Summary |
 |-------|--------|---------|
 | 1 — Master config slot | Done | `rustion/master/config` HTTP + `bvault rustion master read` CLI. PKI mount/role/issuer pointers persisted under the barrier. Phase-1 ephemerally-minted stub keypair so the Phase 3 session-open path could run end-to-end. |
-| 2 — Master issue / rotate / grace window | Done | `rustion/master/issue` + `rustion/master/rotate` HTTP, `bvault rustion master issue` + `bvault rustion master rotate` CLI. Hybrid Ed25519 + ML-DSA-65 keypair lifecycle, real pubkey export with SHA-256 fingerprint over `ed25519 \|\| mldsa65`. `MasterStore::load_active_keys` returns current + previous (within `rotate_grace_secs`) so `envelope::verify_with_grace` accepts envelopes signed by the outgoing key until the grace window closes. Cross-engine PKI emission round-trip deferred to Phase 9 alongside cluster-replicated master. |
+| 2 — Master issue / rotate / grace window | Done | `rustion/master/issue` + `rustion/master/rotate` HTTP, `bvault rustion master issue` + `bvault rustion master rotate` CLI. Hybrid Ed25519 + ML-DSA-65 keypair lifecycle minted through the configured PKI engine — two roles (`pki_role` Ed25519, `pki_role_pqc` ML-DSA-65) issued via `Core::handle_request`, so engine ACL + audit + issuer state all engage. Real pubkey export with SHA-256 fingerprint over `ed25519 \|\| mldsa65`. `MasterStore::load_active_keys` returns current + previous (within `rotate_grace_secs`) so `envelope::verify_with_grace` accepts envelopes signed by the outgoing key until the grace window closes. |
 | 9.2 — Authority enrolment lifecycle (this doc) | Done | YAML on-disk authority store, pending/active/tombstoned states, weekly re-attestation timer, deployment_id binding. |
-| Phase 9 — cluster-replicated master + PKI-engine cert emission | Pending | Issue master via the PKI engine programmatically so the cert serial + lineage is auditable on the engine side, and replicate the signing material across cluster nodes. |
+| Phase 9 — cluster-replicated master | Pending | Replicate the signing material across cluster nodes (PKI-engine cert emission landed with Phase 2). |
 
 Read alongside [`rustion-integration.md`](rustion-integration.md) — Phase 9.1
 covers the in-memory data model, Phase 9.2 wires it to disk + the CLI.

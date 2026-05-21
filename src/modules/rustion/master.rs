@@ -6,17 +6,20 @@
 //! Phase 3 session-open path could run end-to-end.
 //!
 //! Phase 2 (this module) elevates that stub into a real
-//! `issue / rotate` state machine with a grace window:
+//! `issue / rotate` state machine with a grace window **backed by the
+//! PKI engine**:
 //!
-//!   - `MasterStore::issue` mints a fresh hybrid Ed25519 + ML-DSA-65
-//!     keypair, allocates a serial, and persists the record under
-//!     `rustion/master/signing-key` alongside the public halves and
-//!     `not_after`. Refuses to overwrite an already-issued master —
-//!     the operator must `rotate` to cut over.
+//!   - `MasterStore::issue` calls the configured PKI mount twice —
+//!     once against `pki_role` (Ed25519 leaf) and once against
+//!     `pki_role_pqc` (ML-DSA-65 leaf) — and persists the engine-
+//!     returned PKCS#8 private keys + certificates + serials under
+//!     `rustion/master/signing-key`. Refuses to overwrite an
+//!     already-issued master; operators must `rotate` to cut over.
 //!   - `MasterStore::rotate` archives the current record as
 //!     `previous_*`, sets `previous_grace_until = now + rotate_grace_secs`,
-//!     and mints a fresh keypair as the new current. Envelopes signed
-//!     by the outgoing key stay valid until the grace window closes.
+//!     and mints a fresh hybrid pair through the PKI engine the same
+//!     way `issue` does. Envelopes signed by the outgoing key stay
+//!     valid until the grace window closes.
 //!   - `MasterStore::load_active_keys` returns the current signing
 //!     key plus the previous one when `now < previous_grace_until`.
 //!     Envelope-build paths still use only the current key; the
@@ -24,25 +27,29 @@
 //!
 //! ## Design notes
 //!
-//! - **Single PKI role.** The configured `pki_role` is a single
-//!   deployment marker on the master config. We do **not** add a
-//!   parallel `pki_role_pqc` or extend the PKI role schema with a
-//!   hybrid attribute in this phase. The actual cert emission round
-//!   trip via the PKI engine — issuing a real X.509 leaf with a
-//!   server-stored binding — is wired in alongside the cluster-
-//!   replicated master story (Phase 9). For Phase 2 the keypair is
-//!   generated locally under the encrypted barrier view and tagged
-//!   with a synthetic serial; the `pki_mount` / `pki_role` slots
-//!   gate `issue` so an operator cannot mint a master before
-//!   configuring the eventual PKI binding.
+//! - **Two PKI roles.** Hybrid issuance needs two distinct PKI roles
+//!   — one classical (Ed25519) and one PQC (ML-DSA-65) — because the
+//!   PKI engine emits one leaf per call. `MasterConfig.pki_role` is
+//!   the Ed25519 role; `MasterConfig.pki_role_pqc` is the ML-DSA-65
+//!   role. Both must be configured before `issue` / `rotate` succeeds.
+//!   The cross-engine call goes through `Core::handle_request`, so the
+//!   operator's token, ACL, audit, and lease accounting all flow
+//!   through the existing PKI boundary.
+//!
+//! - **Private-key custody.** The PKI engine's `pki/issue/:role`
+//!   path returns the leaf private key in PKCS#8 PEM form (RFC 8410
+//!   for Ed25519, IETF lamps draft for ML-DSA-65). We re-derive the
+//!   raw 32-byte seeds from that PKCS#8 so the rest of the rustion
+//!   module — which speaks `bv_crypto::BvrgMasterSigningKey` —
+//!   doesn't have to learn PKCS#8.
 //!
 //! - **On-disk shape.** The record persisted under
 //!   `rustion/master/signing-key` is `MasterSigningRecord`, which
 //!   carries the current keypair (seeds + derived public bytes +
-//!   serial + not_after) and an optional `previous` half for the
-//!   grace window. Phase 1 callers that wrote the old
-//!   `StubSigningKey` shape are still readable — `get_or_init_signing_key`
-//!   migrates them in place on first read.
+//!   PKI-engine cert + serial + not_after) and an optional `previous`
+//!   half for the grace window. Phase 1 callers that wrote the old
+//!   `StubSigningKey` shape are still readable — `read_signing_record`
+//!   migrates them in-memory on first read.
 //!
 //! - **Forward-looking defaults.** Default algorithm = hybrid
 //!   Ed25519 + ML-DSA-65; default issue TTL = 5 years; default
@@ -79,8 +86,15 @@ const DEPLOYMENT_ID: &str = "deployment-id";
 pub struct MasterConfig {
     /// PKI mount the master cert is minted from (e.g. `pki-internal/`).
     pub pki_mount: String,
-    /// PKI role under that mount.
+    /// PKI role under that mount used for the Ed25519 half. Must be
+    /// configured before `issue` / `rotate` will succeed.
     pub pki_role: String,
+    /// PKI role under that mount used for the ML-DSA-65 half. Must be
+    /// configured before `issue` / `rotate` will succeed. Distinct
+    /// from `pki_role` because the PKI engine emits one leaf per call
+    /// and a single role is locked to one key algorithm.
+    #[serde(default)]
+    pub pki_role_pqc: Option<String>,
     /// Issuer ref under the PKI mount. Empty = mount default.
     #[serde(default)]
     pub issuer_ref: String,
@@ -141,7 +155,23 @@ pub struct SigningKeyHalf {
     pub ed25519_pub_b64: String,
     /// Raw FIPS 204 ML-DSA-65 public key bytes, base64.
     pub mldsa65_pub_b64: String,
+    /// Serial of the Ed25519 leaf as returned by the PKI engine. Also
+    /// the canonical `serial` exposed in `IssueOutcome` /
+    /// `MasterPubKeyExport.current_serial`. Legacy local-keygen
+    /// records carry a synthetic `legacy-…` value here.
     pub serial: String,
+    /// Serial of the ML-DSA-65 leaf as returned by the PKI engine.
+    /// Empty for legacy local-keygen records.
+    #[serde(default)]
+    pub mldsa65_serial: String,
+    /// PEM-encoded X.509 cert returned by the PKI engine for the
+    /// Ed25519 leaf. Empty for legacy local-keygen records.
+    #[serde(default)]
+    pub ed25519_cert_pem: String,
+    /// PEM-encoded X.509 cert returned by the PKI engine for the
+    /// ML-DSA-65 leaf. Empty for legacy local-keygen records.
+    #[serde(default)]
+    pub mldsa65_cert_pem: String,
     pub not_after: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
 }
@@ -202,6 +232,259 @@ pub struct ActiveMasterKey {
     pub serial: String,
     pub ed25519_pub: Vec<u8>,
     pub mldsa65_pub: Vec<u8>,
+}
+
+/// One half (Ed25519 or ML-DSA-65) of a freshly-issued hybrid master,
+/// as handed back by the PKI engine. The seed bytes are re-derived from
+/// the engine's PKCS#8 PEM so the rest of the rustion module — which
+/// speaks raw seeds — doesn't have to learn PKCS#8.
+pub struct IssuedHalf {
+    /// 32-byte raw seed; the only material the rustion side actually
+    /// needs to keep working.
+    pub seed: [u8; 32],
+    /// PKI engine's serial for this leaf (hex string).
+    pub serial: String,
+    /// PEM-armoured X.509 leaf returned by the engine. Kept under the
+    /// barrier so `bvault rustion master pubkey` can surface it as
+    /// audit material in a follow-up phase.
+    pub certificate_pem: String,
+}
+
+/// One hybrid pair freshly minted through the PKI engine.
+pub struct IssuedHybrid {
+    pub ed25519: IssuedHalf,
+    pub mldsa65: IssuedHalf,
+}
+
+/// Abstraction over "ask the PKI engine for a fresh leaf of the
+/// requested algorithm". Production code dispatches into
+/// `Core::handle_request` so the engine ACL / audit / issuer state all
+/// apply; tests inject a fake that mints the same shape locally.
+#[async_trait::async_trait]
+pub trait MasterCertIssuer: Send + Sync {
+    /// Mint a fresh hybrid (Ed25519 + ML-DSA-65) pair. `pki_mount`
+    /// has a trailing slash (e.g. `pki-internal/`); the two role
+    /// names address the classical and PQC roles on that mount.
+    async fn issue_hybrid(
+        &self,
+        pki_mount: &str,
+        pki_role_ed25519: &str,
+        pki_role_mldsa65: &str,
+        ttl_secs: u64,
+        common_name: &str,
+    ) -> Result<IssuedHybrid, RvError>;
+}
+
+/// Production `MasterCertIssuer`: routes every call through
+/// `Core::handle_request`, propagating the operator's `client_token`
+/// so the PKI engine's ACL, audit, and lease layers all engage.
+pub struct CoreMasterCertIssuer {
+    pub core: Arc<Core>,
+    pub client_token: String,
+}
+
+#[async_trait::async_trait]
+impl MasterCertIssuer for CoreMasterCertIssuer {
+    async fn issue_hybrid(
+        &self,
+        pki_mount: &str,
+        pki_role_ed25519: &str,
+        pki_role_mldsa65: &str,
+        ttl_secs: u64,
+        common_name: &str,
+    ) -> Result<IssuedHybrid, RvError> {
+        let ed = pki_issue_one(
+            &self.core,
+            &self.client_token,
+            pki_mount,
+            pki_role_ed25519,
+            ttl_secs,
+            common_name,
+            PkiHalfKind::Ed25519,
+        )
+        .await?;
+        let ml = pki_issue_one(
+            &self.core,
+            &self.client_token,
+            pki_mount,
+            pki_role_mldsa65,
+            ttl_secs,
+            common_name,
+            PkiHalfKind::MlDsa65,
+        )
+        .await?;
+        Ok(IssuedHybrid { ed25519: ed, mldsa65: ml })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PkiHalfKind {
+    Ed25519,
+    MlDsa65,
+}
+
+#[maybe_async::maybe_async]
+async fn pki_issue_one(
+    core: &Core,
+    client_token: &str,
+    pki_mount: &str,
+    pki_role: &str,
+    ttl_secs: u64,
+    common_name: &str,
+    kind: PkiHalfKind,
+) -> Result<IssuedHalf, RvError> {
+    use crate::logical::{Operation, Request};
+    let mount = pki_mount.trim_end_matches('/');
+    let path = format!("{}/issue/{}", mount, pki_role);
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "common_name".into(),
+        serde_json::Value::String(common_name.to_string()),
+    );
+    body.insert(
+        "ttl".into(),
+        serde_json::Value::String(format!("{}s", ttl_secs)),
+    );
+    let mut req = Request::new(path.clone());
+    req.operation = Operation::Write;
+    req.client_token = client_token.to_string();
+    req.body = Some(body);
+    let resp = core.handle_request(&mut req).await.map_err(|e| {
+        bv_error_string!(&format!(
+            "rustion master: PKI engine call {path} failed: {e:?}"
+        ))
+    })?;
+    let data = resp
+        .and_then(|r| r.data)
+        .ok_or_else(|| bv_error_string!(&format!("rustion master: PKI engine {path} returned no data")))?;
+    let private_key_pem = data
+        .get("private_key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            bv_error_string!(&format!(
+                "rustion master: PKI engine {path} did not return private_key — \
+                 the role must allow generated keys"
+            ))
+        })?
+        .to_string();
+    let certificate_pem = data
+        .get("certificate")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| bv_error_string!(&format!("rustion master: PKI engine {path} did not return certificate")))?
+        .to_string();
+    let serial = data
+        .get("serial_number")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| bv_error_string!(&format!("rustion master: PKI engine {path} did not return serial_number")))?
+        .to_string();
+    // Sanity check the algorithm the engine reports matches what we
+    // asked for — otherwise we'd happily store a P-256 leaf under the
+    // Ed25519 slot and trip up envelope signing.
+    if let Some(t) = data.get("private_key_type").and_then(|v| v.as_str()) {
+        let expected = match kind {
+            PkiHalfKind::Ed25519 => "ed25519",
+            PkiHalfKind::MlDsa65 => "ml-dsa-65",
+        };
+        if t != expected {
+            return Err(bv_error_string!(&format!(
+                "rustion master: PKI role {pki_role} returned private_key_type={t}, \
+                 expected {expected}"
+            )));
+        }
+    }
+    let seed = match kind {
+        PkiHalfKind::Ed25519 => extract_ed25519_seed_from_pkcs8(&private_key_pem)?,
+        PkiHalfKind::MlDsa65 => extract_mldsa65_seed_from_pkcs8(&private_key_pem)?,
+    };
+    Ok(IssuedHalf { seed, serial, certificate_pem })
+}
+
+/// Decode an RFC-8410 Ed25519 `PRIVATE KEY` PEM and return the raw
+/// 32-byte seed. The PKI engine emits this via `rcgen`'s standard
+/// PKCS#8 serializer.
+fn extract_ed25519_seed_from_pkcs8(pem: &str) -> Result<[u8; 32], RvError> {
+    use pkcs8::{
+        der::{asn1::OctetString, Decode},
+        PrivateKeyInfo,
+    };
+    const OID_ED25519: pkcs8::ObjectIdentifier =
+        pkcs8::ObjectIdentifier::new_unwrap("1.3.101.112");
+    let der_bytes = pem_decode_block(pem, "PRIVATE KEY")?;
+    let info = PrivateKeyInfo::from_der(&der_bytes)
+        .map_err(|e| bv_error_string!(&format!("ed25519 pkcs8 decode: {e}")))?;
+    if info.algorithm.oid != OID_ED25519 {
+        return Err(bv_error_string!(&format!(
+            "expected Ed25519 PKCS#8 OID 1.3.101.112, got {}",
+            info.algorithm.oid
+        )));
+    }
+    // RFC 8410 wraps the 32-byte seed in an inner OCTET STRING inside
+    // the outer PKCS#8 privateKey field.
+    let inner = OctetString::from_der(info.private_key)
+        .map_err(|e| bv_error_string!(&format!("ed25519 pkcs8 inner OCTET STRING decode: {e}")))?;
+    let bytes = inner.as_bytes();
+    if bytes.len() != 32 {
+        return Err(bv_error_string!(&format!(
+            "ed25519 seed has unexpected length {}",
+            bytes.len()
+        )));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(bytes);
+    Ok(seed)
+}
+
+/// Decode the IETF-lamps draft ML-DSA-65 `PRIVATE KEY` PEM and return
+/// the raw 32-byte seed. Matches the shape `MlDsaSigner::to_pkcs8_pem`
+/// emits on the PKI engine side.
+fn extract_mldsa65_seed_from_pkcs8(pem: &str) -> Result<[u8; 32], RvError> {
+    use pkcs8::{
+        der::{asn1::OctetString, Decode},
+        PrivateKeyInfo,
+    };
+    // ML-DSA-65 (IETF lamps draft).
+    const OID_ML_DSA_65: pkcs8::ObjectIdentifier =
+        pkcs8::ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.18");
+    let der_bytes = pem_decode_block(pem, "PRIVATE KEY")?;
+    let info = PrivateKeyInfo::from_der(&der_bytes)
+        .map_err(|e| bv_error_string!(&format!("ml-dsa-65 pkcs8 decode: {e}")))?;
+    if info.algorithm.oid != OID_ML_DSA_65 {
+        return Err(bv_error_string!(&format!(
+            "expected ML-DSA-65 PKCS#8 OID {}, got {}",
+            OID_ML_DSA_65, info.algorithm.oid
+        )));
+    }
+    let inner = OctetString::from_der(info.private_key)
+        .map_err(|e| bv_error_string!(&format!("ml-dsa-65 pkcs8 inner OCTET STRING decode: {e}")))?;
+    let bytes = inner.as_bytes();
+    if bytes.len() != 32 {
+        return Err(bv_error_string!(&format!(
+            "ml-dsa-65 seed has unexpected length {}",
+            bytes.len()
+        )));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(bytes);
+    Ok(seed)
+}
+
+fn pem_decode_block(pem: &str, label: &str) -> Result<Vec<u8>, RvError> {
+    let begin = format!("-----BEGIN {label}-----");
+    let end = format!("-----END {label}-----");
+    let s = pem
+        .find(&begin)
+        .ok_or_else(|| bv_error_string!(&format!("missing {begin} header")))?;
+    let body_start = s + begin.len();
+    let e = pem[body_start..]
+        .find(&end)
+        .ok_or_else(|| bv_error_string!(&format!("missing {end} footer")))?;
+    let body: String = pem[body_start..body_start + e]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    STANDARD
+        .decode(body.as_bytes())
+        .map_err(|e| bv_error_string!(&format!("pem base64 decode: {e}")))
 }
 
 pub struct MasterStore {
@@ -362,18 +645,16 @@ impl MasterStore {
         signing_key_from_half(&half)
     }
 
-    /// Issue a fresh master keypair. Fails if `pki_mount` /
-    /// `pki_role` is empty (operator must configure the binding
-    /// first) or if a current keypair is already on disk (operator
-    /// must `rotate` to cut over).
-    pub async fn issue(&self) -> Result<IssueOutcome, RvError> {
+    /// Issue a fresh master keypair through the PKI engine. Fails if
+    /// `pki_mount` / `pki_role` / `pki_role_pqc` is empty (operator
+    /// must configure the binding first) or if a current keypair is
+    /// already on disk (operator must `rotate` to cut over).
+    pub async fn issue(
+        &self,
+        issuer: &dyn MasterCertIssuer,
+    ) -> Result<IssueOutcome, RvError> {
         let mut cfg = self.get_or_default().await?;
-        if cfg.pki_mount.trim().is_empty() || cfg.pki_role.trim().is_empty() {
-            return Err(bv_error_string!(
-                "rustion master issue: pki_mount and pki_role must be configured first \
-                 (POST rustion/master/config)"
-            ));
-        }
+        let (pki_mount, pki_role, pki_role_pqc) = require_pki_binding(&cfg, "issue")?;
         if !cfg.current_serial.is_empty() {
             return Err(bv_error_string!(&format!(
                 "rustion master issue: a master is already issued (serial={}); \
@@ -382,7 +663,16 @@ impl MasterStore {
             )));
         }
         let now = Utc::now();
-        let half = mint_fresh_half(cfg.default_ttl_secs, now)?;
+        let hybrid = issuer
+            .issue_hybrid(
+                &pki_mount,
+                &pki_role,
+                &pki_role_pqc,
+                cfg.default_ttl_secs,
+                "rustion-master",
+            )
+            .await?;
+        let half = half_from_issued(&hybrid, cfg.default_ttl_secs, now)?;
         let outcome = IssueOutcome {
             serial: half.serial.clone(),
             not_after: half.not_after,
@@ -407,15 +697,16 @@ impl MasterStore {
     }
 
     /// Rotate: shift the current keypair into the `previous` slot,
-    /// arm the grace window, and mint a new current. Fails when no
-    /// current keypair is present (the operator must `issue` first).
-    pub async fn rotate(&self) -> Result<IssueOutcome, RvError> {
+    /// arm the grace window, and mint a fresh hybrid pair through the
+    /// PKI engine. Fails when no current keypair is present (the
+    /// operator must `issue` first) or when the PKI binding is
+    /// incomplete.
+    pub async fn rotate(
+        &self,
+        issuer: &dyn MasterCertIssuer,
+    ) -> Result<IssueOutcome, RvError> {
         let mut cfg = self.get_or_default().await?;
-        if cfg.pki_mount.trim().is_empty() || cfg.pki_role.trim().is_empty() {
-            return Err(bv_error_string!(
-                "rustion master rotate: pki_mount and pki_role must be configured first"
-            ));
-        }
+        let (pki_mount, pki_role, pki_role_pqc) = require_pki_binding(&cfg, "rotate")?;
         let existing = self
             .read_signing_record()
             .await?
@@ -427,7 +718,16 @@ impl MasterStore {
             })?;
         let now = Utc::now();
         let grace_until = now + chrono::Duration::seconds(cfg.rotate_grace_secs as i64);
-        let fresh = mint_fresh_half(cfg.default_ttl_secs, now)?;
+        let hybrid = issuer
+            .issue_hybrid(
+                &pki_mount,
+                &pki_role,
+                &pki_role_pqc,
+                cfg.default_ttl_secs,
+                "rustion-master",
+            )
+            .await?;
+        let fresh = half_from_issued(&hybrid, cfg.default_ttl_secs, now)?;
         let outcome = IssueOutcome {
             serial: fresh.serial.clone(),
             not_after: fresh.not_after,
@@ -551,20 +851,54 @@ impl MasterStore {
 
 // ─── Helpers ───────────────────────────────────────────────────────
 
-fn mint_fresh_half(default_ttl_secs: u64, now: DateTime<Utc>) -> Result<SigningKeyHalf, RvError> {
-    let mut ed_seed = [0u8; 32];
-    rand::rng().fill_bytes(&mut ed_seed);
-    let mut ml_seed = [0u8; 32];
-    rand::rng().fill_bytes(&mut ml_seed);
-    let serial = mint_serial(&now);
-    let not_after = now + chrono::Duration::seconds(default_ttl_secs as i64);
-    derive_half_from_seeds(
-        &STANDARD.encode(ed_seed),
-        &STANDARD.encode(ml_seed),
-        serial,
+/// Validate that `pki_mount`, `pki_role`, and `pki_role_pqc` are all
+/// set on the master config. Returns the trimmed values.
+fn require_pki_binding(
+    cfg: &MasterConfig,
+    op: &str,
+) -> Result<(String, String, String), RvError> {
+    if cfg.pki_mount.trim().is_empty() || cfg.pki_role.trim().is_empty() {
+        return Err(bv_error_string!(&format!(
+            "rustion master {op}: pki_mount and pki_role must be configured first \
+             (POST rustion/master/config)"
+        )));
+    }
+    let pqc = cfg.pki_role_pqc.as_deref().unwrap_or("").trim().to_string();
+    if pqc.is_empty() {
+        return Err(bv_error_string!(&format!(
+            "rustion master {op}: pki_role_pqc must be configured (the ML-DSA-65 role) \
+             before {op} will succeed — set it via POST rustion/master/config"
+        )));
+    }
+    Ok((
+        cfg.pki_mount.trim().to_string(),
+        cfg.pki_role.trim().to_string(),
+        pqc,
+    ))
+}
+
+/// Build a `SigningKeyHalf` from a freshly-engine-issued hybrid pair.
+/// Seeds are dropped into the on-disk b64 fields; cert + serial come
+/// straight from the engine; `not_after` is derived from `now + ttl`.
+fn half_from_issued(
+    hybrid: &IssuedHybrid,
+    ttl_secs: u64,
+    now: DateTime<Utc>,
+) -> Result<SigningKeyHalf, RvError> {
+    let not_after = now + chrono::Duration::seconds(ttl_secs as i64);
+    let ed_seed_b64 = STANDARD.encode(hybrid.ed25519.seed);
+    let ml_seed_b64 = STANDARD.encode(hybrid.mldsa65.seed);
+    let mut half = derive_half_from_seeds(
+        &ed_seed_b64,
+        &ml_seed_b64,
+        hybrid.ed25519.serial.clone(),
         not_after,
         now,
-    )
+    )?;
+    half.mldsa65_serial = hybrid.mldsa65.serial.clone();
+    half.ed25519_cert_pem = hybrid.ed25519.certificate_pem.clone();
+    half.mldsa65_cert_pem = hybrid.mldsa65.certificate_pem.clone();
+    Ok(half)
 }
 
 fn derive_half_from_seeds(
@@ -599,6 +933,9 @@ fn derive_half_from_seeds(
         ed25519_pub_b64: STANDARD.encode(ed_pub),
         mldsa65_pub_b64: STANDARD.encode(&ml_pub),
         serial,
+        mldsa65_serial: String::new(),
+        ed25519_cert_pem: String::new(),
+        mldsa65_cert_pem: String::new(),
         not_after,
         created_at,
     })
@@ -644,16 +981,6 @@ fn half_to_active(
     ))
 }
 
-fn mint_serial(now: &DateTime<Utc>) -> String {
-    let mut rand_bytes = [0u8; 8];
-    rand::rng().fill_bytes(&mut rand_bytes);
-    format!(
-        "{}-{}",
-        now.format("%Y%m%dT%H%M%SZ"),
-        hex::encode(rand_bytes)
-    )
-}
-
 fn legacy_serial(now: &DateTime<Utc>) -> String {
     format!("legacy-{}", now.format("%Y%m%dT%H%M%SZ"))
 }
@@ -686,8 +1013,12 @@ mod tests {
     use crate::storage::{barrier::SecurityBarrier, barrier_aes_gcm, barrier_view::BarrierView};
     use crate::test_utils::new_test_backend;
 
-    async fn fresh_store() -> Arc<MasterStore> {
-        let backend = new_test_backend("test_rustion_master");
+    async fn fresh_store_named(test_name: &str) -> Arc<MasterStore> {
+        // Per-test name keeps macOS's nanosecond clock collisions —
+        // which happen when several `fresh_store` calls land in the
+        // same instant — from steering two tests into the same temp
+        // dir and tripping `ErrBarrierUnsealFailed` on the loser.
+        let backend = new_test_backend(&format!("test_rustion_master_{test_name}"));
         let mut key = vec![0u8; 32];
         rand::rng().fill_bytes(key.as_mut_slice());
         let barrier = barrier_aes_gcm::AESGCMBarrier::new(backend);
@@ -705,10 +1036,62 @@ mod tests {
         let mut cfg = store.get_or_default().await.unwrap();
         cfg.pki_mount = "pki-internal/".into();
         cfg.pki_role = "rustion-master".into();
+        cfg.pki_role_pqc = Some("rustion-master-pqc".into());
         cfg.rotate_grace_secs = grace_secs;
         cfg.default_ttl_secs = 3600;
         cfg.updated_at = Utc::now();
         store.put(&cfg).await.unwrap();
+    }
+
+    /// Test-only `MasterCertIssuer` that mints seeds locally (the
+    /// pre-refactor behaviour) and hands back a synthetic cert + serial.
+    /// The unit tests need this because spinning a full PKI mount under
+    /// an unsealed Core inside `cargo test --lib` is overkill — the
+    /// behaviour we actually want to cover here is the issue / rotate /
+    /// grace state machine, not the X.509 emission. The
+    /// `pki_issue_routes_through_engine` test below covers the real
+    /// `Core::handle_request` round-trip end-to-end.
+    struct FakeIssuer {
+        seen: std::sync::Mutex<Vec<(String, String, String)>>,
+    }
+    impl FakeIssuer {
+        fn new() -> Self {
+            Self { seen: std::sync::Mutex::new(Vec::new()) }
+        }
+    }
+    #[async_trait::async_trait]
+    impl MasterCertIssuer for FakeIssuer {
+        async fn issue_hybrid(
+            &self,
+            pki_mount: &str,
+            pki_role_ed25519: &str,
+            pki_role_mldsa65: &str,
+            _ttl_secs: u64,
+            _common_name: &str,
+        ) -> Result<IssuedHybrid, RvError> {
+            self.seen.lock().unwrap().push((
+                pki_mount.to_string(),
+                pki_role_ed25519.to_string(),
+                pki_role_mldsa65.to_string(),
+            ));
+            let mut ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut ed_seed);
+            let mut ml_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut ml_seed);
+            let now = Utc::now();
+            Ok(IssuedHybrid {
+                ed25519: IssuedHalf {
+                    seed: ed_seed,
+                    serial: format!("ed-{}", now.format("%Y%m%dT%H%M%S%fZ")),
+                    certificate_pem: "-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----\n".into(),
+                },
+                mldsa65: IssuedHalf {
+                    seed: ml_seed,
+                    serial: format!("ml-{}", now.format("%Y%m%dT%H%M%S%fZ")),
+                    certificate_pem: "-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----\n".into(),
+                },
+            })
+        }
     }
 
     #[maybe_async::test(
@@ -716,11 +1099,20 @@ mod tests {
         async(all(not(feature = "sync_handler")), tokio::test)
     )]
     async fn issue_then_export_returns_pubkey_pems() {
-        let store = fresh_store().await;
+        let store = fresh_store_named("issue_then_export").await;
         configure(&store, 60).await;
-        let outcome = store.issue().await.expect("issue");
+        let issuer = FakeIssuer::new();
+        let outcome = store.issue(&issuer).await.expect("issue");
         assert!(!outcome.serial.is_empty());
         assert!(!outcome.rotated);
+        // FakeIssuer was actually consulted with the configured mount
+        // + both roles — the binding hasn't been short-circuited.
+        let seen = issuer.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "issuer must be called exactly once per issue");
+        assert_eq!(seen[0].0, "pki-internal/");
+        assert_eq!(seen[0].1, "rustion-master");
+        assert_eq!(seen[0].2, "rustion-master-pqc");
+        drop(seen);
         let export = store.export_pubkey().await.expect("export");
         assert!(export.issued);
         assert!(export.ed25519_pem.contains("BVRG ED25519 PUBLIC KEY"));
@@ -734,8 +1126,9 @@ mod tests {
         async(all(not(feature = "sync_handler")), tokio::test)
     )]
     async fn issue_without_pki_config_errors() {
-        let store = fresh_store().await;
-        let err = store.issue().await.expect_err("must fail");
+        let store = fresh_store_named("issue_without_pki_config").await;
+        let issuer = FakeIssuer::new();
+        let err = store.issue(&issuer).await.expect_err("must fail");
         let msg = format!("{err}");
         assert!(msg.contains("pki_mount"), "got: {msg}");
     }
@@ -744,11 +1137,31 @@ mod tests {
         feature = "sync_handler",
         async(all(not(feature = "sync_handler")), tokio::test)
     )]
+    async fn issue_without_pqc_role_errors() {
+        let store = fresh_store_named("issue_without_pqc_role").await;
+        // Configure mount + ed25519 role, but leave pki_role_pqc unset.
+        let mut cfg = store.get_or_default().await.unwrap();
+        cfg.pki_mount = "pki-internal/".into();
+        cfg.pki_role = "rustion-master".into();
+        cfg.pki_role_pqc = None;
+        cfg.updated_at = Utc::now();
+        store.put(&cfg).await.unwrap();
+        let issuer = FakeIssuer::new();
+        let err = store.issue(&issuer).await.expect_err("must fail");
+        let msg = format!("{err}");
+        assert!(msg.contains("pki_role_pqc"), "got: {msg}");
+    }
+
+    #[maybe_async::test(
+        feature = "sync_handler",
+        async(all(not(feature = "sync_handler")), tokio::test)
+    )]
     async fn issue_twice_without_rotate_errors() {
-        let store = fresh_store().await;
+        let store = fresh_store_named("issue_twice").await;
         configure(&store, 60).await;
-        store.issue().await.expect("first issue");
-        let err = store.issue().await.expect_err("second issue must fail");
+        let issuer = FakeIssuer::new();
+        store.issue(&issuer).await.expect("first issue");
+        let err = store.issue(&issuer).await.expect_err("second issue must fail");
         let msg = format!("{err}");
         assert!(msg.contains("already issued"), "got: {msg}");
     }
@@ -758,10 +1171,14 @@ mod tests {
         async(all(not(feature = "sync_handler")), tokio::test)
     )]
     async fn rotate_shifts_current_to_previous() {
-        let store = fresh_store().await;
+        let store = fresh_store_named("rotate_shifts").await;
         configure(&store, 600).await;
-        let first = store.issue().await.expect("issue");
-        let second = store.rotate().await.expect("rotate");
+        let issuer = FakeIssuer::new();
+        let first = store.issue(&issuer).await.expect("issue");
+        // Sleep a microsecond so the FakeIssuer's wallclock-based
+        // serial differs between the two calls.
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let second = store.rotate(&issuer).await.expect("rotate");
         assert!(second.rotated);
         assert_ne!(first.serial, second.serial);
         let cfg = store.get().await.unwrap().expect("cfg present");
@@ -779,10 +1196,12 @@ mod tests {
         async(all(not(feature = "sync_handler")), tokio::test)
     )]
     async fn previous_drops_after_grace() {
-        let store = fresh_store().await;
+        let store = fresh_store_named("previous_drops_after_grace").await;
         configure(&store, 1).await;
-        store.issue().await.expect("issue");
-        store.rotate().await.expect("rotate");
+        let issuer = FakeIssuer::new();
+        store.issue(&issuer).await.expect("issue");
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        store.rotate(&issuer).await.expect("rotate");
         // Force the grace window into the past.
         let mut rec = store
             .read_signing_record()
@@ -800,9 +1219,10 @@ mod tests {
         async(all(not(feature = "sync_handler")), tokio::test)
     )]
     async fn rotate_without_issue_errors() {
-        let store = fresh_store().await;
+        let store = fresh_store_named("rotate_without_issue").await;
         configure(&store, 60).await;
-        let err = store.rotate().await.expect_err("must fail");
+        let issuer = FakeIssuer::new();
+        let err = store.rotate(&issuer).await.expect_err("must fail");
         let msg = format!("{err}");
         assert!(msg.contains("nothing to rotate"), "got: {msg}");
     }

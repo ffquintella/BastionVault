@@ -57,18 +57,24 @@ EXAMPLE ENTRY:
   grace window closes. (`features/rustion-authority-lifecycle.md`,
   `src/modules/rustion/master.rs`)
 - `MasterStore::load_active_keys` + `envelope::verify_with_grace` —
-  ordered verify against current first, previous within grace. Phase 2
-  decision: keep a single `pki_role` configuration field (no parallel
-  `pki_role_pqc`); the cross-engine PKI emission round-trip is deferred
-  to Phase 9 alongside the cluster-replicated master path. Documented
-  inline in `master.rs`.
+  ordered verify against current first, previous within grace.
 
 ### Changed
+- Rustion master issue/rotate now mint keys via the configured PKI engine
+  instead of generating them locally. `MasterConfig` gains a `pki_role_pqc`
+  field (ML-DSA-65 role; `pki_role` continues to address the Ed25519 role)
+  and both `issue` and `rotate` now route through `Core::handle_request`
+  against `<pki_mount>/issue/<role>` for each half, so engine ACL, audit,
+  and issuer state all engage. The real PKI-engine serial is surfaced as
+  `current_serial`; the leaf PEMs are persisted under the barrier on the
+  master signing record. Operators must configure both roles before
+  `issue` / `rotate` will succeed.
 - `rustion/master/pubkey` returns real Ed25519 / ML-DSA-65 public PEMs
   plus a SHA-256 fingerprint over the canonical `ed25519 || mldsa65`
   concatenation once the master has been issued, replacing the Phase-1
   empty-pubkey stub. `master/config` response now surfaces
-  `previous_serial`, `previous_not_after`, and `previous_grace_until`.
+  `pki_role_pqc`, `previous_serial`, `previous_not_after`, and
+  `previous_grace_until`.
 
 ## [0.8.6] - 2026-05-21
 
