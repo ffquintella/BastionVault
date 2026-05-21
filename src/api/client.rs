@@ -1,8 +1,21 @@
-use std::{collections::HashMap, fs, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt, fs,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use better_default::Default;
 use serde_json::{Map, Value};
-use ureq::tls::{Certificate, ClientCert, PrivateKey, RootCerts, TlsConfig};
+use ureq::{
+    tls::{Certificate, ClientCert, PrivateKey, RootCerts, TlsConfig},
+    unversioned::{
+        resolver::{ArrayVec, ResolvedSocketAddrs, Resolver},
+        transport::{DefaultConnector, NextTimeout},
+    },
+};
 
 use super::HttpResponse;
 use crate::errors::RvError;
@@ -33,6 +46,40 @@ pub struct Client {
     pub http_client: ureq::Agent,
     #[default(1)]
     pub api_version: u8,
+    /// When set, the agent is built with a static DNS resolver that returns
+    /// this socket address for every URI. Lets callers point `address` at a
+    /// hostname matching a cert SAN while the actual TCP connection goes to
+    /// a different IP (e.g. 127.0.0.1). Wired up by
+    /// `HttpOptions::client_at` when `--tls-server-name` is provided.
+    pub override_socket_addr: Option<SocketAddr>,
+}
+
+/// One-shot resolver that returns the same socket address for any URI it
+/// receives. Used to honour `--tls-server-name` by separating the cert SAN
+/// (encoded in the URL host so rustls picks it up as SNI) from the actual
+/// connection target.
+#[derive(Clone)]
+struct StaticAddrResolver(SocketAddr);
+
+impl fmt::Debug for StaticAddrResolver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "StaticAddrResolver({})", self.0)
+    }
+}
+
+impl Resolver for StaticAddrResolver {
+    fn resolve(
+        &self,
+        _uri: &ureq::http::Uri,
+        _config: &ureq::config::Config,
+        _timeout: NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        let mut out: ResolvedSocketAddrs = ArrayVec::from_fn(|_| self.0);
+        // ArrayVec::from_fn fills every slot; trim back to a single entry so
+        // the connector doesn't retry against ghost duplicates.
+        out.truncate(1);
+        Ok(out)
+    }
 }
 
 impl TLSConfigBuilder {
@@ -130,6 +177,11 @@ impl Client {
         self
     }
 
+    pub fn with_override_socket_addr(mut self, addr: SocketAddr) -> Self {
+        self.override_socket_addr = Some(addr);
+        self
+    }
+
     pub fn with_api_version(mut self, version: u8) -> Self {
         self.api_version = version;
         self
@@ -158,7 +210,15 @@ impl Client {
             config_builder = config_builder.tls_config(tls_config.tls_config.clone());
         }
 
-        self.http_client = config_builder.build().new_agent();
+        let config = config_builder.build();
+        self.http_client = match self.override_socket_addr {
+            Some(addr) => ureq::Agent::with_parts(
+                config,
+                DefaultConnector::default(),
+                StaticAddrResolver(addr),
+            ),
+            None => config.new_agent(),
+        };
         self
     }
 

@@ -269,9 +269,21 @@ impl HttpOptions {
     /// [`Self::client`] after discovery resolves the cluster name,
     /// and by `cluster discover` for the diagnostics-only path.
     pub fn client_at(&self, url: &str) -> Result<Client, RvError> {
-        let mut client = Client::new().with_addr(url).with_token(&self.token);
+        // --tls-server-name rewrites the URL host to the supplied name so
+        // rustls uses it as SNI, while a static resolver attached to the
+        // ureq agent keeps the connection aimed at the original host's
+        // IP. Lets you point at e.g. 127.0.0.1 but have rustls verify
+        // against a SAN like `segdc1vds0005.fgv.br`.
+        let (effective_url, override_addr) = match self.tls_server_name.as_deref() {
+            Some(name) if !name.is_empty() => rewrite_url_for_sni(url, name)?,
+            _ => (url.to_string(), None),
+        };
+        let mut client = Client::new().with_addr(&effective_url).with_token(&self.token);
+        if let Some(addr) = override_addr {
+            client = client.with_override_socket_addr(addr);
+        }
 
-        if url.starts_with("https://") {
+        if effective_url.starts_with("https://") {
             let mut tls_config_builder = TLSConfigBuilder::new().with_insecure(self.tls_skip_verify);
             let auto_ca = self.discovered_ca_cert();
             let ca_cert = self.ca_cert.as_ref().or(auto_ca.as_ref());
@@ -364,6 +376,7 @@ impl HttpOptions {
         &self.address
     }
 
+
     /// Look for a server-published serving certificate at a small set of
     /// conventional paths, used as a fallback when the user did not pass
     /// `--ca-cert` / `VAULT_CACERT`. Lets `bvault foo` against a TLS-enabled
@@ -403,6 +416,58 @@ impl HttpOptions {
     }
 }
 
+/// Replace the host in a `scheme://host[:port]/...` URL with `sni_name`,
+/// returning the rewritten URL plus the original host's resolved
+/// `SocketAddr` for the agent's static resolver. Returns `(url, None)` if
+/// the original host couldn't be resolved — TLS will then attempt name
+/// resolution as if the flag weren't passed, which surfaces a clearer
+/// error than silently dropping the override.
+fn rewrite_url_for_sni(
+    url: &str,
+    sni_name: &str,
+) -> Result<(String, Option<std::net::SocketAddr>), RvError> {
+    use std::net::ToSocketAddrs;
+
+    let (scheme, rest) = url
+        .split_once("://")
+        .ok_or_else(|| RvError::ErrString(format!("malformed URL: {url}")))?;
+    let (authority, path_suffix) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    // Strip optional userinfo (`user:pass@host:port`) — we never set it,
+    // but be defensive.
+    let host_port = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+
+    // Extract port if present. IPv6 literals are wrapped in [].
+    let (host, port) = if let Some(stripped) = host_port.strip_prefix('[') {
+        let (h, rest) = stripped
+            .split_once(']')
+            .ok_or_else(|| RvError::ErrString(format!("malformed IPv6 host: {host_port}")))?;
+        let p = rest.strip_prefix(':');
+        (h.to_string(), p)
+    } else if let Some((h, p)) = host_port.rsplit_once(':') {
+        (h.to_string(), Some(p))
+    } else {
+        (host_port.to_string(), None)
+    };
+    let port_str = port.map(|s| s.to_string()).unwrap_or_else(|| match scheme {
+        "https" => "443".to_string(),
+        _ => "80".to_string(),
+    });
+    let port_num: u16 = port_str
+        .parse()
+        .map_err(|_| RvError::ErrString(format!("invalid port `{port_str}` in {url}")))?;
+
+    // Resolve the original host to a SocketAddr. If it fails, fall back to
+    // letting the default resolver try — the user gets a meaningful error
+    // either way.
+    let socket_addr = (host.as_str(), port_num).to_socket_addrs().ok().and_then(|mut it| it.next());
+
+    let new_url = format!("{scheme}://{sni_name}:{port_num}{path_suffix}");
+    Ok((new_url, socket_addr))
+}
+
 pub trait CommandExecutor {
     #[inline]
     fn execute(&mut self) -> ExitCode {
@@ -419,6 +484,50 @@ pub trait CommandExecutor {
     }
 
     fn main(&self) -> Result<(), RvError>;
+}
+
+#[cfg(test)]
+mod sni_rewrite_tests {
+    use super::rewrite_url_for_sni;
+
+    #[test]
+    fn rewrites_ipv4_host_preserves_port_and_path() {
+        let (url, addr) = rewrite_url_for_sni("https://127.0.0.1:8200/v1/foo", "vault.example").unwrap();
+        assert_eq!(url, "https://vault.example:8200/v1/foo");
+        let addr = addr.expect("loopback should always resolve");
+        assert_eq!(addr.port(), 8200);
+        assert!(addr.ip().is_loopback());
+    }
+
+    #[test]
+    fn rewrites_ipv6_host() {
+        let (url, addr) = rewrite_url_for_sni("https://[::1]:4200", "vault.example").unwrap();
+        assert_eq!(url, "https://vault.example:4200");
+        let addr = addr.expect("loopback should always resolve");
+        assert_eq!(addr.port(), 4200);
+    }
+
+    #[test]
+    fn defaults_port_for_scheme_when_omitted() {
+        let (url, _) = rewrite_url_for_sni("https://127.0.0.1/", "vault.example").unwrap();
+        assert_eq!(url, "https://vault.example:443/");
+    }
+
+    #[test]
+    fn returns_none_addr_for_unresolvable_host_but_still_rewrites() {
+        let (url, addr) = rewrite_url_for_sni(
+            "https://this-host-does-not-exist.invalid:8200/x",
+            "vault.example",
+        )
+        .unwrap();
+        assert_eq!(url, "https://vault.example:8200/x");
+        assert!(addr.is_none());
+    }
+
+    #[test]
+    fn rejects_malformed_url() {
+        assert!(rewrite_url_for_sni("not-a-url", "vault.example").is_err());
+    }
 }
 
 #[cfg(test)]

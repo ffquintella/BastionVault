@@ -45,6 +45,20 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-05-21
+
+### Fixed
+- CLI `--tls-server-name` is now actually wired into the TLS stack. Previously
+  the flag (and `VAULT_TLS_SERVER_NAME` env var) parsed via clap but never
+  reached ureq, so rustls validated the server cert against the URL host —
+  pointing at `https://127.0.0.1:8200` with a cert SAN of `foo.example.com`
+  failed with `NotValidForName` regardless of `--tls-server-name`.
+  `HttpOptions::client_at` now rewrites the URL host to the supplied SNI
+  name and attaches a static DNS resolver to the ureq agent so the actual
+  TCP connection still lands on the original host. Lets containerised
+  deployments point the CLI at loopback while verifying against the host
+  FQDN's cert SAN.
+
 ## [0.8.2] - 2026-05-21
 
 ### Added
