@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-05-21
+
 ### Added
 - **Rustion master authority lifecycle Phase 2** — `rustion/master/issue`
   and `rustion/master/rotate` HTTP endpoints plus matching CLI subcommands
