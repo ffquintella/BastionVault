@@ -234,25 +234,28 @@ _bump-write:
 #   make container-image IMAGE_NAME=ghcr.io/ffquintella/bastionvault
 #   make container-image IMAGE_TAG=v0.4.0-rc1
 #   make container-image PLATFORM=linux/arm64    # default is linux/amd64
-#   make container-image INCLUDE_SHELL=1         # bake busybox /bin/sh in
+#   make container-image INCLUDE_SHELL=0         # opt-out of /bin/sh
 #
 # `BUILDX` toggles `docker buildx build` (multi-arch capable) when
 # CONTAINER_TOOL=docker. Podman handles --platform natively so the toggle
 # has no effect there.
 #
-# `INCLUDE_SHELL` (0|1, default 0) controls whether the production image
-# carries a shell. Off by default to preserve the classic shell-less
-# distroless property (smallest attack surface, no /bin/sh available
-# inside the container at all). Set to 1 to stage `busybox-static` from
-# a Debian builder layer and copy it into the runtime as /bin/busybox
-# with /bin/sh -> busybox. The :debug variant always has a shell and is
+# `INCLUDE_SHELL` (0|1, default 1) controls whether the production
+# image carries a shell. On by default so `podman exec` works out of
+# the box and the bundled `rustion-master-bootstrap.sh` can be invoked
+# directly inside the container. Setting to 0 stages no shell, restoring
+# the classic shell-less distroless property (smallest attack surface,
+# no /bin/sh available inside the container at all). When on, a Debian
+# builder layer stages `busybox-static` and copies it into the runtime
+# as /bin/busybox with /bin/sh -> busybox (single static binary, no
+# library deps, ~1 MB). The :debug variant always has a shell and is
 # unaffected by this flag.
 
 CONTAINER_TOOL ?= $(shell command -v podman >/dev/null 2>&1 && echo podman || echo docker)
 IMAGE_NAME     ?= bastionvault
 IMAGE_TAG      ?= $(VERSION)
 BUILDX         ?= 0
-INCLUDE_SHELL  ?= 0
+INCLUDE_SHELL  ?= 1
 
 # Default `PLATFORM` to linux/amd64 so the image we build by default
 # matches what we publish from CI (Linux/amd64 runners) and what most

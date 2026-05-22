@@ -95,16 +95,20 @@ RUN if readelf -d /out/bvault | grep -E 'NEEDED.*(libssl|libcrypto)'; then \
     fi
 
 # ---------- Stage 2: tools (pulled for TARGETPLATFORM) ----------
-# Optional shell staging. Gated by the `INCLUDE_SHELL` build ARG:
+# Shell staging. Gated by the `INCLUDE_SHELL` build ARG:
 #
-#   INCLUDE_SHELL=0  (default) — final image is shell-less, matching
-#                    classic distroless. `kubectl exec` / `podman
-#                    exec` won't have a shell to run.
-#   INCLUDE_SHELL=1  — stage busybox-static and copy it in as
-#                    /bin/busybox with /bin/sh -> busybox. Static
+#   INCLUDE_SHELL=1  (default) — stage busybox-static and copy it in
+#                    as /bin/busybox with /bin/sh -> busybox. Static
 #                    binary, no library deps, ~1 MB. Operators get a
-#                    POSIX shell for diagnostics without dragging in
-#                    glibc-linked bash + libtinfo.
+#                    POSIX shell for diagnostics + the in-container
+#                    `rustion-master-bootstrap.sh` runs out of the box
+#                    on `podman exec` without needing the :debug
+#                    variant or a host-side `podman cp`.
+#   INCLUDE_SHELL=0  — final image is shell-less, matching classic
+#                    distroless. `kubectl exec` / `podman exec` won't
+#                    have a shell to run. Opt-in for hardening
+#                    scenarios where the attack surface trade-off
+#                    matters more than operator ergonomics.
 #
 # Either way we land in a `tools` stage so the runtime can do an
 # unconditional `COPY --from=tools` — when the shell is disabled the
@@ -115,7 +119,7 @@ RUN if readelf -d /out/bvault | grep -E 'NEEDED.*(libssl|libcrypto)'; then \
 # (and we want to keep it that way).
 FROM --platform=$TARGETPLATFORM docker.io/library/debian:bookworm-slim AS tools
 
-ARG INCLUDE_SHELL=0
+ARG INCLUDE_SHELL=1
 
 RUN set -eux; \
     mkdir -p /staged/bin; \
@@ -128,9 +132,9 @@ RUN set -eux; \
     fi
 
 # ---------- Stage 3: runtime (pulled for TARGETPLATFORM) ----------
-# Distroless: glibc + ca-certificates + nothing else (plus, optionally,
-# /bin/busybox when built with INCLUDE_SHELL=1). No package manager,
-# no userspace network tools. The :debug variant layers on ss / ip /
+# Distroless: glibc + ca-certificates + /bin/busybox (the latter from
+# the `tools` stage, opt-out via --build-arg INCLUDE_SHELL=0). No
+# package manager, no userspace network tools. The :debug variant layers on ss / ip /
 # tcpdump / curl for incident response.
 FROM --platform=$TARGETPLATFORM gcr.io/distroless/cc-debian12:nonroot
 
@@ -145,16 +149,16 @@ COPY --from=builder /out/bvault         /usr/local/bin/bvault
 COPY --from=builder /out/bv-ssh-helper  /usr/local/bin/bv-ssh-helper
 
 # Operator bootstrap script for the Rustion master keypair. POSIX sh
-# so it runs under busybox ash when the image is built with
-# INCLUDE_SHELL=1 (or via the :debug variant). On a default
-# (INCLUDE_SHELL=0) build there is no shell to interpret it — copy
-# the file out with `podman cp <ctr>:/usr/local/bin/rustion-master-bootstrap.sh .`
-# and run it from your host instead.
+# so it runs under busybox ash, which is bundled by default via the
+# `tools` stage (INCLUDE_SHELL=1). Operators who explicitly opt out of
+# the shell with `--build-arg INCLUDE_SHELL=0` should `podman cp` this
+# file out and run it from the host instead.
 COPY --chmod=0755 scripts/rustion-master-bootstrap.sh /usr/local/bin/rustion-master-bootstrap.sh
 
-# Optional shell. Empty when built with the default INCLUDE_SHELL=0;
-# carries /bin/busybox + a /bin/sh symlink when built with
-# INCLUDE_SHELL=1. See the `tools` stage above for the rationale.
+# Shell. Carries /bin/busybox + a /bin/sh symlink by default
+# (INCLUDE_SHELL=1, set in the `tools` stage above). When built with
+# --build-arg INCLUDE_SHELL=0 the staged directory is empty and this
+# COPY is a no-op. See the `tools` stage above for the rationale.
 COPY --from=tools /staged/bin/  /bin/
 
 # Inert sample config (file storage at /var/lib/bvault/data, TLS expected

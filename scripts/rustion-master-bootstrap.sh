@@ -4,8 +4,8 @@
 #
 # POSIX sh — runs under bash, dash, zsh, AND busybox ash so the same
 # file can be invoked from an operator's laptop OR from inside the
-# distroless container image (built with INCLUDE_SHELL=1, or via the
-# :debug variant). Avoid bash-only constructs.
+# distroless container image (which ships a busybox /bin/sh by default;
+# the :debug variant always has one). Avoid bash-only constructs.
 #
 # Replaces the ~6-command manual recipe in
 # features/rustion-authority-lifecycle.md §0. Idempotent: re-runs

@@ -45,6 +45,26 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.11] - 2026-05-22
+
+### Changed
+- **Default container image now ships with `/bin/sh`.** The
+  `INCLUDE_SHELL` build arg in `deploy/container/Containerfile` and
+  the `Makefile` flipped from default `0` → default `1`, so a plain
+  `make container-image` (or a CI build with no overrides) bakes in
+  `busybox-static` from a Debian builder layer as `/bin/busybox` with
+  `/bin/sh` symlinked to it. Single static binary, no library deps,
+  ~1 MB. The bundled `rustion-master-bootstrap.sh` and any other
+  shell-driven workflows (init scripts, `podman exec`, readiness
+  probes) now work out of the box. Operators who want the classic
+  shell-less distroless property can opt back out with
+  `--build-arg INCLUDE_SHELL=0` / `make container-image INCLUDE_SHELL=0`.
+  apt only runs in the staging container, so the final image still
+  carries no package manager regardless of the flag.
+- Docs updated: `features/packaging-podman-server.md` and
+  `docs/rustion-integration.md` §3.1 now describe the new default and
+  the opt-out path.
+
 ## [0.8.10] - 2026-05-22
 
 ### Added
