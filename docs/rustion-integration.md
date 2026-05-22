@@ -111,6 +111,21 @@ scripts/rustion-master-bootstrap.sh --help
 
 Exit codes: `0` success, `1` user/env error (bad flag, missing `bvault`, login missing), `2` PKI failure (a request returned an error — the offending response is printed), `3` master is already issued (informational; use `bvault rustion master rotate` to mint a new keypair instead of accidentally rotating from a CI loop).
 
+**Running the script inside the container.** The script is shipped at `/usr/local/bin/rustion-master-bootstrap.sh` in every published image so operators don't need to copy it in by hand. It's POSIX sh (no bash dependency), so it runs under busybox ash without modification:
+
+```bash
+# :debug variant ships a shell by default — directly executable:
+podman exec -it bastionvault /usr/local/bin/rustion-master-bootstrap.sh --help
+
+# Default production image is shell-less. Either build it with
+# INCLUDE_SHELL=1 (stages busybox-static as /bin/sh), or copy the
+# script out and run it from the host:
+podman cp bastionvault:/usr/local/bin/rustion-master-bootstrap.sh ./rustion-master-bootstrap.sh
+./rustion-master-bootstrap.sh
+```
+
+The script auto-detects an incompatible default PKI issuer (e.g. an EC or RSA root reused from another mount) and aborts before the issue step fails with `ErrPkiKeyTypeInvalid` — see §3.1 troubleshooting below.
+
 The same flow ships in the GUI as **Settings → Rustion → Bastions → Master signing cert → Bootstrap master**. The button is only visible while the master is unissued; the wizard renders the same per-step ✓ list and leaves the modal open on failure so the operator can retry.
 
 #### Option B — Manual path (finer control)

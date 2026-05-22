@@ -41,6 +41,12 @@ FROM gcr.io/distroless/cc-debian12 AS runtime
 
 COPY --from=builder /usr/local/bin/bvault /usr/local/bin/bvault
 
+# Operator bootstrap script for the Rustion master keypair. POSIX sh
+# (runs under busybox ash). The e2e distroless image has no shell by
+# default — copy the script out with `docker cp` and run from the
+# host, or layer a shell-bearing image on top for in-container use.
+COPY --chmod=0755 scripts/rustion-master-bootstrap.sh /usr/local/bin/rustion-master-bootstrap.sh
+
 # Default config + data directories. The e2e compose file
 # bind-mounts ./var/bv into /var/lib/bastion-vault so state survives
 # `docker compose down`.

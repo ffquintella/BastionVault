@@ -45,7 +45,36 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
-## [0.8.9] - 2026-05-22
+## [0.8.10] - 2026-05-22
+
+### Added
+- `scripts/rustion-master-bootstrap.sh` is now shipped inside the
+  published container images at `/usr/local/bin/rustion-master-bootstrap.sh`
+  (`deploy/container/Containerfile`, `deploy/container/Containerfile.debug`,
+  and the e2e `Dockerfile`). The `:debug` variant runs it directly via
+  `podman exec`; the default distroless variant either needs
+  `INCLUDE_SHELL=1` or `podman cp` to extract and run from the host.
+
+### Changed
+- `scripts/rustion-master-bootstrap.sh` rewritten as POSIX sh (was
+  `#!/usr/bin/env bash`) so it runs under busybox ash inside the
+  container image without dragging a bash binary in. Syntax verified
+  under bash, dash, and POSIX sh.
+- Bootstrap script now reads `<mount>/issuer/default` after the "root
+  certificate already present" branch and refuses up-front when the
+  default issuer's `key_type` is classical (EC / RSA) instead of
+  `ed25519` / `ml-dsa-65`. Mirrors the GUI wizard's new detection.
+- Bootstrap script's "Mint hybrid master keypair" step now also
+  rewrites the raw `ErrPkiKeyTypeInvalid` enum from `bvault rustion
+  master issue` into actionable remediation guidance (fresh mount,
+  delete bad issuer, promote a compatible one).
+
+### Fixed
+- `scripts/rustion-master-bootstrap.sh` previously called
+  `bvault secrets enable -path=…` with Vault's single-dash flag style,
+  which clap does not accept — so the script was actually broken at
+  step 2 on any first-time install (it only ever worked when the PKI
+  mount was already present). Corrected to `--path=…`.
 
 ### Fixed
 - **GUI: Bootstrap Rustion master wizard** previously short-circuited the

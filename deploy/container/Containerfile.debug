@@ -63,6 +63,11 @@ LABEL org.opencontainers.image.title="BastionVault (debug)" \
 COPY --from=builder /src/target/release/bvault         /usr/local/bin/bvault
 COPY --from=builder /src/target/release/bv-ssh-helper  /usr/local/bin/bv-ssh-helper
 
+# Operator bootstrap script for the Rustion master keypair. The
+# `debug-nonroot` base already carries busybox, so this is directly
+# runnable via `podman exec <ctr> /usr/local/bin/rustion-master-bootstrap.sh`.
+COPY --chmod=0755 scripts/rustion-master-bootstrap.sh /usr/local/bin/rustion-master-bootstrap.sh
+
 # Diagnostic tools. We carry only the binaries the troubleshooting
 # cookbook actually mentions; resist the urge to grow this set.
 COPY --from=tools /usr/sbin/ss            /usr/local/bin/ss

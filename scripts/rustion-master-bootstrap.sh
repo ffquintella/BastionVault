@@ -1,5 +1,11 @@
-#!/usr/bin/env bash
+#!/bin/sh
+# shellcheck shell=sh
 # One-shot bootstrap for the Rustion master keypair.
+#
+# POSIX sh — runs under bash, dash, zsh, AND busybox ash so the same
+# file can be invoked from an operator's laptop OR from inside the
+# distroless container image (built with INCLUDE_SHELL=1, or via the
+# :debug variant). Avoid bash-only constructs.
 #
 # Replaces the ~6-command manual recipe in
 # features/rustion-authority-lifecycle.md §0. Idempotent: re-runs
@@ -32,7 +38,11 @@
 #   2  PKI failure (mount, root, role, or config call failed)
 #   3  master already issued (not an error — informational)
 
-set -euo pipefail
+set -eu
+# pipefail is bash/ksh; busybox ash has it but POSIX dash doesn't.
+# Enable it best-effort so a failing left-hand-side of a pipeline still
+# trips `set -e` where the shell supports it.
+(set -o pipefail) 2>/dev/null && set -o pipefail || true
 
 # ── Defaults ─────────────────────────────────────────────────────────
 PKI_MOUNT="pki"
@@ -57,7 +67,11 @@ if [ -z "${VAULT_TOKEN:-}" ] && [ -n "${BVAULT_TOKEN:-}" ]; then
 fi
 
 usage() {
-  sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
+  # Print the Usage/Flags/Exit-codes block from the header comment.
+  # Range is hand-maintained: lines 10–39 cover the description-onward
+  # banner; the lines above are POSIX-sh boilerplate that the operator
+  # doesn't need to see when running --help.
+  sed -n '10,39p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -115,7 +129,7 @@ if bvault secrets list 2>/dev/null | awk '{print $1}' | grep -Eq "^${PKI_MOUNT}/
   MOUNT_PRESENT=1
 fi
 if [ "$MOUNT_PRESENT" -eq 0 ]; then
-  if ! bvault secrets enable -path="$PKI_MOUNT" pki; then
+  if ! bvault secrets enable --path="$PKI_MOUNT" pki; then
     echo "error: failed to enable PKI mount at '$PKI_MOUNT'" >&2
     exit 2
   fi
@@ -143,6 +157,39 @@ else
     echo "    generated root CN='$COMMON_NAME' ttl=$ROOT_TTL"
   else
     echo "    root certificate already present — skipping"
+    # When we skipped root generation because something was already
+    # there, we cannot let an EC / RSA default issuer through: BV's
+    # PKI engine refuses to sign an ML-DSA-65 leaf with a classical
+    # root, and the operator would otherwise hit `ErrPkiKeyTypeInvalid`
+    # at step 6 with no clear remediation. Inspect the default
+    # issuer's key_type and bail early with concrete next-steps.
+    DEFAULT_ISSUER_INFO="$(bvault read "${PKI_MOUNT}/issuer/default" 2>/dev/null || true)"
+    if [ -n "$DEFAULT_ISSUER_INFO" ]; then
+      DEFAULT_KEY_TYPE="$(printf '%s\n' "$DEFAULT_ISSUER_INFO" \
+        | awk '/^key_type[[:space:]]/ {print tolower($2); exit}')"
+      if [ -n "$DEFAULT_KEY_TYPE" ] \
+          && [ "$DEFAULT_KEY_TYPE" != "ed25519" ] \
+          && [ "$DEFAULT_KEY_TYPE" != "ml-dsa-65" ]; then
+        echo "error: default issuer at '${PKI_MOUNT}/' has key_type='${DEFAULT_KEY_TYPE}'" >&2
+        echo "       — BV's PKI engine cannot sign an ML-DSA-65 leaf with a" >&2
+        echo "       classical (EC / RSA) root. Aborting before 'master issue'" >&2
+        echo "       fails with ErrPkiKeyTypeInvalid." >&2
+        echo "" >&2
+        echo "  Fix one of the following and re-run:" >&2
+        echo "    1. (recommended) Use a fresh PKI mount:" >&2
+        echo "         $0 --pki-mount pki-rustion ..." >&2
+        echo "    2. Delete the incompatible issuer at this mount:" >&2
+        echo "         bvault delete ${PKI_MOUNT}/issuer/default" >&2
+        echo "       then re-run this script." >&2
+        echo "    3. Promote a compatible Ed25519 / ML-DSA-65 issuer that" >&2
+        echo "       already exists at '${PKI_MOUNT}/' to default with" >&2
+        echo "         bvault write ${PKI_MOUNT}/config/issuers default=<ref>" >&2
+        exit 2
+      fi
+      if [ -n "$DEFAULT_KEY_TYPE" ]; then
+        echo "    default issuer key_type=${DEFAULT_KEY_TYPE} — compatible"
+      fi
+    fi
   fi
 fi
 
@@ -150,6 +197,8 @@ fi
 echo "==> [4/6] Ensuring PKI roles ($ED25519_ROLE, $MLDSA65_ROLE)"
 
 write_role() {
+  # POSIX sh doesn't standardise `local`, but every shell we target
+  # (bash, dash, ash, ksh, zsh) implements it. Keep it for hygiene.
   local role="$1" key_type="$2"
   if [ "$FORCE" -eq 0 ] && bvault read "${PKI_MOUNT}/roles/${role}" >/dev/null 2>&1; then
     echo "    role '$role' already exists — skipping (use --force to overwrite)"
@@ -188,6 +237,25 @@ echo "==> [6/6] Minting the hybrid master keypair"
 if ! ISSUE_OUTPUT="$(bvault rustion master issue 2>&1)"; then
   echo "error: 'bvault rustion master issue' failed:" >&2
   echo "$ISSUE_OUTPUT" | sed 's/^/    /' >&2
+  # Rewrite the cryptic ErrPkiKeyTypeInvalid with actionable
+  # remediation. The pre-flight check above catches this for the
+  # "issuer already present" path, but a brand-new mount whose root
+  # was somehow created with the wrong key algorithm can still trip
+  # it here.
+  if printf '%s' "$ISSUE_OUTPUT" | grep -q "ErrPkiKeyTypeInvalid"; then
+    echo "" >&2
+    echo "  Diagnosis: the default issuer at '${PKI_MOUNT}/' is likely" >&2
+    echo "  classical (EC / RSA) and cannot sign the ML-DSA-65 master" >&2
+    echo "  leaf. BV's PKI engine does not support classical → PQ" >&2
+    echo "  certificate chains." >&2
+    echo "" >&2
+    echo "  Fix one of the following and re-run:" >&2
+    echo "    1. (recommended) Use a fresh PKI mount:" >&2
+    echo "         $0 --pki-mount pki-rustion ..." >&2
+    echo "    2. Delete the incompatible issuer at this mount:" >&2
+    echo "         bvault delete ${PKI_MOUNT}/issuer/default" >&2
+    echo "       then re-run this script." >&2
+  fi
   exit 2
 fi
 echo "$ISSUE_OUTPUT" | sed 's/^/    /'

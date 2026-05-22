@@ -144,6 +144,14 @@ LABEL org.opencontainers.image.title="BastionVault" \
 COPY --from=builder /out/bvault         /usr/local/bin/bvault
 COPY --from=builder /out/bv-ssh-helper  /usr/local/bin/bv-ssh-helper
 
+# Operator bootstrap script for the Rustion master keypair. POSIX sh
+# so it runs under busybox ash when the image is built with
+# INCLUDE_SHELL=1 (or via the :debug variant). On a default
+# (INCLUDE_SHELL=0) build there is no shell to interpret it — copy
+# the file out with `podman cp <ctr>:/usr/local/bin/rustion-master-bootstrap.sh .`
+# and run it from your host instead.
+COPY --chmod=0755 scripts/rustion-master-bootstrap.sh /usr/local/bin/rustion-master-bootstrap.sh
+
 # Optional shell. Empty when built with the default INCLUDE_SHELL=0;
 # carries /bin/busybox + a /bin/sh symlink when built with
 # INCLUDE_SHELL=1. See the `tools` stage above for the rationale.
