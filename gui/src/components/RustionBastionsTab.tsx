@@ -52,23 +52,39 @@ export function RustionBastionsTab() {
 
   const refresh = useCallback(async () => {
     setLoading(true);
+    // Don't gang all fetches behind a single Promise.all — one rejected
+    // call (e.g. a 404 from rustionTargetHealthAll on a fresh vault)
+    // would abort the batch and leave masterCfg / masterPub stale, so
+    // the panel keeps showing "Master not issued yet" even after a
+    // successful bootstrap. Settle each one independently and surface
+    // errors via toast rather than dropping the whole refresh.
     try {
-      const [ts, hs, mc, mp, depId] = await Promise.all([
+      const results = await Promise.allSettled([
         rustion.rustionTargetList(),
         rustion.rustionTargetHealthAll(),
         rustion.rustionMasterRead(),
         rustion.rustionMasterPubkeyExport(),
-        rustion.rustionDeploymentIdRead().catch(() => ""),
+        rustion.rustionDeploymentIdRead(),
       ]);
-      setTargets(ts);
-      const map: Record<string, RustionTargetHealth> = {};
-      for (const h of hs) map[h.id] = h;
-      setHealth(map);
-      setMasterCfg(mc);
-      setMasterPub(mp);
-      setDeploymentId(depId);
-    } catch (e) {
-      toast("error", extractError(e));
+      const [tsR, hsR, mcR, mpR, depIdR] = results;
+      if (tsR.status === "fulfilled") setTargets(tsR.value);
+      if (hsR.status === "fulfilled") {
+        const map: Record<string, RustionTargetHealth> = {};
+        for (const h of hsR.value) map[h.id] = h;
+        setHealth(map);
+      }
+      if (mcR.status === "fulfilled") setMasterCfg(mcR.value);
+      if (mpR.status === "fulfilled") setMasterPub(mpR.value);
+      setDeploymentId(depIdR.status === "fulfilled" ? depIdR.value : "");
+      const failed = results
+        .map((r, i) => ({ r, name: ["targets", "health", "master", "pubkey", "deployment_id"][i] }))
+        .filter(({ r }) => r.status === "rejected") as Array<{
+          r: PromiseRejectedResult;
+          name: string;
+        }>;
+      for (const { r, name } of failed) {
+        toast("error", `${name}: ${extractError(r.reason)}`);
+      }
     } finally {
       setLoading(false);
     }

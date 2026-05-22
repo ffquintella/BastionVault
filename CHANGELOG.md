@@ -45,6 +45,19 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.14] - 2026-05-22
+
+### Fixed
+- **Rustion settings panel now refreshes master state when sibling
+  fetches fail.** `refresh()` in
+  `gui/src/components/RustionBastionsTab.tsx` ganged five backend calls
+  behind a single `Promise.all`, so a 404 from `rustionTargetHealthAll`
+  (common on a fresh vault with no targets enrolled yet) aborted the
+  batch and left `masterCfg` / `masterPub` stale — the panel kept
+  showing "Master not issued yet" even after the bootstrap wizard
+  succeeded. Switched to `Promise.allSettled`, applying each result
+  independently and surfacing per-call errors via toast.
+
 ## [0.8.13] - 2026-05-22
 
 ### Fixed
