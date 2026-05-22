@@ -20,7 +20,7 @@ use crate::{
     disable_version_flag = false,
     about = r#"Enables a secrets engine. By default, secrets engines are enabled at the path
 corresponding to their TYPE, but users can customize the path using the
--path option.
+--path option.
 
 Once enabled, BastionVault will route all requests which begin with the path to the
 secrets engine.
@@ -31,11 +31,11 @@ Enable the AWS secrets engine at aws/:
 
 Enable the SSH secrets engine at ssh-prod/:
 
-    $ bvault secrets enable -path=ssh-prod ssh
+    $ bvault secrets enable --path=ssh-prod ssh
 
 Enable the database secrets engine with an explicit maximum TTL of 30m:
 
-    $ bvault secrets enable -max-lease-ttl=30m database
+    $ bvault secrets enable --max-lease-ttl=30m database
 
 For a full list of secrets engines and examples, please see the documentation."#
 )]

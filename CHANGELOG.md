@@ -45,8 +45,18 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
-### Added
+## [0.8.8] - 2026-05-22
 
+### Fixed
+- Docs and `bvault secrets enable --help` text incorrectly showed Vault's
+  single-dash flag style (e.g. `-path=pki`). BastionVault uses clap-style
+  long flags (`--path=pki`). Corrected across feature docs, the SSH engine
+  doc, the dynamic-engine-plugins README, and the in-binary help text.
+  Also fixed the dynamic-engine-plugins README example, which referenced
+  a nonexistent `-plugin=` flag — plugin selection is done via
+  `--options=plugin_name=…`.
+
+### Added
 - One-shot bootstrap script `scripts/rustion-master-bootstrap.sh` for
   Rustion master + PKI roles + issue. GUI: Rustion → Master panel now
   has a "Bootstrap master" button that runs the same flow.

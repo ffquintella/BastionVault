@@ -76,7 +76,7 @@ The engine type is `ssh`. Mount once per logical environment (e.g. `ssh/` for pr
 ### CLI
 
 ```bash
-bv secrets enable -path=ssh ssh
+bvault secrets enable --path=ssh ssh
 ```
 
 ### HTTP
@@ -415,7 +415,7 @@ Audit logs still capture the role name, caller identity, and metadata — useful
 
 ### Rotate the CA
 
-1. Generate a new CA at a *second* mount: `bv secrets enable -path=ssh-v2 ssh; bv write ssh-v2/config/ca generate_signing_key=true`.
+1. Generate a new CA at a *second* mount: `bvault secrets enable --path=ssh-v2 ssh; bvault write ssh-v2/config/ca generate_signing_key=true`.
 2. Pin both CA pubkeys in `TrustedUserCAKeys` on target hosts (concatenate them in the file).
 3. Migrate roles to the new mount.
 4. Once outstanding certificates from the old CA expire (i.e. one `max_ttl` window), remove the old pubkey line from `TrustedUserCAKeys` and `bv secrets disable ssh`.

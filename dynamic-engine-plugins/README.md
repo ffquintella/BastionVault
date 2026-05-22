@@ -56,7 +56,7 @@ Operators install individual plugins from a release artifact via the existing pl
 bvault sys plugins catalog secret bastion-plugin-postgres \
   --sha256 <hex> \
   --command bastion-plugin-postgres
-bvault secrets enable -path=postgres-prod -plugin=bastion-plugin-postgres database
+bvault secrets enable --path=postgres-prod --options=plugin_name=bastion-plugin-postgres database
 ```
 
 ## Building

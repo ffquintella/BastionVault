@@ -138,7 +138,7 @@ and leaves the modal open on failure so the operator can retry.
 
 ```bash
 # 1. Enable the PKI mount (skip if already mounted) and generate a root.
-bvault secrets enable -path=pki pki
+bvault secrets enable --path=pki pki
 bvault write -field=certificate pki/root/generate/internal \
     common_name="BastionVault Rustion Master Root" \
     ttl=87600h > /tmp/rustion-root.pem

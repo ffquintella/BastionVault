@@ -151,7 +151,7 @@ required = [
 ]
 ```
 
-When an operator does `vault secrets enable -path=postgres-prod database` (or the BastionVault equivalent), the framework:
+When an operator does `bvault secrets enable --path=postgres-prod database` (BastionVault uses clap-style `--path`, not Vault's single-dash `-path`), the framework:
 
 1. Resolves `engine_type = "database"` against the catalog,
 2. Picks the highest-priority enabled plugin claiming that engine type,
