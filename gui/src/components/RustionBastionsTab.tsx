@@ -882,6 +882,11 @@ export function BootstrapMasterModal({
           mode: "internal",
           common_name: commonName,
           ttl: rootTtl,
+          // Must be Ed25519 — BV's PKI engine refuses classical (EC / RSA)
+          // → PQ chains, so an EC root cannot sign the ML-DSA-65 leaf at
+          // step 6 (`ErrPkiKeyTypeInvalid`). Ed25519 can sign both the
+          // Ed25519 and ML-DSA-65 master leaves.
+          key_type: "ed25519",
         });
         update("root", { status: "ok" });
       }

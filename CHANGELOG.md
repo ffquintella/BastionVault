@@ -45,6 +45,20 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.12] - 2026-05-22
+
+### Fixed
+- **Rustion master bootstrap now generates an Ed25519 root** instead of
+  the PKI engine's EC default. The GUI `Bootstrap Rustion master` wizard
+  (`gui/src/components/RustionBastionsTab.tsx`) and
+  `scripts/rustion-master-bootstrap.sh` both called the root-generate
+  endpoint with no `key_type`, producing a classical EC root that could
+  not sign the ML-DSA-65 master leaf — step 6 (`Mint hybrid master
+  keypair`) failed with `HTTP 400: master issue: rustion master: PKI
+  engine call pki/issue/<mldsa65-role> failed: ErrPkiKeyTypeInvalid`.
+  Recovery for affected mounts: `bvault delete <mount>/issuer/default`
+  and re-run the wizard / script.
+
 ## [0.8.11] - 2026-05-22
 
 ### Changed

@@ -148,13 +148,18 @@ else
     ROOT_PRESENT=1
   fi
   if [ "$ROOT_PRESENT" -eq 0 ]; then
+    # key_type=ed25519: BV's PKI engine refuses classical (EC / RSA) → PQ
+    # chains, so a default EC / RSA root cannot sign the ML-DSA-65 master
+    # leaf at step 6 (ErrPkiKeyTypeInvalid). Ed25519 can sign both the
+    # Ed25519 and ML-DSA-65 leaves.
     if ! bvault write "${PKI_MOUNT}/root/generate/internal" \
         common_name="$COMMON_NAME" \
+        key_type=ed25519 \
         ttl="$ROOT_TTL" >/dev/null; then
       echo "error: failed to generate PKI root at '${PKI_MOUNT}/root/generate/internal'" >&2
       exit 2
     fi
-    echo "    generated root CN='$COMMON_NAME' ttl=$ROOT_TTL"
+    echo "    generated root CN='$COMMON_NAME' key_type=ed25519 ttl=$ROOT_TTL"
   else
     echo "    root certificate already present — skipping"
     # When we skipped root generation because something was already
