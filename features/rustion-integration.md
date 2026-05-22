@@ -324,6 +324,186 @@ Recording: always (locked)
 
 If `rustion-pci-1` is `down`, the dispatcher tries `rustion-pci-2`. If both are `down`, Connect fails with `bastion_unavailable` — the operator is **not** silently dropped onto `rustion-corp`, because the locked `pci-zone` group constrains the candidate set. That hard-fail is the point of the lock.
 
+### Enrolling a Rustion bastion — operator runbook
+
+End-to-end procedure for taking a freshly provisioned Rustion host and
+landing it in BastionVault's registry. The handshake is **two-sided**:
+BastionVault has to pin Rustion's hybrid identity, and Rustion has to
+approve BastionVault's master pubkey before envelopes are honoured.
+Skip either half and the dispatcher will surface `unknown_authority`
+on the first session attempt.
+
+#### 0. Prerequisites
+
+- Rustion ≥ 0.10.0 (ships the `control-plane identity export` CLI).
+  Older builds: bring the host up to date, or copy `identity.pub` off
+  disk manually (see step 1 footnote).
+- Rustion's control-plane listener is configured and reachable from
+  BastionVault — by default `127.0.0.1:8443`. Production deployments
+  set `control_plane.listen = "0.0.0.0:9443"` (or similar) plus
+  `tls_cert_path` / `tls_key_path` in `rustion.toml`. The endpoint
+  pasted into BV is always `host:port` of this listener.
+- Rustion has been started at least once so the control-plane bootstrap
+  routine has materialised `<identity_dir>/identity.{pub,key}`. On a
+  cold host you'll see `control-plane: identity missing — generating
+  fresh ML-KEM-768 keypair` in the log on first boot.
+
+#### 1. Export Rustion's hybrid identity (on the Rustion host)
+
+```bash
+# ML-KEM-768 encapsulation key — used by BV to seal session-grant
+# envelopes to this Rustion. Base64 standard-alphabet, newline-
+# terminated.
+rustion control-plane identity export \
+    --config /etc/rustion/rustion.toml > kem.pub.b64
+
+# (Optional) raw bytes, e.g. to pipe into a separate signing step:
+rustion control-plane identity export \
+    --config /etc/rustion/rustion.toml --raw > identity.pub.bin
+```
+
+The `--kem` flag is accepted for forward compatibility but is currently
+a no-op — the command always reads `<identity_dir>/identity.pub`
+(ML-KEM-768, 1184 bytes raw / 1580 chars base64). The file lives under
+`control_plane.identity_dir`, default `/opt/rustion/control-plane/` in
+release builds and `~/.rustion/control-plane/` in debug builds. The
+matching private half stays in `identity.key` with `0600` perms and is
+never emitted by the CLI.
+
+> **Ed25519 + ML-DSA-65 webhook signing pair — current gap.** The
+> BastionVault form asks for `public_key.ed25519` and
+> `public_key.mldsa65` alongside the KEM key. These are the public
+> halves of Rustion's *webhook* signing keypair (`WebhookSigningKey`
+> in [`crates/rustion-control-plane/src/webhook.rs`](https://github.com/…/rustion/blob/main/crates/rustion-control-plane/src/webhook.rs)).
+> As of Rustion 0.10.0 this keypair is generated fresh in memory at
+> startup and is **not yet exported by the CLI**. Until the follow-up
+> `rustion control-plane webhook-key export` lands, operators have two
+> options: (a) submit empty strings in BV — recording webhooks land
+> unverified, sessions still work; or (b) extract the public halves
+> from the running process via `journalctl -u rustion | grep
+> webhook.public` (Rustion logs them at INFO on startup for exactly
+> this case). Track the export-CLI follow-up under Phase 9.3.
+
+#### 2. Register the Rustion target on BastionVault
+
+GUI path — **Settings → Rustion Bastions → Enrol bastion**. Paste:
+
+| Field | Value | Source |
+|---|---|---|
+| Name | Operator-friendly label, unique per deployment, case-insensitive | Free-form |
+| Endpoint | `host:port` of Rustion's control-plane listener | `control_plane.listen` |
+| `public_key.ed25519` (base64 SPKI) | Webhook signing — Ed25519 half | Rustion log line `webhook.public.ed25519=…` (see gap note above) |
+| `public_key.mldsa65` (base64 raw) | Webhook signing — ML-DSA-65 half | Rustion log line `webhook.public.mldsa65=…` |
+| `kem_public_key` (base64 raw ML-KEM-768) | Session-envelope sealing | `rustion control-plane identity export` (step 1) |
+| Description / Tags / Enabled | Free-form | — |
+
+CLI parity:
+
+```bash
+bvault rustion target add \
+    --name eu-prod-1 \
+    --endpoint rustion-eu-1.internal:9443 \
+    --ed25519 "$(cat ed25519.spki.b64)" \
+    --mldsa65 "$(cat mldsa65.pub.b64)" \
+    --kem-pubkey "$(cat kem.pub.b64)" \
+    --description "EU west primary" \
+    --tags "region=eu-west-1,zone=prod"
+```
+
+Both paths refuse a classical-only submission (`ed25519` set,
+`mldsa65` empty) as a downgrade attack. IDs are derived deterministi-
+cally from the lowercased name, so a CLI re-submission lands on the
+same record as the wizard — useful for declarative provisioning.
+
+After save, BV transitions the target through `Unknown → Up` once the
+30s health pinger ([`probe.rs`](../src/modules/rustion/probe.rs)) sees
+a `200 OK` from `GET /v1/health`. The wizard's **Test Connection**
+button (`POST /v1/rustion/targets/{id}/probe`) forces a single
+on-demand probe so operators don't have to wait for the next sweep.
+
+#### 3. Export BastionVault's master pubkey (on BastionVault)
+
+```bash
+bvault rustion master export --output bv-master.b64
+# or, GUI: Settings → Rustion Bastions → "Export master pubkey"
+```
+
+This emits the hybrid Ed25519 + ML-DSA-65 master signing pubkey along
+with BV's `deployment_id` — both required at the Rustion approval
+step. The same file can be re-used across every Rustion target in the
+deployment; rotating the master cert invalidates it.
+
+#### 4. Submit to Rustion's pending queue
+
+BastionVault automatically posts the master pubkey to
+`POST /v1/authority/submit` on every newly enrolled target. The
+submission lands in `<authorities_dir>/authorities-pending/<n>.yaml`
+on the Rustion side, inert (envelopes return `403
+authority_pending`) until an admin approves it. To trigger the
+submission manually — e.g. after re-establishing connectivity to a
+previously-unreachable target — use
+`POST /v1/rustion/targets/{id}/reattest` or the wizard's **Re-submit
+enrolment** button.
+
+#### 5. Approve on Rustion
+
+```bash
+# On the Rustion host, as an operator:
+rustion authority list-pending
+# NAME                        SUBMITTED-AT          DEPLOYMENT-ID
+# bv-eu-prod                  2026-05-22T14:02:11Z  d-7f3a…
+
+rustion authority approve --name bv-eu-prod \
+    --max-session-secs 28800 \
+    --replay-window-secs 300
+# moves authorities-pending/bv-eu-prod.yaml → authorities/bv-eu-prod.yaml
+# pins deployment_id; writes authority.approved to the hash chain
+```
+
+`approve` is the moment Rustion starts accepting envelopes signed by
+the submitted master pubkey. `max-session-secs` is the per-authority
+upper bound on requested TTLs (default 8h); `replay-window-secs` is the
+clock-skew tolerance for envelope nonce freshness (default 5 min).
+
+Use `rustion authority reject --name <n> --reason "<why>"` to send
+the submission to `tombstoned/` instead — the operator on the BV side
+will see `authority_tombstoned` on the next probe and must investigate
+before re-submitting.
+
+#### 6. Verify end-to-end
+
+```bash
+# On BastionVault — open + close a no-op session against the target:
+bvault rustion target test --id <target-id>
+# expects: probe_ok=true, envelope_accepted=true, session_open=true
+```
+
+The GUI surfaces the same call as **Test Session** on the target row.
+A green check on both *Health* and *Trust* columns means the target is
+ready for production traffic. From this point onwards the dispatcher
+will route sessions to it under whatever policy chain selects it.
+
+#### 7. Day-2 operations
+
+- **Re-attestation** runs weekly from BV (`POST /v1/rustion/master/attest`);
+  if it fails three times, the target flips to `attestation_stale` and
+  is excluded from the dispatcher until the operator re-runs step 4.
+- **Master rotation** issues a fresh master cert and resubmits to every
+  enrolled Rustion. Rustion treats it as a key rotation (same
+  `deployment_id`, new `current_pubkey`) and the admin re-approves
+  with `rustion authority approve` — the workflow is identical to a
+  first enrolment, except the pending YAML is annotated as a rotation
+  in the diff column.
+- **De-enrolment** — deleting the target on BV sends a final signed
+  `deenrol` envelope; Rustion moves the authority into `tombstoned/`
+  and refuses further envelopes from that pubkey forever. The
+  tombstone survives admin restarts and cannot be cleared without an
+  explicit `rustion authority untombstone <n>`.
+- **Symmetric revocation** — if the Rustion admin runs
+  `rustion authority deenrol --name bv-eu-prod` first, BV's next probe
+  sees the `authority_tombstoned` response and surfaces
+  `bastion_rejected_authority` on the target row.
+
 ### Module / file layout (BastionVault)
 
 ```

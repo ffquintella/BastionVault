@@ -45,6 +45,26 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.16] - 2026-05-22
+
+### Changed
+- **Rustion enrolment docs — operator runbook.** Added an
+  end-to-end "Enrolling a Rustion bastion" section to
+  [`features/rustion-integration.md`](features/rustion-integration.md)
+  covering the new `rustion control-plane identity export` CLI
+  (Rustion 0.10.0), where the ML-KEM-768 / Ed25519 / ML-DSA-65 keys
+  live, how to submit + approve on the Rustion side
+  (`rustion authority list-pending` / `approve`), how to verify
+  end-to-end, and day-2 ops (re-attestation, master rotation, de-enrol,
+  symmetric revocation). Flagged the current gap that Rustion's
+  webhook Ed25519 + ML-DSA-65 public halves are not yet exported by
+  the CLI — operators read them from the startup INFO log until the
+  Phase 9.3 export command lands. Modal helper text in
+  [`RustionBastionsTab.tsx`](gui/src/components/RustionBastionsTab.tsx)
+  and CLI long-help in
+  [`rustion_target_add.rs`](src/cli/command/rustion_target_add.rs)
+  updated to point at the runbook.
+
 ## [0.8.15] - 2026-05-22
 
 ### Fixed

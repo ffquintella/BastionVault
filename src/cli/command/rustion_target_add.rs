@@ -44,9 +44,13 @@ pub struct RustionTargetAdd {
     mldsa65: String,
 
     /// Base64 raw FIPS 203 ML-KEM-768 public key — used to encrypt
-    /// session-grant envelopes to this Rustion instance. Get it from
-    /// `rustion control-plane identity export --kem` on the Rustion
-    /// side.
+    /// session-grant envelopes to this Rustion instance. Emit it on
+    /// the Rustion host with `rustion control-plane identity export
+    /// --config <path-to-rustion.toml>` (the `--kem` flag is accepted
+    /// for forward compatibility but is currently a no-op — the
+    /// command always reads `<identity_dir>/identity.pub`). See
+    /// `features/rustion-integration.md` for the full enrolment
+    /// runbook.
     #[arg(long = "kem-pubkey")]
     kem_pubkey: String,
 

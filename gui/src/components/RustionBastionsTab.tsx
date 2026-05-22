@@ -543,10 +543,18 @@ function EnrolWizardModal({
     >
       <div className="space-y-3">
         <p className="text-xs text-[var(--color-text-muted)]">
-          Paste the hybrid public key Rustion exports via{" "}
-          <code>rustion control-plane identity export</code>. Both
-          halves (Ed25519 + ML-DSA-65) are required — a classical-only
-          enrolment is refused as a downgrade attack.
+          <strong>KEM key:</strong> <code>rustion control-plane
+          identity export</code> on the Rustion host emits the
+          base64-encoded ML-KEM-768 public key.{" "}
+          <strong>Ed25519 + ML-DSA-65:</strong> the webhook signing
+          halves — Rustion logs them at INFO on startup
+          (<code>webhook.public.ed25519=…</code> /{" "}
+          <code>webhook.public.mldsa65=…</code>) until a dedicated
+          export CLI lands (Phase 9.3). Both signature halves are
+          required — a classical-only enrolment is refused as a
+          downgrade attack. See{" "}
+          <code>features/rustion-integration.md</code> §“Enrolling a
+          Rustion bastion — operator runbook”.
         </p>
         <div className="grid grid-cols-2 gap-3">
           <Input
