@@ -138,64 +138,35 @@ else
   echo "    PKI mount '$PKI_MOUNT/' already present — skipping enable"
 fi
 
-# ── 3. Root cert ─────────────────────────────────────────────────────
-echo "==> [3/6] Ensuring root certificate"
+# Per-class issuer names. BV's PKI engine refuses mixed-class chains
+# (classical CA → PQC leaf or vice versa), so we stand up two roots in
+# the same mount and pin each role to its matching one.
+ED_ISSUER_NAME="rustion-master-ed25519-root"
+ML_ISSUER_NAME="rustion-master-mldsa65-root"
+
+# ── 3. Root certs (one per algorithm class) ──────────────────────────
+echo "==> [3/6] Ensuring Ed25519 + ML-DSA-65 root certificates"
 if [ "$SKIP_ROOT" -eq 1 ]; then
-  echo "    --skip-root set — assuming root already exists"
+  echo "    --skip-root set — assuming both roots already exist"
 else
-  ROOT_PRESENT=0
-  if bvault read "${PKI_MOUNT}/cert/ca" >/dev/null 2>&1; then
-    ROOT_PRESENT=1
-  fi
-  if [ "$ROOT_PRESENT" -eq 0 ]; then
-    # key_type=ed25519: BV's PKI engine refuses classical (EC / RSA) → PQ
-    # chains, so a default EC / RSA root cannot sign the ML-DSA-65 master
-    # leaf at step 6 (ErrPkiKeyTypeInvalid). Ed25519 can sign both the
-    # Ed25519 and ML-DSA-65 leaves.
+  ensure_root() {
+    local issuer_name="$1" key_type="$2" cn_suffix="$3"
+    if bvault read "${PKI_MOUNT}/issuer/${issuer_name}" >/dev/null 2>&1; then
+      echo "    issuer '${issuer_name}' already present — skipping"
+      return 0
+    fi
     if ! bvault write "${PKI_MOUNT}/root/generate/internal" \
-        common_name="$COMMON_NAME" \
-        key_type=ed25519 \
-        ttl="$ROOT_TTL" >/dev/null; then
-      echo "error: failed to generate PKI root at '${PKI_MOUNT}/root/generate/internal'" >&2
+        common_name="${COMMON_NAME} (${cn_suffix})" \
+        key_type="${key_type}" \
+        ttl="$ROOT_TTL" \
+        issuer_name="${issuer_name}" >/dev/null; then
+      echo "error: failed to generate ${key_type} root '${issuer_name}'" >&2
       exit 2
     fi
-    echo "    generated root CN='$COMMON_NAME' key_type=ed25519 ttl=$ROOT_TTL"
-  else
-    echo "    root certificate already present — skipping"
-    # When we skipped root generation because something was already
-    # there, we cannot let an EC / RSA default issuer through: BV's
-    # PKI engine refuses to sign an ML-DSA-65 leaf with a classical
-    # root, and the operator would otherwise hit `ErrPkiKeyTypeInvalid`
-    # at step 6 with no clear remediation. Inspect the default
-    # issuer's key_type and bail early with concrete next-steps.
-    DEFAULT_ISSUER_INFO="$(bvault read "${PKI_MOUNT}/issuer/default" 2>/dev/null || true)"
-    if [ -n "$DEFAULT_ISSUER_INFO" ]; then
-      DEFAULT_KEY_TYPE="$(printf '%s\n' "$DEFAULT_ISSUER_INFO" \
-        | awk '/^key_type[[:space:]]/ {print tolower($2); exit}')"
-      if [ -n "$DEFAULT_KEY_TYPE" ] \
-          && [ "$DEFAULT_KEY_TYPE" != "ed25519" ] \
-          && [ "$DEFAULT_KEY_TYPE" != "ml-dsa-65" ]; then
-        echo "error: default issuer at '${PKI_MOUNT}/' has key_type='${DEFAULT_KEY_TYPE}'" >&2
-        echo "       — BV's PKI engine cannot sign an ML-DSA-65 leaf with a" >&2
-        echo "       classical (EC / RSA) root. Aborting before 'master issue'" >&2
-        echo "       fails with ErrPkiKeyTypeInvalid." >&2
-        echo "" >&2
-        echo "  Fix one of the following and re-run:" >&2
-        echo "    1. (recommended) Use a fresh PKI mount:" >&2
-        echo "         $0 --pki-mount pki-rustion ..." >&2
-        echo "    2. Delete the incompatible issuer at this mount:" >&2
-        echo "         bvault delete ${PKI_MOUNT}/issuer/default" >&2
-        echo "       then re-run this script." >&2
-        echo "    3. Promote a compatible Ed25519 / ML-DSA-65 issuer that" >&2
-        echo "       already exists at '${PKI_MOUNT}/' to default with" >&2
-        echo "         bvault write ${PKI_MOUNT}/config/issuers default=<ref>" >&2
-        exit 2
-      fi
-      if [ -n "$DEFAULT_KEY_TYPE" ]; then
-        echo "    default issuer key_type=${DEFAULT_KEY_TYPE} — compatible"
-      fi
-    fi
-  fi
+    echo "    generated root '${issuer_name}' key_type=${key_type} ttl=$ROOT_TTL"
+  }
+  ensure_root "$ED_ISSUER_NAME" "ed25519"  "Ed25519"
+  ensure_root "$ML_ISSUER_NAME" "ml-dsa-65" "ML-DSA-65"
 fi
 
 # ── 4. Roles ─────────────────────────────────────────────────────────
@@ -204,24 +175,27 @@ echo "==> [4/6] Ensuring PKI roles ($ED25519_ROLE, $MLDSA65_ROLE)"
 write_role() {
   # POSIX sh doesn't standardise `local`, but every shell we target
   # (bash, dash, ash, ksh, zsh) implements it. Keep it for hygiene.
-  local role="$1" key_type="$2"
+  local role="$1" key_type="$2" issuer_ref="$3"
   if [ "$FORCE" -eq 0 ] && bvault read "${PKI_MOUNT}/roles/${role}" >/dev/null 2>&1; then
     echo "    role '$role' already exists — skipping (use --force to overwrite)"
     return 0
   fi
+  # issuer_ref pins the role to its matching CA — required because the
+  # PKI engine refuses mixed-class chains.
   if ! bvault write "${PKI_MOUNT}/roles/${role}" \
       key_type="$key_type" \
       allow_any_name=true \
+      issuer_ref="$issuer_ref" \
       ttl="$ROLE_TTL" \
       max_ttl="$ROLE_MAX_TTL" >/dev/null; then
     echo "error: failed to write role '$role' (key_type=$key_type)" >&2
     exit 2
   fi
-  echo "    wrote role '$role' key_type=$key_type ttl=$ROLE_TTL max_ttl=$ROLE_MAX_TTL"
+  echo "    wrote role '$role' key_type=$key_type issuer_ref=$issuer_ref ttl=$ROLE_TTL max_ttl=$ROLE_MAX_TTL"
 }
 
-write_role "$ED25519_ROLE" "ed25519"
-write_role "$MLDSA65_ROLE" "ml-dsa-65"
+write_role "$ED25519_ROLE" "ed25519"  "$ED_ISSUER_NAME"
+write_role "$MLDSA65_ROLE" "ml-dsa-65" "$ML_ISSUER_NAME"
 
 # ── 5. Master config ─────────────────────────────────────────────────
 echo "==> [5/6] Pointing rustion master at PKI mount + roles"

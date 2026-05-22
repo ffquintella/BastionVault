@@ -45,6 +45,23 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.13] - 2026-05-22
+
+### Fixed
+- **Rustion master bootstrap now provisions two roots, one per
+  algorithm class.** 0.8.12 switched the single bootstrap root to
+  Ed25519, which fixed the EC default but still failed at `pki/issue/
+  <mldsa65-role>` — the PKI engine refuses mixed-class chains (a
+  classical CA cannot sign a PQC leaf and vice versa). The GUI wizard
+  (`gui/src/components/RustionBastionsTab.tsx`) and
+  `scripts/rustion-master-bootstrap.sh` now stand up both an Ed25519
+  root (`rustion-master-ed25519-root`) and an ML-DSA-65 root
+  (`rustion-master-mldsa65-root`) in the same mount, and pin each role
+  to its matching issuer via `issuer_ref`. Matches the pattern in
+  `tests/test_rustion_master_pki_issue.rs`. Re-running the wizard /
+  script over a 0.8.12 install rewrites the role bindings; stale
+  roles from older versions are overwritten in place.
+
 ## [0.8.12] - 2026-05-22
 
 ### Fixed

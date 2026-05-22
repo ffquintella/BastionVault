@@ -722,7 +722,18 @@ const BOOTSTRAP_DEFAULTS = {
   rotateGraceSecs: 86400,
 };
 
-function bootstrapRoleConfig(keyType: string, ttl: string, maxTtl: string): PkiRoleConfig {
+// Per-class issuer names. BV's PKI engine refuses mixed-class chains
+// (classical CA → PQC leaf or vice versa), so the bootstrap stands up
+// two roots in the same mount and pins each role to its matching one.
+const ED_ISSUER_NAME = "rustion-master-ed25519-root";
+const ML_ISSUER_NAME = "rustion-master-mldsa65-root";
+
+function bootstrapRoleConfig(
+  keyType: string,
+  ttl: string,
+  maxTtl: string,
+  issuerRef: string,
+): PkiRoleConfig {
   return {
     ttl,
     max_ttl: maxTtl,
@@ -746,7 +757,7 @@ function bootstrapRoleConfig(keyType: string, ttl: string, maxTtl: string): PkiR
     ou: "",
     no_store: false,
     generate_lease: false,
-    issuer_ref: "",
+    issuer_ref: issuerRef,
     allow_key_reuse: false,
     allowed_key_refs: [],
     allowed_domains: [],
@@ -793,7 +804,7 @@ export function BootstrapMasterModal({
 
     const initial: BootstrapStep[] = [
       { key: "mount", label: `Enable PKI mount '${mountPath}/'`, status: "pending" },
-      { key: "root", label: "Generate root certificate", status: "pending" },
+      { key: "root", label: "Generate Ed25519 + ML-DSA-65 root certificates", status: "pending" },
       { key: "ed", label: `Create Ed25519 role '${edRole}'`, status: "pending" },
       { key: "ml", label: `Create ML-DSA-65 role '${mlRole}'`, status: "pending" },
       { key: "config", label: "Write rustion master config", status: "pending" },
@@ -825,71 +836,55 @@ export function BootstrapMasterModal({
       return;
     }
 
-    // 2. Root. The rustion master needs a signing chain whose root key
-    //    can produce an Ed25519 AND an ML-DSA-65 leaf. The PKI engine
-    //    refuses classical→PQ hybrid chains, so an EC / RSA default
-    //    issuer here will fail later at `pki/issue/<mldsa65-role>` with
-    //    `ErrPkiKeyTypeInvalid`. If the mount already has issuers, read
-    //    the default and reject up-front when its key_type is anything
-    //    other than ed25519 or ml-dsa-65 — far clearer than letting the
-    //    failure surface five steps later.
+    // 2. Roots. BV's PKI engine refuses mixed-class chains (classical
+    //    CA → PQC leaf or PQC CA → classical leaf), so we need TWO
+    //    roots in the same mount — one Ed25519 (signs the classical
+    //    leaf) and one ML-DSA-65 (signs the PQC leaf) — and each role
+    //    must pin to its matching issuer via `issuer_ref`. We use
+    //    stable issuer names so re-runs are idempotent.
     update("root", { status: "running" });
     try {
       const issuers = await api.pkiListIssuers(mountPath).catch(() => ({
         issuers: [],
       }));
-      if (issuers.issuers && issuers.issuers.length > 0) {
-        // Inspect the default issuer (the one rustion master uses by
-        // virtue of `issuer_ref: "default"` below).
-        let defaultDetail: { key_type: string; common_name: string } | null = null;
-        try {
-          defaultDetail = await api.pkiReadIssuer(mountPath, "default");
-        } catch (_) {
-          // No default set, or read failed — fall through to the
-          // "skipped" behaviour and let the issue step surface a clearer
-          // error if it actually matters.
-        }
-        if (defaultDetail) {
-          const kt = (defaultDetail.key_type || "").toLowerCase();
-          const compatible = kt === "ed25519" || kt === "ml-dsa-65";
-          if (!compatible) {
-            update("root", {
-              status: "err",
-              detail:
-                `default issuer at '${mountPath}/' has key_type='${kt || "unknown"}' ` +
-                `(CN='${defaultDetail.common_name || "?"}'), which cannot sign the ` +
-                `ML-DSA-65 master leaf. Fix: re-run with a fresh PKI mount ` +
-                `(e.g. 'pki-rustion'), OR delete the incompatible issuer ` +
-                `(bvault delete ${mountPath}/issuer/default) and re-run, OR ` +
-                `promote a compatible Ed25519 issuer at this mount to default.`,
-            });
-            setRunning(false);
-            return;
-          }
-          update("root", {
-            status: "skipped",
-            detail: `issuer already present (key_type=${kt})`,
-          });
-        } else {
-          update("root", {
-            status: "skipped",
-            detail: "issuer already present",
-          });
-        }
-      } else {
+      const present = new Set(
+        (issuers.issuers || []).map((i: { name: string }) => i.name),
+      );
+      const created: string[] = [];
+      const skipped: string[] = [];
+      if (!present.has(ED_ISSUER_NAME)) {
         await api.pkiGenerateRoot({
           mount: mountPath,
           mode: "internal",
-          common_name: commonName,
+          common_name: `${commonName} (Ed25519)`,
           ttl: rootTtl,
-          // Must be Ed25519 — BV's PKI engine refuses classical (EC / RSA)
-          // → PQ chains, so an EC root cannot sign the ML-DSA-65 leaf at
-          // step 6 (`ErrPkiKeyTypeInvalid`). Ed25519 can sign both the
-          // Ed25519 and ML-DSA-65 master leaves.
           key_type: "ed25519",
+          issuer_name: ED_ISSUER_NAME,
         });
-        update("root", { status: "ok" });
+        created.push("ed25519");
+      } else {
+        skipped.push("ed25519");
       }
+      if (!present.has(ML_ISSUER_NAME)) {
+        await api.pkiGenerateRoot({
+          mount: mountPath,
+          mode: "internal",
+          common_name: `${commonName} (ML-DSA-65)`,
+          ttl: rootTtl,
+          key_type: "ml-dsa-65",
+          issuer_name: ML_ISSUER_NAME,
+        });
+        created.push("ml-dsa-65");
+      } else {
+        skipped.push("ml-dsa-65");
+      }
+      const parts = [];
+      if (created.length) parts.push(`created: ${created.join(", ")}`);
+      if (skipped.length) parts.push(`already present: ${skipped.join(", ")}`);
+      update("root", {
+        status: created.length ? "ok" : "skipped",
+        detail: parts.join(" — "),
+      });
     } catch (e) {
       update("root", { status: "err", detail: extractError(e) });
       setRunning(false);
@@ -901,13 +896,14 @@ export function BootstrapMasterModal({
       stepKey: string,
       roleName: string,
       keyType: string,
+      issuerRef: string,
     ): Promise<boolean> {
       update(stepKey, { status: "running" });
       try {
         await api.pkiWriteRole(
           mountPath,
           roleName,
-          bootstrapRoleConfig(keyType, roleTtl, roleMaxTtl),
+          bootstrapRoleConfig(keyType, roleTtl, roleMaxTtl, issuerRef),
         );
         update(stepKey, { status: "ok" });
         return true;
@@ -916,11 +912,11 @@ export function BootstrapMasterModal({
         return false;
       }
     }
-    if (!(await writeRole("ed", edRole.trim(), "ed25519"))) {
+    if (!(await writeRole("ed", edRole.trim(), "ed25519", ED_ISSUER_NAME))) {
       setRunning(false);
       return;
     }
-    if (!(await writeRole("ml", mlRole.trim(), "ml-dsa-65"))) {
+    if (!(await writeRole("ml", mlRole.trim(), "ml-dsa-65", ML_ISSUER_NAME))) {
       setRunning(false);
       return;
     }
@@ -965,11 +961,14 @@ export function BootstrapMasterModal({
     } catch (e) {
       const raw = extractError(e);
       const detail = raw.includes("ErrPkiKeyTypeInvalid")
-        ? `${raw} — the default issuer at '${mountPath}/' is likely ` +
-          `classical (EC / RSA) and cannot sign the ML-DSA-65 leaf. Fix: ` +
-          `re-run this wizard with a fresh PKI mount (e.g. 'pki-rustion'), ` +
-          `OR delete the incompatible issuer ` +
-          `(bvault delete ${mountPath}/issuer/default) and re-run.`
+        ? `${raw} — the role's issuer_ref points at a CA whose key class ` +
+          `does not match the role's key_type. Expected pinning: role ` +
+          `'${edRole.trim()}' → issuer '${ED_ISSUER_NAME}', role ` +
+          `'${mlRole.trim()}' → issuer '${ML_ISSUER_NAME}'. Re-running the ` +
+          `wizard will rewrite the role bindings, but stale roles from a ` +
+          `prior version may still point at 'default' — delete the roles ` +
+          `(bvault delete ${mountPath}/roles/${edRole.trim()} and ` +
+          `${mountPath}/roles/${mlRole.trim()}) and re-run.`
         : raw;
       update("issue", { status: "err", detail });
       setRunning(false);
