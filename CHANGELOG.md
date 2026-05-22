@@ -45,6 +45,18 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.15] - 2026-05-22
+
+### Fixed
+- **`rustion/targets/health` no longer 404s.** The Rustion module
+  registered the catch-all `targets/(?P<id>[A-Za-z0-9_\-]+)$` route
+  before the literal-name routes `targets/health` and `targets/probe`,
+  so the resolver matched the catch-all first with `id="health"` and
+  the read handler returned `HTTP 404: rustion target 'health' not
+  found` on every settings-panel refresh (and the analogous error for
+  `probe`). Moved the literal-name routes ahead of the catch-all in
+  `src/modules/rustion/mod.rs`.
+
 ## [0.8.14] - 2026-05-22
 
 ### Fixed

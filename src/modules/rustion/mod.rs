@@ -296,6 +296,32 @@ impl RustionBackend {
                     ],
                     help: "List enrolled Rustion targets, or POST a fresh enrolment."
                 },
+                // NOTE on ordering — the route resolver matches patterns
+                // in registration order, so the literal-name routes
+                // (`targets/health`, `targets/probe`) MUST be registered
+                // before the `targets/(?P<id>…)$` catch-all. Otherwise
+                // the catch-all eats them as id="health" / id="probe"
+                // and the GUI gets `HTTP 404: rustion target 'health'
+                // not found` on every refresh.
+                {
+                    pattern: r"targets/health/?$",
+                    operations: [
+                        {op: Operation::Read, handler: h_health_all.handle_health_all}
+                    ],
+                    help: "Cached health for every enrolled target (background-poller view)."
+                },
+                {
+                    // Force a full probe sweep across every enabled
+                    // target — same routine the background pinger
+                    // runs on its 30s tick, exposed for operators who
+                    // just changed an endpoint and want immediate
+                    // feedback instead of waiting for the next tick.
+                    pattern: r"targets/probe$",
+                    operations: [
+                        {op: Operation::Write, handler: h_probe_all.handle_probe_all}
+                    ],
+                    help: "Trigger an immediate health probe sweep across every enabled Rustion target."
+                },
                 {
                     pattern: r"targets/(?P<id>[A-Za-z0-9_\-]+)$",
                     fields: {
@@ -356,25 +382,6 @@ impl RustionBackend {
                         {op: Operation::Delete, handler: h_target_delete.handle_target_delete}
                     ],
                     help: "Read, update, or delete one Rustion target."
-                },
-                {
-                    pattern: r"targets/health/?$",
-                    operations: [
-                        {op: Operation::Read, handler: h_health_all.handle_health_all}
-                    ],
-                    help: "Cached health for every enrolled target (background-poller view)."
-                },
-                {
-                    // Force a full probe sweep across every enabled
-                    // target — same routine the background pinger
-                    // runs on its 30s tick, exposed for operators who
-                    // just changed an endpoint and want immediate
-                    // feedback instead of waiting for the next tick.
-                    pattern: r"targets/probe$",
-                    operations: [
-                        {op: Operation::Write, handler: h_probe_all.handle_probe_all}
-                    ],
-                    help: "Trigger an immediate health probe sweep across every enabled Rustion target."
                 },
                 {
                     // Per-target probe + read. The Write path probes,
