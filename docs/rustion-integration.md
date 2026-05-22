@@ -40,33 +40,171 @@ Rustion verifies the envelope (authority pubkey pinned in YAML, deployment_id ma
 
 ## 3. Enrolling a Rustion bastion
 
-The full operator runbook lives at [`features/rustion-authority-lifecycle.md`](https://github.com/ffquintella/BastionVault/blob/main/features/rustion-authority-lifecycle.md). Quick path:
+The full operator runbook lives at [`features/rustion-authority-lifecycle.md`](https://github.com/ffquintella/BastionVault/blob/main/features/rustion-authority-lifecycle.md). The two-step picture is: **(3.1)** initialize the master keypair on the BV side, then **(3.2)** submit + approve the bastion enrolment.
 
-> **First-time setup:** before step 1 below, the BV master must be
-> issued. As of 0.8.7 issuance routes through the PKI engine. The
-> fastest path is the bootstrap script (or the matching "Bootstrap
-> master" button in Settings → Rustion → Bastions → Master signing
-> cert):
->
-> ```bash
-> bvault login   # populate ~/.vault-token, or export VAULT_ADDR/VAULT_TOKEN
-> scripts/rustion-master-bootstrap.sh
-> # idempotent; re-running skips already-present mount / root / roles.
-> # exits code 3 (informational) if the master is already issued —
-> # use `bvault rustion master rotate` to mint a new keypair instead.
-> ```
->
-> Run `scripts/rustion-master-bootstrap.sh --help` for every override
-> (PKI mount, role names, TTLs, grace window, root common name). The
-> manual recipe is still documented in
-> [`features/rustion-authority-lifecycle.md` §0](https://github.com/ffquintella/BastionVault/blob/main/features/rustion-authority-lifecycle.md#0-bootstrap-the-master-keypair-one-time-per-bv-deployment)
-> under "Manual path (if you need finer control)" for operators who
-> want to wire up the PKI mount and roles by hand.
->
-> Until `issue` succeeds, `master export` returns the empty stub with
-> `Issued: false`. Use `bvault rustion master rotate` to mint a new
-> keypair later — envelopes signed by the outgoing key remain valid
-> for `rotate_grace_secs` after rotation.
+### 3.1 Initialize the Rustion master keypair (one-time, per BV deployment)
+
+The master is a hybrid Ed25519 + ML-DSA-65 keypair that signs every BVRG-v1 envelope BV sends to a Rustion bastion. As of **0.8.7** it is issued through the configured PKI secrets engine — there is no local keygen — so the steps below either run the bootstrap script (recommended) or wire up the PKI mount + roles by hand.
+
+Verify state before you start:
+
+```bash
+bvault login   # populate ~/.vault-token, or export VAULT_ADDR + VAULT_TOKEN
+bvault rustion master export
+# If you see `Issued: false` and empty pubkeys, run the steps below.
+# If you see real pubkeys + a deployment_id, you're already initialized —
+# skip to §3.2.
+```
+
+#### Option A — Bootstrap script (recommended)
+
+The script is idempotent: it inspects what's already on the server and skips any step that's done. Safe to re-run.
+
+1. **Authenticate as a root-equivalent token** (the script needs to enable the PKI mount, generate a root, create roles, write `sys/rustion/master/config`, and call `issue`):
+
+   ```bash
+   bvault login -method=userpass username=root
+   # or: export VAULT_TOKEN=<root token>; export VAULT_ADDR=https://bv:8200
+   ```
+
+2. **Run the script with defaults** (PKI mount `pki`, role names `rustion-master-ed25519` / `rustion-master-mldsa65`, 1-year leaf TTL, 10-year root TTL, 1-day rotate grace):
+
+   ```bash
+   scripts/rustion-master-bootstrap.sh
+   ```
+
+   Per-step output (each line is one ✓ check):
+
+   ```
+   ✓ PKI mount 'pki' present
+   ✓ Root CA generated (BastionVault Rustion Master Root)
+   ✓ Role 'rustion-master-ed25519' present
+   ✓ Role 'rustion-master-mldsa65' present
+   ✓ Master config written
+   ✓ Master issued: serial 17:42:0a:…  not_after 2027-05-22T…Z
+   ```
+
+3. **Confirm initialization:**
+
+   ```bash
+   bvault rustion master export
+   # pubkey_ed25519:  Zk6JhJxQ7yK3l8...wA
+   # pubkey_mldsa65:  MIIBCgKCAQEA...=
+   # deployment_id:   f47ac10b-58cc-4372-a567-0e02b2c3d479
+   # Issued:          true
+   ```
+
+Overrides:
+
+```bash
+scripts/rustion-master-bootstrap.sh \
+    --pki-mount pki \
+    --ed25519-role rustion-master-ed25519 \
+    --mldsa65-role rustion-master-mldsa65 \
+    --ttl 8760h --max-ttl 87600h --root-ttl 87600h \
+    --rotate-grace-secs 86400 \
+    --common-name "BastionVault Rustion Master Root"
+
+# Every flag with defaults:
+scripts/rustion-master-bootstrap.sh --help
+```
+
+Exit codes: `0` success, `1` user/env error (bad flag, missing `bvault`, login missing), `2` PKI failure (a request returned an error — the offending response is printed), `3` master is already issued (informational; use `bvault rustion master rotate` to mint a new keypair instead of accidentally rotating from a CI loop).
+
+The same flow ships in the GUI as **Settings → Rustion → Bastions → Master signing cert → Bootstrap master**. The button is only visible while the master is unissued; the wizard renders the same per-step ✓ list and leaves the modal open on failure so the operator can retry.
+
+#### Option B — Manual path (finer control)
+
+Use this when you already have a PKI mount you want to reuse, when you need to mint the root with custom subject fields, or when your org requires a separate change ticket per `bvault write` call.
+
+1. **Enable the PKI mount** (skip if already mounted):
+
+   ```bash
+   bvault secrets enable --path=pki pki
+   ```
+
+2. **Generate the root CA** (skip if a root already exists at this mount):
+
+   ```bash
+   bvault write -field=certificate pki/root/generate/internal \
+       common_name="BastionVault Rustion Master Root" \
+       ttl=87600h > /tmp/rustion-root.pem
+
+   bvault write pki/config/urls \
+       issuing_certificates="$VAULT_ADDR/v1/pki/ca" \
+       crl_distribution_points="$VAULT_ADDR/v1/pki/crl"
+   ```
+
+3. **Create one role per algorithm.** Names are arbitrary, but they must match what step 4 references. `key_type` must be exactly `ed25519` or `ml-dsa-65`:
+
+   ```bash
+   bvault write pki/roles/rustion-master-ed25519 \
+       key_type=ed25519 \
+       allow_any_name=true \
+       ttl=8760h \
+       max_ttl=87600h
+
+   bvault write pki/roles/rustion-master-mldsa65 \
+       key_type=ml-dsa-65 \
+       allow_any_name=true \
+       ttl=8760h \
+       max_ttl=87600h
+   ```
+
+4. **Wire the rustion master at those roles:**
+
+   ```bash
+   bvault rustion master config \
+       pki_mount=pki \
+       pki_role=rustion-master-ed25519 \
+       pki_role_pqc=rustion-master-mldsa65 \
+       issuer_ref=default \
+       default_ttl_secs=31536000 \
+       rotate_grace_secs=86400
+   ```
+
+   Confirm:
+
+   ```bash
+   bvault read sys/rustion/master/config
+   ```
+
+5. **Issue the hybrid master.** This calls `pki/issue/<role>` twice (once per algorithm), captures both serials + leaf-cert PEMs, and persists the keypair under the encrypted barrier view:
+
+   ```bash
+   bvault rustion master issue
+   # serial:     17:42:0a:...
+   # not_after:  2027-05-22T14:02:33Z
+   # algorithm:  hybrid-ed25519-mldsa65
+   ```
+
+6. **Confirm initialization** (same check as Option A step 3):
+
+   ```bash
+   bvault rustion master export
+   ```
+
+Troubleshooting `bvault rustion master issue`:
+
+| Error                                                       | Cause                                                                                                | Fix                                                                                                       |
+|-------------------------------------------------------------|------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------|
+| `pki_mount / pki_role / pki_role_pqc must be configured`    | Step 4 didn't run or wrote into the wrong path                                                       | Re-run `bvault rustion master config …` and verify with `bvault read sys/rustion/master/config`           |
+| `master already issued; use rotate to mint a new keypair`   | Idempotency guard — a current master already exists                                                  | Run `bvault rustion master rotate` instead                                                                |
+| `pki engine error: role "..." not found`                    | Role names in `master/config` don't match the PKI roles created in step 3                            | `bvault list pki/roles` and reconcile                                                                     |
+| `pki engine error: unsupported key_type ...`                | Wrong `key_type` on the role                                                                         | Recreate the role with `key_type=ed25519` or `key_type=ml-dsa-65`                                         |
+
+#### Rotation (after initialization)
+
+Once issued, mint a fresh hybrid keypair anytime with:
+
+```bash
+bvault rustion master rotate
+# Archives current -> previous, arms previous_grace_until = now + rotate_grace_secs,
+# then mints a fresh current. BVRG-v1 envelopes signed by the outgoing
+# key remain valid until the grace window closes (default 1 day).
+```
+
+### 3.2 Submit + approve the bastion enrolment
 
 ```bash
 # 1. On the BV side — export the master pubkey + deployment id.

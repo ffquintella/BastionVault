@@ -45,6 +45,14 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Changed
+- `docs/rustion-integration.md` now has a dedicated §3.1 "Initialize the
+  Rustion master keypair" section with full step-by-step instructions
+  for both the bootstrap-script path and the manual PKI-wiring path,
+  plus a state-check, rotation, and a troubleshooting table for
+  `bvault rustion master issue`. Previously this content was only a
+  blockquote pointing out at `features/rustion-authority-lifecycle.md`.
+
 ## [0.8.8] - 2026-05-22
 
 ### Fixed
