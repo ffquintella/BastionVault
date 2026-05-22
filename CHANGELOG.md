@@ -45,6 +45,23 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.17] - 2026-05-22
+
+### Changed
+- **Rustion enrolment docs — webhook-key export wired in.** Replaced
+  the placeholder "current gap" callout in
+  [`features/rustion-integration.md`](features/rustion-integration.md)
+  with the real `rustion control-plane webhook-key export` invocation
+  (Rustion 0.10.1+). The webhook signing pair is now persisted at
+  `<identity_dir>/webhook.key` on first boot and the CLI emits both
+  `ed25519_spki_b64` and `mldsa65_pub_b64` directly, so operators no
+  longer need the log-scraping workaround that 0.8.16's docs
+  described. Source-table for the enrol form and the modal helper
+  text in
+  [`RustionBastionsTab.tsx`](gui/src/components/RustionBastionsTab.tsx)
+  updated to match. Earlier "Phase 9.3 follow-up" reference dropped —
+  it shipped as Rustion 0.10.1.
+
 ## [0.8.16] - 2026-05-22
 
 ### Changed

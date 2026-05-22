@@ -370,19 +370,39 @@ release builds and `~/.rustion/control-plane/` in debug builds. The
 matching private half stays in `identity.key` with `0600` perms and is
 never emitted by the CLI.
 
-> **Ed25519 + ML-DSA-65 webhook signing pair — current gap.** The
-> BastionVault form asks for `public_key.ed25519` and
-> `public_key.mldsa65` alongside the KEM key. These are the public
-> halves of Rustion's *webhook* signing keypair (`WebhookSigningKey`
-> in [`crates/rustion-control-plane/src/webhook.rs`](https://github.com/…/rustion/blob/main/crates/rustion-control-plane/src/webhook.rs)).
-> As of Rustion 0.10.0 this keypair is generated fresh in memory at
-> startup and is **not yet exported by the CLI**. Until the follow-up
-> `rustion control-plane webhook-key export` lands, operators have two
-> options: (a) submit empty strings in BV — recording webhooks land
-> unverified, sessions still work; or (b) extract the public halves
-> from the running process via `journalctl -u rustion | grep
-> webhook.public` (Rustion logs them at INFO on startup for exactly
-> this case). Track the export-CLI follow-up under Phase 9.3.
+The Ed25519 + ML-DSA-65 webhook signing pair (used by Rustion to sign
+outbound recording webhooks; `WebhookSigningKey` in
+`crates/rustion-control-plane/src/webhook.rs`) is persisted on first
+boot to `<identity_dir>/webhook.key` (64 bytes: 32B Ed25519 seed +
+32B ML-DSA-65 seed, `0600`) and exported via a dedicated CLI added in
+Rustion 0.10.1:
+
+```bash
+# Default JSON shape — ready to feed into a config-management
+# pipeline or jq:
+rustion control-plane webhook-key export \
+    --config /etc/rustion/rustion.toml
+# {
+#   "ed25519_spki_b64": "MCowBQYDK2VwAyEA...",
+#   "mldsa65_pub_b64": "MIIH...",
+#   "fingerprint_sha256": "ab12cd34..."
+# }
+
+# Shell-source-able env form, handy for `bvault rustion target add`:
+rustion control-plane webhook-key export --format env > webhook.env
+source webhook.env
+# RUSTION_WEBHOOK_ED25519=...
+# RUSTION_WEBHOOK_MLDSA65=...
+```
+
+`ed25519_spki_b64` is the **SPKI-wrapped** form expected by BV's
+`public_key.ed25519 (base64 SPKI)` field; `mldsa65_pub_b64` is the
+1952-byte raw ML-DSA-65 public key. The `fingerprint_sha256` is
+`sha256(ed25519_raw || mldsa65_raw)` hex — print it on both sides of
+the enrolment to cross-check at the Rustion approval step. Persistence
+means BV's pin survives Rustion restarts; rotating the webhook
+keypair is currently a manual `rm webhook.key && systemctl restart
+rustion` plus a re-enrolment on BV.
 
 #### 2. Register the Rustion target on BastionVault
 
@@ -392,8 +412,8 @@ GUI path — **Settings → Rustion Bastions → Enrol bastion**. Paste:
 |---|---|---|
 | Name | Operator-friendly label, unique per deployment, case-insensitive | Free-form |
 | Endpoint | `host:port` of Rustion's control-plane listener | `control_plane.listen` |
-| `public_key.ed25519` (base64 SPKI) | Webhook signing — Ed25519 half | Rustion log line `webhook.public.ed25519=…` (see gap note above) |
-| `public_key.mldsa65` (base64 raw) | Webhook signing — ML-DSA-65 half | Rustion log line `webhook.public.mldsa65=…` |
+| `public_key.ed25519` (base64 SPKI) | Webhook signing — Ed25519 half | `ed25519_spki_b64` from `rustion control-plane webhook-key export` |
+| `public_key.mldsa65` (base64 raw) | Webhook signing — ML-DSA-65 half | `mldsa65_pub_b64` from `rustion control-plane webhook-key export` |
 | `kem_public_key` (base64 raw ML-KEM-768) | Session-envelope sealing | `rustion control-plane identity export` (step 1) |
 | Description / Tags / Enabled | Free-form | — |
 
