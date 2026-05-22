@@ -42,6 +42,29 @@ Rustion verifies the envelope (authority pubkey pinned in YAML, deployment_id ma
 
 The full operator runbook lives at [`features/rustion-authority-lifecycle.md`](https://github.com/ffquintella/BastionVault/blob/main/features/rustion-authority-lifecycle.md). Quick path:
 
+> **First-time setup:** before step 1 below, the BV master must be
+> issued. As of 0.8.7 issuance routes through the PKI engine. Quick
+> bootstrap (see [`features/rustion-authority-lifecycle.md` §0](https://github.com/ffquintella/BastionVault/blob/main/features/rustion-authority-lifecycle.md#0-bootstrap-the-master-keypair-one-time-per-bv-deployment)
+> for the full recipe and troubleshooting table):
+>
+> ```bash
+> bvault secrets enable -path=pki pki
+> bvault write pki/root/generate/internal common_name="BV Rustion Master Root" ttl=87600h
+> bvault write pki/roles/rustion-master-ed25519 key_type=ed25519  allow_any_name=true ttl=8760h max_ttl=87600h
+> bvault write pki/roles/rustion-master-mldsa65 key_type=ml-dsa-65 allow_any_name=true ttl=8760h max_ttl=87600h
+> bvault rustion master config \
+>     pki_mount=pki \
+>     pki_role=rustion-master-ed25519 \
+>     pki_role_pqc=rustion-master-mldsa65 \
+>     rotate_grace_secs=86400
+> bvault rustion master issue
+> ```
+>
+> Until `issue` succeeds, `master export` returns the empty stub with
+> `Issued: false`. Use `bvault rustion master rotate` to mint a new
+> keypair later — envelopes signed by the outgoing key remain valid
+> for `rotate_grace_secs` after rotation.
+
 ```bash
 # 1. On the BV side — export the master pubkey + deployment id.
 bvault rustion master export
