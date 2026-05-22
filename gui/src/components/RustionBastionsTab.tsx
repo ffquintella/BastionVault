@@ -825,14 +825,57 @@ export function BootstrapMasterModal({
       return;
     }
 
-    // 2. Root.
+    // 2. Root. The rustion master needs a signing chain whose root key
+    //    can produce an Ed25519 AND an ML-DSA-65 leaf. The PKI engine
+    //    refuses classical→PQ hybrid chains, so an EC / RSA default
+    //    issuer here will fail later at `pki/issue/<mldsa65-role>` with
+    //    `ErrPkiKeyTypeInvalid`. If the mount already has issuers, read
+    //    the default and reject up-front when its key_type is anything
+    //    other than ed25519 or ml-dsa-65 — far clearer than letting the
+    //    failure surface five steps later.
     update("root", { status: "running" });
     try {
       const issuers = await api.pkiListIssuers(mountPath).catch(() => ({
         issuers: [],
       }));
       if (issuers.issuers && issuers.issuers.length > 0) {
-        update("root", { status: "skipped", detail: "issuer already present" });
+        // Inspect the default issuer (the one rustion master uses by
+        // virtue of `issuer_ref: "default"` below).
+        let defaultDetail: { key_type: string; common_name: string } | null = null;
+        try {
+          defaultDetail = await api.pkiReadIssuer(mountPath, "default");
+        } catch (_) {
+          // No default set, or read failed — fall through to the
+          // "skipped" behaviour and let the issue step surface a clearer
+          // error if it actually matters.
+        }
+        if (defaultDetail) {
+          const kt = (defaultDetail.key_type || "").toLowerCase();
+          const compatible = kt === "ed25519" || kt === "ml-dsa-65";
+          if (!compatible) {
+            update("root", {
+              status: "err",
+              detail:
+                `default issuer at '${mountPath}/' has key_type='${kt || "unknown"}' ` +
+                `(CN='${defaultDetail.common_name || "?"}'), which cannot sign the ` +
+                `ML-DSA-65 master leaf. Fix: re-run with a fresh PKI mount ` +
+                `(e.g. 'pki-rustion'), OR delete the incompatible issuer ` +
+                `(bvault delete ${mountPath}/issuer/default) and re-run, OR ` +
+                `promote a compatible Ed25519 issuer at this mount to default.`,
+            });
+            setRunning(false);
+            return;
+          }
+          update("root", {
+            status: "skipped",
+            detail: `issuer already present (key_type=${kt})`,
+          });
+        } else {
+          update("root", {
+            status: "skipped",
+            detail: "issuer already present",
+          });
+        }
       } else {
         await api.pkiGenerateRoot({
           mount: mountPath,
@@ -900,7 +943,13 @@ export function BootstrapMasterModal({
       return;
     }
 
-    // 6. Issue.
+    // 6. Issue. ErrPkiKeyTypeInvalid here almost always means the
+    //    default issuer at `<mount>/` is classical (EC / RSA) and the
+    //    PKI engine refuses to sign the ML-DSA-65 leaf with it. The
+    //    upfront check in step 2 catches this on a re-run, but a brand-
+    //    new mount whose root was created with the wrong defaults (or a
+    //    race) can still trip it — rewrite the error so the operator
+    //    knows what to do next.
     update("issue", { status: "running" });
     try {
       const res = await rustion.rustionMasterIssue();
@@ -909,7 +958,15 @@ export function BootstrapMasterModal({
         detail: res.serial ? `serial=${res.serial}` : undefined,
       });
     } catch (e) {
-      update("issue", { status: "err", detail: extractError(e) });
+      const raw = extractError(e);
+      const detail = raw.includes("ErrPkiKeyTypeInvalid")
+        ? `${raw} — the default issuer at '${mountPath}/' is likely ` +
+          `classical (EC / RSA) and cannot sign the ML-DSA-65 leaf. Fix: ` +
+          `re-run this wizard with a fresh PKI mount (e.g. 'pki-rustion'), ` +
+          `OR delete the incompatible issuer ` +
+          `(bvault delete ${mountPath}/issuer/default) and re-run.`
+        : raw;
+      update("issue", { status: "err", detail });
       setRunning(false);
       return;
     }

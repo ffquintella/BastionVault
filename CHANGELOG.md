@@ -45,6 +45,24 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.9] - 2026-05-22
+
+### Fixed
+- **GUI: Bootstrap Rustion master wizard** previously short-circuited the
+  "Generate root certificate" step whenever the chosen PKI mount already
+  had *any* issuer, regardless of its key algorithm. On mounts hosting
+  an EC or RSA default issuer (e.g. a shared `pki/` reused for other
+  CAs), the bootstrap would then fail at the last step with the cryptic
+  `HTTP 400: master issue: rustion master: PKI engine call
+  pki/issue/<role> failed: ErrPkiKeyTypeInvalid`, because BV's PKI engine
+  cannot sign an ML-DSA-65 leaf with a classical root. The wizard now
+  reads `<mount>/issuer/default` before skipping the root step and
+  refuses up-front with actionable remediation when the existing
+  default's `key_type` is anything other than `ed25519` / `ml-dsa-65`.
+  The issue-step error handler also rewrites the raw
+  `ErrPkiKeyTypeInvalid` into a message that names the likely cause and
+  the two fix paths. (`gui/src/components/RustionBastionsTab.tsx`)
+
 ### Changed
 - `docs/rustion-integration.md` now has a dedicated §3.1 "Initialize the
   Rustion master keypair" section with full step-by-step instructions
@@ -52,6 +70,9 @@ EXAMPLE ENTRY:
   plus a state-check, rotation, and a troubleshooting table for
   `bvault rustion master issue`. Previously this content was only a
   blockquote pointing out at `features/rustion-authority-lifecycle.md`.
+  The troubleshooting table gained an `ErrPkiKeyTypeInvalid` row with a
+  dedicated "Why this happens and how to avoid it" explainer that
+  walks operators through using a fresh PKI mount to recover.
 
 ## [0.8.8] - 2026-05-22
 

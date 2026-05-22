@@ -192,6 +192,21 @@ Troubleshooting `bvault rustion master issue`:
 | `master already issued; use rotate to mint a new keypair`   | Idempotency guard — a current master already exists                                                  | Run `bvault rustion master rotate` instead                                                                |
 | `pki engine error: role "..." not found`                    | Role names in `master/config` don't match the PKI roles created in step 3                            | `bvault list pki/roles` and reconcile                                                                     |
 | `pki engine error: unsupported key_type ...`                | Wrong `key_type` on the role                                                                         | Recreate the role with `key_type=ed25519` or `key_type=ml-dsa-65`                                         |
+| `ErrPkiKeyTypeInvalid` (typically on the ML-DSA-65 half)    | The PKI mount's **default issuer is classical (EC / RSA)** — BV's PKI engine refuses to sign an ML-DSA-65 leaf with a classical root. Happens most often when the wizard / script reuses an existing PKI mount that already had a non-PQ-compatible root. | Prefer a fresh mount (see below). Otherwise, delete the incompatible issuer: `bvault delete <mount>/issuer/default` then re-run, OR promote a compatible Ed25519 issuer at this mount with `bvault write <mount>/config/issuers default=<ref>` and re-run. |
+
+##### Why this happens and how to avoid it
+
+The hybrid master is **Ed25519 + ML-DSA-65**. The PKI engine can sign an Ed25519 leaf from an EC / RSA / Ed25519 issuer, but it **does not** support classical → post-quantum chains: an EC or RSA root cannot sign an ML-DSA-65 leaf. The bootstrap wizard's "issuer already present → skip root generation" branch (versions ≤ 0.8.8) accepted any existing default issuer at the mount, which silently set this up to fail at the issue step five clicks later.
+
+As of 0.8.9 the wizard now reads the default issuer's `key_type` before skipping the root step and refuses up-front with the same remediation if it sees anything other than `ed25519` / `ml-dsa-65`. The issue step also rewrites the raw `ErrPkiKeyTypeInvalid` message with a pointer at the likely culprit and the two fix paths.
+
+**Recommended remediation when you hit this on a shared mount:**
+
+1. Re-open the **Bootstrap Rustion master** modal in the GUI (Settings → Rustion → Bastions → Master signing cert).
+2. Change the **PKI mount** field from `pki` to a fresh value like `pki-rustion`.
+3. Click **Bootstrap**. The wizard mints a clean Ed25519 root at the new mount and the ML-DSA-65 leaf signs cleanly.
+
+Or from the CLI, swap `--pki-mount pki` for `--pki-mount pki-rustion` on `scripts/rustion-master-bootstrap.sh`.
 
 #### Rotation (after initialization)
 
