@@ -21,7 +21,9 @@ import {
   Textarea,
   useToast,
 } from "./ui";
+import * as api from "../lib/api";
 import * as rustion from "../lib/rustion";
+import type { PkiRoleConfig } from "../lib/types";
 import type {
   RustionHealthStatus,
   RustionMasterConfig,
@@ -43,6 +45,7 @@ export function RustionBastionsTab() {
   const [masterCfg, setMasterCfg] = useState<RustionMasterConfig | null>(null);
   const [masterPub, setMasterPub] = useState<RustionMasterPubkey | null>(null);
   const [showMasterEdit, setShowMasterEdit] = useState(false);
+  const [showMasterBootstrap, setShowMasterBootstrap] = useState(false);
   // Phase 9.1: this BV deployment's stable UUID. Pasted into the
   // bastion's authority record at enrolment time.
   const [deploymentId, setDeploymentId] = useState<string>("");
@@ -231,9 +234,16 @@ export function RustionBastionsTab() {
       <Card
         title="Master signing cert"
         actions={
-          <Button variant="ghost" onClick={() => setShowMasterEdit(true)}>
-            Configure
-          </Button>
+          <div className="flex gap-2">
+            {!masterPub?.issued && (
+              <Button onClick={() => setShowMasterBootstrap(true)}>
+                Bootstrap master
+              </Button>
+            )}
+            <Button variant="ghost" onClick={() => setShowMasterEdit(true)}>
+              Configure
+            </Button>
+          </div>
         }
       >
         <p className="text-xs text-[var(--color-text-muted)] mb-3">
@@ -244,6 +254,17 @@ export function RustionBastionsTab() {
           PKI engine; today this panel surfaces the configuration slot
           and the pubkey export shape.
         </p>
+        {!masterPub?.issued && (
+          <div className="mb-3 p-3 rounded border border-dashed border-[var(--color-border)] text-xs">
+            <div className="font-semibold mb-1">Master not issued yet.</div>
+            <div className="text-[var(--color-text-muted)]">
+              Click <b>Bootstrap master</b> to run the one-shot wizard
+              (PKI mount + root + two roles + master config + issue).
+              Equivalent CLI:{" "}
+              <code className="font-mono">scripts/rustion-master-bootstrap.sh</code>.
+            </div>
+          </div>
+        )}
         {masterCfg && (
           <div className="grid grid-cols-2 gap-3 text-xs">
             <Field label="Algorithm" value={masterCfg.algorithm || "—"} />
@@ -253,8 +274,12 @@ export function RustionBastionsTab() {
               value={masterCfg.pki_mount || "(unset)"}
             />
             <Field
-              label="PKI role"
+              label="PKI role (Ed25519)"
               value={masterCfg.pki_role || "(unset)"}
+            />
+            <Field
+              label="PKI role (ML-DSA-65)"
+              value={masterCfg.pki_role_pqc || "(unset)"}
             />
             <Field
               label="Default TTL"
@@ -338,6 +363,15 @@ export function RustionBastionsTab() {
         onClose={() => setShowMasterEdit(false)}
         onSaved={async () => {
           setShowMasterEdit(false);
+          await refresh();
+        }}
+      />
+
+      <BootstrapMasterModal
+        open={showMasterBootstrap}
+        onClose={() => setShowMasterBootstrap(false)}
+        onDone={async () => {
+          setShowMasterBootstrap(false);
           await refresh();
         }}
       />
@@ -573,6 +607,7 @@ function MasterEditModal({
   const { toast } = useToast();
   const [pkiMount, setPkiMount] = useState("");
   const [pkiRole, setPkiRole] = useState("");
+  const [pkiRolePqc, setPkiRolePqc] = useState("");
   const [issuerRef, setIssuerRef] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -580,6 +615,7 @@ function MasterEditModal({
     if (open && current) {
       setPkiMount(current.pki_mount);
       setPkiRole(current.pki_role);
+      setPkiRolePqc(current.pki_role_pqc);
       setIssuerRef(current.issuer_ref);
     }
   }, [open, current]);
@@ -592,6 +628,7 @@ function MasterEditModal({
         ...current,
         pki_mount: pkiMount.trim(),
         pki_role: pkiRole.trim(),
+        pki_role_pqc: pkiRolePqc.trim(),
         issuer_ref: issuerRef.trim(),
       });
       toast("success", "Master-cert config saved");
@@ -634,10 +671,16 @@ function MasterEditModal({
           placeholder="pki-internal/"
         />
         <Input
-          label="PKI role"
+          label="PKI role (Ed25519)"
           value={pkiRole}
           onChange={(e) => setPkiRole(e.target.value)}
-          placeholder="rustion-master"
+          placeholder="rustion-master-ed25519"
+        />
+        <Input
+          label="PKI role (ML-DSA-65)"
+          value={pkiRolePqc}
+          onChange={(e) => setPkiRolePqc(e.target.value)}
+          placeholder="rustion-master-mldsa65"
         />
         <Input
           label="Issuer ref (optional)"
@@ -648,4 +691,358 @@ function MasterEditModal({
       </div>
     </Modal>
   );
+}
+
+// ── Bootstrap Master wizard ──────────────────────────────────────────
+//
+// One-shot orchestrator that mirrors `scripts/rustion-master-bootstrap.sh`:
+// detects existing PKI mount / root / roles, fills in the gaps, writes
+// the rustion master config, then calls `rustion/master/issue`. Each
+// step renders a live ✓ / ✗ status line so the operator can see which
+// command failed if anything goes wrong, and retry without reopening
+// the modal.
+
+type StepStatus = "pending" | "running" | "ok" | "err" | "skipped";
+
+interface BootstrapStep {
+  key: string;
+  label: string;
+  status: StepStatus;
+  detail?: string;
+}
+
+const BOOTSTRAP_DEFAULTS = {
+  pkiMount: "pki",
+  ed25519Role: "rustion-master-ed25519",
+  mldsa65Role: "rustion-master-mldsa65",
+  commonName: "BastionVault Rustion Master Root",
+  rootTtl: "87600h",
+  roleTtl: "8760h",
+  roleMaxTtl: "87600h",
+  rotateGraceSecs: 86400,
+};
+
+function bootstrapRoleConfig(keyType: string, ttl: string, maxTtl: string): PkiRoleConfig {
+  return {
+    ttl,
+    max_ttl: maxTtl,
+    key_type: keyType,
+    key_bits: 0,
+    allow_localhost: false,
+    allow_any_name: true,
+    allow_subdomains: false,
+    allow_bare_domains: false,
+    allow_ip_sans: false,
+    server_flag: false,
+    client_flag: true,
+    use_csr_sans: false,
+    use_csr_common_name: false,
+    key_usage: ["DigitalSignature"],
+    ext_key_usage: [],
+    country: "",
+    province: "",
+    locality: "",
+    organization: "",
+    ou: "",
+    no_store: false,
+    generate_lease: false,
+    issuer_ref: "",
+    allow_key_reuse: false,
+    allowed_key_refs: [],
+    allowed_domains: [],
+    allow_glob_domains: false,
+    acme_enabled: false,
+  };
+}
+
+export function BootstrapMasterModal({
+  open,
+  onClose,
+  onDone,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const { toast } = useToast();
+  const [pkiMount, setPkiMount] = useState(BOOTSTRAP_DEFAULTS.pkiMount);
+  const [edRole, setEdRole] = useState(BOOTSTRAP_DEFAULTS.ed25519Role);
+  const [mlRole, setMlRole] = useState(BOOTSTRAP_DEFAULTS.mldsa65Role);
+  const [commonName, setCommonName] = useState(BOOTSTRAP_DEFAULTS.commonName);
+  const [rootTtl, setRootTtl] = useState(BOOTSTRAP_DEFAULTS.rootTtl);
+  const [roleTtl, setRoleTtl] = useState(BOOTSTRAP_DEFAULTS.roleTtl);
+  const [roleMaxTtl, setRoleMaxTtl] = useState(BOOTSTRAP_DEFAULTS.roleMaxTtl);
+  const [graceSecs, setGraceSecs] = useState(
+    BOOTSTRAP_DEFAULTS.rotateGraceSecs,
+  );
+  const [running, setRunning] = useState(false);
+  const [steps, setSteps] = useState<BootstrapStep[]>([]);
+
+  function reset() {
+    setSteps([]);
+    setRunning(false);
+  }
+
+  async function handleBootstrap() {
+    const mountPath = pkiMount.trim().replace(/\/+$/, "");
+    if (!mountPath || !edRole.trim() || !mlRole.trim()) {
+      toast("error", "PKI mount and both role names are required");
+      return;
+    }
+    setRunning(true);
+
+    const initial: BootstrapStep[] = [
+      { key: "mount", label: `Enable PKI mount '${mountPath}/'`, status: "pending" },
+      { key: "root", label: "Generate root certificate", status: "pending" },
+      { key: "ed", label: `Create Ed25519 role '${edRole}'`, status: "pending" },
+      { key: "ml", label: `Create ML-DSA-65 role '${mlRole}'`, status: "pending" },
+      { key: "config", label: "Write rustion master config", status: "pending" },
+      { key: "issue", label: "Mint hybrid master keypair", status: "pending" },
+    ];
+    setSteps(initial);
+
+    const update = (key: string, patch: Partial<BootstrapStep>) =>
+      setSteps((s) =>
+        s.map((step) => (step.key === key ? { ...step, ...patch } : step)),
+      );
+
+    // 1. PKI mount.
+    update("mount", { status: "running" });
+    try {
+      const mounts = await api.pkiListMounts();
+      const present = mounts.some(
+        (m) => m.path.replace(/\/+$/, "") === mountPath,
+      );
+      if (present) {
+        update("mount", { status: "skipped", detail: "already mounted" });
+      } else {
+        await api.pkiEnableMount(`${mountPath}/`);
+        update("mount", { status: "ok" });
+      }
+    } catch (e) {
+      update("mount", { status: "err", detail: extractError(e) });
+      setRunning(false);
+      return;
+    }
+
+    // 2. Root.
+    update("root", { status: "running" });
+    try {
+      const issuers = await api.pkiListIssuers(mountPath).catch(() => ({
+        issuers: [],
+      }));
+      if (issuers.issuers && issuers.issuers.length > 0) {
+        update("root", { status: "skipped", detail: "issuer already present" });
+      } else {
+        await api.pkiGenerateRoot({
+          mount: mountPath,
+          mode: "internal",
+          common_name: commonName,
+          ttl: rootTtl,
+        });
+        update("root", { status: "ok" });
+      }
+    } catch (e) {
+      update("root", { status: "err", detail: extractError(e) });
+      setRunning(false);
+      return;
+    }
+
+    // 3 + 4. Roles.
+    async function writeRole(
+      stepKey: string,
+      roleName: string,
+      keyType: string,
+    ): Promise<boolean> {
+      update(stepKey, { status: "running" });
+      try {
+        await api.pkiWriteRole(
+          mountPath,
+          roleName,
+          bootstrapRoleConfig(keyType, roleTtl, roleMaxTtl),
+        );
+        update(stepKey, { status: "ok" });
+        return true;
+      } catch (e) {
+        update(stepKey, { status: "err", detail: extractError(e) });
+        return false;
+      }
+    }
+    if (!(await writeRole("ed", edRole.trim(), "ed25519"))) {
+      setRunning(false);
+      return;
+    }
+    if (!(await writeRole("ml", mlRole.trim(), "ml-dsa-65"))) {
+      setRunning(false);
+      return;
+    }
+
+    // 5. Master config.
+    update("config", { status: "running" });
+    try {
+      await rustion.rustionMasterWrite({
+        pki_mount: mountPath,
+        pki_role: edRole.trim(),
+        pki_role_pqc: mlRole.trim(),
+        issuer_ref: "default",
+        algorithm: "",
+        default_ttl_secs: 31536000,
+        rotate_grace_secs: graceSecs,
+        current_serial: "",
+        current_not_after: "",
+        updated_at: "",
+        configured: false,
+      });
+      update("config", { status: "ok" });
+    } catch (e) {
+      update("config", { status: "err", detail: extractError(e) });
+      setRunning(false);
+      return;
+    }
+
+    // 6. Issue.
+    update("issue", { status: "running" });
+    try {
+      const res = await rustion.rustionMasterIssue();
+      update("issue", {
+        status: "ok",
+        detail: res.serial ? `serial=${res.serial}` : undefined,
+      });
+    } catch (e) {
+      update("issue", { status: "err", detail: extractError(e) });
+      setRunning(false);
+      return;
+    }
+
+    setRunning(false);
+    toast("success", "Master bootstrap complete");
+    onDone();
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={() => {
+        if (!running) {
+          reset();
+          onClose();
+        }
+      }}
+      title="Bootstrap Rustion master"
+      size="md"
+      actions={
+        <>
+          <Button
+            variant="ghost"
+            disabled={running}
+            onClick={() => {
+              reset();
+              onClose();
+            }}
+          >
+            Close
+          </Button>
+          <Button onClick={handleBootstrap} disabled={running}>
+            {running ? "Bootstrapping…" : "Bootstrap"}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <p className="text-xs text-[var(--color-text-muted)]">
+          One-shot equivalent of{" "}
+          <code className="font-mono">scripts/rustion-master-bootstrap.sh</code>.
+          Enables the PKI mount, generates a root certificate, writes
+          both PKI roles, points the rustion master at them, and mints
+          the hybrid keypair. Each step is idempotent — already-present
+          state is skipped.
+        </p>
+        <div className="grid grid-cols-2 gap-3">
+          <Input
+            label="PKI mount"
+            value={pkiMount}
+            onChange={(e) => setPkiMount(e.target.value)}
+            disabled={running}
+          />
+          <Input
+            label="Rotate grace (secs)"
+            type="number"
+            value={String(graceSecs)}
+            onChange={(e) =>
+              setGraceSecs(Math.max(0, Number(e.target.value) || 0))
+            }
+            disabled={running}
+          />
+          <Input
+            label="Ed25519 role"
+            value={edRole}
+            onChange={(e) => setEdRole(e.target.value)}
+            disabled={running}
+          />
+          <Input
+            label="ML-DSA-65 role"
+            value={mlRole}
+            onChange={(e) => setMlRole(e.target.value)}
+            disabled={running}
+          />
+          <Input
+            label="Role TTL"
+            value={roleTtl}
+            onChange={(e) => setRoleTtl(e.target.value)}
+            disabled={running}
+          />
+          <Input
+            label="Role max TTL"
+            value={roleMaxTtl}
+            onChange={(e) => setRoleMaxTtl(e.target.value)}
+            disabled={running}
+          />
+          <Input
+            label="Root TTL"
+            value={rootTtl}
+            onChange={(e) => setRootTtl(e.target.value)}
+            disabled={running}
+          />
+          <Input
+            label="Root common name"
+            value={commonName}
+            onChange={(e) => setCommonName(e.target.value)}
+            disabled={running}
+          />
+        </div>
+        {steps.length > 0 && (
+          <div className="mt-3 border-t border-[var(--color-border)] pt-3 space-y-1.5 text-xs">
+            {steps.map((step) => (
+              <div key={step.key} className="flex items-start gap-2 min-w-0">
+                <StepIcon status={step.status} />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate">{step.label}</div>
+                  {step.detail && (
+                    <div className="text-[var(--color-text-muted)] truncate">
+                      {step.detail}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+function StepIcon({ status }: { status: StepStatus }) {
+  switch (status) {
+    case "ok":
+      return <span className="text-emerald-400" aria-label="ok">✓</span>;
+    case "skipped":
+      return <span className="text-sky-400" aria-label="skipped">✓</span>;
+    case "err":
+      return <span className="text-red-400" aria-label="error">✗</span>;
+    case "running":
+      return <span className="text-amber-400" aria-label="running">…</span>;
+    default:
+      return <span className="text-[var(--color-text-muted)]" aria-label="pending">•</span>;
+  }
 }

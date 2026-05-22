@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+- One-shot bootstrap script `scripts/rustion-master-bootstrap.sh` for
+  Rustion master + PKI roles + issue. GUI: Rustion → Master panel now
+  has a "Bootstrap master" button that runs the same flow.
+
 ## [0.8.7] - 2026-05-21
 
 ### Added

@@ -43,22 +43,25 @@ Rustion verifies the envelope (authority pubkey pinned in YAML, deployment_id ma
 The full operator runbook lives at [`features/rustion-authority-lifecycle.md`](https://github.com/ffquintella/BastionVault/blob/main/features/rustion-authority-lifecycle.md). Quick path:
 
 > **First-time setup:** before step 1 below, the BV master must be
-> issued. As of 0.8.7 issuance routes through the PKI engine. Quick
-> bootstrap (see [`features/rustion-authority-lifecycle.md` §0](https://github.com/ffquintella/BastionVault/blob/main/features/rustion-authority-lifecycle.md#0-bootstrap-the-master-keypair-one-time-per-bv-deployment)
-> for the full recipe and troubleshooting table):
+> issued. As of 0.8.7 issuance routes through the PKI engine. The
+> fastest path is the bootstrap script (or the matching "Bootstrap
+> master" button in Settings → Rustion → Bastions → Master signing
+> cert):
 >
 > ```bash
-> bvault secrets enable -path=pki pki
-> bvault write pki/root/generate/internal common_name="BV Rustion Master Root" ttl=87600h
-> bvault write pki/roles/rustion-master-ed25519 key_type=ed25519  allow_any_name=true ttl=8760h max_ttl=87600h
-> bvault write pki/roles/rustion-master-mldsa65 key_type=ml-dsa-65 allow_any_name=true ttl=8760h max_ttl=87600h
-> bvault rustion master config \
->     pki_mount=pki \
->     pki_role=rustion-master-ed25519 \
->     pki_role_pqc=rustion-master-mldsa65 \
->     rotate_grace_secs=86400
-> bvault rustion master issue
+> bvault login   # populate ~/.vault-token, or export VAULT_ADDR/VAULT_TOKEN
+> scripts/rustion-master-bootstrap.sh
+> # idempotent; re-running skips already-present mount / root / roles.
+> # exits code 3 (informational) if the master is already issued —
+> # use `bvault rustion master rotate` to mint a new keypair instead.
 > ```
+>
+> Run `scripts/rustion-master-bootstrap.sh --help` for every override
+> (PKI mount, role names, TTLs, grace window, root common name). The
+> manual recipe is still documented in
+> [`features/rustion-authority-lifecycle.md` §0](https://github.com/ffquintella/BastionVault/blob/main/features/rustion-authority-lifecycle.md#0-bootstrap-the-master-keypair-one-time-per-bv-deployment)
+> under "Manual path (if you need finer control)" for operators who
+> want to wire up the PKI mount and roles by hand.
 >
 > Until `issue` succeeds, `master export` returns the empty stub with
 > `Issued: false`. Use `bvault rustion master rotate` to mint a new

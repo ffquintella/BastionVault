@@ -491,6 +491,7 @@ pub fn run() {
             commands::rustion::rustion_target_probe,
             commands::rustion::rustion_master_read,
             commands::rustion::rustion_master_write,
+            commands::rustion::rustion_master_issue,
             commands::rustion::rustion_master_pubkey_export,
             commands::rustion::rustion_session_open,
             commands::rustion::rustion_session_renew,

@@ -73,6 +73,13 @@ pub struct RustionTargetProbeResult {
 pub struct RustionMasterConfig {
     pub pki_mount: String,
     pub pki_role: String,
+    /// Phase-2 ML-DSA-65 sibling role. Required alongside `pki_role`
+    /// (the Ed25519 half) for `master/issue` to succeed — the rustion
+    /// engine mints both halves of the hybrid keypair through the PKI
+    /// engine. Optional on the wire so older GUIs that pre-date the
+    /// hybrid binding still round-trip cleanly.
+    #[serde(default)]
+    pub pki_role_pqc: String,
     pub issuer_ref: String,
     pub algorithm: String,
     pub default_ttl_secs: u64,
@@ -81,6 +88,13 @@ pub struct RustionMasterConfig {
     pub current_not_after: String,
     pub updated_at: String,
     pub configured: bool,
+}
+
+#[derive(Serialize, Default)]
+pub struct RustionMasterIssueResult {
+    pub serial: String,
+    pub not_after: String,
+    pub algorithm: String,
 }
 
 #[derive(Serialize, Default)]
@@ -272,21 +286,7 @@ pub async fn rustion_master_read(state: State<'_, AppState>) -> CmdResult<Rustio
     )
     .await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
-    Ok(RustionMasterConfig {
-        pki_mount: s(&data, "pki_mount"),
-        pki_role: s(&data, "pki_role"),
-        issuer_ref: s(&data, "issuer_ref"),
-        algorithm: s(&data, "algorithm"),
-        default_ttl_secs: u64_field(&data, "default_ttl_secs"),
-        rotate_grace_secs: u64_field(&data, "rotate_grace_secs"),
-        current_serial: s(&data, "current_serial"),
-        current_not_after: s(&data, "current_not_after"),
-        updated_at: s(&data, "updated_at"),
-        configured: data
-            .get("configured")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-    })
+    Ok(master_config_from_map(&data))
 }
 
 #[tauri::command]
@@ -300,6 +300,12 @@ pub async fn rustion_master_write(
     }
     if !input.pki_role.is_empty() {
         body.insert("pki_role".into(), Value::String(input.pki_role));
+    }
+    if !input.pki_role_pqc.is_empty() {
+        body.insert(
+            "pki_role_pqc".into(),
+            Value::String(input.pki_role_pqc),
+        );
     }
     if !input.issuer_ref.is_empty() {
         body.insert("issuer_ref".into(), Value::String(input.issuer_ref));
@@ -324,21 +330,49 @@ pub async fn rustion_master_write(
     )
     .await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
-    Ok(RustionMasterConfig {
-        pki_mount: s(&data, "pki_mount"),
-        pki_role: s(&data, "pki_role"),
-        issuer_ref: s(&data, "issuer_ref"),
+    Ok(master_config_from_map(&data))
+}
+
+/// Mint the hybrid Ed25519 + ML-DSA-65 master keypair through the
+/// configured PKI engine. Mirrors the CLI's `bvault rustion master
+/// issue` — both sides hit `rustion/master/issue`. Used by the
+/// Bootstrap Master wizard in the GUI.
+#[tauri::command]
+pub async fn rustion_master_issue(
+    state: State<'_, AppState>,
+) -> CmdResult<RustionMasterIssueResult> {
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}master/issue"),
+        None,
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(RustionMasterIssueResult {
+        serial: s(&data, "serial"),
+        not_after: s(&data, "not_after"),
         algorithm: s(&data, "algorithm"),
-        default_ttl_secs: u64_field(&data, "default_ttl_secs"),
-        rotate_grace_secs: u64_field(&data, "rotate_grace_secs"),
-        current_serial: s(&data, "current_serial"),
-        current_not_after: s(&data, "current_not_after"),
-        updated_at: s(&data, "updated_at"),
+    })
+}
+
+fn master_config_from_map(data: &Map<String, Value>) -> RustionMasterConfig {
+    RustionMasterConfig {
+        pki_mount: s(data, "pki_mount"),
+        pki_role: s(data, "pki_role"),
+        pki_role_pqc: s(data, "pki_role_pqc"),
+        issuer_ref: s(data, "issuer_ref"),
+        algorithm: s(data, "algorithm"),
+        default_ttl_secs: u64_field(data, "default_ttl_secs"),
+        rotate_grace_secs: u64_field(data, "rotate_grace_secs"),
+        current_serial: s(data, "current_serial"),
+        current_not_after: s(data, "current_not_after"),
+        updated_at: s(data, "updated_at"),
         configured: data
             .get("configured")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-    })
+    }
 }
 
 // ─── Session open ────────────────────────────────────────────────

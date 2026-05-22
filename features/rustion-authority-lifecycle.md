@@ -102,6 +102,40 @@ issued. As of 0.8.7 the issuance flow routes through the PKI engine —
 no more local keygen — so you need a PKI mount with two roles wired
 up (one Ed25519, one ML-DSA-65), then a single `issue` call.
 
+#### One-shot path (recommended)
+
+Run the bootstrap script. It detects what's already in place (mount,
+root, roles, master config, issued cert) and skips ahead — safe to
+re-run, but exits code 3 if the master is already issued so CI loops
+don't accidentally rotate.
+
+```bash
+bvault login   # populate ~/.vault-token (or export VAULT_ADDR + VAULT_TOKEN)
+scripts/rustion-master-bootstrap.sh
+
+# Override any default:
+scripts/rustion-master-bootstrap.sh \
+    --pki-mount pki \
+    --ed25519-role rustion-master-ed25519 \
+    --mldsa65-role rustion-master-mldsa65 \
+    --ttl 8760h --max-ttl 87600h --root-ttl 87600h \
+    --rotate-grace-secs 86400 \
+    --common-name "BastionVault Rustion Master Root"
+
+# See every flag:
+scripts/rustion-master-bootstrap.sh --help
+```
+
+Exit codes: `0` success, `1` user/env error, `2` PKI failure, `3`
+master already issued (run `bvault rustion master rotate` instead).
+
+The same flow ships in the GUI as **Settings → Rustion → Bastions →
+Master signing cert → Bootstrap master**. The button is only shown
+when the master is unissued; the wizard renders a per-step ✓ list
+and leaves the modal open on failure so the operator can retry.
+
+#### Manual path (if you need finer control)
+
 ```bash
 # 1. Enable the PKI mount (skip if already mounted) and generate a root.
 bvault secrets enable -path=pki pki

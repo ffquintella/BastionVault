@@ -59,6 +59,10 @@ export interface RustionTargetProbeResult {
 export interface RustionMasterConfig {
   pki_mount: string;
   pki_role: string;
+  /** Phase-2 ML-DSA-65 sibling role. Required for `master/issue` to
+   *  succeed — the rustion engine mints the hybrid keypair by calling
+   *  pki/issue/<pki_role> + pki/issue/<pki_role_pqc>. */
+  pki_role_pqc: string;
   issuer_ref: string;
   algorithm: string;
   default_ttl_secs: number;
@@ -67,6 +71,12 @@ export interface RustionMasterConfig {
   current_not_after: string;
   updated_at: string;
   configured: boolean;
+}
+
+export interface RustionMasterIssueResult {
+  serial: string;
+  not_after: string;
+  algorithm: string;
 }
 
 export interface RustionMasterPubkey {
@@ -122,6 +132,11 @@ export const rustionMasterRead = () =>
 
 export const rustionMasterWrite = (input: RustionMasterConfig) =>
   invoke<RustionMasterConfig>("rustion_master_write", { input });
+
+/** Mint the hybrid Ed25519 + ML-DSA-65 master keypair through the
+ *  configured PKI engine. Mirrors `bvault rustion master issue`. */
+export const rustionMasterIssue = () =>
+  invoke<RustionMasterIssueResult>("rustion_master_issue");
 
 export const rustionMasterPubkeyExport = () =>
   invoke<RustionMasterPubkey>("rustion_master_pubkey_export");
