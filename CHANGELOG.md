@@ -45,6 +45,21 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-05-26
+
+### Added
+
+- **Connect button restored on the Resources list cards**
+  (`gui/src/routes/ResourcesPage.tsx`). The inline quick-connect
+  button was dropped when the paginated search endpoint replaced the
+  list-then-fan-out reads (the card projection omits
+  `connection_profiles`). It's back as a one-click action that opens
+  the resource detail straight on the Connection tab, where the
+  per-profile launcher has the full metadata (LDAP-operator prompt,
+  recently-connected, Rustion route resolver). Shown only on
+  `server`-type resources and honours the per-type connect toggle —
+  matching the detail view's Connection-tab gating.
+
 ## [0.10.2] - 2026-05-26
 
 ### Changed

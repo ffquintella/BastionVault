@@ -88,21 +88,27 @@ function ResourceCard({
   typeConfig,
   assetGroups,
   onSelect,
+  onConnect,
   onPickGroup,
 }: {
   meta: api.ResourceCardEntry;
   typeConfig: ResourceTypeConfig;
   assetGroups: string[];
   onSelect: (name: string) => void;
+  onConnect: (name: string) => void;
   onPickGroup: (group: string) => void;
 }) {
   // The card-shaped projection from the search endpoint omits
-  // `os_type` and `connection_profiles`, so the inline quick-connect
-  // button isn't available in the list view anymore — the operator
-  // clicks into the resource and uses the Connection tab's launcher.
-  // Tradeoff for being able to render thousands of resources without
-  // shipping full metadata for each.
+  // `os_type` and `connection_profiles`. The card-level Connect
+  // button therefore doesn't dispatch a session directly — it opens
+  // the resource detail on the Connection tab where the per-profile
+  // launcher has the full metadata. Keeps the list payload small
+  // while restoring a one-click path to Connect.
   const td = getTypeDef(typeConfig, meta.type);
+  // Connect is server-only (matches the detail view's tab gating) and
+  // honours the per-type connect toggle.
+  const canConnect =
+    String(meta.type || "") === "server" && td.connect?.enabled !== false;
   return (
     <button
       onClick={() => onSelect(meta.name)}
@@ -110,6 +116,27 @@ function ResourceCard({
     >
       <div className="flex items-center gap-2 mb-2">
         <span className="font-medium truncate flex-1 min-w-0">{meta.name}</span>
+        {canConnect && (
+          <span
+            role="button"
+            tabIndex={0}
+            onClick={(ev) => {
+              ev.stopPropagation();
+              onConnect(meta.name);
+            }}
+            onKeyDown={(ev) => {
+              if (ev.key === "Enter" || ev.key === " ") {
+                ev.stopPropagation();
+                ev.preventDefault();
+                onConnect(meta.name);
+              }
+            }}
+            className="px-2 py-0.5 bg-[var(--color-primary)] text-white rounded text-xs cursor-pointer hover:opacity-80 shrink-0"
+            title="Connect"
+          >
+            Connect
+          </span>
+        )}
         <ResourceTypeIcon typeDef={td} />
       </div>
       {meta.hostname ? (
@@ -423,16 +450,28 @@ export function ResourcesPage() {
     };
   }, [recent]);
 
-  async function selectResource(name: string) {
+  async function selectResource(name: string, tab: typeof detailTab = "info") {
     try {
       const info = await api.readResource(name);
       setSelected(name);
       setResourceInfo(info);
-      setDetailTab("info");
+      setDetailTab(tab);
       setRecent(pushRecent(name));
     } catch (e: unknown) {
       toast("error", extractError(e));
     }
+  }
+
+  // Card-level Connect: open the resource detail straight on the
+  // Connection tab so the existing per-profile launcher (with its
+  // LDAP-operator prompt, recently-connected list, and Rustion route
+  // resolver) takes over. We don't fire the session directly from the
+  // card because the search-endpoint projection omits
+  // connection_profiles — we'd have to read the resource anyway, and
+  // surfacing the profile list lets the operator pick when there's
+  // more than one.
+  function connectResource(name: string) {
+    void selectResource(name, "connection");
   }
 
   async function handleDelete() {
@@ -641,6 +680,7 @@ export function ResourcesPage() {
                       typeConfig={typeConfig}
                       assetGroups={assetGroups.map.byResource[meta.name] || []}
                       onSelect={selectResource}
+                      onConnect={connectResource}
                       onPickGroup={(g) => setFilterGroup((cur) => (cur === g ? "" : g))}
                     />
                   ))}
@@ -656,6 +696,7 @@ export function ResourcesPage() {
                   typeConfig={typeConfig}
                   assetGroups={assetGroups.map.byResource[meta.name] || []}
                   onSelect={selectResource}
+                  onConnect={connectResource}
                   onPickGroup={(g) => setFilterGroup((cur) => (cur === g ? "" : g))}
                 />
               ))}
