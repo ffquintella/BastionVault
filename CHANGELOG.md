@@ -45,6 +45,27 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-05-26
+
+### Added
+
+- **Pre-flight pubkey-length validation on Rustion target write**
+  (`src/modules/rustion/mod.rs`). `handle_target_create` and
+  `handle_target_update` now reject `kem_public_key` whose
+  base64-decoded length is not 1184 bytes (ML-KEM-768) and
+  `public_key_mldsa65` whose decoded length is not 1952 bytes
+  (ML-DSA-65) with `HTTP 400` plus the field name and observed length.
+  Catches the "pasted into the wrong slot" enrolment mistake at write
+  time instead of letting it surface as `HTTP 500: envelope build
+  failed: invalid KEM public key` deep in a later Connect attempt.
+- **Pubkey-health badges on Settings → Rustion Bastions row**
+  (`gui/src/components/RustionBastionsTab.tsx`). Each target row now
+  decodes its `kem_public_key` and `public_key_mldsa65` and renders a
+  red `KEM pubkey <N> B (need 1184)` chip (or `… missing` / `…
+  invalid base64`) and a yellow `ML-DSA-65 pubkey <N> B (need 1952)`
+  chip when the slot is broken. Operators see broken enrolments before
+  clicking Connect.
+
 ## [0.9.0] - 2026-05-26
 
 Minor bump cutting the Phase 7.4 (Rustion-mediated Connect) work

@@ -917,6 +917,49 @@ impl RustionBackendInner {
         Ok(Some(Response::list_response(&ids)))
     }
 
+    /// Phase 7.4: pre-flight check the post-quantum pubkey lengths
+    /// before the target lands in storage. ML-KEM-768 public keys are
+    /// **1184 bytes** raw; ML-DSA-65 public keys are **1952 bytes** raw.
+    /// A wrong-length value (typically a fingerprint pasted into the
+    /// wrong slot during enrolment) gets through every later check at
+    /// the BV side, then surfaces as `HTTP 500: envelope build failed:
+    /// invalid KEM public key` deep in a Connect attempt. Catching it
+    /// at write time gives the operator an actionable `HTTP 400` with
+    /// the field name and the observed length.
+    ///
+    /// Empty values are tolerated — both create and update accept
+    /// missing fields and the update path uses empty-as-"keep-existing"
+    /// patch semantics.
+    fn validate_target_pubkeys(input: &RustionTargetInput) -> Result<(), RvError> {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+        fn check(label: &str, b64: &str, expected: usize) -> Result<(), RvError> {
+            if b64.is_empty() {
+                return Ok(());
+            }
+            let raw = STANDARD.decode(b64.as_bytes()).map_err(|e| {
+                bv_error_response_status!(
+                    400,
+                    &format!("{label}: base64 decode failed ({e}); expected a {expected}-byte key")
+                )
+            })?;
+            if raw.len() != expected {
+                return Err(bv_error_response_status!(
+                    400,
+                    &format!(
+                        "{label}: decoded length {} bytes, expected {expected}. Did you paste the wrong key into this field? (ML-KEM-768 = 1184, ML-DSA-65 = 1952)",
+                        raw.len()
+                    )
+                ));
+            }
+            Ok(())
+        }
+
+        check("kem_public_key", &input.kem_public_key, 1184)?;
+        check("public_key_mldsa65", &input.public_key.mldsa65, 1952)?;
+        Ok(())
+    }
+
     pub async fn handle_target_create(
         &self,
         _b: &dyn Backend,
@@ -924,6 +967,7 @@ impl RustionBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let input = Self::input_from_req(req, "")?;
+        Self::validate_target_pubkeys(&input)?;
         let target = store.create_target(input).await?;
         log::info!(
             "{}: id={} name={} endpoint={} fingerprint={}",
@@ -997,6 +1041,11 @@ impl RustionBackendInner {
         } else if input.tls_pinned_cert_pem.trim() == "-" {
             input.tls_pinned_cert_pem = String::new();
         }
+        // Validate AFTER the empty-as-"keep" patch merge above. That
+        // way an update that only touches `description` still passes
+        // even if the existing kem field had been written before this
+        // check existed.
+        Self::validate_target_pubkeys(&input)?;
         let updated = store.update_target(&id, input).await?;
         let rotated = updated.public_key.ed25519 != existing.public_key.ed25519
             || updated.public_key.mldsa65 != existing.public_key.mldsa65;

@@ -33,6 +33,61 @@ import type {
 } from "../lib/rustion";
 import { extractError } from "../lib/error";
 
+/// Phase 7.4 — decode + length-check a base64 pubkey blob from a
+/// target record. Returns `null` when the field is empty (operator may
+/// have skipped that key during enrolment), the literal `"invalid"`
+/// when base64 decoding fails, or the raw byte length on success.
+/// Compared against the expected ML-KEM-768 / ML-DSA-65 byte size to
+/// surface a "wrong key in this slot" badge on the targets row.
+function pubkeyByteLength(b64: string): number | "invalid" | null {
+  if (!b64) return null;
+  try {
+    return atob(b64).length;
+  } catch {
+    return "invalid";
+  }
+}
+
+interface PubkeyHealthBadgesProps {
+  kemPublicKey: string;
+  mldsa65PublicKey: string;
+}
+
+function PubkeyHealthBadges({ kemPublicKey, mldsa65PublicKey }: PubkeyHealthBadgesProps) {
+  const kem = pubkeyByteLength(kemPublicKey);
+  const mldsa = pubkeyByteLength(mldsa65PublicKey);
+
+  const badges: { label: string; variant: "warning" | "error" }[] = [];
+  if (kem === null) {
+    badges.push({ label: "KEM pubkey missing", variant: "error" });
+  } else if (kem === "invalid") {
+    badges.push({ label: "KEM pubkey invalid base64", variant: "error" });
+  } else if (kem !== 1184) {
+    badges.push({
+      label: `KEM pubkey ${kem} B (need 1184)`,
+      variant: "error",
+    });
+  }
+  if (mldsa === null) {
+    badges.push({ label: "ML-DSA-65 pubkey missing", variant: "warning" });
+  } else if (mldsa === "invalid") {
+    badges.push({ label: "ML-DSA-65 pubkey invalid base64", variant: "warning" });
+  } else if (mldsa !== 1952) {
+    badges.push({
+      label: `ML-DSA-65 pubkey ${mldsa} B (need 1952)`,
+      variant: "warning",
+    });
+  }
+  if (badges.length === 0) return null;
+  return (
+    <div className="flex gap-1 mt-1 flex-wrap">
+      {badges.map((b) => (
+        <Badge key={b.label} label={b.label} variant={b.variant} />
+      ))}
+    </div>
+  );
+}
+
 export function RustionBastionsTab() {
   const { toast } = useToast();
   const [targets, setTargets] = useState<RustionTargetSummary[]>([]);
@@ -199,6 +254,10 @@ export function RustionBastionsTab() {
                             ))}
                           </div>
                         )}
+                        <PubkeyHealthBadges
+                          kemPublicKey={t.kem_public_key}
+                          mldsa65PublicKey={t.public_key_mldsa65}
+                        />
                       </td>
                       <td className="py-2 pr-3 font-mono text-xs">
                         {t.endpoint}
