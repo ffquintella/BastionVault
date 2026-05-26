@@ -37,8 +37,10 @@ import {
   rustionRecordingRead,
   rustionRecordingReplayLog,
   rustionRecordingsList,
+  rustionTargetList,
   type RustionRecordingBlob,
   type RustionRecordingEntry,
+  type RustionTargetSummary,
 } from "../lib/rustion";
 
 export function RecordingsPage() {
@@ -51,6 +53,14 @@ export function RecordingsPage() {
   const [selected, setSelected] = useState<RustionRecordingEntry | null>(null);
   const [pullInput, setPullInput] = useState({ bastionId: "", sessionId: "" });
   const [pulling, setPulling] = useState(false);
+  // Enrolled bastions for the Force-pull dropdown. Loaded once on
+  // mount; the operator picks by friendly name and we submit the id.
+  // Avoids the previous freeform text input that let the operator
+  // type the bastion *name* (`dev-1`) when the API wants the id
+  // (`rt_<hex>`), which surfaced as `HTTP 500: Logical backend
+  // operation not supported` from the per-target route resolver.
+  const [bastions, setBastions] = useState<RustionTargetSummary[]>([]);
+  const [bastionsLoading, setBastionsLoading] = useState(true);
 
   const reload = async () => {
     setLoading(true);
@@ -69,6 +79,23 @@ export function RecordingsPage() {
 
   useEffect(() => {
     void reload();
+    // Load enrolled bastions for the Force-pull dropdown. Failures
+    // here are non-fatal — the dropdown just renders "No bastions
+    // enrolled" and the operator can refresh from Settings.
+    (async () => {
+      try {
+        const list = await rustionTargetList();
+        setBastions(list);
+        if (list.length > 0) {
+          setPullInput((p) => (p.bastionId ? p : { ...p, bastionId: list[0].id }));
+        }
+      } catch (e) {
+        toast.toast("error", `Failed to load bastions: ${extractError(e)}`);
+      } finally {
+        setBastionsLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const filtered = useMemo(() => {
@@ -96,7 +123,9 @@ export function RecordingsPage() {
     try {
       const entry = await rustionRecordingPull(pullInput);
       toast.toast("success", `Pulled recording ${entry.recordingId}`);
-      setPullInput({ bastionId: "", sessionId: "" });
+      // Keep the selected bastion (operator likely wants to pull
+      // another session from the same one); only clear the session id.
+      setPullInput((p) => ({ ...p, sessionId: "" }));
       await reload();
     } catch (e) {
       toast.toast("error", `Pull failed: ${extractError(e)}`);
@@ -120,13 +149,28 @@ export function RecordingsPage() {
         <Card className="p-4">
           <h2 className="text-sm font-semibold mb-3">Force-pull a recording</h2>
           <div className="grid grid-cols-2 gap-3">
-            <Input
-              label="Bastion ID"
+            <Select
+              label="Bastion"
               value={pullInput.bastionId}
               onChange={(e) =>
                 setPullInput({ ...pullInput, bastionId: e.target.value })
               }
-              placeholder="rt_<16 hex>"
+              disabled={bastionsLoading || bastions.length === 0}
+              options={
+                bastions.length === 0
+                  ? [
+                      {
+                        value: "",
+                        label: bastionsLoading
+                          ? "Loading…"
+                          : "No bastions enrolled",
+                      },
+                    ]
+                  : bastions.map((b) => ({
+                      value: b.id,
+                      label: `${b.name} (${b.id})`,
+                    }))
+              }
             />
             <Input
               label="Session ID"
@@ -138,7 +182,14 @@ export function RecordingsPage() {
             />
           </div>
           <div className="mt-3">
-            <Button onClick={handlePull} loading={pulling} variant="primary">
+            <Button
+              onClick={handlePull}
+              loading={pulling}
+              variant="primary"
+              disabled={
+                bastions.length === 0 || !pullInput.bastionId || !pullInput.sessionId
+              }
+            >
               Pull from bastion
             </Button>
           </div>

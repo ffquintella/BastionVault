@@ -45,6 +45,21 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-05-26
+
+### Changed
+
+- **Recordings → Force-pull: Bastion ID is now a dropdown**
+  (`gui/src/routes/RecordingsPage.tsx`). The freeform text input was
+  too easy to misuse — operators typed the friendly name (`dev-1`)
+  while the API requires the id (`rt_<hex>`), which surfaced as the
+  confusing `HTTP 500: Logical backend operation not supported` from
+  the per-target route resolver. The dropdown loads enrolled bastions
+  via `rustion_target_list` on mount, shows `<name> (<id>)`, and
+  submits the id. Empty list shows "No bastions enrolled" and
+  disables the Pull button. Selected bastion is preserved across
+  successive pulls.
+
 ## [0.10.1] - 2026-05-26
 
 ### Security
