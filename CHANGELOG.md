@@ -45,6 +45,39 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.18] - 2026-05-26
+
+### Added
+- **Per-target TLS pinning for Rustion bastions.** New field
+  `tls_pinned_cert_pem` on `RustionTarget` (and on the
+  `rustion/targets`{,/{id}} HTTP API, the
+  `bvault rustion target add --tls-cert-pem …` CLI flag, and the
+  enrolment modal's new "Advanced — pin TLS leaf certificate" section).
+  When set, the probe + session + telemetry + recordings + enrolment
+  paths build a `reqwest::Client` that trusts **only** the supplied
+  PEM cert as a root and skips hostname matching — pinning the leaf
+  already binds trust to a specific server, making CN/SAN matching
+  redundant and letting BV tolerate self-signed Rustion certs (lab /
+  pre-prod) without weakening trust on production targets behind a
+  real PKI. Mirrors the per-target pinning model already used for
+  the Ed25519 / ML-DSA-65 / ML-KEM-768 keys.
+- **Shared `super::http::build_client_for(target, timeout)` helper**
+  ([src/modules/rustion/http.rs](src/modules/rustion/http.rs)) so the
+  six call sites that talk to Rustion (probe, two session-open
+  loops, renew, kill, telemetry pull, recording fetch / blob,
+  attest, deenrol) honour the pin uniformly. The previous per-module
+  `build_http_client()` helpers were folded into this single entry
+  point.
+
+### Changed
+- **Update semantics for `tls_pinned_cert_pem`.** Empty value
+  preserves the existing pin on update (matches the rest of the
+  patch-style fields); the single-character sentinel `-` clears a
+  previously-set pin.
+- **Target response shape gains `tls_pinned: bool`** alongside the
+  full `tls_pinned_cert_pem` body, so the GUI can render a "pinned"
+  badge in list views without loading the PEM.
+
 ## [0.8.17] - 2026-05-22
 
 ### Changed

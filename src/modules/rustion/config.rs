@@ -74,6 +74,17 @@ pub struct RustionTarget {
     /// JSON path Rustion returns.
     #[serde(default)]
     pub default_recording_dir: String,
+    /// Optional pinned TLS leaf certificate (PEM-encoded). When set,
+    /// the probe + dispatcher build a `reqwest` client that trusts
+    /// **only** this cert as a root and skips hostname matching —
+    /// pinning the exact leaf makes the hostname check redundant
+    /// and lets us tolerate self-signed certs without SubjectAltName
+    /// entries (common in pre-prod / lab deployments). When empty,
+    /// the standard webpki-roots CA verification path is used.
+    /// Mirrors the per-target pinning model BV already uses for the
+    /// Ed25519 / ML-DSA-65 / ML-KEM-768 keys.
+    #[serde(default)]
+    pub tls_pinned_cert_pem: String,
     /// ISO-8601.
     pub created_at: DateTime<Utc>,
     /// ISO-8601. Bumped on every successful upsert.
@@ -173,4 +184,8 @@ pub struct RustionTargetInput {
     pub enabled: bool,
     #[serde(default)]
     pub default_recording_dir: String,
+    /// PEM-encoded leaf certificate to pin. See
+    /// [`RustionTarget::tls_pinned_cert_pem`].
+    #[serde(default)]
+    pub tls_pinned_cert_pem: String,
 }

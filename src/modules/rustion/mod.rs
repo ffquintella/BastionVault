@@ -39,6 +39,7 @@ pub mod dispatcher;
 pub mod enrolment;
 pub mod envelope;
 pub mod health;
+pub mod http;
 pub mod master;
 pub mod poller;
 pub mod policy;
@@ -288,6 +289,11 @@ impl RustionBackend {
                             field_type: FieldType::Str,
                             default: "",
                             description: "Optional: relative directory under the Rustion recordings root for diagnostics."
+                        },
+                        "tls_pinned_cert_pem": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "Optional PEM-encoded leaf TLS certificate to pin for outbound HTTPS to this Rustion. When set, BV trusts only this cert and skips hostname matching — lets the probe tolerate self-signed certs (lab / pre-prod) without weakening trust on production targets behind a real PKI."
                         }
                     },
                     operations: [
@@ -374,6 +380,11 @@ impl RustionBackend {
                             field_type: FieldType::Str,
                             default: "",
                             description: "Optional diagnostic field."
+                        },
+                        "tls_pinned_cert_pem": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "Optional pinned TLS leaf cert (PEM). Empty preserves existing value on update."
                         }
                     },
                     operations: [
@@ -860,6 +871,7 @@ impl RustionBackendInner {
             tags,
             enabled,
             default_recording_dir: pick("default_recording_dir"),
+            tls_pinned_cert_pem: pick("tls_pinned_cert_pem"),
         })
     }
 
@@ -954,6 +966,14 @@ impl RustionBackendInner {
         }
         if input.default_recording_dir.is_empty() {
             input.default_recording_dir = existing.default_recording_dir.clone();
+        }
+        if input.tls_pinned_cert_pem.is_empty() {
+            // Patch semantics: empty preserves the existing pin. To
+            // explicitly **clear** a pin, the operator submits the
+            // sentinel "-" — handled below as a one-character escape.
+            input.tls_pinned_cert_pem = existing.tls_pinned_cert_pem.clone();
+        } else if input.tls_pinned_cert_pem.trim() == "-" {
+            input.tls_pinned_cert_pem = String::new();
         }
         let updated = store.update_target(&id, input).await?;
         let rotated = updated.public_key.ed25519 != existing.public_key.ed25519
@@ -2672,6 +2692,18 @@ fn target_response(t: &RustionTarget) -> Response {
     data.insert(
         "default_recording_dir".into(),
         Value::String(t.default_recording_dir.clone()),
+    );
+    // Expose whether a TLS pin is configured (boolean), not the PEM
+    // itself — keeps health/list responses compact and prevents the
+    // pin from leaking into log scrapes. The full PEM is still
+    // readable via the per-id Read handler.
+    data.insert(
+        "tls_pinned".into(),
+        Value::Bool(!t.tls_pinned_cert_pem.trim().is_empty()),
+    );
+    data.insert(
+        "tls_pinned_cert_pem".into(),
+        Value::String(t.tls_pinned_cert_pem.clone()),
     );
     data.insert("created_at".into(), Value::String(t.created_at.to_rfc3339()));
     data.insert("updated_at".into(), Value::String(t.updated_at.to_rfc3339()));

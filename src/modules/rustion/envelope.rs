@@ -433,6 +433,7 @@ mod tests {
             tags: vec![],
             enabled: true,
             default_recording_dir: String::new(),
+            tls_pinned_cert_pem: String::new(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

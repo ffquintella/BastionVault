@@ -90,7 +90,7 @@ pub async fn run_probe_pass(core: &Arc<Core>) -> Result<(), RvError> {
 /// Used by the synchronous "test connection" admin endpoint so the
 /// GUI / CLI can surface a verdict without waiting for the next tick.
 pub async fn probe_target_now(store: &Arc<RustionStore>, target: &RustionTarget) {
-    let client = match build_client() {
+    let client = match build_client_for(target) {
         Ok(c) => c,
         Err(e) => {
             log::warn!("rustion/pinger: build http client: {e}");
@@ -116,14 +116,12 @@ async fn tick(core: &Arc<Core>) -> Result<(), RvError> {
         return Ok(());
     }
 
-    let client = match build_client() {
-        Ok(c) => c,
-        Err(e) => {
-            log::warn!("rustion/pinger: build http client: {e}");
-            return Ok(());
-        }
-    };
-
+    // Per-target client: each target may carry its own pinned TLS
+    // leaf cert, so we can't share a single client across the fleet
+    // without losing the pin scope. Connection reuse is per-host
+    // anyway (each target is a distinct endpoint) so the only thing
+    // sacrificed is the cost of constructing the client struct —
+    // negligible against a 30s probe cadence.
     for id in ids {
         let Some(target) = store.get_target(&id).await? else {
             continue;
@@ -134,6 +132,17 @@ async fn tick(core: &Arc<Core>) -> Result<(), RvError> {
             // so flipping `enabled=false` doesn't churn audit events.
             continue;
         }
+        let client = match build_client_for(&target) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!(
+                    "rustion/pinger: build http client for {} ({}): {e}",
+                    target.id,
+                    target.name
+                );
+                continue;
+            }
+        };
         probe_one(&client, &store, &target).await;
     }
     Ok(())
@@ -242,14 +251,8 @@ struct HealthBody {
     now: Option<String>,
 }
 
-fn build_client() -> Result<reqwest::Client, RvError> {
-    reqwest::ClientBuilder::new()
-        // No redirects: a misbehaving bastion shouldn't be able to
-        // redirect the probe to an arbitrary URL.
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(PROBE_TIMEOUT)
-        .build()
-        .map_err(|e| RvError::ErrString(format!("rustion: build http client: {e}")))
+fn build_client_for(target: &RustionTarget) -> Result<reqwest::Client, RvError> {
+    super::http::build_client_for(target, PROBE_TIMEOUT)
 }
 
 fn mint_nonce() -> String {

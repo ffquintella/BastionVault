@@ -169,13 +169,15 @@ pub async fn open_session(
     }
 
     // 2. Walk candidates. On 4xx → halt, on transport/5xx → advance.
-    let client = build_http_client()
-        .map_err(|e| SessionOpenError::Master(format!("http client: {e}")))?;
+    // Client is built per-target inside the loop — each Rustion can
+    // carry its own pinned TLS leaf cert.
     let mut attempts: Vec<AttemptOutcome> = Vec::new();
     let mut tried_ids: Vec<String> = Vec::new();
 
     for target in &plan.candidates {
         tried_ids.push(target.id.clone());
+        let client = super::http::build_client_for(target, Duration::from_secs(10))
+            .map_err(|e| SessionOpenError::Master(format!("http client: {e}")))?;
         let built = match build_open_envelope(master, target, operator, request) {
             Ok(b) => b,
             Err(e) => {
@@ -275,14 +277,15 @@ pub async fn open_session_v2(
         return Err(SessionOpenError::NoCandidates);
     }
 
-    let client = build_http_client()
-        .map_err(|e| SessionOpenError::Master(format!("http client: {e}")))?;
+    // Per-target client construction; honours `tls_pinned_cert_pem`.
     let mut attempts: Vec<AttemptOutcome> = Vec::new();
     let mut tried_ids: Vec<String> = Vec::new();
     let bastion_selection = plan.mode.as_str();
 
     for target in &plan.candidates {
         tried_ids.push(target.id.clone());
+        let client = super::http::build_client_for(target, Duration::from_secs(10))
+            .map_err(|e| SessionOpenError::Master(format!("http client: {e}")))?;
         let built = match build_open_envelope(master, target, operator, request) {
             Ok(b) => b,
             Err(e) => {
@@ -502,7 +505,8 @@ pub async fn renew_session(
     )
     .map_err(|e| SessionRenewError::Envelope(format!("{e}")))?;
 
-    let client = build_http_client().map_err(|e| SessionRenewError::Transport(e))?;
+    let client = super::http::build_client_for(&target, Duration::from_secs(10))
+        .map_err(|e| SessionRenewError::Transport(format!("{e}")))?;
     let url = format!(
         "https://{}/v1/sessions/{}/renew",
         target.endpoint.trim_end_matches('/'),
@@ -565,7 +569,8 @@ pub async fn kill_session(
     let built = envelope::build_kill(master, &target, operator, &request.correlation_id)
         .map_err(|e| SessionRenewError::Envelope(format!("{e}")))?;
 
-    let client = build_http_client().map_err(|e| SessionRenewError::Transport(e))?;
+    let client = super::http::build_client_for(&target, Duration::from_secs(10))
+        .map_err(|e| SessionRenewError::Transport(format!("{e}")))?;
     let url = format!(
         "https://{}/v1/sessions/{}",
         target.endpoint.trim_end_matches('/'),
@@ -605,13 +610,9 @@ pub async fn kill_session(
     })
 }
 
-fn build_http_client() -> Result<reqwest::Client, String> {
-    reqwest::ClientBuilder::new()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("{e}"))
-}
+// HTTP client construction moved to `super::http::build_client_for`,
+// which honours per-target TLS pinning. The previous helper was
+// removed when the pinning model landed.
 
 // Small `Vec<u8>` ↔ CBOR byte-string serde adapter so the request
 // payload's `credential_material` survives a JSON / CBOR / serde

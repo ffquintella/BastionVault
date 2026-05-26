@@ -116,6 +116,7 @@ impl RustionStore {
             tags: normalized.tags,
             enabled: normalized.enabled,
             default_recording_dir: normalized.default_recording_dir,
+            tls_pinned_cert_pem: normalized.tls_pinned_cert_pem,
             created_at: now,
             updated_at: now,
         };
@@ -164,6 +165,7 @@ impl RustionStore {
         existing.tags = normalized.tags;
         existing.enabled = normalized.enabled;
         existing.default_recording_dir = normalized.default_recording_dir;
+        existing.tls_pinned_cert_pem = normalized.tls_pinned_cert_pem;
         existing.updated_at = Utc::now();
         self.put_target_record(&existing).await?;
         Ok(existing)
@@ -273,7 +275,33 @@ fn validate_input(input: &RustionTargetInput) -> Result<RustionTargetInput, RvEr
             .collect(),
         enabled: input.enabled,
         default_recording_dir: input.default_recording_dir.trim().to_string(),
+        tls_pinned_cert_pem: validate_tls_pinned_cert_pem(&input.tls_pinned_cert_pem)?,
     })
+}
+
+/// Light-touch validation: an empty value is accepted (= no pin, use
+/// system roots). A non-empty value must look like a PEM CERTIFICATE
+/// block and decode cleanly via `reqwest::Certificate::from_pem` —
+/// catches paste errors at write time rather than at the next probe.
+fn validate_tls_pinned_cert_pem(pem: &str) -> Result<String, RvError> {
+    let trimmed = pem.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    if !trimmed.contains("-----BEGIN CERTIFICATE-----")
+        || !trimmed.contains("-----END CERTIFICATE-----")
+    {
+        return Err(bv_error_string!(
+            "rustion target tls_pinned_cert_pem must be PEM-encoded \
+             (no BEGIN/END CERTIFICATE markers found)"
+        ));
+    }
+    reqwest::Certificate::from_pem(trimmed.as_bytes()).map_err(|e| {
+        bv_error_string!(&format!(
+            "rustion target tls_pinned_cert_pem failed to parse: {e}"
+        ))
+    })?;
+    Ok(trimmed.to_string())
 }
 
 fn id_from_name(name: &str) -> String {

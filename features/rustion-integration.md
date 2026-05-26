@@ -404,6 +404,33 @@ means BV's pin survives Rustion restarts; rotating the webhook
 keypair is currently a manual `rm webhook.key && systemctl restart
 rustion` plus a re-enrolment on BV.
 
+#### 1b. (Optional) capture the control-plane TLS cert for pinning
+
+BastionVault verifies the Rustion control-plane TLS cert against the
+standard webpki-roots bundle by default. If your Rustion is serving a
+self-signed cert (lab, pre-prod, or any deployment where minting a
+cert from the internal CA isn't on the critical path), enable
+per-target pinning by also exporting the leaf cert:
+
+```bash
+sudo cat /srv/application-config/rustion/tls/server.crt > server.crt
+```
+
+(or wherever `control_plane.tls_cert_path` points to in
+`rustion.toml`). You'll paste the PEM body into the BV enrol form's
+"Advanced — pin TLS leaf certificate" section in step 2. When the
+field is set, BV trusts only that leaf as a root and skips hostname
+matching — pinning the exact cert already binds trust to a specific
+server, so the hostname check becomes redundant. This is the
+preferred way to deal with self-signed certs that lack a
+`SubjectAltName` extension; the alternative (adding the cert to the
+host's system CA bundle) is silently ignored by BV's `reqwest`
+client, which uses bundled webpki-roots rather than the host bundle.
+
+Leave the field empty if your Rustion serves a cert chained to a CA
+already in webpki-roots — that's the standard production posture and
+needs no extra config.
+
 #### 2. Register the Rustion target on BastionVault
 
 GUI path — **Settings → Rustion Bastions → Enrol bastion**. Paste:

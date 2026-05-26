@@ -233,6 +233,7 @@ mod tests {
             tags: vec![],
             enabled,
             default_recording_dir: String::new(),
+            tls_pinned_cert_pem: String::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

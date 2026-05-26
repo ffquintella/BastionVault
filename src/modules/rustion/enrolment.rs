@@ -76,7 +76,8 @@ pub async fn attest_bastion(
     let built = envelope::build_attest(master, &target, operator)
         .map_err(|e| EnrolmentError::Envelope(format!("{e}")))?;
 
-    let client = build_http_client().map_err(EnrolmentError::Transport)?;
+    let client = super::http::build_client_for(&target, Duration::from_secs(10))
+        .map_err(|e| EnrolmentError::Transport(format!("{e}")))?;
     let url = format!(
         "https://{}/v1/authorities/attest",
         target.endpoint.trim_end_matches('/')
@@ -196,7 +197,8 @@ pub async fn deenrol_bastion(
     let built = envelope::build_deenrol(master, target, operator, reason)
         .map_err(|e| EnrolmentError::Envelope(format!("{e}")))?;
 
-    let client = build_http_client().map_err(EnrolmentError::Transport)?;
+    let client = super::http::build_client_for(&target, Duration::from_secs(10))
+        .map_err(|e| EnrolmentError::Transport(format!("{e}")))?;
     let url = format!(
         "https://{}/v1/authorities/deenrol",
         target.endpoint.trim_end_matches('/')
@@ -230,13 +232,8 @@ pub async fn deenrol_bastion(
     })
 }
 
-fn build_http_client() -> Result<reqwest::Client, String> {
-    reqwest::ClientBuilder::new()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("{e}"))
-}
+// HTTP client construction moved to `super::http::build_client_for`,
+// which honours per-target TLS pinning.
 
 // ─── Tests ──────────────────────────────────────────────────────────
 

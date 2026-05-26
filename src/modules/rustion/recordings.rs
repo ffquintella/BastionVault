@@ -190,11 +190,7 @@ pub async fn pull_recording(
         target.endpoint.trim_end_matches('/'),
         session_id
     );
-    let client = reqwest::ClientBuilder::new()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| bv_error_string!(&format!("http client: {e}")))?;
+    let client = super::http::build_client_for(&target, std::time::Duration::from_secs(10))?;
     let resp = client
         .get(&url)
         .send()
@@ -289,11 +285,7 @@ pub async fn fetch_blob(
         target.endpoint.trim_end_matches('/'),
         recording_id
     );
-    let client = reqwest::ClientBuilder::new()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| bv_error_string!(&format!("http client: {e}")))?;
+    let client = super::http::build_client_for(&target, std::time::Duration::from_secs(30))?;
     let resp = client
         .get(&url)
         .send()

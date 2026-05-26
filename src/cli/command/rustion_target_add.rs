@@ -72,6 +72,15 @@ pub struct RustionTargetAdd {
     #[arg(long, default_value = "")]
     default_recording_dir: String,
 
+    /// Optional PEM-encoded leaf TLS certificate to pin for outbound
+    /// HTTPS to this Rustion. When set, BV trusts only this cert and
+    /// skips hostname matching — lets BV tolerate self-signed certs
+    /// (lab / pre-prod) without weakening trust elsewhere. Read from
+    /// a file with `--tls-cert-pem "$(cat server.crt)"` or pass the
+    /// PEM body inline. To clear an existing pin on update, pass `-`.
+    #[arg(long = "tls-cert-pem", default_value = "")]
+    tls_pinned_cert_pem: String,
+
     #[deref]
     #[command(flatten, next_help_heading = "HTTP Options")]
     http_options: command::HttpOptions,
@@ -111,6 +120,12 @@ impl CommandExecutor for RustionTargetAdd {
             "default_recording_dir".into(),
             Value::String(self.default_recording_dir.clone()),
         );
+        if !self.tls_pinned_cert_pem.is_empty() {
+            body.insert(
+                "tls_pinned_cert_pem".into(),
+                Value::String(self.tls_pinned_cert_pem.clone()),
+            );
+        }
 
         let resp = client.logical().write("rustion/targets", Some(body))?;
         if resp.response_status == 200 {

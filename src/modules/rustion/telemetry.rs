@@ -222,11 +222,6 @@ async fn tick(core: &Arc<Core>) -> Result<(), RvError> {
     let cursors_view = std::sync::Arc::new(system_view.new_sub_view(CURSOR_SUB_PATH));
 
     let ids = store.list_target_ids().await?;
-    let client = reqwest::ClientBuilder::new()
-        .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| bv_error_string!(&format!("http client: {e}")))?;
 
     for id in ids {
         let Some(target) = store.get_target(&id).await? else {
@@ -237,6 +232,18 @@ async fn tick(core: &Arc<Core>) -> Result<(), RvError> {
         if !target.enabled {
             continue;
         }
+        // Per-target client honours `tls_pinned_cert_pem`.
+        let client = match super::http::build_client_for(&target, Duration::from_secs(10)) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!(
+                    "rustion/telemetry: build http client for {} ({}): {e}",
+                    target.id,
+                    target.name
+                );
+                continue;
+            }
+        };
         let base = format!("https://{}", target.endpoint.trim_end_matches('/'));
         let auth_header = "bastion-vault";
         let mut snap = TargetSnapshot {

@@ -465,6 +465,7 @@ function EnrolWizardModal({
   const [ed25519, setEd25519] = useState("");
   const [mldsa65, setMldsa65] = useState("");
   const [kemPub, setKemPub] = useState("");
+  const [tlsCertPem, setTlsCertPem] = useState("");
   const [description, setDescription] = useState("");
   const [tags, setTags] = useState("");
   const [enabled, setEnabled] = useState(true);
@@ -477,6 +478,7 @@ function EnrolWizardModal({
       setEd25519(target?.public_key_ed25519 ?? "");
       setMldsa65(target?.public_key_mldsa65 ?? "");
       setKemPub(target?.kem_public_key ?? "");
+      setTlsCertPem(target?.tls_pinned_cert_pem ?? "");
       setDescription(target?.description ?? "");
       setTags(target?.tags.join(", ") ?? "");
       setEnabled(target?.enabled ?? true);
@@ -512,6 +514,7 @@ function EnrolWizardModal({
             .filter(Boolean),
           enabled,
           default_recording_dir: target?.default_recording_dir ?? "",
+          tls_pinned_cert_pem: tlsCertPem.trim(),
         },
         editing ? target?.id : undefined,
       );
@@ -591,6 +594,35 @@ function EnrolWizardModal({
           rows={3}
           className="font-mono text-xs"
         />
+        <details className="rounded border border-[var(--color-border)] p-2">
+          <summary className="cursor-pointer text-xs text-[var(--color-text-muted)]">
+            Advanced — pin TLS leaf certificate (optional)
+          </summary>
+          <p className="mt-2 text-xs text-[var(--color-text-muted)]">
+            Paste the PEM contents of the Rustion control-plane TLS
+            cert (the file at <code>control_plane.tls_cert_path</code>{" "}
+            on the Rustion host). When set, BV trusts only this cert
+            and skips hostname matching — lets the probe tolerate
+            self-signed certs (lab / pre-prod) without weakening
+            trust on production targets behind a real PKI. Leave
+            empty to use the system root CA bundle.
+            {editing && (
+              <>
+                {" "}
+                To clear a previously-pinned cert, replace its body
+                with a single <code>-</code>.
+              </>
+            )}
+          </p>
+          <Textarea
+            label="tls_pinned_cert_pem"
+            value={tlsCertPem}
+            onChange={(e) => setTlsCertPem(e.target.value)}
+            rows={6}
+            placeholder={"-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----"}
+            className="font-mono text-xs mt-2"
+          />
+        </details>
         <Input
           label="Description"
           value={description}

@@ -26,6 +26,15 @@ export interface RustionTargetSummary {
    *  session-grant envelopes to this Rustion instance. Empty for
    *  records enrolled before this field landed. */
   kem_public_key: string;
+  /** PEM-encoded leaf TLS cert pinned for outbound HTTPS to this
+   *  Rustion. When non-empty, BV trusts only this cert as a root and
+   *  skips hostname matching — lets the probe tolerate self-signed
+   *  certs (lab / pre-prod) without weakening trust elsewhere. */
+  tls_pinned_cert_pem: string;
+  /** Convenience boolean mirror of `tls_pinned_cert_pem.length > 0`
+   *  emitted by the server so list/health views can render a badge
+   *  without loading the PEM body. */
+  tls_pinned: boolean;
 }
 
 export interface RustionTargetHealth {
@@ -99,6 +108,10 @@ export interface RustionTargetInput {
   tags: string[];
   enabled: boolean;
   default_recording_dir: string;
+  /** Optional PEM-encoded pinned TLS leaf cert. Empty = no pin /
+   *  preserve existing on update. Pass the sentinel `"-"` on update
+   *  to explicitly clear a previously-set pin. */
+  tls_pinned_cert_pem?: string;
 }
 
 export const rustionTargetList = () =>
