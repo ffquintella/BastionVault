@@ -520,6 +520,7 @@ pub fn run() {
             commands::rustion::rustion_policy_resource_read,
             commands::rustion::rustion_policy_resource_write,
             commands::rustion::rustion_policy_force_rustion,
+            commands::rustion::rustion_policy_effective,
             commands::rustion::rustion_telemetry_list,
             commands::rustion::rustion_telemetry_poll,
             // Per-user scoping: entity, owner, sharing, transfer

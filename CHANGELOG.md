@@ -45,6 +45,47 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.21] - 2026-05-26
+
+### Added
+
+#### Rustion Connect Routing (Phase 7.4)
+
+- **`POST rustion/policy/effective`** (`src/modules/rustion/mod.rs`) -- Resolve
+  the effective Rustion policy (transport / bastions / recording / lock state)
+  for a given resource without opening a session. Takes the same
+  `resource_id` / `resource_type` / `asset_group_ids` hints as `session/open`
+  and runs them through `policy::resolve`. Used by the GUI Connect path to
+  gate direct dials.
+- **`rustion_policy_effective` Tauri command**
+  (`gui/src-tauri/src/commands/rustion.rs`) -- Thin wrapper over the new
+  server endpoint.
+
+### Changed
+
+- **GUI Connect now honours Rustion policy** (`gui/src-tauri/src/commands/connect.rs`).
+  Before dialing, the in-app Connect button reads the effective per-resource
+  Rustion policy and:
+  - On `transport=rustion-required` (SSH + ssh-password): routes the session
+    through a Rustion bastion via `rustion/session/open` and dials the
+    returned `host:port` as user `operator` with the ticket as the SSH
+    password.
+  - On `transport=rustion-preferred` with a non-empty bastion set: same path
+    as required when the credential is ssh-password; falls back to direct
+    dial otherwise.
+  - On `transport=direct` / unset: dials direct (existing behaviour).
+
+### Fixed
+
+- **Connect button no longer silently bypasses `rustion-required` policy**
+  (`gui/src-tauri/src/commands/connect.rs`). Until 0.8.20 the per-resource
+  Rustion policy was persisted but never consulted at connect time; an
+  operator who saved `rustion-required` on a resource still got a direct
+  dial from the GUI host. SSH-password sessions now route through the
+  bastion; SSH with private-key or certificate credentials and any RDP
+  session fail closed with an explanatory error under `rustion-required`
+  (the bastion proxy doesn't speak those today).
+
 ## [0.8.20] - 2026-05-26
 
 ### Fixed

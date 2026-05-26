@@ -1326,6 +1326,112 @@ pub async fn rustion_policy_force_rustion(
     })
 }
 
+// ─── Phase 7.4: effective-policy resolver ────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionPolicyEffectiveRequest {
+    #[serde(default)]
+    pub resource_id: String,
+    #[serde(default)]
+    pub resource_type: String,
+    #[serde(default)]
+    pub asset_group_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionEffectivePolicy {
+    /// `direct | rustion-preferred | rustion-required`.
+    pub transport: String,
+    pub transport_source: String,
+    /// Bastion ids the resolver would pick. Already expanded from
+    /// `bastion_group` when applicable, so the caller doesn't need to
+    /// fan out separately.
+    pub bastions: Vec<String>,
+    pub bastion_group: String,
+    pub bastions_source: String,
+    pub recording: String,
+    pub recording_source: String,
+    pub locked_by: Vec<String>,
+    /// Present when a lower tier tried to weaken a locked higher tier.
+    /// session/open would refuse with 403 in this case; callers should
+    /// surface this verbatim and refuse to dial.
+    pub lock_violation: Option<RustionLockViolation>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionLockViolation {
+    pub locking_tier: String,
+    pub field: String,
+    pub detail: String,
+}
+
+#[tauri::command]
+pub async fn rustion_policy_effective(
+    state: State<'_, AppState>,
+    request: RustionPolicyEffectiveRequest,
+) -> CmdResult<RustionEffectivePolicy> {
+    let mut body = Map::new();
+    if !request.resource_id.is_empty() {
+        body.insert("resource_id".into(), Value::String(request.resource_id));
+    }
+    if !request.resource_type.is_empty() {
+        body.insert(
+            "resource_type".into(),
+            Value::String(request.resource_type),
+        );
+    }
+    if !request.asset_group_ids.is_empty() {
+        body.insert(
+            "asset_group_ids".into(),
+            Value::Array(
+                request
+                    .asset_group_ids
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
+    }
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}policy/effective"),
+        Some(body),
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    let lock_violation = data.get("lock_violation").and_then(|v| match v {
+        Value::Object(m) => Some(RustionLockViolation {
+            locking_tier: s(m, "locking_tier"),
+            field: s(m, "field"),
+            detail: s(m, "detail"),
+        }),
+        _ => None,
+    });
+    Ok(RustionEffectivePolicy {
+        transport: s(&data, "transport"),
+        transport_source: s(&data, "transport_source"),
+        bastions: data
+            .get("bastions")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        bastion_group: s(&data, "bastion_group"),
+        bastions_source: s(&data, "bastions_source"),
+        recording: s(&data, "recording"),
+        recording_source: s(&data, "recording_source"),
+        locked_by: data
+            .get("locked_by")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        lock_violation,
+    })
+}
+
 // ─── Phase 8.1: telemetry ────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Default)]

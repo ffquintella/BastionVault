@@ -231,6 +231,7 @@ impl RustionBackend {
         let h_policy_res_read = self.inner.clone();
         let h_policy_res_write = self.inner.clone();
         let h_policy_force_rustion = self.inner.clone();
+        let h_policy_effective = self.inner.clone();
         let h_telemetry_all = self.inner.clone();
         let h_telemetry_poll = self.inner.clone();
         let h_noop1 = self.inner.clone();
@@ -718,6 +719,24 @@ impl RustionBackend {
                         {op: Operation::Write, handler: h_policy_force_rustion.handle_policy_force_rustion}
                     ],
                     help: "Phase 7 — Force every Connect through Rustion. Root-only. Without confirm=true, returns a diff preview."
+                },
+                {
+                    // POST rustion/policy/effective — Phase 7.4. Returns
+                    // the resolver's verdict for a given resource without
+                    // opening a session. The GUI Connect path calls this
+                    // before it decides whether to dial direct or route
+                    // through a bastion — required so a `rustion-required`
+                    // policy can't be silently bypassed.
+                    pattern: r"policy/effective$",
+                    fields: {
+                        "resource_id": { field_type: FieldType::Str, required: false, description: "Resource id for per-resource policy lookup." },
+                        "resource_type": { field_type: FieldType::Str, required: false, description: "Resource type for per-type policy lookup." },
+                        "asset_group_ids": { field_type: FieldType::CommaStringSlice, required: false, description: "Asset group ids the resource belongs to (per-AG resolution)." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_policy_effective.handle_policy_effective}
+                    ],
+                    help: "Phase 7.4 — Resolve the effective Rustion policy (transport / bastions / recording) for a given resource without opening a session. Used by the GUI Connect path to gate direct dials against rustion-required."
                 },
                 {
                     // Read / update / delete a single bastion group.
@@ -2503,6 +2522,126 @@ impl RustionBackendInner {
                         .into(),
                 ),
             );
+        }
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    // ─── Phase 7.4: effective-policy resolver endpoint ────────────
+
+    /// Resolve the effective policy for the given resource hints. Mirrors
+    /// the resolution session/open does internally, but returns the
+    /// verdict without dialing a bastion. The GUI Connect path calls this
+    /// to decide whether to dial direct or route through Rustion, so a
+    /// `rustion-required` policy cannot be silently bypassed by a client
+    /// that never invokes session/open.
+    pub async fn handle_policy_effective(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let pick = |k: &str| -> String {
+            req.get_data(k)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_default()
+        };
+        let resource_id = pick("resource_id");
+        let resource_type = pick("resource_type");
+        let asset_group_ids = read_string_list(req, "asset_group_ids");
+
+        let pol = self.resolve_policy_store()?;
+        let global = pol.get_global().await?;
+        let type_policy = if resource_type.is_empty() {
+            None
+        } else {
+            pol.get_type(&resource_type).await?
+        };
+        let mut ag_policies: Vec<policy::AssetGroupPolicy> = Vec::new();
+        for ag_id in &asset_group_ids {
+            if let Some(p) = pol.get_asset_group(ag_id).await? {
+                ag_policies.push(p);
+            }
+        }
+        let resource_policy = if resource_id.is_empty() {
+            None
+        } else {
+            pol.get_resource(&resource_id).await?
+        };
+
+        let effective = policy::resolve(
+            &global,
+            type_policy.as_ref(),
+            &ag_policies,
+            resource_policy.as_ref(),
+        );
+
+        // Resolve the bastion-group members if the resolver picked one,
+        // so the caller doesn't need to fan out to /bastion-groups/<name>.
+        let mut effective_bastions = effective.bastions.clone();
+        let mut bastion_group_resolved: Option<String> = effective.bastion_group.clone();
+        if effective_bastions.is_empty() {
+            if let Some(ref group_name) = effective.bastion_group {
+                if let Some(grp) = pol.get_group(group_name).await? {
+                    effective_bastions = grp.members.clone();
+                }
+            }
+        }
+        let _ = &mut bastion_group_resolved; // kept for future audit surface
+
+        let mut data = Map::new();
+        data.insert(
+            "transport".into(),
+            Value::String(effective.transport.as_str().to_string()),
+        );
+        data.insert(
+            "transport_source".into(),
+            Value::String(effective.transport_source.to_string()),
+        );
+        data.insert(
+            "bastions".into(),
+            Value::Array(
+                effective_bastions
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
+        data.insert(
+            "bastion_group".into(),
+            Value::String(effective.bastion_group.clone().unwrap_or_default()),
+        );
+        data.insert(
+            "bastions_source".into(),
+            Value::String(effective.bastions_source.to_string()),
+        );
+        data.insert(
+            "recording".into(),
+            Value::String(effective.recording.as_str().to_string()),
+        );
+        data.insert(
+            "recording_source".into(),
+            Value::String(effective.recording_source.to_string()),
+        );
+        data.insert(
+            "locked_by".into(),
+            Value::Array(
+                effective
+                    .locked_by
+                    .iter()
+                    .map(|s| Value::String((*s).to_string()))
+                    .collect(),
+            ),
+        );
+        if let Some(ref lv) = effective.lock_violation {
+            let mut lvm = Map::new();
+            lvm.insert(
+                "locking_tier".into(),
+                Value::String(lv.locking_tier.to_string()),
+            );
+            lvm.insert("field".into(), Value::String(lv.field.to_string()));
+            lvm.insert("detail".into(), Value::String(lv.detail.clone()));
+            data.insert("lock_violation".into(), Value::Object(lvm));
         }
         Ok(Some(Response::data_response(Some(data))))
     }
