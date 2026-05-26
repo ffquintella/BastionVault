@@ -42,6 +42,7 @@ use ironrdp::connector::{
     ClientConnector, Config as ConnectorConfig, ConnectionResult, Credentials, DesktopSize,
     SmartCardIdentity,
 };
+use ironrdp::pdu::nego::NegoRequestData;
 use ironrdp::displaycontrol::client::DisplayControlClient;
 use ironrdp::displaycontrol::pdu::MonitorLayoutEntry;
 use ironrdp::dvc::DrdynvcClient;
@@ -82,6 +83,13 @@ pub struct RdpOpenArgs {
     /// `false` keeps the visual fidelity defaults; `true` trades a
     /// blander desktop for less repaint bandwidth.
     pub aggressive_performance: bool,
+    /// Optional X.224 routing-token cookie. Set to
+    /// `Some("mstshash=tkt_<hex>")` when the session is being routed
+    /// through a Rustion bastion — the bastion looks the ticket up at
+    /// the X.224 stage and skips local auth + client-side CredSSP.
+    /// When `None`, ironrdp's default (a cookie with the username) is
+    /// used. Phase 7.4 of the Rustion integration.
+    pub routing_token: Option<String>,
 }
 
 /// What kind of credential the operator picked for this session.
@@ -362,7 +370,14 @@ fn build_connector_config(args: &RdpOpenArgs) -> ConnectorConfig {
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         platform: MajorPlatformType::UNIX,
         enable_server_pointer: false,
-        request_data: None,
+        // Phase 7.4: Rustion-routed sessions carry the ticket in the
+        // X.224 routing-token slot; the bastion consumes it at the
+        // Connection Request stage and skips local auth. None on the
+        // direct path keeps ironrdp's default behaviour (username cookie).
+        request_data: args
+            .routing_token
+            .as_ref()
+            .map(|t| NegoRequestData::routing_token(t.clone())),
         autologon: false,
         enable_audio_playback: false,
         pointer_software_rendering: true,

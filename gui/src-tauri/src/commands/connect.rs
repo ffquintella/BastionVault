@@ -444,33 +444,77 @@ pub async fn session_open_rdp(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Phase 7.4 — refuse to dial direct when the Rustion policy
-    // requires routing through a bastion. The bastion proxy doesn't
-    // yet speak RDP, so there is no preferred-with-fallback path here;
-    // the only correct behaviour is to fail closed and let the
-    // operator either relax the policy or wait for the RDP-over-Rustion
-    // transport to land.
-    let (resource_id, resource_type, asset_group_ids) =
-        collect_policy_hints(&state, &request.resource_name, &meta).await;
-    let effective =
-        read_effective_policy(&state, &resource_id, &resource_type, &asset_group_ids).await?;
-    if let Some(detail) = effective.lock_violation {
-        return Err(CommandError::from(format!(
-            "rustion policy lock violation: {detail}"
-        )));
-    }
-    if effective.transport == "rustion-required" {
-        return Err(CommandError::from(
-            "rustion-required policy: RDP cannot route through the bastion proxy yet \
-             (Rustion's RDP transport is not wired). Refusing to dial direct.".to_string(),
-        ));
-    }
-    if effective.transport == "rustion-preferred" && !effective.bastions.is_empty() {
-        log::warn!(
-            "resource-connect/rdp: rustion-preferred policy but RDP-over-Rustion is not \
-             wired yet; falling back to direct dial"
-        );
-    }
+    // Phase 7.4 — consult the Rustion policy resolver. Mirrors the SSH
+    // path: when transport requires (or prefers) a bastion AND the
+    // credential is rdp-password, route session/open at Rustion and
+    // dial the bastion with `mstshash=<ticket>` as the X.224 routing
+    // token. Smartcard credentials under `rustion-required` fail closed
+    // (the bastion's `rdp-cert` PKINIT path is tracked separately).
+    let primary_target_host = host_candidates
+        .first()
+        .cloned()
+        .unwrap_or_default();
+    let route = resolve_rdp_connect_route(
+        &state,
+        &request.resource_name,
+        &meta,
+        &profile,
+        &primary_target_host,
+        port,
+        &username,
+        &credential,
+    )
+    .await?;
+
+    let (
+        host_candidates,
+        port,
+        username_for_dial,
+        credential_for_dial,
+        domain_for_dial,
+        routing_token,
+        rustion_label,
+    ) = match &route {
+        ConnectRoute::Direct => (
+            host_candidates,
+            port,
+            username.clone(),
+            credential.clone(),
+            domain.clone(),
+            None,
+            None,
+        ),
+        ConnectRoute::Rustion {
+            bastion_host,
+            bastion_port,
+            ticket,
+            bastion_name,
+        } => {
+            log::info!(
+                "resource-connect/rdp: routing through Rustion bastion `{}` ({}:{})",
+                bastion_name, bastion_host, bastion_port
+            );
+            (
+                vec![bastion_host.clone()],
+                *bastion_port,
+                // Bastion ignores the X.224 user; supply a label that
+                // makes the recording metadata legible.
+                "rustion-operator".to_string(),
+                // The credential field is unused on the wire for
+                // ticketed sessions (TLS-only path, no client-side
+                // CredSSP, bastion drives upstream auth from the
+                // envelope). Pass an empty password so the connector
+                // can fill its Credentials slot.
+                session::rdp::RdpCredential::Password(Zeroizing::new(String::new())),
+                None,
+                Some(format!("mstshash={ticket}")),
+                Some(bastion_name.clone()),
+            )
+        }
+    };
+    let username = username_for_dial;
+    let credential = credential_for_dial;
+    let domain = domain_for_dial;
 
     // Walk the host candidates in order — IP first when present,
     // hostname as fallback. Only network-layer failures fall through
@@ -493,6 +537,7 @@ pub async fn session_open_rdp(
                     label,
                     on_close: on_close.clone(),
                     aggressive_performance,
+                    routing_token: routing_token.clone(),
                 },
             )
             .await;
@@ -517,7 +562,19 @@ pub async fn session_open_rdp(
             last_err.unwrap_or_else(|| "rdp: no host candidates succeeded".into())
         ))?
     };
-    let label = format!("rdp {username}@{host}:{port}");
+    let label = match &rustion_label {
+        Some(name) => format!(
+            "rdp {target_user}@{target_host}:{target_port} via rustion[{name}]",
+            target_user = profile_username(&profile),
+            target_host = primary_target_host,
+            target_port = profile
+                .get("target_port")
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u16::try_from(n).ok())
+                .unwrap_or(3389),
+        ),
+        None => format!("rdp {username}@{host}:{port}"),
+    };
 
     let window_label = format!("rdp-{}", outcome.token);
     let url = format!(
@@ -1187,6 +1244,175 @@ async fn resolve_ssh_connect_route(
     body.insert(
         "credential_kind".into(),
         Value::String("ssh-password".to_string()),
+    );
+    body.insert(
+        "credential_username".into(),
+        Value::String(target_user.to_string()),
+    );
+    body.insert(
+        "credential_material".into(),
+        Value::String(credential_material_b64),
+    );
+    body.insert("ttl_secs".into(), Value::Number(ttl_secs.into()));
+    body.insert("max_renewals".into(), Value::Number(max_renewals.into()));
+    body.insert("recording".into(), Value::String(recording));
+    if !effective.bastions.is_empty() {
+        body.insert(
+            "bastions".into(),
+            Value::Array(
+                effective
+                    .bastions
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
+    }
+    if !resource_id.is_empty() {
+        body.insert("resource_id".into(), Value::String(resource_id));
+    }
+    if !resource_type.is_empty() {
+        body.insert("resource_type".into(), Value::String(resource_type));
+    }
+    if !asset_group_ids.is_empty() {
+        body.insert(
+            "asset_group_ids".into(),
+            Value::Array(asset_group_ids.into_iter().map(Value::String).collect()),
+        );
+    }
+    let resp = make_request(
+        state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}session/open"),
+        Some(body),
+    )
+    .await
+    .map_err(|e| {
+        CommandError::from(format!(
+            "rustion session/open failed: {e:?}"
+        ))
+    })?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    let bastion_host = data
+        .get("host")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let bastion_port = data
+        .get("port")
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u16::try_from(n).ok())
+        .unwrap_or(0);
+    let ticket = data
+        .get("ticket")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let bastion_name = data
+        .get("bastion_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if bastion_host.is_empty() || bastion_port == 0 || ticket.is_empty() {
+        return Err(CommandError::from(
+            "rustion session/open returned an incomplete ticket bundle".to_string(),
+        ));
+    }
+    Ok(ConnectRoute::Rustion {
+        bastion_host,
+        bastion_port,
+        ticket,
+        bastion_name,
+    })
+}
+
+/// RDP analogue of [`resolve_ssh_connect_route`]. Same shape; differs in:
+///   - `target_protocol` is `rdp` on the rustion envelope;
+///   - the credential kind sent to Rustion is `rdp-password`;
+///   - smart-card credentials cannot ride through the bastion (Rustion
+///     surfaces them as `rdp-cert` and rejects the BV-injection path
+///     today), so they fail closed under `rustion-required`.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_rdp_connect_route(
+    state: &State<'_, AppState>,
+    resource_name: &str,
+    meta: &Map<String, Value>,
+    profile: &Value,
+    target_host: &str,
+    target_port: u16,
+    target_user: &str,
+    credential: &session::rdp::RdpCredential,
+) -> Result<ConnectRoute, CommandError> {
+    let (resource_id, resource_type, asset_group_ids) =
+        collect_policy_hints(state, resource_name, meta).await;
+    let effective =
+        read_effective_policy(state, &resource_id, &resource_type, &asset_group_ids).await?;
+
+    if let Some(detail) = effective.lock_violation {
+        return Err(CommandError::from(format!(
+            "rustion policy lock violation: {detail}"
+        )));
+    }
+
+    let prefer_rustion = match effective.transport.as_str() {
+        "rustion-required" => true,
+        "rustion-preferred" => !effective.bastions.is_empty(),
+        _ => false,
+    };
+    if !prefer_rustion {
+        return Ok(ConnectRoute::Direct);
+    }
+
+    // Only rdp-password rides through the bastion proxy today. The
+    // Rustion side rejects rdp-cert at the CredSSP-injection driver
+    // (PKINIT/SPNEGO needs a separate path), so smartcard sessions
+    // either fail closed under `rustion-required` or fall back to the
+    // direct PIV emulator under `rustion-preferred`.
+    let password = match credential {
+        session::rdp::RdpCredential::Password(p) => p.to_string(),
+        session::rdp::RdpCredential::SmartCard(_) => {
+            if effective.transport == "rustion-required" {
+                return Err(CommandError::from(
+                    "rustion-required policy: smart-card (rdp-cert) credentials cannot route \
+                     through the bastion yet (PKINIT/SPNEGO path is separate). Refusing to \
+                     dial direct.".to_string(),
+                ));
+            }
+            log::warn!(
+                "resource-connect/rdp: rustion-preferred but credential is smart-card; \
+                 falling back to direct dial"
+            );
+            return Ok(ConnectRoute::Direct);
+        }
+    };
+
+    let ttl_secs = profile
+        .get("ttl_secs")
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(3600);
+    let max_renewals = profile
+        .get("max_renewals")
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u8::try_from(n).ok())
+        .unwrap_or(3);
+    let recording = if effective.recording.is_empty() {
+        "always".to_string()
+    } else {
+        effective.recording.clone()
+    };
+
+    let credential_material_b64 =
+        base64::engine::general_purpose::STANDARD.encode(password.as_bytes());
+
+    let mut body = Map::new();
+    body.insert("target_host".into(), Value::String(target_host.to_string()));
+    body.insert("target_port".into(), Value::Number(target_port.into()));
+    body.insert("target_protocol".into(), Value::String("rdp".to_string()));
+    body.insert(
+        "credential_kind".into(),
+        Value::String("rdp-password".to_string()),
     );
     body.insert(
         "credential_username".into(),

@@ -25,7 +25,7 @@ Net result: operators get the same one-click Connect UX as today, but every sess
 
 ## Current State
 
-- [Resource Connect](resource-connect.md) ships seven phases (SSH × {Secret, LDAP, PKI} ✅, RDP × {Secret, LDAP, PKI smartcard via CredSSP} ✅, ⌘K palette, per-type policy). As of Phase 7.4, the in-app Connect button consults the per-resource Rustion policy and routes SSH-password sessions through a bastion when transport is `rustion-required` or `rustion-preferred`; non-password SSH and any RDP under `rustion-required` fail closed pending bastion-proxy support.
+- [Resource Connect](resource-connect.md) ships seven phases (SSH × {Secret, LDAP, PKI} ✅, RDP × {Secret, LDAP, PKI smartcard via CredSSP} ✅, ⌘K palette, per-type policy). As of Phase 7.4, the in-app Connect button consults the per-resource Rustion policy and routes both SSH-password and RDP-password sessions through a bastion when transport is `rustion-required` or `rustion-preferred`; non-password SSH and smart-card (rdp-cert) RDP under `rustion-required` fail closed pending the bastion's PKINIT path.
 - BastionVault has a [PKI engine](pki-secret-engine.md) that can issue both classical and ML-DSA / hybrid certs — the master signing cert can ride on existing PKI plumbing (no new key-management subsystem).
 - BastionVault has [audit logging](audit-logging.md) (HMAC-chained file device). Pointer events to remote recordings slot into the existing pipeline.
 - Rustion (`/Users/felipe/Dev/Rustion`) is its own server with its own user / target / role YAML store, its own auth (password + Argon2id, certificate, SAML, FIDO2, TOTP), and its own admin TUI. It does **not** today expose a control-plane API for "create me a session for this credential, signed by an external trust anchor." That control plane is the new surface this feature adds — symmetric work in both repos.
@@ -943,7 +943,7 @@ Brings the four-tier policy from "data model + global CRUD" up to a usable gover
 - **Settings → Rustion → Policy panel**: new `RustionPolicyPanel` component mounted under the existing "Rustion" tab alongside `RustionBastionsTab`. Three cards: Global Policy editor (transport / recording / bastions / bastion_group / lock), Bastion Groups CRUD (list + create/edit/delete modals with member list + selection mode + description), and "Force all Connect through Rustion" with preview→confirm dry-run flow.
 - **Audit emission**: `POLICY_TYPE_UPDATE`, `POLICY_ASSET_GROUP_UPDATE`, `POLICY_RESOURCE_UPDATE` now light up at their respective write sites. `POLICY_GLOBAL_UPDATE` doubles as the audit event for the force-rustion migration.
 
-### Phase 7.4 — GUI Connect honours Rustion policy — **Done** (BV 0.8.21)
+### Phase 7.4 — GUI Connect honours Rustion policy — **Done** (BV 0.8.21 SSH, BV 0.8.22 RDP)
 
 Closes the gap left by Phase 7.3: the policy resolver was wired into `session/open`, but the in-app Connect button never invoked `session/open`. It dialled the resource directly regardless of the per-resource transport setting, so a `rustion-required` policy was effectively cosmetic for clicks from the GUI.
 
@@ -955,8 +955,12 @@ Closes the gap left by Phase 7.3: the policy resolver was wired into `session/op
   - `transport=rustion-required` with a non-ssh-password credential (private-key / certificate) → fail closed with explanatory error. Only ssh-password is wired through the bastion proxy today (matches the rustion-ssh e2e harness).
   - `transport=direct` or empty → existing direct dial.
   - Lock violation surfaced from the resolver → fail closed.
-- **RDP Connect fails closed on `rustion-required`.** Rustion's RDP transport is not yet wired through the bastion proxy, so the only correct behaviour under a Rustion-required policy is to refuse the dial rather than silently bypass.
-- **Limitations carried into a follow-up:** bastion host-key pinning is not yet enforced (TOFU on first connect); session renew/kill lifecycle is not yet wired into the spawned session window (`useRustionSessionLifecycle` remains unconsumed); RDP-over-Rustion blocked on the bastion proxy's RDP path.
+- **`gui/src-tauri/src/commands/connect.rs` -- RDP Connect routes through Rustion when policy requires (BV 0.8.22).** Same shape as SSH:
+  - `rustion-required` + rdp-password → `rustion/session/open` with `target_protocol=rdp` / `credential_kind=rdp-password`; dials bastion `host:port` with the ticket carried in the X.224 routing-token slot as `mstshash=tkt_<hex>` (via `NegoRequestData::routing_token`). The bastion consumes the ticket at the Connection Request stage, skips client-side NLA, and drives upstream CredSSP itself with the envelope's credential (Phase 4.2-full bv_credssp injection driver).
+  - `rustion-preferred` + bastions + rdp-password → same path, falls back to direct on Rustion failure.
+  - `rustion-required` + smart-card (rdp-cert) → **fail closed.** The bastion rejects rdp-cert at the CredSSP-injection driver today; the PKINIT/SPNEGO path is tracked as a separate Rustion-side track. Direct dial with the PIV emulator still works on `direct` / `preferred`.
+- **`session::rdp::RdpOpenArgs::routing_token`** — new `Option<String>` plumbing the ticket cookie into `ConnectorConfig::request_data`.
+- **Limitations carried into a follow-up:** bastion host-key / TLS pinning is not yet enforced (TOFU on first connect); session renew/kill lifecycle is not yet wired into the spawned session window (`useRustionSessionLifecycle` remains unconsumed); rdp-cert (smart-card) through Rustion blocked on the bastion's separate PKINIT/SPNEGO path.
 
 ### Phase 7.3 — Per-tier editor integration + full resolver chain — **Done** (BV 0.7.31)
 

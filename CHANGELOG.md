@@ -45,6 +45,32 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.22] - 2026-05-26
+
+### Changed
+
+- **GUI RDP Connect now routes through Rustion when policy requires**
+  (`gui/src-tauri/src/commands/connect.rs`, `gui/src-tauri/src/session/rdp.rs`).
+  Mirror of the 0.8.21 SSH wiring:
+  - On `transport=rustion-required` (RDP + rdp-password): calls
+    `rustion/session/open` with `target_protocol=rdp` /
+    `credential_kind=rdp-password` and dials the returned bastion
+    `host:port` with the ticket carried in the X.224 routing-token slot
+    as `mstshash=tkt_<hex>`. The bastion consumes the ticket at the
+    Connection Request stage, skips local auth + client-side CredSSP,
+    and drives upstream CredSSP itself using the envelope's credential.
+  - On `transport=rustion-preferred` with bastions available +
+    rdp-password: same path, falls back to direct on Rustion failure.
+  - On `transport=rustion-required` with a smart-card (rdp-cert)
+    credential: fails closed with explanatory error. The bastion's
+    PKINIT/SPNEGO injection path is tracked separately; the direct PIV
+    emulator still works on `direct` / `preferred`.
+  - On `transport=direct` / unset: dials direct (existing behaviour).
+- **`session::rdp::RdpOpenArgs` grows a `routing_token: Option<String>`
+  field.** When set, ironrdp's `ConnectorConfig::request_data` carries it
+  as `NegoRequestData::routing_token`, putting the ticket into the X.224
+  Connection Request the bastion parses for ticket auth.
+
 ## [0.8.21] - 2026-05-26
 
 ### Added
