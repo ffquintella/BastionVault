@@ -45,6 +45,16 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-05-26
+
+Minor bump cutting the Phase 7.4 (Rustion-mediated Connect) work
+shipped in 0.8.21 / 0.8.22 / 0.8.23 as a single release line. No
+new behaviour beyond what those patches already shipped; consult
+their headers below for the full list. Headline change: the GUI
+Connect button now honours the per-resource Rustion policy for SSH
+and RDP, routes through the bastion when the policy demands, and
+the spawned session window drives auto-renew + manual Renew/Terminate.
+
 ## [0.8.23] - 2026-05-26
 
 ### Added
