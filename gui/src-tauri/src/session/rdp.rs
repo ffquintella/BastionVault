@@ -925,6 +925,11 @@ pub async fn drop_session(
     let mut sessions = state.connect_sessions.lock().await;
     let removed = sessions.remove(token);
     drop(sessions);
+    state
+        .rustion_session_bundles
+        .lock()
+        .await
+        .remove(token);
     match removed {
         Some(SessionState::Rdp(s)) => {
             log::info!("resource-connect/rdp: closed session token={token}");

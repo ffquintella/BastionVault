@@ -943,7 +943,7 @@ Brings the four-tier policy from "data model + global CRUD" up to a usable gover
 - **Settings → Rustion → Policy panel**: new `RustionPolicyPanel` component mounted under the existing "Rustion" tab alongside `RustionBastionsTab`. Three cards: Global Policy editor (transport / recording / bastions / bastion_group / lock), Bastion Groups CRUD (list + create/edit/delete modals with member list + selection mode + description), and "Force all Connect through Rustion" with preview→confirm dry-run flow.
 - **Audit emission**: `POLICY_TYPE_UPDATE`, `POLICY_ASSET_GROUP_UPDATE`, `POLICY_RESOURCE_UPDATE` now light up at their respective write sites. `POLICY_GLOBAL_UPDATE` doubles as the audit event for the force-rustion migration.
 
-### Phase 7.4 — GUI Connect honours Rustion policy — **Done** (BV 0.8.21 SSH, BV 0.8.22 RDP)
+### Phase 7.4 — GUI Connect honours Rustion policy — **Done** (BV 0.8.21 SSH, BV 0.8.22 RDP, BV 0.8.23 lifecycle)
 
 Closes the gap left by Phase 7.3: the policy resolver was wired into `session/open`, but the in-app Connect button never invoked `session/open`. It dialled the resource directly regardless of the per-resource transport setting, so a `rustion-required` policy was effectively cosmetic for clicks from the GUI.
 
@@ -960,7 +960,8 @@ Closes the gap left by Phase 7.3: the policy resolver was wired into `session/op
   - `rustion-preferred` + bastions + rdp-password → same path, falls back to direct on Rustion failure.
   - `rustion-required` + smart-card (rdp-cert) → **fail closed.** The bastion rejects rdp-cert at the CredSSP-injection driver today; the PKINIT/SPNEGO path is tracked as a separate Rustion-side track. Direct dial with the PIV emulator still works on `direct` / `preferred`.
 - **`session::rdp::RdpOpenArgs::routing_token`** — new `Option<String>` plumbing the ticket cookie into `ConnectorConfig::request_data`.
-- **Limitations carried into a follow-up:** bastion host-key / TLS pinning is not yet enforced (TOFU on first connect); session renew/kill lifecycle is not yet wired into the spawned session window (`useRustionSessionLifecycle` remains unconsumed); rdp-cert (smart-card) through Rustion blocked on the bastion's separate PKINIT/SPNEGO path.
+- **Session lifecycle wired into the spawned window (BV 0.8.23).** The host stashes `{session_id, bastion_id, bastion_name, correlation_id, expires_at, max_renewals, protocol}` in `AppState::rustion_session_bundles` keyed by the SSH/RDP session token. A new `session_rustion_info` Tauri command surfaces it. The window mounts a shared `RustionSessionChip` that calls `useRustionSessionLifecycle`, auto-renewing at `expires_at − 60s` and surfacing manual Renew + Terminate buttons + a live TTL countdown + the `used / max` renewal budget. Direct sessions render no chip.
+- **Limitations carried into a follow-up:** bastion host-key / TLS pinning is not yet enforced (TOFU on first connect; both BV-side target-record field and Rustion-side exposure of the bastion's leaf required); rdp-cert (smart-card) through Rustion blocked on the bastion's separate PKINIT/SPNEGO path.
 
 ### Phase 7.3 — Per-tier editor integration + full resolver chain — **Done** (BV 0.7.31)
 

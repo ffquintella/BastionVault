@@ -1768,6 +1768,22 @@ export type SessionOpenRdpResponse = {
 export const sessionOpenRdp = (request: SessionOpenRdpRequest) =>
   invoke<SessionOpenRdpResponse>("session_open_rdp", { request });
 
+/// Phase 7.4: per-session Rustion bundle. Returned by
+/// `session_rustion_info` when the open path routed through a bastion;
+/// `null` for direct dials.
+export type SessionRustionInfo = {
+  session_id: string;
+  bastion_id: string;
+  bastion_name: string;
+  correlation_id: string;
+  expires_at: string;
+  max_renewals: number;
+  protocol: string;
+};
+
+export const sessionRustionInfo = (token: string) =>
+  invoke<SessionRustionInfo | null>("session_rustion_info", { request: { token } });
+
 export type LdapCheckConnectionResult = {
   ok: boolean;
   url: string;

@@ -150,11 +150,34 @@ pub struct AppState {
     /// use to drive the remote PTY.
     pub connect_sessions:
         tokio::sync::Mutex<HashMap<String, crate::session::SessionState>>,
+    /// Phase 7.4: per-session Rustion bundle stashed when the Connect
+    /// path routed through a bastion. Keyed by the same SSH/RDP
+    /// session token in `connect_sessions`. Read by the spawned window
+    /// via `session_rustion_info` to drive renew/kill UI; dropped
+    /// alongside the session in `drop_session`.
+    pub rustion_session_bundles:
+        tokio::sync::Mutex<HashMap<String, RustionSessionBundle>>,
     /// Plugin Extensibility v1: per-vault on-disk surface cache.
     /// Resolved on first use from the Tauri app's cache directory
     /// (`<dirs::cache>/com.bastionvault.gui/plugins/<vault-id>/`).
     /// Cleared when the operator switches vaults.
     pub plugin_surface_cache: Mutex<Option<bv_client::SurfaceCache>>,
+}
+
+/// Persistent identity of a Rustion-mediated session, captured at
+/// `session/open` time. The spawned SSH/RDP window queries this to
+/// drive renew + kill against the same correlation_id Rustion bound
+/// to the open envelope.
+#[derive(Clone)]
+pub struct RustionSessionBundle {
+    pub session_id: String,
+    pub bastion_id: String,
+    pub bastion_name: String,
+    pub correlation_id: String,
+    pub expires_at: String,
+    pub max_renewals: u32,
+    /// `ssh` | `rdp` — surfaced in audit + the lifecycle UI.
+    pub protocol: String,
 }
 
 impl AppState {
@@ -171,6 +194,7 @@ impl AppState {
             cloud_sessions: std::sync::Mutex::new(HashMap::new()),
             oidc_sessions: std::sync::Mutex::new(HashMap::new()),
             connect_sessions: tokio::sync::Mutex::new(HashMap::new()),
+            rustion_session_bundles: tokio::sync::Mutex::new(HashMap::new()),
             plugin_surface_cache: Mutex::new(None),
         }
     }

@@ -45,6 +45,35 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.23] - 2026-05-26
+
+### Added
+
+#### Rustion session lifecycle in the spawned Connect window (Phase 7.4)
+
+- **`session_rustion_info` Tauri command**
+  (`gui/src-tauri/src/commands/connect.rs`). Returns the Rustion
+  `{session_id, bastion_id, bastion_name, correlation_id, expires_at,
+  max_renewals, protocol}` bundle the host stashed when the open
+  routed through a bastion, or `null` for direct dials. The bundle is
+  keyed by the local SSH/RDP session token and dropped alongside the
+  session on close.
+- **`RustionSessionChip` component**
+  (`gui/src/components/RustionSessionChip.tsx`). Drops into the
+  header of the `SessionSshWindow` and `SessionRdpWindow` routes. On
+  mount it calls `session_rustion_info`; when a bundle comes back it
+  drives [`useRustionSessionLifecycle`](gui/src/hooks/useRustionSessionLifecycle.ts)
+  so the session auto-renews at `expires_at − 60s` and the operator
+  can press a manual Renew or Terminate. Surfaces the bastion name,
+  the live TTL countdown, and the `renewals_used / max_renewals`
+  budget. Direct sessions render nothing.
+- **`AppState::rustion_session_bundles`** (`gui/src-tauri/src/state.rs`).
+  In-memory map keyed by SSH/RDP session token. Populated in
+  `commands/connect.rs` after a Rustion-routed `session/open`
+  succeeds; cleared by `session::{ssh,rdp}::drop_session`. Closes the
+  Phase 7.4 follow-up that left `useRustionSessionLifecycle`
+  unconsumed.
+
 ## [0.8.22] - 2026-05-26
 
 ### Changed

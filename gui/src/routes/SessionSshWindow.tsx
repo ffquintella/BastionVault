@@ -23,6 +23,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { extractError } from "../lib/error";
+import { RustionSessionChip } from "../components/RustionSessionChip";
 
 interface StdoutPayload {
   bytes_b64: string;
@@ -233,6 +234,7 @@ export function SessionSshWindow() {
           </span>
         )}
         <div style={{ flex: 1 }} />
+        <RustionSessionChip token={token} />
         <button
           onClick={handleDisconnect}
           disabled={status === "closed"}

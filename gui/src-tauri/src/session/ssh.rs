@@ -589,6 +589,15 @@ pub async fn drop_session(
     let mut sessions = state.connect_sessions.lock().await;
     let removed = sessions.remove(token);
     drop(sessions);
+    // Phase 7.4 — also drop any stashed Rustion lifecycle bundle keyed
+    // by the same token. The window's close hook already calls
+    // rustion/session/kill so the bastion releases the slot; this just
+    // clears the GUI-side mirror.
+    state
+        .rustion_session_bundles
+        .lock()
+        .await
+        .remove(token);
     match removed {
         Some(SessionState::Ssh(s)) => {
             log::info!("resource-connect/ssh: closed session token={token}");

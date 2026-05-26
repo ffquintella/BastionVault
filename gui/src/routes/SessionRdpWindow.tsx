@@ -14,6 +14,8 @@ import { useSearchParams } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+import { RustionSessionChip } from "../components/RustionSessionChip";
+
 interface FramePayload {
   bytes_b64: string;
   x: number;
@@ -264,6 +266,7 @@ export function SessionRdpWindow() {
           <span style={{ fontSize: 11, color: "#ff6e6e" }}>{errorMessage}</span>
         )}
         <div style={{ flex: 1 }} />
+        <RustionSessionChip token={token} />
         <button
           onClick={handleDisconnect}
           disabled={status === "closed"}

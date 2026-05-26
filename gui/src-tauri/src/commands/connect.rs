@@ -168,6 +168,7 @@ pub async fn session_open_ssh(
             bastion_port,
             ticket,
             bastion_name,
+            ..
         } => {
             log::info!(
                 "resource-connect/ssh: routing through Rustion bastion `{}` ({}:{})",
@@ -257,6 +258,36 @@ pub async fn session_open_ssh(
         ),
         None => format!("ssh {username}@{host}:{port}"),
     };
+
+    // Phase 7.4: stash the Rustion lifecycle bundle keyed by the
+    // local SSH token so the spawned window can drive renew + kill.
+    if let ConnectRoute::Rustion {
+        bastion_id,
+        bastion_name,
+        session_id,
+        correlation_id,
+        expires_at,
+        max_renewals,
+        ..
+    } = &route
+    {
+        state
+            .rustion_session_bundles
+            .lock()
+            .await
+            .insert(
+                outcome.token.clone(),
+                crate::state::RustionSessionBundle {
+                    session_id: session_id.clone(),
+                    bastion_id: bastion_id.clone(),
+                    bastion_name: bastion_name.clone(),
+                    correlation_id: correlation_id.clone(),
+                    expires_at: expires_at.clone(),
+                    max_renewals: *max_renewals,
+                    protocol: "ssh".to_string(),
+                },
+            );
+    }
 
     // Spawn the SessionSshWindow into a new WebviewWindow. The
     // window's React route claims the session via the token + the
@@ -489,6 +520,7 @@ pub async fn session_open_rdp(
             bastion_port,
             ticket,
             bastion_name,
+            ..
         } => {
             log::info!(
                 "resource-connect/rdp: routing through Rustion bastion `{}` ({}:{})",
@@ -575,6 +607,36 @@ pub async fn session_open_rdp(
         ),
         None => format!("rdp {username}@{host}:{port}"),
     };
+
+    // Phase 7.4: stash the Rustion lifecycle bundle keyed by the
+    // local RDP token so the spawned window can drive renew + kill.
+    if let ConnectRoute::Rustion {
+        bastion_id,
+        bastion_name,
+        session_id,
+        correlation_id,
+        expires_at,
+        max_renewals,
+        ..
+    } = &route
+    {
+        state
+            .rustion_session_bundles
+            .lock()
+            .await
+            .insert(
+                outcome.token.clone(),
+                crate::state::RustionSessionBundle {
+                    session_id: session_id.clone(),
+                    bastion_id: bastion_id.clone(),
+                    bastion_name: bastion_name.clone(),
+                    correlation_id: correlation_id.clone(),
+                    expires_at: expires_at.clone(),
+                    max_renewals: *max_renewals,
+                    protocol: "rdp".to_string(),
+                },
+            );
+    }
 
     let window_label = format!("rdp-{}", outcome.token);
     let url = format!(
@@ -953,6 +1015,43 @@ pub struct SshCloseRequest {
     pub token: String,
 }
 
+/// Phase 7.4: surface the Rustion lifecycle bundle the host stashed at
+/// open time. The spawned session window calls this on mount; a
+/// non-null return drives the renew + kill UI. Direct sessions return
+/// `None`.
+#[derive(Serialize)]
+pub struct SessionRustionInfo {
+    pub session_id: String,
+    pub bastion_id: String,
+    pub bastion_name: String,
+    pub correlation_id: String,
+    pub expires_at: String,
+    pub max_renewals: u32,
+    pub protocol: String,
+}
+
+#[derive(Deserialize)]
+pub struct SessionRustionInfoRequest {
+    pub token: String,
+}
+
+#[tauri::command]
+pub async fn session_rustion_info(
+    state: State<'_, AppState>,
+    request: SessionRustionInfoRequest,
+) -> CmdResult<Option<SessionRustionInfo>> {
+    let bundles = state.rustion_session_bundles.lock().await;
+    Ok(bundles.get(&request.token).map(|b| SessionRustionInfo {
+        session_id: b.session_id.clone(),
+        bastion_id: b.bastion_id.clone(),
+        bastion_name: b.bastion_name.clone(),
+        correlation_id: b.correlation_id.clone(),
+        expires_at: b.expires_at.clone(),
+        max_renewals: b.max_renewals,
+        protocol: b.protocol.clone(),
+    }))
+}
+
 #[tauri::command]
 pub async fn session_close(
     state: State<'_, AppState>,
@@ -1020,7 +1119,8 @@ enum ConnectRoute {
     /// Effective policy requires (or prefers, with bastions available)
     /// routing through a Rustion bastion. The session/open call has
     /// already happened; the caller dials `bastion_host:bastion_port`
-    /// as user `operator` with `ticket` as the SSH password.
+    /// as user `operator` with `ticket` as the SSH password (or for
+    /// RDP, with the ticket in the mstshash routing-token cookie).
     Rustion {
         bastion_host: String,
         bastion_port: u16,
@@ -1028,6 +1128,15 @@ enum ConnectRoute {
         /// Surface in the session window label so the operator sees
         /// which bastion is in the path.
         bastion_name: String,
+        /// Lifecycle handle Rustion bound to this session: identifies
+        /// the bastion-side slot for renew + kill. Plumbed into
+        /// `AppState::rustion_session_bundles` keyed by the local
+        /// session token so the spawned window can drive auto-renew.
+        bastion_id: String,
+        session_id: String,
+        correlation_id: String,
+        expires_at: String,
+        max_renewals: u32,
     },
 }
 
@@ -1319,11 +1428,36 @@ async fn resolve_ssh_connect_route(
             "rustion session/open returned an incomplete ticket bundle".to_string(),
         ));
     }
+    let bastion_id = data
+        .get("bastion_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let session_id = data
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let correlation_id = data
+        .get("correlation_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let expires_at = data
+        .get("expires_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     Ok(ConnectRoute::Rustion {
         bastion_host,
         bastion_port,
         ticket,
         bastion_name,
+        bastion_id,
+        session_id,
+        correlation_id,
+        expires_at,
+        max_renewals: max_renewals as u32,
     })
 }
 
@@ -1488,11 +1622,36 @@ async fn resolve_rdp_connect_route(
             "rustion session/open returned an incomplete ticket bundle".to_string(),
         ));
     }
+    let bastion_id = data
+        .get("bastion_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let session_id = data
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let correlation_id = data
+        .get("correlation_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let expires_at = data
+        .get("expires_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     Ok(ConnectRoute::Rustion {
         bastion_host,
         bastion_port,
         ticket,
         bastion_name,
+        bastion_id,
+        session_id,
+        correlation_id,
+        expires_at,
+        max_renewals: max_renewals as u32,
     })
 }
 
