@@ -37,6 +37,12 @@ pub struct RustionTargetSummary {
     pub public_key_ed25519: String,
     pub public_key_mldsa65: String,
     pub kem_public_key: String,
+    /// Convenience boolean mirror — true iff `tls_pinned_cert_pem`
+    /// is non-empty on the server.
+    pub tls_pinned: bool,
+    /// PEM-encoded leaf cert pinned for outbound HTTPS to this
+    /// Rustion (empty when no pin is configured).
+    pub tls_pinned_cert_pem: String,
 }
 
 #[derive(Serialize, Default)]
@@ -124,6 +130,10 @@ pub struct RustionTargetInput {
     pub enabled: bool,
     #[serde(default)]
     pub default_recording_dir: String,
+    /// Optional pinned TLS leaf cert (PEM). Empty preserves the
+    /// existing value on update; the sentinel `"-"` clears it.
+    #[serde(default)]
+    pub tls_pinned_cert_pem: String,
 }
 
 fn default_enabled() -> bool {
@@ -207,6 +217,10 @@ pub async fn rustion_target_upsert(
     body.insert(
         "default_recording_dir".into(),
         Value::String(input.default_recording_dir),
+    );
+    body.insert(
+        "tls_pinned_cert_pem".into(),
+        Value::String(input.tls_pinned_cert_pem),
     );
 
     let path = match id {
@@ -1642,6 +1656,11 @@ fn target_summary_from_map(data: &Map<String, Value>) -> RustionTargetSummary {
         public_key_ed25519: ed25519,
         public_key_mldsa65: mldsa65,
         kem_public_key: s(data, "kem_public_key"),
+        tls_pinned: data
+            .get("tls_pinned")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        tls_pinned_cert_pem: s(data, "tls_pinned_cert_pem"),
     }
 }
 

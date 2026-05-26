@@ -45,6 +45,32 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.19] - 2026-05-26
+
+### Fixed
+- **TLS pinning now works with self-signed leaf certs.** 0.8.18's
+  pin implementation called `add_root_certificate(leaf)` +
+  `danger_accept_invalid_hostnames`, but rustls / webpki refuse to
+  use a cert as a trust anchor unless it carries
+  `BasicConstraints: CA=true`. Self-signed leaves (the common
+  pre-prod / lab posture — cert minted with `openssl req -x509` and
+  no `-extensions`) have no extensions at all, so the handshake
+  still failed with `UnknownIssuer` despite the pin. Switched to
+  `danger_accept_invalid_certs(true)` alongside the
+  `add_root_certificate(cert)` call: BV's real authentication of
+  every Rustion-bound request lives in the BVRG-v1 envelope
+  (Ed25519 + ML-DSA-65 signature, bound to the pinned authority
+  pubkey on Rustion's side), so the TLS layer is transport
+  encryption — downgrading verification when a pin is configured is
+  the right trade-off until proper SPKI-pinning lands.
+- **Probe error messages now walk the `source()` chain.** The previous
+  `format!("transport: {e}")` showed only reqwest's top-level
+  "error sending request for url …", hiding the real TLS / DNS /
+  connect cause. The error now reads e.g. `transport: error
+  sending request … -> client error (Connect) -> invalid peer
+  certificate: UnknownIssuer`, surfacing exactly what the next
+  hop is rejecting.
+
 ## [0.8.18] - 2026-05-26
 
 ### Added

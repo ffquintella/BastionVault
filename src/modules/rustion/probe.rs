@@ -202,8 +202,18 @@ async fn run_single_probe(client: &reqwest::Client, target: &RustionTarget) -> P
     let resp = match resp {
         Ok(r) => r,
         Err(e) => {
+            // Walk the `source()` chain so the operator sees the real
+            // cause (TLS handshake, DNS, connect refused, …) instead
+            // of the generic reqwest top-level "error sending request".
+            let mut detail = format!("{e}");
+            let mut src: Option<&dyn std::error::Error> = std::error::Error::source(&e);
+            while let Some(s) = src {
+                detail.push_str(" -> ");
+                detail.push_str(&format!("{s}"));
+                src = std::error::Error::source(s);
+            }
             return ProbeOutcome::Failure {
-                error: format!("transport: {e}"),
+                error: format!("transport: {detail}"),
             };
         }
     };
