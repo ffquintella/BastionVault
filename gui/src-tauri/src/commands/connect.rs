@@ -1110,6 +1110,77 @@ use super::make_request;
 
 const RUSTION_MOUNT: &str = "rustion/";
 
+/// Phase 7.4: bastion-host fallback. Rustion's `session/open` returns
+/// the SSH/RDP proxy listener's `{host, port}`. Some operators bind
+/// the listener to `0.0.0.0` (or `::`) in `rustion.toml`, which the
+/// bastion then dutifully echoes back as the dial host. Connecting
+/// to `0.0.0.0` from the operator's machine resolves to localhost and
+/// fails with `connection refused`. When the returned host is an
+/// unspecified address (or empty), reuse the host portion of the
+/// bastion target's `endpoint` — the control-plane address operators
+/// already configured at enrolment time and that BV reaches every day
+/// for health probes. The port stays as returned; the listener port
+/// is distinct from the control-plane port and we have no other source
+/// for it.
+async fn resolve_bastion_dial_host(
+    state: &State<'_, AppState>,
+    bastion_id: &str,
+    returned_host: &str,
+) -> String {
+    fn is_unspecified(h: &str) -> bool {
+        let t = h.trim();
+        t.is_empty() || t == "0.0.0.0" || t == "::" || t == "[::]" || t == "*"
+    }
+    if !is_unspecified(returned_host) {
+        return returned_host.to_string();
+    }
+    if bastion_id.is_empty() {
+        return returned_host.to_string();
+    }
+    let path = format!("{RUSTION_MOUNT}targets/{bastion_id}");
+    let resp = match make_request(state, Operation::Read, path, None).await {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!(
+                "resource-connect: bastion `{bastion_id}` returned host `{returned_host}`; \
+                 fallback target lookup failed ({e:?})"
+            );
+            return returned_host.to_string();
+        }
+    };
+    let endpoint = resp
+        .and_then(|r| r.data)
+        .and_then(|d| d.get("endpoint").and_then(|v| v.as_str()).map(String::from))
+        .unwrap_or_default();
+    // Strip the port (and any IPv6 brackets) from `host:port` form. We
+    // want only the host segment because the SSH/RDP listener port
+    // differs from the control-plane port.
+    let host_only = if endpoint.starts_with('[') {
+        // `[::1]:9443` → `::1`
+        endpoint
+            .strip_prefix('[')
+            .and_then(|s| s.split_once(']'))
+            .map(|(h, _)| h.to_string())
+            .unwrap_or(endpoint.clone())
+    } else if let Some((h, _)) = endpoint.rsplit_once(':') {
+        h.to_string()
+    } else {
+        endpoint.clone()
+    };
+    if host_only.is_empty() || is_unspecified(&host_only) {
+        log::warn!(
+            "resource-connect: bastion `{bastion_id}` endpoint `{endpoint}` yields no \
+             usable dial host; keeping `{returned_host}` and the dial will likely fail"
+        );
+        return returned_host.to_string();
+    }
+    log::info!(
+        "resource-connect: bastion `{bastion_id}` advertised dial host `{returned_host}`; \
+         substituting `{host_only}` from target endpoint"
+    );
+    host_only
+}
+
 /// Outcome of consulting the Rustion policy resolver before a Connect.
 /// Returned by [`resolve_connect_route`].
 enum ConnectRoute {
@@ -1403,7 +1474,7 @@ async fn resolve_ssh_connect_route(
         ))
     })?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
-    let bastion_host = data
+    let returned_host = data
         .get("host")
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -1423,16 +1494,19 @@ async fn resolve_ssh_connect_route(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    if bastion_host.is_empty() || bastion_port == 0 || ticket.is_empty() {
-        return Err(CommandError::from(
-            "rustion session/open returned an incomplete ticket bundle".to_string(),
-        ));
-    }
     let bastion_id = data
         .get("bastion_id")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // Resolve `0.0.0.0` / unspecified host advertisements via the
+    // bastion target's enrolment endpoint (see `resolve_bastion_dial_host`).
+    let bastion_host = resolve_bastion_dial_host(state, &bastion_id, &returned_host).await;
+    if bastion_host.is_empty() || bastion_port == 0 || ticket.is_empty() {
+        return Err(CommandError::from(
+            "rustion session/open returned an incomplete ticket bundle".to_string(),
+        ));
+    }
     let session_id = data
         .get("session_id")
         .and_then(|v| v.as_str())
@@ -1597,7 +1671,7 @@ async fn resolve_rdp_connect_route(
         ))
     })?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
-    let bastion_host = data
+    let returned_host = data
         .get("host")
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -1617,16 +1691,19 @@ async fn resolve_rdp_connect_route(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    if bastion_host.is_empty() || bastion_port == 0 || ticket.is_empty() {
-        return Err(CommandError::from(
-            "rustion session/open returned an incomplete ticket bundle".to_string(),
-        ));
-    }
     let bastion_id = data
         .get("bastion_id")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // Resolve `0.0.0.0` / unspecified host advertisements via the
+    // bastion target's enrolment endpoint (see `resolve_bastion_dial_host`).
+    let bastion_host = resolve_bastion_dial_host(state, &bastion_id, &returned_host).await;
+    if bastion_host.is_empty() || bastion_port == 0 || ticket.is_empty() {
+        return Err(CommandError::from(
+            "rustion session/open returned an incomplete ticket bundle".to_string(),
+        ));
+    }
     let session_id = data
         .get("session_id")
         .and_then(|v| v.as_str())

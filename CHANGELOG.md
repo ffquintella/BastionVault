@@ -45,6 +45,26 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-05-26
+
+### Fixed
+
+- **Connect to bastion no longer fails on `0.0.0.0` listener bind**
+  (`gui/src-tauri/src/commands/connect.rs`). When Rustion's
+  `session/open` response carries an unspecified host
+  (`0.0.0.0` / `::` / empty) — which happens whenever the SSH/RDP
+  proxy listener is configured to bind to all interfaces in
+  `rustion.toml` — the GUI used to dial it literally and the OS
+  collapsed it to localhost, surfacing `connect 0.0.0.0:<port>:
+  Connection refused`. The new `resolve_bastion_dial_host` helper
+  detects unspecified hosts and substitutes the host portion of the
+  bastion target's enrolment `endpoint` (the same address BV reaches
+  for health probes). The proxy port returned by `session/open` is
+  kept as-is — it is distinct from the control-plane port and we
+  have no other source for it. Substitution is logged at
+  `INFO`; missing target lookups degrade to a `WARN` and the original
+  dial host so the operator still sees a useful error.
+
 ## [0.9.1] - 2026-05-26
 
 ### Added
