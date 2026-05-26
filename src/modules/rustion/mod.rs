@@ -689,7 +689,10 @@ impl RustionBackend {
                 },
                 {
                     // GET/PUT rustion/policy/resource/<id> — Phase 7.2.
-                    pattern: r"policy/resource/(?P<id>[A-Za-z0-9_\-]+)$",
+                    // Resource ids are hostnames and may contain dots, so
+                    // we accept any non-slash run rather than the narrow
+                    // [A-Za-z0-9_\-]+ class used by group-id patterns.
+                    pattern: r"policy/resource/(?P<id>[^/]+)$",
                     fields: {
                         "transport": { field_type: FieldType::Str, required: false, description: "direct | rustion-preferred | rustion-required" },
                         "bastions": { field_type: FieldType::CommaStringSlice, required: false, description: "Pinned bastion ids." },

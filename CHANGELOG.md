@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.8.20] - 2026-05-26
+
+### Fixed
+
+- **Rustion per-resource policy save for hostname IDs** (`src/modules/rustion/mod.rs`) -- broadened the `rustion/policy/resource/<id>` route regex from `[A-Za-z0-9_\-]+` to `[^/]+` so resource IDs that contain dots (e.g. `apldc1vds0044.fgv.br`) match the pattern. Previously the path fell through to the default logical-backend handler and the GUI Connection tab showed `HTTP 500: Logical backend path not supported` on Save.
+
 ## [0.8.19] - 2026-05-26
 
 ### Fixed
