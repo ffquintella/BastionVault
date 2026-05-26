@@ -45,6 +45,37 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-05-26
+
+### Security
+
+- **Stop leaking the caller's auth token into Rustion envelopes**
+  (`src/modules/rustion/mod.rs`). The `operator.src_ip` field of
+  every BVRG envelope (open / renew / kill / attest / deenrol) was
+  being populated with `req.client_token` — a leftover placeholder
+  that stamped the Vault token straight into Rustion's audit chain
+  and broke ticket source-IP binding (the token string never matches
+  a real TCP peer, so every SSH ticket-auth attempt failed with
+  `TicketIpMismatch`). New `operator_src_ip(req)` helper sources from
+  `req.connection.peer_addr_derived` (post-X-Forwarded-For walk) or
+  `peer_addr` (port-stripped) instead. Returns empty when no
+  Connection is attached (embedded callers, tests); Rustion 0.10.4+
+  treats empty src_ip as "no IP binding, accept any dial source."
+  Operators rotating their Vault tokens after upgrading is
+  defence-in-depth — the field was stamped on outbound envelopes
+  only and Rustion only logged it as `operator_src_ip` in audit
+  records, but anyone with read access to those logs would have
+  seen the token.
+
+### Fixed
+
+- **SSH Connect through Rustion no longer fails with `ssh:
+  authentication rejected`**. Direct downstream of the src_ip fix
+  above: Rustion's SSH ticket-auth rejected every attempt because
+  the dial's TCP peer never matched the leaked token string. Now
+  matches an actual operator IP (or is intentionally empty for
+  embedded callers).
+
 ## [0.10.0] - 2026-05-26
 
 Minor bump introducing the Rustion listener-info discovery handshake.

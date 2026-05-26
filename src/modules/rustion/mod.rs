@@ -1593,7 +1593,8 @@ impl RustionBackendInner {
                 .get("session_id")
                 .cloned()
                 .unwrap_or_default(),
-            src_ip: req.client_token.clone(), // placeholder; the route layer doesn't currently surface remote addr
+            // See operator_context() — same source-of-truth.
+            src_ip: operator_src_ip(req),
             // Phase 9.1 — the deployment_id field is sourced from BV's
             // master store (a stable UUID minted on first PKI init),
             // not from the caller's auth metadata. Rustion authorities
@@ -2851,7 +2852,17 @@ impl RustionBackendInner {
                 .get("session_id")
                 .cloned()
                 .unwrap_or_default(),
-            src_ip: req.client_token.clone(),
+            // The operator's public IP. Sourced from the resolved
+            // `peer_addr_derived` (post-X-Forwarded-For walk) so a
+            // reverse proxy doesn't collapse every operator to the
+            // proxy's IP. Empty when no Connection was attached
+            // (in-process embedded callers / tests) — Rustion's
+            // ticket-auth treats empty src_ip as "no IP binding,
+            // accept any dial source." Never source from
+            // `req.client_token`: that field carries the operator's
+            // *auth token* and stamping it here would leak it into
+            // Rustion's audit chain.
+            src_ip: operator_src_ip(req),
             deployment_id: self
                 .resolve_master_store()?
                 .get_or_init_deployment_id()
@@ -2956,6 +2967,36 @@ fn issue_outcome_to_map(outcome: &master::IssueOutcome) -> Map<String, Value> {
         );
     }
     data
+}
+
+/// Extract the operator's source IP for stamping into a Rustion
+/// envelope. Prefers `peer_addr_derived` (the post-X-Forwarded-For
+/// walk computed by the HTTP layer) over `peer_addr` (the raw socket
+/// peer, which collapses to the reverse-proxy IP when one is in
+/// front). Returns an empty string when no `Connection` is attached
+/// to the request (embedded callers, unit tests); Rustion's
+/// ticket-auth treats empty `src_ip` as "no IP binding, accept any
+/// dial source."
+///
+/// IMPORTANT: never source from `req.client_token`. That field
+/// carries the caller's authentication token; stamping it into the
+/// envelope leaks it into Rustion's audit chain and breaks ticket
+/// source-IP binding (the token never matches the actual TCP peer
+/// the operator dials from).
+fn operator_src_ip(req: &Request) -> String {
+    let Some(conn) = req.connection.as_ref() else {
+        return String::new();
+    };
+    if !conn.peer_addr_derived.is_empty() {
+        return conn.peer_addr_derived.clone();
+    }
+    // peer_addr may carry a port suffix (`1.2.3.4:54321`); strip it.
+    if let Some((host, _)) = conn.peer_addr.rsplit_once(':') {
+        if !host.is_empty() {
+            return host.to_string();
+        }
+    }
+    conn.peer_addr.clone()
 }
 
 fn target_response(t: &RustionTarget) -> Response {
