@@ -488,6 +488,7 @@ pub fn run() {
             commands::rustion::rustion_target_read,
             commands::rustion::rustion_target_upsert,
             commands::rustion::rustion_target_delete,
+            commands::rustion::rustion_target_refresh_listeners,
             commands::rustion::rustion_target_health_all,
             commands::rustion::rustion_target_probe,
             commands::rustion::rustion_master_read,

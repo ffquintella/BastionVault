@@ -43,6 +43,21 @@ pub struct RustionTargetSummary {
     /// PEM-encoded leaf cert pinned for outbound HTTPS to this
     /// Rustion (empty when no pin is configured).
     pub tls_pinned_cert_pem: String,
+    /// Phase 9.3 — discovered SSH proxy listener dial host. Empty
+    /// when the bastion's `ssh_advertise` is unset or bound to an
+    /// unspecified address; Connect falls back to the host portion of
+    /// `endpoint` in that case.
+    #[serde(default)]
+    pub ssh_listener_host: String,
+    #[serde(default)]
+    pub ssh_listener_port: u16,
+    #[serde(default)]
+    pub rdp_listener_host: String,
+    #[serde(default)]
+    pub rdp_listener_port: u16,
+    /// ISO-8601 timestamp of the last successful listener-info pull.
+    #[serde(default)]
+    pub listeners_synced_at: String,
 }
 
 #[derive(Serialize, Default)]
@@ -228,6 +243,27 @@ pub async fn rustion_target_upsert(
         None => format!("{RUSTION_MOUNT}targets/"),
     };
     let resp = make_request(&state, Operation::Write, path, Some(body)).await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    Ok(target_summary_from_map(&data))
+}
+
+/// Phase 9.3 — pull listener-info from a Rustion bastion and persist
+/// it on the BV target record. Calls `POST rustion/targets/<id>/listeners/refresh`
+/// which in turn hits the bastion's `GET /v1/listeners`. Returns the
+/// updated target summary so the GUI can refresh the row without a
+/// follow-up read.
+#[tauri::command]
+pub async fn rustion_target_refresh_listeners(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<RustionTargetSummary> {
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}targets/{id}/listeners/refresh"),
+        None,
+    )
+    .await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(target_summary_from_map(&data))
 }
@@ -1767,6 +1803,19 @@ fn target_summary_from_map(data: &Map<String, Value>) -> RustionTargetSummary {
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         tls_pinned_cert_pem: s(data, "tls_pinned_cert_pem"),
+        ssh_listener_host: s(data, "ssh_listener_host"),
+        ssh_listener_port: data
+            .get("ssh_listener_port")
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u16::try_from(n).ok())
+            .unwrap_or(0),
+        rdp_listener_host: s(data, "rdp_listener_host"),
+        rdp_listener_port: data
+            .get("rdp_listener_port")
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u16::try_from(n).ok())
+            .unwrap_or(0),
+        listeners_synced_at: s(data, "listeners_synced_at"),
     }
 }
 

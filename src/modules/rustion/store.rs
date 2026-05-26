@@ -119,6 +119,11 @@ impl RustionStore {
             tls_pinned_cert_pem: normalized.tls_pinned_cert_pem,
             created_at: now,
             updated_at: now,
+            ssh_listener_host: String::new(),
+            ssh_listener_port: 0,
+            rdp_listener_host: String::new(),
+            rdp_listener_port: 0,
+            listeners_synced_at: String::new(),
         };
         self.put_target_record(&target).await?;
         // Seed the health record so a freshly-enrolled target is
@@ -167,6 +172,30 @@ impl RustionStore {
         existing.default_recording_dir = normalized.default_recording_dir;
         existing.tls_pinned_cert_pem = normalized.tls_pinned_cert_pem;
         existing.updated_at = Utc::now();
+        self.put_target_record(&existing).await?;
+        Ok(existing)
+    }
+
+    /// Phase 9.3 — apply discovered listener-info to an existing target.
+    /// Preserves every other field (including `updated_at`) so listener
+    /// pulls don't masquerade as a full re-enrolment in audit logs.
+    pub async fn set_listener_info(
+        &self,
+        id: &str,
+        ssh_host: &str,
+        ssh_port: u16,
+        rdp_host: &str,
+        rdp_port: u16,
+    ) -> Result<RustionTarget, RvError> {
+        let id = sanitize_id(id)?;
+        let Some(mut existing) = self.get_target(&id).await? else {
+            return Err(bv_error_string!(&format!("rustion target `{id}` not found")));
+        };
+        existing.ssh_listener_host = ssh_host.to_string();
+        existing.ssh_listener_port = ssh_port;
+        existing.rdp_listener_host = rdp_host.to_string();
+        existing.rdp_listener_port = rdp_port;
+        existing.listeners_synced_at = Utc::now().to_rfc3339();
         self.put_target_record(&existing).await?;
         Ok(existing)
     }

@@ -45,6 +45,45 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-05-26
+
+Minor bump introducing the Rustion listener-info discovery handshake.
+Replaces the 0.9.2 client-side heuristic for `0.0.0.0` bastion
+advertisements with a proper out-of-band negotiation at enrolment
+time. Requires Rustion ≥ 0.10.3 (ships `GET /v1/listeners`); older
+Rustion versions are still supported via the 0.9.2 fallback path.
+
+### Added
+
+#### Listener-info discovery (Phase 9.3)
+
+- **`POST rustion/targets/<id>/listeners/refresh`** server route
+  (`src/modules/rustion/mod.rs`). Calls Rustion's `GET /v1/listeners`
+  over the pinned-TLS path and persists the per-protocol dial
+  coordinates onto the target record.
+- **`rustion_target_refresh_listeners` Tauri command**
+  (`gui/src-tauri/src/commands/rustion.rs`). Thin wrapper for the
+  GUI. Also auto-fires right after `rustion_target_upsert` so newly
+  enrolled bastions get listener coords on the first round trip;
+  failures are logged as `WARN` and do not block enrolment.
+- **`src/modules/rustion/listeners.rs`** — thin async client for the
+  bastion's `GET /v1/listeners` endpoint. Reuses the existing
+  per-target TLS pinning helper. 10s timeout.
+- **`RustionTarget` fields** (`src/modules/rustion/config.rs`):
+  `ssh_listener_host`, `ssh_listener_port`, `rdp_listener_host`,
+  `rdp_listener_port`, `listeners_synced_at`. Surfaced in the target
+  read/list responses and the `RustionTargetSummary` GUI type.
+
+### Changed
+
+- **`resolve_bastion_dial_coords` replaces `resolve_bastion_dial_host`**
+  (`gui/src-tauri/src/commands/connect.rs`). The Connect path now
+  picks dial coordinates in three tiers — stored listener info (Phase
+  9.3) → session/open echo when specified → endpoint-host fallback —
+  and returns the `(host, port)` pair as a unit so the dial uses a
+  coherent source. Logs which tier produced the verdict at `INFO` for
+  every Rustion-mediated Connect.
+
 ## [0.9.2] - 2026-05-26
 
 ### Fixed

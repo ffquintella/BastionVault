@@ -1110,75 +1110,135 @@ use super::make_request;
 
 const RUSTION_MOUNT: &str = "rustion/";
 
-/// Phase 7.4: bastion-host fallback. Rustion's `session/open` returns
-/// the SSH/RDP proxy listener's `{host, port}`. Some operators bind
-/// the listener to `0.0.0.0` (or `::`) in `rustion.toml`, which the
-/// bastion then dutifully echoes back as the dial host. Connecting
-/// to `0.0.0.0` from the operator's machine resolves to localhost and
-/// fails with `connection refused`. When the returned host is an
-/// unspecified address (or empty), reuse the host portion of the
-/// bastion target's `endpoint` — the control-plane address operators
-/// already configured at enrolment time and that BV reaches every day
-/// for health probes. The port stays as returned; the listener port
-/// is distinct from the control-plane port and we have no other source
-/// for it.
-async fn resolve_bastion_dial_host(
+/// Phase 9.3: resolved dial coordinates for a Rustion-mediated session.
+/// Returned by [`resolve_bastion_dial_coords`]. The session/open call
+/// echoes the listener's `{host, port}` but is unreliable when the
+/// bastion is bound to an unspecified address; this function applies
+/// a deterministic three-tier preference:
+///
+///   1. **Stored listener info on the target record** (preferred). BV
+///      pulls this at enrolment time via `rustion_target_refresh_listeners`
+///      → `GET /v1/listeners` on the bastion. When present, both host
+///      and port come from this source; we never trust the per-session
+///      echo over a value the operator's enrolment validated.
+///   2. **Per-session `host` returned by `session/open`**, when it's a
+///      specified (non-`0.0.0.0` / non-`::`) value. Backward-compat
+///      path for deployments running an older Rustion that doesn't
+///      ship `/v1/listeners`.
+///   3. **Host portion of the target's `endpoint`** (last-ditch).
+///      Combined with the per-session port. Used when neither (1) nor
+///      (2) yields a usable host but the session/open response carried
+///      a port.
+///
+/// Returns `(host, port)` so the dial uses a coherent pair from a
+/// single source rather than mixing host from (3) with port from (2)
+/// which could resolve to a stale listener after a config change.
+async fn resolve_bastion_dial_coords(
     state: &State<'_, AppState>,
     bastion_id: &str,
+    protocol: BastionProtocol,
     returned_host: &str,
-) -> String {
+    returned_port: u16,
+) -> (String, u16) {
     fn is_unspecified(h: &str) -> bool {
         let t = h.trim();
         t.is_empty() || t == "0.0.0.0" || t == "::" || t == "[::]" || t == "*"
     }
-    if !is_unspecified(returned_host) {
-        return returned_host.to_string();
-    }
-    if bastion_id.is_empty() {
-        return returned_host.to_string();
-    }
-    let path = format!("{RUSTION_MOUNT}targets/{bastion_id}");
-    let resp = match make_request(state, Operation::Read, path, None).await {
-        Ok(r) => r,
-        Err(e) => {
-            log::warn!(
-                "resource-connect: bastion `{bastion_id}` returned host `{returned_host}`; \
-                 fallback target lookup failed ({e:?})"
-            );
-            return returned_host.to_string();
+    let target = if bastion_id.is_empty() {
+        None
+    } else {
+        match make_request(
+            state,
+            Operation::Read,
+            format!("{RUSTION_MOUNT}targets/{bastion_id}"),
+            None,
+        )
+        .await
+        {
+            Ok(r) => r.and_then(|x| x.data),
+            Err(e) => {
+                log::warn!(
+                    "resource-connect: bastion `{bastion_id}` target lookup failed \
+                     ({e:?}); will fall back to session/open echo"
+                );
+                None
+            }
         }
     };
-    let endpoint = resp
-        .and_then(|r| r.data)
-        .and_then(|d| d.get("endpoint").and_then(|v| v.as_str()).map(String::from))
-        .unwrap_or_default();
-    // Strip the port (and any IPv6 brackets) from `host:port` form. We
-    // want only the host segment because the SSH/RDP listener port
-    // differs from the control-plane port.
-    let host_only = if endpoint.starts_with('[') {
-        // `[::1]:9443` → `::1`
-        endpoint
-            .strip_prefix('[')
-            .and_then(|s| s.split_once(']'))
-            .map(|(h, _)| h.to_string())
-            .unwrap_or(endpoint.clone())
-    } else if let Some((h, _)) = endpoint.rsplit_once(':') {
-        h.to_string()
-    } else {
-        endpoint.clone()
-    };
-    if host_only.is_empty() || is_unspecified(&host_only) {
+
+    // Tier 1: discovered listener-info on the target record.
+    if let Some(ref data) = target {
+        let (host_key, port_key) = match protocol {
+            BastionProtocol::Ssh => ("ssh_listener_host", "ssh_listener_port"),
+            BastionProtocol::Rdp => ("rdp_listener_host", "rdp_listener_port"),
+        };
+        let stored_host = data
+            .get(host_key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let stored_port = data
+            .get(port_key)
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u16::try_from(n).ok())
+            .unwrap_or(0);
+        if !is_unspecified(&stored_host) && stored_port != 0 {
+            log::info!(
+                "resource-connect: bastion `{bastion_id}` using stored listener coords \
+                 {protocol:?} {stored_host}:{stored_port} (synced_at={})",
+                data.get("listeners_synced_at")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("never")
+            );
+            return (stored_host, stored_port);
+        }
+    }
+
+    // Tier 2: the session/open echo, when its host is specified.
+    if !is_unspecified(returned_host) {
+        return (returned_host.to_string(), returned_port);
+    }
+
+    // Tier 3: endpoint-host fallback. The session/open port still wins
+    // — it's the SSH/RDP proxy port, distinct from the control-plane
+    // port we'd strip off the endpoint.
+    if let Some(data) = target {
+        let endpoint = data
+            .get("endpoint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let host_only = if endpoint.starts_with('[') {
+            endpoint
+                .strip_prefix('[')
+                .and_then(|s| s.split_once(']'))
+                .map(|(h, _)| h.to_string())
+                .unwrap_or(endpoint.clone())
+        } else if let Some((h, _)) = endpoint.rsplit_once(':') {
+            h.to_string()
+        } else {
+            endpoint.clone()
+        };
+        if !host_only.is_empty() && !is_unspecified(&host_only) {
+            log::info!(
+                "resource-connect: bastion `{bastion_id}` advertised dial host \
+                 `{returned_host}`; substituting `{host_only}` from target endpoint \
+                 (run `rustion_target_refresh_listeners` to discover the canonical host)"
+            );
+            return (host_only, returned_port);
+        }
         log::warn!(
             "resource-connect: bastion `{bastion_id}` endpoint `{endpoint}` yields no \
              usable dial host; keeping `{returned_host}` and the dial will likely fail"
         );
-        return returned_host.to_string();
     }
-    log::info!(
-        "resource-connect: bastion `{bastion_id}` advertised dial host `{returned_host}`; \
-         substituting `{host_only}` from target endpoint"
-    );
-    host_only
+    (returned_host.to_string(), returned_port)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BastionProtocol {
+    Ssh,
+    Rdp,
 }
 
 /// Outcome of consulting the Rustion policy resolver before a Connect.
@@ -1356,6 +1416,7 @@ async fn resolve_ssh_connect_route(
     target_user: &str,
     credential: &SshCredential,
 ) -> Result<ConnectRoute, CommandError> {
+    const BASTION_PROTOCOL: BastionProtocol = BastionProtocol::Ssh;
     let (resource_id, resource_type, asset_group_ids) =
         collect_policy_hints(state, resource_name, meta).await;
     let effective =
@@ -1499,9 +1560,19 @@ async fn resolve_ssh_connect_route(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    // Resolve `0.0.0.0` / unspecified host advertisements via the
-    // bastion target's enrolment endpoint (see `resolve_bastion_dial_host`).
-    let bastion_host = resolve_bastion_dial_host(state, &bastion_id, &returned_host).await;
+    // Phase 9.3: prefer the stored listener coords (set at enrolment
+    // by `rustion_target_refresh_listeners`) over the session/open
+    // echo, and fall back to the target endpoint host when neither is
+    // usable. Protocol is filled in per call site below.
+    let bastion_port_in = bastion_port;
+    let (bastion_host, bastion_port) = resolve_bastion_dial_coords(
+        state,
+        &bastion_id,
+        BASTION_PROTOCOL,
+        &returned_host,
+        bastion_port_in,
+    )
+    .await;
     if bastion_host.is_empty() || bastion_port == 0 || ticket.is_empty() {
         return Err(CommandError::from(
             "rustion session/open returned an incomplete ticket bundle".to_string(),
@@ -1552,6 +1623,7 @@ async fn resolve_rdp_connect_route(
     target_user: &str,
     credential: &session::rdp::RdpCredential,
 ) -> Result<ConnectRoute, CommandError> {
+    const BASTION_PROTOCOL: BastionProtocol = BastionProtocol::Rdp;
     let (resource_id, resource_type, asset_group_ids) =
         collect_policy_hints(state, resource_name, meta).await;
     let effective =
@@ -1696,9 +1768,19 @@ async fn resolve_rdp_connect_route(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    // Resolve `0.0.0.0` / unspecified host advertisements via the
-    // bastion target's enrolment endpoint (see `resolve_bastion_dial_host`).
-    let bastion_host = resolve_bastion_dial_host(state, &bastion_id, &returned_host).await;
+    // Phase 9.3: prefer the stored listener coords (set at enrolment
+    // by `rustion_target_refresh_listeners`) over the session/open
+    // echo, and fall back to the target endpoint host when neither is
+    // usable. Protocol is filled in per call site below.
+    let bastion_port_in = bastion_port;
+    let (bastion_host, bastion_port) = resolve_bastion_dial_coords(
+        state,
+        &bastion_id,
+        BASTION_PROTOCOL,
+        &returned_host,
+        bastion_port_in,
+    )
+    .await;
     if bastion_host.is_empty() || bastion_port == 0 || ticket.is_empty() {
         return Err(CommandError::from(
             "rustion session/open returned an incomplete ticket bundle".to_string(),

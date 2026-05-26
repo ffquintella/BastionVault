@@ -40,6 +40,7 @@ pub mod enrolment;
 pub mod envelope;
 pub mod health;
 pub mod http;
+pub mod listeners;
 pub mod master;
 pub mod poller;
 pub mod policy;
@@ -232,6 +233,7 @@ impl RustionBackend {
         let h_policy_res_write = self.inner.clone();
         let h_policy_force_rustion = self.inner.clone();
         let h_policy_effective = self.inner.clone();
+        let h_target_listeners_refresh = self.inner.clone();
         let h_telemetry_all = self.inner.clone();
         let h_telemetry_poll = self.inner.clone();
         let h_noop1 = self.inner.clone();
@@ -412,6 +414,27 @@ impl RustionBackend {
                         {op: Operation::Write, handler: h_probe_one.handle_probe_one}
                     ],
                     help: "Probe a single Rustion target and return its fresh health record."
+                },
+                {
+                    // Phase 9.3 — listener-info discovery. Calls
+                    // `GET /v1/listeners` on the bastion's control
+                    // plane and stores the SSH/RDP proxy dial
+                    // coordinates on the target record. Fired
+                    // automatically after upsert; can be re-run via
+                    // the GUI if the operator changes the bastion's
+                    // `ssh_advertise` / `rdp_advertise` config.
+                    pattern: r"targets/(?P<id>[A-Za-z0-9_\-]+)/listeners/refresh$",
+                    fields: {
+                        "id": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Target id whose listener info to refresh."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_target_listeners_refresh.handle_target_listeners_refresh}
+                    ],
+                    help: "Pull the SSH/RDP listener coords from a Rustion bastion and persist them on the target record (Phase 9.3)."
                 },
                 {
                     pattern: r"master/config$",
@@ -977,7 +1000,82 @@ impl RustionBackendInner {
             target.endpoint,
             target.fingerprint
         );
-        Ok(Some(target_response(&target)))
+        // Phase 9.3 — best-effort: pull listener coords right after
+        // enrolment so the GUI doesn't need a follow-up call. Failures
+        // here are common (bastion not yet running, network not yet
+        // routable) and must NOT fail the enrolment — the operator can
+        // re-trigger discovery later via the targets/<id>/listeners/refresh
+        // route once the bastion is reachable.
+        let final_target = match Self::try_refresh_listeners(&store, &target).await {
+            Ok(t) => t,
+            Err(e) => {
+                log::warn!(
+                    "rustion: post-enrol listener discovery for {} failed: {e:?} \
+                     (target stored without listener coords; operator can refresh later)",
+                    target.id
+                );
+                target
+            }
+        };
+        Ok(Some(target_response(&final_target)))
+    }
+
+    async fn try_refresh_listeners(
+        store: &Arc<store::RustionStore>,
+        target: &config::RustionTarget,
+    ) -> Result<config::RustionTarget, RvError> {
+        let info = listeners::discover(target).await?;
+        store
+            .set_listener_info(
+                &target.id,
+                info.ssh.advertised_host.as_str(),
+                info.ssh.port,
+                info.rdp.advertised_host.as_str(),
+                info.rdp.port,
+            )
+            .await
+    }
+
+    /// Phase 9.3 — discover the SSH/RDP proxy dial coordinates by
+    /// calling `GET /v1/listeners` on the bastion's control plane and
+    /// persisting the result. The handler best-effort-fires from
+    /// `handle_target_create` so newly-enrolled targets get their
+    /// listener coords without an extra operator click; it's also
+    /// exposed as a route so the GUI can re-trigger when the bastion's
+    /// advertised host/port changes.
+    pub async fn handle_target_listeners_refresh(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_store()?;
+        let id = req
+            .get_data("id")?
+            .as_str()
+            .ok_or(RvError::ErrRequestFieldInvalid)?
+            .to_string();
+        let target = store.get_target(&id).await?.ok_or_else(|| {
+            bv_error_response_status!(404, &format!("rustion target `{id}` not found"))
+        })?;
+        let info = listeners::discover(&target).await?;
+        let updated = store
+            .set_listener_info(
+                &id,
+                info.ssh.advertised_host.as_str(),
+                info.ssh.port,
+                info.rdp.advertised_host.as_str(),
+                info.rdp.port,
+            )
+            .await?;
+        log::info!(
+            "rustion: refreshed listener info for target {} (ssh={}:{} rdp={}:{})",
+            id,
+            updated.ssh_listener_host,
+            updated.ssh_listener_port,
+            updated.rdp_listener_host,
+            updated.rdp_listener_port,
+        );
+        Ok(Some(target_response(&updated)))
     }
 
     pub async fn handle_target_read(
@@ -2898,6 +2996,30 @@ fn target_response(t: &RustionTarget) -> Response {
     );
     data.insert("created_at".into(), Value::String(t.created_at.to_rfc3339()));
     data.insert("updated_at".into(), Value::String(t.updated_at.to_rfc3339()));
+    // Phase 9.3 — discovered listener coords. `host` is empty when
+    // discovery hasn't run or the bastion bound to an unspecified
+    // address; the Connect path falls back to the endpoint host in
+    // that case.
+    data.insert(
+        "ssh_listener_host".into(),
+        Value::String(t.ssh_listener_host.clone()),
+    );
+    data.insert(
+        "ssh_listener_port".into(),
+        Value::Number(t.ssh_listener_port.into()),
+    );
+    data.insert(
+        "rdp_listener_host".into(),
+        Value::String(t.rdp_listener_host.clone()),
+    );
+    data.insert(
+        "rdp_listener_port".into(),
+        Value::Number(t.rdp_listener_port.into()),
+    );
+    data.insert(
+        "listeners_synced_at".into(),
+        Value::String(t.listeners_synced_at.clone()),
+    );
     let map: Map<String, Value> = data.into_iter().collect();
     Response::data_response(Some(map))
 }

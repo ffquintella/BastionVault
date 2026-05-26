@@ -89,6 +89,27 @@ pub struct RustionTarget {
     pub created_at: DateTime<Utc>,
     /// ISO-8601. Bumped on every successful upsert.
     pub updated_at: DateTime<Utc>,
+    /// Phase 9.3 — discovered SSH proxy listener coords. Populated
+    /// by `rustion_target_refresh_listeners` (which calls Rustion's
+    /// `GET /v1/listeners`). Empty `host` means "discovery hasn't run
+    /// yet" or "the bastion couldn't advertise a public host" — the
+    /// Connect path then falls back to deriving the host from
+    /// `endpoint` and trusts the port returned by `session/open`.
+    /// Storing the discovered values avoids relying on the bastion to
+    /// echo correct values in every per-session response.
+    #[serde(default)]
+    pub ssh_listener_host: String,
+    #[serde(default)]
+    pub ssh_listener_port: u16,
+    #[serde(default)]
+    pub rdp_listener_host: String,
+    #[serde(default)]
+    pub rdp_listener_port: u16,
+    /// ISO-8601 timestamp of the last successful listener-info pull.
+    /// Empty before any pull. Surfaces in the GUI so operators can see
+    /// how stale the discovered coords are.
+    #[serde(default)]
+    pub listeners_synced_at: String,
 }
 
 fn default_enabled() -> bool {
