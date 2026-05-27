@@ -45,6 +45,36 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.10.4] - 2026-05-26
+
+### Added
+
+#### Default connection profile
+
+- **Connection profiles can be flagged as the default**
+  (`gui/src/lib/types.ts`, `gui/src/lib/connectionProfiles.ts`,
+  `gui/src/routes/ResourcesPage.tsx`). A new `is_default` flag on
+  `ConnectionProfile` marks the one profile the one-click Connect
+  launches. The Connection-tab list shows a `DEFAULT` badge and a
+  "Set default" action per profile; saving normalises to the
+  at-most-one-default invariant (the first profile is auto-promoted
+  when none is flagged, so every resource with profiles has exactly
+  one default).
+- **Resource-card Connect now auto-launches the default profile.**
+  Instead of opening the Connection tab, the card's Connect button
+  reads the resource, picks the default profile (`is_default`, else
+  the sole launchable profile), and dispatches the SSH/RDP session
+  directly. It falls back to opening the Connection tab only when
+  there's genuine ambiguity (2+ profiles, none flagged default) or
+  the default needs an interactive operator credential prompt (LDAP
+  operator-bind) — surfacing an "pick one, or mark a default" hint in
+  the ambiguous case.
+- New shared helpers in `connectionProfiles.ts`:
+  `isLaunchableProfile`, `needsOperatorPrompt`, `pickDefaultProfile`,
+  `normalizeProfileDefaults` — used by both the card quick-Connect and
+  the Connection-tab launcher so they agree on launchability and
+  default selection.
+
 ## [0.10.3] - 2026-05-26
 
 ### Added

@@ -177,6 +177,77 @@ export function validateProfile(p: ConnectionProfile): string | null {
   }
 }
 
+/**
+ * True when the Connect button can actually launch this profile
+ * today. SSH/RDP × {secret, ldap, pki} ship; the SSH secret-engine
+ * source is still pending. Mirrors the per-(protocol, source) matrix
+ * the Connection-tab editor enforces. Kept here so the resource-card
+ * quick-Connect and the Connection-tab launcher agree on launchability.
+ */
+export function isLaunchableProfile(p: ConnectionProfile): boolean {
+  if (p.protocol !== "ssh" && p.protocol !== "rdp") return false;
+  switch (p.credential_source.kind) {
+    case "secret":
+    case "ldap":
+    case "pki":
+      return true;
+    case "ssh-engine":
+      return false;
+  }
+}
+
+/**
+ * True when launching this profile needs an interactive operator
+ * credential prompt before the session can open (LDAP operator-bind).
+ * The resource-card quick-Connect can't satisfy this inline, so it
+ * routes such profiles to the Connection tab instead of firing
+ * blindly.
+ */
+export function needsOperatorPrompt(p: ConnectionProfile): boolean {
+  return (
+    p.credential_source.kind === "ldap" &&
+    p.credential_source.bind_mode === "operator"
+  );
+}
+
+/**
+ * Pick the profile a one-click Connect should launch:
+ *   1. the launchable profile flagged `is_default`, else
+ *   2. the sole launchable profile, else
+ *   3. null — the caller should surface the picker (Connection tab)
+ *      because there's genuine ambiguity (multiple profiles, none
+ *      marked default) or nothing launchable at all.
+ */
+export function pickDefaultProfile(
+  profiles: ConnectionProfile[],
+): ConnectionProfile | null {
+  const launchable = profiles.filter(isLaunchableProfile);
+  if (launchable.length === 0) return null;
+  const flagged = launchable.find((p) => p.is_default);
+  if (flagged) return flagged;
+  if (launchable.length === 1) return launchable[0];
+  return null;
+}
+
+/**
+ * Enforce the at-most-one-default invariant on a profile list before
+ * it is persisted:
+ *   - When two or more carry `is_default`, keep the first and clear
+ *     the rest (last-write-wins is handled by the caller setting the
+ *     flag on the chosen one *before* calling this).
+ *   - When none carry it but the list is non-empty, promote the first
+ *     profile so every resource with profiles has exactly one default.
+ * Returns a new array; inputs are not mutated.
+ */
+export function normalizeProfileDefaults(
+  profiles: ConnectionProfile[],
+): ConnectionProfile[] {
+  if (profiles.length === 0) return profiles.map((p) => ({ ...p }));
+  const flaggedIdx = profiles.findIndex((p) => p.is_default);
+  const keepIdx = flaggedIdx >= 0 ? flaggedIdx : 0;
+  return profiles.map((p, i) => ({ ...p, is_default: i === keepIdx }));
+}
+
 /** Filter a profile list to those whose protocol matches the
  *  Connect button's choice for the current `os_type`. */
 export function profilesForOsType(

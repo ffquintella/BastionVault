@@ -273,6 +273,16 @@ export interface ConnectionProfile {
   id: string;
   /** Operator-visible label (e.g. "Default", "Break-glass"). */
   name: string;
+  /**
+   * When true, this profile is the one the resource-card / ⌘K
+   * quick-Connect launches without prompting the operator to choose.
+   * At most one profile per resource carries this flag; the
+   * Connection-tab editor clears it from the others on save. Optional
+   * + defaults to false for profiles minted before this field landed
+   * — the launcher then falls back to "the sole profile" or, failing
+   * that, opens the Connection tab so the operator picks.
+   */
+  is_default?: boolean;
   protocol: SessionProtocol;
   /**
    * Transport: `direct` opens an SSH/RDP socket from the GUI host

@@ -47,6 +47,10 @@ import {
   blankProfile,
   defaultPort,
   detectSecretShape,
+  isLaunchableProfile,
+  needsOperatorPrompt,
+  normalizeProfileDefaults,
+  pickDefaultProfile,
   protocolForOsType,
   readProfiles,
   validateProfile,
@@ -462,16 +466,49 @@ export function ResourcesPage() {
     }
   }
 
-  // Card-level Connect: open the resource detail straight on the
-  // Connection tab so the existing per-profile launcher (with its
-  // LDAP-operator prompt, recently-connected list, and Rustion route
-  // resolver) takes over. We don't fire the session directly from the
-  // card because the search-endpoint projection omits
-  // connection_profiles — we'd have to read the resource anyway, and
-  // surfacing the profile list lets the operator pick when there's
-  // more than one.
-  function connectResource(name: string) {
-    void selectResource(name, "connection");
+  // Card-level Connect: read the resource, pick its default profile,
+  // and launch it directly. Falls back to opening the Connection tab
+  // (so the operator can pick / add one) when:
+  //   - there's no launchable default (zero profiles, or 2+ with none
+  //     flagged default — genuine ambiguity), or
+  //   - the default needs an interactive operator credential prompt
+  //     (LDAP operator-bind) which the card can't satisfy inline.
+  async function connectResource(name: string) {
+    let info: ResourceMetadata;
+    try {
+      info = await api.readResource(name);
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+      return;
+    }
+    const profiles = readProfiles(info as Record<string, unknown>);
+    const target = pickDefaultProfile(profiles);
+    // Ambiguous or nothing launchable, or needs a prompt → hand off to
+    // the Connection tab where the full launcher lives.
+    if (!target || needsOperatorPrompt(target)) {
+      setSelected(name);
+      setResourceInfo(info);
+      setDetailTab("connection");
+      setRecent(pushRecent(name));
+      if (!target && profiles.length > 1) {
+        toast(
+          "info",
+          "Multiple connection profiles — pick one, or mark a default.",
+        );
+      }
+      return;
+    }
+    // One-click launch of the default profile.
+    setRecent(pushRecent(name));
+    try {
+      if (target.protocol === "ssh") {
+        await api.sessionOpenSsh({ resource_name: name, profile_id: target.id });
+      } else {
+        await api.sessionOpenRdp({ resource_name: name, profile_id: target.id });
+      }
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
   }
 
   async function handleDelete() {
@@ -1029,19 +1066,7 @@ function ConnectionProfilesPanel({
   //     publickey credential)
   //   - RDP+PKI: pending CredSSP smartcard wiring
   //   - SSH-engine: pending
-  const launchableProfiles = profiles.filter((p) => {
-    if (p.protocol !== "ssh" && p.protocol !== "rdp") return false;
-    switch (p.credential_source.kind) {
-      case "secret":
-      case "ldap":
-      case "pki":
-        // SSH+PKI: russh publickey via the PKI-issued key.
-        // RDP+PKI: CredSSP smartcard via sspi-rs's PIV emulator.
-        return true;
-      case "ssh-engine":
-        return false;
-    }
-  });
+  const launchableProfiles = profiles.filter(isLaunchableProfile);
 
   // LDAP operator-bind mode requires a credential prompt before
   // the open call. We surface it as a tiny inline modal; on
@@ -1088,9 +1113,13 @@ function ConnectionProfilesPanel({
 
   async function persist(next: ConnectionProfile[]) {
     try {
+      // Enforce the at-most-one-default invariant on every write so a
+      // resource with profiles always has exactly one default (the
+      // first, if the operator never set one explicitly).
+      const normalized = normalizeProfileDefaults(next);
       const updated: ResourceMetadata = {
         ...(resource as ResourceMetadata),
-        connection_profiles: next as unknown as ResourceMetadata["connection_profiles"],
+        connection_profiles: normalized as unknown as ResourceMetadata["connection_profiles"],
       };
       await api.writeResource(String(resource.name), updated);
       onUpdated();
@@ -1113,6 +1142,14 @@ function ConnectionProfilesPanel({
     const next = profiles.filter((x) => x.id !== p.id);
     await persist(next);
     setConfirmDelete(null);
+  }
+
+  // Flag `p` as the default and clear the rest. persist() normalizes,
+  // but we set the flag here so normalize keeps the operator's choice
+  // rather than defaulting to the first profile.
+  async function handleSetDefault(p: ConnectionProfile) {
+    const next = profiles.map((x) => ({ ...x, is_default: x.id === p.id }));
+    await persist(next);
   }
 
   return (
@@ -1158,6 +1195,9 @@ function ConnectionProfilesPanel({
                 <div className="flex items-center gap-2">
                   <strong className="truncate">{p.name}</strong>
                   <Badge label={p.protocol.toUpperCase()} />
+                  {p.is_default && (
+                    <Badge label="DEFAULT" variant="success" />
+                  )}
                 </div>
                 <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5 text-xs text-[var(--color-text-muted)] mt-1">
                   <dt>target</dt>
@@ -1197,6 +1237,16 @@ function ConnectionProfilesPanel({
                     title="Connect for this combination ships in a later phase"
                   >
                     Connect
+                  </Button>
+                )}
+                {!p.is_default && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => handleSetDefault(p)}
+                    title="Make this the profile the one-click Connect launches"
+                  >
+                    Set default
                   </Button>
                 )}
                 <Button size="sm" variant="ghost" onClick={() => setEditTarget(p)}>
