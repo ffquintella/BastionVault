@@ -45,6 +45,18 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.10.7] - 2026-05-27
+
+### Security
+- CLI token helper file is now encrypted at rest (`src/cli/util.rs`). `bvault login` previously wrote the issued token (including a root token, when that is the logged-in identity) as plaintext to `$BVAULT_TOKEN_FILE` / `~/.vault-token`, protected only by 0600 file permissions — so anything able to read as that user, or any backup/snapshot of the path, captured a usable token. The token is now sealed with XChaCha20-Poly1305 under a key derived (HKDF-SHA256) from the host's machine id (`/etc/machine-id`, or `IOPlatformUUID` on macOS), so a file copied to another host or restored from backup fails to decrypt. Files are written with a `BVTOK1:` marker; legacy plaintext files without the marker are still read (and upgraded to encrypted on the next login) so existing deployments keep working. Operators should still rotate any root token that was previously cached in plaintext.
+
+### Fixed
+- Rustion module test build no longer fails to compile (`src/modules/rustion/dispatcher.rs`, `src/modules/rustion/envelope.rs`). Two `#[cfg(test)]` `RustionTarget` constructors predated the Phase 9.3 listener-discovery fields (`ssh_listener_host/port`, `rdp_listener_host/port`, `listeners_synced_at`) and were missing them, breaking `cargo test --lib`. The fields are now populated with defaults in both test fixtures.
+- `cucumber_hiqlite` integration test fixed (`tests/cucumber_hiqlite.rs`). It set `listen_addr_raft`/`listen_addr_api` with an embedded port (`127.0.0.1:28200`), but `HiqliteBackend` now treats those as host-only and appends the `port_{raft,api}` keys, yielding a malformed `127.0.0.1:28200:8210` address that failed to resolve. Addresses are now host-only with explicit port keys. Also made the backend a process-global singleton run with `max_concurrent_scenarios(1)`, since a hiqlite node binds fixed ports and is not torn down between scenarios — per-scenario backends collided on the ports and concurrent scenarios raced on the shared table.
+- `test_default_logical` updated for the `rustion/` default mount (`tests/test_default_logical.rs`). The default core-mount count assertion still expected 6; `rustion/` brings it to 7.
+- Live Sessions "Recent audit witness" no longer empties out after a poll that returns no new entries (`src/modules/rustion/telemetry.rs`). Each telemetry tick builds a fresh per-target snapshot and the audit pull only returns entries newer than the persisted cursor, so the in-memory recent set was being rebuilt from an empty base every tick — the moment a tick found no new entries the live view dropped to 0. The tick now seeds `recent_audit` from the previously cached snapshot, dedupes by hash, and caps at the 200 latest. The persistent witness store under `rustion/audit_witness/` was always intact; only the live view was affected.
+- Live Sessions "Terminate" no longer shows a scary red error when the bastion has already torn the session down. A `409 session_already_terminated` from the bastion is now treated as a benign outcome (info toast) since the session is already gone, and both the success and already-terminated paths force a synchronous telemetry poll so the stale row drops out of the cached snapshot immediately instead of lingering until the next 60s tick (`gui/src/routes/RustionLiveSessionsPage.tsx`).
+
 ## [0.10.6] - 2026-05-27
 
 ### Fixed

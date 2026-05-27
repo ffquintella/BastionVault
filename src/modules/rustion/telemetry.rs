@@ -365,11 +365,24 @@ async fn tick(core: &Arc<Core>) -> Result<(), RvError> {
                             e
                         })
                         .collect();
-                    // Cap the in-memory recent_audit at 200 latest
-                    // entries — the persistent witness store keeps the
-                    // full set under rustion/audit_witness/.
-                    let mut combined = std::mem::take(&mut snap.recent_audit);
-                    combined.append(&mut stamped.clone());
+                    // Carry forward the previously cached recent set —
+                    // each tick builds a fresh snapshot and the audit pull
+                    // only returns entries newer than the cursor, so
+                    // without seeding from the prior snapshot the live view
+                    // would empty out the moment a tick returns no new
+                    // entries. Dedup by hash, then cap at the 200 latest;
+                    // the persistent witness store keeps the full set under
+                    // rustion/audit_witness/.
+                    let mut combined = cache
+                        .get(&id)
+                        .await
+                        .map(|prev| prev.recent_audit)
+                        .unwrap_or_default();
+                    for e in stamped.iter() {
+                        if !combined.iter().any(|c| c.hash == e.hash) {
+                            combined.push(e.clone());
+                        }
+                    }
                     if combined.len() > 200 {
                         let drop = combined.len() - 200;
                         combined.drain(0..drop);

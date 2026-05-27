@@ -7,7 +7,7 @@ mod inner {
     use std::collections::HashMap;
     use std::env;
     use std::fs;
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock};
 
     use cucumber::{given, then, when, World};
     use serde_json::Value;
@@ -39,40 +39,67 @@ mod inner {
         }
     }
 
+    // A hiqlite node binds fixed raft/api ports and runs background tasks
+    // that are not torn down between scenarios. cucumber builds a fresh
+    // `World` per scenario, so creating a backend per scenario would try to
+    // re-bind the same ports and fail with `Address already in use`. Share a
+    // single process-global backend instead; each scenario clears the table
+    // via the "the vault table is empty" step, so state stays isolated.
+    static SHARED_BACKEND: OnceLock<Arc<HiqliteBackend>> = OnceLock::new();
+
+    fn shared_backend() -> Arc<HiqliteBackend> {
+        SHARED_BACKEND
+            .get_or_init(|| {
+                let dir = env::temp_dir().join("bvault_cucumber_hiqlite");
+                let _ = fs::remove_dir_all(&dir);
+                fs::create_dir_all(&dir).unwrap();
+
+                let mut conf: HashMap<String, Value> = HashMap::new();
+                conf.insert(
+                    "data_dir".to_string(),
+                    Value::String(dir.to_string_lossy().into_owned()),
+                );
+                conf.insert("node_id".to_string(), Value::Number(1.into()));
+                conf.insert(
+                    "secret_raft".to_string(),
+                    Value::String("cucumber_raft_secret_".to_string()),
+                );
+                conf.insert(
+                    "secret_api".to_string(),
+                    Value::String("cucumber_api_secret_1".to_string()),
+                );
+                conf.insert("table".to_string(), Value::String("vault".to_string()));
+                // `listen_addr_{api,raft}` are host-only; the port comes from
+                // the separate `port_{api,raft}` keys (HiqliteBackend builds
+                // the node address as `host:port`). Embedding the port in the
+                // host string yields a malformed `host:port:port` address that
+                // fails to resolve.
+                conf.insert(
+                    "listen_addr_api".to_string(),
+                    Value::String("127.0.0.1".to_string()),
+                );
+                conf.insert(
+                    "listen_addr_raft".to_string(),
+                    Value::String("127.0.0.1".to_string()),
+                );
+                conf.insert("port_api".to_string(), Value::Number(28100.into()));
+                conf.insert("port_raft".to_string(), Value::Number(28200.into()));
+
+                Arc::new(
+                    HiqliteBackend::new(&conf).expect("failed to create hiqlite backend"),
+                )
+            })
+            .clone()
+    }
+
     #[given("a hiqlite backend")]
     async fn given_a_hiqlite_backend(world: &mut HiqliteWorld) {
-        if world.backend.is_some() {
-            return;
-        }
-
-        let dir = env::temp_dir().join("bvault_cucumber_hiqlite");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        world.data_dir = dir.to_string_lossy().into_owned();
-
-        let mut conf: HashMap<String, Value> = HashMap::new();
-        conf.insert("data_dir".to_string(), Value::String(world.data_dir.clone()));
-        conf.insert("node_id".to_string(), Value::Number(1.into()));
-        conf.insert(
-            "secret_raft".to_string(),
-            Value::String("cucumber_raft_secret_".to_string()),
-        );
-        conf.insert(
-            "secret_api".to_string(),
-            Value::String("cucumber_api_secret_1".to_string()),
-        );
-        conf.insert("table".to_string(), Value::String("vault".to_string()));
-        conf.insert(
-            "listen_addr_api".to_string(),
-            Value::String("127.0.0.1:28100".to_string()),
-        );
-        conf.insert(
-            "listen_addr_raft".to_string(),
-            Value::String("127.0.0.1:28200".to_string()),
-        );
-
-        let backend = HiqliteBackend::new(&conf).expect("failed to create hiqlite backend");
-        world.backend = Some(Arc::new(backend));
+        let backend = shared_backend();
+        world.data_dir = env::temp_dir()
+            .join("bvault_cucumber_hiqlite")
+            .to_string_lossy()
+            .into_owned();
+        world.backend = Some(backend);
     }
 
     #[given("the vault table is empty")]
@@ -149,7 +176,13 @@ mod inner {
     }
 
     pub async fn run() {
+        // Scenarios share one process-global backend + table (see
+        // SHARED_BACKEND), so they must run serially — cucumber's default
+        // concurrent execution would let scenarios race on the same table
+        // (one clearing it while another reads), producing flaky value/count
+        // mismatches.
         HiqliteWorld::cucumber()
+            .max_concurrent_scenarios(1)
             .run_and_exit("tests/features/hiqlite_storage.feature")
             .await;
     }

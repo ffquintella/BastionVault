@@ -4,8 +4,12 @@
 // filling the modal, and submitting drives the right Tauri commands
 // in the right order:
 //   pki_list_mounts → pki_enable_mount → pki_list_issuers
-//   → pki_generate_root → pki_write_role (×2)
+//   → pki_generate_root (×2) → pki_write_role (×2)
 //   → rustion_master_write → rustion_master_issue
+//
+// Two roots are generated (one Ed25519, one ML-DSA-65) because BV's PKI
+// refuses mixed-class chains, so each leaf role pins its own same-class
+// issuer.
 //
 // We don't pin on the exact arg shape of every call (the rustion master
 // config snapshot has a lot of dead fields the wizard fills with empty
@@ -140,11 +144,13 @@ describe("RustionBastionsTab — Bootstrap Master wizard", () => {
       .map(([cmd]) => cmd as string)
       .filter((c) => wizardCmds.has(c));
 
-    // Expected ordered sequence — two pki_write_role calls (one per role).
+    // Expected ordered sequence — two pki_generate_root calls (Ed25519 +
+    // ML-DSA-65 roots) and two pki_write_role calls (one per role).
     expect(orderedCalls).toEqual([
       "pki_list_mounts",
       "pki_enable_mount",
       "pki_list_issuers",
+      "pki_generate_root",
       "pki_generate_root",
       "pki_write_role",
       "pki_write_role",

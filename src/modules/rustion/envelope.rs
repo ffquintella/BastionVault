@@ -436,6 +436,11 @@ mod tests {
             tls_pinned_cert_pem: String::new(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            ssh_listener_host: String::new(),
+            ssh_listener_port: 0,
+            rdp_listener_host: String::new(),
+            rdp_listener_port: 0,
+            listeners_synced_at: String::new(),
         }
     }
 

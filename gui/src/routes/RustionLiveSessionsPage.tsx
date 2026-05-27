@@ -93,9 +93,19 @@ export function RustionLiveSessionsPage() {
         correlationId: sess.correlationId,
       });
       toast.toast("success", `Terminated ${sess.sessionId}`);
-      await load();
+      // Force a synchronous poll so the now-dead session drops out of the
+      // cached snapshot immediately instead of lingering until the next 60s tick.
+      setTargets(await rustionTelemetryPoll());
     } catch (e) {
-      toast.toast("error", `Terminate failed: ${extractError(e)}`);
+      const msg = extractError(e);
+      // The bastion is the source of truth: if it already tore the session
+      // down, our cached row is just stale. Treat that as success and refresh.
+      if (msg.includes("session_already_terminated")) {
+        toast.toast("info", `Session ${sess.sessionId} was already terminated`);
+        setTargets(await rustionTelemetryPoll());
+      } else {
+        toast.toast("error", `Terminate failed: ${msg}`);
+      }
     } finally {
       setKilling(null);
     }
