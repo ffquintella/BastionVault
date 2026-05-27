@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.10.8] - 2026-05-27
+
+### Fixed
+
+- **Rustion `recording.ready` webhook deliveries were rejected before reaching the handler** -- the `rustion/webhooks/recording-ready` path is authenticated by the hybrid Ed25519+ML-DSA-65 signature verified against the originating bastion's pinned pubkey, but the path was not declared as an unauthenticated route. Bastions hold no Vault token, so every delivery was rejected at the token-auth gate (`pre_route`) before the signature-verifying handler ran, leaving the Recordings index permanently empty. Declared `webhooks/recording-ready` as an `unauth_path` on the rustion backend.
+
 ## [0.10.7] - 2026-05-27
 
 ### Security

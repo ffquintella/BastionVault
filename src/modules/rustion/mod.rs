@@ -239,7 +239,7 @@ impl RustionBackend {
         let h_noop1 = self.inner.clone();
         let h_noop2 = self.inner.clone();
 
-        let backend = new_logical_backend!({
+        let mut backend = new_logical_backend!({
             paths: [
                 {
                     // List + create. List returns target ids only; the
@@ -821,6 +821,14 @@ impl RustionBackend {
             }],
             help: RUSTION_BACKEND_HELP,
         });
+
+        // The recording.ready webhook is authenticated by the hybrid
+        // Ed25519+ML-DSA-65 signature verified against the originating
+        // bastion's pinned pubkey — the caller is an external bastion
+        // that holds no Vault token, so the path must bypass the
+        // token-auth gate. Without this, every delivery is rejected at
+        // pre_route before the signature-verifying handler runs.
+        backend.unauth_paths = Arc::new(vec!["webhooks/recording-ready".to_string()]);
 
         backend
     }
