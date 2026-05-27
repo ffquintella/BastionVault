@@ -45,6 +45,13 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.10.9] - 2026-05-27
+
+### Fixed
+
+- **Rustion `recording.ready` webhook receiver rewritten to match the real wire contract.** The previous logical-backend handler expected a `{bastion_id, signature, sidecar_json}` JSON envelope, but Rustion's `rustion-control-plane::webhook` deliverer actually POSTs the **raw sidecar JSON** as the body with the hybrid signature in the **`X-Rustion-Signature` header** — so every delivery would have been rejected with `400 bastion_id is required`. Replaced it with a dedicated actix route (`src/http/rustion_webhook.rs`) registered ahead of the `/v1` logical catch-all, which verifies `sha256(raw body)` against the pinned key directly off the wire, identifies the bastion via a `?bastion_id=` query hint (with a try-all-enrolled-keys fallback), and ingests the sidecar into the recordings index. This supersedes the unauth-path change from 0.10.8 (the old logical route and its `unauth_paths` entry were removed).
+- **Ed25519 webhook-signature verification rejected real pinned keys.** `webhook_verify::verify` assumed a raw 32-byte Ed25519 key, but enrolment pins the 44-byte DER SPKI form (`ed25519_spki_b64` from `rustion control-plane webhook-key export`), so verification always failed with `PubkeyLen`. The verifier now accepts both the SPKI wrapper and a bare 32-byte key.
+
 ## [0.10.8] - 2026-05-27
 
 ### Fixed

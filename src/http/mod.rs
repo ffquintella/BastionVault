@@ -23,6 +23,7 @@ pub mod client_ip;
 pub mod logical;
 pub mod metrics;
 pub mod proxy_protocol;
+pub mod rustion_webhook;
 pub mod sys;
 
 pub const AUTH_COOKIE_NAME: &str = "token";
@@ -94,6 +95,12 @@ pub fn request_on_connect_handler(conn: &dyn Any, ext: &mut Extensions) {
 
 pub fn init_service(cfg: &mut web::ServiceConfig) {
     sys::init_sys_service(cfg);
+    // Must precede the `/v1/{path:.*}` logical catch-all so the Rustion
+    // recording.ready webhook is handled by its purpose-built receiver
+    // (raw body + X-Rustion-Signature header) rather than the generic
+    // logical plumbing, which can neither recover the signed bytes nor
+    // read the signature header.
+    rustion_webhook::init_rustion_webhook_service(cfg);
     logical::init_logical_service(cfg);
     metrics::init_metrics_service(cfg);
 }

@@ -211,7 +211,6 @@ impl RustionBackend {
         let h_session_kill = self.inner.clone();
         let h_authority_attest = self.inner.clone();
         let h_target_deenrol = self.inner.clone();
-        let h_webhook_recording = self.inner.clone();
         let h_recordings_list = self.inner.clone();
         let h_recording_read = self.inner.clone();
         let h_recording_pull = self.inner.clone();
@@ -239,7 +238,7 @@ impl RustionBackend {
         let h_noop1 = self.inner.clone();
         let h_noop2 = self.inner.clone();
 
-        let mut backend = new_logical_backend!({
+        let backend = new_logical_backend!({
             paths: [
                 {
                     // List + create. List returns target ids only; the
@@ -586,22 +585,6 @@ impl RustionBackend {
                     help: "Open a Rustion-mediated SSH/RDP session. Runs the dispatcher, builds a BVRG-v1 envelope, POSTs at the chosen Rustion target, and returns the session ticket bundle."
                 },
                 {
-                    // POST rustion/webhooks/recording-ready — Phase 6.2.
-                    // Verifies the X-Rustion-Signature against the
-                    // bastion's pinned recording_webhook_pubkey and stores
-                    // the sidecar in the recordings index.
-                    pattern: r"webhooks/recording-ready$",
-                    fields: {
-                        "bastion_id": { field_type: FieldType::Str, default: "", description: "Bastion target id originating the webhook (looked up to pull the pinned recording_webhook_pubkey)." },
-                        "signature": { field_type: FieldType::Str, default: "", description: "X-Rustion-Signature header value: `ed25519=<base64> mldsa65=<base64>`." },
-                        "sidecar_json": { field_type: FieldType::Str, default: "", description: "The sidecar payload bytes (serialised JSON) as a base64 string." }
-                    },
-                    operations: [
-                        {op: Operation::Write, handler: h_webhook_recording.handle_webhook_recording_ready}
-                    ],
-                    help: "Phase 6.2 — Inbound webhook receiver for `recording.ready` notifications from a Rustion bastion. Signature is verified against the bastion's pinned recording_webhook_pubkey; sidecar is stored in the recordings index; audit::RECORDING_LINKED is emitted."
-                },
-                {
                     // GET rustion/recordings — list known recordings.
                     pattern: r"recordings/?$",
                     operations: [
@@ -821,14 +804,6 @@ impl RustionBackend {
             }],
             help: RUSTION_BACKEND_HELP,
         });
-
-        // The recording.ready webhook is authenticated by the hybrid
-        // Ed25519+ML-DSA-65 signature verified against the originating
-        // bastion's pinned pubkey — the caller is an external bastion
-        // that holds no Vault token, so the path must bypass the
-        // token-auth gate. Without this, every delivery is rejected at
-        // pre_route before the signature-verifying handler runs.
-        backend.unauth_paths = Arc::new(vec!["webhooks/recording-ready".to_string()]);
 
         backend
     }
@@ -1991,120 +1966,6 @@ impl RustionBackendInner {
             Value::String(result.correlation_id),
         );
         data.insert("reason".into(), Value::String(reason));
-        Ok(Some(Response::data_response(Some(data))))
-    }
-
-    // ─── Phase 6.2: recording webhook + index ──────────────────────
-
-    pub async fn handle_webhook_recording_ready(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
-        let store = self.resolve_store()?;
-        let recordings = self.resolve_recordings_store()?;
-
-        let pick = |k: &str| -> String {
-            req.get_data(k)
-                .ok()
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .unwrap_or_default()
-        };
-        let bastion_id = pick("bastion_id");
-        let signature = pick("signature");
-        let sidecar_b64 = pick("sidecar_json");
-
-        if bastion_id.is_empty() {
-            return Err(bv_error_response_status!(400, "bastion_id is required"));
-        }
-        if signature.is_empty() {
-            return Err(bv_error_response_status!(400, "signature header value is required"));
-        }
-        let sidecar_bytes = STANDARD
-            .decode(sidecar_b64.as_bytes())
-            .map_err(|e| bv_error_response_status!(400, &format!("sidecar_json base64 decode: {e}")))?;
-
-        // Look up the bastion's pinned signing pubkey.
-        let target = store
-            .get_target(&bastion_id)
-            .await?
-            .ok_or_else(|| bv_error_response_status!(404, &format!("bastion `{bastion_id}` not enrolled")))?;
-
-        // Verify the hybrid signature. The pinned pubkey halves are
-        // stored base64 on the RustionTarget; the webhook signer is
-        // mirror-implementation of rustion-control-plane::webhook so
-        // we replicate the verification path here instead of pulling
-        // the Rustion crate as a BV dep.
-        webhook_verify::verify(
-            &target.public_key.ed25519,
-            &target.public_key.mldsa65,
-            &signature,
-            &sidecar_bytes,
-        )
-        .map_err(|e| bv_error_response_status!(401, &format!("signature verify: {e}")))?;
-
-        // Parse the sidecar payload.
-        let sidecar: serde_json::Value = serde_json::from_slice(&sidecar_bytes)
-            .map_err(|e| bv_error_response_status!(400, &format!("sidecar parse: {e}")))?;
-        let sd = sidecar.as_object().ok_or_else(|| {
-            bv_error_response_status!(400, "sidecar must be a JSON object")
-        })?;
-        let s = |k: &str| -> String {
-            sd.get(k).and_then(|v| v.as_str()).map(String::from).unwrap_or_default()
-        };
-        let u = |k: &str| -> u64 {
-            sd.get(k).and_then(|v| v.as_u64()).unwrap_or(0)
-        };
-        let parse_iso = |k: &str| -> chrono::DateTime<chrono::Utc> {
-            sd.get(k)
-                .and_then(|v| v.as_str())
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map(|d| d.with_timezone(&chrono::Utc))
-                .unwrap_or_else(chrono::Utc::now)
-        };
-
-        let recording_id = s("recording_id");
-        if recording_id.is_empty() {
-            return Err(bv_error_response_status!(400, "sidecar missing recording_id"));
-        }
-        let entry = recordings::RecordingEntry {
-            recording_id: recording_id.clone(),
-            session_id: s("session_id"),
-            authority: s("authority"),
-            format: s("format"),
-            sha256: s("sha256"),
-            size_bytes: u("size_bytes"),
-            started_at: parse_iso("started_at"),
-            finished_at: parse_iso("finished_at"),
-            target_host: s("target_host"),
-            target_user: s("target_user"),
-            correlation_id: s("correlation_id"),
-            bastion_id: bastion_id.clone(),
-            received_at: chrono::Utc::now(),
-            delivery_mode: "webhook".into(),
-        };
-        recordings.put(&entry).await?;
-        // Clear the pending-recording marker so the 24h poller drops
-        // this session from its sweep list. Phase 6.4.
-        let _ = recordings.pending_remove(&entry.session_id).await;
-
-        log::info!(
-            "{}: recording_id={} session_id={} bastion={} correlation_id={}",
-            audit::RECORDING_LINKED,
-            entry.recording_id,
-            entry.session_id,
-            entry.bastion_id,
-            entry.correlation_id
-        );
-
-        let mut data = Map::new();
-        data.insert("recording_id".into(), Value::String(entry.recording_id));
-        data.insert("delivery_mode".into(), Value::String(entry.delivery_mode));
-        data.insert(
-            "received_at".into(),
-            Value::String(entry.received_at.to_rfc3339()),
-        );
         Ok(Some(Response::data_response(Some(data))))
     }
 

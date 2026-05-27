@@ -62,10 +62,7 @@ pub fn verify(
     if ml_pub_bytes.len() != MLDSA65_PK_LEN {
         return Err(VerifyError::PubkeyLen);
     }
-    let ed_pub_arr: [u8; 32] = ed_pub_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| VerifyError::PubkeyLen)?;
+    let ed_pub_arr = normalize_ed25519(&ed_pub_bytes)?;
     let ed_pub =
         VerifyingKey::from_bytes(&ed_pub_arr).map_err(|_| VerifyError::Ed25519Invalid)?;
 
@@ -99,6 +96,28 @@ pub fn verify(
     pk.verify(&tbs, &ml_sig_arr, &[])
         .then_some(())
         .ok_or(VerifyError::MlDsa65Invalid)
+}
+
+/// Normalise a pinned Ed25519 public key to its raw 32 bytes.
+///
+/// `rustion control-plane webhook-key export` emits the Ed25519 half
+/// as `ed25519_spki_b64` — a 44-byte DER SubjectPublicKeyInfo wrapper
+/// (`302a300506032b6570032100 || <32 raw bytes>`) — and BV pins that
+/// value verbatim on `RustionTarget.public_key.ed25519`. The original
+/// verifier assumed a raw 32-byte key and rejected the real pinned
+/// value with `PubkeyLen`, so no live webhook could ever verify.
+/// Accept both the SPKI form and a bare 32-byte key.
+fn normalize_ed25519(bytes: &[u8]) -> Result<[u8; 32], VerifyError> {
+    const SPKI_PREFIX: [u8; 12] = [
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+    ];
+    match bytes.len() {
+        32 => bytes.try_into().map_err(|_| VerifyError::PubkeyLen),
+        44 if bytes[..12] == SPKI_PREFIX => {
+            bytes[12..].try_into().map_err(|_| VerifyError::PubkeyLen)
+        }
+        _ => Err(VerifyError::PubkeyLen),
+    }
 }
 
 fn parse_header(s: &str) -> Result<(String, String), VerifyError> {
@@ -165,6 +184,23 @@ mod tests {
         let body = br#"{"x":1}"#;
         let header = sign(&sk_seed, &ml_sk, body);
         verify(&ed_pk_b64, &ml_pk_b64, &header, body).expect("ok");
+    }
+
+    #[test]
+    fn round_trip_spki_ed25519() {
+        // The Ed25519 half pinned on a real target is the 44-byte DER
+        // SPKI wrapper (`ed25519_spki_b64`), not a raw 32-byte key.
+        // Verification must succeed against that form too.
+        let (raw_ed_pk_b64, ml_pk_b64, sk_seed, ml_sk) = synth();
+        let raw = B64.decode(raw_ed_pk_b64.as_bytes()).unwrap();
+        let mut spki = vec![
+            0x30u8, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
+        spki.extend_from_slice(&raw);
+        let spki_b64 = B64.encode(spki);
+        let body = br#"{"recording_id":"rec_x"}"#;
+        let header = sign(&sk_seed, &ml_sk, body);
+        verify(&spki_b64, &ml_pk_b64, &header, body).expect("spki ed25519 ok");
     }
 
     #[test]
