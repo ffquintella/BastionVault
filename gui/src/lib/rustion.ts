@@ -307,6 +307,20 @@ export interface RustionRecordingPullRequest {
 export const rustionRecordingPull = (request: RustionRecordingPullRequest) =>
   invoke<RustionRecordingEntry>("rustion_recording_pull", { request });
 
+export interface RustionReconcileReport {
+  found: number;
+  imported: number;
+  skippedExisting: number;
+}
+
+/** Actively reconcile the recordings index against a bastion's
+ *  `/v1/recordings` list. Omit `bastionId` to sweep every enrolled
+ *  bastion. Idempotent — only missing recordings are imported. */
+export const rustionRecordingsReconcile = (bastionId?: string) =>
+  invoke<RustionReconcileReport>("rustion_recordings_reconcile", {
+    bastionId: bastionId ?? null,
+  });
+
 export interface RustionRecordingBlob {
   recordingId: string;
   format: string;

@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.10.10] - 2026-05-27
+
+### Added
+
+- **Active recordings reconcile (list-pull) path.** BV can now actively query a bastion's full recording index instead of waiting for a webhook push or pulling one session at a time. New endpoint `POST rustion/recordings/reconcile` (`bastion_id` optional — empty sweeps every enrolled bastion) calls Rustion's new `GET /v1/recordings`, then ingests any recording BV is missing (matched by `recording_id`, `delivery_mode=reconcile`). Idempotent. This recovers recordings the per-session pull-fallback cannot reach — terminated sessions and sessions lost across a bastion restart, since it reads the bastion's on-disk index rather than the live session table. Surfaced in the GUI Recordings page as a **Sync all bastions / Sync this bastion** button (`rustion_recordings_reconcile` Tauri command). Requires Rustion ≥ 0.10.9 (the `/v1/recordings` endpoint).
+
 ## [0.10.9] - 2026-05-27
 
 ### Fixed

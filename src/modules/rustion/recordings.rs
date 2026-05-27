@@ -269,6 +269,131 @@ pub async fn pull_recording(
     Ok(entry)
 }
 
+// ─── Phase 6.5: active reconcile (list-pull) ────────────────────────
+
+/// Outcome of an active reconcile sweep against one bastion.
+#[derive(Debug, Default, Serialize)]
+pub struct ReconcileReport {
+    pub bastion_id: String,
+    /// Recordings the bastion reported in its index.
+    pub found: usize,
+    /// New recordings ingested into the BV index this sweep.
+    pub imported: usize,
+    /// Recordings already present in the BV index, left untouched.
+    pub skipped_existing: usize,
+}
+
+/// Actively pull a bastion's full recording index (`GET /v1/recordings`)
+/// and ingest any recordings BV doesn't already hold.
+///
+/// This is the third recording-delivery path, complementing the
+/// `recording.ready` webhook (push) and the per-session pull-fallback.
+/// Unlike the per-session route — which resolves against Rustion's
+/// live in-memory session table and so cannot serve terminated
+/// sessions or survive a bastion restart — the list endpoint walks the
+/// bastion's on-disk recording index, so reconcile recovers recordings
+/// regardless of session lifecycle or missed webhooks.
+///
+/// Idempotent: recordings already in the index (matched by
+/// `recording_id`) are skipped, so it is safe to run on a schedule or
+/// on-demand from the GUI.
+pub async fn reconcile_from_bastion(
+    targets: &super::store::RustionStore,
+    recordings: &RecordingsStore,
+    bastion_id: &str,
+) -> Result<ReconcileReport, RvError> {
+    let target = targets
+        .get_target(bastion_id)
+        .await?
+        .ok_or_else(|| bv_error_string!(&format!("bastion `{bastion_id}` not enrolled")))?;
+
+    let url = format!(
+        "https://{}/v1/recordings",
+        target.endpoint.trim_end_matches('/')
+    );
+    let client = super::http::build_client_for(&target, std::time::Duration::from_secs(15))?;
+    let resp = client
+        .get(&url)
+        .header("X-Rustion-Authority", "bastion-vault")
+        .send()
+        .await
+        .map_err(|e| bv_error_string!(&format!("transport: {e}")))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        let mapped = if status == reqwest::StatusCode::NOT_FOUND {
+            404
+        } else {
+            502
+        };
+        return Err(crate::bv_error_response_status!(
+            mapped,
+            &format!("bastion returned HTTP {status}: {body}")
+        ));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| bv_error_string!(&format!("read body: {e}")))?;
+    let parsed: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| bv_error_string!(&format!("recordings list parse: {e}")))?;
+    let list = parsed
+        .get("recordings")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut report = ReconcileReport {
+        bastion_id: bastion_id.to_string(),
+        ..Default::default()
+    };
+    for item in &list {
+        let Some(sd) = item.as_object() else {
+            continue;
+        };
+        report.found += 1;
+        let s = |k: &str| -> String {
+            sd.get(k).and_then(|v| v.as_str()).map(String::from).unwrap_or_default()
+        };
+        let u = |k: &str| -> u64 { sd.get(k).and_then(|v| v.as_u64()).unwrap_or(0) };
+        let parse_iso = |k: &str| -> DateTime<Utc> {
+            sd.get(k)
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(Utc::now)
+        };
+        let recording_id = s("recording_id");
+        if recording_id.is_empty() {
+            continue;
+        }
+        if recordings.get(&recording_id).await?.is_some() {
+            report.skipped_existing += 1;
+            continue;
+        }
+        let entry = RecordingEntry {
+            recording_id,
+            session_id: s("session_id"),
+            authority: s("authority"),
+            format: s("format"),
+            sha256: s("sha256"),
+            size_bytes: u("size_bytes"),
+            started_at: parse_iso("started_at"),
+            finished_at: parse_iso("finished_at"),
+            target_host: s("target_host"),
+            target_user: s("target_user"),
+            correlation_id: s("correlation_id"),
+            bastion_id: bastion_id.to_string(),
+            received_at: Utc::now(),
+            delivery_mode: "reconcile".into(),
+        };
+        recordings.put(&entry).await?;
+        let _ = recordings.pending_remove(&entry.session_id).await;
+        report.imported += 1;
+    }
+    Ok(report)
+}
+
 /// Phase 6.5: fetch the recording artifact bytes from the bastion's
 /// `GET /v1/recordings/{rid}/blob` endpoint. Returns the raw bytes
 /// + the format string from the `X-Recording-Format` header so the

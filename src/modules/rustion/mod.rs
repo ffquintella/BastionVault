@@ -214,6 +214,7 @@ impl RustionBackend {
         let h_recordings_list = self.inner.clone();
         let h_recording_read = self.inner.clone();
         let h_recording_pull = self.inner.clone();
+        let h_recordings_reconcile = self.inner.clone();
         let h_recording_blob = self.inner.clone();
         let h_recording_replay_log = self.inner.clone();
         let h_policy_global_read = self.inner.clone();
@@ -795,6 +796,20 @@ impl RustionBackend {
                         {op: Operation::Write, handler: h_recording_pull.handle_recording_pull}
                     ],
                     help: "Phase 6.3 — force-pull a recording sidecar from a bastion when the recording.ready webhook missed. Stores into the recordings index with delivery_mode=pull."
+                },
+                {
+                    // POST rustion/recordings/reconcile — Phase 6.5
+                    // active list-pull: GET the bastion's full recording
+                    // index and ingest any recordings BV is missing.
+                    // Works for terminated sessions and missed webhooks.
+                    pattern: r"recordings/reconcile$",
+                    fields: {
+                        "bastion_id": { field_type: FieldType::Str, default: "", description: "Bastion id to reconcile. When empty, every enrolled bastion is swept." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_recordings_reconcile.handle_recordings_reconcile}
+                    ],
+                    help: "Phase 6.5 — actively reconcile the recordings index against a bastion's `/v1/recordings` list. Idempotent; imports anything missing with delivery_mode=reconcile."
                 }
             ],
             secrets: [{
@@ -2102,6 +2117,68 @@ impl RustionBackendInner {
         let json = serde_json::to_value(&entry)
             .map_err(|e| bv_error_string!(&format!("encode recording: {e}")))?;
         let data = json.as_object().cloned().unwrap_or_default();
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn handle_recordings_reconcile(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_store()?;
+        let recordings = self.resolve_recordings_store()?;
+        let bastion_id = req
+            .get_data("bastion_id")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
+            .unwrap_or_default();
+
+        // Empty bastion_id → sweep every enrolled target. Per-bastion
+        // failures are recorded rather than aborting the whole sweep, so
+        // one unreachable bastion doesn't mask recoveries from the rest.
+        let ids = if bastion_id.is_empty() {
+            store.list_target_ids().await?
+        } else {
+            vec![bastion_id]
+        };
+
+        let mut reports = Vec::new();
+        let mut errors = Map::new();
+        let (mut total_found, mut total_imported, mut total_skipped) = (0u64, 0u64, 0u64);
+        for id in ids {
+            match recordings::reconcile_from_bastion(&store, &recordings, &id).await {
+                Ok(rep) => {
+                    total_found += rep.found as u64;
+                    total_imported += rep.imported as u64;
+                    total_skipped += rep.skipped_existing as u64;
+                    if let Ok(v) = serde_json::to_value(&rep) {
+                        reports.push(v);
+                    }
+                }
+                Err(e) => {
+                    errors.insert(id.clone(), Value::String(e.to_string()));
+                    log::warn!("rustion recordings reconcile: bastion {id} failed: {e}");
+                }
+            }
+        }
+        if total_imported > 0 {
+            log::info!(
+                "{}: reconcile imported={} found={} skipped={}",
+                audit::RECORDING_LINKED,
+                total_imported,
+                total_found,
+                total_skipped
+            );
+        }
+
+        let mut data = Map::new();
+        data.insert("found".into(), Value::from(total_found));
+        data.insert("imported".into(), Value::from(total_imported));
+        data.insert("skipped_existing".into(), Value::from(total_skipped));
+        data.insert("bastions".into(), Value::Array(reports));
+        if !errors.is_empty() {
+            data.insert("errors".into(), Value::Object(errors));
+        }
         Ok(Some(Response::data_response(Some(data))))
     }
 

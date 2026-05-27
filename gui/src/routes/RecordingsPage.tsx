@@ -34,6 +34,7 @@ import {
   rustionOpenReplayWindow,
   rustionRecordingBlob,
   rustionRecordingPull,
+  rustionRecordingsReconcile,
   rustionRecordingRead,
   rustionRecordingReplayLog,
   rustionRecordingsList,
@@ -53,6 +54,7 @@ export function RecordingsPage() {
   const [selected, setSelected] = useState<RustionRecordingEntry | null>(null);
   const [pullInput, setPullInput] = useState({ bastionId: "", sessionId: "" });
   const [pulling, setPulling] = useState(false);
+  const [reconciling, setReconciling] = useState(false);
   // Enrolled bastions for the Force-pull dropdown. Loaded once on
   // mount; the operator picks by friendly name and we submit the id.
   // Avoids the previous freeform text input that let the operator
@@ -134,6 +136,27 @@ export function RecordingsPage() {
     }
   };
 
+  // Active reconcile: ask each enrolled bastion for its full recording
+  // index and import anything we're missing. Recovers terminated
+  // sessions and missed webhooks that the per-session pull can't reach.
+  const handleReconcile = async () => {
+    setReconciling(true);
+    try {
+      const rep = await rustionRecordingsReconcile(
+        pullInput.bastionId || undefined,
+      );
+      toast.toast(
+        rep.imported > 0 ? "success" : "info",
+        `Reconcile: ${rep.imported} imported, ${rep.skippedExisting} already present (${rep.found} found)`,
+      );
+      await reload();
+    } catch (e) {
+      toast.toast("error", `Reconcile failed: ${extractError(e)}`);
+    } finally {
+      setReconciling(false);
+    }
+  };
+
   return (
     <Layout>
       <div className="space-y-4">
@@ -181,7 +204,7 @@ export function RecordingsPage() {
               placeholder="sess_<32 hex>"
             />
           </div>
-          <div className="mt-3">
+          <div className="mt-3 flex items-center gap-2">
             <Button
               onClick={handlePull}
               loading={pulling}
@@ -192,6 +215,18 @@ export function RecordingsPage() {
             >
               Pull from bastion
             </Button>
+            <Button
+              onClick={handleReconcile}
+              loading={reconciling}
+              variant="secondary"
+              disabled={bastions.length === 0}
+            >
+              {pullInput.bastionId ? "Sync this bastion" : "Sync all bastions"}
+            </Button>
+            <span className="text-xs text-neutral-500 min-w-0">
+              Pulls the bastion's full recording index and imports anything
+              missing — recovers closed sessions and missed webhooks.
+            </span>
           </div>
         </Card>
 

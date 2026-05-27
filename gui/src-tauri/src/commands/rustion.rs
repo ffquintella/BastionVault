@@ -776,6 +776,42 @@ pub async fn rustion_recording_pull(
 
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct RustionReconcileReport {
+    pub found: u64,
+    pub imported: u64,
+    pub skipped_existing: u64,
+}
+
+/// Actively reconcile the recordings index against one or all enrolled
+/// bastions' `/v1/recordings` list. Empty `bastion_id` sweeps them all.
+#[tauri::command]
+pub async fn rustion_recordings_reconcile(
+    state: State<'_, AppState>,
+    bastion_id: Option<String>,
+) -> CmdResult<RustionReconcileReport> {
+    let mut body = Map::new();
+    body.insert(
+        "bastion_id".into(),
+        Value::String(bastion_id.unwrap_or_default()),
+    );
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}recordings/reconcile"),
+        Some(body),
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    let num = |k: &str| -> u64 { data.get(k).and_then(|v| v.as_u64()).unwrap_or(0) };
+    Ok(RustionReconcileReport {
+        found: num("found"),
+        imported: num("imported"),
+        skipped_existing: num("skipped_existing"),
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct RustionRecordingBlob {
     pub recording_id: String,
     pub format: String,
