@@ -2151,9 +2151,7 @@ impl RustionBackendInner {
             return Err(bv_error_response_status!(400, "recording_id is required"));
         }
         let (bytes, format, sha256) =
-            recordings::fetch_blob(&store, &recordings, &rid)
-                .await
-                .map_err(|e| bv_error_string!(&format!("{e}")))?;
+            recordings::fetch_blob(&store, &recordings, &rid).await?;
         let mut data = Map::new();
         data.insert("recording_id".into(), Value::String(rid));
         data.insert("format".into(), Value::String(format));
@@ -2223,9 +2221,8 @@ impl RustionBackendInner {
                 "bastion_id and session_id are required"
             ));
         }
-        let entry = recordings::pull_recording(&store, &recordings, &bastion_id, &session_id)
-            .await
-            .map_err(|e| bv_error_string!(&format!("{e}")))?;
+        let entry =
+            recordings::pull_recording(&store, &recordings, &bastion_id, &session_id).await?;
         log::info!(
             "{}: recording_id={} session_id={} bastion={} mode=pull",
             audit::RECORDING_LINKED,

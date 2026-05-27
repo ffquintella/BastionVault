@@ -45,6 +45,11 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.10.6] - 2026-05-27
+
+### Fixed
+- Recording force-pull and blob-fetch now surface the bastion's upstream status faithfully — a missing sidecar returns 404 and other upstream failures return 502, instead of collapsing every error into a generic HTTP 500.
+
 ## [0.10.5] - 2026-05-26
 
 ### Fixed

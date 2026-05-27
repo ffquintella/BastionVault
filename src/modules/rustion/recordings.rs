@@ -199,9 +199,19 @@ pub async fn pull_recording(
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(bv_error_string!(&format!(
-            "bastion returned HTTP {status}: {body}"
-        )));
+        // Surface the upstream failure with a faithful status: a missing
+        // recording on the bastion is a 404, any other upstream failure is
+        // a 502 (the bastion is an upstream gateway from our perspective).
+        // Without this, every upstream error collapsed into a generic 500.
+        let mapped = if status == reqwest::StatusCode::NOT_FOUND {
+            404
+        } else {
+            502
+        };
+        return Err(crate::bv_error_response_status!(
+            mapped,
+            &format!("bastion returned HTTP {status}: {body}")
+        ));
     }
     let bytes = resp
         .bytes()
@@ -294,9 +304,19 @@ pub async fn fetch_blob(
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(bv_error_string!(&format!(
-            "bastion returned HTTP {status}: {body}"
-        )));
+        // Surface the upstream failure with a faithful status: a missing
+        // recording on the bastion is a 404, any other upstream failure is
+        // a 502 (the bastion is an upstream gateway from our perspective).
+        // Without this, every upstream error collapsed into a generic 500.
+        let mapped = if status == reqwest::StatusCode::NOT_FOUND {
+            404
+        } else {
+            502
+        };
+        return Err(crate::bv_error_response_status!(
+            mapped,
+            &format!("bastion returned HTTP {status}: {body}")
+        ));
     }
     let format = resp
         .headers()
