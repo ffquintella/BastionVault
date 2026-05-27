@@ -45,6 +45,22 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.10.5] - 2026-05-26
+
+### Fixed
+
+- **Recording force-pull no longer 500s with "Logical backend
+  operation not supported"** (`src/modules/rustion/mod.rs`). The
+  `recordings/<rid>` catch-all route used the pattern
+  `[A-Za-z0-9_\-]+`, which also matched the sibling literal routes
+  `recordings/pull` and `recordings/replay-log` (rid="pull" /
+  "replay-log"). Because the catch-all was registered first and only
+  declares the `Read` operation, a `POST recordings/pull` resolved to
+  the read handler and was rejected. Recording ids are always
+  `rec_<hex>`, so both `<rid>` patterns now pin the `rec_` prefix —
+  the literal routes resolve correctly and the latent `replay-log`
+  shadowing is closed too.
+
 ## [0.10.4] - 2026-05-26
 
 ### Added

@@ -611,7 +611,15 @@ impl RustionBackend {
                 },
                 {
                     // GET rustion/recordings/<rid> — fetch one recording entry.
-                    pattern: r"recordings/(?P<rid>[A-Za-z0-9_\-]+)$",
+                    // The rid is always `rec_<hex>` (see rustion-recording's
+                    // sidecar id minting). Pin the `rec_` prefix in the
+                    // pattern so this catch-all doesn't shadow the sibling
+                    // literal routes `recordings/pull` and
+                    // `recordings/replay-log` — without it, a POST to
+                    // `recordings/pull` matched here (rid="pull") and was
+                    // rejected with `Logical backend operation not
+                    // supported` because this route only declares Read.
+                    pattern: r"recordings/(?P<rid>rec_[A-Za-z0-9_\-]+)$",
                     operations: [
                         {op: Operation::Read, handler: h_recording_read.handle_recording_read}
                     ],
@@ -640,7 +648,7 @@ impl RustionBackend {
                     // GET /v1/recordings/<rid>/blob endpoint and
                     // returns the recording bytes (base64-wrapped so
                     // the BV response shape stays JSON-friendly).
-                    pattern: r"recordings/(?P<rid>[A-Za-z0-9_\-]+)/blob$",
+                    pattern: r"recordings/(?P<rid>rec_[A-Za-z0-9_\-]+)/blob$",
                     operations: [
                         {op: Operation::Read, handler: h_recording_blob.handle_recording_blob}
                     ],
