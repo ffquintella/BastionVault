@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.10.11] - 2026-05-28
+
+### Fixed
+
+- **Owner capture overwrites ghost records** (`src/modules/identity/owner_store.rs`) -- `record_kv_owner_if_absent` (plus the resource and file siblings) used to short-circuit on *any* existing storage row, including legacy rows with an empty `entity_id` left over from older server versions. Those rows render as "Unowned" in the GUI, so the user-visible promise that "the next authenticated write captures ownership" was broken on upgraded deployments. Now the absent-check inspects the stored record's `entity_id` and overwrites when it is empty, while still preserving any concrete owner. Regression test `test_kv_ghost_record_overwritten_by_next_write`.
+
 ## [0.10.10] - 2026-05-27
 
 ### Added

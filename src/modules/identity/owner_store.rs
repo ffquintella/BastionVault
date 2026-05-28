@@ -118,8 +118,17 @@ impl OwnerStore {
             return Ok(());
         };
         let key = Self::kv_key(&canonical);
-        if self.kv_view.get(&key).await?.is_some() {
-            return Ok(());
+        // Treat a record with an empty entity_id as "absent" — older
+        // server versions could leave such ghost entries from writes
+        // by callers whose auth metadata lacked entity_id. `get_kv_owner`
+        // surfaces those as "Unowned" to the GUI, and the user-facing
+        // promise is that the next authenticated write captures
+        // ownership, so we overwrite them here.
+        if let Some(raw) = self.kv_view.get(&key).await? {
+            let existing: OwnerRecord = serde_json::from_slice(&raw.value).unwrap_or_default();
+            if !existing.entity_id.is_empty() {
+                return Ok(());
+            }
         }
         let rec = OwnerRecord {
             entity_id: entity_id.to_string(),
@@ -165,6 +174,19 @@ impl OwnerStore {
         self.kv_view.delete(&key).await
     }
 
+    /// Test-only: plant a raw record with an empty `entity_id` to
+    /// simulate a "ghost" owner row from an older server version.
+    /// Used by the regression test in `identity_tests` that verifies
+    /// `record_kv_owner_if_absent` overwrites such rows.
+    #[cfg(test)]
+    pub async fn plant_kv_ghost_for_test(&self, path: &str) -> Result<(), RvError> {
+        let canonical = Self::canonicalize_kv_path(path).expect("valid kv path");
+        let key = Self::kv_key(&canonical);
+        let rec = OwnerRecord { entity_id: String::new(), created_at: String::new() };
+        let value = serde_json::to_vec(&rec)?;
+        self.kv_view.put(&StorageEntry { key, value }).await
+    }
+
     pub async fn get_resource_owner(
         &self,
         resource: &str,
@@ -192,8 +214,11 @@ impl OwnerStore {
         if key.is_empty() || key.contains('/') {
             return Ok(());
         }
-        if self.resource_view.get(&key).await?.is_some() {
-            return Ok(());
+        if let Some(raw) = self.resource_view.get(&key).await? {
+            let existing: OwnerRecord = serde_json::from_slice(&raw.value).unwrap_or_default();
+            if !existing.entity_id.is_empty() {
+                return Ok(());
+            }
         }
         let rec = OwnerRecord {
             entity_id: entity_id.to_string(),
@@ -267,8 +292,11 @@ impl OwnerStore {
             return Ok(());
         }
         let key = id.trim().to_string();
-        if self.file_view.get(&key).await?.is_some() {
-            return Ok(());
+        if let Some(raw) = self.file_view.get(&key).await? {
+            let existing: OwnerRecord = serde_json::from_slice(&raw.value).unwrap_or_default();
+            if !existing.entity_id.is_empty() {
+                return Ok(());
+            }
         }
         let rec = OwnerRecord {
             entity_id: entity_id.to_string(),

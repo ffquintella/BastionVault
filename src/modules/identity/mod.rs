@@ -2452,6 +2452,48 @@ mod identity_tests {
         assert_eq!(kv_rec.entity_id, "root");
     }
 
+    /// A "ghost" owner record — an entry with an empty `entity_id` left
+    /// over from older server versions — must not block the next
+    /// authenticated write from capturing ownership. `get_kv_owner`
+    /// surfaces such ghosts as `None` ("Unowned" in the GUI), and the
+    /// user-facing promise is that the next write claims them.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_kv_ghost_record_overwritten_by_next_write() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_kv_ghost_record_overwritten").await;
+
+        let module = core
+            .module_manager
+            .get_module::<IdentityModule>("identity")
+            .expect("identity module");
+        let store = module.owner_store().expect("owner store");
+
+        store
+            .plant_kv_ghost_for_test("secret/data/ghost-secret")
+            .await
+            .unwrap();
+        assert!(
+            store.get_kv_owner("secret/data/ghost-secret").await.unwrap().is_none(),
+            "ghost record must report as Unowned",
+        );
+
+        let _ = test_write_api(
+            &core,
+            &root_token,
+            "secret/data/ghost-secret",
+            true,
+            json!({ "data": { "v": "x" } }).as_object().cloned(),
+        )
+        .await;
+
+        let rec = store
+            .get_kv_owner("secret/data/ghost-secret")
+            .await
+            .unwrap()
+            .expect("write after ghost must stamp owner");
+        assert_eq!(rec.entity_id, "root");
+    }
+
     /// `sys/owner/backfill` — admin migration endpoint that stamps a
     /// given entity_id as owner of every currently-unowned target in
     /// `resources` + `kv_paths`. Exercises the sudo-gated handler end
