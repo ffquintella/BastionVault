@@ -276,6 +276,115 @@ async fn sys_owner_backfill_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// POST `/sys/kv-owner/transfer` — admin-only ownership reassignment
+/// of a KV path. Thin HTTP shim over the sys-backend logical route
+/// `kv-owner/transfer`; the same body shape applies
+/// (`{ path, new_owner_entity_id }`).
+async fn sys_kv_owner_transfer_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
+        serde_json::Map::new()
+    } else {
+        serde_json::from_slice(&body)?
+    };
+    body.clear();
+
+    let mut r = request_auth(&req);
+    r.path = "sys/kv-owner/transfer".to_string();
+    r.operation = Operation::Write;
+    r.body = Some(payload);
+    handle_request(core, &mut r).await
+}
+
+/// POST `/sys/kv-owner/claim` — caller stamps own entity_id as owner
+/// of a currently-unowned KV path. Refuses on already-owned paths
+/// (409). Thin HTTP shim over the sys-backend logical route
+/// `kv-owner/claim`; body is `{ path }`.
+async fn sys_kv_owner_claim_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
+        serde_json::Map::new()
+    } else {
+        serde_json::from_slice(&body)?
+    };
+    body.clear();
+
+    let mut r = request_auth(&req);
+    r.path = "sys/kv-owner/claim".to_string();
+    r.operation = Operation::Write;
+    r.body = Some(payload);
+    handle_request(core, &mut r).await
+}
+
+/// POST `/sys/resource-owner/transfer` — admin-only ownership
+/// reassignment of a resource. Body: `{ resource, new_owner_entity_id }`.
+async fn sys_resource_owner_transfer_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
+        serde_json::Map::new()
+    } else {
+        serde_json::from_slice(&body)?
+    };
+    body.clear();
+
+    let mut r = request_auth(&req);
+    r.path = "sys/resource-owner/transfer".to_string();
+    r.operation = Operation::Write;
+    r.body = Some(payload);
+    handle_request(core, &mut r).await
+}
+
+/// POST `/sys/asset-group-owner/transfer` — admin-only ownership
+/// reassignment of an asset group. Body: `{ name, new_owner_entity_id }`.
+async fn sys_asset_group_owner_transfer_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
+        serde_json::Map::new()
+    } else {
+        serde_json::from_slice(&body)?
+    };
+    body.clear();
+
+    let mut r = request_auth(&req);
+    r.path = "sys/asset-group-owner/transfer".to_string();
+    r.operation = Operation::Write;
+    r.body = Some(payload);
+    handle_request(core, &mut r).await
+}
+
+/// POST `/sys/file-owner/transfer` — admin-only ownership reassignment
+/// of a file. Body: `{ id, new_owner_entity_id }`.
+async fn sys_file_owner_transfer_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
+        serde_json::Map::new()
+    } else {
+        serde_json::from_slice(&body)?
+    };
+    body.clear();
+
+    let mut r = request_auth(&req);
+    r.path = "sys/file-owner/transfer".to_string();
+    r.operation = Operation::Write;
+    r.body = Some(payload);
+    handle_request(core, &mut r).await
+}
+
 /// DELETE `/sys/audit/{path}` — disable an audit device.
 async fn sys_audit_disable_request_handler(
     req: HttpRequest,
@@ -2449,6 +2558,31 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
         .service(
             web::resource("/owner/backfill")
                 .route(web::post().to(sys_owner_backfill_request_handler)),
+        )
+        // Owner self-claim and admin transfer routes. These have always
+        // been registered on the sys backend's logical route table, but
+        // without an explicit HTTP-layer shim a request to
+        // `/v1/sys/kv-owner/claim` (and friends) is 404'd by the sys
+        // scope before reaching the `/v1/{path:.*}` logical catch-all.
+        .service(
+            web::resource("/kv-owner/transfer")
+                .route(web::post().to(sys_kv_owner_transfer_request_handler)),
+        )
+        .service(
+            web::resource("/kv-owner/claim")
+                .route(web::post().to(sys_kv_owner_claim_request_handler)),
+        )
+        .service(
+            web::resource("/resource-owner/transfer")
+                .route(web::post().to(sys_resource_owner_transfer_request_handler)),
+        )
+        .service(
+            web::resource("/asset-group-owner/transfer")
+                .route(web::post().to(sys_asset_group_owner_transfer_request_handler)),
+        )
+        .service(
+            web::resource("/file-owner/transfer")
+                .route(web::post().to(sys_file_owner_transfer_request_handler)),
         )
         .service(
             web::resource("/internal/ui/mounts").route(web::get().to(sys_get_internal_ui_mounts_request_handler)),

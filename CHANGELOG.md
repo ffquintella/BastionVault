@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.10.14] - 2026-05-28
+
+### Fixed
+
+- **Ownership transfer / claim HTTP endpoints reachable** (`src/http/sys.rs`) -- the sys-backend logical routes `kv-owner/transfer`, `kv-owner/claim`, `resource-owner/transfer`, `asset-group-owner/transfer`, and `file-owner/transfer` had no explicit HTTP-layer shim. Actix's `/v1/sys` and `/v2/sys` scopes were 404'ing those paths before they could reach the `/v1/{path:.*}` logical catch-all, so the Tauri **Claim ownership** button (and every owner-transfer flow over remote backends) returned `HTTP 404 (no body)` even though the sys backend was registered correctly. Added per-route shims that build a `Request` and delegate to `core.handle_request`, mirroring how every other `sys/*` endpoint is wired.
+
 ## [0.10.13] - 2026-05-28
 
 ### Added
