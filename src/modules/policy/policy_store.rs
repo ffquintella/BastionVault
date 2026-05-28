@@ -273,6 +273,13 @@ path "secret/metadata/*" {
     scopes       = ["owner", "shared"]
 }
 
+# --- Ownership self-claim ---
+# Lets the user stamp themselves as owner of a currently-unowned KV
+# path. The handler refuses to overwrite an existing owner.
+path "sys/kv-owner/claim" {
+    capabilities = ["update"]
+}
+
 # --- Resources (owner/shared-scoped) ---
 #
 # Delete is intentionally not granted -- destructive operations on
@@ -389,6 +396,14 @@ path "secret/data/*" {
 path "secret/metadata/*" {
     capabilities = ["read", "list", "delete"]
     scopes       = ["owner", "shared"]
+}
+
+# --- Ownership self-claim ---
+# Lets the user stamp themselves as owner of a currently-unowned KV
+# path. The handler refuses to overwrite an existing owner, so this
+# cannot be used to steal authored secrets.
+path "sys/kv-owner/claim" {
+    capabilities = ["update"]
 }
 
 # --- Resources (full CRUD on authored/shared items) ---

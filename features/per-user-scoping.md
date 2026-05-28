@@ -279,6 +279,7 @@ Ownership / sharing endpoints introduced by this feature:
 | GET    | `/v2/sys/identity/entity/self`                         | Read the caller's own entity record |
 | GET    | `/v2/sys/identity/entity/{id}`                         | Read an entity (privileged) |
 | POST   | `/v2/sys/kv-owner/transfer`                            | Admin-only ownership transfer for a KV entry |
+| POST   | `/v2/sys/kv-owner/claim`                               | Caller stamps own entity_id as owner of an unowned KV path. Returns 409 if already owned (use transfer). |
 | POST   | `/v2/sys/resource-owner/transfer`                      | Same for a resource |
 | PUT    | `/v2/identity/sharing/by-target/{kind}/{b64}/{grantee}` | Create or update a share. Body carries `grantee_kind` (entity / group_user / group_app), `capabilities`, optional `expires_at`. |
 | GET    | `/v2/identity/sharing/by-grantee/{grantee}`             | List what is shared *with* an entity (legacy entity-only). |
@@ -303,6 +304,7 @@ owner/share stores the same way.
 | 8 | Sharing MVP: `SecretShare` store + v2 API + evaluator hook | Done |
 | 9 | Sharing GUI: share dialog, "shared with me" section, revoke flow | Done |
 | 10 | Admin ownership-transfer endpoints + GUI | Done |
+| 11 | Self-service `kv-owner/claim` endpoint + Claim button + owner-badge in secrets list | Done |
 
 Phases 1–6 deliver the two baseline roles the operator asked for
 (`standard-user-readonly` and `secret-author`).

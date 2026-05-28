@@ -548,6 +548,8 @@ export const deleteShare = (
 ) => invoke<void>("delete_share", { kind, targetPath, grantee, granteeKind });
 export const transferKvOwner = (path: string, newOwnerEntityId: string) =>
   invoke<void>("transfer_kv_owner", { path, newOwnerEntityId });
+export const claimKvOwner = (path: string) =>
+  invoke<void>("claim_kv_owner", { path });
 export const transferResourceOwner = (resource: string, newOwnerEntityId: string) =>
   invoke<void>("transfer_resource_owner", { resource, newOwnerEntityId });
 export const transferAssetGroupOwner = (name: string, newOwnerEntityId: string) =>

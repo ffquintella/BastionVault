@@ -45,6 +45,20 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.10.13] - 2026-05-28
+
+### Added
+
+- **KV ownership claim endpoint and Claim button** (`src/modules/system/mod.rs`, `gui/src-tauri/src/commands/sharing.rs`, `gui/src/lib/api.ts`, `gui/src/routes/SecretsPage.tsx`) -- new `sys/kv-owner/claim` route lets any caller with ACL access to it stamp their `entity_id` as the owner of a currently-unowned KV secret. Refuses on already-owned paths (returns 409) so it cannot be used to steal ownership -- use `sys/kv-owner/transfer` (admin) to reassign. The Share dialog now renders a **Claim ownership** button on unowned secrets, and admins see **Transfer** / **Assign owner** regardless of current ownership state. Addresses the long tail of "Unowned" rows imported by PMP before ghost-row overwrite shipped in 0.10.11.
+
+### Fixed
+
+- **Tauri build no longer fails when `mcp_local_dev` is off** (`gui/src-tauri/build.rs`, `gui/src-tauri/capabilities/`) -- the `mcp-bridge:default` permission lived in the always-loaded `capabilities/default.json`, so a default `cargo check -p bastion-vault-gui` failed because the plugin (and its permission schema) is only compiled in under the `mcp_local_dev` feature. The mcp-bridge permission now lives in its own capability file that `build.rs` materializes only when the feature is enabled and removes otherwise, keeping the dev bridge fully gated as agent.md requires.
+
+### Changed
+
+- **Owner badge on secrets list** (`gui/src/routes/SecretsPage.tsx`) -- every leaf in the KV list now shows an `unowned` / `you` / `owned` chip so operators can spot orphan paths without opening each share dialog. Folder entries are unaffected. Ownership is fetched best-effort in parallel after the listing loads.
+
 ## [0.10.12] - 2026-05-28
 
 ### Changed

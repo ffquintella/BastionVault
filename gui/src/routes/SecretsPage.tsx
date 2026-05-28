@@ -163,6 +163,12 @@ export function SecretsPage() {
 
   const hasMultipleMounts = (kvMounts?.length ?? 0) > 1;
 
+  // Map from leaf key name -> owner entity_id ("" for unowned). Used
+  // to render an owner badge next to each secret in the listing.
+  // Folder entries are not present.
+  const [ownerByKey, setOwnerByKey] = useState<Record<string, string>>({});
+  const callerEntityId = useAuthStore((s) => s.entityId);
+
   const loadKeys = useCallback(async () => {
     setLoading(true);
     try {
@@ -174,6 +180,37 @@ export function SecretsPage() {
       setLoading(false);
     }
   }, [currentPath, mountBase, mountType]);
+
+  // After the key list refreshes, fetch ownership for every leaf in
+  // parallel. Best-effort: any individual failure leaves that key
+  // without a badge rather than blocking the whole listing.
+  useEffect(() => {
+    if (!keys || keys.length === 0) {
+      setOwnerByKey({});
+      return;
+    }
+    let cancelled = false;
+    const leaves = keys.filter((k) => !k.endsWith("/"));
+    Promise.all(
+      leaves.map(async (k) => {
+        const full = canonicalizeSecretPath(mountBase + currentPath + k);
+        try {
+          const o = await api.getKvOwner(full);
+          return [k, o?.owned ? o.entity_id : ""] as const;
+        } catch {
+          return [k, ""] as const;
+        }
+      }),
+    ).then((rows) => {
+      if (cancelled) return;
+      const next: Record<string, string> = {};
+      for (const [k, v] of rows) next[k] = v;
+      setOwnerByKey(next);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [keys, currentPath, mountBase]);
 
   useEffect(() => {
     if (currentPath) {
@@ -471,6 +508,14 @@ export function SecretsPage() {
                 <div className="space-y-0.5 -mx-1">
                   {visibleKeys.map((key) => {
                     const groups = groupsForKey(key);
+                    const isFolder = key.endsWith("/");
+                    const ownerId = isFolder ? undefined : ownerByKey[key];
+                    const ownerKnown = ownerId !== undefined;
+                    const ownerSelf =
+                      ownerKnown &&
+                      ownerId !== "" &&
+                      callerEntityId !== "" &&
+                      ownerId === callerEntityId;
                     return (
                       <div key={key}>
                         <button
@@ -481,7 +526,33 @@ export function SecretsPage() {
                               : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
                           }`}
                         >
-                          {key}
+                          <div className="flex items-center justify-between gap-2 min-w-0">
+                            <span className="truncate">{key}</span>
+                            {!isFolder && ownerKnown && (
+                              <span
+                                className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] ${
+                                  ownerId === ""
+                                    ? "bg-[var(--color-warning)] text-black"
+                                    : ownerSelf
+                                      ? "bg-[var(--color-success)] text-white"
+                                      : "bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]"
+                                }`}
+                                title={
+                                  ownerId === ""
+                                    ? "Unowned — next write captures ownership"
+                                    : ownerSelf
+                                      ? "Owned by you"
+                                      : `Owned by ${ownerId}`
+                                }
+                              >
+                                {ownerId === ""
+                                  ? "unowned"
+                                  : ownerSelf
+                                    ? "you"
+                                    : "owned"}
+                              </span>
+                            )}
+                          </div>
                         </button>
                         {groups.length > 0 && (
                           <div className="flex flex-wrap gap-1 px-3 pb-1">
@@ -741,6 +812,16 @@ function SecretSharingPanel({
     }
   }
 
+  async function handleClaim() {
+    try {
+      await api.claimKvOwner(fullPath);
+      toast("success", "Ownership claimed");
+      load();
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
+  }
+
   function toggleCap(c: string) {
     setCaps((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]));
   }
@@ -765,11 +846,18 @@ function SecretSharingPanel({
           <label className="text-xs font-medium text-[var(--color-text-muted)]">
             Owner
           </label>
-          {isAdmin && (
-            <Button size="sm" variant="ghost" onClick={() => setShowTransfer(true)}>
-              Transfer
-            </Button>
-          )}
+          <div className="flex items-center gap-2">
+            {!owner?.owned && (
+              <Button size="sm" variant="secondary" onClick={handleClaim}>
+                Claim ownership
+              </Button>
+            )}
+            {isAdmin && (
+              <Button size="sm" variant="ghost" onClick={() => setShowTransfer(true)}>
+                {owner?.owned ? "Transfer" : "Assign owner"}
+              </Button>
+            )}
+          </div>
         </div>
         {owner?.owned ? (
           <div className="flex items-center gap-2">
@@ -778,7 +866,8 @@ function SecretSharingPanel({
           </div>
         ) : (
           <p className="text-xs text-[var(--color-text-muted)] italic">
-            Unowned. The next authenticated write to this path captures ownership.
+            Unowned. Click <strong>Claim ownership</strong> to capture this
+            path, or wait for the next authenticated write.
           </p>
         )}
       </div>

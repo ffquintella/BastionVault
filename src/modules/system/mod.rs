@@ -124,6 +124,7 @@ impl SystemBackend {
         let sys_backend_policies_delete = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_policies_history = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_kv_owner_transfer = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_kv_owner_claim = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_resource_owner_transfer = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_asset_group_owner_transfer = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_file_owner_transfer = self.self_ptr.upgrade().unwrap().clone();
@@ -326,6 +327,26 @@ impl SystemBackend {
                     },
                     operations: [
                         {op: Operation::Write, handler: sys_backend_kv_owner_transfer.handle_kv_owner_transfer}
+                    ]
+                },
+                {
+                    // Claim ownership of a currently *unowned* KV
+                    // secret. Gated by the ACL on
+                    // `sys/kv-owner/claim` — typical policy grants this
+                    // to any authenticated entity, but the handler
+                    // refuses to overwrite an existing owner so it
+                    // cannot be used to steal a path. The caller's
+                    // entity_id (or display_name fallback) is stamped
+                    // as the owner.
+                    pattern: r"kv-owner/claim$",
+                    fields: {
+                        "path": {
+                            field_type: FieldType::Str,
+                            description: "Full logical path of the KV secret (e.g., secret/foo/bar or secret/data/foo/bar)."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: sys_backend_kv_owner_claim.handle_kv_owner_claim}
                     ]
                 },
                 {
@@ -863,6 +884,59 @@ impl SystemBackend {
         let mut data = Map::new();
         data.insert("path".into(), Value::String(path));
         data.insert("new_owner_entity_id".into(), Value::String(new_owner));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// Claim ownership of an *unowned* KV secret. Refuses if the path
+    /// is already owned — the admin transfer endpoint must be used to
+    /// reassign an existing owner, so this cannot be used to steal a
+    /// path. The new owner is the caller's `entity_id` (preferring
+    /// `caller_audit_actor`'s fallback to `display_name` so root-token
+    /// claims still stamp a useful actor).
+    pub async fn handle_kv_owner_claim(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let path = req
+            .get_data("path")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        if path.trim().is_empty() {
+            return Err(bv_error_response_status!(400, "path is required"));
+        }
+
+        let caller_id = crate::modules::identity::caller_audit_actor(req);
+        if caller_id.is_empty() {
+            return Err(bv_error_response_status!(
+                400,
+                "caller has no entity_id; cannot claim ownership"
+            ));
+        }
+
+        let identity = self.get_module::<IdentityModule>("identity")?;
+        let store = identity.owner_store().ok_or_else(|| {
+            bv_error_response_status!(500, "owner store not initialized")
+        })?;
+
+        if let Some(existing) = store.get_kv_owner(&path).await? {
+            // Refuse to overwrite. Use sys/kv-owner/transfer (admin)
+            // to reassign an existing owner.
+            return Err(bv_error_response_status!(
+                409,
+                format!(
+                    "path is already owned by entity_id={}; use kv-owner/transfer to reassign",
+                    existing.entity_id
+                )
+            ));
+        }
+
+        store.set_kv_owner(&path, &caller_id).await?;
+
+        let mut data = Map::new();
+        data.insert("path".into(), Value::String(path));
+        data.insert("owner_entity_id".into(), Value::String(caller_id));
         Ok(Some(Response::data_response(Some(data))))
     }
 

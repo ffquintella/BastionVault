@@ -34,7 +34,7 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | Secret Versioning & Soft-Delete | Done | KV v2 backend, CLI auto-detect, full GUI (history panel + per-version actions + CAS + engine config). [spec](features/secret-versioning-and-soft-delete.md) |
 | Access Control (RBAC + path-based ACL) | Done | Path-based policy engine with allow / deny / capabilities. |
 | Identity Groups (user / app groups → policy mapping) | Done | [spec](features/identity-groups.md) — policy union for UserPass / AppRole / FIDO2, plus Phase 7 group-shared resources via `metadata { group_shared_resources = "true" }`. |
-| Per-User Scoping (ownership + policy templating + sharing) | Done | [spec](features/per-user-scoping.md) — 10 phases + migration backfill. |
+| Per-User Scoping (ownership + policy templating + sharing) | Done | [spec](features/per-user-scoping.md) — 11 phases + migration backfill (Phase 11: self-service claim + list badge). |
 | Asset Groups (collections of resources + KV paths) | Done | [spec](features/resource-groups.md) — 13 phases incl. ownership, sharing, member redaction. |
 | Audit Logging (tamper-evident, HMAC chain) | Done | Phase 1 file device shipped; syslog / HTTP devices [deferred](#deferred-sub-initiatives). |
 | Metrics (Prometheus) | Done | Standard `/metrics` endpoint. |
