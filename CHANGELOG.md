@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.10.12] - 2026-05-28
+
+### Changed
+
+- **Secrets group filter is now a drill-down chain** (`gui/src/routes/SecretsPage.tsx`) -- replaces the single-group toggle with an AND chain. Selecting a group narrows both the key list and the visible group cards to the intersection, so picking a second group drills further. Active filters render as a clickable breadcrumb (`All groups / group-a / group-b`); each crumb backs up to that step. Counts on the group cards reflect the intersection against the current working set, not the full mount.
+
 ## [0.10.11] - 2026-05-28
 
 ### Fixed

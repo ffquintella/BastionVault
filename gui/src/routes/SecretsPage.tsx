@@ -65,15 +65,18 @@ export function SecretsPage() {
   const [kvMounts, setKvMounts] = useState<KvMount[] | null>(null);
 
   const assetGroups = useAssetGroupMap();
-  const [filterGroup, setFilterGroup] = useState<string | null>(null);
+  // Stack of group filters applied as an AND chain. Empty means "no
+  // filter, show every group with secrets under the current prefix".
+  // Each entry deeper drills further into the faceted intersection.
+  const [groupFilters, setGroupFilters] = useState<string[]>([]);
 
   // Resolve the asset-groups a given leaf key belongs to. Checks both
-  // the full logical path (mountBase + currentPath + key) and the bare
+  // the full logical path (currentPath + key) and the bare
   // key name — a user who typed just "test1" into the group editor
   // without the "secret/" prefix should still see the chip here.
   function groupsForKey(key: string): string[] {
     if (key.endsWith("/")) return [];
-    const fullPath = canonicalizeSecretPath(mountBase + currentPath + key);
+    const fullPath = canonicalizeSecretPath(currentPath + key);
     const keyOnly = canonicalizeSecretPath(currentPath + key);
     const out = new Set<string>();
     for (const g of assetGroups.map.bySecret[fullPath] || []) out.add(g);
@@ -83,11 +86,32 @@ export function SecretsPage() {
     return Array.from(out).sort();
   }
 
-  // Group cards above the key list: one per group that contains at
-  // least one of the currently-listed leaf keys.
+  // Set of canonical secret paths under the current path prefix that
+  // belong to ALL currently-active group filters. This is the working
+  // set used to (a) decide which sibling groups still have material to
+  // offer as a next drill-down step and (b) filter the keys list.
+  const currentPrefix = canonicalizeSecretPath(currentPath);
+  const matchingSecrets = new Set<string>();
+  for (const [secretPath, groups] of Object.entries(assetGroups.map.bySecret)) {
+    const underPrefix =
+      !currentPrefix ||
+      secretPath === currentPrefix ||
+      secretPath.startsWith(currentPrefix + "/");
+    if (!underPrefix) continue;
+    if (groupFilters.every((g) => groups.includes(g))) {
+      matchingSecrets.add(secretPath);
+    }
+  }
+
+  // Group cards above the key list: at the root level (no filter)
+  // every group with secrets under the prefix; once one or more
+  // filters are active, every OTHER group whose secrets intersect the
+  // current working set, so the user can drill further into the
+  // facet. Counts are intersection sizes against the working set.
   const groupCounts = new Map<string, number>();
-  for (const k of keys) {
-    for (const g of groupsForKey(k)) {
+  for (const secretPath of matchingSecrets) {
+    for (const g of assetGroups.map.bySecret[secretPath] || []) {
+      if (groupFilters.includes(g)) continue;
       groupCounts.set(g, (groupCounts.get(g) || 0) + 1);
     }
   }
@@ -95,9 +119,22 @@ export function SecretsPage() {
     .map(([name, count]) => ({ name, count }))
     .sort((a, b) => a.name.localeCompare(b.name));
 
-  const visibleKeys = filterGroup
-    ? keys.filter((k) => groupsForKey(k).includes(filterGroup))
-    : keys;
+  // True when the listing entry is or contains a secret in the working
+  // set. Folders match if any descendant is in the set.
+  function keyMatchesFilters(key: string): boolean {
+    if (groupFilters.length === 0) return true;
+    if (!key.endsWith("/")) {
+      const full = canonicalizeSecretPath(currentPath + key);
+      return matchingSecrets.has(full);
+    }
+    const folderPrefix = canonicalizeSecretPath(currentPath + key);
+    for (const p of matchingSecrets) {
+      if (p === folderPrefix || p.startsWith(folderPrefix + "/")) return true;
+    }
+    return false;
+  }
+
+  const visibleKeys = keys.filter(keyMatchesFilters);
 
   // Load the list of KV mounts once. Used both for auto-selecting a single
   // mount (skipping the picker) and for rendering the picker when there is
@@ -380,10 +417,39 @@ export function SecretsPage() {
           )
         ) : (
           <div className="flex flex-col gap-4">
+            {groupFilters.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1 text-sm">
+                <button
+                  type="button"
+                  onClick={() => setGroupFilters([])}
+                  className="text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
+                >
+                  All groups
+                </button>
+                {groupFilters.map((g, i) => (
+                  <span key={g} className="flex items-center gap-1">
+                    <span className="text-[var(--color-text-muted)]">/</span>
+                    <button
+                      type="button"
+                      onClick={() => setGroupFilters(groupFilters.slice(0, i + 1))}
+                      className={
+                        i === groupFilters.length - 1
+                          ? "text-[var(--color-text)] font-medium"
+                          : "text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
+                      }
+                    >
+                      {g}
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             <GroupsSection
               groups={groupOptions}
-              selected={filterGroup}
-              onSelect={setFilterGroup}
+              selected={null}
+              onSelect={(name) => {
+                if (name) setGroupFilters([...groupFilters, name]);
+              }}
               itemKindPlural="secrets"
             />
 
@@ -394,9 +460,9 @@ export function SecretsPage() {
                 <p className="text-sm text-[var(--color-text-muted)]">Loading...</p>
               ) : visibleKeys.length === 0 ? (
                 <EmptyState
-                  title={filterGroup ? "No secrets in this group" : "No secrets"}
+                  title={groupFilters.length > 0 ? "No secrets in this group" : "No secrets"}
                   description={
-                    filterGroup
+                    groupFilters.length > 0
                       ? "Clear the group filter to see all secrets"
                       : "Create your first secret"
                   }
