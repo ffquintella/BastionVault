@@ -162,4 +162,6 @@ Phases 1–4 shipped in `crates/bv-client`:
 
 Server `/sys/health` and `/sys/cluster-status` already exist and require no changes.
 
+**Cluster-wide operator seal/unseal:** because seal state is per-node (each node holds its own in-memory barrier and accumulates unseal-key shares independently), `bvault operator seal` and `bvault operator unseal` now fan out over *every* node returned by SRV discovery rather than the single `pick()`ed node. `HttpOptions::cluster_clients(local)` (`src/cli/command/mod.rs`) returns one `(url, Client)` per discovered candidate (reusing `probe_cluster` + `client_at`), or a single entry for `--local` / literal `http(s)://` addresses / `--no-cluster-discovery`. Unseal broadcasts each share to all nodes so they cross the threshold in lockstep; both commands report per-node results and continue past per-node failures.
+
 **Not yet wired into the GUI's `connect_remote` Tauri command or the CLI's `--address` flag** — phases 5 and 6 of the roadmap. Today every caller still uses `RemoteBackendBuilder::build` (literal path), so the new behaviour is dormant until a caller switches to `build_with_discovery`.

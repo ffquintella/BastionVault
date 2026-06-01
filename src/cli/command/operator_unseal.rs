@@ -33,6 +33,9 @@ pub struct Unseal {
     #[arg(next_line_help = false, value_name = "KEY", help = r#"A portion of the root key to unseal a Vault server."#)]
     unseal_key: Option<String>,
 
+    #[arg(long, help = "Operate only on the connected node, not the whole cluster")]
+    local: bool,
+
     #[deref]
     #[command(flatten, next_help_heading = "HTTP Options")]
     http_options: command::HttpOptions,
@@ -54,9 +57,6 @@ impl CommandExecutor for Unseal {
     }
 
     fn main(&self) -> Result<(), RvError> {
-        let client = self.client()?;
-        let sys = client.sys();
-
         let key = if let Some(unseal_key) = &self.unseal_key {
             unseal_key.clone()
         } else {
@@ -68,17 +68,33 @@ impl CommandExecutor for Unseal {
             value
         };
 
-        match sys.unseal(&key) {
-            Ok(ret) => {
-                if ret.response_status == 200 {
-                    self.output.print_value(ret.response_data.as_ref().unwrap(), true)?;
-                } else if ret.response_status == 204 {
-                    println!("ok");
-                } else {
-                    ret.print_debug_info();
-                }
+        // In a cluster, seal state is per-node, so the same share must
+        // reach every node to bring them across the threshold in
+        // lockstep. `cluster_clients` returns one client per discovered
+        // node (or just the connected node for --local / literal URLs).
+        let targets = self.cluster_clients(self.local)?;
+        let multi = targets.len() > 1;
+        let mut ok = 0usize;
+        for (url, client) in &targets {
+            if multi {
+                println!("==> {url}");
             }
-            Err(e) => eprintln!("Error sealing: {e}"),
+            match client.sys().unseal(&key) {
+                Ok(ret) => {
+                    if ret.response_status == 200 {
+                        self.output.print_value(ret.response_data.as_ref().unwrap(), true)?;
+                    } else if ret.response_status == 204 {
+                        println!("ok");
+                    } else {
+                        ret.print_debug_info();
+                    }
+                    ok += 1;
+                }
+                Err(e) => eprintln!("Error unsealing {url}: {e}"),
+            }
+        }
+        if multi {
+            println!("\nUnseal share applied to {ok}/{} nodes", targets.len());
         }
         Ok(())
     }

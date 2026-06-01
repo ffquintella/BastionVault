@@ -27,6 +27,9 @@ Seal the BastionVault server:
   $ bvault operator seal"#
 )]
 pub struct Seal {
+    #[arg(long, help = "Operate only on the connected node, not the whole cluster")]
+    local: bool,
+
     #[deref]
     #[command(flatten, next_help_heading = "HTTP Options")]
     http_options: command::HttpOptions,
@@ -46,14 +49,26 @@ impl CommandExecutor for Seal {
 
     #[inline]
     fn main(&self) -> Result<(), RvError> {
-        let client = self.client()?;
-        let sys = client.sys();
-
-        match sys.seal() {
-            Ok(_) => {
-                println!("Success! BastionVault is sealed.");
+        // Seal state is per-node, so seal every node in the cluster.
+        // `cluster_clients` returns one client per discovered node (or
+        // just the connected node for --local / literal URLs).
+        let targets = self.cluster_clients(self.local)?;
+        let multi = targets.len() > 1;
+        let mut ok = 0usize;
+        for (url, client) in &targets {
+            if multi {
+                print!("==> {url} ");
             }
-            Err(e) => eprintln!("Error sealing: {e}"),
+            match client.sys().seal() {
+                Ok(_) => {
+                    println!("Success! BastionVault is sealed.");
+                    ok += 1;
+                }
+                Err(e) => eprintln!("Error sealing {url}: {e}"),
+            }
+        }
+        if multi {
+            println!("\nSealed {ok}/{} nodes", targets.len());
         }
         Ok(())
     }

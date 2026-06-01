@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.10.15] - 2026-06-01
+
+### Changed
+
+- **Cluster-wide `operator seal` / `operator unseal`** (`src/cli/command/operator_seal.rs`, `src/cli/command/operator_unseal.rs`, `src/cli/command/mod.rs`) -- seal state is per-node (each node holds its own in-memory barrier and accumulates unseal-key shares independently), so a single CLI request only sealed/unsealed one node and, worse, discovery could land successive unseal shares on different nodes so none reached threshold. These commands now fan out over every node returned by SRV cluster discovery (`HttpOptions::cluster_clients`), broadcasting each unseal share to all nodes so they cross the threshold in lockstep and reporting per-node results. A new `--local` flag (and literal `http(s)://` addresses / `--no-cluster-discovery`) restricts the operation to the single connected node. No server-side change.
+
 ## [0.10.14] - 2026-05-28
 
 ### Fixed

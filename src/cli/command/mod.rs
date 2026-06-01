@@ -329,6 +329,41 @@ impl HttpOptions {
             .ok_or_else(|| format!("no healthy node found for `{}`", self.address))
     }
 
+    /// Resolve the set of cluster nodes a cluster-wide operator command
+    /// (e.g. `operator unseal` / `operator seal`) should target. Returns
+    /// one `(url, Client)` per node.
+    ///
+    /// - `local == true`, a literal `http(s)://` URL, or
+    ///   `--no-cluster-discovery` → a single entry for the resolved
+    ///   address, preserving the original single-node behavior.
+    /// - a bare cluster name with SRV records → one entry per discovered
+    ///   node, so seal/unseal apply to the whole cluster. All candidates
+    ///   are returned (including sealed/unreachable ones) — sealed nodes
+    ///   are exactly the ones to unseal, and unreachable ones surface as
+    ///   per-node failures the caller reports.
+    pub fn cluster_clients(&self, local: bool) -> Result<Vec<(String, Client)>, RvError> {
+        if local
+            || self.no_cluster_discovery
+            || self.address.starts_with("http://")
+            || self.address.starts_with("https://")
+        {
+            let url = self.resolved_address()?;
+            let client = self.client_at(&url)?;
+            return Ok(vec![(url, client)]);
+        }
+        let probes = self.probe_cluster().map_err(RvError::ErrString)?;
+        if probes.is_empty() {
+            return Err(RvError::ErrString(format!("no nodes found for `{}`", self.address)));
+        }
+        probes
+            .iter()
+            .map(|p| {
+                let url = p.candidate.url();
+                self.client_at(&url).map(|c| (url, c))
+            })
+            .collect()
+    }
+
     /// Resolve + probe without picking, so callers (e.g. the
     /// `cluster discover` subcommand) can render the full probe
     /// table even when no candidate is healthy.
