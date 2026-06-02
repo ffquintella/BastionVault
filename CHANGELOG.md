@@ -45,6 +45,10 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Changed
+
+- **Machine Authentication spec redirected to FerroGate** ([`features/machine-authentication.md`](features/machine-authentication.md)) — the auth method now admits machines by verifying a **FerroGate** TPM-attested, post-quantum SPIFFE identity (a DPoP-bound child token or SVID, composite Ed25519 + ML-DSA-65) against FerroGate's published JWKS/CRL, rather than a home-grown host-hardware fingerprint. BastionVault becomes the relying party and keeps an admin-approval gate: an unknown but attested machine is held `pending` until an administrator approves it and attaches a policy set; the first machine to authenticate while no machine is yet approved **and** presenting a BastionVault root token is auto-approved (one-shot bootstrap). Verification reuses FerroGate's `#![forbid(unsafe_code)]` reference verifier crates — no custom crypto. Supersedes the earlier composite-key (random part + software-readable host fingerprint) design.
+
 ## [0.11.0] - 2026-06-02
 
 Minor-version release. Promotes the Connect-Only Access feature and the revived
