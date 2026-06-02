@@ -18,7 +18,13 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 
 ## How to read this
 
-- Tables below carry one row per tracked feature. **Status** is one of `Done`, `Todo`, `Partial`, `Removed`. **Notes** is a one-line summary with a spec link.
+- Tables below carry one row per tracked feature. **Status** leads with a progress checkbox followed by one of `Done`, `Todo`, `Partial`, `Removed`. **Notes** is a one-line summary with a spec link.
+- **Checkbox legend:**
+  - `[x]` — Done / shipped
+  - `[/]` — In progress (includes `Partial` and `Skeleton`)
+  - `[ ]` — Todo / not started
+  - `[~]` — Removed / dropped
+- A feature counts as Done (`[x]`) only when every phase in its linked spec is complete. Mixed-phase features stay `[/]`.
 - Detailed phase notes for each feature live in the linked spec under [`features/`](features/) — the table is deliberately terse.
 - Multi-phase initiatives that have closed out are summarised under [Completed Initiatives](#completed-initiatives) with full phase notes and outcomes.
 - Open follow-ups that are not a top-line feature live under [Deferred sub-initiatives](#deferred-sub-initiatives).
@@ -27,114 +33,114 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 
 ### Core
 
-| Feature | Status | Notes |
+| Status | Feature | Notes |
 |---|---|---|
-| Core Vault Operations (init / seal / unseal / status) | Done | Vault-API-compatible. |
-| Secret Management (KV CRUD) | Done | KV v1 + KV v2 incl. nested-folder LIST. |
-| Secret Versioning & Soft-Delete | Done | KV v2 backend, CLI auto-detect, full GUI (history panel + per-version actions + CAS + engine config). [spec](features/secret-versioning-and-soft-delete.md) |
-| Access Control (RBAC + path-based ACL) | Done | Path-based policy engine with allow / deny / capabilities (incl. `connect`). |
-| Connect-Only Access | In progress | [spec](features/connect-only-access.md) — `connect` capability + `rustion/v2/session/open` server-side credential resolution + `v2/sys/capabilities-self` + GUI credential hiding. Phase 1 + GUI filtering + GUI Rustion connect-path rewiring (Phase 2b) done. **e2e-validated live** via the revived `tests/e2e/rustion-ssh/` harness: a connect-only token is denied a direct secret read (403) yet proxies a real SSH shell to the target through the bastion. Remaining: RDP connect path + non-secret credential kinds. |
-| Identity Groups (user / app groups → policy mapping) | Done | [spec](features/identity-groups.md) — policy union for UserPass / AppRole / FIDO2, plus Phase 7 group-shared resources via `metadata { group_shared_resources = "true" }`. |
-| Per-User Scoping (ownership + policy templating + sharing) | Done | [spec](features/per-user-scoping.md) — 11 phases + migration backfill (Phase 11: self-service claim + list badge). |
-| Asset Groups (collections of resources + KV paths) | Done | [spec](features/resource-groups.md) — 13 phases incl. ownership, sharing, member redaction. |
-| Audit Logging (tamper-evident, HMAC chain) | Done | Phase 1 file device shipped; syslog / HTTP devices [deferred](#deferred-sub-initiatives). |
-| Metrics (Prometheus) | Done | Standard `/metrics` endpoint. |
+| `[x]` Done | Core Vault Operations (init / seal / unseal / status) | Vault-API-compatible. |
+| `[x]` Done | Secret Management (KV CRUD) | KV v1 + KV v2 incl. nested-folder LIST. |
+| `[x]` Done | Secret Versioning & Soft-Delete | KV v2 backend, CLI auto-detect, full GUI (history panel + per-version actions + CAS + engine config). [spec](features/secret-versioning-and-soft-delete.md) |
+| `[x]` Done | Access Control (RBAC + path-based ACL) | Path-based policy engine with allow / deny / capabilities (incl. `connect`). |
+| `[/]` In progress | Connect-Only Access | [spec](features/connect-only-access.md) — `connect` capability + `rustion/v2/session/open` server-side credential resolution + `v2/sys/capabilities-self` + GUI credential hiding. Phase 1 + GUI filtering + GUI Rustion connect-path rewiring (Phase 2b) done. **e2e-validated live** via the revived `tests/e2e/rustion-ssh/` harness: a connect-only token is denied a direct secret read (403) yet proxies a real SSH shell to the target through the bastion. Remaining: RDP connect path + non-secret credential kinds. |
+| `[x]` Done | Identity Groups (user / app groups → policy mapping) | [spec](features/identity-groups.md) — policy union for UserPass / AppRole / FIDO2, plus Phase 7 group-shared resources via `metadata { group_shared_resources = "true" }`. |
+| `[x]` Done | Per-User Scoping (ownership + policy templating + sharing) | [spec](features/per-user-scoping.md) — 11 phases + migration backfill (Phase 11: self-service claim + list badge). |
+| `[x]` Done | Asset Groups (collections of resources + KV paths) | [spec](features/resource-groups.md) — 13 phases incl. ownership, sharing, member redaction. |
+| `[x]` Done | Audit Logging (tamper-evident, HMAC chain) | Phase 1 file device shipped; syslog / HTTP devices [deferred](#deferred-sub-initiatives). |
+| `[x]` Done | Metrics (Prometheus) | Standard `/metrics` endpoint. |
 
 ### Cryptography
 
-| Feature | Status | Notes |
+| Status | Feature | Notes |
 |---|---|---|
-| Post-Quantum Crypto Migration | Done | [roadmap](roadmaps/post-quantum-crypto-migration.md) — host stack OpenSSL-free, including FIDO2 (now using an in-tree pure-Rust WebAuthn RP at `src/modules/credential/fido2/rp/`). |
-| Key Management (ML-KEM-768, ML-DSA-65, ChaCha20-Poly1305) | Done | PQ-first stack. |
-| Key Rotation & Re-encryption | Done | Re-encrypt with new barrier key on rotate. |
-| HSM Support | Todo | [spec](features/hsm-support.md) |
+| `[x]` Done | Post-Quantum Crypto Migration | [roadmap](roadmaps/post-quantum-crypto-migration.md) — host stack OpenSSL-free, including FIDO2 (now using an in-tree pure-Rust WebAuthn RP at `src/modules/credential/fido2/rp/`). |
+| `[x]` Done | Key Management (ML-KEM-768, ML-DSA-65, ChaCha20-Poly1305) | PQ-first stack. |
+| `[x]` Done | Key Rotation & Re-encryption | Re-encrypt with new barrier key on rotate. |
+| `[ ]` Todo | HSM Support | [spec](features/hsm-support.md) |
 
 ### Storage
 
-| Feature | Status | Notes |
+| Status | Feature | Notes |
 |---|---|---|
-| Storage Backend: Encrypted File | Done | Local file storage with barrier encryption. |
-| Storage Backend: MySQL | Done | Diesel + r2d2 pool. |
-| Storage Backend: SQLx | Removed | libsqlite3-sys conflict. |
-| Storage Backend: Hiqlite (embedded Raft SQLite, HA) | Done | [roadmap](roadmaps/hiqlite-default-ha-storage.md) — default backend, 6 phases. |
-| Cloud targets for Encrypted File (S3 / OneDrive / Google Drive / Dropbox) | Done | [spec](features/cloud-storage-backend.md) — 8 phases incl. cache decorator + key obfuscation. |
-| Operator Backup / Restore (BVBK) | Done | [spec](features/import-export-backup-restore.md) — full-vault binary archive, HMAC-SHA256, for disaster recovery. |
-| User-facing Exchange Module (`.bvx`) | Done | [spec](features/import-export-module.md) — password-encrypted JSON for "Alice shares N secrets with Bob"; built on top of BVBK but a different threat model. Argon2id + XChaCha20-Poly1305, two-step preview-then-apply import with `skip` / `overwrite` / `rename` conflict policies, full GUI with scope picker + entropy meter. |
-| Scheduled Exports | Done | [spec](features/scheduled-exports.md) — `src/scheduled_exports/` (runner + schedule + store), `POST/GET/PUT/DELETE /v1/sys/scheduled-exports/*`, Tauri commands + GUI tab under `/exchange` (Scheduled backups). Built on top of the `.bvx` Exchange machinery. |
-| Caching | Done | [spec](features/caching.md) — token cache + ciphertext-only secret cache + memory hardening. |
-| Batch Operations | Done | [spec](features/batch-operations.md) — Phase 1 HTTP shipped; CLI + SDK [deferred](#deferred-sub-initiatives). |
+| `[x]` Done | Storage Backend: Encrypted File | Local file storage with barrier encryption. |
+| `[x]` Done | Storage Backend: MySQL | Diesel + r2d2 pool. |
+| `[~]` Removed | Storage Backend: SQLx | libsqlite3-sys conflict. |
+| `[x]` Done | Storage Backend: Hiqlite (embedded Raft SQLite, HA) | [roadmap](roadmaps/hiqlite-default-ha-storage.md) — default backend, 6 phases. |
+| `[x]` Done | Cloud targets for Encrypted File (S3 / OneDrive / Google Drive / Dropbox) | [spec](features/cloud-storage-backend.md) — 8 phases incl. cache decorator + key obfuscation. |
+| `[x]` Done | Operator Backup / Restore (BVBK) | [spec](features/import-export-backup-restore.md) — full-vault binary archive, HMAC-SHA256, for disaster recovery. |
+| `[x]` Done | User-facing Exchange Module (`.bvx`) | [spec](features/import-export-module.md) — password-encrypted JSON for "Alice shares N secrets with Bob"; built on top of BVBK but a different threat model. Argon2id + XChaCha20-Poly1305, two-step preview-then-apply import with `skip` / `overwrite` / `rename` conflict policies, full GUI with scope picker + entropy meter. |
+| `[x]` Done | Scheduled Exports | [spec](features/scheduled-exports.md) — `src/scheduled_exports/` (runner + schedule + store), `POST/GET/PUT/DELETE /v1/sys/scheduled-exports/*`, Tauri commands + GUI tab under `/exchange` (Scheduled backups). Built on top of the `.bvx` Exchange machinery. |
+| `[x]` Done | Caching | [spec](features/caching.md) — token cache + ciphertext-only secret cache + memory hardening. |
+| `[x]` Done | Batch Operations | [spec](features/batch-operations.md) — Phase 1 HTTP shipped; CLI + SDK [deferred](#deferred-sub-initiatives). |
 
 ### Resources
 
-| Feature | Status | Notes |
+| Status | Feature | Notes |
 |---|---|---|
-| Resource Management (inventory + grouped secrets) | Done | [spec](features/resources.md) — 14 Tauri commands, full GUI. |
-| File Resources (binary blobs + sync targets) | Done | [spec](features/file-resources.md) — local-FS + SMB + SFTP + SCP + periodic re-sync + sync-on-write. |
-| First-class `firewall` / `switch` types + refined `database` | Done | [spec](features/resource-types-firewall-switch-db.md) — three phases shipped; closed-enum DB engines, vendor / HA-role / layer / firmware fields. |
-| Resource Connect — in-app SSH / RDP for server resources | Done | [spec](features/resource-connect.md) — Phases 1–7 incl. ⌘K palette, recently-connected list, Connect-policy on `ResourceTypeDef`. SSH × {Secret, LDAP, PKI, **SSH engine (CA + OTP)**}, RDP × {Secret, LDAP, PKI}. |
+| `[x]` Done | Resource Management (inventory + grouped secrets) | [spec](features/resources.md) — 14 Tauri commands, full GUI. |
+| `[x]` Done | File Resources (binary blobs + sync targets) | [spec](features/file-resources.md) — local-FS + SMB + SFTP + SCP + periodic re-sync + sync-on-write. |
+| `[x]` Done | First-class `firewall` / `switch` types + refined `database` | [spec](features/resource-types-firewall-switch-db.md) — three phases shipped; closed-enum DB engines, vendor / HA-role / layer / firmware fields. |
+| `[x]` Done | Resource Connect — in-app SSH / RDP for server resources | [spec](features/resource-connect.md) — Phases 1–7 incl. ⌘K palette, recently-connected list, Connect-policy on `ResourceTypeDef`. SSH × {Secret, LDAP, PKI, **SSH engine (CA + OTP)**}, RDP × {Secret, LDAP, PKI}. |
 
 ### Networking & TLS
 
-| Feature | Status | Notes |
+| Status | Feature | Notes |
 |---|---|---|
-| TLS & mTLS (Rustls-based) | Done | PQ-friendly hybrid suites (X25519MLKEM768) supported. |
+| `[x]` Done | TLS & mTLS (Rustls-based) | PQ-friendly hybrid suites (X25519MLKEM768) supported. |
 
 ### Authentication
 
-| Feature | Status | Notes |
+| Status | Feature | Notes |
 |---|---|---|
-| Auth: Token | Done | Vault-shape token store. |
-| Auth: AppRole | Done | RoleID + SecretID. |
-| Auth: Userpass | Done | Argon2 password hashing. |
-| Auth: Certificate | Done | mTLS client-cert auth. |
-| Auth: OIDC | Done | [spec](features/oidc-auth.md) — server module + GUI lifecycle, PKCE / nonce / JWKS. |
-| Auth: SAML 2.0 | Done | [spec](features/saml-auth.md) — pure-Rust SP-initiated SSO, no libxml2 / xmlsec. |
-| Auth: FIDO2 / WebAuthn / YubiKey | Done | [roadmap](roadmaps/tauri-gui-fido2.md) — server uses an in-tree pure-Rust RP (`fido2/rp/`); no `openssl` in the server crate. ES256 + Ed25519, attestation `none` only. |
-| Packaging — server container image | In progress | [roadmap](roadmaps/packaging-and-distribution.md) — Wave 1 + Wave 2 (cluster compose, multi-arch, Cosign keyless, CycloneDX SBOM, `:debug` variant) shipped. Helm chart + Phase 1.5 trusted-proxy still open. |
-| Packaging — Linux CLI installers | Done (amd64) | cargo-deb + cargo-generate-rpm metadata in `Cargo.toml`; `make linux-cli-packages`. GPG signing + arm64 cross-builds deferred to later waves. |
-| Packaging — Linux GUI installers | Skeleton | Postinst/prerm scripts staged; `tauri.conf.json` wiring + first `tauri build` pass on a Linux host pending. |
-| Packaging — macOS / Windows installers | Todo | Wave 3 — pending macOS / Windows build runners + signing identities (notary, EV Authenticode). |
-| Packaging — client distribution website | Todo | Wave 3/4 — depends on signed client artefacts. |
-| Auth: Machine Authentication | Todo | [spec](features/machine-authentication.md) — composite-key (random + host-hardware fingerprint), admin-approval gated. |
+| `[x]` Done | Auth: Token | Vault-shape token store. |
+| `[x]` Done | Auth: AppRole | RoleID + SecretID. |
+| `[x]` Done | Auth: Userpass | Argon2 password hashing. |
+| `[x]` Done | Auth: Certificate | mTLS client-cert auth. |
+| `[x]` Done | Auth: OIDC | [spec](features/oidc-auth.md) — server module + GUI lifecycle, PKCE / nonce / JWKS. |
+| `[x]` Done | Auth: SAML 2.0 | [spec](features/saml-auth.md) — pure-Rust SP-initiated SSO, no libxml2 / xmlsec. |
+| `[x]` Done | Auth: FIDO2 / WebAuthn / YubiKey | [roadmap](roadmaps/tauri-gui-fido2.md) — server uses an in-tree pure-Rust RP (`fido2/rp/`); no `openssl` in the server crate. ES256 + Ed25519, attestation `none` only. |
+| `[/]` In progress | Packaging — server container image | [roadmap](roadmaps/packaging-and-distribution.md) — Wave 1 + Wave 2 (cluster compose, multi-arch, Cosign keyless, CycloneDX SBOM, `:debug` variant) shipped. Helm chart + Phase 1.5 trusted-proxy still open. |
+| `[/]` Done (amd64) | Packaging — Linux CLI installers | cargo-deb + cargo-generate-rpm metadata in `Cargo.toml`; `make linux-cli-packages`. GPG signing + arm64 cross-builds deferred to later waves. |
+| `[/]` Skeleton | Packaging — Linux GUI installers | Postinst/prerm scripts staged; `tauri.conf.json` wiring + first `tauri build` pass on a Linux host pending. |
+| `[ ]` Todo | Packaging — macOS / Windows installers | Wave 3 — pending macOS / Windows build runners + signing identities (notary, EV Authenticode). |
+| `[ ]` Todo | Packaging — client distribution website | Wave 3/4 — depends on signed client artefacts. |
+| `[ ]` Todo | Auth: Machine Authentication | [spec](features/machine-authentication.md) — composite-key (random + host-hardware fingerprint), admin-approval gated. |
 
 ### Secret Engines
 
-| Feature | Status | Notes |
+| Status | Feature | Notes |
 |---|---|---|
-| PKI | Done | [spec](features/pki-secret-engine.md) — Phases 1–5.2; classical + ML-DSA + composite, multi-issuer, on-demand + auto tidy. |
-| PKI: ACME server endpoints | Done | [spec](features/pki-acme.md) — RFC-8555 feature-complete, HTTP-01 + DNS-01 + EAB. |
-| PKI: Key Management + Cert Lifecycle | Done | [spec](features/pki-key-management-and-lifecycle.md) — 7 phases incl. `CertDeliveryPlugin` trait. |
-| Transit | Done | [spec](features/transit-secret-engine.md) — Phases 1–4: AEAD + HMAC + sign/verify + ML-KEM + ML-DSA + BYOK + hybrid. |
-| TOTP | Done | [spec](features/totp-secret-engine.md) — Phases 1–4: HOTP / TOTP + GUI. |
-| SSH | Done | [spec](features/ssh-secret-engine.md) — Phases 1–4: CA Ed25519 + OTP + ML-DSA-65. |
-| OpenLDAP / AD password-rotation | Done | [spec](features/ldap-secret-engine.md) — 5 phases incl. identity-aware check-out affinity. |
-| Dynamic Secrets framework | Todo | [spec](features/dynamic-secrets.md) — host ships only the framework; engines under [`dynamic-engine-plugins/`](dynamic-engine-plugins/). |
-| XCA database import | Done | [spec](features/xca-import.md) — external plugin `bastion-plugin-xca` shipped; reads `.xdb` SQLite, decrypts both XCA envelope formats, imports into the PKI engine via the operator-driven GUI wizard. |
-| Password Manager Pro resource import | Done | [spec](features/pmp-import.md) — `bastion-plugin-pmp` external plugin + GUI wizard. |
+| `[x]` Done | PKI | [spec](features/pki-secret-engine.md) — Phases 1–5.2; classical + ML-DSA + composite, multi-issuer, on-demand + auto tidy. |
+| `[x]` Done | PKI: ACME server endpoints | [spec](features/pki-acme.md) — RFC-8555 feature-complete, HTTP-01 + DNS-01 + EAB. |
+| `[x]` Done | PKI: Key Management + Cert Lifecycle | [spec](features/pki-key-management-and-lifecycle.md) — 7 phases incl. `CertDeliveryPlugin` trait. |
+| `[x]` Done | Transit | [spec](features/transit-secret-engine.md) — Phases 1–4: AEAD + HMAC + sign/verify + ML-KEM + ML-DSA + BYOK + hybrid. |
+| `[x]` Done | TOTP | [spec](features/totp-secret-engine.md) — Phases 1–4: HOTP / TOTP + GUI. |
+| `[x]` Done | SSH | [spec](features/ssh-secret-engine.md) — Phases 1–4: CA Ed25519 + OTP + ML-DSA-65. |
+| `[x]` Done | OpenLDAP / AD password-rotation | [spec](features/ldap-secret-engine.md) — 5 phases incl. identity-aware check-out affinity. |
+| `[ ]` Todo | Dynamic Secrets framework | [spec](features/dynamic-secrets.md) — host ships only the framework; engines under [`dynamic-engine-plugins/`](dynamic-engine-plugins/). |
+| `[x]` Done | XCA database import | [spec](features/xca-import.md) — external plugin `bastion-plugin-xca` shipped; reads `.xdb` SQLite, decrypts both XCA envelope formats, imports into the PKI engine via the operator-driven GUI wizard. |
+| `[x]` Done | Password Manager Pro resource import | [spec](features/pmp-import.md) — `bastion-plugin-pmp` external plugin + GUI wizard. |
 
 ### Infrastructure
 
-| Feature | Status | Notes |
+| Status | Feature | Notes |
 |---|---|---|
-| High Availability (Raft via Hiqlite) | Done | [roadmap](roadmaps/hiqlite-default-ha-storage.md) — cluster CLI, PQ TLS, HA fault-injection. |
-| Vault Cluster — Client Discovery & Health-Aware Connection | Done | [spec](features/vault-cluster-client-discovery.md), [roadmap](roadmaps/vault-cluster-client-discovery.md) — All 8 phases shipped. `bv-client` discovery + health, `build_with_discovery` builder, sticky failure contract, Tauri `connect_remote` wiring + Settings diagnostics modal, `bvault cluster discover` CLI subcommand + `--no-cluster-discovery` flag, 26 new tests (19 unit + 7 e2e), operator runbook in docs. `operator seal` / `operator unseal` fan out cluster-wide via SRV discovery (per-node seal state), with `--local` to scope to one node. |
-| Plugin System | Done | [spec](features/plugin-system.md) — WASM + supervised process runtime, signed manifests, per-plugin metrics, GUI. |
-| Plugin Extensibility (surface manifest, dynamic GUI menus/forms, client cache, auto-update) | Done | [spec](features/plugin-extensibility.md), [roadmap](roadmaps/plugin-extensibility-redesign.md) — 8 phases shipped end-to-end (server surface storage + 3 HTTP routes, bv-client cache, GUI dynamic render, form-hook WASM sandbox, long-poll watcher, operator UX, reference TOTP example + SDK helpers). |
-| Namespaces / Multi-tenancy | Partial | [spec](features/namespaces-multitenancy.md) |
-| Kubernetes Integration | Todo | [spec](features/kubernetes-integration.md) — `kubernetes` auth backend + CSI driver + agent injector. |
-| Rustion Bastion Integration | In progress | [spec](features/rustion-integration.md) — mediates Resource Connect through a PQC bastion; recording delegated to Rustion. **Phases 1–9 done, Phase 4.2-full done, Phase 7.4 done** (BV 0.7.14 → 0.8.23, Rustion 0.7.11 → 0.8.0): full session/recording pipeline + four-tier policy + telemetry pull + audit-witness replication + rate-limited telemetry + recording.replayed audit + fleet analytics + stable deployment_id + Rustion authorities-pending holding pen + disk-backed `authorities-pending/` + `tombstoned/` YAML with `rustion authority {list-pending, approve, reject, deenrol, untombstone, list, list-tombstones}` operator CLI + BV weekly re-attestation timer + `rustion_authority_attest` + `rustion_target_deenrol` Tauri commands + deployment_id binding (403 attestation_mismatch) + separate SessionReplayWindow Tauri WebviewWindow + WASM bitmap-update decoder at `gui/wasm/rdp-replay/` with matching TS port + RdpReplayCanvas live playback (uncompressed 16/24/32 bpp + RLE16/RLE24) + signed-URL replay path (`POST /v1/recordings/<rid>/replay` + HMAC-bound `GET /v1/recordings/<rid>`) + bastion-driven CredSSP injection driver (NTLMv2 sealing + RC4 keystream + pubKeyAuth +1 contract + sealed TSCredentials, simulated-Windows e2e tested) + operator deployment guide at [`features/rustion-authority-lifecycle.md`](features/rustion-authority-lifecycle.md) + **master authority lifecycle Phase 2** (`rustion master issue` / `rotate` CLI + HTTP, hybrid Ed25519 + ML-DSA-65 keypair lifecycle with rotate-grace window, real pubkey export, previous-key acceptance during grace via `verify_with_grace`). Phase 7.4 wires the in-app Connect button to the policy resolver: SSH-password sessions (BV 0.8.21) and RDP-password sessions (BV 0.8.22) route through the bastion when transport is `rustion-required` / `rustion-preferred`; non-password SSH and smart-card (rdp-cert) RDP under `rustion-required` fail closed pending the bastion's PKINIT path. BV 0.8.23 wires the spawned SSH/RDP session window into `useRustionSessionLifecycle` via a new `session_rustion_info` Tauri command + shared `RustionSessionChip` (auto-renew + manual Renew/Terminate + live TTL). Remaining: bastion host-key / TLS pinning in the GUI dialler (cross-repo with Rustion), rdp-cert via PKINIT/SPNEGO, live-Windows-VM transport hookup, `attestation_renew_at` enforcement at envelope-verify, Rustion admin web UI, BV-side GUI buttons for the new Tauri commands, cluster-replicated master + true PKI-engine cert emission (Phase 9 of authority lifecycle). NSCodec / RemoteFX / 8 bpp RLE / bitmap-cache references and `rdp-cert` smart-card PKINIT documented as separate tracks. |
-| Web UI / Desktop GUI (Tauri) | Done | [roadmap](roadmaps/tauri-gui-fido2.md) — 9 phases, 55 Tauri commands, 79 React modules, 10 pages. |
-| Compliance Reporting | Todo | [spec](features/compliance-reporting.md) |
+| `[x]` Done | High Availability (Raft via Hiqlite) | [roadmap](roadmaps/hiqlite-default-ha-storage.md) — cluster CLI, PQ TLS, HA fault-injection. |
+| `[x]` Done | Vault Cluster — Client Discovery & Health-Aware Connection | [spec](features/vault-cluster-client-discovery.md), [roadmap](roadmaps/vault-cluster-client-discovery.md) — All 8 phases shipped. `bv-client` discovery + health, `build_with_discovery` builder, sticky failure contract, Tauri `connect_remote` wiring + Settings diagnostics modal, `bvault cluster discover` CLI subcommand + `--no-cluster-discovery` flag, 26 new tests (19 unit + 7 e2e), operator runbook in docs. `operator seal` / `operator unseal` fan out cluster-wide via SRV discovery (per-node seal state), with `--local` to scope to one node. |
+| `[x]` Done | Plugin System | [spec](features/plugin-system.md) — WASM + supervised process runtime, signed manifests, per-plugin metrics, GUI. |
+| `[x]` Done | Plugin Extensibility (surface manifest, dynamic GUI menus/forms, client cache, auto-update) | [spec](features/plugin-extensibility.md), [roadmap](roadmaps/plugin-extensibility-redesign.md) — 8 phases shipped end-to-end (server surface storage + 3 HTTP routes, bv-client cache, GUI dynamic render, form-hook WASM sandbox, long-poll watcher, operator UX, reference TOTP example + SDK helpers). |
+| `[/]` Partial | Namespaces / Multi-tenancy | [spec](features/namespaces-multitenancy.md) |
+| `[ ]` Todo | Kubernetes Integration | [spec](features/kubernetes-integration.md) — `kubernetes` auth backend + CSI driver + agent injector. |
+| `[/]` In progress | Rustion Bastion Integration | [spec](features/rustion-integration.md) — mediates Resource Connect through a PQC bastion; recording delegated to Rustion. **Phases 1–9 done, Phase 4.2-full done, Phase 7.4 done** (BV 0.7.14 → 0.8.23, Rustion 0.7.11 → 0.8.0): full session/recording pipeline + four-tier policy + telemetry pull + audit-witness replication + rate-limited telemetry + recording.replayed audit + fleet analytics + stable deployment_id + Rustion authorities-pending holding pen + disk-backed `authorities-pending/` + `tombstoned/` YAML with `rustion authority {list-pending, approve, reject, deenrol, untombstone, list, list-tombstones}` operator CLI + BV weekly re-attestation timer + `rustion_authority_attest` + `rustion_target_deenrol` Tauri commands + deployment_id binding (403 attestation_mismatch) + separate SessionReplayWindow Tauri WebviewWindow + WASM bitmap-update decoder at `gui/wasm/rdp-replay/` with matching TS port + RdpReplayCanvas live playback (uncompressed 16/24/32 bpp + RLE16/RLE24) + signed-URL replay path (`POST /v1/recordings/<rid>/replay` + HMAC-bound `GET /v1/recordings/<rid>`) + bastion-driven CredSSP injection driver (NTLMv2 sealing + RC4 keystream + pubKeyAuth +1 contract + sealed TSCredentials, simulated-Windows e2e tested) + operator deployment guide at [`features/rustion-authority-lifecycle.md`](features/rustion-authority-lifecycle.md) + **master authority lifecycle Phase 2** (`rustion master issue` / `rotate` CLI + HTTP, hybrid Ed25519 + ML-DSA-65 keypair lifecycle with rotate-grace window, real pubkey export, previous-key acceptance during grace via `verify_with_grace`). Phase 7.4 wires the in-app Connect button to the policy resolver: SSH-password sessions (BV 0.8.21) and RDP-password sessions (BV 0.8.22) route through the bastion when transport is `rustion-required` / `rustion-preferred`; non-password SSH and smart-card (rdp-cert) RDP under `rustion-required` fail closed pending the bastion's PKINIT path. BV 0.8.23 wires the spawned SSH/RDP session window into `useRustionSessionLifecycle` via a new `session_rustion_info` Tauri command + shared `RustionSessionChip` (auto-renew + manual Renew/Terminate + live TTL). Remaining: bastion host-key / TLS pinning in the GUI dialler (cross-repo with Rustion), rdp-cert via PKINIT/SPNEGO, live-Windows-VM transport hookup, `attestation_renew_at` enforcement at envelope-verify, Rustion admin web UI, BV-side GUI buttons for the new Tauri commands, cluster-replicated master + true PKI-engine cert emission (Phase 9 of authority lifecycle). NSCodec / RemoteFX / 8 bpp RLE / bitmap-cache references and `rdp-cert` smart-card PKINIT documented as separate tracks. |
+| `[x]` Done | Web UI / Desktop GUI (Tauri) | [roadmap](roadmaps/tauri-gui-fido2.md) — 9 phases, 55 Tauri commands, 79 React modules, 10 pages. |
+| `[ ]` Todo | Compliance Reporting | [spec](features/compliance-reporting.md) |
 
 ### Packaging & Distribution
 
 Sequenced together under [`roadmaps/packaging-and-distribution.md`](roadmaps/packaging-and-distribution.md). Specs drafted; no code yet.
 
-| Feature | Status | Notes |
+| Status | Feature | Notes |
 |---|---|---|
-| Server Container Image (Podman / OCI, standalone + cluster) | Partial | [spec](features/packaging-podman-server.md) — **Phase 1 shipped**: standalone, `linux/amd64`, distroless `cc-debian12:nonroot`, GHCR push on `v*.*.*` tags, unsigned. Phases 1.5 (client-IP propagation), 2 (cluster), 3 (multi-arch + Cosign + SBOM + `:debug`), 4 (Helm chart) pending. |
-| Native Client Installers (deb / rpm / pkg / msi for GUI + CLI) | Todo | [spec](features/packaging-client-binaries.md) — Tauri bundler for GUI, parallel CLI track via `cargo-deb` / `cargo-generate-rpm` / `pkgbuild` / WiX 3.x. Double-signed (platform-native + Cosign). Phase 5 publishes apt + dnf repos. |
-| Client Distribution Website (OCI image) | Todo | [spec](features/packaging-distribution-website.md) — small `axum` + `askama` static-site server, signed `manifest.json` consumed by both the landing page and the GUI's "update available" banner (link-out only, no auto-update). |
+| `[/]` Partial | Server Container Image (Podman / OCI, standalone + cluster) | [spec](features/packaging-podman-server.md) — **Phase 1 shipped**: standalone, `linux/amd64`, distroless `cc-debian12:nonroot`, GHCR push on `v*.*.*` tags, unsigned. Phases 1.5 (client-IP propagation), 2 (cluster), 3 (multi-arch + Cosign + SBOM + `:debug`), 4 (Helm chart) pending. |
+| `[ ]` Todo | Native Client Installers (deb / rpm / pkg / msi for GUI + CLI) | [spec](features/packaging-client-binaries.md) — Tauri bundler for GUI, parallel CLI track via `cargo-deb` / `cargo-generate-rpm` / `pkgbuild` / WiX 3.x. Double-signed (platform-native + Cosign). Phase 5 publishes apt + dnf repos. |
+| `[ ]` Todo | Client Distribution Website (OCI image) | [spec](features/packaging-distribution-website.md) — small `axum` + `askama` static-site server, signed `manifest.json` consumed by both the landing page and the GUI's "update available" banner (link-out only, no auto-update). |
 
 ## Active Initiatives
 
