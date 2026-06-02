@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-02
+
+Minor-version release. Promotes the Connect-Only Access feature and the revived
+Rustion SSH e2e harness (shipped in 0.10.16) to a minor version now that the
+connect-only path is validated live end-to-end. No code changes since 0.10.16.
+
 ## [0.10.16] - 2026-06-02
 
 ### Added
