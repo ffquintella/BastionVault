@@ -1,0 +1,166 @@
+//! Trust-anchor configuration for the FerroGate auth backend (Phase 1).
+//!
+//! `auth/ferrogate/config` records how BastionVault locates and trusts
+//! FerroGate's composite verification keys (the SPIFFE trust domain, the
+//! expected audience, the JWKS source, and the bootstrap knobs). All fields are
+//! public key material or policy knobs — none is a secret — but the path is
+//! root/sudo-gated regardless.
+
+use std::{collections::HashMap, sync::Arc};
+
+use super::{FerroGateBackend, FerroGateBackendInner, FerroGateConfig};
+use crate::{
+    context::Context,
+    errors::RvError,
+    logical::{field::FieldTrait, Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
+    new_fields, new_fields_internal, new_path, new_path_internal,
+    storage::StorageEntry,
+};
+
+const CONFIG_KEY: &str = "config";
+
+impl FerroGateBackend {
+    pub fn config_path(&self) -> Path {
+        let read_ref = self.inner.clone();
+        let write_ref = self.inner.clone();
+
+        new_path!({
+            pattern: r"config$",
+            fields: {
+                "trust_domain": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "FerroGate SPIFFE trust domain, e.g. 'ferrogate.prod'."
+                },
+                "expected_audience": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "This vault's audience, matched against a child token's 'aud'."
+                },
+                "jwks_source": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "How to obtain FerroGate keys: 'static_jwks' or 'cmis_grpc'."
+                },
+                "cmis_endpoint": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "CMIS gRPC endpoint (when jwks_source = cmis_grpc)."
+                },
+                "cmis_spki_pins": {
+                    field_type: FieldType::CommaStringSlice,
+                    required: false,
+                    description: "SHA-384 SPKI pins (hex) for the CMIS server certificate."
+                },
+                "static_jwks": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "Pinned JWK set JSON (when jwks_source = static_jwks)."
+                },
+                "accept_svid": {
+                    field_type: FieldType::Bool,
+                    required: false,
+                    description: "Accept a host SVID presented directly (weaker; no per-request DPoP)."
+                },
+                "clock_leeway_secs": {
+                    field_type: FieldType::Int,
+                    required: false,
+                    description: "Clock leeway in seconds for token nbf/exp checks."
+                },
+                "default_token_ttl": {
+                    field_type: FieldType::Int,
+                    required: false,
+                    description: "Default minted-token TTL (seconds) when an approval sets none."
+                },
+                "bootstrap_root_auto_approve": {
+                    field_type: FieldType::Bool,
+                    required: false,
+                    description: "Auto-approve the first machine that logs in with a root token."
+                },
+                "bootstrap_policies": {
+                    field_type: FieldType::CommaStringSlice,
+                    required: false,
+                    description: "Policies granted to the auto-approved first machine."
+                }
+            },
+            operations: [
+                {op: Operation::Read, handler: read_ref.read_config},
+                {op: Operation::Write, handler: write_ref.write_config}
+            ],
+            help: r#"Configure the FerroGate trust anchor (keys, audience, bootstrap behaviour)."#
+        })
+    }
+}
+
+#[maybe_async::maybe_async]
+impl FerroGateBackendInner {
+    /// Load the stored config, or the defaults if none has been written yet.
+    pub async fn get_config(&self, req: &mut Request) -> Result<FerroGateConfig, RvError> {
+        match req.storage_get(CONFIG_KEY).await? {
+            Some(entry) => Ok(serde_json::from_slice(entry.value.as_slice())?),
+            None => Ok(FerroGateConfig::default()),
+        }
+    }
+
+    /// Persist the config.
+    pub async fn set_config(&self, req: &mut Request, config: &FerroGateConfig) -> Result<(), RvError> {
+        let entry = StorageEntry::new(CONFIG_KEY, config)?;
+        req.storage_put(&entry).await
+    }
+
+    pub async fn read_config(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let config = self.get_config(req).await?;
+        let value = serde_json::to_value(&config)?;
+        let data = value.as_object().cloned().ok_or(RvError::ErrResponseDataInvalid)?;
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    pub async fn write_config(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        // Merge provided fields onto the existing config so partial updates work.
+        let mut config = self.get_config(req).await?;
+
+        if let Ok(v) = req.get_data("trust_domain") {
+            config.trust_domain = v.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        }
+        if let Ok(v) = req.get_data("expected_audience") {
+            config.expected_audience = v.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        }
+        if let Ok(v) = req.get_data("jwks_source") {
+            let src = v.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+            if src != super::jwks_source::STATIC && src != super::jwks_source::CMIS_GRPC {
+                return Ok(Some(Response::error_response(
+                    "jwks_source must be 'static_jwks' or 'cmis_grpc'",
+                )));
+            }
+            config.jwks_source = src;
+        }
+        if let Ok(v) = req.get_data("cmis_endpoint") {
+            config.cmis_endpoint = v.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        }
+        if let Ok(v) = req.get_data("cmis_spki_pins") {
+            config.cmis_spki_pins = v.as_comma_string_slice().ok_or(RvError::ErrRequestFieldInvalid)?;
+        }
+        if let Ok(v) = req.get_data("static_jwks") {
+            config.static_jwks = v.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        }
+        if let Ok(v) = req.get_data("accept_svid") {
+            config.accept_svid = v.as_bool_ex().ok_or(RvError::ErrRequestFieldInvalid)?;
+        }
+        if let Ok(v) = req.get_data("clock_leeway_secs") {
+            config.clock_leeway_secs = v.as_int().ok_or(RvError::ErrRequestFieldInvalid)?;
+        }
+        if let Ok(v) = req.get_data("default_token_ttl") {
+            let ttl = v.as_int().ok_or(RvError::ErrRequestFieldInvalid)?;
+            config.default_token_ttl = ttl.max(0) as u64;
+        }
+        if let Ok(v) = req.get_data("bootstrap_root_auto_approve") {
+            config.bootstrap_root_auto_approve = v.as_bool_ex().ok_or(RvError::ErrRequestFieldInvalid)?;
+        }
+        if let Ok(v) = req.get_data("bootstrap_policies") {
+            config.bootstrap_policies = v.as_comma_string_slice().ok_or(RvError::ErrRequestFieldInvalid)?;
+        }
+
+        self.set_config(req, &config).await?;
+        Ok(None)
+    }
+}

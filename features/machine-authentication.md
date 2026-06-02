@@ -84,7 +84,14 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
 
 ## Current State
 
-- Not started. This document is the design projection.
+- **Phase 1 shipped.** The `ferrogate` auth backend is registered and mounts at `auth/ferrogate/`
+  ([`src/modules/credential/ferrogate/`](../src/modules/credential/ferrogate/)). Trust-anchor `config`
+  read/write, the `MachineEntry` storage layout, and the admin lifecycle routes (`register`, `LIST machines`,
+  `GET/DELETE machines/{id}`, `approve`, `reject`, `revoke`) are implemented and covered by an integration test.
+  `{id}` is the BLAKE3 hex of the SPIFFE ID (a raw SPIFFE ID can't be a path segment). `register` doubles as
+  admin pre-authorization and as the way to exercise the lifecycle before real `login` lands. `login` returns a
+  `not_implemented` error pending Phase 2.
+- Phases 2–7 are not started.
 - BastionVault ships Token, UserPass, AppRole, Certificate, and FIDO2/WebAuthn auth methods. None consume an
   external attestation authority.
 - FerroGate (sibling repo `../FerroGate`) exposes: a CMIS `JWKS` gRPC RPC returning composite verification keys
@@ -330,7 +337,7 @@ operator on attested host                     server
 
 | # | Title | Notes |
 |---|---|---|
-| 1 | **Plugin skeleton + config + storage** | `auth/ferrogate/` mount as a self-contained crate, `config` read/write, storage layout, audit-event scaffolding, admin `list`/`approve`/`reject`/`revoke` against fixture records. `login` stubbed `not_implemented`. |
+| 1 ✅ | **Plugin skeleton + config + storage** | **Done.** `auth/ferrogate/` mount, `config` read/write, `MachineEntry` storage layout, admin `register`/`list`/`show`/`delete`/`approve`/`reject`/`revoke`. `login` stubbed `not_implemented`. Integration test covers the full admin lifecycle. (Audit-event emission deferred to land with `login` in Phase 3.) |
 | 2 | **Verification core (static JWKS) + login** | Wire `ferro-child-verify::verify_bound` end-to-end with a `static_jwks` trust anchor. Child-token + DPoP login mints a token for an *already-approved* fixture machine; unknown → pending. Deterministic tests with fixture tokens/JWKS exported from FerroGate test vectors. |
 | 3 | **Enrolment state machine + bootstrap** | First-seen → pending creation as a login side effect, status poll, admin approve/reject/revoke transitions, and the **root-token one-shot bootstrap** (`approved_count == 0` + root). Integration test: unknown machine denied → admin approve → next login succeeds; and the bootstrap happy path. |
 | 4 | **CMIS gRPC JWKS source + CRL** | `cmis_grpc` source with SPKI-pinned hybrid-PQC TLS fetch, cache, periodic refresh, CRL enforcement (revoked token rejected). Stale/fail-closed tests. |

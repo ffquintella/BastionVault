@@ -9,8 +9,8 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | State | Count |
 |---|---|
 | Done | 46 |
-| Partial | 2 |
-| Todo | 7 |
+| Partial | 3 |
+| Todo | 6 |
 | Removed | 1 |
 | **Total tracked features** | **56** |
 
@@ -101,7 +101,7 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | `[/]` Skeleton | Packaging — Linux GUI installers | Postinst/prerm scripts staged; `tauri.conf.json` wiring + first `tauri build` pass on a Linux host pending. |
 | `[ ]` Todo | Packaging — macOS / Windows installers | Wave 3 — pending macOS / Windows build runners + signing identities (notary, EV Authenticode). |
 | `[ ]` Todo | Packaging — client distribution website | Wave 3/4 — depends on signed client artefacts. |
-| `[ ]` Todo | Auth: Machine Authentication (FerroGate) | [spec](features/machine-authentication.md) — admit only FerroGate-attested machines (TPM-rooted SVID / DPoP child token), admin-approval gated, first-machine root bootstrap. Supersedes the earlier host-fingerprint design. |
+| `[/]` Partial | Auth: Machine Authentication (FerroGate) | [spec](features/machine-authentication.md) — admit only FerroGate-attested machines (TPM-rooted SVID / DPoP child token), admin-approval gated, first-machine root bootstrap. **Phase 1 done** (`auth/ferrogate/` mount + config + admin lifecycle; `login` stubbed). Supersedes the earlier host-fingerprint design. |
 
 ### Secret Engines
 

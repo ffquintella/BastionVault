@@ -45,6 +45,10 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+- **FerroGate machine-auth backend — Phase 1 (skeleton)** ([`src/modules/credential/ferrogate/`](src/modules/credential/ferrogate/)). A new `ferrogate` auth method mounts at `auth/ferrogate/` and gates vault access on a machine's FerroGate-attested SPIFFE identity plus an administrator approval. This phase ships the trust-anchor configuration (`POST`/`GET auth/ferrogate/config`), the machine-enrolment storage layout, and the admin lifecycle routes: `register` (pre-authorize a SPIFFE ID), `LIST machines`, `GET`/`DELETE auth/ferrogate/machines/{id}`, and `approve`/`reject`/`revoke` (where `{id}` is the BLAKE3 hex of the SPIFFE ID). All admin routes are root/sudo-gated. `auth/ferrogate/login` is present but returns a not-implemented error until Phase 2 wires FerroGate's reference token verifiers.
+
 ### Changed
 
 - **Machine Authentication spec redirected to FerroGate** ([`features/machine-authentication.md`](features/machine-authentication.md)) — the auth method now admits machines by verifying a **FerroGate** TPM-attested, post-quantum SPIFFE identity (a DPoP-bound child token or SVID, composite Ed25519 + ML-DSA-65) against FerroGate's published JWKS/CRL, rather than a home-grown host-hardware fingerprint. BastionVault becomes the relying party and keeps an admin-approval gate: an unknown but attested machine is held `pending` until an administrator approves it and attaches a policy set; the first machine to authenticate while no machine is yet approved **and** presenting a BastionVault root token is auto-approved (one-shot bootstrap). Verification reuses FerroGate's `#![forbid(unsafe_code)]` reference verifier crates — no custom crypto. Supersedes the earlier composite-key (random part + software-readable host fingerprint) design.
