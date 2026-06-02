@@ -1786,6 +1786,17 @@ export type SessionRustionInfo = {
 export const sessionRustionInfo = (token: string) =>
   invoke<SessionRustionInfo | null>("session_rustion_info", { request: { token } });
 
+/// Effective capabilities of the current token on a set of paths. Used to
+/// filter UI affordances — e.g. hide a resource's credential values when the
+/// caller holds only `connect`, not `read`, on `resources/secrets/<name>/`.
+export type CapabilitiesResult = {
+  /** Path → capability strings, e.g. `{"resources/secrets/db/": ["connect"]}`. */
+  paths: Record<string, string[]>;
+};
+
+export const capabilitiesSelf = (paths: string[]) =>
+  invoke<CapabilitiesResult>("capabilities_self", { paths });
+
 export type LdapCheckConnectionResult = {
   ok: boolean;
   url: string;

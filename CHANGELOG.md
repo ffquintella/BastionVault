@@ -45,6 +45,72 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.10.16] - 2026-06-02
+
+### Added
+
+#### Connect-Only Access (Phase 1 + GUI filtering, features/connect-only-access.md)
+
+- Add a new `connect` ACL capability so a policy can grant the ability to open
+  a Rustion-brokered session to a resource **without** granting `read` on its
+  stored credentials. Example: `path "resources/secrets/db-prod/*" { capabilities = ["connect"] }`.
+  `read`/`root` imply `connect`, so existing policies are unaffected.
+- Add `rustion/v2/session/open`: a connect-only session-open entry point that
+  enforces `connect` (or `read`/`root`) on the resource's secret path and, when
+  given a credential reference (`credential_source = {kind:"secret", secret_id}`),
+  resolves the credential **server-side** under BastionVault's own authority so
+  the connecting operator never reads it. v1 `rustion/session/open` is unchanged.
+- Add `v2/sys/capabilities-self`: report the calling token's effective
+  capabilities on a set of paths (Vault-compatible). The GUI uses it to hide
+  credential values and restrict connections to Rustion-brokered profiles when
+  the caller holds only `connect`.
+- GUI: hide a resource's stored credentials and offer only Rustion connection
+  profiles when the caller has connect-only access; add a `capabilities_self`
+  Tauri command and `api.capabilitiesSelf` wrapper.
+- GUI: the SSH connect path resolves `secret`-backed credentials through
+  `rustion/v2/session/open` (sending a credential reference, not the material),
+  so a connect-only operator can launch a brokered session without reading the
+  credential. v1 and v2 share the ticket-bundle parser.
+
+### Security
+
+- Connect-only credential resolution happens server-side via the router
+  (bypassing the caller's read capability only after the `connect` gate
+  passes), and emits a `security`-target audit line attributed to the
+  connecting operator.
+
+### Fixed
+
+#### Rustion SSH e2e harness revived (`tests/e2e/rustion-ssh/`)
+
+- Revive the docker-compose harness that had rotted since v0.7 so
+  `docker compose up -d` + `run.sh` drives a real Rustion-mediated SSH session
+  end-to-end again — and now also exercises the connect-only path live.
+- Fix the BV image build: drop the `COPY plugins-ext` from the root `Dockerfile`
+  (the dir is workspace-excluded and `.dockerignore`d), and remove the dead
+  `BASTION_VAULT_LOCAL_DEV` env (no server code ever read it).
+- Fix the rustion build context: `../../../Rustion` (nonexistent) →
+  `../../../../rustion` (the sibling repo) in `docker-compose.yaml` and the
+  README; drop the obsolete compose `version:` key.
+- Replace the never-implemented auto-init env with an API-driven flow: `run.sh`
+  init+unseals BV over `/v1/sys/{init,unseal}` from a cold sealed start and
+  captures the root token (mount `config/bv-config.hcl`).
+- Rewrite `config/rustion.toml` to the current `rustion_core` config schema
+  (renamed/removed `[audit] checkpoint_interval_secs`, `[recording]
+  root_dir/format`, `[ssh] allow_bv_ticket`, `identity_pub/priv`); `run.sh`
+  mints the required control-plane TLS cert and seeds a cert-auth-only admin
+  user so the TTY-less container doesn't block on the first-run prompt.
+- Automate enrolment end-to-end: pin BV's master pubkey as a Rustion authority
+  in the on-disk `pubkey_*_b64` schema; enrol the bastion on BV with rustion's
+  ML-KEM-768 pubkey (`identity.pub`) and Ed25519+ML-DSA-65 signing pubkeys
+  (`rustion control-plane webhook-key export`), pinning rustion's self-signed
+  control-plane leaf so BV's strict-TLS client accepts it; probe until healthy.
+- Extend `run.sh` to prove connect-only live: create a resource + ssh-password
+  secret + a `connect`-only policy/token, confirm the token is denied a direct
+  secret read (403), then `POST rustion/v2/session/open` with a credential
+  reference (no material) and proxy a real SSH shell through the bastion to the
+  OpenSSH target as `deploy` — the operator never reads the credential.
+
 ## [0.10.15] - 2026-06-01
 
 ### Changed

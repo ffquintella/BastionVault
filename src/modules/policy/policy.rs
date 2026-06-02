@@ -193,6 +193,8 @@ pub enum Capability {
     Patch = 1 << 7,
     #[strum(to_string = "root")]
     Root = 1 << 8,
+    #[strum(to_string = "connect")]
+    Connect = 1 << 9,
 }
 
 impl Capability {
@@ -785,6 +787,34 @@ mod mod_policy_tests {
         assert_eq!(policy.paths[0].permissions.allowed_parameters.len(), 1);
         assert_eq!(policy.paths[0].permissions.denied_parameters.len(), 1);
         assert_eq!(policy.paths[0].permissions.required_parameters, vec!["param1", "param2"]);
+    }
+
+    #[test]
+    fn test_connect_capability_round_trip() {
+        // String <-> enum round-trip and bit value for the connect capability.
+        assert_eq!(Capability::from_str("connect").unwrap(), Capability::Connect);
+        assert_eq!(Capability::Connect.to_string(), "connect");
+        assert_eq!(Capability::Connect.to_bits(), 1 << 9);
+        // `connect` must surface through the EnumIter-driven reverse mapping
+        // used by ACL::capabilities / the capabilities-self endpoint.
+        assert!(to_granting_capabilities(Capability::Connect.to_bits()).contains(&"connect".to_string()));
+    }
+
+    #[test]
+    fn test_policy_from_str_hcl_with_connect() {
+        // A connect-only grant: the caller may open a brokered session to the
+        // resource but must NOT receive `read` on its stored credential.
+        let hcl_policy = r#"
+        path "resources/secrets/db-prod/*" {
+            capabilities = ["connect"]
+        }"#;
+
+        let policy = Policy::from_str(hcl_policy).unwrap();
+        assert_eq!(policy.paths.len(), 1);
+        assert_eq!(policy.paths[0].path, "resources/secrets/db-prod/");
+        assert_eq!(policy.paths[0].permissions.capabilities_bitmap, Capability::Connect.to_bits());
+        // Crucially, connect-only does not imply read.
+        assert_eq!(policy.paths[0].permissions.capabilities_bitmap & Capability::Read.to_bits(), 0);
     }
 
     #[test]

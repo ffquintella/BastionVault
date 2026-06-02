@@ -1041,6 +1041,38 @@ function CreateResourceModal({ open, onClose, typeConfig, onCreated, toast }: {
  * editor and surface a "ships in Phase N" hint until those phases
  * land.
  */
+/**
+ * Report whether the caller may read a resource's stored credentials, by
+ * querying their effective capabilities on `resources/secrets/<name>/`.
+ * Returns `null` while loading. A connect-only caller (capability `connect`
+ * but not `read`) resolves to `false` — the UI then hides credential values
+ * and restricts connections to Rustion-brokered profiles. Fails closed on
+ * error so credentials are never exposed by accident; the server enforces
+ * the real boundary regardless.
+ */
+function useCanReadSecrets(resourceName: string): boolean | null {
+  const [canRead, setCanRead] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setCanRead(null);
+    const path = `resources/secrets/${resourceName}/`;
+    api
+      .capabilitiesSelf([path])
+      .then((res) => {
+        if (cancelled) return;
+        const caps = res.paths[path] ?? [];
+        setCanRead(caps.includes("read") || caps.includes("root"));
+      })
+      .catch(() => {
+        if (!cancelled) setCanRead(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [resourceName]);
+  return canRead;
+}
+
 function ConnectionProfilesPanel({
   resource,
   onUpdated,
@@ -1066,7 +1098,16 @@ function ConnectionProfilesPanel({
   //     publickey credential)
   //   - RDP+PKI: pending CredSSP smartcard wiring
   //   - SSH-engine: pending
-  const launchableProfiles = profiles.filter(isLaunchableProfile);
+  //
+  // Connect-only callers (no `read` on the resource's secrets) may only
+  // launch Rustion-brokered profiles: a `direct` dial would resolve the
+  // credential into the local GUI process, defeating the boundary. The
+  // server resolves the credential for `rustion` opens, so those are safe.
+  const canReadSecrets = useCanReadSecrets(String(resource.name ?? ""));
+  const connectOnly = canReadSecrets === false;
+  const launchableProfiles = profiles
+    .filter(isLaunchableProfile)
+    .filter((p) => !connectOnly || p.kind === "rustion");
 
   // LDAP operator-bind mode requires a credential prompt before
   // the open call. We surface it as a tiny inline modal; on
@@ -1176,6 +1217,15 @@ function ConnectionProfilesPanel({
           <div className="rounded border border-yellow-700 bg-yellow-950/40 text-yellow-200 px-3 py-2 text-sm">
             <code>os_type = {osType}</code> — Connect is disabled for
             this OS type. Profiles can still be saved for future use.
+          </div>
+        )}
+
+        {connectOnly && (
+          <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] px-3 py-2 text-sm">
+            <strong className="text-[var(--color-text)]">Connect-only access.</strong>{" "}
+            You can open Rustion-brokered sessions to this resource, but its
+            stored credentials are not visible to you. Direct-dial profiles
+            are hidden because they would expose the credential locally.
           </div>
         )}
 
@@ -2078,9 +2128,19 @@ function ResourceSecretsPanel({ resourceName, toast }: {
   const [versions, setVersions] = useState<SecretHistoryVersion[]>([]);
   const [loadingVersions, setLoadingVersions] = useState(false);
 
+  const canReadSecrets = useCanReadSecrets(resourceName);
+
   useEffect(() => {
-    loadSecrets();
-  }, [resourceName]);
+    // Don't attempt to list/read secrets for a connect-only caller — the
+    // request would 403. Wait until the capability check resolves.
+    if (canReadSecrets === null) return;
+    if (canReadSecrets) {
+      loadSecrets();
+    } else {
+      setKeys([]);
+      setLoading(false);
+    }
+  }, [resourceName, canReadSecrets]);
 
   async function loadSecrets() {
     setLoading(true);
@@ -2200,6 +2260,17 @@ function ResourceSecretsPanel({ resourceName, toast }: {
     } finally {
       setSavingEdit(false);
     }
+  }
+
+  if (canReadSecrets === false) {
+    return (
+      <Card>
+        <EmptyState
+          title="Credentials hidden"
+          description="You have connect-only access to this resource. You can open Rustion-brokered sessions from the Connection tab, but its stored credentials are not visible to you."
+        />
+      </Card>
+    );
   }
 
   return (

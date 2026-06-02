@@ -206,6 +206,7 @@ impl RustionBackend {
         let h_master_issue = self.inner.clone();
         let h_master_rotate = self.inner.clone();
         let h_session_open = self.inner.clone();
+        let h_session_open_v2 = self.inner.clone();
         let h_deployment_id = self.inner.clone();
         let h_session_renew = self.inner.clone();
         let h_session_kill = self.inner.clone();
@@ -584,6 +585,36 @@ impl RustionBackend {
                         {op: Operation::Write, handler: h_session_open.handle_session_open}
                     ],
                     help: "Open a Rustion-mediated SSH/RDP session. Runs the dispatcher, builds a BVRG-v1 envelope, POSTs at the chosen Rustion target, and returns the session ticket bundle."
+                },
+                {
+                    // POST rustion/v2/session/open — connect-only entry point.
+                    // Enforces a `connect` (or read/root) capability on the
+                    // resource's secret path and resolves `secret`-kind
+                    // credentials server-side, so an operator can open a
+                    // brokered session without `read` on the credential.
+                    pattern: r"v2/session/open$",
+                    fields: {
+                        "resource_name": { field_type: FieldType::Str, default: "", description: "Resource whose secret path gates the connect capability and is resolved server-side." },
+                        "credential_source": { field_type: FieldType::Map, required: false, description: "Credential reference, e.g. {\"kind\":\"secret\",\"secret_id\":\"…\"}. When set and credential_material is empty, BastionVault resolves it server-side." },
+                        "target_host": { field_type: FieldType::Str, default: "", description: "Target SSH/RDP destination host." },
+                        "target_port": { field_type: FieldType::Int, default: 22, description: "Target SSH/RDP destination port." },
+                        "target_protocol": { field_type: FieldType::Str, default: "ssh", description: "ssh | rdp" },
+                        "target_hostkey_pin": { field_type: FieldType::Str, default: "", description: "Optional TOFU host-key fingerprint." },
+                        "credential_kind": { field_type: FieldType::Str, default: "", description: "ssh-key | ssh-password | rdp-password | rdp-cert | ..." },
+                        "credential_username": { field_type: FieldType::Str, default: "", description: "Username on the target host." },
+                        "credential_material": { field_type: FieldType::Str, default: "", description: "Base64-encoded credential bytes (deferred ldap/ssh-engine/pki kinds still pass this through)." },
+                        "ttl_secs": { field_type: FieldType::Int, default: 3600, description: "Requested session TTL." },
+                        "max_renewals": { field_type: FieldType::Int, default: 3, description: "Max renewal count." },
+                        "recording": { field_type: FieldType::Str, default: "always", description: "always | off | input-redacted" },
+                        "bastions": { field_type: FieldType::CommaStringSlice, required: false, description: "Pinned ordered target ids; empty = random global pool." },
+                        "resource_id": { field_type: FieldType::Str, required: false, description: "Resource id for per-resource policy lookup." },
+                        "resource_type": { field_type: FieldType::Str, required: false, description: "Resource type for per-type policy lookup." },
+                        "asset_group_ids": { field_type: FieldType::CommaStringSlice, required: false, description: "Asset group ids the resource belongs to (for per-AG resolution)." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_session_open_v2.handle_session_open_v2}
+                    ],
+                    help: "Connect-only Rustion session open. Enforces a `connect` capability on the resource and resolves secret-kind credentials server-side so the caller never needs read access to the credential."
                 },
                 {
                     // GET rustion/recordings — list known recordings.
@@ -1734,6 +1765,211 @@ impl RustionBackendInner {
             }
             Err(e) => Err(bv_error_string!(&format!("{e}"))),
         }
+    }
+
+    // ─── Connect-only session-open (v2) ─────────────────────────────
+
+    /// `POST rustion/v2/session/open` — the connect-only entry point.
+    ///
+    /// Differs from [`handle_session_open`] in two ways:
+    ///   1. It enforces a `connect` (or `read`/`root`) capability on the
+    ///      resource's secret path, so an operator can be granted the
+    ///      ability to open a brokered session **without** read access to
+    ///      the underlying credential.
+    ///   2. When the caller passes a credential *reference*
+    ///      (`credential_source = {kind:"secret", secret_id:"…"}`) instead
+    ///      of raw `credential_material`, BastionVault resolves the secret
+    ///      server-side under its own authority — the connect-only caller
+    ///      never reads it.
+    ///
+    /// All brokering logic (dispatcher, envelope, policy resolution) is
+    /// shared with [`handle_session_open`], which this delegates into once
+    /// credential material is in hand. v1 never calls v2.
+    pub async fn handle_session_open_v2(
+        &self,
+        b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let resource_name = req
+            .get_data("resource_name")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        if resource_name.is_empty() {
+            return Err(bv_error_response_status!(
+                400,
+                "v2 session/open requires `resource_name`"
+            ));
+        }
+
+        // (1) Connect-capability gate on the resource's secret path. This
+        // is a SECOND ACL check, distinct from the `Write` check post_auth
+        // already ran on `rustion/v2/session/open` itself: that guards who
+        // may call the endpoint; this guards who may connect to *this*
+        // resource. `read`/`root` imply connect, so existing read+connect
+        // users keep working with no policy change.
+        let auth = req
+            .auth
+            .clone()
+            .ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
+        let policy_module = self
+            .core
+            .module_manager
+            .get_module::<crate::modules::policy::PolicyModule>("policy")
+            .ok_or_else(|| bv_error_string!("policy module not registered"))?;
+        let acl = policy_module
+            .policy_store
+            .load()
+            .new_acl_for_request(&auth.policies, None, &auth)
+            .await?;
+        let secret_prefix = format!("resources/secrets/{resource_name}/");
+        let caps = acl.capabilities(secret_prefix);
+        let may_connect = caps
+            .iter()
+            .any(|c| c == "connect" || c == "read" || c == "root");
+        if !may_connect {
+            return Err(RvError::ErrPermissionDenied);
+        }
+
+        // (2) Server-side credential resolution. Only when the caller did
+        // not already supply raw `credential_material` (the deferred
+        // ldap/ssh-engine/pki kinds still resolve client-side and pass
+        // material through). The `secret` kind is resolved here so a
+        // connect-only caller never needs `read` on the secret.
+        let cred_material_present = req
+            .get_data("credential_material")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| !s.is_empty()))
+            .unwrap_or(false);
+        if !cred_material_present {
+            let cs = req.get_data("credential_source").ok().ok_or_else(|| {
+                bv_error_response_status!(
+                    400,
+                    "v2 session/open requires `credential_material` or `credential_source`"
+                )
+            })?;
+            let kind = cs.get("kind").and_then(|v| v.as_str()).unwrap_or_default();
+            match kind {
+                "secret" => {
+                    let secret_id = cs
+                        .get("secret_id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            bv_error_response_status!(400, "credential_source.secret_id is required")
+                        })?
+                        .to_string();
+                    let (material_b64, username) = self
+                        .resolve_secret_credential(&resource_name, &secret_id, &auth)
+                        .await?;
+                    let data = req.data.get_or_insert_with(Map::new);
+                    data.insert("credential_material".into(), Value::String(material_b64));
+                    if data
+                        .get("credential_kind")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .is_empty()
+                    {
+                        data.insert(
+                            "credential_kind".into(),
+                            Value::String("ssh-password".into()),
+                        );
+                    }
+                    if let Some(u) = username {
+                        if data
+                            .get("credential_username")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .is_empty()
+                        {
+                            data.insert("credential_username".into(), Value::String(u));
+                        }
+                    }
+                }
+                other => {
+                    return Err(bv_error_response_status!(
+                        400,
+                        &format!(
+                            "v2 session/open server-side resolution supports \
+                             credential_source.kind=\"secret\" only; got `{other}`. \
+                             Pass resolved `credential_material` for ldap/ssh-engine/pki."
+                        )
+                    ));
+                }
+            }
+        }
+
+        // (3) Delegate to the shared brokering engine.
+        self.handle_session_open(b, req).await
+    }
+
+    /// Resolve a resource-stored secret to base64-encoded ssh-password
+    /// credential material, using BastionVault's own authority (NOT the
+    /// caller's `read` capability — that's the whole point of connect-only).
+    /// The caller's `connect` grant must already have been verified.
+    ///
+    /// Only the ssh-password shape is brokered server-side today, matching
+    /// the bastion proxy's current capability (private-key/cert flows are
+    /// not yet wired through the proxy).
+    async fn resolve_secret_credential(
+        &self,
+        resource_name: &str,
+        secret_id: &str,
+        auth: &crate::logical::Auth,
+    ) -> Result<(String, Option<String>), RvError> {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+        // Route directly through the router so the read runs under the
+        // server's authority, skipping the per-caller ACL gate. The
+        // connect-capability check in `handle_session_open_v2` is the
+        // authorization for this read.
+        let path = format!("resources/secrets/{resource_name}/{secret_id}");
+        let mut sub = Request::new(&path);
+        sub.operation = Operation::Read;
+        let resp = self
+            .core
+            .router
+            .handle_request(&mut sub)
+            .await?
+            .ok_or_else(|| {
+                bv_error_response_status!(
+                    404,
+                    &format!("resource secret `{secret_id}` not found for `{resource_name}`")
+                )
+            })?;
+        let data = resp.data.unwrap_or_default();
+        let password = data
+            .get("password")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if password.is_empty() {
+            return Err(bv_error_response_status!(
+                422,
+                &format!(
+                    "secret `{secret_id}` carries no `password` field — only ssh-password \
+                     credentials can be brokered server-side today"
+                )
+            ));
+        }
+        let username = data
+            .get("username")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+
+        // Mirror the resource module's security-log line so "who pulled a
+        // credential to broker a connect-only session" lands in security.log
+        // attributed to the connecting operator (the router-direct read above
+        // has no caller identity of its own).
+        log::info!(
+            target: "security",
+            "rustion-connect-resolve: user={} resource={} key={}",
+            auth.metadata.get("username").map(String::as_str).unwrap_or(""),
+            resource_name,
+            secret_id
+        );
+
+        Ok((STANDARD.encode(password.as_bytes()), username))
     }
 
     // ─── Phase 5: renew + kill ──────────────────────────────────────
@@ -3139,5 +3375,142 @@ impl Module for RustionModule {
         self.policy_store.store(Arc::new(None));
         self.telemetry_cache.store(Arc::new(None));
         core.delete_logical_backend("rustion")
+    }
+}
+
+#[cfg(test)]
+mod connect_only_tests {
+    use crate::test_utils::TestHttpServer;
+
+    /// End-to-end authorization proof for connect-only access through
+    /// `rustion/v2/session/open`:
+    ///   - a connect-only caller (capability `connect`, not `read`) is denied
+    ///     a direct read of the resource secret, but its v2 session-open
+    ///     passes the connect gate and reaches dispatch (no bastion enrolled
+    ///     → 502/503, NOT a 403 permission-denied at the gate). This proves
+    ///     the credential was resolved server-side without the caller's read.
+    ///   - a caller with neither `read` nor `connect` on the resource is
+    ///     denied at the gate (403) before any resolution.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_connect_only_session_open_v2_gate_and_resolution() {
+        let mut server = TestHttpServer::new("test_connect_only_session_open_v2", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+
+        // Stored credential for the resource (server-side resolvable).
+        server
+            .write(
+                "resources/secrets/db/ssh",
+                serde_json::json!({ "password": "hunter2", "username": "deploy" })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+
+        // connect-only: may open a session, may NOT read the secret.
+        // read-connect: may do both. no-connect: may call the endpoint but
+        // not connect to this resource. All three may hit the rustion mount.
+        let policies = [
+            (
+                "connect-only",
+                "path \"resources/secrets/db/*\" { capabilities = [\"connect\"] }\n\
+                 path \"rustion/*\" { capabilities = [\"create\", \"update\", \"read\"] }",
+            ),
+            (
+                "no-connect",
+                "path \"rustion/*\" { capabilities = [\"create\", \"update\", \"read\"] }",
+            ),
+        ];
+        for (name, body) in policies {
+            server
+                .write(
+                    &format!("sys/policies/acl/{name}"),
+                    serde_json::json!({ "policy": body }).as_object().cloned(),
+                    Some(&root),
+                )
+                .unwrap();
+        }
+
+        server
+            .write(
+                "sys/auth/pass",
+                serde_json::json!({ "type": "userpass" }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        for (user, policy) in [("conn", "connect-only"), ("noconn", "no-connect")] {
+            server
+                .write(
+                    &format!("auth/pass/users/{user}"),
+                    serde_json::json!({
+                        "password": "hunter22XX!",
+                        "token_policies": policy,
+                        "ttl": 0,
+                    })
+                    .as_object()
+                    .cloned(),
+                    Some(&root),
+                )
+                .unwrap();
+        }
+
+        let login = |user: &str| -> String {
+            server
+                .write(
+                    &format!("auth/pass/login/{user}"),
+                    serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                    None,
+                )
+                .unwrap()
+                .1
+                .get("auth")
+                .and_then(|a| a.get("client_token"))
+                .and_then(|v| v.as_str())
+                .unwrap()
+                .to_string()
+        };
+
+        let open_v2 = |token: &str| -> u16 {
+            server
+                .write(
+                    "rustion/v2/session/open",
+                    serde_json::json!({
+                        "resource_name": "db",
+                        "credential_source": { "kind": "secret", "secret_id": "ssh" },
+                        "target_host": "10.0.0.5",
+                        "target_port": 22,
+                        "target_protocol": "ssh"
+                    })
+                    .as_object()
+                    .cloned(),
+                    Some(token),
+                )
+                .unwrap()
+                .0
+        };
+
+        let conn = login("conn");
+        let noconn = login("noconn");
+
+        // Connect-only caller cannot read the stored credential directly.
+        let (read_status, _) = server
+            .request("GET", "resources/secrets/db/ssh", None, Some(&conn), None)
+            .unwrap();
+        assert_eq!(read_status, 403, "connect-only must be denied a direct secret read");
+
+        // ...but its v2 session-open passes the connect gate and resolves the
+        // credential server-side, failing only at dispatch (no bastion).
+        let conn_open = open_v2(&conn);
+        assert_ne!(conn_open, 403, "connect-only must pass the connect gate, got 403");
+        assert_ne!(conn_open, 401, "connect-only is authenticated, got 401");
+        assert!(
+            conn_open == 502 || conn_open == 503,
+            "connect-only should reach dispatch and fail on no-bastion (502/503), got {conn_open}"
+        );
+
+        // No-connect caller is denied at the gate before any resolution.
+        let noconn_open = open_v2(&noconn);
+        assert_eq!(noconn_open, 403, "no-connect must be denied at the connect gate");
     }
 }

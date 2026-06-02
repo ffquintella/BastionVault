@@ -692,6 +692,28 @@ async fn sys_get_internal_ui_mounts_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// POST `/v2/sys/capabilities-self` — report the caller's effective
+/// capabilities on a set of paths.
+async fn sys_capabilities_self_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
+        serde_json::Map::new()
+    } else {
+        serde_json::from_slice(&body)?
+    };
+    body.clear();
+
+    let mut r = request_auth(&req);
+    r.path = "sys/capabilities-self".to_string();
+    r.operation = Operation::Write;
+    r.body = Some(payload);
+
+    handle_request(core, &mut r).await
+}
+
 async fn sys_get_internal_ui_mount_request_handler(
     req: HttpRequest,
     name: web::Path<String>,
@@ -2606,6 +2628,13 @@ pub fn init_sys_service(cfg: &mut web::ServiceConfig) {
                 web::resource("/batch")
                     .app_data(web::JsonConfig::default().limit(default_batch_body_limit()))
                     .route(web::post().to(crate::http::batch::sys_batch_v2_request_handler)),
+            )
+            // Effective-capabilities lookup. v2-only: registered here rather
+            // than in `configure_sys_routes` so `/v1/sys/capabilities-self`
+            // is not served.
+            .service(
+                web::resource("/capabilities-self")
+                    .route(web::post().to(sys_capabilities_self_request_handler)),
             ),
     );
 }

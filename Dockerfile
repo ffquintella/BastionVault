@@ -23,7 +23,8 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY gui/src-tauri/Cargo.toml ./gui/src-tauri/Cargo.toml
-COPY plugins-ext ./plugins-ext
+# Note: `plugins-ext/` is excluded from the Cargo workspace (and from the
+# Docker build context via .dockerignore), so it is intentionally not copied.
 
 # Source tree + build. The gui crate is in the workspace but its
 # bastion-vault-gui binary needs the Tauri tooling — we explicitly
@@ -55,8 +56,12 @@ WORKDIR /var/lib/bastion-vault
 
 EXPOSE 8200 8201
 
-ENV VAULT_LOG_LEVEL=info \
-    BASTION_VAULT_LOCAL_DEV=1
+# NOTE: no auto-init env var. The server always starts sealed +
+# uninitialised; the e2e driver (tests/e2e/rustion-ssh/run.sh) performs
+# init + unseal over the API. (An earlier revision set an unread
+# `BASTION_VAULT_LOCAL_DEV=1` here, implying an auto-init path that no
+# server code ever honoured — removed to avoid the false promise.)
+ENV VAULT_LOG_LEVEL=info
 
 ENTRYPOINT ["/usr/local/bin/bvault"]
 CMD ["server", "--config", "/etc/bastion-vault/config.toml"]

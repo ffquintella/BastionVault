@@ -1,36 +1,74 @@
-# Rustion config for the Phase 3.1 e2e driver.
-# Minimal: control-plane HTTP listener + SSH proxy listener,
-# `authorities/` mounted from `./config/rustion-authorities/` on
-# the host so the BV-issued master pubkey can be pasted in
-# without rebuilding the image.
+# Rustion config for the BastionVault e2e driver.
+#
+# Schema tracks rustion-core/src/config.rs (the v0.7-era keys this file
+# used to carry — `bind`, `identity_pub/priv`, `allow_bv_ticket`,
+# `checkpoint_interval_secs`, the `[control_plane.health]` table — were
+# all renamed or dropped). All writable paths live under the
+# bind-mounted /var/lib/rustion so state survives `docker compose down`.
 
-[control_plane]
-enabled        = true
-bind           = "0.0.0.0:9443"
-authorities_dir = "/etc/rustion/authorities/"
-# Identity keypair persisted on the bind-mount so it survives
-# container restarts. Auto-generated on first start.
-identity_pub   = "/var/lib/rustion/identity.pub"
-identity_priv  = "/var/lib/rustion/identity.key"
-recording_fetch_enabled = true
-active_session_cap = 64
-max_envelope_bytes = 16384
+[server]
+ssh_listen                 = "0.0.0.0:2222"
+rdp_listen                 = "0.0.0.0:3389"
+smb_listen                 = "0.0.0.0:4445"
+max_sessions               = 100
+idle_timeout_secs          = 600
+max_session_duration_secs  = 3600
+rdp_nla_enabled            = false
+rdp_pqc_tls                = false
+ssh_host_key_path          = "/var/lib/rustion/ssh_host_ed25519_key"
 
-[control_plane.health]
-rate_per_source_per_sec   = 4
-rate_per_authority_per_sec = 10
+[crypto]
+cipher_suite  = "hybrid-pqc"
+pqc_kem       = "ml-kem-768"
+pqc_sig       = "ml-dsa-65"
+classical_kem = "x25519"
+classical_sig = "ed25519"
+symmetric     = "aes-256-gcm"
 
-[ssh]
-bind          = "0.0.0.0:2222"
-host_key      = "/var/lib/rustion/ssh_host_ed25519_key"
-# BV-mediated sessions don't require a host-side Rustion user —
-# the ticket-auth path bypasses the user store entirely.
-allow_bv_ticket = true
+[auth]
+password_auth          = true
+certificate_auth       = false
+saml_auth              = false
+oidc_auth              = false
+mfa_required           = false
+ca_cert_path           = ""
+users_dir              = "/var/lib/rustion/users"
+targets_dir            = "/var/lib/rustion/targets"
+roles_dir              = "/var/lib/rustion/roles"
+credential_key_path    = "/var/lib/rustion/credential.key"
+rate_limit_attempts    = 5
+rate_limit_window_secs = 60
 
-[recording]
-root_dir      = "/var/lib/rustion/recordings"
-format        = "asciicast"
+[auth.mfa_methods]
+totp    = true
+fido2   = false
+yubikey = false
 
 [audit]
-log_path      = "/var/lib/rustion/audit.log"
-checkpoint_interval_secs = 300
+log_dir             = "/var/lib/rustion/audit"
+checkpoint_interval = 1000
+signing_key_dir     = "/var/lib/rustion/audit-keys"
+verify_on_startup   = false
+
+[recording]
+base_dir         = "/var/lib/rustion/recordings"
+ssh_record_input = false
+retention_days   = 30
+
+# BastionVault control-plane HTTPS listener — where BV POSTs BVRG-v1
+# envelopes (/v1/sessions) and the e2e driver polls /v1/health. The
+# ML-KEM-768 identity keypair (identity.pub / identity.key) is
+# auto-generated under identity_dir on first start; the TLS cert/key are
+# NOT auto-generated (config validation requires they exist), so run.sh
+# mints a self-signed pair into control-plane/ before first start.
+[control_plane]
+enabled         = true
+listen          = "0.0.0.0:9443"
+tls_cert_path   = "/var/lib/rustion/control-plane/tls.crt"
+tls_key_path    = "/var/lib/rustion/control-plane/tls.key"
+identity_dir    = "/var/lib/rustion"
+authorities_dir = "/etc/rustion/authorities"
+# host:port advertised back to BV in the session-open response. The
+# driver dials Rustion's published port on the host directly, so this is
+# informational for the in-network view.
+ssh_advertise   = "rustion:2222"

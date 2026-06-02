@@ -138,6 +138,7 @@ impl SystemBackend {
         let sys_backend_internal_ui_mounts_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_internal_ui_mount_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_cache_flush = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_capabilities_self = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_owner_backfill = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_sso_settings_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_sso_settings_write = self.self_ptr.upgrade().unwrap().clone();
@@ -514,6 +515,23 @@ impl SystemBackend {
                     },
                     operations: [
                         {op: Operation::Read, handler: sys_backend_internal_ui_mount_read.handle_internal_ui_mount_read}
+                    ]
+                },
+                {
+                    // Report the calling token's effective capabilities on a
+                    // set of paths, so the GUI can filter affordances it must
+                    // not offer (e.g. hide credential values when the caller
+                    // holds only `connect`, not `read`). Vault-compatible
+                    // shape. v2-only (HTTP shim registered under /v2/sys).
+                    pattern: "capabilities-self$",
+                    fields: {
+                        "paths": {
+                            field_type: FieldType::Array,
+                            description: r#"Paths to evaluate the caller's capabilities against."#
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: sys_backend_capabilities_self.handle_capabilities_self}
                     ]
                 },
                 {
@@ -1773,6 +1791,63 @@ impl SystemBackend {
         Ok(None)
     }
 
+    /// `POST sys/capabilities-self` (exposed as `/v2/sys/capabilities-self`).
+    ///
+    /// Returns the calling token's effective capabilities on each requested
+    /// path. Vault-compatible response shape: a top-level `capabilities` map
+    /// (path → list of capability strings) plus per-path keys for callers
+    /// that index by path directly. The GUI uses this to decide, for a
+    /// resource's secret path, whether to show credential values (`read`
+    /// present) or only a brokered "Connect" button (`connect` only).
+    pub async fn handle_capabilities_self(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let policy_module = self.get_module::<PolicyModule>("policy")?;
+
+        let paths: Vec<String> = match req.get_data("paths") {
+            Ok(Value::Array(arr)) => arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect(),
+            Ok(Value::String(s)) => vec![s],
+            _ => Vec::new(),
+        };
+        if paths.is_empty() {
+            return Err(bv_error_response_status!(400, "`paths` must be a non-empty array"));
+        }
+
+        // The capabilities are those of the authenticated caller. An
+        // unauthenticated request cannot reach a `Write` route, so `auth`
+        // is present; treat its absence as deny.
+        let auth = req
+            .auth
+            .clone()
+            .ok_or(RvError::ErrPermissionDenied)?;
+        let acl: ACL = policy_module
+            .policy_store
+            .load()
+            .new_acl_for_request(&auth.policies, None, &auth)
+            .await?;
+
+        let mut capabilities = Map::new();
+        for path in &paths {
+            let caps = acl.capabilities(path.clone());
+            capabilities.insert(
+                path.clone(),
+                Value::Array(caps.into_iter().map(Value::String).collect()),
+            );
+        }
+
+        // Vault returns both a `capabilities` map and per-path top-level
+        // keys; mirror that so existing clients work unchanged.
+        let mut data = capabilities.clone();
+        data.insert("capabilities".into(), Value::Object(capabilities));
+
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
     pub async fn handle_internal_ui_mounts_read(
         &self,
         _backend: &dyn Backend,
@@ -2019,6 +2094,111 @@ mod mod_system_tests {
         // Identity mount for user/application groups.
         assert!(ret["secret"]["identity/"].is_object());
         assert_eq!(ret["secret"]["identity/"]["type"], Value::String("identity".into()));
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_capabilities_self_connect_only_vs_read() {
+        let mut server = TestHttpServer::new("test_capabilities_self_connect_only", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+        // capabilities-self is a v2-only route; strip the hardcoded `/v1`
+        // so `v2/sys/capabilities-self` resolves (mirrors the batch tests).
+        server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
+
+        // A connect-only policy and a read+connect policy on the same path.
+        server
+            .write(
+                "v1/sys/policies/acl/connect-only",
+                serde_json::json!({
+                    "policy": "path \"resources/secrets/db-prod/*\" { capabilities = [\"connect\"] }"
+                })
+                .as_object()
+                .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        server
+            .write(
+                "v1/sys/policies/acl/read-connect",
+                serde_json::json!({
+                    "policy": "path \"resources/secrets/db-prod/*\" { capabilities = [\"read\", \"list\", \"connect\"] }"
+                })
+                .as_object()
+                .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+
+        // Two userpass users, one per policy.
+        server
+            .write(
+                "v1/sys/auth/pass",
+                serde_json::json!({ "type": "userpass" }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        for (user, policy) in [("conn", "connect-only"), ("both", "read-connect")] {
+            server
+                .write(
+                    &format!("v1/auth/pass/users/{user}"),
+                    serde_json::json!({
+                        "password": "hunter22XX!",
+                        "token_policies": policy,
+                        "ttl": 0,
+                    })
+                    .as_object()
+                    .cloned(),
+                    Some(&root),
+                )
+                .unwrap();
+        }
+
+        let login = |user: &str| -> String {
+            server
+                .write(
+                    &format!("v1/auth/pass/login/{user}"),
+                    serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                    None,
+                )
+                .unwrap()
+                .1
+                .get("auth")
+                .and_then(|a| a.get("client_token"))
+                .and_then(|v| v.as_str())
+                .unwrap()
+                .to_string()
+        };
+
+        let caps_for = |token: &str| -> Vec<String> {
+            let (status, resp) = server
+                .request(
+                    "POST",
+                    "v2/sys/capabilities-self",
+                    serde_json::json!({ "paths": ["resources/secrets/db-prod/"] })
+                        .as_object()
+                        .cloned(),
+                    Some(token),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(status, 200, "capabilities-self must succeed: {resp:?}");
+            resp.get("capabilities")
+                .and_then(|c| c.get("resources/secrets/db-prod/"))
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default()
+        };
+
+        // Connect-only token: `connect` present, `read` absent — the
+        // signal the GUI uses to hide credentials.
+        let conn_caps = caps_for(&login("conn"));
+        assert!(conn_caps.contains(&"connect".to_string()), "got {conn_caps:?}");
+        assert!(!conn_caps.contains(&"read".to_string()), "got {conn_caps:?}");
+
+        // read+connect token: both present.
+        let both_caps = caps_for(&login("both"));
+        assert!(both_caps.contains(&"connect".to_string()), "got {both_caps:?}");
+        assert!(both_caps.contains(&"read".to_string()), "got {both_caps:?}");
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

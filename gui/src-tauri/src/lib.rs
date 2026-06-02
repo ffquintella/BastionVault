@@ -540,6 +540,7 @@ pub fn run() {
             commands::sharing::claim_kv_owner,
             commands::sharing::transfer_resource_owner,
             commands::sharing::transfer_asset_group_owner,
+            commands::capabilities::capabilities_self,
             // FIDO2
             commands::fido2_native::fido2_native_register,
             commands::fido2_native::fido2_native_login,

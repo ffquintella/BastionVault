@@ -1,0 +1,4 @@
+# Generated at runtime by run.sh — not part of the committed harness.
+var/
+run.log
+config/rustion-authorities/

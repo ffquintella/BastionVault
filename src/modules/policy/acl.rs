@@ -2055,6 +2055,39 @@ path "kv/deny" {
     }
 
     #[test]
+    fn test_acl_connect_only_capability() {
+        // A connect-only grant must expose `connect` on the resource secret
+        // path but NOT `read` — this is the property the connect-only model
+        // (open a brokered session without reading the credential) relies on.
+        let policy = create_test_policy(
+            "connect-only",
+            r#"
+            path "resources/secrets/db-prod/*" {
+                capabilities = ["connect"]
+            }
+            "#,
+        );
+        let acl = ACL::new(&[Arc::new(policy)]).unwrap();
+        let caps = acl.capabilities("resources/secrets/db-prod/");
+        assert_eq!(caps, vec![Capability::Connect.to_string()]);
+        assert!(!caps.contains(&Capability::Read.to_string()));
+
+        // A read+connect grant exposes both, so the GUI shows credentials.
+        let policy = create_test_policy(
+            "read-connect",
+            r#"
+            path "resources/secrets/db-prod/*" {
+                capabilities = ["read", "list", "connect"]
+            }
+            "#,
+        );
+        let acl = ACL::new(&[Arc::new(policy)]).unwrap();
+        let caps = acl.capabilities("resources/secrets/db-prod/");
+        assert!(caps.contains(&Capability::Read.to_string()));
+        assert!(caps.contains(&Capability::Connect.to_string()));
+    }
+
+    #[test]
     fn test_check_path_capability() {
         let mut rules = Trie::new();
         rules.insert(

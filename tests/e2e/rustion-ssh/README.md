@@ -35,23 +35,49 @@ operator-shell
 
 - Docker + docker-compose v2
 - The BV repo at `/Users/felipe/Dev/BastionVault` (or wherever you cloned it)
-- The Rustion repo as a sibling directory (the compose file references
-  `../../../Rustion` as the build context for the rustion service)
-- `bvault` CLI installed on the host (for the run.sh driver — falls back
-  to `docker compose exec bv bvault` when missing)
+- The Rustion repo as a sibling of the BastionVault repo (the compose file
+  references `../../../../rustion` — i.e. `/Users/felipe/Dev/rustion` next to
+  `/Users/felipe/Dev/BastionVault` — as the build context for the rustion
+  service)
+- Host tools used by `run.sh`: `curl`, `jq`, `openssl`, `ssh`, and
+  `sshpass` (the last is optional — without it the driver prints the
+  manual `ssh` command instead of dialling through automatically).
+
+`run.sh` drives the server entirely over its HTTP API; the `bvault` CLI
+is **not** required on the host.
 
 ## Driver
 
-`run.sh` brings up the stack, enrols the Rustion target on BV, calls
-`bvault rustion target health` to confirm the bastion is reachable,
-then walks an SSH session through the full pipeline (steps 1 → 6 in
-the diagram).
+`run.sh` is self-contained — `./run.sh` from cold start:
 
-The Phase 3.2 Dockerfiles land at `Dockerfile` in each repo's root:
-multi-stage builds (rust:1.82-bookworm builder + distroless cc-debian12
-runtime) that ship just the `bvault` / `rustion-server` binaries.
-The compose file builds both images on first `up`; subsequent runs
-reuse the cached layers.
+1. brings up `bastion-vault`, then **init + unseals it over the API**
+   (the server starts sealed/uninitialised; there is no auto-init env
+   var) and captures the root token;
+2. issues + exports BV's master signing pubkey and writes the Rustion
+   **authority record** in the schema rustion deserialises
+   (`pubkey_ed25519_b64` / `pubkey_mldsa65_b64` = base64 of the raw key
+   bytes, *not* PEM);
+3. brings up `rustion` + `openssh-target`, then enrols the bastion on BV
+   using rustion's ML-KEM-768 pubkey (read from the bind-mounted
+   `var/rustion/identity.pub`) and pins rustion's self-signed TLS leaf
+   (BV uses strict CA verification unless a leaf is pinned);
+4. creates a resource + ssh-password secret and walks a **classic**
+   session (root token, raw credential) through to a shell on the
+   target;
+5. exercises the **connect-only** path
+   (`features/connect-only-access.md`): a connect-only token is denied a
+   direct read of the secret (HTTP 403) yet its
+   `rustion/v2/session/open` resolves the credential server-side and
+   proxies an SSH session through the bastion — the operator never reads
+   the credential.
+
+Both images are multi-stage builds (rust:1.82-bookworm builder +
+distroless cc-debian12 runtime) shipping just the `bvault` /
+`rustion-server` binaries. The compose file builds them on first `up`;
+subsequent runs reuse the cached layers.
+
+To reuse an already-initialised `var/bv`, pass `BV_ROOT_TOKEN=…`. To
+start fresh, `docker compose down -v && rm -rf var/bv/* var/rustion/*`.
 
 ## Layout
 

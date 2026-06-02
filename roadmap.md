@@ -32,7 +32,8 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | Core Vault Operations (init / seal / unseal / status) | Done | Vault-API-compatible. |
 | Secret Management (KV CRUD) | Done | KV v1 + KV v2 incl. nested-folder LIST. |
 | Secret Versioning & Soft-Delete | Done | KV v2 backend, CLI auto-detect, full GUI (history panel + per-version actions + CAS + engine config). [spec](features/secret-versioning-and-soft-delete.md) |
-| Access Control (RBAC + path-based ACL) | Done | Path-based policy engine with allow / deny / capabilities. |
+| Access Control (RBAC + path-based ACL) | Done | Path-based policy engine with allow / deny / capabilities (incl. `connect`). |
+| Connect-Only Access | In progress | [spec](features/connect-only-access.md) — `connect` capability + `rustion/v2/session/open` server-side credential resolution + `v2/sys/capabilities-self` + GUI credential hiding. Phase 1 + GUI filtering + GUI Rustion connect-path rewiring (Phase 2b) done. **e2e-validated live** via the revived `tests/e2e/rustion-ssh/` harness: a connect-only token is denied a direct secret read (403) yet proxies a real SSH shell to the target through the bastion. Remaining: RDP connect path + non-secret credential kinds. |
 | Identity Groups (user / app groups → policy mapping) | Done | [spec](features/identity-groups.md) — policy union for UserPass / AppRole / FIDO2, plus Phase 7 group-shared resources via `metadata { group_shared_resources = "true" }`. |
 | Per-User Scoping (ownership + policy templating + sharing) | Done | [spec](features/per-user-scoping.md) — 11 phases + migration backfill (Phase 11: self-service claim + list badge). |
 | Asset Groups (collections of resources + KV paths) | Done | [spec](features/resource-groups.md) — 13 phases incl. ownership, sharing, member redaction. |

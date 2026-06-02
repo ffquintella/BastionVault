@@ -315,6 +315,56 @@ Returns the caller's `entity_id`, `username`, `mount_path`,
 entity from the caller's alias if the token's metadata has no
 `entity_id` yet.
 
+### Connect-Only Access
+
+The `connect` capability lets a policy grant the ability to open a
+Rustion-brokered session to a resource **without** read access to its
+stored credentials:
+
+~~~hcl
+path "resources/secrets/db-prod/*" {
+  capabilities = ["connect"]
+}
+~~~
+
+`read` and `root` imply `connect`. The credential is resolved server-side
+and injected by the bastion; the connect-only caller never reads it.
+
+**Effective capabilities (v2-only):**
+
+~~~
+POST /v2/sys/capabilities-self
+~~~
+
+Body `{ "paths": ["resources/secrets/db-prod/"] }`. Returns the caller's
+capability strings per path (Vault-compatible): a top-level `capabilities`
+map plus per-path keys. The GUI uses this to hide credential values when a
+caller has `connect` but not `read`.
+
+**Connect-only session open (v2-only):**
+
+~~~
+POST /v2/rustion/session/open
+~~~
+
+Enforces `connect`/`read`/`root` on `resources/secrets/<resource_name>/`
+before resolving credentials. When given a credential reference instead of
+raw `credential_material`, BastionVault resolves the secret server-side:
+
+~~~json
+{
+  "resource_name": "db-prod",
+  "credential_source": { "kind": "secret", "secret_id": "ssh" },
+  "target_host": "10.0.0.5",
+  "target_port": 22,
+  "target_protocol": "ssh"
+}
+~~~
+
+Only the `secret` credential kind (ssh-password shape) is resolved
+server-side today. v1 `POST /v1/rustion/session/open` (raw
+`credential_material`) is unchanged.
+
 ### Asset Groups (resource bundles)
 
 Asset groups bundle resources and KV secrets under a single name so

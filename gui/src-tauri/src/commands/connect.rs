@@ -95,51 +95,93 @@ pub async fn session_open_ssh(
         .unwrap_or("")
         .to_string();
 
-    // Resolve the credential source. Phases 3 + 5 ship: Secret +
-    // LDAP (operator-bind / static-role / library set).
-    let resolved = resolve_ssh_credential(
-        &state,
-        &request.resource_name,
-        &profile,
-        &meta,
-        request.operator_credential.as_ref(),
-    )
-    .await?;
-    let credential = resolved.credential;
-    // LDAP profiles can override the profile's username with the
-    // one the cred resolver returned (static_role/library set
-    // returns the canonical service-account username).
-    let username = if let Some(u) = resolved.effective_username {
-        u
-    } else {
-        username
-    };
-    if username.is_empty() {
-        return Err(CommandError::from(
-            "SSH profile has no username (set profile.username or use an LDAP credential source)"
-                .to_string(),
-        ));
-    }
-
-    // Consult the Rustion policy resolver. Picks the resource's first
-    // host candidate as the policy's `target_host` — that's what the
-    // bastion will dial after consuming the ticket. The resource's full
-    // candidate list still applies on the direct path.
+    // Pick the resource's first host candidate as the policy's
+    // `target_host` — what the bastion dials after consuming the ticket.
+    // The resource's full candidate list still applies on the direct path.
     let primary_target_host = host_candidates
         .first()
         .cloned()
         .unwrap_or_default();
-    let route = resolve_ssh_connect_route(
-        &state,
-        &request.resource_name,
-        &meta,
-        &profile,
-        &primary_target_host,
-        port,
-        &username,
-        &credential,
-    )
-    .await?;
+
+    // For secret-backed credentials, prefer server-side resolution through
+    // `rustion/v2/session/open`: BastionVault resolves and injects the
+    // secret, so a connect-only operator (capability `connect` but not
+    // `read`) can still open a brokered session — the GUI never reads the
+    // credential on this path. Returns `Direct` when the policy doesn't
+    // route through a bastion, in which case we fall back to the
+    // client-side resolution path below (Secret + LDAP / SSH-engine / PKI).
+    let credential_source = profile
+        .get("credential_source")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let credential_source_kind = credential_source
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let v2_route: Option<ConnectRoute> = if credential_source_kind == "secret" {
+        let r = open_rustion_session_v2_ssh(
+            &state,
+            &request.resource_name,
+            &meta,
+            &profile,
+            &primary_target_host,
+            port,
+            &username,
+            &credential_source,
+        )
+        .await?;
+        match r {
+            ConnectRoute::Rustion { .. } => Some(r),
+            ConnectRoute::Direct => None,
+        }
+    } else {
+        None
+    };
+
+    // `credential` is `Some` only on the client-side path (direct dials and
+    // non-secret kinds). The v2 server-side path dials the bastion with the
+    // ticket and never resolves a target credential locally.
+    let (route, credential, username, on_close): (
+        ConnectRoute,
+        Option<SshCredential>,
+        String,
+        Option<crate::session::SessionCleanup>,
+    ) = if let Some(r) = v2_route {
+        (r, None, username, None)
+    } else {
+        let resolved = resolve_ssh_credential(
+            &state,
+            &request.resource_name,
+            &profile,
+            &meta,
+            request.operator_credential.as_ref(),
+        )
+        .await?;
+        let cred = resolved.credential;
+        // LDAP profiles can override the profile's username with the one the
+        // cred resolver returned (static_role / library set returns the
+        // canonical service-account username).
+        let username = resolved.effective_username.unwrap_or(username);
+        if username.is_empty() {
+            return Err(CommandError::from(
+                "SSH profile has no username (set profile.username or use an LDAP credential source)"
+                    .to_string(),
+            ));
+        }
+        let route = resolve_ssh_connect_route(
+            &state,
+            &request.resource_name,
+            &meta,
+            &profile,
+            &primary_target_host,
+            port,
+            &username,
+            &cred,
+        )
+        .await?;
+        (route, Some(cred), username, resolved.on_close)
+    };
 
     // When the policy routes through a bastion, replace the dial inputs:
     // the operator connects to bastion_host:bastion_port as user
@@ -155,14 +197,19 @@ pub async fn session_open_ssh(
         host_key_fingerprint,
         rustion_label,
     ) = match &route {
-        ConnectRoute::Direct => (
-            host_candidates,
-            port,
-            username.clone(),
-            credential.clone(),
-            host_key_fingerprint,
-            None,
-        ),
+        ConnectRoute::Direct => {
+            let cred = credential.clone().ok_or_else(|| {
+                CommandError::from("direct dial requires a resolved credential".to_string())
+            })?;
+            (
+                host_candidates,
+                port,
+                username.clone(),
+                cred,
+                host_key_fingerprint,
+                None,
+            )
+        }
         ConnectRoute::Rustion {
             bastion_host,
             bastion_port,
@@ -189,7 +236,6 @@ pub async fn session_open_ssh(
     // both are set on the resource). Fall back to the next candidate
     // only on network-layer failures — auth rejections short-circuit
     // so we don't burn auth attempts on every candidate.
-    let on_close = resolved.on_close;
     let username = username_for_dial;
     let credential = credential_for_dial;
     let (chosen_host, outcome): (String, SshOpenOutcome) = {
@@ -1535,6 +1581,19 @@ async fn resolve_ssh_connect_route(
         ))
     })?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
+    parse_rustion_ticket_bundle(state, data, BASTION_PROTOCOL, max_renewals as u32).await
+}
+
+/// Parse the `{session_id, host, port, ticket, …}` bundle returned by
+/// `rustion/session/open` (v1) or `rustion/v2/session/open` into a
+/// [`ConnectRoute::Rustion`]. Shared by both routes so the dial-coord
+/// resolution, validation, and field extraction stay identical.
+async fn parse_rustion_ticket_bundle(
+    state: &State<'_, AppState>,
+    data: Map<String, Value>,
+    protocol: BastionProtocol,
+    max_renewals: u32,
+) -> Result<ConnectRoute, CommandError> {
     let returned_host = data
         .get("host")
         .and_then(|v| v.as_str())
@@ -1560,15 +1619,14 @@ async fn resolve_ssh_connect_route(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    // Phase 9.3: prefer the stored listener coords (set at enrolment
-    // by `rustion_target_refresh_listeners`) over the session/open
-    // echo, and fall back to the target endpoint host when neither is
-    // usable. Protocol is filled in per call site below.
+    // Phase 9.3: prefer the stored listener coords (set at enrolment by
+    // `rustion_target_refresh_listeners`) over the session/open echo, and
+    // fall back to the target endpoint host when neither is usable.
     let bastion_port_in = bastion_port;
     let (bastion_host, bastion_port) = resolve_bastion_dial_coords(
         state,
         &bastion_id,
-        BASTION_PROTOCOL,
+        protocol,
         &returned_host,
         bastion_port_in,
     )
@@ -1602,8 +1660,108 @@ async fn resolve_ssh_connect_route(
         session_id,
         correlation_id,
         expires_at,
-        max_renewals: max_renewals as u32,
+        max_renewals,
     })
+}
+
+/// Connect-only SSH path: open a Rustion session by sending a credential
+/// **reference** (`credential_source`) to `rustion/v2/session/open` so
+/// BastionVault resolves and injects the secret server-side. The GUI never
+/// reads the secret, so an operator with `connect` (but not `read`) on the
+/// resource can still launch a session. Returns [`ConnectRoute::Direct`]
+/// when the policy does not route through a bastion — the caller then falls
+/// back to the client-side resolution path.
+async fn open_rustion_session_v2_ssh(
+    state: &State<'_, AppState>,
+    resource_name: &str,
+    meta: &Map<String, Value>,
+    profile: &Value,
+    target_host: &str,
+    target_port: u16,
+    target_user: &str,
+    credential_source: &Value,
+) -> Result<ConnectRoute, CommandError> {
+    const BASTION_PROTOCOL: BastionProtocol = BastionProtocol::Ssh;
+    let (resource_id, resource_type, asset_group_ids) =
+        collect_policy_hints(state, resource_name, meta).await;
+    let effective =
+        read_effective_policy(state, &resource_id, &resource_type, &asset_group_ids).await?;
+
+    if let Some(detail) = effective.lock_violation {
+        return Err(CommandError::from(format!(
+            "rustion policy lock violation: {detail}"
+        )));
+    }
+
+    let prefer_rustion = match effective.transport.as_str() {
+        "rustion-required" => true,
+        "rustion-preferred" => !effective.bastions.is_empty(),
+        _ => false,
+    };
+    if !prefer_rustion {
+        // Policy didn't select a bastion; the caller resolves the
+        // credential client-side and dials direct.
+        return Ok(ConnectRoute::Direct);
+    }
+
+    let ttl_secs = profile
+        .get("ttl_secs")
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(3600);
+    let max_renewals = profile
+        .get("max_renewals")
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u8::try_from(n).ok())
+        .unwrap_or(3);
+    let recording = if effective.recording.is_empty() {
+        "always".to_string()
+    } else {
+        effective.recording.clone()
+    };
+
+    let mut body = Map::new();
+    // The reference, not the material — BastionVault resolves it.
+    body.insert("resource_name".into(), Value::String(resource_name.to_string()));
+    body.insert("credential_source".into(), credential_source.clone());
+    body.insert("target_host".into(), Value::String(target_host.to_string()));
+    body.insert("target_port".into(), Value::Number(target_port.into()));
+    body.insert("target_protocol".into(), Value::String("ssh".to_string()));
+    body.insert("credential_kind".into(), Value::String("ssh-password".to_string()));
+    // May be empty; the server fills it from the secret's `username` field.
+    body.insert("credential_username".into(), Value::String(target_user.to_string()));
+    body.insert("ttl_secs".into(), Value::Number(ttl_secs.into()));
+    body.insert("max_renewals".into(), Value::Number(max_renewals.into()));
+    body.insert("recording".into(), Value::String(recording));
+    if !effective.bastions.is_empty() {
+        body.insert(
+            "bastions".into(),
+            Value::Array(effective.bastions.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    if !resource_id.is_empty() {
+        body.insert("resource_id".into(), Value::String(resource_id));
+    }
+    if !resource_type.is_empty() {
+        body.insert("resource_type".into(), Value::String(resource_type));
+    }
+    if !asset_group_ids.is_empty() {
+        body.insert(
+            "asset_group_ids".into(),
+            Value::Array(asset_group_ids.into_iter().map(Value::String).collect()),
+        );
+    }
+
+    let resp = make_request(
+        state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}v2/session/open"),
+        Some(body),
+    )
+    .await
+    .map_err(|e| CommandError::from(format!("rustion v2 session/open failed: {e:?}")))?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    parse_rustion_ticket_bundle(state, data, BASTION_PROTOCOL, max_renewals as u32).await
 }
 
 /// RDP analogue of [`resolve_ssh_connect_route`]. Same shape; differs in:
@@ -1743,75 +1901,7 @@ async fn resolve_rdp_connect_route(
         ))
     })?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
-    let returned_host = data
-        .get("host")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let bastion_port = data
-        .get("port")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| u16::try_from(n).ok())
-        .unwrap_or(0);
-    let ticket = data
-        .get("ticket")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let bastion_name = data
-        .get("bastion_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let bastion_id = data
-        .get("bastion_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    // Phase 9.3: prefer the stored listener coords (set at enrolment
-    // by `rustion_target_refresh_listeners`) over the session/open
-    // echo, and fall back to the target endpoint host when neither is
-    // usable. Protocol is filled in per call site below.
-    let bastion_port_in = bastion_port;
-    let (bastion_host, bastion_port) = resolve_bastion_dial_coords(
-        state,
-        &bastion_id,
-        BASTION_PROTOCOL,
-        &returned_host,
-        bastion_port_in,
-    )
-    .await;
-    if bastion_host.is_empty() || bastion_port == 0 || ticket.is_empty() {
-        return Err(CommandError::from(
-            "rustion session/open returned an incomplete ticket bundle".to_string(),
-        ));
-    }
-    let session_id = data
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let correlation_id = data
-        .get("correlation_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let expires_at = data
-        .get("expires_at")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    Ok(ConnectRoute::Rustion {
-        bastion_host,
-        bastion_port,
-        ticket,
-        bastion_name,
-        bastion_id,
-        session_id,
-        correlation_id,
-        expires_at,
-        max_renewals: max_renewals as u32,
-    })
+    parse_rustion_ticket_bundle(state, data, BASTION_PROTOCOL, max_renewals as u32).await
 }
 
 async fn read_resource_meta(

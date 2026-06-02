@@ -1,5 +1,3 @@
-version: "3.9"
-
 # Three-service stack exercising Rustion-mediated SSH end-to-end.
 # Maps the four steps from features/rustion-integration.md § Trust
 # model onto a docker network:
@@ -28,14 +26,22 @@ services:
       - "8201:8201"  # Hiqlite raft (single-node test mode)
     volumes:
       - ./var/bv:/var/lib/bastion-vault
-      - ./config/bv-policy.hcl:/etc/bastion-vault/policies/admin.hcl:ro
+      - ./config/bv-config.hcl:/etc/bastion-vault/config.hcl:ro
+    # The image's default CMD points at config.toml; this harness ships
+    # an HCL config (file storage + plaintext listener), so override the
+    # config path. The server comes up *sealed + uninitialised* — run.sh
+    # drives init + unseal over the API and captures the root token.
+    command: ["server", "--config", "/etc/bastion-vault/config.hcl"]
     environment:
       - VAULT_LOG_LEVEL=info
-      - BASTION_VAULT_LOCAL_DEV=1
 
   rustion:
     build:
-      context: ../../../Rustion
+      # Rustion lives as a sibling of the BastionVault repo
+      # (/Users/felipe/Dev/rustion), four levels up from this compose
+      # file. (`../../../Rustion` — three levels — would resolve inside
+      # the BastionVault tree and does not exist.)
+      context: ../../../../rustion
       dockerfile: Dockerfile
     image: rustion:phase32
     container_name: rustion
@@ -68,7 +74,8 @@ services:
       - PASSWORD_ACCESS=true
       - SUDO_ACCESS=false
     expose:
-      - "22"
+      # linuxserver/openssh-server listens on 2222 inside the container.
+      - "2222"
 
 networks:
   rustion-e2e:
