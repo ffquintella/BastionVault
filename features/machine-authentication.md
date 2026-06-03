@@ -107,8 +107,12 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   `unknown` if never seen). Key transitions emit `audit`-target log events (`ferrogate.machine.first_seen` /
   `.bootstrap_approved` / `.login`). Tested: bootstrap approves+mints the first machine, the second machine in
   the same conditions goes `pending`, and the status endpoint reports approved/unknown.
-- **Phase 4 shipped (plaintext validated live; PQ-TLS implemented, server-side validation pending).** The
-  `cmis_grpc` JWKS source is implemented: BastionVault calls FerroGate's `ferrogate.v1.MachineIdentity/JWKS` RPC
+- **Phase 4 shipped — both transports validated live.** Plaintext was validated against CMIS 0.13.1; the
+  **hybrid post-quantum TLS path is now validated end-to-end against the live CMIS 0.15.0** (`X25519MLKEM768`-only,
+  SHA-384 SPKI-pinned ECDSA-P256 server cert) — BastionVault negotiates the PQ key exchange, pins the cert, and
+  fetches the JWKS (`kid cmis-dev-1`). The vendored FerroGate SDK is bumped to `releases/v0.15.0`
+  (`ferro-crypto` + `ferro-child-verify`; public APIs and the proto are unchanged from 0.13.2). The
+  `cmis_grpc` JWKS source calls FerroGate's `ferrogate.v1.MachineIdentity/JWKS` RPC
   and caches the result for `jwks_refresh_secs` (default 60), with stale-while-revalidate on fetch failure. The
   gRPC stubs are **pre-generated** from `machine_identity.proto` and vendored
   ([`cmis_proto.rs`](../src/modules/credential/ferrogate/cmis_proto.rs)) so `protoc` is **not** a BastionVault
@@ -369,7 +373,7 @@ operator on attested host                     server
 | 1 ✅ | **Plugin skeleton + config + storage** | **Done.** `auth/ferrogate/` mount, `config` read/write, `MachineEntry` storage layout, admin `register`/`list`/`show`/`delete`/`approve`/`reject`/`revoke`. `login` stubbed `not_implemented`. Integration test covers the full admin lifecycle. (Audit-event emission deferred to land with `login` in Phase 3.) |
 | 2 ✅ | **Verification core (static JWKS) + login** | **Done.** `ferro-child-verify::verify_bound` wired end-to-end against a `static_jwks` anchor (verifier vendored from FerroGate `releases/v0.13.2` under `third_party/`). Child-token + DPoP login mints a token for an approved machine; unknown → pending; audience + trust-domain enforced. DPoP read from `DPoP` header or `dpop` body field. Deterministic test mints a real composite-signed token. |
 | 3 ✅ | **Enrolment state machine + bootstrap** | **Done.** First-seen → pending side effect, token-authenticated self-poll (`POST status`), admin approve/reject/revoke transitions, and the **root-token one-shot bootstrap** (`approved_count == 0` + root). `audit`-target log events on key transitions. Tests cover the bootstrap happy path, the second-machine-not-bootstrapped guard, and the status endpoint. (Self-poll is `POST status` with the token rather than `GET enrolment/{spiffe_id}` — a SPIFFE ID can't be a path segment, and presenting the token both identifies and authorizes the poll.) |
-| 4 ✅ | **CMIS gRPC JWKS source** | **Done** (plaintext validated live; PQ-TLS pending server). `cmis_grpc` source calls `MachineIdentity/JWKS` with cache + stale-while-revalidate; pre-generated tonic stubs (no protoc in build); transport selectable plaintext / SPKI-pinned hybrid-PQ-TLS via `cmis_tls_enable`. Validated end-to-end against the live dev CMIS (`segdc1vds0005`). CRL enforcement applies to the SVID path → folded into Phase 7. |
+| 4 ✅ | **CMIS gRPC JWKS source** | **Done — plaintext + PQ-TLS both validated live.** `cmis_grpc` source calls `MachineIdentity/JWKS` with cache + stale-while-revalidate; pre-generated tonic stubs (no protoc in build); transport selectable plaintext / SPKI-pinned hybrid-PQ-TLS via `cmis_tls_enable`. PQ-TLS (`X25519MLKEM768`) validated end-to-end against the live CMIS 0.15.0 on `segdc1vds0005`. SDK vendored at v0.15.0. CRL enforcement applies to the SVID path → folded into Phase 7. |
 | 5 | **Client CLI** | `bvault ferrogate login|status|whoami` driving the MIA helper socket + DPoP proof construction; clear errors when the MIA is absent or the machine is pending. |
 | 6 | **Admin GUI page** | `Settings → Auth → Machines` (Pending/Approved/History/Config tabs), `AUTH_TYPES` entry, responsive per GUI rules. UI tests under `vitest`. |
 | 7 | **Direct-SVID mode + hardening + docs** | Opt-in `accept_svid` path via `verify_unrevoked`; rate limits on `login`; dashboard metrics (`ferrogate_pending_total`, `ferrogate_approved_total`, `ferrogate_login_total`, `ferrogate_login_denied_total`); threat-model write-up under `docs/`; operator setup guide (FerroGate trust-anchor config, bootstrap recipe, CRL caveats for `static_jwks`). |

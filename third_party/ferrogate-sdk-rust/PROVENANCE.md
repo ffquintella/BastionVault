@@ -25,11 +25,11 @@ workspace (see the `exclude` list in the root `Cargo.toml`).
 | | |
 |---|---|
 | Project | FerroGate |
-| Release | `releases/v0.13.2` |
-| URL | https://github.com/ffquintella/FerroGate/releases/tag/releases/v0.13.2 |
-| Asset | `ferrogate-sdk-rust-0.13.2.tgz` |
-| SHA-256 | `1d949a723f7c7bcd6352273ca9d1621a3e121b712cfa683c98cc4163b55d6802` |
-| SDK version | `0.13.2` |
+| Release | `releases/v0.15.0` |
+| URL | https://github.com/ffquintella/FerroGate/releases/tag/releases/v0.15.0 |
+| Asset | `ferrogate-sdk-rust-0.15.0.tgz` |
+| SHA-256 | `2755507d7a3b0b6970efdd4be45f02dbdf7b0d4413ab2c9f1b0326873a2f4eef` |
+| SDK version | `0.15.0` |
 
 ## Updating
 

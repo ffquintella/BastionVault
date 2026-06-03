@@ -4,7 +4,7 @@
 [package]
 name        = "ferro-child-verify"
 description = "FerroGate — reference verifier for DPoP-bound composite-signed child tokens (F09)"
-version      = "0.13.2"
+version      = "0.15.0"
 edition      = "2021"
 rust-version = "1.88"
 license      = "Apache-2.0"
