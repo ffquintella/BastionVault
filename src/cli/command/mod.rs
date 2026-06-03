@@ -40,6 +40,10 @@ pub mod operator_init;
 pub mod operator_backup;
 pub mod operator_export;
 pub mod operator_import;
+#[cfg(unix)]
+pub mod ferrogate;
+#[cfg(unix)]
+pub mod ferrogate_mia;
 pub mod exchange;
 pub mod exchange_export;
 pub mod exchange_import;

@@ -123,7 +123,16 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   and is wired but awaits a TLS-enabled CMIS for its full validation. CRL is **not** enforced on the child-token
   path (FerroGate's child-token verifier does not check the CRL; the `x-ferrogate-crl` JWKS extension applies to
   the direct-SVID path — deferred to Phase 7).
-- Phases 5–7 are not started. (`sync_handler` build of `cmis_grpc` is unsupported — async-only — and that build
+- **Phase 5 shipped (Unix).** Client CLI `bvault ferrogate login|status|whoami` driving the FerroGate **MIA
+  helper socket** (`/run/ferrogate/mia.sock`, length-delimited CBOR, mirrored from `mia::helper::proto`): `login`
+  mints a DPoP-bound child token from the MIA, builds the RFC 9449 proof, and exchanges it at
+  `auth/<mount>/login`, persisting the issued BastionVault token; `status` reports enrolment without minting a
+  vault token; `whoami` prints the host SPIFFE id locally. A missing MIA fails clean with
+  `ferrogate_mia_unavailable`. The CLI's DPoP construction is proven against FerroGate's own `verify_dpop_proof`
+  in a unit test; the wire framing has a CBOR round-trip test. Unix-only for now (Windows named-pipe is a
+  follow-up). Full live login isn't exercised in the current dev env (the dev CMIS has no RIM bundle, so its MIA
+  can't attest/mint), but every layer the CLI owns is unit-validated.
+- Phases 6–7 are not started. (`sync_handler` build of `cmis_grpc` is unsupported — async-only — and that build
   config is independently broken repo-wide. Audit events are log-only; no dedicated audit-store rows yet.)
 - BastionVault ships Token, UserPass, AppRole, Certificate, and FIDO2/WebAuthn auth methods. None consume an
   external attestation authority.
@@ -374,7 +383,7 @@ operator on attested host                     server
 | 2 ✅ | **Verification core (static JWKS) + login** | **Done.** `ferro-child-verify::verify_bound` wired end-to-end against a `static_jwks` anchor (verifier vendored from FerroGate `releases/v0.13.2` under `third_party/`). Child-token + DPoP login mints a token for an approved machine; unknown → pending; audience + trust-domain enforced. DPoP read from `DPoP` header or `dpop` body field. Deterministic test mints a real composite-signed token. |
 | 3 ✅ | **Enrolment state machine + bootstrap** | **Done.** First-seen → pending side effect, token-authenticated self-poll (`POST status`), admin approve/reject/revoke transitions, and the **root-token one-shot bootstrap** (`approved_count == 0` + root). `audit`-target log events on key transitions. Tests cover the bootstrap happy path, the second-machine-not-bootstrapped guard, and the status endpoint. (Self-poll is `POST status` with the token rather than `GET enrolment/{spiffe_id}` — a SPIFFE ID can't be a path segment, and presenting the token both identifies and authorizes the poll.) |
 | 4 ✅ | **CMIS gRPC JWKS source** | **Done — plaintext + PQ-TLS both validated live.** `cmis_grpc` source calls `MachineIdentity/JWKS` with cache + stale-while-revalidate; pre-generated tonic stubs (no protoc in build); transport selectable plaintext / SPKI-pinned hybrid-PQ-TLS via `cmis_tls_enable`. PQ-TLS (`X25519MLKEM768`) validated end-to-end against the live CMIS 0.15.0 on `segdc1vds0005`. SDK vendored at v0.15.0. CRL enforcement applies to the SVID path → folded into Phase 7. |
-| 5 | **Client CLI** | `bvault ferrogate login|status|whoami` driving the MIA helper socket + DPoP proof construction; clear errors when the MIA is absent or the machine is pending. |
+| 5 ✅ | **Client CLI** | **Done (Unix).** `bvault ferrogate login|status|whoami` driving the MIA helper socket (CBOR framing mirrored from `mia::helper::proto`) + DPoP proof construction; `ferrogate_mia_unavailable` when the MIA is absent. DPoP proof proven against `ferro-child-verify::verify_dpop_proof`; CBOR wire round-trip test. Windows named-pipe deferred. |
 | 6 | **Admin GUI page** | `Settings → Auth → Machines` (Pending/Approved/History/Config tabs), `AUTH_TYPES` entry, responsive per GUI rules. UI tests under `vitest`. |
 | 7 | **Direct-SVID mode + hardening + docs** | Opt-in `accept_svid` path via `verify_unrevoked`; rate limits on `login`; dashboard metrics (`ferrogate_pending_total`, `ferrogate_approved_total`, `ferrogate_login_total`, `ferrogate_login_denied_total`); threat-model write-up under `docs/`; operator setup guide (FerroGate trust-anchor config, bootstrap recipe, CRL caveats for `static_jwks`). |
 
