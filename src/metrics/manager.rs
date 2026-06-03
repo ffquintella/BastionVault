@@ -26,6 +26,8 @@ impl MetricsManager {
         cache_metrics().register(&mut registry.lock().unwrap());
         // Phase 5.10: per-plugin counters. Same singleton pattern.
         crate::plugins::metrics::register(&mut registry.lock().unwrap());
+        // FerroGate machine-auth counters (same singleton pattern).
+        crate::metrics::ferrogate_metrics::ferrogate_metrics().register(&mut registry.lock().unwrap());
         MetricsManager { registry, system_metrics, http_metrics }
     }
 }

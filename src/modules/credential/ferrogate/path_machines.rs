@@ -18,8 +18,9 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use serde_json::{json, Map, Value};
 
 use super::{
-    jwks_source, machine_id, now_unix, status, verify::verify_child_token, FerroGateBackend, FerroGateBackendInner,
-    FerroGateConfig, MachineEntry,
+    jwks_source, machine_id, now_unix, status,
+    verify::{self, verify_child_token},
+    FerroGateBackend, FerroGateBackendInner, FerroGateConfig, MachineEntry,
 };
 #[cfg(not(feature = "sync_handler"))]
 use super::CachedJwks;
@@ -29,6 +30,7 @@ use crate::{
     logical::{
         field::FieldTrait, Auth, Backend, Field, FieldType, Lease, Operation, Path, PathOperation, Request, Response,
     },
+    metrics::ferrogate_metrics::{ferrogate_metrics, DenyReason},
     modules::auth::AuthModule,
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
@@ -351,6 +353,8 @@ impl FerroGateBackendInner {
         m.approver = Self::approver_name(req);
         m.reject_reason.clear();
         self.set_machine(req, &id, &m).await?;
+        log::info!(target: "audit", "ferrogate.machine.approved spiffe_id={} approver={}", m.spiffe_id, m.approver);
+        ferrogate_metrics().record_approved();
         Ok(None)
     }
 
@@ -437,6 +441,21 @@ impl FerroGateBackendInner {
         Ok(n)
     }
 
+    /// Per-source-IP fixed-window rate check. Returns `true` if the attempt is
+    /// within `limit` for the current minute (`limit == 0` = unlimited).
+    fn rate_ok(&self, ip: &str, limit: u32) -> bool {
+        if limit == 0 || ip.is_empty() {
+            return true;
+        }
+        let window = now_unix() / 60;
+        let mut entry = self.login_attempts.entry(ip.to_string()).or_insert((window, 0));
+        if entry.0 != window {
+            *entry = (window, 0);
+        }
+        entry.1 += 1;
+        entry.1 <= limit
+    }
+
     /// Resolve the JWKS (trust anchor) to verify tokens against, per the
     /// configured source: `static_jwks` returns the pasted set; `cmis_grpc`
     /// fetches it from CMIS (cached for `jwks_refresh_secs`).
@@ -500,8 +519,16 @@ impl FerroGateBackendInner {
     /// count is zero).
     pub async fn login(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let config = self.get_config(req).await?;
-
         let (token, dpop) = Self::extract_token_dpop(req)?;
+        let ip = Self::source_ip(req);
+
+        // Per-source-IP rate limit — keeps a flood of unknown machines from
+        // filling the pending queue.
+        if !self.rate_ok(&ip, config.login_rate_limit_per_min) {
+            log::warn!(target: "security", "ferrogate login rate-limited ip={ip}");
+            ferrogate_metrics().record_denied(DenyReason::RateLimited);
+            return Ok(Some(Response::error_response("rate_limited: too many login attempts, retry shortly")));
+        }
 
         let jwks_json = match self.resolve_jwks(&config).await {
             Ok(j) => j,
@@ -511,19 +538,41 @@ impl FerroGateBackendInner {
             }
         };
 
-        let verified = match verify_child_token(&config, &jwks_json, &token, dpop.as_deref(), now_unix()) {
-            Ok(v) => v,
-            Err(reason) => {
-                log::warn!(target: "security", "ferrogate login rejected: {reason}");
-                return Ok(Some(Response::error_response(&reason)));
+        // Route by token type: a directly-presented host SVID (opt-in
+        // `accept_svid`, CRL-enforced, no DPoP) or the default DPoP-bound child
+        // token. Yields the host identity plus any attestation evidence.
+        let typ = verify::token_typ(&token).unwrap_or_default();
+        let (spiffe_id, parent_svid, ek_cert_sha384, policy_id, kid) = if typ == ferro_svid_verify::SVID_TYP {
+            if !config.accept_svid {
+                log::warn!(target: "security", "ferrogate login rejected: direct SVID presented but accept_svid is disabled");
+                return Ok(Some(Response::error_response("direct SVID login is disabled (accept_svid is off)")));
+            }
+            match verify::verify_svid_token(&config, &jwks_json, &token, now_unix()) {
+                Ok(v) => (v.spiffe_id, String::new(), v.ek_cert_sha384, v.policy_id, String::new()),
+                Err(reason) => {
+                    log::warn!(target: "security", "ferrogate login rejected: {reason}");
+                    ferrogate_metrics().record_denied(DenyReason::VerifyFailed);
+                    return Ok(Some(Response::error_response(&reason)));
+                }
+            }
+        } else {
+            match verify_child_token(&config, &jwks_json, &token, dpop.as_deref(), now_unix()) {
+                Ok(v) => (
+                    v.claims.iss.clone(),
+                    v.claims.ferrogate.parent_svid.clone(),
+                    String::new(),
+                    String::new(),
+                    v.kid.clone(),
+                ),
+                Err(reason) => {
+                    log::warn!(target: "security", "ferrogate login rejected: {reason}");
+                    ferrogate_metrics().record_denied(DenyReason::VerifyFailed);
+                    return Ok(Some(Response::error_response(&reason)));
+                }
             }
         };
 
-        let spiffe_id = verified.claims.iss.clone();
-        let parent_svid = verified.claims.ferrogate.parent_svid.clone();
         let id = machine_id(&spiffe_id);
-        let ip = Self::source_ip(req);
-
         let mut machine = self.get_machine(req, &id).await?;
 
         // One-shot first-machine bootstrap (root token + zero approved machines).
@@ -542,6 +591,12 @@ impl FerroGateBackendInner {
                 m.first_seen_at = now_unix();
             }
             m.parent_svid = parent_svid.clone();
+            if !ek_cert_sha384.is_empty() {
+                m.ek_cert_sha384 = ek_cert_sha384.clone();
+            }
+            if !policy_id.is_empty() {
+                m.policy_id = policy_id.clone();
+            }
             m.status = status::APPROVED.to_string();
             m.policies = config.bootstrap_policies.clone();
             m.approved_at = now_unix();
@@ -553,6 +608,7 @@ impl FerroGateBackendInner {
                 "ferrogate.machine.bootstrap_approved spiffe_id={} policies={:?} ip={}",
                 m.spiffe_id, m.policies, ip
             );
+            ferrogate_metrics().record_approved();
             machine = Some(m);
         }
 
@@ -560,8 +616,14 @@ impl FerroGateBackendInner {
             Some(mut m) if m.status == status::APPROVED => {
                 m.last_login_at = now_unix();
                 m.last_login_ip = ip;
-                if m.parent_svid.is_empty() {
-                    m.parent_svid = verified.claims.ferrogate.parent_svid.clone();
+                if m.parent_svid.is_empty() && !parent_svid.is_empty() {
+                    m.parent_svid = parent_svid.clone();
+                }
+                if m.ek_cert_sha384.is_empty() && !ek_cert_sha384.is_empty() {
+                    m.ek_cert_sha384 = ek_cert_sha384.clone();
+                }
+                if m.policy_id.is_empty() && !policy_id.is_empty() {
+                    m.policy_id = policy_id.clone();
                 }
                 self.set_machine(req, &id, &m).await?;
 
@@ -579,17 +641,23 @@ impl FerroGateBackendInner {
                 };
                 auth.metadata.insert("spiffe_id".to_string(), spiffe_id);
                 auth.metadata.insert("mount_path".to_string(), "ferrogate/".to_string());
-                auth.metadata.insert("ferrogate_kid".to_string(), verified.kid);
+                if !kid.is_empty() {
+                    auth.metadata.insert("ferrogate_kid".to_string(), kid);
+                }
                 log::info!(target: "audit", "ferrogate.machine.login spiffe_id={} ip={}", m.spiffe_id, m.last_login_ip);
+                ferrogate_metrics().record_login();
                 Ok(Some(Response { auth: Some(auth), ..Response::default() }))
             }
             Some(m) if m.status == status::PENDING => {
+                ferrogate_metrics().record_denied(DenyReason::Pending);
                 Ok(Some(Response::error_response("enrolment_pending: awaiting administrator approval")))
             }
             Some(m) if m.status == status::REJECTED => {
+                ferrogate_metrics().record_denied(DenyReason::Rejected);
                 Ok(Some(Response::error_response("enrolment_rejected")))
             }
             Some(m) if m.status == status::REVOKED => {
+                ferrogate_metrics().record_denied(DenyReason::Revoked);
                 Ok(Some(Response::error_response("machine_revoked")))
             }
             Some(_) => Ok(Some(Response::error_response("enrolment_pending"))),
@@ -601,11 +669,15 @@ impl FerroGateBackendInner {
                     status: status::PENDING.to_string(),
                     first_seen_at: now_unix(),
                     last_login_ip: ip,
-                    parent_svid: verified.claims.ferrogate.parent_svid.clone(),
+                    parent_svid,
+                    ek_cert_sha384,
+                    policy_id,
                     ..Default::default()
                 };
                 self.set_machine(req, &id, &m).await?;
                 log::info!(target: "audit", "ferrogate.machine.first_seen spiffe_id={} ip={}", m.spiffe_id, m.last_login_ip);
+                ferrogate_metrics().record_pending();
+                ferrogate_metrics().record_denied(DenyReason::Pending);
                 Ok(Some(Response::error_response("enrolment_pending: awaiting administrator approval")))
             }
         }
@@ -624,12 +696,19 @@ impl FerroGateBackendInner {
             Err(reason) => return Ok(Some(Response::error_response(&reason))),
         };
 
-        let verified = match verify_child_token(&config, &jwks_json, &token, dpop.as_deref(), now_unix()) {
-            Ok(v) => v,
-            Err(reason) => return Ok(Some(Response::error_response(&reason))),
+        // Accept either a child token or (when enabled) a host SVID.
+        let typ = verify::token_typ(&token).unwrap_or_default();
+        let spiffe_id = if typ == ferro_svid_verify::SVID_TYP && config.accept_svid {
+            match verify::verify_svid_token(&config, &jwks_json, &token, now_unix()) {
+                Ok(v) => v.spiffe_id,
+                Err(reason) => return Ok(Some(Response::error_response(&reason))),
+            }
+        } else {
+            match verify_child_token(&config, &jwks_json, &token, dpop.as_deref(), now_unix()) {
+                Ok(v) => v.claims.iss,
+                Err(reason) => return Ok(Some(Response::error_response(&reason))),
+            }
         };
-
-        let spiffe_id = verified.claims.iss;
         let id = machine_id(&spiffe_id);
 
         let mut data = Map::new();

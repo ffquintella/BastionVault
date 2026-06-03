@@ -110,6 +110,9 @@ pub struct FerroGateConfig {
     /// How long (seconds) a fetched JWKS is cached before a refresh is attempted.
     #[serde(default = "default_jwks_refresh")]
     pub jwks_refresh_secs: i64,
+    /// Per-source-IP `login` rate limit (attempts per minute); `0` = unlimited.
+    #[serde(default = "default_login_rate")]
+    pub login_rate_limit_per_min: u32,
     /// Auto-approve the first machine that logs in with a root token while no
     /// machine is yet approved (one-shot bootstrap).
     #[serde(default = "default_true")]
@@ -135,6 +138,10 @@ fn default_jwks_refresh() -> i64 {
     60
 }
 
+fn default_login_rate() -> u32 {
+    10
+}
+
 impl Default for FerroGateConfig {
     fn default() -> Self {
         Self {
@@ -149,6 +156,7 @@ impl Default for FerroGateConfig {
             default_token_ttl: 0,
             cmis_tls_enable: true,
             jwks_refresh_secs: default_jwks_refresh(),
+            login_rate_limit_per_min: default_login_rate(),
             bootstrap_root_auto_approve: true,
             bootstrap_policies: default_bootstrap_policies(),
         }
@@ -231,6 +239,8 @@ pub struct FerroGateBackendInner {
     pub core: Arc<Core>,
     /// Last JWKS fetched from CMIS (`cmis_grpc` source). Singleton per mount.
     pub jwks_cache: ArcSwapOption<CachedJwks>,
+    /// Per-source-IP login counters keyed by `ip` → `(minute_window, count)`.
+    pub login_attempts: dashmap::DashMap<String, (i64, u32)>,
 }
 
 #[derive(Deref)]
@@ -241,7 +251,13 @@ pub struct FerroGateBackend {
 
 impl FerroGateBackend {
     pub fn new(core: Arc<Core>) -> Self {
-        Self { inner: Arc::new(FerroGateBackendInner { core, jwks_cache: ArcSwapOption::empty() }) }
+        Self {
+            inner: Arc::new(FerroGateBackendInner {
+                core,
+                jwks_cache: ArcSwapOption::empty(),
+                login_attempts: dashmap::DashMap::new(),
+            }),
+        }
     }
 
     pub fn new_backend(&self) -> LogicalBackend {
@@ -552,6 +568,76 @@ mod test {
         assert_eq!(k.kid, "cmis-dev-1");
         let pk_bytes = URL_SAFE_NO_PAD.decode(k.public.as_bytes()).expect("pub is base64url");
         CompositePublicKey::from_concat_bytes(&pk_bytes).expect("composite public key decodes");
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_ferrogate_login_svid_accept() {
+        use ferro_svid_verify::{CRL_SIGNING_CONTEXT, SVID_SIGNING_CONTEXT, SVID_TYP};
+
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_ferrogate_login_svid_accept").await;
+        test_mount_auth_api(&core, &root_token, "ferrogate", "ferrogate").await;
+
+        let (sk, pk) = CompositeSecretKey::generate().unwrap();
+        let kid = "cmis-dev-1";
+        let now = now_secs();
+        let iss = "spiffe://ferrogate.test/cmis";
+        let sub = "spiffe://ferrogate.test/host/svidhost";
+
+        // Mint a host SVID (typ ferrogate-svid+jwt) signed by the composite key.
+        let header = json!({ "alg": CHILD_ALG, "typ": SVID_TYP, "kid": kid });
+        let claims = json!({
+            "iss": iss, "sub": sub, "iat": now, "nbf": now - 60, "exp": now + 3600,
+            "cnf": { "jkt": "x" },
+            "attest": { "ek_cert_sha384": "ab".repeat(48), "pcr_digest_sha384": "cd".repeat(48), "policy_id": "1" },
+        });
+        let h = b64(&serde_json::to_vec(&header).unwrap());
+        let p = b64(&serde_json::to_vec(&claims).unwrap());
+        let si = format!("{h}.{p}");
+        let svid_sig = sk.sign(SVID_SIGNING_CONTEXT, si.as_bytes()).unwrap();
+        let svid = format!("{si}.{}", b64(&svid_sig.to_concat_bytes()));
+
+        // Mint a fresh, signed, empty CRL. The signed payload is the struct-
+        // ordered compact JSON of CrlBody (issued_at, number, entries).
+        let crl_body = format!("{{\"issued_at\":{now},\"number\":1,\"entries\":[]}}");
+        let crl_sig = sk.sign(CRL_SIGNING_CONTEXT, crl_body.as_bytes()).unwrap();
+        let jwks = format!(
+            "{{\"keys\":[{{\"kty\":\"FERROGATE-COMPOSITE\",\"kid\":\"{kid}\",\"pub\":\"{}\"}}],\
+             \"x-ferrogate-crl\":{{\"body\":{crl_body},\"signer_kid\":\"{kid}\",\"signature_b64\":\"{}\"}}}}",
+            b64(&pk.to_concat_bytes()),
+            b64(&crl_sig.to_concat_bytes()),
+        );
+
+        // Configure with accept_svid OFF first.
+        let cfg = json!({
+            "trust_domain": "ferrogate.test",
+            "expected_audience": "https://vault.example.com",
+            "jwks_source": "static_jwks",
+            "static_jwks": jwks,
+            "accept_svid": false,
+        })
+        .as_object()
+        .cloned();
+        test_write_api(&core, &root_token, "auth/ferrogate/config", true, cfg).await.unwrap();
+
+        // 1) SVID presented while accept_svid is off → denied.
+        let r = do_login(&core, &svid, None).await.unwrap();
+        assert!(r.auth.is_none(), "direct SVID must be denied when accept_svid is off");
+
+        // 2) Enable accept_svid → unknown SVID host recorded pending.
+        let on = json!({ "accept_svid": true }).as_object().cloned();
+        test_write_api(&core, &root_token, "auth/ferrogate/config", true, on).await.unwrap();
+        let r = do_login(&core, &svid, None).await.unwrap();
+        assert!(r.auth.is_none(), "unknown SVID host must be pending");
+
+        // 3) Approve, then the SVID login mints a token (CRL checked, host not revoked).
+        let id = machine_id(sub);
+        let appr = json!({ "policies": "default", "ttl_seconds": 600 }).as_object().cloned();
+        test_write_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}/approve"), true, appr)
+            .await
+            .unwrap();
+        let r = do_login(&core, &svid, None).await.unwrap();
+        let auth = r.auth.expect("approved SVID host mints a token");
+        assert!(auth.policies.contains(&"default".to_string()));
     }
 
     /// Live end-to-end fetch of the JWKS from a real CMIS over the `cmis_grpc`

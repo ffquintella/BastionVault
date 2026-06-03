@@ -139,8 +139,18 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   [`gui/src-tauri/src/commands/ferrogate.rs`](../gui/src-tauri/src/commands/ferrogate.rs) routing to
   `auth/ferrogate/*`, with `api.ts` wrappers, TS types, an `AUTH_TYPES` entry, and two `vitest` tests
   (full GUI suite of 116 passes; tsc + vite build clean).
-- Phase 7 is not started. (`sync_handler` build of `cmis_grpc` is unsupported — async-only — and that build
-  config is independently broken repo-wide. Audit events are log-only; no dedicated audit-store rows yet.)
+- **Phase 7 shipped — feature complete.** Opt-in **direct-SVID mode** (`accept_svid`): a host SVID presented at
+  `login` is verified via the vendored `ferro-svid-verify::verify_unrevoked`, which **enforces FerroGate's
+  composite-signed CRL** (a revoked host, or a stale/absent CRL, fails closed); the host identity is the SVID
+  `sub`, and attestation evidence (`ek_cert_sha384`, `policy_id`) is recorded on the machine. Login routes by
+  JOSE `typ` (SVID vs child token). Added a per-source-IP **login rate limit** (`login_rate_limit_per_min`,
+  default 10, `0` = unlimited). Added **Prometheus counters** (`bvault_ferrogate_login_total`,
+  `_login_denied_total{reason}`, `_pending_total`, `_approved_total`) registered in the metrics manager. Wrote
+  the operator + threat-model guide at [`docs/ferrogate-machine-auth.md`](../docs/ferrogate-machine-auth.md).
+  Tests: SVID `accept_svid` gate + CRL-enforced direct-SVID approve→mint.
+- Caveats: `cmis_grpc` is async-build only (the `sync_handler` feature is independently broken repo-wide);
+  child-token revocation on the `static_jwks` source relies on short token TTL (the CRL is enforced on the SVID
+  path); audit events are structured log lines (no dedicated audit-store rows).
 - BastionVault ships Token, UserPass, AppRole, Certificate, and FIDO2/WebAuthn auth methods. None consume an
   external attestation authority.
 - FerroGate (sibling repo `../FerroGate`) exposes: a CMIS `JWKS` gRPC RPC returning composite verification keys
@@ -392,7 +402,7 @@ operator on attested host                     server
 | 4 ✅ | **CMIS gRPC JWKS source** | **Done — plaintext + PQ-TLS both validated live.** `cmis_grpc` source calls `MachineIdentity/JWKS` with cache + stale-while-revalidate; pre-generated tonic stubs (no protoc in build); transport selectable plaintext / SPKI-pinned hybrid-PQ-TLS via `cmis_tls_enable`. PQ-TLS (`X25519MLKEM768`) validated end-to-end against the live CMIS 0.15.0 on `segdc1vds0005`. SDK vendored at v0.15.0. CRL enforcement applies to the SVID path → folded into Phase 7. |
 | 5 ✅ | **Client CLI** | **Done (Unix).** `bvault ferrogate login|status|whoami` driving the MIA helper socket (CBOR framing mirrored from `mia::helper::proto`) + DPoP proof construction; `ferrogate_mia_unavailable` when the MIA is absent. DPoP proof proven against `ferro-child-verify::verify_dpop_proof`; CBOR wire round-trip test. Windows named-pipe deferred. |
 | 6 ✅ | **Admin GUI page** | **Done.** `Machines (FerroGate)` admin page (route `/ferrogate`, sidebar nav) with Pending / Approved / History / Config tabs; approve/reject/revoke modals; enable-mount empty state; `AUTH_TYPES` entry. Seven Tauri commands (`ferrogate_read_config`/`write_config`/`list_machines`/`approve`/`reject`/`revoke`/`delete_machine`) + api.ts wrappers + types. Two vitest tests. |
-| 7 | **Direct-SVID mode + hardening + docs** | Opt-in `accept_svid` path via `verify_unrevoked`; rate limits on `login`; dashboard metrics (`ferrogate_pending_total`, `ferrogate_approved_total`, `ferrogate_login_total`, `ferrogate_login_denied_total`); threat-model write-up under `docs/`; operator setup guide (FerroGate trust-anchor config, bootstrap recipe, CRL caveats for `static_jwks`). |
+| 7 ✅ | **Direct-SVID mode + hardening + docs** | **Done.** Opt-in `accept_svid` via `verify_unrevoked` (CRL-enforced, fail-closed); per-source-IP `login` rate limit; Prometheus counters (`bvault_ferrogate_login_total` / `_login_denied_total{reason}` / `_pending_total` / `_approved_total`); operator + threat-model guide at `docs/ferrogate-machine-auth.md`. Test covers the `accept_svid` gate + CRL-enforced SVID approve→mint. |
 
 ## Open questions
 

@@ -8,10 +8,11 @@ workspace (see the `exclude` list in the root `Cargo.toml`).
 
 ### What was changed vs. the release
 
-- **Subset only.** The SDK also ships `ferro-proto`, `ferro-svid`,
-  `ferro-svid-verify`, and `ferro-attest`; those are not vendored here (not
-  needed by the child-token verification path, and they drag in protoc / TPM
-  build requirements). They can be added later for the direct-SVID mode.
+- **Subset only.** Vendored: `ferro-crypto`, `ferro-child-verify`, and
+  `ferro-svid-verify` (the last for the direct-SVID `accept_svid` mode + CRL
+  enforcement). Not vendored: `ferro-proto`, `ferro-svid`, `ferro-attest` (not
+  needed by the verification paths, and they drag in protoc / TPM build
+  requirements).
 - **Manifests de-inherited.** Each crate's `Cargo.toml` originally inherited
   `version` / `edition` / deps from the SDK `[workspace]`. Those are inlined to
   concrete values here so the crates stand alone as path dependencies (a nested

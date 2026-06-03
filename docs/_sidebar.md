@@ -12,6 +12,7 @@
 - Operations
   - [Administration](administration.md)
   - [Authentication](authentication.md)
+  - [FerroGate machine auth](ferrogate-machine-auth.md)
   - [API reference](api.md)
   - [Cluster + client discovery](cluster-client-discovery.md)
 

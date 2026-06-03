@@ -82,6 +82,11 @@ impl FerroGateBackend {
                     required: false,
                     description: "Seconds a fetched CMIS JWKS is cached before refresh."
                 },
+                "login_rate_limit_per_min": {
+                    field_type: FieldType::Int,
+                    required: false,
+                    description: "Per-source-IP login attempts per minute (0 = unlimited)."
+                },
                 "bootstrap_root_auto_approve": {
                     field_type: FieldType::Bool,
                     required: false,
@@ -168,6 +173,9 @@ impl FerroGateBackendInner {
         }
         if let Ok(v) = req.get_data("jwks_refresh_secs") {
             config.jwks_refresh_secs = v.as_int().ok_or(RvError::ErrRequestFieldInvalid)?;
+        }
+        if let Ok(v) = req.get_data("login_rate_limit_per_min") {
+            config.login_rate_limit_per_min = v.as_int().ok_or(RvError::ErrRequestFieldInvalid)?.max(0) as u32;
         }
         if let Ok(v) = req.get_data("bootstrap_root_auto_approve") {
             config.bootstrap_root_auto_approve = v.as_bool_ex().ok_or(RvError::ErrRequestFieldInvalid)?;

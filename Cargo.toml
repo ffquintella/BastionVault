@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.11.2"
+version = "0.11.3"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -247,6 +247,9 @@ fips204 = { version = "0.4", default-features = false, features = ["default-rng"
 # own workspace and is excluded from ours. Lean — pulls only serde / base64 /
 # sha2 / ed25519-dalek / fips204, all already in our tree. No custom crypto.
 ferro-child-verify = { path = "third_party/ferrogate-sdk-rust/crates/ferro-child-verify" }
+# Reference verifier for host SVIDs (direct-SVID `accept_svid` mode + CRL
+# enforcement via `verify_unrevoked`). Same vendored SDK.
+ferro-svid-verify = { path = "third_party/ferrogate-sdk-rust/crates/ferro-svid-verify" }
 # `ferro-crypto` (same vendored SDK) provides the hybrid post-quantum TLS
 # provider (X25519MLKEM768) and SPKI-pinning verifier used by the `cmis_grpc`
 # JWKS source's PQ-TLS transport, plus the composite primitive.
