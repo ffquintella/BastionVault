@@ -6,36 +6,33 @@
 
 use ferro_child_verify::{verify_bound, DpopExpectation, JwkSet, Verified};
 
-use super::{jwks_source, FerroGateConfig};
+use super::FerroGateConfig;
 
 /// Maximum age (seconds) accepted on a DPoP proof (RFC 9449 §4.3).
 const DPOP_MAX_AGE_SECS: i64 = 300;
 
 /// Verify a FerroGate child token presented at `auth/ferrogate/login`.
 ///
-/// Returns the validated [`Verified`] claims, or a human-readable rejection
-/// reason (safe to surface — it names *why* verification failed, never secret
-/// material). `now` is Unix seconds; `dpop` is the RFC 9449 proof JWS.
-///
-/// Phase 2 supports only the `static_jwks` trust-anchor source; `cmis_grpc`
-/// lands in Phase 4.
+/// `jwks_json` is the trust anchor the caller resolved (from `static_jwks` or a
+/// `cmis_grpc` fetch). Returns the validated [`Verified`] claims, or a
+/// human-readable rejection reason (safe to surface — it names *why*
+/// verification failed, never secret material). `now` is Unix seconds; `dpop`
+/// is the RFC 9449 proof JWS.
 pub fn verify_child_token(
     config: &FerroGateConfig,
+    jwks_json: &str,
     token: &str,
     dpop: Option<&str>,
     now: i64,
 ) -> Result<Verified, String> {
-    if config.jwks_source != jwks_source::STATIC {
-        return Err("cmis_grpc JWKS source is not implemented yet (Phase 4); configure static_jwks".to_string());
-    }
-    if config.static_jwks.trim().is_empty() {
-        return Err("ferrogate backend is not configured: static_jwks is empty".to_string());
+    if jwks_json.trim().is_empty() {
+        return Err("ferrogate backend has no JWKS (trust anchor) configured".to_string());
     }
     if config.expected_audience.is_empty() {
         return Err("ferrogate backend is not configured: expected_audience is empty".to_string());
     }
 
-    let jwks = JwkSet::from_json(&config.static_jwks).map_err(|e| format!("invalid static_jwks: {e}"))?;
+    let jwks = JwkSet::from_json(jwks_json).map_err(|e| format!("invalid JWKS: {e}"))?;
 
     // The DPoP proof binds to the HTTP method + target URI. Phase 2 uses the
     // configured audience as the expected `htu` (FerroGate's child tokens carry

@@ -23,6 +23,7 @@
 
 use std::{any::Any, sync::Arc, time::SystemTime};
 
+use arc_swap::ArcSwapOption;
 use derive_more::Deref;
 use serde::{Deserialize, Serialize};
 
@@ -34,6 +35,7 @@ use crate::{
     new_logical_backend, new_logical_backend_internal,
 };
 
+pub mod cmis;
 pub mod path_config;
 pub mod path_machines;
 pub mod verify;
@@ -101,6 +103,13 @@ pub struct FerroGateConfig {
     /// Default TTL (seconds) for minted tokens when an approval sets none.
     #[serde(default)]
     pub default_token_ttl: u64,
+    /// Use hybrid post-quantum TLS to reach CMIS (`cmis_grpc` source). When
+    /// `false`, connect over plaintext gRPC — for a dev/loopback CMIS only.
+    #[serde(default = "default_true")]
+    pub cmis_tls_enable: bool,
+    /// How long (seconds) a fetched JWKS is cached before a refresh is attempted.
+    #[serde(default = "default_jwks_refresh")]
+    pub jwks_refresh_secs: i64,
     /// Auto-approve the first machine that logs in with a root token while no
     /// machine is yet approved (one-shot bootstrap).
     #[serde(default = "default_true")]
@@ -122,6 +131,10 @@ fn default_bootstrap_policies() -> Vec<String> {
     vec!["default".to_string()]
 }
 
+fn default_jwks_refresh() -> i64 {
+    60
+}
+
 impl Default for FerroGateConfig {
     fn default() -> Self {
         Self {
@@ -134,10 +147,21 @@ impl Default for FerroGateConfig {
             accept_svid: false,
             clock_leeway_secs: default_clock_leeway(),
             default_token_ttl: 0,
+            cmis_tls_enable: true,
+            jwks_refresh_secs: default_jwks_refresh(),
             bootstrap_root_auto_approve: true,
             bootstrap_policies: default_bootstrap_policies(),
         }
     }
+}
+
+/// In-memory cache of the JWKS fetched from CMIS (`cmis_grpc` source).
+#[derive(Debug, Clone)]
+pub struct CachedJwks {
+    /// The `jwks_json` returned by the CMIS `JWKS` RPC.
+    pub json: String,
+    /// Unix seconds the JWKS was fetched.
+    pub fetched_at: i64,
 }
 
 /// A persisted machine enrolment record, keyed by [`machine_id`] of its SPIFFE ID.
@@ -205,6 +229,8 @@ fn now_unix() -> i64 {
 
 pub struct FerroGateBackendInner {
     pub core: Arc<Core>,
+    /// Last JWKS fetched from CMIS (`cmis_grpc` source). Singleton per mount.
+    pub jwks_cache: ArcSwapOption<CachedJwks>,
 }
 
 #[derive(Deref)]
@@ -215,7 +241,7 @@ pub struct FerroGateBackend {
 
 impl FerroGateBackend {
     pub fn new(core: Arc<Core>) -> Self {
-        Self { inner: Arc::new(FerroGateBackendInner { core }) }
+        Self { inner: Arc::new(FerroGateBackendInner { core, jwks_cache: ArcSwapOption::empty() }) }
     }
 
     pub fn new_backend(&self) -> LogicalBackend {
@@ -526,6 +552,39 @@ mod test {
         assert_eq!(k.kid, "cmis-dev-1");
         let pk_bytes = URL_SAFE_NO_PAD.decode(k.public.as_bytes()).expect("pub is base64url");
         CompositePublicKey::from_concat_bytes(&pk_bytes).expect("composite public key decodes");
+    }
+
+    /// Live end-to-end fetch of the JWKS from a real CMIS over the `cmis_grpc`
+    /// source (plaintext — the dev CMIS speaks cleartext gRPC). Ignored by
+    /// default; run against the dev CMIS with an SSH tunnel:
+    ///
+    /// ```text
+    /// ssh -f -N -L 18443:127.0.0.1:8443 felipe@segdc1vds0005.fgv.br
+    /// FERROGATE_CMIS_ENDPOINT=127.0.0.1:18443 \
+    ///   cargo test --lib ferrogate::test::test_cmis_grpc_live_fetch -- --ignored --nocapture
+    /// ```
+    #[cfg(not(feature = "sync_handler"))]
+    #[tokio::test]
+    #[ignore = "requires a live CMIS at $FERROGATE_CMIS_ENDPOINT (e.g. an SSH tunnel to segdc1vds0005:8443)"]
+    async fn test_cmis_grpc_live_fetch() {
+        use ferro_child_verify::JwkSet;
+
+        let endpoint = std::env::var("FERROGATE_CMIS_ENDPOINT").expect("set FERROGATE_CMIS_ENDPOINT");
+        let cfg = super::FerroGateConfig {
+            jwks_source: super::jwks_source::CMIS_GRPC.to_string(),
+            cmis_endpoint: endpoint,
+            cmis_tls_enable: false, // dev CMIS is plaintext gRPC
+            ..Default::default()
+        };
+
+        let json = super::cmis::fetch_jwks_json(&cfg).await.expect("fetch JWKS from live CMIS");
+        let jwks = JwkSet::from_json(&json).expect("live JWKS parses");
+        assert!(jwks.keys.iter().any(|k| k.kty == "FERROGATE-COMPOSITE"), "expected a composite key");
+        eprintln!(
+            "live CMIS JWKS: {} key(s), kids={:?}",
+            jwks.keys.len(),
+            jwks.keys.iter().map(|k| k.kid.clone()).collect::<Vec<_>>()
+        );
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

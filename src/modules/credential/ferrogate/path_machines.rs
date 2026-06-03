@@ -17,7 +17,12 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use serde_json::{json, Map, Value};
 
-use super::{machine_id, now_unix, status, verify::verify_child_token, FerroGateBackend, FerroGateBackendInner, MachineEntry};
+use super::{
+    jwks_source, machine_id, now_unix, status, verify::verify_child_token, FerroGateBackend, FerroGateBackendInner,
+    FerroGateConfig, MachineEntry,
+};
+#[cfg(not(feature = "sync_handler"))]
+use super::CachedJwks;
 use crate::{
     context::Context,
     errors::RvError,
@@ -432,6 +437,57 @@ impl FerroGateBackendInner {
         Ok(n)
     }
 
+    /// Resolve the JWKS (trust anchor) to verify tokens against, per the
+    /// configured source: `static_jwks` returns the pasted set; `cmis_grpc`
+    /// fetches it from CMIS (cached for `jwks_refresh_secs`).
+    pub async fn resolve_jwks(&self, config: &FerroGateConfig) -> Result<String, String> {
+        match config.jwks_source.as_str() {
+            jwks_source::STATIC => {
+                if config.static_jwks.trim().is_empty() {
+                    return Err("ferrogate backend is not configured: static_jwks is empty".to_string());
+                }
+                Ok(config.static_jwks.clone())
+            }
+            jwks_source::CMIS_GRPC => {
+                #[cfg(feature = "sync_handler")]
+                {
+                    let _ = config;
+                    Err("cmis_grpc JWKS source requires the async (default) build".to_string())
+                }
+                #[cfg(not(feature = "sync_handler"))]
+                {
+                    self.resolve_cmis_jwks(config).await
+                }
+            }
+            other => Err(format!("unknown jwks_source '{other}'")),
+        }
+    }
+
+    /// Fetch the CMIS JWKS, honouring the in-memory cache and falling back to a
+    /// stale cached copy if a refresh fails (stale-while-revalidate).
+    #[cfg(not(feature = "sync_handler"))]
+    async fn resolve_cmis_jwks(&self, config: &FerroGateConfig) -> Result<String, String> {
+        let now = now_unix();
+        if let Some(c) = self.jwks_cache.load_full() {
+            if now - c.fetched_at < config.jwks_refresh_secs.max(1) {
+                return Ok(c.json.clone());
+            }
+        }
+        match super::cmis::fetch_jwks_json(config).await {
+            Ok(json) => {
+                self.jwks_cache.store(Some(Arc::new(CachedJwks { json: json.clone(), fetched_at: now })));
+                Ok(json)
+            }
+            Err(e) => match self.jwks_cache.load_full() {
+                Some(c) => {
+                    log::warn!(target: "security", "ferrogate CMIS JWKS refresh failed ({e}); serving cached JWKS");
+                    Ok(c.json.clone())
+                }
+                None => Err(e),
+            },
+        }
+    }
+
     /// Authenticate a machine. Verifies the FerroGate child token (signature +
     /// DPoP sender-constraint) against the configured trust anchor, then applies
     /// the admin-approval gate keyed on the token's SPIFFE ID:
@@ -447,7 +503,15 @@ impl FerroGateBackendInner {
 
         let (token, dpop) = Self::extract_token_dpop(req)?;
 
-        let verified = match verify_child_token(&config, &token, dpop.as_deref(), now_unix()) {
+        let jwks_json = match self.resolve_jwks(&config).await {
+            Ok(j) => j,
+            Err(reason) => {
+                log::warn!(target: "security", "ferrogate login rejected: {reason}");
+                return Ok(Some(Response::error_response(&reason)));
+            }
+        };
+
+        let verified = match verify_child_token(&config, &jwks_json, &token, dpop.as_deref(), now_unix()) {
             Ok(v) => v,
             Err(reason) => {
                 log::warn!(target: "security", "ferrogate login rejected: {reason}");
@@ -555,7 +619,12 @@ impl FerroGateBackendInner {
         let config = self.get_config(req).await?;
         let (token, dpop) = Self::extract_token_dpop(req)?;
 
-        let verified = match verify_child_token(&config, &token, dpop.as_deref(), now_unix()) {
+        let jwks_json = match self.resolve_jwks(&config).await {
+            Ok(j) => j,
+            Err(reason) => return Ok(Some(Response::error_response(&reason))),
+        };
+
+        let verified = match verify_child_token(&config, &jwks_json, &token, dpop.as_deref(), now_unix()) {
             Ok(v) => v,
             Err(reason) => return Ok(Some(Response::error_response(&reason))),
         };

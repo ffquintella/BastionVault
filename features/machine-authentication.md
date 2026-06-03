@@ -107,8 +107,20 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   `unknown` if never seen). Key transitions emit `audit`-target log events (`ferrogate.machine.first_seen` /
   `.bootstrap_approved` / `.login`). Tested: bootstrap approves+mints the first machine, the second machine in
   the same conditions goes `pending`, and the status endpoint reports approved/unknown.
-- Phases 4–7 are not started. (CMIS gRPC JWKS source returns a not-implemented error; only `static_jwks` works.
-  Audit events are log-only for now — no dedicated audit-store rows yet.)
+- **Phase 4 shipped (plaintext validated live; PQ-TLS implemented, server-side validation pending).** The
+  `cmis_grpc` JWKS source is implemented: BastionVault calls FerroGate's `ferrogate.v1.MachineIdentity/JWKS` RPC
+  and caches the result for `jwks_refresh_secs` (default 60), with stale-while-revalidate on fetch failure. The
+  gRPC stubs are **pre-generated** from `machine_identity.proto` and vendored
+  ([`cmis_proto.rs`](../src/modules/credential/ferrogate/cmis_proto.rs)) so `protoc` is **not** a BastionVault
+  build dependency (runtime `tonic`/`prost` only). Transport is selectable by `cmis_tls_enable`: hybrid
+  post-quantum TLS (`X25519MLKEM768` via `ferro-crypto`, SHA-384 SPKI-pinned, no CA chain) when enabled, or
+  cleartext gRPC when disabled. **Validated end-to-end against the live dev CMIS** (`segdc1vds0005.fgv.br`,
+  CMIS 0.13.1, plaintext — it's an M2 bring-up server) via an `#[ignore]`d live test; the PQ-TLS path compiles
+  and is wired but awaits a TLS-enabled CMIS for its full validation. CRL is **not** enforced on the child-token
+  path (FerroGate's child-token verifier does not check the CRL; the `x-ferrogate-crl` JWKS extension applies to
+  the direct-SVID path — deferred to Phase 7).
+- Phases 5–7 are not started. (`sync_handler` build of `cmis_grpc` is unsupported — async-only — and that build
+  config is independently broken repo-wide. Audit events are log-only; no dedicated audit-store rows yet.)
 - BastionVault ships Token, UserPass, AppRole, Certificate, and FIDO2/WebAuthn auth methods. None consume an
   external attestation authority.
 - FerroGate (sibling repo `../FerroGate`) exposes: a CMIS `JWKS` gRPC RPC returning composite verification keys
@@ -357,7 +369,7 @@ operator on attested host                     server
 | 1 ✅ | **Plugin skeleton + config + storage** | **Done.** `auth/ferrogate/` mount, `config` read/write, `MachineEntry` storage layout, admin `register`/`list`/`show`/`delete`/`approve`/`reject`/`revoke`. `login` stubbed `not_implemented`. Integration test covers the full admin lifecycle. (Audit-event emission deferred to land with `login` in Phase 3.) |
 | 2 ✅ | **Verification core (static JWKS) + login** | **Done.** `ferro-child-verify::verify_bound` wired end-to-end against a `static_jwks` anchor (verifier vendored from FerroGate `releases/v0.13.2` under `third_party/`). Child-token + DPoP login mints a token for an approved machine; unknown → pending; audience + trust-domain enforced. DPoP read from `DPoP` header or `dpop` body field. Deterministic test mints a real composite-signed token. |
 | 3 ✅ | **Enrolment state machine + bootstrap** | **Done.** First-seen → pending side effect, token-authenticated self-poll (`POST status`), admin approve/reject/revoke transitions, and the **root-token one-shot bootstrap** (`approved_count == 0` + root). `audit`-target log events on key transitions. Tests cover the bootstrap happy path, the second-machine-not-bootstrapped guard, and the status endpoint. (Self-poll is `POST status` with the token rather than `GET enrolment/{spiffe_id}` — a SPIFFE ID can't be a path segment, and presenting the token both identifies and authorizes the poll.) |
-| 4 | **CMIS gRPC JWKS source + CRL** | `cmis_grpc` source with SPKI-pinned hybrid-PQC TLS fetch, cache, periodic refresh, CRL enforcement (revoked token rejected). Stale/fail-closed tests. |
+| 4 ✅ | **CMIS gRPC JWKS source** | **Done** (plaintext validated live; PQ-TLS pending server). `cmis_grpc` source calls `MachineIdentity/JWKS` with cache + stale-while-revalidate; pre-generated tonic stubs (no protoc in build); transport selectable plaintext / SPKI-pinned hybrid-PQ-TLS via `cmis_tls_enable`. Validated end-to-end against the live dev CMIS (`segdc1vds0005`). CRL enforcement applies to the SVID path → folded into Phase 7. |
 | 5 | **Client CLI** | `bvault ferrogate login|status|whoami` driving the MIA helper socket + DPoP proof construction; clear errors when the MIA is absent or the machine is pending. |
 | 6 | **Admin GUI page** | `Settings → Auth → Machines` (Pending/Approved/History/Config tabs), `AUTH_TYPES` entry, responsive per GUI rules. UI tests under `vitest`. |
 | 7 | **Direct-SVID mode + hardening + docs** | Opt-in `accept_svid` path via `verify_unrevoked`; rate limits on `login`; dashboard metrics (`ferrogate_pending_total`, `ferrogate_approved_total`, `ferrogate_login_total`, `ferrogate_login_denied_total`); threat-model write-up under `docs/`; operator setup guide (FerroGate trust-anchor config, bootstrap recipe, CRL caveats for `static_jwks`). |

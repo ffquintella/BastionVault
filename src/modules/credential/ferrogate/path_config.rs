@@ -72,6 +72,16 @@ impl FerroGateBackend {
                     required: false,
                     description: "Default minted-token TTL (seconds) when an approval sets none."
                 },
+                "cmis_tls_enable": {
+                    field_type: FieldType::Bool,
+                    required: false,
+                    description: "Use hybrid PQ-TLS to reach CMIS; false = plaintext (dev/loopback only)."
+                },
+                "jwks_refresh_secs": {
+                    field_type: FieldType::Int,
+                    required: false,
+                    description: "Seconds a fetched CMIS JWKS is cached before refresh."
+                },
                 "bootstrap_root_auto_approve": {
                     field_type: FieldType::Bool,
                     required: false,
@@ -152,6 +162,12 @@ impl FerroGateBackendInner {
         if let Ok(v) = req.get_data("default_token_ttl") {
             let ttl = v.as_int().ok_or(RvError::ErrRequestFieldInvalid)?;
             config.default_token_ttl = ttl.max(0) as u64;
+        }
+        if let Ok(v) = req.get_data("cmis_tls_enable") {
+            config.cmis_tls_enable = v.as_bool_ex().ok_or(RvError::ErrRequestFieldInvalid)?;
+        }
+        if let Ok(v) = req.get_data("jwks_refresh_secs") {
+            config.jwks_refresh_secs = v.as_int().ok_or(RvError::ErrRequestFieldInvalid)?;
         }
         if let Ok(v) = req.get_data("bootstrap_root_auto_approve") {
             config.bootstrap_root_auto_approve = v.as_bool_ex().ok_or(RvError::ErrRequestFieldInvalid)?;
