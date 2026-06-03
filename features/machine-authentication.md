@@ -99,8 +99,16 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   `DPoP` header (now plumbed through the HTTP logical layer) or a `dpop` body field. Covered by an integration
   test that mints a real composite-signed token + DPoP proof and exercises unknown→pending→approve→mint, the
   bare-token (no-DPoP) rejection, and the audience-mismatch rejection.
-- Phases 3–7 are not started. (No root-bootstrap yet — unknown machines always go to `pending`. CMIS gRPC JWKS
-  source returns a not-implemented error; only `static_jwks` works so far.)
+- **Phase 3 shipped.** The one-shot **first-machine root bootstrap** is live: when no machine is yet approved
+  and the login request carries a BastionVault root-policy token, the presenting machine is auto-approved with
+  `bootstrap_policies` and minted immediately (`approver = "bootstrap(root)"`); the moment one machine is
+  approved, every later machine falls back to the admin gate. Added a token-authenticated self-poll
+  `POST auth/ferrogate/status` (verifies the token, mints nothing, returns the machine's enrolment status —
+  `unknown` if never seen). Key transitions emit `audit`-target log events (`ferrogate.machine.first_seen` /
+  `.bootstrap_approved` / `.login`). Tested: bootstrap approves+mints the first machine, the second machine in
+  the same conditions goes `pending`, and the status endpoint reports approved/unknown.
+- Phases 4–7 are not started. (CMIS gRPC JWKS source returns a not-implemented error; only `static_jwks` works.
+  Audit events are log-only for now — no dedicated audit-store rows yet.)
 - BastionVault ships Token, UserPass, AppRole, Certificate, and FIDO2/WebAuthn auth methods. None consume an
   external attestation authority.
 - FerroGate (sibling repo `../FerroGate`) exposes: a CMIS `JWKS` gRPC RPC returning composite verification keys
@@ -348,7 +356,7 @@ operator on attested host                     server
 |---|---|---|
 | 1 ✅ | **Plugin skeleton + config + storage** | **Done.** `auth/ferrogate/` mount, `config` read/write, `MachineEntry` storage layout, admin `register`/`list`/`show`/`delete`/`approve`/`reject`/`revoke`. `login` stubbed `not_implemented`. Integration test covers the full admin lifecycle. (Audit-event emission deferred to land with `login` in Phase 3.) |
 | 2 ✅ | **Verification core (static JWKS) + login** | **Done.** `ferro-child-verify::verify_bound` wired end-to-end against a `static_jwks` anchor (verifier vendored from FerroGate `releases/v0.13.2` under `third_party/`). Child-token + DPoP login mints a token for an approved machine; unknown → pending; audience + trust-domain enforced. DPoP read from `DPoP` header or `dpop` body field. Deterministic test mints a real composite-signed token. |
-| 3 | **Enrolment state machine + bootstrap** | First-seen → pending creation as a login side effect, status poll, admin approve/reject/revoke transitions, and the **root-token one-shot bootstrap** (`approved_count == 0` + root). Integration test: unknown machine denied → admin approve → next login succeeds; and the bootstrap happy path. |
+| 3 ✅ | **Enrolment state machine + bootstrap** | **Done.** First-seen → pending side effect, token-authenticated self-poll (`POST status`), admin approve/reject/revoke transitions, and the **root-token one-shot bootstrap** (`approved_count == 0` + root). `audit`-target log events on key transitions. Tests cover the bootstrap happy path, the second-machine-not-bootstrapped guard, and the status endpoint. (Self-poll is `POST status` with the token rather than `GET enrolment/{spiffe_id}` — a SPIFFE ID can't be a path segment, and presenting the token both identifies and authorizes the poll.) |
 | 4 | **CMIS gRPC JWKS source + CRL** | `cmis_grpc` source with SPKI-pinned hybrid-PQC TLS fetch, cache, periodic refresh, CRL enforcement (revoked token rejected). Stale/fail-closed tests. |
 | 5 | **Client CLI** | `bvault ferrogate login|status|whoami` driving the MIA helper socket + DPoP proof construction; clear errors when the MIA is absent or the machine is pending. |
 | 6 | **Admin GUI page** | `Settings → Auth → Machines` (Pending/Approved/History/Config tabs), `AUTH_TYPES` entry, responsive per GUI rules. UI tests under `vitest`. |

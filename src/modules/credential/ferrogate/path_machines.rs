@@ -24,6 +24,7 @@ use crate::{
     logical::{
         field::FieldTrait, Auth, Backend, Field, FieldType, Lease, Operation, Path, PathOperation, Request, Response,
     },
+    modules::auth::AuthModule,
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
 };
@@ -206,6 +207,29 @@ impl FerroGateBackend {
             help: r#"Authenticate a machine using a FerroGate-issued child token (+ DPoP proof)."#
         })
     }
+
+    pub fn status_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"status/?$",
+            fields: {
+                "token": {
+                    field_type: FieldType::Str,
+                    required: true,
+                    description: "FerroGate-issued, DPoP-bound child token (compact JWS)."
+                },
+                "dpop": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "DPoP proof JWS (RFC 9449). Preferred via the 'DPoP' header."
+                }
+            },
+            operations: [
+                {op: Operation::Write, handler: r.status}
+            ],
+            help: r#"Report this machine's enrolment status (verifies the token; mints nothing)."#
+        })
+    }
 }
 
 #[maybe_async::maybe_async]
@@ -364,24 +388,64 @@ impl FerroGateBackendInner {
             .unwrap_or_default()
     }
 
-    /// Authenticate a machine. Verifies the FerroGate child token (signature +
-    /// DPoP sender-constraint) against the configured trust anchor, then applies
-    /// the admin-approval gate keyed on the token's SPIFFE ID:
-    /// approved → mint a token; unknown → record `pending` and deny;
-    /// pending/rejected/revoked → deny.
-    pub async fn login(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let config = self.get_config(req).await?;
-
+    /// Extract `(token, dpop_proof)` from a login/status request. The DPoP proof
+    /// is taken from the RFC 9449 `DPoP` header (plumbed by the HTTP layer) or a
+    /// `dpop` body field (fallback for non-browser clients / tests).
+    fn extract_token_dpop(req: &mut Request) -> Result<(String, Option<String>), RvError> {
         let token = req.get_data("token")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
-
-        // DPoP proof: prefer the RFC 9449 header (plumbed by the HTTP layer),
-        // fall back to a `dpop` body field for non-browser clients / tests.
         let dpop = req
             .headers
             .as_ref()
             .and_then(|h| h.get("dpop").or_else(|| h.get("DPoP")))
             .cloned()
             .or_else(|| req.get_data("dpop").ok().and_then(|v| v.as_str().map(str::to_string)));
+        Ok((token, dpop))
+    }
+
+    /// Whether the request carries a BastionVault token that holds the `root`
+    /// policy. Used only to gate the one-shot first-machine bootstrap.
+    async fn caller_is_root(&self, req: &Request) -> bool {
+        if req.client_token.is_empty() {
+            return false;
+        }
+        let Some(auth_module) = self.core.module_manager.get_module::<AuthModule>("auth") else {
+            return false;
+        };
+        let guard = auth_module.token_store.load();
+        let Some(token_store) = guard.as_ref() else {
+            return false;
+        };
+        matches!(token_store.lookup(&req.client_token).await, Ok(Some(te)) if te.policies.iter().any(|p| p == "root"))
+    }
+
+    /// Count machines currently in the `approved` state.
+    async fn approved_count(&self, req: &mut Request) -> Result<usize, RvError> {
+        let ids = req.storage_list(MACHINE_PREFIX).await?;
+        let mut n = 0;
+        for id in &ids {
+            if let Some(m) = self.get_machine(req, id).await? {
+                if m.status == status::APPROVED {
+                    n += 1;
+                }
+            }
+        }
+        Ok(n)
+    }
+
+    /// Authenticate a machine. Verifies the FerroGate child token (signature +
+    /// DPoP sender-constraint) against the configured trust anchor, then applies
+    /// the admin-approval gate keyed on the token's SPIFFE ID:
+    /// approved → mint a token; unknown → record `pending` and deny;
+    /// pending/rejected/revoked → deny.
+    ///
+    /// First-machine bootstrap: if no machine is approved yet and the request
+    /// carries a BastionVault root token, this machine is auto-approved with the
+    /// configured `bootstrap_policies` (one-shot — only true while the approved
+    /// count is zero).
+    pub async fn login(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let config = self.get_config(req).await?;
+
+        let (token, dpop) = Self::extract_token_dpop(req)?;
 
         let verified = match verify_child_token(&config, &token, dpop.as_deref(), now_unix()) {
             Ok(v) => v,
@@ -392,10 +456,42 @@ impl FerroGateBackendInner {
         };
 
         let spiffe_id = verified.claims.iss.clone();
+        let parent_svid = verified.claims.ferrogate.parent_svid.clone();
         let id = machine_id(&spiffe_id);
         let ip = Self::source_ip(req);
 
-        let machine = self.get_machine(req, &id).await?;
+        let mut machine = self.get_machine(req, &id).await?;
+
+        // One-shot first-machine bootstrap (root token + zero approved machines).
+        let status_now = machine.as_ref().map(|m| m.status.as_str());
+        let is_terminal = matches!(status_now, Some(s) if s == status::REJECTED || s == status::REVOKED);
+        let is_approved = matches!(status_now, Some(s) if s == status::APPROVED);
+        if config.bootstrap_root_auto_approve
+            && !is_approved
+            && !is_terminal
+            && self.approved_count(req).await? == 0
+            && self.caller_is_root(req).await
+        {
+            let mut m = machine.take().unwrap_or_default();
+            if m.spiffe_id.is_empty() {
+                m.spiffe_id = spiffe_id.clone();
+                m.first_seen_at = now_unix();
+            }
+            m.parent_svid = parent_svid.clone();
+            m.status = status::APPROVED.to_string();
+            m.policies = config.bootstrap_policies.clone();
+            m.approved_at = now_unix();
+            m.approver = "bootstrap(root)".to_string();
+            m.reject_reason.clear();
+            self.set_machine(req, &id, &m).await?;
+            log::info!(
+                target: "audit",
+                "ferrogate.machine.bootstrap_approved spiffe_id={} policies={:?} ip={}",
+                m.spiffe_id, m.policies, ip
+            );
+            machine = Some(m);
+        }
+
         match machine {
             Some(mut m) if m.status == status::APPROVED => {
                 m.last_login_at = now_unix();
@@ -420,6 +516,7 @@ impl FerroGateBackendInner {
                 auth.metadata.insert("spiffe_id".to_string(), spiffe_id);
                 auth.metadata.insert("mount_path".to_string(), "ferrogate/".to_string());
                 auth.metadata.insert("ferrogate_kid".to_string(), verified.kid);
+                log::info!(target: "audit", "ferrogate.machine.login spiffe_id={} ip={}", m.spiffe_id, m.last_login_ip);
                 Ok(Some(Response { auth: Some(auth), ..Response::default() }))
             }
             Some(m) if m.status == status::PENDING => {
@@ -444,8 +541,41 @@ impl FerroGateBackendInner {
                     ..Default::default()
                 };
                 self.set_machine(req, &id, &m).await?;
+                log::info!(target: "audit", "ferrogate.machine.first_seen spiffe_id={} ip={}", m.spiffe_id, m.last_login_ip);
                 Ok(Some(Response::error_response("enrolment_pending: awaiting administrator approval")))
             }
         }
+    }
+
+    /// Report this machine's enrolment status without minting a token. Verifies
+    /// the presented FerroGate token (so a client can poll its own status), then
+    /// returns `{ spiffe_id, status, policies, ttl_seconds, approved_at }`, or
+    /// `status: "unknown"` if the machine has never been seen.
+    pub async fn status(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let config = self.get_config(req).await?;
+        let (token, dpop) = Self::extract_token_dpop(req)?;
+
+        let verified = match verify_child_token(&config, &token, dpop.as_deref(), now_unix()) {
+            Ok(v) => v,
+            Err(reason) => return Ok(Some(Response::error_response(&reason))),
+        };
+
+        let spiffe_id = verified.claims.iss;
+        let id = machine_id(&spiffe_id);
+
+        let mut data = Map::new();
+        data.insert("spiffe_id".to_string(), Value::String(spiffe_id));
+        match self.get_machine(req, &id).await? {
+            Some(m) => {
+                data.insert("status".to_string(), Value::String(m.status));
+                data.insert("policies".to_string(), json!(m.policies));
+                data.insert("ttl_seconds".to_string(), json!(m.ttl_seconds));
+                data.insert("approved_at".to_string(), json!(m.approved_at));
+            }
+            None => {
+                data.insert("status".to_string(), Value::String("unknown".to_string()));
+            }
+        }
+        Ok(Some(Response::data_response(Some(data))))
     }
 }

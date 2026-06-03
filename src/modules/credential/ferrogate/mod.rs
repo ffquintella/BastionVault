@@ -220,7 +220,7 @@ impl FerroGateBackend {
 
     pub fn new_backend(&self) -> LogicalBackend {
         let mut backend = new_logical_backend!({
-            unauth_paths: ["login"],
+            unauth_paths: ["login", "status"],
             root_paths: ["config", "register", "machines", "machines/*"],
             help: FERROGATE_BACKEND_HELP,
         });
@@ -233,6 +233,7 @@ impl FerroGateBackend {
         backend.paths.push(Arc::new(self.machine_reject_path()));
         backend.paths.push(Arc::new(self.machine_revoke_path()));
         backend.paths.push(Arc::new(self.login_path()));
+        backend.paths.push(Arc::new(self.status_path()));
 
         backend
     }
@@ -358,8 +359,16 @@ mod test {
 
     #[maybe_async::maybe_async]
     async fn do_login(core: &Core, token: &str, dpop: Option<&str>) -> Option<Response> {
-        let mut req = Request::new("auth/ferrogate/login");
+        do_request(core, "auth/ferrogate/login", token, dpop, "").await
+    }
+
+    #[maybe_async::maybe_async]
+    async fn do_request(core: &Core, path: &str, token: &str, dpop: Option<&str>, client_token: &str) -> Option<Response> {
+        let mut req = Request::new(path);
         req.operation = Operation::Write;
+        if !client_token.is_empty() {
+            req.client_token = client_token.to_string();
+        }
         let mut body = serde_json::Map::new();
         body.insert("token".to_string(), json!(token));
         if let Some(d) = dpop {
@@ -435,6 +444,68 @@ mod test {
         let jws2 = mint_child(&sk, kid, iss, "https://evil.example.com", &jkt2, now, now + 3600);
         let r = do_login(&core, &jws2, Some(&proof2)).await.unwrap();
         assert!(r.auth.is_none(), "audience mismatch must be rejected");
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_ferrogate_root_bootstrap() {
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_ferrogate_root_bootstrap").await;
+        test_mount_auth_api(&core, &root_token, "ferrogate", "ferrogate").await;
+
+        let (sk, pk) = CompositeSecretKey::generate().unwrap();
+        let kid = "host-test-1";
+        let aud = "https://vault.example.com";
+        let now = now_secs();
+        let ed_sk = SigningKey::from_bytes(&[7u8; 32]);
+        let (proof, jkt) = mint_dpop(&ed_sk, "POST", aud, now);
+
+        let cfg = json!({
+            "trust_domain": "ferrogate.test",
+            "expected_audience": aud,
+            "jwks_source": "static_jwks",
+            "static_jwks": jwks_json(kid, &pk),
+        })
+        .as_object()
+        .cloned();
+        test_write_api(&core, &root_token, "auth/ferrogate/config", true, cfg).await.unwrap();
+
+        let iss1 = "spiffe://ferrogate.test/host/first";
+        let jws1 = mint_child(&sk, kid, iss1, aud, &jkt, now, now + 3600);
+
+        // First machine logs in WITH the root token while none are approved →
+        // auto-approved and a token is minted immediately (bootstrap_policies).
+        let r = do_request(&core, "auth/ferrogate/login", &jws1, Some(&proof), &root_token).await.unwrap();
+        let auth = r.auth.expect("first machine is bootstrap-approved and minted");
+        assert!(auth.policies.contains(&"default".to_string()));
+        let id1 = machine_id(iss1);
+        let show = test_read_api(&core, &root_token, &format!("auth/ferrogate/machines/{id1}"), true)
+            .await
+            .unwrap()
+            .unwrap();
+        let data = show.data.unwrap();
+        assert_eq!(data["status"], status::APPROVED);
+        assert_eq!(data["approver"], "bootstrap(root)");
+
+        // Second machine, same conditions (root token presented) → NOT
+        // auto-approved, because one machine is already approved. Goes pending.
+        let iss2 = "spiffe://ferrogate.test/host/second";
+        let jws2 = mint_child(&sk, kid, iss2, aud, &jkt, now, now + 3600);
+        let r = do_request(&core, "auth/ferrogate/login", &jws2, Some(&proof), &root_token).await.unwrap();
+        assert!(r.auth.is_none(), "second machine must not bootstrap");
+        let id2 = machine_id(iss2);
+        let show = test_read_api(&core, &root_token, &format!("auth/ferrogate/machines/{id2}"), true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(show.data.unwrap()["status"], status::PENDING);
+
+        // Self-poll status endpoint: first machine is approved, an unseen one is unknown.
+        let r = do_request(&core, "auth/ferrogate/status", &jws1, Some(&proof), "").await.unwrap();
+        assert_eq!(r.data.unwrap()["status"], status::APPROVED);
+
+        let iss3 = "spiffe://ferrogate.test/host/never";
+        let jws3 = mint_child(&sk, kid, iss3, aud, &jkt, now, now + 3600);
+        let r = do_request(&core, "auth/ferrogate/status", &jws3, Some(&proof), "").await.unwrap();
+        assert_eq!(r.data.unwrap()["status"], "unknown");
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
