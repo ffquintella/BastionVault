@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-06-03
+
 ### Added
 
 - **FerroGate machine-auth backend — Phase 4 (CMIS gRPC JWKS source)**. The `ferrogate` backend can now obtain its trust anchor directly from FerroGate's CMIS instead of a pasted static JWK set: setting `jwks_source = "cmis_grpc"` makes BastionVault call the `ferrogate.v1.MachineIdentity/JWKS` RPC and cache the result for `jwks_refresh_secs` (default 60s), serving the last good copy if a refresh fails. The transport is selectable with `cmis_tls_enable`: hybrid post-quantum TLS (`X25519MLKEM768`, server certificate pinned by SHA-384 SPKI from `cmis_spki_pins`) when enabled, or cleartext gRPC for a dev/loopback CMIS when disabled. The gRPC stubs are pre-generated from FerroGate's `machine_identity.proto` and vendored, so building BastionVault does **not** require `protoc` — only the `tonic`/`prost` runtimes (and `hyper-rustls`/`hyper-util`/`tower`, promoted from the existing dependency tree). Validated end-to-end against the live development CMIS. Note: `cmis_grpc` requires the default async build; the CRL extension served in the JWKS is not enforced on the child-token path (it applies to the direct-SVID path, deferred to a later phase).
