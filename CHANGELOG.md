@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-06-03
+
 ### Changed
 
 - **FerroGate machine-auth: vendored SDK bumped to `releases/v0.15.0`; PQ-TLS validated live.** The `auth/ferrogate/` backend's `cmis_grpc` JWKS source was validated end-to-end over **hybrid post-quantum TLS** against the live CMIS 0.15.0 (`X25519MLKEM768` key exchange, SHA-384 SPKI-pinned server certificate). The vendored FerroGate verifier crates (`ferro-crypto`, `ferro-child-verify`) were updated from 0.13.2 to 0.15.0 (public APIs and the gRPC proto are unchanged; no BastionVault code changes were required). No behaviour change for operators already on the static-JWKS or plaintext paths.
