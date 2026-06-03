@@ -35,7 +35,7 @@ members = [
 # separately — its build artefacts shouldn't pollute the host's
 # `target/`, and its release-profile (panic=abort, opt=s) shouldn't
 # leak into our normal builds.
-exclude = ["plugins-ext", "IronRDP"]
+exclude = ["plugins-ext", "IronRDP", "third_party/ferrogate-sdk-rust"]
 resolver = "2"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -240,6 +240,13 @@ pkcs12 = { version = "0.1", features = ["kdf"] }
 # + AES-256-CBC is the modern shape every importer accepts.
 pkcs5 = { version = "0.7", features = ["alloc", "pbes2"] }
 fips204 = { version = "0.4", default-features = false, features = ["default-rng", "ml-dsa-44", "ml-dsa-65", "ml-dsa-87"] }
+# FerroGate machine-auth backend (`auth/ferrogate/`): the official reference
+# verifier for FerroGate's DPoP-bound, composite-signed (Ed25519 + ML-DSA-65)
+# child tokens. Vendored from the FerroGate `releases/v0.13.2` SDK under
+# `third_party/ferrogate-sdk-rust/` (see its PROVENANCE.md); that tree is its
+# own workspace and is excluded from ours. Lean — pulls only serde / base64 /
+# sha2 / ed25519-dalek / fips204, all already in our tree. No custom crypto.
+ferro-child-verify = { path = "third_party/ferrogate-sdk-rust/crates/ferro-child-verify" }
 const-oid = { version = "0.9", features = ["db"] }
 # Phase 5.3: PKCS#8 (`PrivateKeyInfo`) emit/parse for ML-DSA private keys.
 # Already transitive in the dep tree via `der` / `x509-cert` / `rsa` / `p256`,
@@ -295,6 +302,10 @@ toml = "1.1.2"
 [dev-dependencies]
 serial_test = "3.4"
 cucumber = "0.23"
+# FerroGate composite-signature primitive, used only by the ferrogate
+# auth-backend tests to mint deterministic child-token / DPoP fixtures
+# (the production path verifies via `ferro-child-verify`, never signs).
+ferro-crypto = { path = "third_party/ferrogate-sdk-rust/crates/ferro-crypto" }
 # Pulled in for the Phase-3 composite-signature test so we can verify the
 # classical ECDSA-P256 half of the composite signature directly. p256 +
 # sha2 are already in the dep tree transitively; promoting them keeps the

@@ -91,7 +91,16 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   `{id}` is the BLAKE3 hex of the SPIFFE ID (a raw SPIFFE ID can't be a path segment). `register` doubles as
   admin pre-authorization and as the way to exercise the lifecycle before real `login` lands. `login` returns a
   `not_implemented` error pending Phase 2.
-- Phases 2–7 are not started.
+- **Phase 2 shipped.** `auth/ferrogate/login` verifies a DPoP-bound, composite-signed FerroGate child token via
+  the vendored `ferro-child-verify` reference verifier ([`third_party/ferrogate-sdk-rust/`](../third_party/ferrogate-sdk-rust/),
+  pinned to FerroGate `releases/v0.13.2`) against a `static_jwks` trust anchor, then checks audience + trust
+  domain and applies the approval gate: an approved machine mints a token bound to its policies/TTL; an unknown
+  machine is recorded `pending` and denied; pending/rejected/revoked are denied. The DPoP proof is read from the
+  `DPoP` header (now plumbed through the HTTP logical layer) or a `dpop` body field. Covered by an integration
+  test that mints a real composite-signed token + DPoP proof and exercises unknown→pending→approve→mint, the
+  bare-token (no-DPoP) rejection, and the audience-mismatch rejection.
+- Phases 3–7 are not started. (No root-bootstrap yet — unknown machines always go to `pending`. CMIS gRPC JWKS
+  source returns a not-implemented error; only `static_jwks` works so far.)
 - BastionVault ships Token, UserPass, AppRole, Certificate, and FIDO2/WebAuthn auth methods. None consume an
   external attestation authority.
 - FerroGate (sibling repo `../FerroGate`) exposes: a CMIS `JWKS` gRPC RPC returning composite verification keys
@@ -338,7 +347,7 @@ operator on attested host                     server
 | # | Title | Notes |
 |---|---|---|
 | 1 ✅ | **Plugin skeleton + config + storage** | **Done.** `auth/ferrogate/` mount, `config` read/write, `MachineEntry` storage layout, admin `register`/`list`/`show`/`delete`/`approve`/`reject`/`revoke`. `login` stubbed `not_implemented`. Integration test covers the full admin lifecycle. (Audit-event emission deferred to land with `login` in Phase 3.) |
-| 2 | **Verification core (static JWKS) + login** | Wire `ferro-child-verify::verify_bound` end-to-end with a `static_jwks` trust anchor. Child-token + DPoP login mints a token for an *already-approved* fixture machine; unknown → pending. Deterministic tests with fixture tokens/JWKS exported from FerroGate test vectors. |
+| 2 ✅ | **Verification core (static JWKS) + login** | **Done.** `ferro-child-verify::verify_bound` wired end-to-end against a `static_jwks` anchor (verifier vendored from FerroGate `releases/v0.13.2` under `third_party/`). Child-token + DPoP login mints a token for an approved machine; unknown → pending; audience + trust-domain enforced. DPoP read from `DPoP` header or `dpop` body field. Deterministic test mints a real composite-signed token. |
 | 3 | **Enrolment state machine + bootstrap** | First-seen → pending creation as a login side effect, status poll, admin approve/reject/revoke transitions, and the **root-token one-shot bootstrap** (`approved_count == 0` + root). Integration test: unknown machine denied → admin approve → next login succeeds; and the bootstrap happy path. |
 | 4 | **CMIS gRPC JWKS source + CRL** | `cmis_grpc` source with SPKI-pinned hybrid-PQC TLS fetch, cache, periodic refresh, CRL enforcement (revoked token rejected). Stale/fail-closed tests. |
 | 5 | **Client CLI** | `bvault ferrogate login|status|whoami` driving the MIA helper socket + DPoP proof construction; clear errors when the MIA is absent or the machine is pending. |

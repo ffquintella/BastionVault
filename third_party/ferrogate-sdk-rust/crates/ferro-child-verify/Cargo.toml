@@ -1,0 +1,22 @@
+# Vendored from the FerroGate releases/v0.13.2 SDK (see ../../PROVENANCE.md).
+# Manifest de-inherited from the SDK workspace so the crate stands alone as a
+# path dependency of BastionVault; the `src/` sources are verbatim.
+[package]
+name        = "ferro-child-verify"
+description = "FerroGate — reference verifier for DPoP-bound composite-signed child tokens (F09)"
+version      = "0.13.2"
+edition      = "2021"
+rust-version = "1.88"
+license      = "Apache-2.0"
+repository   = "https://github.com/ffquintella/FerroGate"
+authors      = ["FerroGate contributors"]
+
+[dependencies]
+ferro-crypto = { path = "../ferro-crypto" }
+
+thiserror     = "1"
+serde         = { version = "1", features = ["derive"] }
+serde_json    = "1"
+base64        = "0.22"
+sha2          = "0.10"
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }

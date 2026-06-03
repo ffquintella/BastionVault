@@ -36,6 +36,7 @@ use crate::{
 
 pub mod path_config;
 pub mod path_machines;
+pub mod verify;
 
 static FERROGATE_BACKEND_HELP: &str = r#"
 The "ferrogate" credential provider admits only machines whose identity has
@@ -152,12 +153,17 @@ pub struct MachineEntry {
     /// Token TTL (seconds) granted at approval; `0` means use the config default.
     #[serde(default)]
     pub ttl_seconds: u64,
-    /// `SHA-384(ek_cert)` hex from the verified token's attestation block, when known.
+    /// `SHA-384(ek_cert)` hex from the verified token's attestation block, when
+    /// known. Only the host SVID carries this; child-token logins leave it empty.
     #[serde(default)]
     pub ek_cert_sha384: String,
-    /// RIM policy generation from the attestation block, when known.
+    /// RIM policy generation from the attestation block, when known (SVID only).
     #[serde(default)]
     pub policy_id: String,
+    /// Hex `SHA-384` of the parent host SVID, from a child token's `ferrogate`
+    /// provenance block. Recorded for audit/traceability.
+    #[serde(default)]
+    pub parent_svid: String,
     /// Unix seconds the machine was first seen / registered.
     #[serde(default)]
     pub first_seen_at: i64,
@@ -280,6 +286,10 @@ impl Module for FerroGateModule {
 
 #[cfg(test)]
 mod test {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use ed25519_dalek::{Signer, SigningKey};
+    use ferro_child_verify::{jwk_thumbprint_ed25519, CHILD_ALG, CHILD_SIGNING_CONTEXT, CHILD_TYP};
+    use ferro_crypto::composite::{CompositePublicKey, CompositeSecretKey};
     use serde_json::json;
 
     use crate::{
@@ -290,6 +300,142 @@ mod test {
     };
 
     const SPIFFE: &str = "spiffe://ferrogate.test/host/11111111-1111-1111-1111-111111111111";
+
+    fn b64(bytes: &[u8]) -> String {
+        URL_SAFE_NO_PAD.encode(bytes)
+    }
+
+    /// Mint a composite-signed child token, replicating the MIA wire format.
+    fn mint_child(
+        sk: &CompositeSecretKey,
+        kid: &str,
+        iss: &str,
+        aud: &str,
+        jkt: &str,
+        iat: i64,
+        exp: i64,
+    ) -> String {
+        let header = json!({ "alg": CHILD_ALG, "typ": CHILD_TYP, "kid": kid });
+        let claims = json!({
+            "iss": iss,
+            "sub": format!("{iss}#app:abababababababab"),
+            "aud": aud,
+            "exp": exp,
+            "iat": iat,
+            "jti": "0123456789abcdef0123456789abcdef",
+            "cnf": { "jkt": jkt },
+            "ferrogate": {
+                "parent_svid": "33".repeat(48),
+                "actor_pid": 1234u32,
+                "actor_uid": 1001u32,
+                "actor_bin": "ab".repeat(48),
+            },
+        });
+        let h = b64(&serde_json::to_vec(&header).unwrap());
+        let p = b64(&serde_json::to_vec(&claims).unwrap());
+        let signing_input = format!("{h}.{p}");
+        let sig = sk.sign(CHILD_SIGNING_CONTEXT, signing_input.as_bytes()).unwrap();
+        format!("{signing_input}.{}", b64(&sig.to_concat_bytes()))
+    }
+
+    /// Build a DPoP proof for `(htm, htu, iat)`; return `(proof_jws, jkt)`.
+    fn mint_dpop(ed_sk: &SigningKey, htm: &str, htu: &str, iat: i64) -> (String, String) {
+        let x = b64(ed_sk.verifying_key().as_bytes());
+        let jkt = jwk_thumbprint_ed25519(&x);
+        let header = json!({ "typ": "dpop+jwt", "alg": "EdDSA", "jwk": { "kty": "OKP", "crv": "Ed25519", "x": x } });
+        let claims = json!({ "jti": "dpop-jti-0001", "htm": htm, "htu": htu, "iat": iat });
+        let h = b64(&serde_json::to_vec(&header).unwrap());
+        let p = b64(&serde_json::to_vec(&claims).unwrap());
+        let signing_input = format!("{h}.{p}");
+        let sig = ed_sk.sign(signing_input.as_bytes());
+        (format!("{signing_input}.{}", b64(&sig.to_bytes())), jkt)
+    }
+
+    fn jwks_json(kid: &str, pk: &CompositePublicKey) -> String {
+        json!({ "keys": [ { "kty": "FERROGATE-COMPOSITE", "kid": kid, "pub": b64(&pk.to_concat_bytes()) } ] })
+            .to_string()
+    }
+
+    #[maybe_async::maybe_async]
+    async fn do_login(core: &Core, token: &str, dpop: Option<&str>) -> Option<Response> {
+        let mut req = Request::new("auth/ferrogate/login");
+        req.operation = Operation::Write;
+        let mut body = serde_json::Map::new();
+        body.insert("token".to_string(), json!(token));
+        if let Some(d) = dpop {
+            body.insert("dpop".to_string(), json!(d));
+        }
+        req.body = Some(body);
+        core.handle_request(&mut req).await.unwrap()
+    }
+
+    fn now_secs() -> i64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_ferrogate_login_child_token() {
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_ferrogate_login_child_token").await;
+        test_mount_auth_api(&core, &root_token, "ferrogate", "ferrogate").await;
+
+        let (sk, pk) = CompositeSecretKey::generate().unwrap();
+        let kid = "host-test-1";
+        let aud = "https://vault.example.com";
+        let iss = "spiffe://ferrogate.test/host/abc";
+        let now = now_secs();
+        let ed_sk = SigningKey::from_bytes(&[7u8; 32]);
+        let (proof, jkt) = mint_dpop(&ed_sk, "POST", aud, now);
+        let jws = mint_child(&sk, kid, iss, aud, &jkt, now, now + 3600);
+
+        // configure the trust anchor (static JWKS)
+        let cfg = json!({
+            "trust_domain": "ferrogate.test",
+            "expected_audience": aud,
+            "jwks_source": "static_jwks",
+            "static_jwks": jwks_json(kid, &pk),
+        })
+        .as_object()
+        .cloned();
+        test_write_api(&core, &root_token, "auth/ferrogate/config", true, cfg).await.unwrap();
+
+        // 1) unknown but attested machine → denied + recorded pending
+        let r = do_login(&core, &jws, Some(&proof)).await.unwrap();
+        assert!(r.auth.is_none(), "unknown machine must be denied");
+        let id = machine_id(iss);
+        let show = test_read_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}"), true)
+            .await
+            .unwrap()
+            .unwrap();
+        let data = show.data.unwrap();
+        assert_eq!(data["status"], status::PENDING);
+        assert_eq!(data["spiffe_id"], iss);
+        assert_eq!(data["parent_svid"], "33".repeat(48));
+
+        // 2) admin approves with a policy + ttl
+        let appr = json!({ "policies": "default", "ttl_seconds": 600 }).as_object().cloned();
+        test_write_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}/approve"), true, appr)
+            .await
+            .unwrap();
+
+        // 3) login again → token minted with the approved policies
+        let r = do_login(&core, &jws, Some(&proof)).await.unwrap();
+        let auth = r.auth.expect("approved machine mints a token");
+        // The token store prefixes display_name with the mount type ("ferrogate-").
+        assert!(auth.display_name.ends_with(iss), "display_name = {}", auth.display_name);
+        assert!(auth.policies.contains(&"default".to_string()));
+        assert_eq!(auth.lease.ttl.as_secs(), 600);
+        assert_eq!(auth.metadata.get("spiffe_id").map(String::as_str), Some(iss));
+
+        // 4) a captured token replayed WITHOUT a DPoP proof is rejected
+        let r = do_login(&core, &jws, None).await.unwrap();
+        assert!(r.auth.is_none(), "bare bearer token (no DPoP) must be rejected");
+
+        // 5) wrong audience is rejected even with a valid signature
+        let (proof2, jkt2) = mint_dpop(&ed_sk, "POST", "https://evil.example.com", now);
+        let jws2 = mint_child(&sk, kid, iss, "https://evil.example.com", &jkt2, now, now + 3600);
+        let r = do_login(&core, &jws2, Some(&proof2)).await.unwrap();
+        assert!(r.auth.is_none(), "audience mismatch must be rejected");
+    }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_ferrogate_admin_lifecycle() {

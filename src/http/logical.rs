@@ -90,6 +90,14 @@ async fn logical_request_handler_inner(
     r.connection = Some(req_conn);
     r.api_version = api_version;
 
+    // Surface the RFC 9449 DPoP proof header to backends that consume it
+    // (the `ferrogate` machine-auth backend binds a child token to it). We
+    // copy only this one header rather than the whole header map to keep the
+    // logical request lean and avoid leaking unrelated headers into backends.
+    if let Some(dpop) = req.headers().get("dpop").and_then(|v| v.to_str().ok()) {
+        r.headers.get_or_insert_with(Default::default).insert("dpop".to_string(), dpop.to_string());
+    }
+
     match method {
         Method::GET => {
             r.operation = Operation::Read;
