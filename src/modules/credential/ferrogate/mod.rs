@@ -508,6 +508,26 @@ mod test {
         assert_eq!(r.data.unwrap()["status"], "unknown");
     }
 
+    /// The verifier must consume the *real* JWKS served by the live dev CMIS
+    /// (captured from `ferrogate.v1.MachineIdentity/JWKS` on segdc1vds0005,
+    /// CMIS 0.13.1). Proves BastionVault's vendored `ferro-child-verify` parses
+    /// production CMIS output — including the `x-ferrogate-crl` extension it
+    /// ignores — and that the composite public key decodes.
+    #[test]
+    fn test_real_cmis_jwks_parses() {
+        use ferro_child_verify::JwkSet;
+        use ferro_crypto::composite::CompositePublicKey;
+
+        let raw = include_str!("testdata/cmis_dev_jwks.json");
+        let jwks = JwkSet::from_json(raw).expect("real CMIS JWKS parses");
+        assert_eq!(jwks.keys.len(), 1);
+        let k = &jwks.keys[0];
+        assert_eq!(k.kty, "FERROGATE-COMPOSITE");
+        assert_eq!(k.kid, "cmis-dev-1");
+        let pk_bytes = URL_SAFE_NO_PAD.decode(k.public.as_bytes()).expect("pub is base64url");
+        CompositePublicKey::from_concat_bytes(&pk_bytes).expect("composite public key decodes");
+    }
+
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_ferrogate_admin_lifecycle() {
         let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_ferrogate_admin_lifecycle").await;
