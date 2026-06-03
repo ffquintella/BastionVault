@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-06-03
+
+### Changed
+
+- **Minor version bump marking the FerroGate machine-authentication auth method as complete.** All seven phases of the `ferrogate` auth backend have shipped (see `0.11.3` and the preceding `0.11.x` entries): the `auth/ferrogate/` mount + admin lifecycle, DPoP-bound composite child-token verification + token minting, the one-shot first-machine root bootstrap + self-poll, the `cmis_grpc` JWKS source over plaintext and hybrid post-quantum TLS (validated live against the dev CMIS), the `bvault ferrogate` client CLI, the *Machines (FerroGate)* admin GUI page, and the opt-in direct-SVID mode with CRL enforcement, per-source-IP login rate limiting, Prometheus metrics, and operator docs. No functional change over `0.11.3` — this `0.12.0` release exists to signal the new, fully-shipped feature.
+
 ## [0.11.3] - 2026-06-03
 
 ### Added
