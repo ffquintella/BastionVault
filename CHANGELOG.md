@@ -48,6 +48,7 @@ EXAMPLE ENTRY:
 ### Added
 
 - **FerroGate machine-auth backend — Phase 5 (client CLI)**. New `bvault ferrogate` subcommands (Unix): `login` obtains a DPoP-bound child token from the local FerroGate MIA over its helper socket (`/run/ferrogate/mia.sock`, length-delimited CBOR), builds the RFC 9449 DPoP proof, exchanges it at `auth/<mount>/login`, and persists the issued BastionVault token; `status` reports the machine's enrolment status without minting a vault token; `whoami` prints the host's SPIFFE id locally. A missing MIA fails with a clear `ferrogate_mia_unavailable` error. The CLI's DPoP proof is verified against FerroGate's own `verify_dpop_proof` in tests. Windows named-pipe support is a follow-up.
+- **FerroGate machine-auth backend — Phase 6 (admin GUI page)**. A new desktop GUI page, *Machines (FerroGate)* (route `/ferrogate`, sidebar entry), manages the machine-approval lifecycle: a **Pending** tab to approve (with policy set + token TTL + comment) or reject (with reason) attested-but-unauthorized machines, an **Approved** tab showing policies / last login / source IP with revoke, a **History** tab of rejected/revoked machines, and a **Config** tab to set the trust anchor (trust domain, expected audience, JWKS source, CMIS endpoint + SHA-384 SPKI pins, static JWKS, the PQ-TLS toggle, and the bootstrap toggles). The page enables the `ferrogate` auth method on first use. Backed by seven Tauri commands plus `ferrogate` added to the mount-creation auth-type list.
 
 ## [0.11.2] - 2026-06-03
 

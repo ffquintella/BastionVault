@@ -458,6 +458,41 @@ export interface SecretIdAccessorInfo {
   cidr_list: string[];
 }
 
+// FerroGate machine auth
+export interface FerroGateConfig {
+  trust_domain: string;
+  expected_audience: string;
+  jwks_source: string;
+  cmis_endpoint: string;
+  cmis_spki_pins: string[];
+  static_jwks: string;
+  accept_svid: boolean;
+  clock_leeway_secs: number;
+  default_token_ttl: number;
+  cmis_tls_enable: boolean;
+  jwks_refresh_secs: number;
+  bootstrap_root_auto_approve: boolean;
+  bootstrap_policies: string[];
+}
+
+export interface FerroGateMachine {
+  id: string;
+  spiffe_id: string;
+  status: string;
+  policies: string[];
+  ttl_seconds: number;
+  ek_cert_sha384: string;
+  policy_id: string;
+  parent_svid: string;
+  first_seen_at: number;
+  approved_at: number;
+  approver: string;
+  last_login_at: number;
+  last_login_ip: string;
+  reject_reason: string;
+  comment: string;
+}
+
 // Identity groups
 export type GroupKind = "user" | "app";
 

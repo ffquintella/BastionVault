@@ -143,6 +143,7 @@ const AUTH_TYPES = [
   { value: "userpass", label: "Username & Password" },
   { value: "approle", label: "AppRole" },
   { value: "cert", label: "TLS Certificate" },
+  { value: "ferrogate", label: "FerroGate Machine Identity" },
 ];
 
 export function MountsPage() {

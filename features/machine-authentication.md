@@ -132,7 +132,14 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   in a unit test; the wire framing has a CBOR round-trip test. Unix-only for now (Windows named-pipe is a
   follow-up). Full live login isn't exercised in the current dev env (the dev CMIS has no RIM bundle, so its MIA
   can't attest/mint), but every layer the CLI owns is unit-validated.
-- Phases 6–7 are not started. (`sync_handler` build of `cmis_grpc` is unsupported — async-only — and that build
+- **Phase 6 shipped.** Admin GUI page `Machines (FerroGate)` (route `/ferrogate`, sidebar entry) with Pending /
+  Approved / History / Config tabs: approve (policies + TTL + comment), reject (reason), revoke, and a
+  trust-anchor config form (trust domain, audience, JWKS source, CMIS endpoint + SPKI pins, static JWKS,
+  PQ-TLS toggle, bootstrap toggles). Backed by seven Tauri commands in
+  [`gui/src-tauri/src/commands/ferrogate.rs`](../gui/src-tauri/src/commands/ferrogate.rs) routing to
+  `auth/ferrogate/*`, with `api.ts` wrappers, TS types, an `AUTH_TYPES` entry, and two `vitest` tests
+  (full GUI suite of 116 passes; tsc + vite build clean).
+- Phase 7 is not started. (`sync_handler` build of `cmis_grpc` is unsupported — async-only — and that build
   config is independently broken repo-wide. Audit events are log-only; no dedicated audit-store rows yet.)
 - BastionVault ships Token, UserPass, AppRole, Certificate, and FIDO2/WebAuthn auth methods. None consume an
   external attestation authority.
@@ -384,7 +391,7 @@ operator on attested host                     server
 | 3 ✅ | **Enrolment state machine + bootstrap** | **Done.** First-seen → pending side effect, token-authenticated self-poll (`POST status`), admin approve/reject/revoke transitions, and the **root-token one-shot bootstrap** (`approved_count == 0` + root). `audit`-target log events on key transitions. Tests cover the bootstrap happy path, the second-machine-not-bootstrapped guard, and the status endpoint. (Self-poll is `POST status` with the token rather than `GET enrolment/{spiffe_id}` — a SPIFFE ID can't be a path segment, and presenting the token both identifies and authorizes the poll.) |
 | 4 ✅ | **CMIS gRPC JWKS source** | **Done — plaintext + PQ-TLS both validated live.** `cmis_grpc` source calls `MachineIdentity/JWKS` with cache + stale-while-revalidate; pre-generated tonic stubs (no protoc in build); transport selectable plaintext / SPKI-pinned hybrid-PQ-TLS via `cmis_tls_enable`. PQ-TLS (`X25519MLKEM768`) validated end-to-end against the live CMIS 0.15.0 on `segdc1vds0005`. SDK vendored at v0.15.0. CRL enforcement applies to the SVID path → folded into Phase 7. |
 | 5 ✅ | **Client CLI** | **Done (Unix).** `bvault ferrogate login|status|whoami` driving the MIA helper socket (CBOR framing mirrored from `mia::helper::proto`) + DPoP proof construction; `ferrogate_mia_unavailable` when the MIA is absent. DPoP proof proven against `ferro-child-verify::verify_dpop_proof`; CBOR wire round-trip test. Windows named-pipe deferred. |
-| 6 | **Admin GUI page** | `Settings → Auth → Machines` (Pending/Approved/History/Config tabs), `AUTH_TYPES` entry, responsive per GUI rules. UI tests under `vitest`. |
+| 6 ✅ | **Admin GUI page** | **Done.** `Machines (FerroGate)` admin page (route `/ferrogate`, sidebar nav) with Pending / Approved / History / Config tabs; approve/reject/revoke modals; enable-mount empty state; `AUTH_TYPES` entry. Seven Tauri commands (`ferrogate_read_config`/`write_config`/`list_machines`/`approve`/`reject`/`revoke`/`delete_machine`) + api.ts wrappers + types. Two vitest tests. |
 | 7 | **Direct-SVID mode + hardening + docs** | Opt-in `accept_svid` path via `verify_unrevoked`; rate limits on `login`; dashboard metrics (`ferrogate_pending_total`, `ferrogate_approved_total`, `ferrogate_login_total`, `ferrogate_login_denied_total`); threat-model write-up under `docs/`; operator setup guide (FerroGate trust-anchor config, bootstrap recipe, CRL caveats for `static_jwks`). |
 
 ## Open questions

@@ -10,6 +10,7 @@ import { PmpImportPage } from "./routes/PmpImportPage";
 import { FilesPage } from "./routes/FilesPage";
 import { UsersPage } from "./routes/UsersPage";
 import { AppRolePage } from "./routes/AppRolePage";
+import { FerroGatePage } from "./routes/FerroGatePage";
 import { GroupsPage } from "./routes/GroupsPage";
 import { AssetGroupsPage } from "./routes/AssetGroupsPage";
 import { SharingPage } from "./routes/SharingPage";
@@ -102,6 +103,10 @@ export default function App() {
             <Route
               path="/approle"
               element={<ProtectedRoute><AppRolePage /></ProtectedRoute>}
+            />
+            <Route
+              path="/ferrogate"
+              element={<ProtectedRoute><FerroGatePage /></ProtectedRoute>}
             />
             <Route
               path="/groups"
