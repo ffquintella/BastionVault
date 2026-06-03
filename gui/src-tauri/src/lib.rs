@@ -349,6 +349,14 @@ pub fn run() {
             commands::approle::list_secret_id_accessors,
             commands::approle::lookup_secret_id_accessor,
             commands::approle::destroy_secret_id_accessor,
+            // FerroGate machine auth
+            commands::ferrogate::ferrogate_read_config,
+            commands::ferrogate::ferrogate_write_config,
+            commands::ferrogate::ferrogate_list_machines,
+            commands::ferrogate::ferrogate_approve,
+            commands::ferrogate::ferrogate_reject,
+            commands::ferrogate::ferrogate_revoke,
+            commands::ferrogate::ferrogate_delete_machine,
             // PKI Secret Engine
             commands::pki::pki_list_mounts,
             commands::pki::pki_enable_mount,

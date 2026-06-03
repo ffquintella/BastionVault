@@ -34,6 +34,8 @@ import type {
   SecretIdResponse,
   SecretIdAccessorList,
   SecretIdAccessorInfo,
+  FerroGateConfig,
+  FerroGateMachine,
   GroupKind,
   GroupListResult,
   GroupInfo,
@@ -464,6 +466,40 @@ export const lookupSecretIdAccessor = (name: string, accessor: string) =>
   invoke<SecretIdAccessorInfo>("lookup_secret_id_accessor", { name, accessor });
 export const destroySecretIdAccessor = (name: string, accessor: string) =>
   invoke<void>("destroy_secret_id_accessor", { name, accessor });
+
+// FerroGate machine auth
+export const ferrogateReadConfig = () => invoke<FerroGateConfig>("ferrogate_read_config");
+export const ferrogateWriteConfig = (cfg: {
+  trustDomain: string;
+  expectedAudience: string;
+  jwksSource: string;
+  cmisEndpoint: string;
+  cmisSpkiPins: string;
+  staticJwks: string;
+  acceptSvid: boolean;
+  cmisTlsEnable: boolean;
+  bootstrapRootAutoApprove: boolean;
+  bootstrapPolicies: string;
+}) =>
+  invoke<void>("ferrogate_write_config", {
+    trustDomain: cfg.trustDomain,
+    expectedAudience: cfg.expectedAudience,
+    jwksSource: cfg.jwksSource,
+    cmisEndpoint: cfg.cmisEndpoint,
+    cmisSpkiPins: cfg.cmisSpkiPins,
+    staticJwks: cfg.staticJwks,
+    acceptSvid: cfg.acceptSvid,
+    cmisTlsEnable: cfg.cmisTlsEnable,
+    bootstrapRootAutoApprove: cfg.bootstrapRootAutoApprove,
+    bootstrapPolicies: cfg.bootstrapPolicies,
+  });
+export const ferrogateListMachines = () => invoke<FerroGateMachine[]>("ferrogate_list_machines");
+export const ferrogateApprove = (id: string, policies: string, ttlSeconds: number, comment: string) =>
+  invoke<void>("ferrogate_approve", { id, policies, ttlSeconds, comment });
+export const ferrogateReject = (id: string, reason: string) =>
+  invoke<void>("ferrogate_reject", { id, reason });
+export const ferrogateRevoke = (id: string) => invoke<void>("ferrogate_revoke", { id });
+export const ferrogateDeleteMachine = (id: string) => invoke<void>("ferrogate_delete_machine", { id });
 
 // Identity groups
 export const listGroups = (kind: GroupKind) =>

@@ -45,6 +45,10 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+- **FerroGate machine-auth backend — Phase 6 (admin GUI page)**. A new desktop GUI page, *Machines (FerroGate)* (route `/ferrogate`, sidebar entry), manages the machine-approval lifecycle: a **Pending** tab to approve (with policy set + token TTL + comment) or reject (with reason) attested-but-unauthorized machines, an **Approved** tab showing policies / last login / source IP with revoke, a **History** tab of rejected/revoked machines, and a **Config** tab to set the trust anchor (trust domain, expected audience, JWKS source, CMIS endpoint + SHA-384 SPKI pins, static JWKS, the PQ-TLS toggle, and the bootstrap toggles). The page enables the `ferrogate` auth method on first use. Backed by seven Tauri commands plus `ferrogate` added to the mount-creation auth-type list.
+
 ## [0.11.2] - 2026-06-03
 
 ### Changed

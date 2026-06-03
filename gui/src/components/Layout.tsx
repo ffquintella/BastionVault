@@ -110,6 +110,7 @@ const userNav: NavItem[] = [
 const adminNav: NavItem[] = [
   { path: "/users", label: "Users" },
   { path: "/approle", label: "AppRole" },
+  { path: "/ferrogate", label: "Machines (FerroGate)" },
   { path: "/groups", label: "Identity Groups" },
   { path: "/asset-groups", label: "Asset Groups" },
   { path: "/policies", label: "Policies" },
