@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.11.0"
+version = "0.11.1"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -35,7 +35,7 @@ members = [
 # separately — its build artefacts shouldn't pollute the host's
 # `target/`, and its release-profile (panic=abort, opt=s) shouldn't
 # leak into our normal builds.
-exclude = ["plugins-ext", "IronRDP"]
+exclude = ["plugins-ext", "IronRDP", "third_party/ferrogate-sdk-rust"]
 resolver = "2"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -240,6 +240,29 @@ pkcs12 = { version = "0.1", features = ["kdf"] }
 # + AES-256-CBC is the modern shape every importer accepts.
 pkcs5 = { version = "0.7", features = ["alloc", "pbes2"] }
 fips204 = { version = "0.4", default-features = false, features = ["default-rng", "ml-dsa-44", "ml-dsa-65", "ml-dsa-87"] }
+# FerroGate machine-auth backend (`auth/ferrogate/`): the official reference
+# verifier for FerroGate's DPoP-bound, composite-signed (Ed25519 + ML-DSA-65)
+# child tokens. Vendored from the FerroGate `releases/v0.13.2` SDK under
+# `third_party/ferrogate-sdk-rust/` (see its PROVENANCE.md); that tree is its
+# own workspace and is excluded from ours. Lean — pulls only serde / base64 /
+# sha2 / ed25519-dalek / fips204, all already in our tree. No custom crypto.
+ferro-child-verify = { path = "third_party/ferrogate-sdk-rust/crates/ferro-child-verify" }
+# `ferro-crypto` (same vendored SDK) provides the hybrid post-quantum TLS
+# provider (X25519MLKEM768) and SPKI-pinning verifier used by the `cmis_grpc`
+# JWKS source's PQ-TLS transport, plus the composite primitive.
+ferro-crypto = { path = "third_party/ferrogate-sdk-rust/crates/ferro-crypto" }
+# CMIS gRPC client (Phase 4 — `cmis_grpc` JWKS source). The gRPC stubs are
+# pre-generated from FerroGate's machine_identity.proto and vendored at
+# `src/modules/credential/ferrogate/cmis_proto.rs`, so protoc is NOT required to
+# build BastionVault — only the tonic/prost runtimes.
+tonic = { version = "0.12", default-features = false, features = ["transport", "prost", "codegen"] }
+prost = "0.13"
+# Custom-connector plumbing so the CMIS channel can use ferro-crypto's PQ-TLS
+# rustls config (a provider tonic's built-in TLS can't supply). All three are
+# already in the dependency tree; promoted to direct deps.
+hyper-rustls = { version = "0.27", default-features = false, features = ["http2"] }
+hyper-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
 const-oid = { version = "0.9", features = ["db"] }
 # Phase 5.3: PKCS#8 (`PrivateKeyInfo`) emit/parse for ML-DSA private keys.
 # Already transitive in the dep tree via `der` / `x509-cert` / `rsa` / `p256`,
@@ -295,6 +318,8 @@ toml = "1.1.2"
 [dev-dependencies]
 serial_test = "3.4"
 cucumber = "0.23"
+# `ferro-crypto` is a normal dependency (PQ-TLS transport for cmis_grpc); the
+# ferrogate tests additionally use its composite primitive to mint fixtures.
 # Pulled in for the Phase-3 composite-signature test so we can verify the
 # classical ECDSA-P256 half of the composite signature directly. p256 +
 # sha2 are already in the dep tree transitively; promoting them keeps the

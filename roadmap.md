@@ -9,8 +9,8 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 | State | Count |
 |---|---|
 | Done | 46 |
-| Partial | 2 |
-| Todo | 7 |
+| Partial | 3 |
+| Todo | 6 |
 | Removed | 1 |
 | **Total tracked features** | **56** |
 
@@ -96,12 +96,12 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | `[x]` Done | Auth: OIDC | [spec](features/oidc-auth.md) — server module + GUI lifecycle, PKCE / nonce / JWKS. |
 | `[x]` Done | Auth: SAML 2.0 | [spec](features/saml-auth.md) — pure-Rust SP-initiated SSO, no libxml2 / xmlsec. |
 | `[x]` Done | Auth: FIDO2 / WebAuthn / YubiKey | [roadmap](roadmaps/tauri-gui-fido2.md) — server uses an in-tree pure-Rust RP (`fido2/rp/`); no `openssl` in the server crate. ES256 + Ed25519, attestation `none` only. |
+| `[/]` Partial | Auth: Machine Authentication (FerroGate) | [spec](features/machine-authentication.md) — admit only FerroGate-attested machines (TPM-rooted SVID / DPoP child token), admin-approval gated, first-machine root bootstrap. **Phases 1–4 done** (`auth/ferrogate/` mount + config + admin lifecycle; `login` verifies DPoP-bound child tokens via the vendored FerroGate verifier and mints tokens for approved machines; one-shot first-machine root bootstrap + self-poll status; `cmis_grpc` JWKS source with cache + plaintext/PQ-TLS transport, validated live against the dev CMIS). Phase 5+: client CLI, GUI, direct-SVID + CRL. Supersedes the earlier host-fingerprint design. |
 | `[/]` In progress | Packaging — server container image | [roadmap](roadmaps/packaging-and-distribution.md) — Wave 1 + Wave 2 (cluster compose, multi-arch, Cosign keyless, CycloneDX SBOM, `:debug` variant) shipped. Helm chart + Phase 1.5 trusted-proxy still open. |
 | `[/]` Done (amd64) | Packaging — Linux CLI installers | cargo-deb + cargo-generate-rpm metadata in `Cargo.toml`; `make linux-cli-packages`. GPG signing + arm64 cross-builds deferred to later waves. |
 | `[/]` Skeleton | Packaging — Linux GUI installers | Postinst/prerm scripts staged; `tauri.conf.json` wiring + first `tauri build` pass on a Linux host pending. |
 | `[ ]` Todo | Packaging — macOS / Windows installers | Wave 3 — pending macOS / Windows build runners + signing identities (notary, EV Authenticode). |
 | `[ ]` Todo | Packaging — client distribution website | Wave 3/4 — depends on signed client artefacts. |
-| `[ ]` Todo | Auth: Machine Authentication | [spec](features/machine-authentication.md) — composite-key (random + host-hardware fingerprint), admin-approval gated. |
 
 ### Secret Engines
 
@@ -153,7 +153,7 @@ Next-up `Todo` rows once Packaging & Distribution lands:
 - Kubernetes Integration
 - Compliance Reporting
 - Rustion Bastion Integration (delegated PAM transport + recording)
-- Machine Authentication (composite-key auth for headless clients, admin-approval gated)
+- Machine Authentication (FerroGate-attested machine identity, admin-approval gated, first-machine root bootstrap)
 
 ## Completed Initiatives
 

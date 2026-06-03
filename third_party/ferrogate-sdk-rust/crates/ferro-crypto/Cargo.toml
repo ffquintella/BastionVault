@@ -1,0 +1,40 @@
+# Vendored from the FerroGate releases/v0.13.2 SDK (see ../../PROVENANCE.md).
+# Manifest de-inherited from the SDK workspace so the crate stands alone as a
+# path dependency of BastionVault; the `src/` sources are verbatim.
+[package]
+name        = "ferro-crypto"
+description = "FerroGate — hybrid post-quantum cryptographic primitives (M1)"
+version      = "0.13.2"
+edition      = "2021"
+rust-version = "1.88"
+license      = "Apache-2.0"
+repository   = "https://github.com/ffquintella/FerroGate"
+authors      = ["FerroGate contributors"]
+
+[dependencies]
+thiserror           = "1"
+zeroize             = { version = "1.8", features = ["zeroize_derive"] }
+sha2                = "0.10"
+sha3                = "0.10"
+subtle              = "2.6"
+hex                 = "0.4"
+ed25519-dalek       = { version = "2", features = ["rand_core", "zeroize"] }
+rand_core           = { version = "0.6", features = ["std"] }
+ring                = "0.17"
+serde               = { version = "1", features = ["derive"] }
+rustls              = { version = "0.23", default-features = false, features = ["std", "tls12", "logging", "aws_lc_rs"] }
+rustls-post-quantum = "0.2"
+rustls-pki-types    = "1"
+x509-parser         = "0.16"
+fips204             = "0.4"
+base64              = "0.22"
+der                 = { version = "0.7", features = ["alloc", "derive", "oid"] }
+serde_json          = "1"
+
+[dev-dependencies]
+tokio        = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
+rcgen        = { version = "0.13", default-features = false, features = ["aws_lc_rs", "pem"] }
+aws-lc-rs    = "1"
+wycheproof   = "0.6"
+proptest     = "1"

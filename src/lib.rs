@@ -38,7 +38,8 @@ use crate::{
     modules::{
         auth::AuthModule,
         credential::{
-            approle::AppRoleModule, oidc::OidcModule, saml::SamlModule, userpass::UserPassModule,
+            approle::AppRoleModule, ferrogate::FerroGateModule, oidc::OidcModule, saml::SamlModule,
+            userpass::UserPassModule,
         },
         policy::PolicyModule,
     },
@@ -176,6 +177,10 @@ impl BastionVault {
         // add credential module: saml (Phase 1+2 — config + roles only)
         let saml_module = SamlModule::new(core.clone());
         core.module_manager.add_module(Arc::new(saml_module))?;
+
+        // add credential module: ferrogate (Phase 1 — config + admin lifecycle; login stubbed)
+        let ferrogate_module = FerroGateModule::new(core.clone());
+        core.module_manager.add_module(Arc::new(ferrogate_module))?;
 
         let handlers = core.handlers.load().clone();
         for handler in handlers.iter() {

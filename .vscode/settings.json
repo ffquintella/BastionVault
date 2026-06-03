@@ -2,5 +2,14 @@
     "rust-analyzer.linkedProjects": [
         "Cargo.toml"
     ],
-    "rust-analyzer.cargo.features": ["storage_mysql"]
+    "rust-analyzer.cargo.features": ["storage_mysql"],
+    // The `storage_mysql` feature pulls `mysqlclient-sys`, which needs
+    // libmysqlclient. Homebrew's `mysql-client` is keg-only, so expose its
+    // pkg-config dir; mysqlclient-sys then links the real lib (the pkg-config
+    // path also avoids its hardcoded version gate, which doesn't yet list
+    // 9.6.x). macOS/Homebrew path — Linux devs building storage_mysql override
+    // in their own env; CLI/CI default builds don't use this.
+    "rust-analyzer.cargo.extraEnv": {
+        "PKG_CONFIG_PATH": "/opt/homebrew/opt/mysql-client/lib/pkgconfig"
+    }
 }
