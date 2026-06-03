@@ -45,6 +45,10 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+- **FerroGate machine-auth backend — Phase 5 (client CLI)**. New `bvault ferrogate` subcommands (Unix): `login` obtains a DPoP-bound child token from the local FerroGate MIA over its helper socket (`/run/ferrogate/mia.sock`, length-delimited CBOR), builds the RFC 9449 DPoP proof, exchanges it at `auth/<mount>/login`, and persists the issued BastionVault token; `status` reports the machine's enrolment status without minting a vault token; `whoami` prints the host's SPIFFE id locally. A missing MIA fails with a clear `ferrogate_mia_unavailable` error. The CLI's DPoP proof is verified against FerroGate's own `verify_dpop_proof` in tests. Windows named-pipe support is a follow-up.
+
 ## [0.11.2] - 2026-06-03
 
 ### Changed
