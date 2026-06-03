@@ -570,10 +570,14 @@ mod test {
         use ferro_child_verify::JwkSet;
 
         let endpoint = std::env::var("FERROGATE_CMIS_ENDPOINT").expect("set FERROGATE_CMIS_ENDPOINT");
+        // If FERROGATE_CMIS_SPKI_PIN (hex SHA-384) is set, exercise the hybrid
+        // PQ-TLS path; otherwise plaintext. CMIS >= 0.15.0 is TLS-only.
+        let pin = std::env::var("FERROGATE_CMIS_SPKI_PIN").ok();
         let cfg = super::FerroGateConfig {
             jwks_source: super::jwks_source::CMIS_GRPC.to_string(),
             cmis_endpoint: endpoint,
-            cmis_tls_enable: false, // dev CMIS is plaintext gRPC
+            cmis_tls_enable: pin.is_some(),
+            cmis_spki_pins: pin.into_iter().collect(),
             ..Default::default()
         };
 
