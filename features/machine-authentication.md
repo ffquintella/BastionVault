@@ -139,6 +139,16 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   [`gui/src-tauri/src/commands/ferrogate.rs`](../gui/src-tauri/src/commands/ferrogate.rs) routing to
   `auth/ferrogate/*`, with `api.ts` wrappers, TS types, an `AUTH_TYPES` entry, and two `vitest` tests
   (full GUI suite of 116 passes; tsc + vite build clean).
+- **Phase 6.1 — GUI is now a MIA client too.** The GUI was previously only the relying-party/admin side; a
+  **Machine Login** tab on the *Machines (FerroGate)* page now puts it on the *client* side of the protocol —
+  the same self-bootstrap flow as the CLI. It dials the local MIA helper socket, mints a DPoP-bound child token,
+  and exchanges it at `auth/<mount>/login`, with *Whoami* / *Check status* / *Log in* actions. Four new Tauri
+  commands (`ferrogate_default_socket`, `ferrogate_machine_login`, `ferrogate_machine_status`, `ferrogate_whoami`)
+  **reuse `bastion_vault::cli::command::ferrogate_mia` verbatim** (no second copy of the DPoP/CBOR/thumbprint
+  crypto); the blocking socket I/O runs on `spawn_blocking`, and non-Unix targets return clear "Unix-only" stubs.
+  The socket field is prefilled with the platform default. Logging in here does not replace the admin session
+  token. Also fixed the CLI's `DEFAULT_MIA_SOCKET` to be per-OS (`/var/run/ferrogate/mia.sock` on macOS, where
+  `/run` does not exist; `/run/ferrogate/mia.sock` elsewhere).
 - **Phase 7 shipped — feature complete.** Opt-in **direct-SVID mode** (`accept_svid`): a host SVID presented at
   `login` is verified via the vendored `ferro-svid-verify::verify_unrevoked`, which **enforces FerroGate's
   composite-signed CRL** (a revoked host, or a stale/absent CRL, fails closed); the host identity is the SVID

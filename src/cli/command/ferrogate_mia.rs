@@ -2,7 +2,7 @@
 //! used by the `bvault ferrogate` subcommands.
 //!
 //! The MIA (Machine Identity Agent) exposes a local Unix-domain socket
-//! (`/run/ferrogate/mia.sock` by default) speaking a length-delimited CBOR
+//! ([`DEFAULT_MIA_SOCKET`] by default) speaking a length-delimited CBOR
 //! request/response protocol: a 4-byte big-endian length prefix followed by a
 //! CBOR body. We send a [`HelperReq`] and receive a [`HelperResp`] carrying a
 //! short-lived, DPoP-bound child token. This module re-declares that wire
@@ -20,7 +20,16 @@ use base64::Engine as _;
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 
-/// Default MIA helper socket path on Linux.
+/// Default MIA helper socket path.
+///
+/// The MIA listens on a per-platform location. Linux uses the modern
+/// `/run` tmpfs; macOS has no `/run`, so the MIA binds under `/var/run`
+/// (which resolves to `/private/var/run`). Picking the right default per
+/// target means `bvault ferrogate login` works without an explicit
+/// `--socket` on either OS.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_MIA_SOCKET: &str = "/var/run/ferrogate/mia.sock";
+#[cfg(not(target_os = "macos"))]
 pub const DEFAULT_MIA_SOCKET: &str = "/run/ferrogate/mia.sock";
 
 /// Largest frame we will read or write (matches the MIA's `MAX_FRAME_LEN`).

@@ -15,7 +15,7 @@ import {
   EmptyState,
   useToast,
 } from "../components/ui";
-import type { FerroGateConfig, FerroGateMachine } from "../lib/types";
+import type { FerroGateConfig, FerroGateMachine, FerroGateLoginResult } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 
@@ -204,6 +204,7 @@ export function FerroGatePage() {
                 { id: "pending", label: `Pending${pending.length ? ` (${pending.length})` : ""}` },
                 { id: "approved", label: `Approved${approved.length ? ` (${approved.length})` : ""}` },
                 { id: "history", label: "History" },
+                { id: "self", label: "Machine Login" },
                 { id: "config", label: "Config" },
               ]}
               active={tab}
@@ -304,6 +305,8 @@ export function FerroGatePage() {
               </Card>
             )}
 
+            {tab === "self" && <MachineLoginPanel expectedAudience={config?.expected_audience || ""} toast={toast} />}
+
             {tab === "config" && config && <ConfigPanel config={config} onSaved={load} toast={toast} />}
           </>
         )}
@@ -381,6 +384,174 @@ export function FerroGatePage() {
         variant="danger"
       />
     </Layout>
+  );
+}
+
+function MachineLoginPanel({
+  expectedAudience,
+  toast,
+}: {
+  expectedAudience: string;
+  toast: (type: "success" | "error" | "info", message: string) => void;
+}) {
+  const [socket, setSocket] = useState("");
+  const [audience, setAudience] = useState(expectedAudience);
+  const [mount, setMount] = useState("ferrogate");
+  const [ttl, setTtl] = useState("300");
+  const [busy, setBusy] = useState<"" | "whoami" | "status" | "login">("");
+  const [spiffe, setSpiffe] = useState("");
+  const [statusJson, setStatusJson] = useState("");
+  const [result, setResult] = useState<FerroGateLoginResult | null>(null);
+
+  // Prefill the socket field with this platform's default MIA path so the
+  // operator does not have to know whether it is /run or /var/run.
+  useEffect(() => {
+    void api.ferrogateDefaultSocket().then(setSocket).catch(() => {});
+  }, []);
+  // Keep the audience in sync with the mount's configured expected_audience
+  // until the operator edits it.
+  useEffect(() => {
+    setAudience((a) => (a ? a : expectedAudience));
+  }, [expectedAudience]);
+
+  const ttlNum = parseInt(ttl || "0", 10) || 300;
+
+  async function doWhoami() {
+    setBusy("whoami");
+    try {
+      const id = await api.ferrogateWhoami(socket);
+      setSpiffe(id);
+      toast("success", "MIA reachable");
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function doStatus() {
+    setBusy("status");
+    try {
+      const s = await api.ferrogateMachineStatus(audience, socket, mount, ttlNum);
+      setStatusJson(JSON.stringify(s, null, 2));
+    } catch (e) {
+      setStatusJson("");
+      toast("error", extractError(e));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function doLogin() {
+    setBusy("login");
+    try {
+      const r = await api.ferrogateMachineLogin(audience, socket, mount, ttlNum);
+      setResult(r);
+      setSpiffe(r.spiffe_id || spiffe);
+      toast("success", "Machine authenticated — token issued");
+    } catch (e) {
+      setResult(null);
+      toast("error", extractError(e));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function copyToken() {
+    if (!result?.client_token) return;
+    try {
+      await navigator.clipboard.writeText(result.client_token);
+      toast("success", "Token copied");
+    } catch {
+      toast("error", "Could not copy token");
+    }
+  }
+
+  return (
+    <Card>
+      <div className="space-y-4">
+        <div>
+          <h2 className="text-base font-semibold">Self-enroll this host via the MIA</h2>
+          <p className="text-sm text-[var(--color-text-muted)]">
+            Dials the local FerroGate Machine Identity Agent over its helper socket, mints a
+            short-lived DPoP-bound child token, and exchanges it at <code className="font-mono">auth/{mount.trim() || "ferrogate"}/login</code>.
+            A running MIA on this machine is required. This does not change your current admin session.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div className="col-span-2">
+            <Input
+              label="MIA helper socket"
+              value={socket}
+              onChange={(e) => setSocket(e.target.value)}
+              placeholder="/run/ferrogate/mia.sock"
+            />
+          </div>
+          <Input
+            label="Audience"
+            value={audience}
+            onChange={(e) => setAudience(e.target.value)}
+            placeholder="https://vault.example.com"
+          />
+          <Input label="Mount" value={mount} onChange={(e) => setMount(e.target.value)} placeholder="ferrogate" />
+          <Input
+            label="Child-token TTL (seconds)"
+            type="number"
+            value={ttl}
+            onChange={(e) => setTtl(e.target.value)}
+          />
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <Button variant="secondary" onClick={() => void doWhoami()} disabled={!!busy}>
+            {busy === "whoami" ? "Checking…" : "Whoami"}
+          </Button>
+          <Button variant="secondary" onClick={() => void doStatus()} disabled={!!busy || !audience}>
+            {busy === "status" ? "Checking…" : "Check status"}
+          </Button>
+          <Button onClick={() => void doLogin()} disabled={!!busy || !audience}>
+            {busy === "login" ? "Logging in…" : "Log in"}
+          </Button>
+        </div>
+
+        {spiffe && (
+          <div className="text-sm">
+            <span className="text-[var(--color-text-muted)]">This host&apos;s SPIFFE ID: </span>
+            <span className="break-all font-mono">{spiffe}</span>
+          </div>
+        )}
+
+        {statusJson && (
+          <div>
+            <div className="mb-1 text-sm text-[var(--color-text-muted)]">Enrolment status</div>
+            <pre className="overflow-x-auto rounded bg-[var(--color-bg-subtle)] p-3 text-xs">{statusJson}</pre>
+          </div>
+        )}
+
+        {result?.authenticated && (
+          <Card>
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <Badge variant="success" label="authenticated" />
+                {result.policies.map((p) => (
+                  <Badge key={p} variant="info" label={p} />
+                ))}
+                {result.lease_duration ? (
+                  <span className="text-xs text-[var(--color-text-muted)]">lease {result.lease_duration}s</span>
+                ) : null}
+              </div>
+              <Input label="Vault token" value={result.client_token} readOnly className="font-mono" />
+              <div className="flex justify-end">
+                <Button variant="secondary" size="sm" onClick={() => void copyToken()}>
+                  Copy token
+                </Button>
+              </div>
+            </div>
+          </Card>
+        )}
+      </div>
+    </Card>
   );
 }
 

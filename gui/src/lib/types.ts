@@ -493,6 +493,15 @@ export interface FerroGateMachine {
   comment: string;
 }
 
+// Result of a MIA self-bootstrap / machine-login attempt.
+export interface FerroGateLoginResult {
+  spiffe_id: string;
+  authenticated: boolean;
+  client_token: string;
+  policies: string[];
+  lease_duration: number;
+}
+
 // Identity groups
 export type GroupKind = "user" | "app";
 

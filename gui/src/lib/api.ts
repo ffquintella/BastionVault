@@ -36,6 +36,7 @@ import type {
   SecretIdAccessorInfo,
   FerroGateConfig,
   FerroGateMachine,
+  FerroGateLoginResult,
   GroupKind,
   GroupListResult,
   GroupInfo,
@@ -500,6 +501,13 @@ export const ferrogateReject = (id: string, reason: string) =>
   invoke<void>("ferrogate_reject", { id, reason });
 export const ferrogateRevoke = (id: string) => invoke<void>("ferrogate_revoke", { id });
 export const ferrogateDeleteMachine = (id: string) => invoke<void>("ferrogate_delete_machine", { id });
+// FerroGate MIA client (self-bootstrap / machine login)
+export const ferrogateDefaultSocket = () => invoke<string>("ferrogate_default_socket");
+export const ferrogateMachineLogin = (audience: string, socket: string, mount: string, ttl: number) =>
+  invoke<FerroGateLoginResult>("ferrogate_machine_login", { audience, socket, mount, ttl });
+export const ferrogateMachineStatus = (audience: string, socket: string, mount: string, ttl: number) =>
+  invoke<unknown>("ferrogate_machine_status", { audience, socket, mount, ttl });
+export const ferrogateWhoami = (socket: string) => invoke<string>("ferrogate_whoami", { socket });
 
 // Identity groups
 export const listGroups = (kind: GroupKind) =>

@@ -357,6 +357,11 @@ pub fn run() {
             commands::ferrogate::ferrogate_reject,
             commands::ferrogate::ferrogate_revoke,
             commands::ferrogate::ferrogate_delete_machine,
+            // FerroGate MIA client (self-bootstrap / machine login)
+            commands::ferrogate::ferrogate_default_socket,
+            commands::ferrogate::ferrogate_machine_login,
+            commands::ferrogate::ferrogate_machine_status,
+            commands::ferrogate::ferrogate_whoami,
             // PKI Secret Engine
             commands::pki::pki_list_mounts,
             commands::pki::pki_enable_mount,

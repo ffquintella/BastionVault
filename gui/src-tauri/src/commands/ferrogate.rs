@@ -175,3 +175,216 @@ pub async fn ferrogate_delete_machine(state: State<'_, AppState>, id: String) ->
     make_request(&state, Operation::Delete, format!("auth/ferrogate/machines/{id}"), None).await?;
     Ok(())
 }
+
+// ── Machine-identity client (MIA self-bootstrap) ───────────────────────────
+//
+// The commands above drive the *relying-party* side: they administer the
+// `auth/ferrogate/*` endpoints that VERIFY a token someone presents. The
+// commands below put the GUI on the *client* side of the same protocol —
+// they dial the local FerroGate Machine Identity Agent (MIA) over its Unix
+// helper socket, mint a short-lived DPoP-bound child token, and exchange it
+// at `auth/<mount>/login` to self-enrol this host.
+//
+// The MIA wire format, DPoP proof construction, and JWK thumbprint are reused
+// verbatim from the CLI (`bastion_vault::cli::command::ferrogate_mia`) so they
+// stay byte-identical to what the server's `ferro-child-verify` verifies —
+// there is no second copy of the crypto to drift.
+
+/// Outcome of a machine self-login / self-enrolment attempt.
+#[derive(Serialize, Default)]
+pub struct FerroGateLoginResult {
+    /// SPIFFE id read locally (unverified) from the minted child token —
+    /// lets the UI show "who am I" even when the server denies enrolment.
+    pub spiffe_id: String,
+    /// True when the server minted a vault token (machine is approved).
+    pub authenticated: bool,
+    /// The issued vault token, when `authenticated`. The GUI displays it for
+    /// copy-out; it deliberately does NOT replace the operator's admin
+    /// session token, so exercising this tab cannot log the admin out.
+    pub client_token: String,
+    /// Policies attached to the issued token.
+    pub policies: Vec<String>,
+    /// Token lease lifetime in seconds, when known.
+    pub lease_duration: u64,
+}
+
+/// Mint a child token from the MIA and build its DPoP proof. Runs the blocking
+/// `std` socket I/O on a blocking thread so it never stalls the async runtime.
+/// Returns `(child_token_jws, dpop_proof_jws, spiffe_id)`.
+#[cfg(unix)]
+async fn mia_mint(socket: String, audience: String, ttl: u32) -> Result<(String, String, String), String> {
+    use bastion_vault::cli::command::ferrogate_mia::{self, DpopKey};
+    tokio::task::spawn_blocking(move || {
+        let dpop = DpopKey::generate();
+        let child = ferrogate_mia::request_child_token(&socket, &audience, &dpop.jkt(), ttl)?;
+        let proof = dpop.proof("POST", &audience);
+        let spiffe = ferrogate_mia::jws_claim_str(&child.jws, "iss").unwrap_or_default();
+        Ok((child.jws, proof, spiffe))
+    })
+    .await
+    .map_err(|e| format!("MIA worker thread failed: {e}"))?
+}
+
+/// The default MIA helper socket path for this platform — surfaced so the GUI
+/// can prefill the field instead of hard-coding a Linux-only path.
+#[tauri::command]
+pub fn ferrogate_default_socket() -> String {
+    #[cfg(unix)]
+    {
+        bastion_vault::cli::command::ferrogate_mia::DEFAULT_MIA_SOCKET.to_string()
+    }
+    #[cfg(not(unix))]
+    {
+        String::new()
+    }
+}
+
+fn norm_socket(socket: String) -> String {
+    let s = socket.trim();
+    if s.is_empty() {
+        ferrogate_default_socket()
+    } else {
+        s.to_string()
+    }
+}
+
+fn norm_mount(mount: String) -> String {
+    let m = mount.trim().trim_matches('/');
+    if m.is_empty() { "ferrogate".to_string() } else { m.to_string() }
+}
+
+/// Dial the MIA, mint a child token, and exchange it at `auth/<mount>/login`.
+/// On success the server returns a vault token (machine approved); a pending
+/// or denied enrolment surfaces as an error carrying the server's reason.
+#[cfg(unix)]
+#[tauri::command]
+pub async fn ferrogate_machine_login(
+    state: State<'_, AppState>,
+    audience: String,
+    socket: String,
+    mount: String,
+    ttl: u32,
+) -> CmdResult<FerroGateLoginResult> {
+    let socket = norm_socket(socket);
+    let mount = norm_mount(mount);
+    let ttl = if ttl == 0 { 300 } else { ttl };
+
+    let (jws, proof, spiffe) = mia_mint(socket, audience, ttl).await?;
+
+    let mut body = Map::new();
+    body.insert("token".into(), Value::String(jws));
+    body.insert("dpop".into(), Value::String(proof));
+
+    let resp = super::dispatch_with_token(
+        &state,
+        Operation::Write,
+        format!("auth/{mount}/login"),
+        Some(body),
+        "",
+    )
+    .await?;
+
+    let auth = resp.as_ref().and_then(|r| r.auth.as_ref());
+    let client_token = auth
+        .and_then(|a| a.get("client_token"))
+        .and_then(|t| t.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    if client_token.is_empty() {
+        return Err("login did not return a token (machine not approved)".into());
+    }
+
+    let policies = auth
+        .and_then(|a| a.get("policies"))
+        .and_then(|p| p.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let lease_duration = auth
+        .and_then(|a| a.get("lease_duration"))
+        .and_then(|v| v.as_u64())
+        .or_else(|| resp.as_ref().and_then(|r| r.lease_duration))
+        .unwrap_or(0);
+
+    Ok(FerroGateLoginResult { spiffe_id: spiffe, authenticated: true, client_token, policies, lease_duration })
+}
+
+/// Report this machine's enrolment status without minting a vault token.
+/// Returns the server's `data` payload (e.g. `{ status, policies, ... }`).
+#[cfg(unix)]
+#[tauri::command]
+pub async fn ferrogate_machine_status(
+    state: State<'_, AppState>,
+    audience: String,
+    socket: String,
+    mount: String,
+    ttl: u32,
+) -> CmdResult<Value> {
+    let socket = norm_socket(socket);
+    let mount = norm_mount(mount);
+    let ttl = if ttl == 0 { 300 } else { ttl };
+
+    let (jws, proof, _spiffe) = mia_mint(socket, audience, ttl).await?;
+
+    let mut body = Map::new();
+    body.insert("token".into(), Value::String(jws));
+    body.insert("dpop".into(), Value::String(proof));
+
+    let resp = super::dispatch_with_token(
+        &state,
+        Operation::Write,
+        format!("auth/{mount}/status"),
+        Some(body),
+        "",
+    )
+    .await?;
+
+    Ok(resp.and_then(|r| r.data).map(Value::Object).unwrap_or(Value::Null))
+}
+
+/// Print this host's SPIFFE id, read locally from a freshly minted token.
+/// No server round-trip — useful to confirm the MIA is reachable and which
+/// identity it would present before attempting a login.
+#[cfg(unix)]
+#[tauri::command]
+pub async fn ferrogate_whoami(socket: String) -> CmdResult<String> {
+    let socket = norm_socket(socket);
+    let (_jws, _proof, spiffe) = mia_mint(socket, "urn:bvault:ferrogate:whoami".into(), 60).await?;
+    if spiffe.is_empty() {
+        return Err("could not read SPIFFE id from the minted token".into());
+    }
+    Ok(spiffe)
+}
+
+// On non-Unix targets the MIA helper socket does not exist (Windows named-pipe
+// support is deferred). Provide stubs so the Tauri command table is identical
+// across platforms and the GUI gets a clear error instead of a missing command.
+#[cfg(not(unix))]
+#[tauri::command]
+pub async fn ferrogate_machine_login(
+    _state: State<'_, AppState>,
+    _audience: String,
+    _socket: String,
+    _mount: String,
+    _ttl: u32,
+) -> CmdResult<FerroGateLoginResult> {
+    Err("FerroGate MIA login is only available on Unix (the MIA helper socket is not supported on this platform yet)".into())
+}
+
+#[cfg(not(unix))]
+#[tauri::command]
+pub async fn ferrogate_machine_status(
+    _state: State<'_, AppState>,
+    _audience: String,
+    _socket: String,
+    _mount: String,
+    _ttl: u32,
+) -> CmdResult<Value> {
+    Err("FerroGate MIA status is only available on Unix".into())
+}
+
+#[cfg(not(unix))]
+#[tauri::command]
+pub async fn ferrogate_whoami(_socket: String) -> CmdResult<String> {
+    Err("FerroGate MIA whoami is only available on Unix".into())
+}

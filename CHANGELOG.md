@@ -45,6 +45,16 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-06-09
+
+### Added
+
+- **FerroGate machine-auth — MIA self-bootstrap from the GUI**. The desktop GUI can now act as the *client* side of the FerroGate protocol (it was previously the relying-party / admin side only). A new **Machine Login** tab on the *Machines (FerroGate)* page dials the local FerroGate MIA over its helper socket, mints a DPoP-bound child token, and exchanges it at `auth/<mount>/login` — the same self-bootstrap flow the `bvault ferrogate` CLI performs. Buttons cover *Whoami* (read the host SPIFFE id locally), *Check status* (poll enrolment without minting a vault token), and *Log in* (mint + display the issued vault token for copy-out). Backed by four new Tauri commands (`ferrogate_default_socket`, `ferrogate_machine_login`, `ferrogate_machine_status`, `ferrogate_whoami`) in [`gui/src-tauri/src/commands/ferrogate.rs`](gui/src-tauri/src/commands/ferrogate.rs) that **reuse the CLI's `bastion_vault::cli::command::ferrogate_mia` module verbatim** — no duplicated DPoP/CBOR/thumbprint crypto, so the wire format stays byte-identical to what the server verifies. Blocking socket I/O runs on a `spawn_blocking` thread; non-Unix targets get clear "Unix-only" stubs. Logging in here does **not** replace the operator's admin session token. (`features/machine-authentication.md`)
+
+### Fixed
+
+- **FerroGate CLI MIA socket default on macOS**. `bvault ferrogate {login,status,whoami}` defaulted `--socket` to the Linux path `/run/ferrogate/mia.sock`, which does not exist on macOS (the MIA binds under `/var/run`). `DEFAULT_MIA_SOCKET` is now selected per target OS (`/var/run/ferrogate/mia.sock` on macOS, `/run/ferrogate/mia.sock` elsewhere), so the CLI connects without an explicit `--socket` on either platform. (`src/cli/command/ferrogate_mia.rs`)
+
 ## [0.12.0] - 2026-06-03
 
 ### Changed
