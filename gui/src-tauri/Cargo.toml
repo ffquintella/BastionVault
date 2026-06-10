@@ -89,7 +89,9 @@ uuid = { version = "1", features = ["v4"] }
 # Pure-Rust SSH client for the Resource Connect SSH session window.
 # Same crate the host's files_ssh_sync feature uses for SFTP/SCP
 # pushes — no `libssh2-sys` C dep, no OpenSSL footprint.
-russh = { version = "0.60", default-features = true }
+# `=0.61.1` mirrors the host crate's pin — see the russh comment in the
+# workspace root Cargo.toml (RUSTSEC-2026-0153/0154 + rc-line alignment).
+russh = { version = "=0.61.1", default-features = true }
 async-trait = "0.1"
 futures-util = "0.3"
 log = "0.4"
@@ -98,18 +100,16 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 urlencoding = "2"
 # Resource Connect RDP transport (Phase 4) — IronRDP via the
 # `IronRDP/` git submodule, which is excluded from the host
-# workspace and lives on its own `fix-deps` branch. The fork:
+# workspace and lives on its own `fix-deps` branch. The fork tracks
+# Devolutions master (sspi 0.21 / picky rc.23) plus two local deltas:
 #
-#   - bumps `picky` from rc.22 to rc.23 in `ironrdp-connector`
-#   - bumps `sspi` 0.19 → 0.20 across the workspace
-#   - patches `sspi 0.20.0` to its `main` branch SHA so it picks
-#     up the picky-rc.23 + stable RustCrypto chain
+#   - `ironrdp-connector` accepts PKCS#8 private keys for the
+#     smartcard CredSSP path (BastionVault's PKI engine emits PKCS#8)
+#   - sspi's `network_client` / `dns_resolver` features stay enabled
 #
-# Net effect: ironrdp's transitive `crypto-common` resolves to
-# `0.2.1`, matching the host crate's `digest 0.11` stack via
-# `hmac 0.13`. See `IronRDP/Cargo.toml` `[patch.crates-io]`
-# section + `crates/ironrdp-connector/Cargo.toml` for the pinned
-# rationale.
+# The sspi/picky crates themselves are redirected to BastionVault's
+# forks via the workspace root `[patch.crates-io]` so they sit on the
+# same RustCrypto rc line as russh 0.61 (see root Cargo.toml).
 ironrdp = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps", default-features = false, features = ["connector", "session", "graphics", "input", "pdu", "core", "dvc", "displaycontrol"] }
 ironrdp-async = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps" }
 ironrdp-tls = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-deps", features = ["rustls"] }
@@ -119,9 +119,9 @@ ironrdp-tokio = { git = "https://github.com/ffquintella/IronRDP", branch = "fix-
 # Direct dep on sspi so we can pull `ReqwestNetworkClient` for the
 # CredSSP smartcard path. The transitive sspi via ironrdp-connector
 # would compile without the `network_client` feature here, so we
-# pin it explicitly. Same git pin as the IronRDP `[patch.crates-io]`
-# uses — Cargo's git deps unify on rev.
-sspi = { version = "0.20.1", default-features = false, features = ["network_client", "aws-lc-rs"] }
+# pin it explicitly. Resolves to the ffquintella/sspi-rs fork via the
+# workspace root `[patch.crates-io]`.
+sspi = { version = "0.21", default-features = false, features = ["network_client", "aws-lc-rs"] }
 # Used by `commands/pki.rs::pki_import_ca_pkcs12` for PKCS#12 container
 # parsing. Pure-Rust PFX/PKCS#12 reader; `pbes1` feature covers the
 # legacy Windows-friendly cipher modes (RC2 / 3DES) that openssl had to

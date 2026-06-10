@@ -45,6 +45,40 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.12.5] - 2026-06-10
+
+### Security
+
+- **russh DoS fixes — RUSTSEC-2026-0153 / RUSTSEC-2026-0154** (`Cargo.toml`,
+  `gui/src-tauri/Cargo.toml`) -- bump `russh` 0.60.1 → 0.61.1 (with `russh-cryptovec` 0.59 → 0.61),
+  closing the unbounded 32-bit allocation and unchecked `CryptoVec` growth advisories (both 7.5 high,
+  malicious-server DoS against the SSH client). Pinned `=0.61.1` because 0.61.2 jumps to the
+  `p256 rc.10` / `ed25519-dalek 3.0.0-rc.0` prerelease line that the sspi/picky stack doesn't
+  support yet.
+- **hickory-proto DoS fixes — RUSTSEC-2026-0118 / RUSTSEC-2026-0119** -- the sspi 0.21 upgrade
+  initially pulled `hickory-proto 0.25.2` (CPU-exhaustion name compression + NSEC3 unbounded loop);
+  the sspi fork bumps to `hickory-resolver`/`-proto` 0.26 and ports `sspi/src/dns.rs` to the 0.26
+  resolver API.
+- **Known remaining: RUSTSEC-2023-0071 (rsa Marvin timing sidechannel, 5.9 medium)** -- both `rsa`
+  lines in the tree (0.9.x via `yubikey`/`openidconnect`, 0.10.0-rc via sspi/picky/russh) are
+  affected; no fixed release exists upstream. Revisit when RustCrypto publishes the constant-time
+  rewrite.
+
+### Changed
+
+- **IronRDP fork synced with upstream Devolutions master** (`IronRDP/` submodule,
+  ffquintella/IronRDP `fix-deps`) -- 56 commits merged; ironrdp 0.14 → 0.15, connector 0.8 → 0.9,
+  sspi 0.20.1 → 0.21. The fork's remaining local deltas are the PKCS#8 CredSSP key support and the
+  sspi `network_client`/`dns_resolver` features; its picky-rc.23/sspi-main patch plumbing is now
+  upstreamed and was dropped.
+- **New dependency forks for RustCrypto rc-pin alignment** (`[patch.crates-io]` in `Cargo.toml`) --
+  `sspi`/`picky` exact-pin prerelease crypto crates (`rsa =rc.17`, `ed25519-dalek =pre.6`,
+  `ecdsa =rc.17`) that conflict with russh 0.61.1's pins (`rsa =rc.18`, `ed25519-dalek =pre.7`,
+  `ecdsa =rc.18`). ffquintella/picky-rs `fix-deps` (Devolutions master + ed25519-dalek pre.7 +
+  ecdsa rc.18) and ffquintella/sspi-rs `fix-deps` (rsa rc.18 + stable pkcs8/signature/pbkdf2/rfc6979
+  + hickory 0.26) bring both stacks onto one resolvable graph. Drop the patches once Devolutions
+  publishes releases on the post-rc.17 chain.
+
 ## [0.12.4] - 2026-06-10
 
 ### Fixed

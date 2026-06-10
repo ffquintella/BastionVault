@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.12.4"
+version = "0.12.5"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -124,7 +124,13 @@ smolder-smb-core = { version = "0.3", optional = true }
 # pair will be reused by the planned Resource Connect SSH window
 # (see `features/resource-connect.md`); shipping it here first
 # pre-stages that infrastructure.
-russh = { version = "0.60", optional = true, default-features = true }
+# Pinned `=0.61.1`: fixes RUSTSEC-2026-0153/0154 (unbounded CryptoVec
+# allocation DoS, fixed in 0.60.3+) while staying on the rc line the GUI's
+# sspi/picky stack shares (`p256 =rc.9`, `elliptic-curve =rc.32`,
+# `rsa =rc.18`, `ed25519-dalek =pre.7`). 0.61.2 moves to `p256 =rc.10` /
+# `ed25519-dalek =3.0.0-rc.0`, which the picky/sspi chain doesn't support
+# yet — bump only together with the forks in `[patch.crates-io]` below.
+russh = { version = "=0.61.1", optional = true, default-features = true }
 russh-sftp = { version = "2", optional = true }
 http = "1"
 rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
@@ -532,3 +538,20 @@ name = "cucumber_hiqlite"
 harness = false
 path = "tests/cucumber_hiqlite.rs"
 
+
+[patch.crates-io]
+# russh 0.61 / sspi 0.21 rc-pin alignment (see the russh dependency comment).
+# Published sspi 0.21.0 exact-pins `rsa =0.10.0-rc.17` + `ed25519-dalek
+# =3.0.0-pre.6`, which conflict with russh 0.61.1's `rsa =rc.18` /
+# `ed25519-dalek =pre.7`. The sspi fork bumps those pins; the picky fork
+# (Devolutions master + ed25519-dalek pre.7) supplies the matching
+# elliptic-curve rc.32 / rsa rc.18 chain. The whole picky family is
+# patched so sspi/winscard/ironrdp all resolve one source for the
+# picky-asn1 types that cross their public APIs. Drop these patches once
+# Devolutions publishes sspi/picky releases on the post-rc.17 chain.
+sspi = { git = "https://github.com/ffquintella/sspi-rs", branch = "fix-deps" }
+picky = { git = "https://github.com/ffquintella/picky-rs", branch = "fix-deps", version = "=7.0.0-rc.23" }
+picky-asn1 = { git = "https://github.com/ffquintella/picky-rs", branch = "fix-deps" }
+picky-asn1-der = { git = "https://github.com/ffquintella/picky-rs", branch = "fix-deps" }
+picky-asn1-x509 = { git = "https://github.com/ffquintella/picky-rs", branch = "fix-deps" }
+picky-krb = { git = "https://github.com/ffquintella/picky-rs", branch = "fix-deps" }
