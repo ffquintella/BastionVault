@@ -90,6 +90,54 @@ describe("FerroGatePage", () => {
     expect(screen.getByRole("button", { name: /^reject$/i })).toBeInTheDocument();
   });
 
+  it("surfaces a MIA refusal as a human-readable toast, not the raw opcode", async () => {
+    const user = userEvent.setup();
+    // The Rust boundary maps the refusal opcode through ErrorCode::describe()
+    // and returns "MIA refused: <explanation>"; the raw variant ("CrlStale")
+    // must never reach the toast.
+    const refusal =
+      "MIA refused: its revocation list (CRL) from CMIS is stale — the MIA fails closed; check that CMIS is reachable and publishing a fresh CRL";
+    mockInvoke.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case "ferrogate_list_machines":
+          return Promise.resolve([]);
+        case "ferrogate_read_config":
+          return Promise.resolve({
+            trust_domain: "ferrogate.test",
+            expected_audience: "https://vault.example.com",
+            jwks_source: "static_jwks",
+            cmis_endpoint: "",
+            cmis_spki_pins: [],
+            static_jwks: "",
+            accept_svid: false,
+            clock_leeway_secs: 60,
+            default_token_ttl: 0,
+            cmis_tls_enable: true,
+            jwks_refresh_secs: 60,
+            bootstrap_root_auto_approve: true,
+            bootstrap_policies: ["default"],
+          });
+        case "ferrogate_machine_login":
+          return Promise.reject({ message: refusal });
+        default:
+          return Promise.resolve({});
+      }
+    });
+
+    const { FerroGatePage } = await import("../routes/FerroGatePage");
+    renderWithProviders(<FerroGatePage />);
+
+    await user.click(await screen.findByRole("button", { name: /machine login/i }));
+    const loginBtn = await screen.findByRole("button", { name: /^log in$/i });
+    await waitFor(() => expect(loginBtn).toBeEnabled());
+    await user.click(loginBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText(refusal)).toBeInTheDocument();
+    });
+    expect(screen.queryByText("CrlStale")).not.toBeInTheDocument();
+  });
+
   it("approves a machine via the modal", async () => {
     const user = userEvent.setup();
     const { FerroGatePage } = await import("../routes/FerroGatePage");

@@ -179,7 +179,7 @@ pub fn request_child_token(
         HelperResp::Token(t) => Ok(t),
         HelperResp::Error { code, retry_after } => {
             let hint = retry_after.map(|s| format!(" (retry after {s}s)")).unwrap_or_default();
-            Err(format!("MIA refused to mint a token: {}{hint} [{code:?}]", code.describe()))
+            Err(format!("MIA refused: {}{hint}", code.describe()))
         }
     }
 }
@@ -220,6 +220,33 @@ mod tests {
         ciborium::into_writer(&resp, &mut rbuf).unwrap();
         let rback: HelperResp = ciborium::from_reader(&rbuf[..]).unwrap();
         assert!(matches!(rback, HelperResp::Token(t) if t.exp == 42));
+    }
+
+    #[test]
+    fn every_error_code_has_an_operator_facing_description() {
+        // The string surfaced to the GUI/CLI must be the human-readable
+        // `describe()` text, not the raw enum variant name. Guard every
+        // variant so a future opcode can't silently fall back to `{code:?}`.
+        for code in [
+            ErrorCode::PermissionDenied,
+            ErrorCode::NoHostSvid,
+            ErrorCode::CrlStale,
+            ErrorCode::MalformedRequest,
+            ErrorCode::RateLimited,
+            ErrorCode::Internal,
+        ] {
+            let msg = code.describe();
+            assert!(!msg.is_empty(), "{code:?} has no description");
+            // The raw variant name must not leak into the operator message.
+            assert!(
+                !msg.contains(&format!("{code:?}")),
+                "describe() for {code:?} leaks the raw variant name: {msg}"
+            );
+        }
+        // Spot-check the CrlStale wording the GUI toast renders.
+        assert!(ErrorCode::CrlStale
+            .describe()
+            .contains("revocation list (CRL) from CMIS is stale"));
     }
 }
 

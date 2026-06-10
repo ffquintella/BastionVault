@@ -45,6 +45,18 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-06-10
+
+### Changed
+
+- **MIA refusal toast wording** (`src/cli/command/ferrogate_mia.rs`) -- the error string surfaced to
+  the GUI Machine Login toast (and the CLI) is now `"MIA refused: <explanation>"` using
+  `ErrorCode::describe()`, and no longer appends the raw `[CrlStale]`-style opcode that leaked the
+  enum variant name into operator-facing output. A `CrlStale` refusal reads "MIA refused: its
+  revocation list (CRL) from CMIS is stale — the MIA fails closed; check that CMIS is reachable and
+  publishing a fresh CRL". Guarded by a unit test over every `ErrorCode` variant and a
+  `gui/src/test/ferrogate.test.tsx` case asserting the toast shows the explanation, not `CrlStale`.
+
 ## [0.12.2] - 2026-06-10
 
 ### Changed
