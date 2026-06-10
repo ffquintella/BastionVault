@@ -575,6 +575,31 @@ function ConfigPanel({
   const [bootstrap, setBootstrap] = useState(config.bootstrap_root_auto_approve);
   const [bootstrapPolicies, setBootstrapPolicies] = useState((config.bootstrap_policies || []).join(","));
   const [saving, setSaving] = useState(false);
+  const [autofilling, setAutofilling] = useState(false);
+
+  // Prefill trust domain + CMIS coordinates from the FerroGate MIA installed on
+  // this host (mia.toml + signed allowlist) and verify CMIS is reachable by
+  // fetching its live JWKS. Fills the form only — the operator reviews and Saves.
+  async function autofill() {
+    setAutofilling(true);
+    try {
+      const r = await api.ferrogateAutoconfig(expectedAudience.trim());
+      if (r.trust_domain) setTrustDomain(r.trust_domain);
+      setJwksSource(r.jwks_source || "cmis_grpc");
+      setCmisEndpoint(r.cmis_endpoint);
+      setCmisSpkiPins((r.cmis_spki_pins || []).join(","));
+      setCmisTlsEnable(r.cmis_tls_enable);
+      (r.warnings || []).forEach((w) => toast("info", w));
+      toast(
+        "success",
+        `Filled from local MIA: CMIS ${r.cmis_endpoint}, ${(r.jwks_kids || []).length} key(s). Review and Save.`,
+      );
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setAutofilling(false);
+    }
+  }
 
   async function save() {
     setSaving(true);
@@ -637,8 +662,11 @@ function ConfigPanel({
           </label>
         </div>
       </div>
-      <div className="mt-4 flex justify-end">
-        <Button onClick={() => void save()} disabled={saving}>
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
+        <Button variant="secondary" onClick={() => void autofill()} disabled={autofilling || saving}>
+          {autofilling ? "Reading MIA…" : "Autofill from local MIA"}
+        </Button>
+        <Button onClick={() => void save()} disabled={saving || autofilling}>
           {saving ? "Saving…" : "Save configuration"}
         </Button>
       </div>

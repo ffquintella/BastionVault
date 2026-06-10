@@ -45,6 +45,20 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.12.7] - 2026-06-10
+
+### Added
+
+- **FerroGate `autoconfig` helper** (`src/cli/command/ferrogate_mia.rs`, `src/cli/command/ferrogate.rs`,
+  `gui/src-tauri/src/commands/ferrogate.rs`, `gui/src/routes/FerroGatePage.tsx`) -- derive a complete
+  `ferrogate` mount config from the FerroGate MIA installed on the host, so the operator no longer
+  hand-copies trust anchor fields. Reads the CMIS endpoint + SPKI pin from `mia.toml`, the trust domain
+  from the signed allowlist (`allowlist.cbor`, no token mint required), and fetches the live composite
+  JWKS from CMIS by reusing the mount's own `cmis::fetch_jwks_json`. `bvault ferrogate autoconfig`
+  prints the derived config (`--apply` writes it to `auth/<mount>/config`); the GUI config page gains an
+  **Autofill from local MIA** button backed by a new `ferrogate_autoconfig` Tauri command. Sets
+  `jwks_source = cmis_grpc` so keys auto-refresh.
+
 ## [0.12.6] - 2026-06-10
 
 ### Fixed

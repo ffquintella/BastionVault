@@ -241,6 +241,30 @@ pub fn ferrogate_default_socket() -> String {
     }
 }
 
+/// Derive a complete `ferrogate` mount config from the FerroGate MIA installed
+/// on this host: CMIS endpoint + SPKI pin from `mia.toml`, trust domain from
+/// the signed allowlist, and the live composite JWKS fetched from CMIS. The GUI
+/// uses this to prefill the config form ("Autofill from local MIA") so the
+/// operator does not hand-copy any of it. This only *reads* local state and
+/// fetches the (public) JWKS — it does not write the mount config; the form's
+/// Save button does that.
+#[cfg(unix)]
+#[tauri::command]
+pub async fn ferrogate_autoconfig(
+    audience: String,
+) -> CmdResult<bastion_vault::cli::command::ferrogate_mia::FerrogateAutoConfig> {
+    let audience = audience.trim().to_string();
+    bastion_vault::cli::command::ferrogate_mia::build_autoconfig(audience)
+        .await
+        .map_err(Into::into)
+}
+
+#[cfg(not(unix))]
+#[tauri::command]
+pub async fn ferrogate_autoconfig(_audience: String) -> CmdResult<Value> {
+    Err("FerroGate autoconfig is only available on Unix (the MIA is not supported on this platform yet)".into())
+}
+
 fn norm_socket(socket: String) -> String {
     let s = socket.trim();
     if s.is_empty() {

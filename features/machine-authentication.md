@@ -148,6 +148,14 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   crypto); the blocking socket I/O runs on `spawn_blocking`, and non-Unix targets return clear "Unix-only" stubs.
   The socket field is prefilled with the resolved socket. Logging in here does not replace the admin session
   token.
+- **Phase 6.3 — one-shot mount autoconfig from the local MIA.** `bvault ferrogate autoconfig` (and a GUI
+  *Autofill from local MIA* button on the config page, via the `ferrogate_autoconfig` Tauri command) derives
+  a complete `ferrogate` mount config from the FerroGate MIA installed on the host: the CMIS endpoint + SPKI
+  pin come from `mia.toml` `[cmis]`, the trust domain from the signed allowlist (`allowlist.cbor` — read
+  without minting a token, so a not-yet-allowlisted caller can still provision), and the live composite JWKS
+  is fetched from CMIS by reusing the mount's own `cmis::fetch_jwks_json` (so the fetch path is identical to
+  the running mount's). Sets `jwks_source = cmis_grpc`; `--apply` writes it to `auth/<mount>/config`. The
+  core (`ferrogate_mia::build_autoconfig`) is shared verbatim between CLI and GUI.
 - **Phase 6.2 — socket path is discovered from the MIA's own config, not hard-coded.** The earlier per-OS
   `DEFAULT_MIA_SOCKET` constant broke when MIA ≥0.18 moved its macOS default to
   `/Library/Application Support/FerroGate/run/mia.sock` (and because the path is operator-configurable in

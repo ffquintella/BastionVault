@@ -115,6 +115,188 @@ fn read_helper_socket(path: &Path) -> Option<String> {
     (!sock.is_empty()).then(|| sock.to_string())
 }
 
+// ── ferrogate mount auto-configuration ─────────────────────────────────────
+//
+// Everything a BastionVault `ferrogate` mount needs to trust this host's MIA is
+// already on disk once the MIA is installed: the CMIS endpoint + SPKI pin live
+// in `mia.toml`, and the trust domain is carried in the signed allowlist. The
+// only thing the verifier still needs — the composite JWKS — is served by that
+// same CMIS. `build_autoconfig` gathers all of it so the operator does not have
+// to hand-copy any of these fields.
+
+/// CMIS coordinates discovered from the installed MIA's `mia.toml` `[cmis]`
+/// block — the endpoint + pin a `ferrogate` mount needs to reach the same CMIS
+/// the MIA trusts.
+#[derive(Debug, Clone)]
+pub struct CmisDiscovery {
+    /// CMIS host:port, scheme stripped (BastionVault's gRPC fetcher re-adds it).
+    pub endpoint: String,
+    /// Lowercase-hex SHA-384 SPKI pin of the CMIS certificate (empty for an
+    /// `http://` dev endpoint).
+    pub spki_pin: String,
+    /// Dial CMIS over (PQ-)TLS. `false` only for a plaintext `http://` endpoint.
+    pub tls_enable: bool,
+}
+
+/// Read `[cmis].endpoint` + `spki_pin` from the first MIA config file found
+/// (same discovery order as [`resolve_mia_socket`]). `None` if no config sets a
+/// CMIS endpoint.
+#[must_use]
+pub fn read_cmis_config() -> Option<CmisDiscovery> {
+    mia_config_candidates().iter().find_map(|p| read_cmis(p))
+}
+
+fn read_cmis(path: &Path) -> Option<CmisDiscovery> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let doc = text.parse::<toml::Table>().ok()?;
+    let cmis = doc.get("cmis")?.as_table()?;
+    let raw = cmis.get("endpoint")?.as_str()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let tls_enable = !raw.starts_with("http://");
+    let endpoint = raw
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string();
+    let spki_pin = cmis.get("spki_pin").and_then(toml::Value::as_str).unwrap_or("").trim().to_string();
+    Some(CmisDiscovery { endpoint, spki_pin, tls_enable })
+}
+
+/// Read `[allowlist].path` from `mia.toml`, decode the signed CBOR allowlist,
+/// and return its `trust_domain`. This is the most reliable local source of the
+/// trust domain: unlike reading it from a minted token's SPIFFE `iss`, it does
+/// not require the caller to already be allowlisted.
+#[must_use]
+pub fn read_allowlist_trust_domain() -> Option<String> {
+    let path = mia_config_candidates().iter().find_map(|p| read_allowlist_path(p))?;
+    let bytes = std::fs::read(&path).ok()?;
+    // Envelope: { body, signature }; trust_domain is a field of the inner body
+    // (itself CBOR). The MIA serializes `body` as a `Vec<u8>`, which ciborium
+    // encodes as an array of integers rather than a CBOR byte string — handle
+    // both forms. We only read trust_domain (non-secret policy, used to prefill
+    // the config form); signature verification is the MIA's job.
+    let outer: ciborium::value::Value = ciborium::from_reader(&bytes[..]).ok()?;
+    let body = cbor_to_bytes(cbor_get(&outer, "body")?)?;
+    let inner: ciborium::value::Value = ciborium::from_reader(&body[..]).ok()?;
+    let td = cbor_get(&inner, "trust_domain")?.as_text()?.trim().to_string();
+    (!td.is_empty()).then_some(td)
+}
+
+fn read_allowlist_path(path: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let doc = text.parse::<toml::Table>().ok()?;
+    let p = doc.get("allowlist")?.as_table()?.get("path")?.as_str()?.trim();
+    (!p.is_empty()).then(|| PathBuf::from(p))
+}
+
+/// Look up a string-keyed entry in a CBOR map `Value`.
+fn cbor_get<'a>(v: &'a ciborium::value::Value, key: &str) -> Option<&'a ciborium::value::Value> {
+    v.as_map()?.iter().find(|(k, _)| k.as_text() == Some(key)).map(|(_, val)| val)
+}
+
+/// Coerce a CBOR `Value` that holds a byte sequence into `Vec<u8>`, accepting
+/// both a CBOR byte string and an array of small integers (how ciborium encodes
+/// a serde `Vec<u8>`).
+fn cbor_to_bytes(v: &ciborium::value::Value) -> Option<Vec<u8>> {
+    if let Some(b) = v.as_bytes() {
+        return Some(b.clone());
+    }
+    v.as_array()?
+        .iter()
+        .map(|e| e.as_integer().and_then(|i| u8::try_from(i).ok()))
+        .collect()
+}
+
+/// A completed BastionVault `ferrogate` mount configuration derived from the
+/// installed MIA, ready to write to `auth/<mount>/config`. Serializes to the
+/// exact field names the config endpoint accepts.
+#[derive(Debug, Clone, Serialize)]
+pub struct FerrogateAutoConfig {
+    /// Trust domain (from the signed allowlist); empty if it could not be read.
+    pub trust_domain: String,
+    /// This vault's audience — operator-supplied; cannot be derived from the MIA.
+    pub expected_audience: String,
+    /// Always `cmis_grpc`: keys are fetched + refreshed from CMIS.
+    pub jwks_source: String,
+    /// CMIS host:port (from `mia.toml`).
+    pub cmis_endpoint: String,
+    /// CMIS SPKI pin(s) (from `mia.toml`).
+    pub cmis_spki_pins: Vec<String>,
+    /// Dial CMIS over (PQ-)TLS.
+    pub cmis_tls_enable: bool,
+    /// The composite JWKS fetched live from CMIS — surfaced so the operator can
+    /// eyeball the keys this config will trust. Not written to the mount (the
+    /// `cmis_grpc` source fetches it itself); informational only.
+    pub fetched_jwks: String,
+    /// `kid`s present in the fetched JWKS (sanity-check against token headers).
+    pub jwks_kids: Vec<String>,
+    /// Non-fatal notes (e.g. trust domain not discoverable locally).
+    pub warnings: Vec<String>,
+}
+
+/// Build a completed `ferrogate` mount config from the installed MIA: CMIS
+/// endpoint + pin from `mia.toml`, trust domain from the signed allowlist, and
+/// the live composite JWKS fetched from CMIS over the pinned (PQ-)TLS channel
+/// (reusing BastionVault's own CMIS gRPC client, so the fetch path is exactly
+/// the one the running mount will use). `expected_audience` is operator-supplied
+/// — it identifies this vault and cannot come from the MIA.
+pub async fn build_autoconfig(expected_audience: String) -> Result<FerrogateAutoConfig, String> {
+    use crate::modules::credential::ferrogate::{cmis, jwks_source, FerroGateConfig};
+
+    let disc = read_cmis_config().ok_or_else(|| {
+        "no CMIS endpoint found in mia.toml ([cmis].endpoint) — is the FerroGate MIA installed on \
+         this host?"
+            .to_string()
+    })?;
+    if disc.tls_enable && disc.spki_pin.is_empty() {
+        return Err("mia.toml [cmis].endpoint is https but has no spki_pin; cannot verify CMIS".to_string());
+    }
+
+    let mut warnings = Vec::new();
+    let trust_domain = read_allowlist_trust_domain().unwrap_or_else(|| {
+        warnings.push(
+            "could not read trust_domain from the local allowlist; set it manually if your \
+             deployment pins one"
+                .to_string(),
+        );
+        String::new()
+    });
+
+    let pins: Vec<String> = if disc.spki_pin.is_empty() { Vec::new() } else { vec![disc.spki_pin.clone()] };
+    let probe = FerroGateConfig {
+        cmis_endpoint: disc.endpoint.clone(),
+        cmis_spki_pins: pins.clone(),
+        cmis_tls_enable: disc.tls_enable,
+        ..FerroGateConfig::default()
+    };
+    let fetched_jwks = cmis::fetch_jwks_json(&probe).await?;
+
+    let jwks_kids = match ferro_child_verify::JwkSet::from_json(&fetched_jwks) {
+        Ok(set) => set.keys.into_iter().map(|k| k.kid).collect::<Vec<_>>(),
+        Err(e) => {
+            warnings.push(format!("fetched JWKS did not parse as a composite key set: {e}"));
+            Vec::new()
+        }
+    };
+    if jwks_kids.is_empty() {
+        warnings.push("CMIS returned no usable keys in its JWKS".to_string());
+    }
+
+    Ok(FerrogateAutoConfig {
+        trust_domain,
+        expected_audience,
+        jwks_source: jwks_source::CMIS_GRPC.to_string(),
+        cmis_endpoint: disc.endpoint,
+        cmis_spki_pins: pins,
+        cmis_tls_enable: disc.tls_enable,
+        fetched_jwks,
+        jwks_kids,
+        warnings,
+    })
+}
+
 /// Largest frame we will read or write (matches the MIA's `MAX_FRAME_LEN`).
 const MAX_FRAME_LEN: usize = 64 * 1024;
 
@@ -330,6 +512,35 @@ mod tests {
         assert!(ErrorCode::CrlStale
             .describe()
             .contains("revocation list (CRL) from CMIS is stale"));
+    }
+
+    #[test]
+    fn read_cmis_strips_scheme_and_sets_tls() {
+        let dir = std::env::temp_dir().join("bv_mia_cmis_test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let https = dir.join("https.toml");
+        std::fs::write(
+            &https,
+            "[cmis]\nendpoint = 'https://cmis.example.com:8443/'\nspki_pin = 'abc123'\n",
+        )
+        .unwrap();
+        let d = read_cmis(&https).expect("parses");
+        assert_eq!(d.endpoint, "cmis.example.com:8443", "scheme + trailing slash stripped");
+        assert_eq!(d.spki_pin, "abc123");
+        assert!(d.tls_enable, "https ⇒ TLS");
+
+        let http = dir.join("http.toml");
+        std::fs::write(&http, "[cmis]\nendpoint = 'http://localhost:9000'\n").unwrap();
+        let d = read_cmis(&http).expect("parses");
+        assert_eq!(d.endpoint, "localhost:9000");
+        assert!(!d.tls_enable, "http ⇒ plaintext");
+        assert!(d.spki_pin.is_empty());
+
+        // No [cmis] table ⇒ None.
+        let none = dir.join("none.toml");
+        std::fs::write(&none, "log = 'info'\n").unwrap();
+        assert!(read_cmis(&none).is_none());
     }
 
     #[test]

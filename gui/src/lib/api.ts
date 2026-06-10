@@ -503,6 +503,20 @@ export const ferrogateRevoke = (id: string) => invoke<void>("ferrogate_revoke", 
 export const ferrogateDeleteMachine = (id: string) => invoke<void>("ferrogate_delete_machine", { id });
 // FerroGate MIA client (self-bootstrap / machine login)
 export const ferrogateDefaultSocket = () => invoke<string>("ferrogate_default_socket");
+/** A `ferrogate` mount config derived from the local MIA (snake_case from Rust). */
+export type FerroGateAutoConfig = {
+  trust_domain: string;
+  expected_audience: string;
+  jwks_source: string;
+  cmis_endpoint: string;
+  cmis_spki_pins: string[];
+  cmis_tls_enable: boolean;
+  fetched_jwks: string;
+  jwks_kids: string[];
+  warnings: string[];
+};
+export const ferrogateAutoconfig = (audience: string) =>
+  invoke<FerroGateAutoConfig>("ferrogate_autoconfig", { audience });
 export const ferrogateMachineLogin = (audience: string, socket: string, mount: string, ttl: number) =>
   invoke<FerroGateLoginResult>("ferrogate_machine_login", { audience, socket, mount, ttl });
 export const ferrogateMachineStatus = (audience: string, socket: string, mount: string, ttl: number) =>

@@ -58,6 +58,8 @@ pub enum Commands {
     Status(Status),
     /// Print this host's SPIFFE id (local; no server call).
     Whoami(Whoami),
+    /// Derive a `ferrogate` mount config from the local MIA (and optionally apply it).
+    Autoconfig(Autoconfig),
 }
 
 impl Ferrogate {
@@ -70,6 +72,7 @@ impl Ferrogate {
             Commands::Login(c) => c.execute(),
             Commands::Status(c) => c.execute(),
             Commands::Whoami(c) => c.execute(),
+            Commands::Autoconfig(c) => c.execute(),
         }
     }
 }
@@ -247,5 +250,93 @@ impl CommandExecutor for Whoami {
             .ok_or_else(|| bv_error_string!("could not read SPIFFE id from the minted token".to_string()))?;
         println!("{spiffe}");
         Ok(())
+    }
+}
+
+// ── autoconfig ─────────────────────────────────────────────────────────────
+
+#[derive(Parser, Deref)]
+#[command(
+    about = "Derive a ferrogate mount config from the local MIA",
+    long_about = r#"Build a ready-to-apply `ferrogate` auth-mount configuration from the FerroGate
+MIA installed on this host.
+
+Reads the CMIS endpoint + SPKI pin from mia.toml, the trust domain from the
+signed allowlist, and fetches the live composite JWKS from CMIS. By default it
+prints the resulting config; pass --apply to write it to `auth/<mount>/config`
+on the resolved server (requires an authenticated token).
+
+    $ bvault ferrogate autoconfig
+    $ bvault ferrogate autoconfig --apply --audience https://vault.example.com"#
+)]
+pub struct Autoconfig {
+    /// Audience to set as `expected_audience`. Defaults to the resolved server
+    /// address (the value `login` would mint for).
+    #[arg(long)]
+    audience: Option<String>,
+
+    /// Mount path of the ferrogate auth method.
+    #[arg(long, default_value = "ferrogate")]
+    mount: String,
+
+    /// Write the derived config to `auth/<mount>/config` instead of just
+    /// printing it. Requires an authenticated token.
+    #[arg(long)]
+    apply: bool,
+
+    #[deref]
+    #[command(flatten, next_help_heading = "HTTP Options")]
+    http_options: command::HttpOptions,
+
+    #[command(flatten, next_help_heading = "Output Options")]
+    output: command::OutputOptions,
+}
+
+impl CommandExecutor for Autoconfig {
+    fn main(&self) -> Result<(), RvError> {
+        let audience = match &self.audience {
+            Some(a) => a.clone(),
+            None => self.resolved_address()?,
+        };
+
+        // build_autoconfig fetches the JWKS over async gRPC; the CLI has no
+        // ambient runtime, so spin a single-threaded one for the call.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| bv_error_string!(format!("could not start async runtime: {e}")))?;
+        let cfg = rt
+            .block_on(ferrogate_mia::build_autoconfig(audience))
+            .map_err(|e| bv_error_string!(e))?;
+
+        for w in &cfg.warnings {
+            eprintln!("warning: {w}");
+        }
+
+        if self.apply {
+            let client = self.client()?;
+            let mut body = Map::new();
+            body.insert("trust_domain".into(), Value::String(cfg.trust_domain.clone()));
+            body.insert("expected_audience".into(), Value::String(cfg.expected_audience.clone()));
+            body.insert("jwks_source".into(), Value::String(cfg.jwks_source.clone()));
+            body.insert("cmis_endpoint".into(), Value::String(cfg.cmis_endpoint.clone()));
+            body.insert("cmis_spki_pins".into(), Value::String(cfg.cmis_spki_pins.join(",")));
+            body.insert("cmis_tls_enable".into(), Value::Bool(cfg.cmis_tls_enable));
+
+            let path = format!("auth/{}/config", self.mount.trim_matches('/'));
+            client.logical().write(&path, Some(body))?;
+            println!(
+                "configured {path}: trust_domain={:?}, cmis_endpoint={}, {} key(s) {:?}",
+                cfg.trust_domain,
+                cfg.cmis_endpoint,
+                cfg.jwks_kids.len(),
+                cfg.jwks_kids
+            );
+            Ok(())
+        } else {
+            let value = serde_json::to_value(&cfg).map_err(|e| bv_error_string!(e.to_string()))?;
+            self.output.print_value(&value, true)?;
+            Ok(())
+        }
     }
 }
