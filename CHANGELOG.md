@@ -45,6 +45,18 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-06-10
+
+### Fixed
+
+- **Userpass login `InvalidUriChar` failure** (`gui/src-tauri/src/commands/connection.rs`,
+  `gui/src-tauri/src/commands/auth.rs`) -- the username was interpolated raw into the login request
+  URI (`auth/userpass/login/<username>`), so a stray trailing space or newline (from paste/autofill)
+  produced "Login failed: Some http error happened, http::Error(InvalidUri(InvalidUriChar))" instead
+  of authenticating. The username is now trimmed and percent-encoded before building the URL, in both
+  the remote and embedded login paths. (Pre-existing bug, not a regression from the v0.12.x FerroGate
+  work.)
+
 ## [0.12.3] - 2026-06-10
 
 ### Changed

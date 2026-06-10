@@ -82,6 +82,13 @@ pub async fn login_userpass(
     let mut body = Map::new();
     body.insert("password".to_string(), Value::String(password));
 
+    // The username is a URI path segment. Trim accidental surrounding
+    // whitespace (a stray space/newline from paste or autofill would
+    // otherwise build an invalid URI -> `InvalidUriChar`) and
+    // percent-encode it so any legitimate special character can't break
+    // URL construction.
+    let username = urlencoding::encode(username.trim());
+
     // Login endpoints take no token. Pass an empty string; both
     // EmbeddedBackend (just stores it on the Request) and
     // RemoteBackend (skips the X-BastionVault-Token header for

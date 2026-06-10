@@ -434,6 +434,12 @@ pub async fn remote_login_userpass(
     let client_guard = state.remote_client.lock().await;
     let client = client_guard.as_ref().ok_or("Not connected to remote server")?;
 
+    // Trim accidental surrounding whitespace (a stray space/newline from
+    // paste or autofill would otherwise build an invalid URI ->
+    // `InvalidUriChar`) and percent-encode the username path segment so any
+    // legitimate special character can't break URL construction.
+    let username = urlencoding::encode(username.trim());
+
     let data = serde_json::json!({ "password": password });
     let resp = client
         .request_write(
