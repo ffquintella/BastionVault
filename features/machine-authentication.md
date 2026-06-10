@@ -146,9 +146,17 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   commands (`ferrogate_default_socket`, `ferrogate_machine_login`, `ferrogate_machine_status`, `ferrogate_whoami`)
   **reuse `bastion_vault::cli::command::ferrogate_mia` verbatim** (no second copy of the DPoP/CBOR/thumbprint
   crypto); the blocking socket I/O runs on `spawn_blocking`, and non-Unix targets return clear "Unix-only" stubs.
-  The socket field is prefilled with the platform default. Logging in here does not replace the admin session
-  token. Also fixed the CLI's `DEFAULT_MIA_SOCKET` to be per-OS (`/var/run/ferrogate/mia.sock` on macOS, where
-  `/run` does not exist; `/run/ferrogate/mia.sock` elsewhere).
+  The socket field is prefilled with the resolved socket. Logging in here does not replace the admin session
+  token.
+- **Phase 6.2 — socket path is discovered from the MIA's own config, not hard-coded.** The earlier per-OS
+  `DEFAULT_MIA_SOCKET` constant broke when MIA ≥0.18 moved its macOS default to
+  `/Library/Application Support/FerroGate/run/mia.sock` (and because the path is operator-configurable in
+  `mia.toml` regardless). `resolve_mia_socket()` now mirrors MIA's own resolution order — the
+  `FERROGATE_HELPER_SOCKET` env override, then `[helper].socket` from the first config found
+  (`$FERROGATE_CONFIG`, the per-OS system path `/Library/Application Support/FerroGate/mia.toml` (macOS) or
+  `/etc/ferrogate/mia.toml` (Linux), then the per-user path), then the per-OS `mia setup` wizard default as a
+  last resort. `ferrogate_default_socket` and the `--socket` flags resolve through it; the constant remains only
+  as the fallback. Adds `toml` as a runtime dependency.
 - **Phase 7 shipped — feature complete.** Opt-in **direct-SVID mode** (`accept_svid`): a host SVID presented at
   `login` is verified via the vendored `ferro-svid-verify::verify_unrevoked`, which **enforces FerroGate's
   composite-signed CRL** (a revoked host, or a stale/absent CRL, fails closed); the host identity is the SVID

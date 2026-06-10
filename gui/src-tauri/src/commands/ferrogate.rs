@@ -225,13 +225,15 @@ async fn mia_mint(socket: String, audience: String, ttl: u32) -> Result<(String,
     .map_err(|e| format!("MIA worker thread failed: {e}"))?
 }
 
-/// The default MIA helper socket path for this platform — surfaced so the GUI
-/// can prefill the field instead of hard-coding a Linux-only path.
+/// The MIA helper socket path for this host — resolved by inspecting the
+/// installed MIA's own configuration (env override, then `mia.toml`, then the
+/// per-OS wizard default), so the GUI prefills wherever MIA actually listens
+/// rather than a hard-coded path that breaks when the operator moves it.
 #[tauri::command]
 pub fn ferrogate_default_socket() -> String {
     #[cfg(unix)]
     {
-        bastion_vault::cli::command::ferrogate_mia::DEFAULT_MIA_SOCKET.to_string()
+        bastion_vault::cli::command::ferrogate_mia::resolve_mia_socket()
     }
     #[cfg(not(unix))]
     {

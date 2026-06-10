@@ -45,6 +45,22 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.12.6] - 2026-06-10
+
+### Fixed
+
+- **FerroGate MIA helper socket discovery** (`src/cli/command/ferrogate_mia.rs`,
+  `src/cli/command/ferrogate.rs`, `gui/src-tauri/src/commands/ferrogate.rs`) -- the GUI/CLI
+  hard-coded `/var/run/ferrogate/mia.sock` on macOS, but MIA ≥0.18 moved its default socket to
+  `/Library/Application Support/FerroGate/run/mia.sock` and the path is operator-configurable in
+  `mia.toml`, so machine login failed with `ferrogate_mia_unavailable: ... No such file or directory`
+  even when the MIA was running. Add `resolve_mia_socket()`, which mirrors MIA's own resolution
+  order — the `FERROGATE_HELPER_SOCKET` env override, then `[helper].socket` from the first config
+  found (`$FERROGATE_CONFIG`, the per-OS system path, then the per-user path), then the per-OS wizard
+  default as a last resort. `ferrogate_default_socket` and the `bvault ferrogate login/status/whoami`
+  `--socket` flags now resolve dynamically instead of using a fixed constant. Adds `toml` as a
+  runtime dependency.
+
 ## [0.12.5] - 2026-06-10
 
 ### Security

@@ -485,7 +485,7 @@ function MachineLoginPanel({
               label="MIA helper socket"
               value={socket}
               onChange={(e) => setSocket(e.target.value)}
-              placeholder="/run/ferrogate/mia.sock"
+              placeholder="resolved from the installed MIA's config…"
             />
           </div>
           <Input

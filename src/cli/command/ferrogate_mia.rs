@@ -13,6 +13,7 @@
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -20,17 +21,99 @@ use base64::Engine as _;
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 
-/// Default MIA helper socket path.
+/// Last-resort MIA helper socket path — MIA's `mia setup` wizard default for
+/// this OS.
 ///
-/// The MIA listens on a per-platform location. Linux uses the modern
-/// `/run` tmpfs; macOS has no `/run`, so the MIA binds under `/var/run`
-/// (which resolves to `/private/var/run`). Picking the right default per
-/// target means `bvault ferrogate login` works without an explicit
-/// `--socket` on either OS.
+/// The socket location is operator-configurable in the MIA's `mia.toml`, so a
+/// fixed path inevitably drifts (it did: MIA ≥0.18 moved the macOS default out
+/// of `/var/run`). The authoritative value is whatever the installed MIA is
+/// configured with — [`resolve_mia_socket`] reads that. This constant is only
+/// the fallback used when neither the env override nor any `mia.toml` specifies
+/// a socket, and mirrors MIA's per-OS wizard default
+/// (`ferrogate/crates/mia/src/setup.rs`).
 #[cfg(target_os = "macos")]
-pub const DEFAULT_MIA_SOCKET: &str = "/var/run/ferrogate/mia.sock";
+pub const DEFAULT_MIA_SOCKET: &str = "/Library/Application Support/FerroGate/run/mia.sock";
 #[cfg(not(target_os = "macos"))]
 pub const DEFAULT_MIA_SOCKET: &str = "/run/ferrogate/mia.sock";
+
+/// Resolve the MIA helper socket path by asking the installed MIA where it is
+/// configured to listen, mirroring MIA's own precedence
+/// (`ferrogate/crates/mia/src/config.rs`):
+///
+/// 1. the `FERROGATE_HELPER_SOCKET` environment override (highest);
+/// 2. `[helper].socket` from the first config file that exists and sets it —
+///    `$FERROGATE_CONFIG`, then the per-OS system path, then the per-user path;
+/// 3. [`DEFAULT_MIA_SOCKET`] (MIA's wizard default) when nothing else applies.
+///
+/// This keeps the GUI/CLI in step with whatever the host's `mia.toml` says
+/// instead of hard-coding a path that breaks whenever MIA's default moves or an
+/// operator points the socket elsewhere.
+#[must_use]
+pub fn resolve_mia_socket() -> String {
+    if let Some(s) = env_socket_override() {
+        return s;
+    }
+    if let Some(s) = mia_config_socket() {
+        return s;
+    }
+    DEFAULT_MIA_SOCKET.to_string()
+}
+
+/// `FERROGATE_HELPER_SOCKET`, if set to a non-blank value.
+fn env_socket_override() -> Option<String> {
+    std::env::var("FERROGATE_HELPER_SOCKET").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// `[helper].socket` from the first MIA config file (in MIA's discovery order)
+/// that exists and sets it.
+fn mia_config_socket() -> Option<String> {
+    mia_config_candidates().iter().find_map(|p| read_helper_socket(p))
+}
+
+/// MIA's config-file discovery order: `$FERROGATE_CONFIG`, then the system
+/// path, then the per-user path.
+fn mia_config_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::with_capacity(3);
+    if let Some(p) = std::env::var_os("FERROGATE_CONFIG").filter(|s| !s.is_empty()) {
+        out.push(PathBuf::from(p));
+    }
+    out.push(system_config_path());
+    if let Some(p) = user_config_path() {
+        out.push(p);
+    }
+    out
+}
+
+#[cfg(target_os = "macos")]
+fn system_config_path() -> PathBuf {
+    PathBuf::from("/Library/Application Support/FerroGate/mia.toml")
+}
+#[cfg(not(target_os = "macos"))]
+fn system_config_path() -> PathBuf {
+    PathBuf::from("/etc/ferrogate/mia.toml")
+}
+
+#[cfg(target_os = "macos")]
+fn user_config_path() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|s| !s.is_empty())
+        .map(|h| PathBuf::from(h).join("Library/Application Support/FerroGate/mia.toml"))
+}
+#[cfg(not(target_os = "macos"))]
+fn user_config_path() -> Option<PathBuf> {
+    if let Some(x) = std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()) {
+        return Some(PathBuf::from(x).join("ferrogate/mia.toml"));
+    }
+    std::env::var_os("HOME").filter(|s| !s.is_empty()).map(|h| PathBuf::from(h).join(".config/ferrogate/mia.toml"))
+}
+
+/// Parse `path` as MIA's TOML config and return a non-blank `[helper].socket`.
+fn read_helper_socket(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let doc = text.parse::<toml::Table>().ok()?;
+    let sock = doc.get("helper")?.as_table()?.get("socket")?.as_str()?.trim();
+    (!sock.is_empty()).then(|| sock.to_string())
+}
 
 /// Largest frame we will read or write (matches the MIA's `MAX_FRAME_LEN`).
 const MAX_FRAME_LEN: usize = 64 * 1024;
@@ -247,6 +330,32 @@ mod tests {
         assert!(ErrorCode::CrlStale
             .describe()
             .contains("revocation list (CRL) from CMIS is stale"));
+    }
+
+    #[test]
+    fn read_helper_socket_parses_mia_toml() {
+        // Mirrors a real `mia setup`-written config: the socket lives under
+        // `[helper].socket`, which MIA ≥0.18 places outside /var/run.
+        let dir = std::env::temp_dir().join("bv_mia_cfg_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mia.toml");
+        std::fs::write(
+            &path,
+            "log = 'info'\n\n[helper]\nsocket = '/Library/Application Support/FerroGate/run/mia.sock'\nsocket_mode = '660'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_helper_socket(&path).as_deref(),
+            Some("/Library/Application Support/FerroGate/run/mia.sock")
+        );
+
+        // No [helper].socket ⇒ no path (helper API disabled).
+        let none_path = dir.join("nohelper.toml");
+        std::fs::write(&none_path, "log = 'info'\n").unwrap();
+        assert_eq!(read_helper_socket(&none_path), None);
+
+        // Missing file ⇒ None, never an error.
+        assert_eq!(read_helper_socket(&dir.join("does-not-exist.toml")), None);
     }
 }
 

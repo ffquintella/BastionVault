@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.12.5"
+version = "0.12.6"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -41,6 +41,9 @@ resolver = "2"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+# Parsing the installed MIA's `mia.toml` to discover its configured helper
+# socket (FerroGate machine login). See cli::command::ferrogate_mia.
+toml = "1.1.2"
 bv_crypto = { path = "crates/bv_crypto" }
 bv_plugin_surface = { path = "crates/bv_plugin_surface" }
 # Shared client crate — used by the CLI's `cluster discover`

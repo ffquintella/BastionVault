@@ -14,7 +14,7 @@ use derive_more::Deref;
 use serde_json::{Map, Value};
 use sysexits::ExitCode;
 
-use super::ferrogate_mia::{self, DpopKey, DEFAULT_MIA_SOCKET};
+use super::ferrogate_mia::{self, DpopKey};
 use crate::{
     bv_error_string,
     cli::{command, command::CommandExecutor, util},
@@ -84,9 +84,10 @@ pub struct Login {
     #[arg(long)]
     audience: Option<String>,
 
-    /// MIA helper socket path.
-    #[arg(long, default_value = DEFAULT_MIA_SOCKET)]
-    socket: String,
+    /// MIA helper socket path. Defaults to the socket the installed MIA is
+    /// configured with (`FERROGATE_HELPER_SOCKET`, then `mia.toml`).
+    #[arg(long)]
+    socket: Option<String>,
 
     /// Mount path of the ferrogate auth method.
     #[arg(long, default_value = "ferrogate")]
@@ -119,8 +120,9 @@ impl CommandExecutor for Login {
             None => self.resolved_address()?,
         };
 
+        let socket = self.socket.clone().unwrap_or_else(ferrogate_mia::resolve_mia_socket);
         let dpop = DpopKey::generate();
-        let child = ferrogate_mia::request_child_token(&self.socket, &audience, &dpop.jkt(), self.ttl)
+        let child = ferrogate_mia::request_child_token(&socket, &audience, &dpop.jkt(), self.ttl)
             .map_err(|e| bv_error_string!(e))?;
         let proof = dpop.proof("POST", &audience);
 
@@ -173,8 +175,10 @@ pub struct Status {
     #[arg(long)]
     audience: Option<String>,
 
-    #[arg(long, default_value = DEFAULT_MIA_SOCKET)]
-    socket: String,
+    /// MIA helper socket path. Defaults to the installed MIA's configured
+    /// socket (`FERROGATE_HELPER_SOCKET`, then `mia.toml`).
+    #[arg(long)]
+    socket: Option<String>,
 
     #[arg(long, default_value = "ferrogate")]
     mount: String,
@@ -196,8 +200,9 @@ impl CommandExecutor for Status {
             Some(a) => a.clone(),
             None => self.resolved_address()?,
         };
+        let socket = self.socket.clone().unwrap_or_else(ferrogate_mia::resolve_mia_socket);
         let dpop = DpopKey::generate();
-        let child = ferrogate_mia::request_child_token(&self.socket, &audience, &dpop.jkt(), self.ttl)
+        let child = ferrogate_mia::request_child_token(&socket, &audience, &dpop.jkt(), self.ttl)
             .map_err(|e| bv_error_string!(e))?;
         let proof = dpop.proof("POST", &audience);
 
@@ -222,8 +227,10 @@ impl CommandExecutor for Status {
 #[derive(Parser)]
 #[command(about = "Print this host's SPIFFE id (local; no server call)")]
 pub struct Whoami {
-    #[arg(long, default_value = DEFAULT_MIA_SOCKET)]
-    socket: String,
+    /// MIA helper socket path. Defaults to the installed MIA's configured
+    /// socket (`FERROGATE_HELPER_SOCKET`, then `mia.toml`).
+    #[arg(long)]
+    socket: Option<String>,
 
     /// Audience for the throwaway token minted to read the identity.
     #[arg(long, default_value = "urn:bvault:ferrogate:whoami")]
@@ -232,8 +239,9 @@ pub struct Whoami {
 
 impl CommandExecutor for Whoami {
     fn main(&self) -> Result<(), RvError> {
+        let socket = self.socket.clone().unwrap_or_else(ferrogate_mia::resolve_mia_socket);
         let dpop = DpopKey::generate();
-        let child = ferrogate_mia::request_child_token(&self.socket, &self.audience, &dpop.jkt(), 60)
+        let child = ferrogate_mia::request_child_token(&socket, &self.audience, &dpop.jkt(), 60)
             .map_err(|e| bv_error_string!(e))?;
         let spiffe = ferrogate_mia::jws_claim_str(&child.jws, "iss")
             .ok_or_else(|| bv_error_string!("could not read SPIFFE id from the minted token".to_string()))?;
