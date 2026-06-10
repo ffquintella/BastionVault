@@ -45,6 +45,16 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-06-10
+
+### Changed
+
+- **MIA refusal messages** (`src/cli/command/ferrogate_mia.rs`) -- map the MIA helper's refusal
+  opcodes (`CrlStale`, `PermissionDenied`, `NoHostSvid`, ...) to operator-facing explanations with a
+  pointer to where to look next (e.g. `CrlStale` now reads "its revocation list (CRL) from CMIS is
+  stale — the MIA fails closed; check that CMIS is reachable and publishing a fresh CRL"). Shared by
+  the CLI and the GUI Machine Login tab; the raw opcode is kept in brackets for grepping.
+
 ## [0.12.1] - 2026-06-09
 
 ### Added

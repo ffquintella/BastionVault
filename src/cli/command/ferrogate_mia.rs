@@ -62,6 +62,27 @@ pub enum ErrorCode {
     Internal,
 }
 
+impl ErrorCode {
+    /// Operator-facing explanation of the refusal, with a pointer to where to
+    /// look next (the raw opcode alone is not actionable from the GUI/CLI).
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::PermissionDenied => {
+                "this caller is not on the MIA's local allowlist (review the host's allowlist in CMIS)"
+            }
+            Self::NoHostSvid => {
+                "the MIA has no host SVID yet (host attestation to CMIS has not completed; check the MIA log)"
+            }
+            Self::CrlStale => {
+                "its revocation list (CRL) from CMIS is stale — the MIA fails closed; check that CMIS is reachable and publishing a fresh CRL"
+            }
+            Self::MalformedRequest => "it could not parse the request (client/MIA version mismatch?)",
+            Self::RateLimited => "the request was rate-limited",
+            Self::Internal => "it hit an internal error (check the MIA log)",
+        }
+    }
+}
+
 /// The MIA's reply. Mirrors `mia::helper::proto::HelperResp` (externally tagged).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HelperResp {
@@ -158,7 +179,7 @@ pub fn request_child_token(
         HelperResp::Token(t) => Ok(t),
         HelperResp::Error { code, retry_after } => {
             let hint = retry_after.map(|s| format!(" (retry after {s}s)")).unwrap_or_default();
-            Err(format!("MIA refused to mint a token: {code:?}{hint}"))
+            Err(format!("MIA refused to mint a token: {}{hint} [{code:?}]", code.describe()))
         }
     }
 }
