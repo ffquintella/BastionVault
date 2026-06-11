@@ -68,6 +68,7 @@ describe("FerroGatePage", () => {
             clock_leeway_secs: 60,
             default_token_ttl: 0,
             cmis_tls_enable: true,
+            cmis_same_host: false,
             jwks_refresh_secs: 60,
             bootstrap_root_auto_approve: true,
             bootstrap_policies: ["default"],
@@ -113,6 +114,7 @@ describe("FerroGatePage", () => {
             clock_leeway_secs: 60,
             default_token_ttl: 0,
             cmis_tls_enable: true,
+            cmis_same_host: false,
             jwks_refresh_secs: 60,
             bootstrap_root_auto_approve: true,
             bootstrap_policies: ["default"],
@@ -157,6 +159,30 @@ describe("FerroGatePage", () => {
       expect(mockInvoke).toHaveBeenCalledWith(
         "ferrogate_approve",
         expect.objectContaining({ id: PENDING.id, policies: "default" }),
+      );
+    });
+  });
+
+  it("saves the same-host CMIS flag from the Config tab", async () => {
+    const user = userEvent.setup();
+    const { FerroGatePage } = await import("../routes/FerroGatePage");
+    renderWithProviders(<FerroGatePage />);
+
+    await user.click(await screen.findByRole("button", { name: /^config$/i }));
+
+    // Loaded as false from read_config; toggling it must round-trip on Save.
+    const sameHost = await screen.findByRole("checkbox", {
+      name: /CMIS is on the same host as the server/i,
+    });
+    expect(sameHost).not.toBeChecked();
+    await user.click(sameHost);
+
+    await user.click(screen.getByRole("button", { name: /save configuration/i }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "ferrogate_write_config",
+        expect.objectContaining({ cmisSameHost: true, cmisTlsEnable: true }),
       );
     });
   });

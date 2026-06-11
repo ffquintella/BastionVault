@@ -77,6 +77,11 @@ impl FerroGateBackend {
                     required: false,
                     description: "Use hybrid PQ-TLS to reach CMIS; false = plaintext (dev/loopback only)."
                 },
+                "cmis_same_host": {
+                    field_type: FieldType::Bool,
+                    required: false,
+                    description: "CMIS runs on the same machine as this server: try host-local aliases (host.containers.internal, loopback) before the configured endpoint."
+                },
                 "jwks_refresh_secs": {
                     field_type: FieldType::Int,
                     required: false,
@@ -170,6 +175,9 @@ impl FerroGateBackendInner {
         }
         if let Ok(v) = req.get_data("cmis_tls_enable") {
             config.cmis_tls_enable = v.as_bool_ex().ok_or(RvError::ErrRequestFieldInvalid)?;
+        }
+        if let Ok(v) = req.get_data("cmis_same_host") {
+            config.cmis_same_host = v.as_bool_ex().ok_or(RvError::ErrRequestFieldInvalid)?;
         }
         if let Ok(v) = req.get_data("jwks_refresh_secs") {
             config.jwks_refresh_secs = v.as_int().ok_or(RvError::ErrRequestFieldInvalid)?;

@@ -33,25 +33,85 @@ use proto::JwksRequest;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// `tonic::transport::Error` renders as a bare `"transport error"`; the useful
+/// detail (TLS handshake alert, SPKI pin mismatch, connection refused, …) lives
+/// in its `source()` chain. Walk it so connect failures are diagnosable — e.g.
+/// a rotated CMIS cert shows the pin-verification failure instead of a useless
+/// generic string.
+fn explain<E: std::error::Error>(err: &E) -> String {
+    let mut out = err.to_string();
+    let mut src = err.source();
+    while let Some(e) = src {
+        let detail = e.to_string();
+        if !detail.is_empty() && !out.ends_with(&detail) {
+            out.push_str(": ");
+            out.push_str(&detail);
+        }
+        src = e.source();
+    }
+    out
+}
+
 /// Fetch the raw `jwks_json` string from CMIS. Returns a human-readable error
 /// (safe to surface) on any transport/RPC failure.
+///
+/// With [`FerroGateConfig::cmis_same_host`] set, host-local aliases are tried
+/// before the configured endpoint (see [`candidate_endpoints`]); the first
+/// endpoint that connects serves the RPC.
 pub async fn fetch_jwks_json(config: &FerroGateConfig) -> Result<String, String> {
     if config.cmis_endpoint.trim().is_empty() {
         return Err("cmis_grpc source selected but cmis_endpoint is empty".to_string());
     }
 
-    let channel = if config.cmis_tls_enable {
-        connect_tls(config).await?
-    } else {
-        connect_plaintext(&config.cmis_endpoint).await?
-    };
+    let mut errors = Vec::new();
+    for endpoint in candidate_endpoints(config) {
+        let attempt = if config.cmis_tls_enable {
+            connect_tls(config, &endpoint).await
+        } else {
+            connect_plaintext(&endpoint).await
+        };
+        match attempt {
+            Ok(channel) => {
+                let mut client = MachineIdentityClient::new(channel);
+                let resp = client
+                    .jwks(JwksRequest {})
+                    .await
+                    .map_err(|e| format!("CMIS JWKS RPC failed: {}", e.message()))?;
+                return Ok(resp.into_inner().jwks_json);
+            }
+            Err(e) => errors.push(e),
+        }
+    }
+    Err(errors.join("; "))
+}
 
-    let mut client = MachineIdentityClient::new(channel);
-    let resp = client
-        .jwks(JwksRequest {})
-        .await
-        .map_err(|e| format!("CMIS JWKS RPC failed: {}", e.message()))?;
-    Ok(resp.into_inner().jwks_json)
+/// Endpoints to dial, in order. Without `cmis_same_host` this is just the
+/// configured endpoint. With it, CMIS is declared to run on the same machine
+/// as this server, where the configured endpoint — typically the host's
+/// public name, the right answer for *external* clients (MIAs) — may not be
+/// reachable from the server's own vantage point: inside a rootless-podman
+/// (pasta) container the host's own address hairpins into the container's
+/// empty namespace and is refused. Host-local aliases are tried first with
+/// the configured port, then the configured endpoint as a fallback. The SPKI
+/// pin authenticates the peer whichever name connects, so trying aliases
+/// does not weaken verification.
+fn candidate_endpoints(config: &FerroGateConfig) -> Vec<String> {
+    let configured = config.cmis_endpoint.trim().to_string();
+    if !config.cmis_same_host {
+        return vec![configured];
+    }
+    let port = configured.rsplit(':').next().and_then(|p| p.parse::<u16>().ok());
+    let mut out = Vec::new();
+    if let Some(port) = port {
+        // Podman/Docker's alias for "the machine this container runs on".
+        out.push(format!("host.containers.internal:{port}"));
+        // Bare-metal / host-network deployments.
+        out.push(format!("127.0.0.1:{port}"));
+    }
+    if !out.contains(&configured) {
+        out.push(configured);
+    }
+    out
 }
 
 /// Cleartext gRPC channel (dev/loopback only).
@@ -62,11 +122,11 @@ async fn connect_plaintext(endpoint: &str) -> Result<Channel, String> {
         .timeout(REQUEST_TIMEOUT)
         .connect()
         .await
-        .map_err(|e| format!("connect to CMIS (plaintext) failed: {e}"))
+        .map_err(|e| format!("connect to CMIS at {endpoint} (plaintext) failed: {}", explain(&e)))
 }
 
 /// Hybrid post-quantum TLS gRPC channel with SHA-384 SPKI pinning.
-async fn connect_tls(config: &FerroGateConfig) -> Result<Channel, String> {
+async fn connect_tls(config: &FerroGateConfig, endpoint: &str) -> Result<Channel, String> {
     use ferro_crypto::pin::{SpkiPin, SpkiPinVerifier};
     use ferro_crypto::tls::{ferrogate_provider, ProviderMode};
 
@@ -103,11 +163,53 @@ async fn connect_tls(config: &FerroGateConfig) -> Result<Channel, String> {
         .enable_http2()
         .wrap_connector(http);
 
-    Endpoint::from_shared(format!("https://{}", config.cmis_endpoint))
+    Endpoint::from_shared(format!("https://{endpoint}"))
         .map_err(|e| format!("invalid cmis_endpoint: {e}"))?
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
         .connect_with_connector(connector)
         .await
-        .map_err(|e| format!("connect to CMIS (PQ-TLS) failed: {e}"))
+        .map_err(|e| format!("connect to CMIS at {endpoint} (PQ-TLS) failed: {}", explain(&e)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(endpoint: &str, same_host: bool) -> FerroGateConfig {
+        FerroGateConfig {
+            cmis_endpoint: endpoint.to_string(),
+            cmis_same_host: same_host,
+            ..FerroGateConfig::default()
+        }
+    }
+
+    #[test]
+    fn same_host_off_uses_only_the_configured_endpoint() {
+        assert_eq!(candidate_endpoints(&cfg("cmis.example.com:8443", false)), vec![
+            "cmis.example.com:8443"
+        ]);
+    }
+
+    #[test]
+    fn same_host_tries_local_aliases_first_then_configured() {
+        assert_eq!(candidate_endpoints(&cfg("segdc1vds0005.fgv.br:8443", true)), vec![
+            "host.containers.internal:8443",
+            "127.0.0.1:8443",
+            "segdc1vds0005.fgv.br:8443",
+        ]);
+    }
+
+    #[test]
+    fn same_host_does_not_duplicate_a_loopback_endpoint() {
+        assert_eq!(candidate_endpoints(&cfg("127.0.0.1:9000", true)), vec![
+            "host.containers.internal:9000",
+            "127.0.0.1:9000",
+        ]);
+    }
+
+    #[test]
+    fn same_host_without_a_port_falls_back_to_the_configured_endpoint() {
+        assert_eq!(candidate_endpoints(&cfg("cmis.example.com", true)), vec!["cmis.example.com"]);
+    }
 }

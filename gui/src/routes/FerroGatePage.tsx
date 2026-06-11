@@ -572,6 +572,7 @@ function ConfigPanel({
   const [staticJwks, setStaticJwks] = useState(config.static_jwks);
   const [acceptSvid, setAcceptSvid] = useState(config.accept_svid);
   const [cmisTlsEnable, setCmisTlsEnable] = useState(config.cmis_tls_enable);
+  const [cmisSameHost, setCmisSameHost] = useState(config.cmis_same_host);
   const [bootstrap, setBootstrap] = useState(config.bootstrap_root_auto_approve);
   const [bootstrapPolicies, setBootstrapPolicies] = useState((config.bootstrap_policies || []).join(","));
   const [saving, setSaving] = useState(false);
@@ -589,6 +590,7 @@ function ConfigPanel({
       setCmisEndpoint(r.cmis_endpoint);
       setCmisSpkiPins((r.cmis_spki_pins || []).join(","));
       setCmisTlsEnable(r.cmis_tls_enable);
+      if (r.fetched_jwks) setStaticJwks(r.fetched_jwks);
       (r.warnings || []).forEach((w) => toast("info", w));
       toast(
         "success",
@@ -613,6 +615,7 @@ function ConfigPanel({
         staticJwks,
         acceptSvid,
         cmisTlsEnable,
+        cmisSameHost,
         bootstrapRootAutoApprove: bootstrap,
         bootstrapPolicies,
       });
@@ -651,6 +654,10 @@ function ConfigPanel({
           <label className="flex items-center gap-2">
             <input type="checkbox" checked={cmisTlsEnable} onChange={(e) => setCmisTlsEnable(e.target.checked)} />
             Use PQ-TLS to reach CMIS
+          </label>
+          <label className="flex items-center gap-2" title="The endpoint above may not be reachable from the server's own vantage point (e.g. a containerised server). Tries host.containers.internal and loopback first, then the configured endpoint. The SPKI pin still authenticates the peer.">
+            <input type="checkbox" checked={cmisSameHost} onChange={(e) => setCmisSameHost(e.target.checked)} />
+            CMIS is on the same host as the server
           </label>
           <label className="flex items-center gap-2">
             <input type="checkbox" checked={bootstrap} onChange={(e) => setBootstrap(e.target.checked)} />

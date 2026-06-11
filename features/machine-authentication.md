@@ -122,7 +122,13 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   CMIS 0.13.1, plaintext — it's an M2 bring-up server) via an `#[ignore]`d live test; the PQ-TLS path compiles
   and is wired but awaits a TLS-enabled CMIS for its full validation. CRL is **not** enforced on the child-token
   path (FerroGate's child-token verifier does not check the CRL; the `x-ferrogate-crl` JWKS extension applies to
-  the direct-SVID path — deferred to Phase 7).
+  the direct-SVID path — deferred to Phase 7). A `cmis_same_host` config flag (2026-06-11) handles the
+  server-and-CMIS-on-one-machine topology: the configured `cmis_endpoint` (the host's public name, right for
+  external MIAs) can be unreachable from the server's own vantage point — inside a rootless-podman (pasta)
+  container the host's own address hairpins into the container's empty namespace — so with the flag set the
+  fetch tries `host.containers.internal:<port>`, then loopback, then the configured endpoint (SPKI pin
+  authenticates the peer whichever name connects). Connect errors also unwrap tonic's `source()` chain so the
+  real cause (pin mismatch, refused, handshake alert) is surfaced instead of a bare `"transport error"`.
 - **Phase 5 shipped (Unix).** Client CLI `bvault ferrogate login|status|whoami` driving the FerroGate **MIA
   helper socket** (`/run/ferrogate/mia.sock`, length-delimited CBOR, mirrored from `mia::helper::proto`): `login`
   mints a DPoP-bound child token from the MIA, builds the RFC 9449 proof, and exchanges it at

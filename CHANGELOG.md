@@ -45,6 +45,31 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.12.8] - 2026-06-11
+
+### Added
+
+- **FerroGate `cmis_same_host` config flag** (`src/modules/credential/ferrogate/{mod,path_config,cmis}.rs`,
+  `gui/src-tauri/src/commands/ferrogate.rs`, `gui/src/routes/FerroGatePage.tsx`, `gui/src/lib/{api,types}.ts`)
+  -- declares that CMIS runs on the same machine as the BastionVault server. The configured
+  `cmis_endpoint` is typically the host's public name (right for external MIA clients) but can be
+  unreachable from the server's own vantage point: inside a rootless-podman (pasta) container the
+  host's own address hairpins into the container's empty namespace and is refused. With the flag set,
+  the JWKS fetch tries `host.containers.internal:<port>`, then `127.0.0.1:<port>`, then the configured
+  endpoint, using the first that connects; per-endpoint failures are accumulated into the surfaced
+  error. Safe because the SHA-384 SPKI pin authenticates the peer regardless of the name dialled.
+  Exposed as a "CMIS is on the same host as the server" checkbox in the GUI config panel; the live
+  test honours `FERROGATE_CMIS_SAME_HOST` to exercise the fallback chain against a real CMIS.
+
+### Fixed
+
+- **FerroGate CMIS connect errors now name the real cause** (`src/modules/credential/ferrogate/cmis.rs`)
+  -- `tonic::transport::Error` renders connect-phase failures as a bare `"transport error"`, hiding the
+  actual reason (SPKI pin mismatch after a CMIS cert rotation, TLS handshake alert, connection refused).
+  Both `connect_plaintext` and `connect_tls` now walk the error `source()` chain via a new `explain()`
+  helper so the surfaced message (e.g. in the GUI "Enrolment status" panel) includes the underlying
+  detail and names the endpoint that failed.
+
 ## [0.12.7] - 2026-06-10
 
 ### Added

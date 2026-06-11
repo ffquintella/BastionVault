@@ -470,6 +470,7 @@ export interface FerroGateConfig {
   clock_leeway_secs: number;
   default_token_ttl: number;
   cmis_tls_enable: boolean;
+  cmis_same_host: boolean;
   jwks_refresh_secs: number;
   bootstrap_root_auto_approve: boolean;
   bootstrap_policies: string[];

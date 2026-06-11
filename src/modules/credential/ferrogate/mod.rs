@@ -107,6 +107,16 @@ pub struct FerroGateConfig {
     /// `false`, connect over plaintext gRPC — for a dev/loopback CMIS only.
     #[serde(default = "default_true")]
     pub cmis_tls_enable: bool,
+    /// CMIS runs on the same machine as this BastionVault server. The
+    /// configured `cmis_endpoint` (typically the host's public name, correct
+    /// for external clients) may not be reachable from the server's own
+    /// vantage point — e.g. from inside a rootless-podman container the
+    /// host's own address hairpins into the container's empty namespace. When
+    /// set, host-local aliases (`host.containers.internal`, loopback) are
+    /// tried first, falling back to the configured endpoint. Safe because the
+    /// SPKI pin authenticates the peer regardless of the name dialled.
+    #[serde(default)]
+    pub cmis_same_host: bool,
     /// How long (seconds) a fetched JWKS is cached before a refresh is attempted.
     #[serde(default = "default_jwks_refresh")]
     pub jwks_refresh_secs: i64,
@@ -155,6 +165,7 @@ impl Default for FerroGateConfig {
             clock_leeway_secs: default_clock_leeway(),
             default_token_ttl: 0,
             cmis_tls_enable: true,
+            cmis_same_host: false,
             jwks_refresh_secs: default_jwks_refresh(),
             login_rate_limit_per_min: default_login_rate(),
             bootstrap_root_auto_approve: true,
@@ -664,6 +675,11 @@ mod test {
             cmis_endpoint: endpoint,
             cmis_tls_enable: pin.is_some(),
             cmis_spki_pins: pin.into_iter().collect(),
+            // With FERROGATE_CMIS_SAME_HOST set, exercises the host-local
+            // candidate fallback (host.containers.internal → loopback →
+            // configured) — from a dev laptop the first two fail and the
+            // configured endpoint must still win.
+            cmis_same_host: std::env::var("FERROGATE_CMIS_SAME_HOST").is_ok(),
             ..Default::default()
         };
 

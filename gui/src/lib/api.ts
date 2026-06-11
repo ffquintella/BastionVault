@@ -479,6 +479,7 @@ export const ferrogateWriteConfig = (cfg: {
   staticJwks: string;
   acceptSvid: boolean;
   cmisTlsEnable: boolean;
+  cmisSameHost: boolean;
   bootstrapRootAutoApprove: boolean;
   bootstrapPolicies: string;
 }) =>
@@ -491,6 +492,7 @@ export const ferrogateWriteConfig = (cfg: {
     staticJwks: cfg.staticJwks,
     acceptSvid: cfg.acceptSvid,
     cmisTlsEnable: cfg.cmisTlsEnable,
+    cmisSameHost: cfg.cmisSameHost,
     bootstrapRootAutoApprove: cfg.bootstrapRootAutoApprove,
     bootstrapPolicies: cfg.bootstrapPolicies,
   });

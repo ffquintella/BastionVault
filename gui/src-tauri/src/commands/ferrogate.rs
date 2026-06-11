@@ -36,6 +36,8 @@ pub struct FerroGateConfig {
     #[serde(default)]
     pub cmis_tls_enable: bool,
     #[serde(default)]
+    pub cmis_same_host: bool,
+    #[serde(default)]
     pub jwks_refresh_secs: i64,
     #[serde(default)]
     pub bootstrap_root_auto_approve: bool,
@@ -99,6 +101,7 @@ pub async fn ferrogate_write_config(
     static_jwks: String,
     accept_svid: bool,
     cmis_tls_enable: bool,
+    cmis_same_host: bool,
     bootstrap_root_auto_approve: bool,
     bootstrap_policies: String,
 ) -> CmdResult<()> {
@@ -113,6 +116,7 @@ pub async fn ferrogate_write_config(
     body.insert("static_jwks".into(), Value::String(static_jwks));
     body.insert("accept_svid".into(), Value::Bool(accept_svid));
     body.insert("cmis_tls_enable".into(), Value::Bool(cmis_tls_enable));
+    body.insert("cmis_same_host".into(), Value::Bool(cmis_same_host));
     body.insert("bootstrap_root_auto_approve".into(), Value::Bool(bootstrap_root_auto_approve));
     body.insert("bootstrap_policies".into(), Value::String(bootstrap_policies));
 
