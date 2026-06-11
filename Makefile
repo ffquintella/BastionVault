@@ -372,7 +372,8 @@ linux-cli-packages: linux-cli-deb linux-cli-rpm ## Build both .deb and .rpm for 
 #   1. `make container-repo-setup` — interactive prompts; writes the
 #      target registry config to `.container-repo.env` (gitignored).
 #   2. `make container-image-push` — re-tags the local image and pushes
-#      to whatever was saved.
+#      to whatever was saved. Builds the image first (via `make
+#      container-image`) when no local `$(IMAGE_NAME):$(IMAGE_TAG)` exists.
 #
 # `.container-repo.env` is plain shell `KEY=value` lines so it can be
 # sourced from the recipe and inspected with `cat`. We never write
@@ -430,7 +431,7 @@ container-repo-show: ## Print the saved registry config from $(CONTAINER_REPO_EN
 	@echo "==> $(CONTAINER_REPO_ENV)"
 	@sed 's/^/    /' $(CONTAINER_REPO_ENV)
 
-container-image-push: ## Tag + push $(IMAGE_NAME):$(IMAGE_TAG) AND :latest to the saved registry. Override version with PUSH_TAG=
+container-image-push: ## Build (if missing) + tag + push $(IMAGE_NAME):$(IMAGE_TAG) AND :latest to the saved registry. Override version with PUSH_TAG=
 	@if [ ! -f $(CONTAINER_REPO_ENV) ]; then \
 		echo "ERROR: no registry configured. Run 'make container-repo-setup' first."; \
 		exit 1; \
@@ -438,6 +439,12 @@ container-image-push: ## Tag + push $(IMAGE_NAME):$(IMAGE_TAG) AND :latest to th
 	@command -v $(CONTAINER_TOOL) >/dev/null 2>&1 || { \
 		echo "ERROR: '$(CONTAINER_TOOL)' not found."; exit 1; \
 	}
+	@if $(CONTAINER_TOOL) image inspect "$(IMAGE_NAME):$(IMAGE_TAG)" >/dev/null 2>&1 ; then \
+		echo "==> using existing local image $(IMAGE_NAME):$(IMAGE_TAG)" ; \
+	else \
+		echo "==> local image $(IMAGE_NAME):$(IMAGE_TAG) not found — building it first" ; \
+		$(MAKE) container-image ; \
+	fi
 	@. ./$(CONTAINER_REPO_ENV) ; \
 	 SCHEME=$${SCHEME:-https} ; \
 	 LOCAL_TAG="$(IMAGE_NAME):$(IMAGE_TAG)" ; \
@@ -450,8 +457,7 @@ container-image-push: ## Tag + push $(IMAGE_NAME):$(IMAGE_TAG) AND :latest to th
 	 REMOTE_VERSION="$$REMOTE_PFX:$$VERSION_TAG" ; \
 	 REMOTE_LATEST="$$REMOTE_PFX:latest" ; \
 	 if ! $(CONTAINER_TOOL) image inspect "$$LOCAL_TAG" >/dev/null 2>&1 ; then \
-	   echo "ERROR: local image '$$LOCAL_TAG' not found. Build it first:" ; \
-	   echo "  make container-image" ; \
+	   echo "ERROR: local image '$$LOCAL_TAG' still not found after build — check 'make container-image' output." ; \
 	   exit 1 ; \
 	 fi ; \
 	 PUSH_FLAGS="" ; \
