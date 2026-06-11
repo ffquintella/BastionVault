@@ -269,8 +269,13 @@ impl RemoteBackendBuilder {
 
         let agent = config_builder.build().new_agent();
 
+        // Strip trailing slashes so `build_url` never emits a double
+        // slash when joining a leading-slash path (`https://host:port//v1/...`),
+        // which mirrors the legacy `Client::with_addr` normalization and
+        // keeps both clients dialing the same well-formed URLs.
         let address = self
             .address
+            .map(|a| a.trim_end_matches('/').to_string())
             .unwrap_or_else(|| "https://127.0.0.1:8200".to_string());
         let input_label = address.clone();
         RemoteBackend {

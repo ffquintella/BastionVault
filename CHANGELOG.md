@@ -45,6 +45,35 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-06-11
+
+### Added
+
+- **Edit button on the vault chooser** (`gui/src/routes/ConnectPage.tsx`) -- saved vault cards now
+  offer "Edit" alongside Pin/Remove, opening the same Add modal prefilled from the profile and saving
+  in place via the existing `update_vault_profile` command (no more remove-and-re-add). Works for
+  Local/Server/Cloud profiles; editing does not auto-open or change the default, and cloud
+  `credentials_ref` is preserved.
+
+### Fixed
+
+- **Trailing slash in a server address produced a double-slash request URL**
+  (`src/api/client.rs`, `crates/bv-client/src/remote.rs`) -- a profile address like
+  `https://host:port/` was concatenated with a leading-slash path (`/v1/sys/health`) to yield
+  `https://host:port//v1/...`, which the server does not route; the empty response surfaced as
+  `Json(Error("EOF while parsing a value", line: 1, column: 0))`. Both HTTP clients now strip trailing
+  slashes from the address when building requests.
+- **FerroGate child-token verification rejected benign audience/`htu` variations**
+  (`third_party/ferrogate-sdk-rust/crates/ferro-child-verify/src/lib.rs`,
+  `src/modules/credential/ferrogate/verify.rs`) -- the DPoP proof's `htu` and the token `aud` were
+  compared to the mount's `expected_audience` with exact string equality, so a trailing slash or a
+  scheme/host case difference between the GUI profile address and the configured audience (e.g.
+  `https://host:4200` vs `https://host:4200/`) failed with `DpopBindingMismatch` ("DPoP proof does
+  not match the request"). Both comparisons now run through a new origin-normalizer
+  (`normalize_htu`) that strips a trailing slash, lower-cases the scheme and host, and drops an
+  explicit default port (`:80`/`:443`). This is a normalization, not a loosening -- scheme, host,
+  port and path must still all be equal, so a different origin is still rejected.
+
 ## [0.13.0] - 2026-06-11
 
 ### Added

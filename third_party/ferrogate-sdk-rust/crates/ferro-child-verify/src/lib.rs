@@ -354,8 +354,13 @@ pub fn verify_dpop_proof(
         .map_err(|_| VerifyError::DpopProofInvalid("bad proof signature".to_string()))?;
 
     // The proof signature holds; bind it to this request and check freshness.
+    // `htu` is compared after origin-normalization so that a trailing slash or a
+    // case/default-port difference between the configured audience and the
+    // client-echoed target URI does not read as a forged binding (see
+    // [`normalize_htu`]). `htm` stays an exact match — HTTP methods are
+    // case-sensitive and there is no benign variation to absorb.
     let claims: DpopClaims = decode_dpop_json(parts[1])?;
-    if claims.htm != expect.htm || claims.htu != expect.htu {
+    if claims.htm != expect.htm || normalize_htu(&claims.htu) != normalize_htu(expect.htu) {
         return Err(VerifyError::DpopBindingMismatch);
     }
     if claims.iat > now + leeway_secs || claims.iat < now - expect.max_age_secs {
@@ -403,6 +408,104 @@ pub fn jwk_thumbprint_ed25519(x_b64url: &str) -> String {
     let canonical = format!(r#"{{"crv":"Ed25519","kty":"OKP","x":"{x_b64url}"}}"#);
     let digest = Sha256::digest(canonical.as_bytes());
     URL_SAFE_NO_PAD.encode(digest)
+}
+
+/// Canonicalize an HTTP target URI (`htu`) or token audience (`aud`) for
+/// comparison.
+///
+/// FerroGate child tokens carry `aud == htu`, and both values are configured by
+/// an operator on the resource server and echoed verbatim by the client. Purely
+/// textual differences that still denote the **same origin** must not surface as
+/// a [`VerifyError::DpopBindingMismatch`] — e.g. `https://host:4200` versus
+/// `https://host:4200/`, or `HTTPS://Host:4200`. This collapses those
+/// differences *without* loosening the check into a prefix/substring match: the
+/// scheme, host, port, and path must all still be equal after normalization.
+///
+/// It is a deliberately small, parser-free normalizer (the crate carries no URL
+/// dependency) that applies only well-defined RFC 3986 origin equivalences:
+///
+/// * the scheme is lower-cased (schemes are case-insensitive),
+/// * the authority's host is lower-cased (DNS names are case-insensitive),
+/// * an explicit default port — `:80` for `http`, `:443` for `https` — is
+///   dropped,
+/// * one or more trailing `/` are stripped from an (otherwise empty- or
+///   path-only) URI.
+///
+/// Userinfo, query, and fragment are preserved verbatim; the path is left
+/// case-sensitive (only its trailing slash is trimmed). A value with no `://`
+/// scheme separator is only trailing-slash-trimmed, since no host can be safely
+/// identified to case-fold.
+#[must_use]
+pub fn normalize_htu(uri: &str) -> String {
+    let uri = uri.trim();
+
+    // Without a scheme separator we cannot isolate a host to case-fold; limit
+    // ourselves to the unambiguous trailing-slash trim.
+    let Some((scheme, rest)) = uri.split_once("://") else {
+        return uri.trim_end_matches('/').to_string();
+    };
+    let scheme = scheme.to_ascii_lowercase();
+
+    // Split the authority from everything that follows it (path/query/fragment),
+    // which is left untouched apart from the path's trailing slash.
+    let (authority, tail) = match rest.find(['/', '?', '#']) {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, ""),
+    };
+
+    // authority = [ userinfo "@" ] host [ ":" port ]. Userinfo is rare and kept
+    // verbatim (it is case-sensitive).
+    let (userinfo, hostport) = match authority.rsplit_once('@') {
+        Some((u, hp)) => (Some(u), hp),
+        None => (None, authority),
+    };
+
+    // Separate host from port, honoring bracketed IPv6 literals (`[::1]:443`).
+    let (host, port) = if let Some(after_bracket) = hostport.strip_prefix('[') {
+        match after_bracket.split_once(']') {
+            Some((h, rest)) => (
+                format!("[{}]", h.to_ascii_lowercase()),
+                rest.strip_prefix(':'),
+            ),
+            None => (hostport.to_ascii_lowercase(), None),
+        }
+    } else {
+        match hostport.rsplit_once(':') {
+            Some((h, p)) => (h.to_ascii_lowercase(), Some(p)),
+            None => (hostport.to_ascii_lowercase(), None),
+        }
+    };
+
+    // Drop an explicit default port; keep any other (including an empty one,
+    // which is malformed but preserved so it cannot silently match a real port).
+    let port = match port {
+        Some("443") if scheme == "https" => None,
+        Some("80") if scheme == "http" => None,
+        other => other,
+    };
+
+    // Trim trailing slash(es) only on a clean path (no query/fragment), so a
+    // bare `/` collapses to the empty path and `/a/` matches `/a`.
+    let tail = if tail.starts_with('/') && !tail.contains(['?', '#']) {
+        tail.trim_end_matches('/')
+    } else {
+        tail
+    };
+
+    let mut out = String::with_capacity(uri.len());
+    out.push_str(&scheme);
+    out.push_str("://");
+    if let Some(u) = userinfo {
+        out.push_str(u);
+        out.push('@');
+    }
+    out.push_str(&host);
+    if let Some(p) = port {
+        out.push(':');
+        out.push_str(p);
+    }
+    out.push_str(tail);
+    out
 }
 
 fn decode_json<T: for<'de> Deserialize<'de>>(segment: &str) -> Result<T, VerifyError> {

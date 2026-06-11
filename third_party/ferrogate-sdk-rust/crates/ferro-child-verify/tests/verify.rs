@@ -9,8 +9,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ed25519_dalek::{Signer, SigningKey};
 use ferro_child_verify::{
-    jwk_thumbprint_ed25519, verify, verify_bound, DpopExpectation, JwkSet, VerifyError, CHILD_ALG,
-    CHILD_SIGNING_CONTEXT, CHILD_TYP,
+    jwk_thumbprint_ed25519, normalize_htu, verify, verify_bound, DpopExpectation, JwkSet,
+    VerifyError, CHILD_ALG, CHILD_SIGNING_CONTEXT, CHILD_TYP,
 };
 use ferro_crypto::composite::{CompositePublicKey, CompositeSecretKey};
 
@@ -217,4 +217,92 @@ fn wrong_key_does_not_verify() {
     let mismatched = jwks_for(KID, &other_pk);
     let err = verify(&f.jws, &mismatched, 1100, 30).unwrap_err();
     assert_eq!(err, VerifyError::BadSignature);
+}
+
+// --- htu / audience normalization ---------------------------------------
+
+/// Build a child token + matching DPoP proof whose `htu`/`aud` is `proof_htu`,
+/// then verify it against an expectation of `expect_htu`. Both derive from the
+/// same configured address in production; this lets a test drive a benign
+/// textual difference between the two.
+fn verify_with_htus(proof_htu: &str, expect_htu: &str) -> Result<(), VerifyError> {
+    let (sk, pk) = CompositeSecretKey::generate().unwrap();
+    let ed_sk = SigningKey::from_bytes(&[7u8; 32]);
+    let (proof, jkt) = dpop_proof(&ed_sk, HTM, proof_htu, 1000);
+    // Mint a token whose `aud` matches the proof's `htu` (FerroGate keeps them
+    // equal), bound to the proof key.
+    let header = serde_json::json!({ "alg": CHILD_ALG, "typ": CHILD_TYP, "kid": KID });
+    let claims = serde_json::json!({
+        "iss": "spiffe://ferrogate.test/host/abc",
+        "sub": "spiffe://ferrogate.test/host/abc#app:abababababababab",
+        "aud": proof_htu,
+        "exp": 1600,
+        "iat": 1000,
+        "jti": "0123456789abcdef0123456789abcdef",
+        "cnf": { "jkt": jkt },
+        "ferrogate": {
+            "parent_svid": "33".repeat(48),
+            "actor_pid": 1234u32,
+            "actor_uid": 1001u32,
+            "actor_bin": "ab".repeat(48),
+        },
+    });
+    let h = b64(&serde_json::to_vec(&header).unwrap());
+    let p = b64(&serde_json::to_vec(&claims).unwrap());
+    let signing_input = format!("{h}.{p}");
+    let sig = sk.sign(CHILD_SIGNING_CONTEXT, signing_input.as_bytes()).unwrap();
+    let jws = format!("{signing_input}.{}", b64(&sig.to_concat_bytes()));
+    let jwks = jwks_for(KID, &pk);
+    let expect = DpopExpectation { htm: HTM, htu: expect_htu, max_age_secs: 60 };
+    verify_bound(&jws, &jwks, Some(&proof), &expect, 1010, 30).map(|_| ())
+}
+
+#[test]
+fn normalize_htu_collapses_benign_origin_differences() {
+    // Trailing slash.
+    assert_eq!(normalize_htu("https://host:4200"), normalize_htu("https://host:4200/"));
+    assert_eq!(normalize_htu("https://host:4200/a"), normalize_htu("https://host:4200/a/"));
+    // Scheme + host case.
+    assert_eq!(normalize_htu("HTTPS://Host:4200"), normalize_htu("https://host:4200"));
+    // Default port equivalence.
+    assert_eq!(normalize_htu("https://host:443/x"), normalize_htu("https://host/x"));
+    assert_eq!(normalize_htu("http://host:80"), normalize_htu("http://host"));
+    // Combined.
+    assert_eq!(normalize_htu("HTTPS://Host:443/"), normalize_htu("https://host"));
+}
+
+#[test]
+fn normalize_htu_keeps_meaningful_differences() {
+    // A non-default port is not dropped.
+    assert_ne!(normalize_htu("https://host:4200"), normalize_htu("https://host"));
+    // The path is case-sensitive (only its trailing slash is trimmed).
+    assert_ne!(normalize_htu("https://host/Resource"), normalize_htu("https://host/resource"));
+    // A different host is still a mismatch — normalization is not a prefix match.
+    assert_ne!(normalize_htu("https://host"), normalize_htu("https://host.evil.com"));
+    // :443 is only the default for https, not http.
+    assert_ne!(normalize_htu("http://host:443"), normalize_htu("http://host"));
+}
+
+#[test]
+fn trailing_slash_difference_still_binds() {
+    // Client echoes a trailing slash; server config has none (and vice versa).
+    verify_with_htus("https://api.example.com:4200/", "https://api.example.com:4200")
+        .expect("trailing slash on the proof must still bind");
+    verify_with_htus("https://api.example.com:4200", "https://api.example.com:4200/")
+        .expect("trailing slash on the expectation must still bind");
+}
+
+#[test]
+fn scheme_and_host_case_difference_still_binds() {
+    verify_with_htus("https://API.Example.com:4200/", "https://api.example.com:4200")
+        .expect("scheme/host case must not break the binding");
+}
+
+#[test]
+fn genuinely_different_audience_still_rejected() {
+    // A different host must remain a DpopBindingMismatch — normalization closes
+    // benign textual gaps, it does not relax the origin check.
+    let err = verify_with_htus("https://api.example.com:4200", "https://evil.example.com:4200")
+        .unwrap_err();
+    assert_eq!(err, VerifyError::DpopBindingMismatch);
 }

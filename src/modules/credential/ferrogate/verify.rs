@@ -6,7 +6,7 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use ferro_child_verify::{verify_bound, DpopExpectation, JwkSet, Verified};
+use ferro_child_verify::{normalize_htu, verify_bound, DpopExpectation, JwkSet, Verified};
 
 use super::FerroGateConfig;
 
@@ -99,7 +99,12 @@ pub fn verify_child_token(
     let verified = verify_bound(token, &jwks, dpop, &expect, now, config.clock_leeway_secs)
         .map_err(|e| format!("token verification failed: {e}"))?;
 
-    if verified.claims.aud != config.expected_audience {
+    // Compare on the normalized origin so a trailing slash or case/default-port
+    // difference between the client-echoed audience and the configured
+    // `expected_audience` is not a mismatch. This mirrors the `htu` check inside
+    // `verify_bound` (both derive from the same address) and is a normalization,
+    // not a loosening — scheme, host, port and path must still all be equal.
+    if normalize_htu(&verified.claims.aud) != normalize_htu(&config.expected_audience) {
         return Err(format!(
             "token audience '{}' does not match expected '{}'",
             verified.claims.aud, config.expected_audience
@@ -117,4 +122,109 @@ pub fn verify_child_token(
     }
 
     Ok(verified)
+}
+
+#[cfg(test)]
+mod tests {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use ed25519_dalek::{Signer, SigningKey};
+    use ferro_child_verify::{jwk_thumbprint_ed25519, CHILD_ALG, CHILD_SIGNING_CONTEXT, CHILD_TYP};
+    use ferro_crypto::composite::CompositeSecretKey;
+    use serde_json::json;
+
+    use super::{verify_child_token, FerroGateConfig};
+
+    const KID: &str = "host-test-1";
+    const ISS: &str = "spiffe://ferrogate.test/host/abc";
+
+    fn b64(bytes: &[u8]) -> String {
+        URL_SAFE_NO_PAD.encode(bytes)
+    }
+
+    fn mint_child(sk: &CompositeSecretKey, aud: &str, jkt: &str, iat: i64, exp: i64) -> String {
+        let header = json!({ "alg": CHILD_ALG, "typ": CHILD_TYP, "kid": KID });
+        let claims = json!({
+            "iss": ISS,
+            "sub": format!("{ISS}#app:abababababababab"),
+            "aud": aud,
+            "exp": exp,
+            "iat": iat,
+            "jti": "0123456789abcdef0123456789abcdef",
+            "cnf": { "jkt": jkt },
+            "ferrogate": {
+                "parent_svid": "33".repeat(48),
+                "actor_pid": 1234u32,
+                "actor_uid": 1001u32,
+                "actor_bin": "ab".repeat(48),
+            },
+        });
+        let h = b64(&serde_json::to_vec(&header).unwrap());
+        let p = b64(&serde_json::to_vec(&claims).unwrap());
+        let signing_input = format!("{h}.{p}");
+        let sig = sk.sign(CHILD_SIGNING_CONTEXT, signing_input.as_bytes()).unwrap();
+        format!("{signing_input}.{}", b64(&sig.to_concat_bytes()))
+    }
+
+    fn mint_dpop(ed_sk: &SigningKey, htu: &str, iat: i64) -> (String, String) {
+        let x = b64(ed_sk.verifying_key().as_bytes());
+        let jkt = jwk_thumbprint_ed25519(&x);
+        let header = json!({ "typ": "dpop+jwt", "alg": "EdDSA", "jwk": { "kty": "OKP", "crv": "Ed25519", "x": x } });
+        let claims = json!({ "jti": "dpop-jti-0001", "htm": "POST", "htu": htu, "iat": iat });
+        let h = b64(&serde_json::to_vec(&header).unwrap());
+        let p = b64(&serde_json::to_vec(&claims).unwrap());
+        let signing_input = format!("{h}.{p}");
+        let sig = ed_sk.sign(signing_input.as_bytes());
+        (format!("{signing_input}.{}", b64(&sig.to_bytes())), jkt)
+    }
+
+    fn jwks_json(pk: &ferro_crypto::composite::CompositePublicKey) -> String {
+        json!({ "keys": [ { "kty": "FERROGATE-COMPOSITE", "kid": KID, "pub": b64(&pk.to_concat_bytes()) } ] })
+            .to_string()
+    }
+
+    /// Mint a token+proof whose `aud`/`htu` is `client_addr` and verify it
+    /// against a mount configured with `expected_audience = configured`.
+    fn verify_with(client_addr: &str, configured: &str) -> Result<(), String> {
+        let (sk, pk) = CompositeSecretKey::generate().unwrap();
+        let ed_sk = SigningKey::from_bytes(&[7u8; 32]);
+        let now = 1000;
+        let (proof, jkt) = mint_dpop(&ed_sk, client_addr, now);
+        let jws = mint_child(&sk, client_addr, &jkt, now, now + 3600);
+        let config = FerroGateConfig {
+            trust_domain: "ferrogate.test".to_string(),
+            expected_audience: configured.to_string(),
+            clock_leeway_secs: 30,
+            ..Default::default()
+        };
+        verify_child_token(&config, &jwks_json(&pk), &jws, Some(&proof), now + 10).map(|_| ())
+    }
+
+    #[test]
+    fn trailing_slash_difference_is_accepted() {
+        verify_with("https://vault.example.com:4200/", "https://vault.example.com:4200")
+            .expect("client trailing slash must still verify");
+        verify_with("https://vault.example.com:4200", "https://vault.example.com:4200/")
+            .expect("configured trailing slash must still verify");
+    }
+
+    #[test]
+    fn scheme_and_host_case_difference_is_accepted() {
+        verify_with("HTTPS://Vault.Example.com:4200", "https://vault.example.com:4200")
+            .expect("scheme/host case must not break verification");
+    }
+
+    #[test]
+    fn default_port_difference_is_accepted() {
+        verify_with("https://vault.example.com:443", "https://vault.example.com")
+            .expect("explicit default https port must verify");
+    }
+
+    #[test]
+    fn genuinely_different_audience_is_rejected() {
+        // A different host must still fail — normalization is not a loosening.
+        let err = verify_with("https://vault.example.com", "https://evil.example.com")
+            .expect_err("a different origin must be rejected");
+        // The DPoP htu binding trips first (htu == aud here), surfaced verbatim.
+        assert!(err.contains("does not match"), "unexpected error: {err}");
+    }
 }

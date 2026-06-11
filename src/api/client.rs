@@ -165,7 +165,12 @@ impl Client {
     }
 
     pub fn with_addr(mut self, addr: &str) -> Self {
-        self.address = addr.into();
+        // Strip trailing slashes so request URLs (built by appending a
+        // leading-slash path like `/v1/sys/health`) never produce a
+        // double slash (`https://host:port//v1/...`), which the server
+        // does not route and which surfaces as an empty-body JSON parse
+        // error. The operator may legitimately enter `https://host:port/`.
+        self.address = addr.trim_end_matches('/').into();
         self
     }
 

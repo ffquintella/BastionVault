@@ -123,6 +123,9 @@ export function ConnectPage() {
   const [addKind, setAddKind] = useState<AddKind>(null);
   const [addBusy, setAddBusy] = useState(false);
   const [newName, setNewName] = useState("");
+  // When set, the modal is editing an existing profile in place
+  // (calls `update_vault_profile`) rather than adding a new one.
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   // Remote add-form fields.
   const [remoteAddr, setRemoteAddr] = useState("https://127.0.0.1:8200");
@@ -654,6 +657,7 @@ export function ConnectPage() {
 
   function resetAddForm(kind: AddKind) {
     setAddKind(kind);
+    setEditingId(null);
     setError(null);
     setCloudCredsReady(false);
     setS3AccessKeyId("");
@@ -692,6 +696,67 @@ export function ConnectPage() {
           setLocalDefaultDir("");
           setLocalDataDir("");
         });
+    }
+  }
+
+  /**
+   * Open the same modal in edit mode, prefilled from an existing
+   * profile. Saving calls `update_vault_profile` (in place) rather
+   * than adding a new entry — see `handleAddAndOpen`. Cloud secrets
+   * (credentials_ref) are preserved; the inline S3/OAuth fields stay
+   * blank since the saved ref already points at the stored creds.
+   */
+  function openEditForm(profile: VaultProfile) {
+    setError(null);
+    setEditingId(profile.id);
+    setNewName(profile.name);
+    if (profile.spec.kind === "remote") {
+      const p = (profile.spec as { profile: RemoteProfile }).profile;
+      setAddKind("remote");
+      setRemoteAddr(p.address);
+      setTlsSkipVerify(p.tls_skip_verify ?? false);
+      setCaCertPath(p.ca_cert_path ?? "");
+      setClusterDiscovery(p.cluster_discovery ?? true);
+      setRemoteMachineIdentity(p.require_machine_identity ?? false);
+    } else if (profile.spec.kind === "local") {
+      const s = profile.spec as { storage_kind: string; data_dir?: string | null };
+      setAddKind("local");
+      const kind = (s.storage_kind === "hiqlite" ? "hiqlite" : "file") as
+        | "file"
+        | "hiqlite";
+      setLocalStorageKind(kind);
+      // Resolve the canonical default for the hint; keep the saved
+      // custom dir if one was set, else fall back to the default.
+      api
+        .getDefaultLocalDataDir(kind)
+        .then((def) => {
+          setLocalDefaultDir(def);
+          setLocalDataDir(s.data_dir?.trim() ? s.data_dir!.trim() : def);
+        })
+        .catch(() => {
+          setLocalDefaultDir("");
+          setLocalDataDir(s.data_dir ?? "");
+        });
+    } else {
+      const cfg = (profile.spec as { config: { target: string } & Record<string, unknown> })
+        .config;
+      const provider = (cfg.target as CloudProvider) ?? "s3";
+      setAddKind("cloud");
+      setCloudProvider(provider);
+      setCloudBucket((cfg.bucket as string) ?? "");
+      setCloudRegion((cfg.region as string) ?? "us-east-1");
+      setCloudEndpointUrl((cfg.endpoint_url as string) ?? "");
+      setCloudClientId((cfg.client_id as string) ?? "");
+      setCloudCredentialsRef((cfg.credentials_ref as string) ?? "");
+      setCloudPrefix((cfg.prefix as string) ?? "");
+      setCloudObfuscate((cfg.obfuscate_keys as boolean) ?? false);
+      // A saved cloud profile already has working credentials behind
+      // its ref, so editing starts in the "ready" state — the user
+      // only re-runs Connect if they want to rotate them.
+      setCloudCredsReady(Boolean(cfg.credentials_ref));
+      setS3AccessKeyId("");
+      setS3SecretAccessKey("");
+      setS3SessionToken("");
     }
   }
 
@@ -839,6 +904,22 @@ export function ConnectPage() {
           config: { target: cloudProvider, ...config },
         };
       } else {
+        return;
+      }
+
+      // Edit mode: replace the existing profile in place and close.
+      // No auto-open and no default side-effect — editing connection
+      // details shouldn't silently reconnect or repin.
+      if (editingId) {
+        await api.updateVaultProfile({
+          id: editingId,
+          name: newName.trim() || "Untitled vault",
+          spec,
+        });
+        setAddKind(null);
+        setEditingId(null);
+        await refreshProfiles();
+        toast("success", "Vault updated");
         return;
       }
 
@@ -1066,6 +1147,7 @@ export function ConnectPage() {
             opening={opening === p.id}
             onOpen={() => openProfile(p).catch(() => {})}
             onSetDefault={() => handleSetDefault(p.id)}
+            onEdit={() => openEditForm(p)}
             onRemove={() => handleRemove(p.id, p.name)}
           />
         ))}
@@ -1086,22 +1168,43 @@ export function ConnectPage() {
       {/* Add-vault modal */}
       <Modal
         open={addKind !== null}
-        onClose={() => setAddKind(null)}
+        onClose={() => {
+          setAddKind(null);
+          setEditingId(null);
+        }}
         title={
           addKind === "local"
-            ? "Add Local Vault"
+            ? editingId
+              ? "Edit Local Vault"
+              : "Add Local Vault"
             : addKind === "remote"
-              ? "Add Server"
+              ? editingId
+                ? "Edit Server"
+                : "Add Server"
               : addKind === "cloud"
-                ? "Add Cloud Vault"
+                ? editingId
+                  ? "Edit Cloud Vault"
+                  : "Add Cloud Vault"
                 : ""
         }
         size="md"
         actions={
           <>
-            <Button variant="ghost" onClick={() => setAddKind(null)}>Cancel</Button>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setAddKind(null);
+                setEditingId(null);
+              }}
+            >
+              Cancel
+            </Button>
             <Button onClick={handleAddAndOpen} loading={addBusy}>
-              {addBusy ? "Saving…" : "Save & Open"}
+              {addBusy
+                ? "Saving…"
+                : editingId
+                  ? "Save changes"
+                  : "Save & Open"}
             </Button>
           </>
         }
@@ -1750,6 +1853,7 @@ function VaultProfileCard({
   opening,
   onOpen,
   onSetDefault,
+  onEdit,
   onRemove,
 }: {
   profile: VaultProfile;
@@ -1757,6 +1861,7 @@ function VaultProfileCard({
   opening: boolean;
   onOpen: () => void;
   onSetDefault: () => void;
+  onEdit: () => void;
   onRemove: () => void;
 }) {
   const kindLabel =
@@ -1812,6 +1917,13 @@ function VaultProfileCard({
               Pin
             </button>
           )}
+          <button
+            onClick={onEdit}
+            className="text-xs px-2 py-1 text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
+            title="Edit this vault's connection details"
+          >
+            Edit
+          </button>
           <button
             onClick={onRemove}
             className="text-xs px-2 py-1 text-[var(--color-text-muted)] hover:text-red-400 transition-colors"
