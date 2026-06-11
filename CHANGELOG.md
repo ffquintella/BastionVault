@@ -45,6 +45,42 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-06-11
+
+### Added
+
+#### Combined machine+user authentication & enrolment lifecycle
+
+- **Server-side combined machine+user policy** (`src/modules/credential/ferrogate/{mod,path_config,path_machines}.rs`)
+  -- `auth/ferrogate/login` now accepts an optional `user_token`. When present, the minted token's
+  policies are the **intersection** of the machine's approved policies and the user token's policies
+  (`default` is baseline and re-injected by the token store), the combined token carries the *user's*
+  `entity_id`/`username` for ownership/ACL while still recording the attesting `spiffe_id`, and the
+  (broader) intermediate user token is revoked so only the narrower combined token survives. A new
+  `require_user_token` config flag enforces this server-side: a login without a valid `user_token` is
+  denied (`user_token_required`). Root tokens cannot be bound. Covered by
+  `test_ferrogate_combined_user_binding`.
+- **Operator CLI machine authorization** (`src/cli/command/operator_ferrogate.rs`) -- new
+  `bvault operator ferrogate {list,approve,reject,revoke}` subcommands that administer the enrolment
+  queue against the running server with a root token. They do NOT require an approved machine, which
+  breaks the bootstrap deadlock (you can authorize the first machine from the server). Machines are
+  addressed by handle (from `list`) or by SPIFFE id (auto-hashed to the BLAKE3 handle).
+- **GUI per-connection machine-identity gate** (`gui/src/routes/ConnectPage.tsx`,
+  `gui/src/routes/LoginPage.tsx`, `gui/src-tauri/src/state.rs`) -- a new "Require machine identity
+  (FerroGate)" option on remote connection profiles. When set, the connect flow attests the host via
+  the local MIA before the login screen: an **approved** machine proceeds to user login (whose token is
+  then bound into a combined session); a **pending/unknown** machine shows an enrolment dialog (SPIFFE
+  id + `operator ferrogate approve` hint + Recheck); an **explicitly denied** (`rejected`/`revoked`)
+  machine shows a hard access-denied with no proceed.
+- **Typed enrolment outcome from machine login** (`gui/src-tauri/src/commands/ferrogate.rs`,
+  `gui/src/lib/types.ts`) -- `ferrogate_machine_login` now returns a classified `enrolment`
+  (`approved`/`pending`/`rejected`/`revoked`) + `message` instead of a generic error, so the UI can
+  branch; genuine transport/verification failures still surface as hard errors. A `user_token`
+  argument drives the combined-binding flow.
+- **GUI admin toggle for combined auth** (`gui/src/routes/FerroGatePage.tsx`) -- the FerroGate config
+  panel gains a "Require user token (machine + user)" checkbox wired to the new `require_user_token`
+  flag.
+
 ## [0.12.8] - 2026-06-11
 
 ### Added

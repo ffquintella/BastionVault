@@ -38,6 +38,14 @@ use crate::{
 
 const MACHINE_PREFIX: &str = "machine/";
 
+/// Result of binding a user token to a machine login: the intersected policy
+/// set plus the user's identity to stamp on the combined session token.
+struct BoundUser {
+    policies: Vec<String>,
+    entity_id: String,
+    username: String,
+}
+
 fn machine_key(id: &str) -> String {
     format!("{MACHINE_PREFIX}{id}")
 }
@@ -206,6 +214,11 @@ impl FerroGateBackend {
                     field_type: FieldType::Str,
                     required: false,
                     description: "DPoP proof JWS (RFC 9449). Preferred via the 'DPoP' header; this body field is a fallback for non-browser clients."
+                },
+                "user_token": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "Optional already-authenticated user token to bind. When present (or when the mount's require_user_token is set), the minted token's policies are the intersection of the machine's and the user token's; the user token is then revoked."
                 }
             },
             operations: [
@@ -427,6 +440,74 @@ impl FerroGateBackendInner {
         matches!(token_store.lookup(&req.client_token).await, Ok(Some(te)) if te.policies.iter().any(|p| p == "root"))
     }
 
+    /// Bind an already-authenticated user token to this machine login.
+    ///
+    /// Looks the token up in the token store, computes the policy intersection
+    /// (named policies present in BOTH the machine's approved set and the user
+    /// token's set — `default` is excluded here and re-injected by the token
+    /// store), captures the user's `entity_id`/`username` so the combined
+    /// session carries the *user's* identity, and revokes the (broader)
+    /// intermediate user token so only the narrower combined token survives.
+    ///
+    /// Returns `Ok(None)` when no `user_token` was supplied. Returns
+    /// `Err(reason)` (a user-facing message) when a token was supplied but is
+    /// invalid or carries `root` — never bind a root token into a machine
+    /// session.
+    async fn bind_user_token(
+        &self,
+        req: &Request,
+        machine_policies: &[String],
+    ) -> Result<Option<BoundUser>, String> {
+        let user_token = req
+            .get_data("user_token")
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .filter(|t| !t.trim().is_empty());
+        let Some(user_token) = user_token else {
+            return Ok(None);
+        };
+
+        let auth_module = self
+            .core
+            .module_manager
+            .get_module::<AuthModule>("auth")
+            .ok_or_else(|| "user_binding_unavailable: auth module not loaded".to_string())?;
+        let guard = auth_module.token_store.load();
+        let token_store = guard
+            .as_ref()
+            .ok_or_else(|| "user_binding_unavailable: token store not initialised".to_string())?;
+
+        let te = match token_store.lookup(&user_token).await {
+            Ok(Some(te)) => te,
+            _ => return Err("invalid_user_token: the supplied user token is not valid".to_string()),
+        };
+        if te.policies.iter().any(|p| p == "root") {
+            return Err("invalid_user_token: root tokens cannot be bound to a machine login".to_string());
+        }
+
+        // Intersect named policies; `default` is baseline and re-injected by the
+        // token store, so exclude it from the comparison on both sides.
+        let user_named: std::collections::HashSet<&str> =
+            te.policies.iter().map(String::as_str).filter(|p| *p != "default").collect();
+        let policies: Vec<String> = machine_policies
+            .iter()
+            .filter(|p| p.as_str() != "default" && user_named.contains(p.as_str()))
+            .cloned()
+            .collect();
+
+        let entity_id = te.meta.get("entity_id").cloned().unwrap_or_default();
+        let username = te.meta.get("username").cloned().unwrap_or_default();
+
+        // Drop the broader intermediate token — only the combined token should
+        // remain usable. Best-effort: a revoke failure must not block the login
+        // (the combined token is still the narrower of the two).
+        if let Err(e) = token_store.revoke(&user_token).await {
+            log::warn!(target: "security", "ferrogate: failed to revoke bound user token: {e}");
+        }
+
+        Ok(Some(BoundUser { policies, entity_id, username }))
+    }
+
     /// Count machines currently in the `approved` state.
     async fn approved_count(&self, req: &mut Request) -> Result<usize, RvError> {
         let ids = req.storage_list(MACHINE_PREFIX).await?;
@@ -627,6 +708,29 @@ impl FerroGateBackendInner {
                 }
                 self.set_machine(req, &id, &m).await?;
 
+                // Combined machine+user auth: bind an optional user token and
+                // intersect policies. When the mount enforces it, a login with
+                // no user_token is denied outright.
+                let bound = match self.bind_user_token(req, &m.policies).await {
+                    Ok(b) => b,
+                    Err(reason) => {
+                        log::warn!(target: "security", "ferrogate login rejected: {reason}");
+                        ferrogate_metrics().record_denied(DenyReason::VerifyFailed);
+                        return Ok(Some(Response::error_response(&reason)));
+                    }
+                };
+                if config.require_user_token && bound.is_none() {
+                    log::warn!(target: "security", "ferrogate login rejected: user_token required but absent spiffe_id={}", m.spiffe_id);
+                    ferrogate_metrics().record_denied(DenyReason::VerifyFailed);
+                    return Ok(Some(Response::error_response(
+                        "user_token_required: this mount requires a user token bound to the machine login",
+                    )));
+                }
+                let policies = match &bound {
+                    Some(b) => b.policies.clone(),
+                    None => m.policies.clone(),
+                };
+
                 let ttl = if m.ttl_seconds > 0 { m.ttl_seconds } else { config.default_token_ttl };
                 let mut auth = Auth {
                     lease: Lease {
@@ -635,8 +739,8 @@ impl FerroGateBackendInner {
                         ..Default::default()
                     },
                     display_name: spiffe_id.clone(),
-                    policies: m.policies.clone(),
-                    token_policies: m.policies.clone(),
+                    policies: policies.clone(),
+                    token_policies: policies,
                     ..Default::default()
                 };
                 auth.metadata.insert("spiffe_id".to_string(), spiffe_id);
@@ -644,7 +748,24 @@ impl FerroGateBackendInner {
                 if !kid.is_empty() {
                     auth.metadata.insert("ferrogate_kid".to_string(), kid);
                 }
-                log::info!(target: "audit", "ferrogate.machine.login spiffe_id={} ip={}", m.spiffe_id, m.last_login_ip);
+                // Stamp the bound user's identity so the combined session is
+                // owned by the user (ownership/ACL "owner" scope) while still
+                // recording the attesting machine via spiffe_id above.
+                if let Some(b) = &bound {
+                    if !b.entity_id.is_empty() {
+                        auth.metadata.insert("entity_id".to_string(), b.entity_id.clone());
+                    }
+                    if !b.username.is_empty() {
+                        auth.metadata.insert("username".to_string(), b.username.clone());
+                    }
+                }
+                log::info!(
+                    target: "audit",
+                    "ferrogate.machine.login spiffe_id={} ip={} bound_user={}",
+                    m.spiffe_id,
+                    m.last_login_ip,
+                    bound.as_ref().map(|b| b.username.as_str()).filter(|u| !u.is_empty()).unwrap_or("-")
+                );
                 ferrogate_metrics().record_login();
                 Ok(Some(Response { auth: Some(auth), ..Response::default() }))
             }

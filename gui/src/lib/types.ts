@@ -24,6 +24,13 @@ export interface RemoteProfile {
   discovery_srv_service?: string;
   /** Per-probe deadline in milliseconds (default 1500). */
   health_probe_timeout_ms?: number;
+  /**
+   * Require a successful FerroGate machine login before the user-login
+   * screen. When `true`, the connect flow attests this host via the local
+   * MIA and gates on operator approval, so vault access needs machine
+   * identity AND a user credential. Defaults off.
+   */
+  require_machine_identity?: boolean;
 }
 
 export interface RemoteStatus {
@@ -474,6 +481,7 @@ export interface FerroGateConfig {
   jwks_refresh_secs: number;
   bootstrap_root_auto_approve: boolean;
   bootstrap_policies: string[];
+  require_user_token: boolean;
 }
 
 export interface FerroGateMachine {
@@ -495,9 +503,17 @@ export interface FerroGateMachine {
 }
 
 // Result of a MIA self-bootstrap / machine-login attempt.
+export type FerroGateEnrolment = "approved" | "pending" | "rejected" | "revoked";
+
 export interface FerroGateLoginResult {
   spiffe_id: string;
   authenticated: boolean;
+  // Classified enrolment outcome — lets the UI branch (proceed / show setup
+  // dialog / show hard denial) without parsing free-text errors. Hard failures
+  // (transport, token verification, rate limiting) reject the promise instead.
+  enrolment: FerroGateEnrolment;
+  // Server's reason for a non-approved outcome (empty when authenticated).
+  message: string;
   client_token: string;
   policies: string[];
   lease_duration: number;

@@ -2,8 +2,8 @@ use clap::{Parser, Subcommand};
 use sysexits::ExitCode;
 
 use super::{
-    operator_cloud_target_connect, operator_export, operator_import, operator_init, operator_seal,
-    operator_unseal,
+    operator_cloud_target_connect, operator_export, operator_ferrogate, operator_import,
+    operator_init, operator_seal, operator_unseal,
 };
 #[cfg(not(feature = "sync_handler"))]
 use super::{
@@ -59,6 +59,10 @@ pub enum Commands {
     /// Google Drive, Dropbox). See `features/cloud-storage-backend.md`.
     #[command(name = "cloud-target")]
     CloudTarget(CloudTarget),
+    /// Administer the FerroGate machine enrolment queue (list / approve /
+    /// reject / revoke). Operates against the running server with a root
+    /// token and does NOT require an approved machine.
+    Ferrogate(operator_ferrogate::Ferrogate),
 }
 
 /// Grouping wrapper so we can hang `connect` (and future verbs like
@@ -104,6 +108,7 @@ impl Commands {
             Commands::Export(export) => export.execute(),
             Commands::Import(import) => import.execute(),
             Commands::CloudTarget(c) => c.execute(),
+            Commands::Ferrogate(c) => c.execute(),
         }
     }
 }

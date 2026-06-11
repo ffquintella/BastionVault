@@ -101,6 +101,11 @@ impl FerroGateBackend {
                     field_type: FieldType::CommaStringSlice,
                     required: false,
                     description: "Policies granted to the auto-approved first machine."
+                },
+                "require_user_token": {
+                    field_type: FieldType::Bool,
+                    required: false,
+                    description: "Require a user_token on login and intersect its policies with the machine's (combined machine+user auth)."
                 }
             },
             operations: [
@@ -190,6 +195,9 @@ impl FerroGateBackendInner {
         }
         if let Ok(v) = req.get_data("bootstrap_policies") {
             config.bootstrap_policies = v.as_comma_string_slice().ok_or(RvError::ErrRequestFieldInvalid)?;
+        }
+        if let Ok(v) = req.get_data("require_user_token") {
+            config.require_user_token = v.as_bool_ex().ok_or(RvError::ErrRequestFieldInvalid)?;
         }
 
         self.set_config(req, &config).await?;

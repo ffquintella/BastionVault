@@ -130,6 +130,14 @@ pub struct FerroGateConfig {
     /// Policies granted to the auto-approved first machine.
     #[serde(default = "default_bootstrap_policies")]
     pub bootstrap_policies: Vec<String>,
+    /// Enforce combined machine+user auth server-side: when `true`, a `login`
+    /// must also carry a valid `user_token`, and the minted token's policies
+    /// are the INTERSECTION of the machine's approved policies and the user
+    /// token's policies (the intermediate user token is revoked). A login
+    /// without a `user_token` is denied. Default `false` keeps machine-only
+    /// logins working for deployments that don't require a user factor.
+    #[serde(default)]
+    pub require_user_token: bool,
 }
 
 fn default_clock_leeway() -> i64 {
@@ -170,6 +178,7 @@ impl Default for FerroGateConfig {
             login_rate_limit_per_min: default_login_rate(),
             bootstrap_root_auto_approve: true,
             bootstrap_policies: default_bootstrap_policies(),
+            require_user_token: false,
         }
     }
 }
@@ -497,6 +506,92 @@ mod test {
         let jws2 = mint_child(&sk, kid, iss, "https://evil.example.com", &jkt2, now, now + 3600);
         let r = do_login(&core, &jws2, Some(&proof2)).await.unwrap();
         assert!(r.auth.is_none(), "audience mismatch must be rejected");
+    }
+
+    /// Mint a userpass user with `policies` and log in, returning its token.
+    #[maybe_async::maybe_async]
+    async fn make_user_token(core: &Core, root_token: &str, user: &str, policies: &str) -> String {
+        let body = json!({ "password": "pw", "policies": policies }).as_object().cloned();
+        test_write_api(core, root_token, &format!("auth/userpass/users/{user}"), true, body)
+            .await
+            .unwrap();
+        let mut req = Request::new(&format!("auth/userpass/login/{user}"));
+        req.operation = Operation::Write;
+        req.body = Some(json!({ "password": "pw" }).as_object().cloned().unwrap());
+        let resp = core.handle_request(&mut req).await.unwrap().expect("userpass login response");
+        resp.auth.expect("userpass login mints a token").client_token
+    }
+
+    /// Combined machine+user auth: binding a user token intersects policies,
+    /// revokes the user token, and `require_user_token` denies a bare machine
+    /// login.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_ferrogate_combined_user_binding() {
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_ferrogate_combined_user_binding").await;
+        test_mount_auth_api(&core, &root_token, "ferrogate", "ferrogate").await;
+        test_mount_auth_api(&core, &root_token, "userpass", "userpass").await;
+
+        let (sk, pk) = CompositeSecretKey::generate().unwrap();
+        let kid = "host-test-combined";
+        let aud = "https://vault.example.com";
+        let iss = "spiffe://ferrogate.test/host/combined";
+        let now = now_secs();
+        let ed_sk = SigningKey::from_bytes(&[9u8; 32]);
+        let (proof, jkt) = mint_dpop(&ed_sk, "POST", aud, now);
+        let jws = mint_child(&sk, kid, iss, aud, &jkt, now, now + 3600);
+
+        let cfg = json!({
+            "trust_domain": "ferrogate.test",
+            "expected_audience": aud,
+            "jwks_source": "static_jwks",
+            "static_jwks": jwks_json(kid, &pk),
+        })
+        .as_object()
+        .cloned();
+        test_write_api(&core, &root_token, "auth/ferrogate/config", true, cfg).await.unwrap();
+
+        // Record (pending) then approve the machine with two named policies.
+        do_login(&core, &jws, Some(&proof)).await.unwrap();
+        let id = machine_id(iss);
+        let appr = json!({ "policies": "shared,machineonly", "ttl_seconds": 600 }).as_object().cloned();
+        test_write_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}/approve"), true, appr)
+            .await
+            .unwrap();
+
+        // A user whose policies overlap the machine's only on "shared".
+        let user_token = make_user_token(&core, &root_token, "alice", "shared,useronly").await;
+
+        // Bind: the minted token's named policies = intersection ("shared"),
+        // never the machine-only or user-only ones. "default" is baseline.
+        let mut req = Request::new("auth/ferrogate/login");
+        req.operation = Operation::Write;
+        req.body = Some(
+            json!({ "token": jws, "dpop": proof, "user_token": user_token })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        );
+        let resp = core.handle_request(&mut req).await.unwrap().unwrap();
+        let auth = resp.auth.expect("combined login mints a token");
+        assert!(auth.policies.contains(&"shared".to_string()), "policies = {:?}", auth.policies);
+        assert!(!auth.policies.contains(&"machineonly".to_string()), "machine-only must be dropped");
+        assert!(!auth.policies.contains(&"useronly".to_string()), "user-only must be dropped");
+
+        // The intermediate user token is revoked — a self-lookup with it fails.
+        let mut lk = Request::new("auth/token/lookup-self");
+        lk.operation = Operation::Read;
+        lk.client_token = user_token.clone();
+        assert!(
+            core.handle_request(&mut lk).await.is_err()
+                || core.handle_request(&mut lk).await.ok().flatten().is_none(),
+            "bound user token must be revoked after binding"
+        );
+
+        // Enforce server-side: require_user_token denies a bare machine login.
+        let cfg2 = json!({ "require_user_token": true }).as_object().cloned();
+        test_write_api(&core, &root_token, "auth/ferrogate/config", true, cfg2).await.unwrap();
+        let r = do_login(&core, &jws, Some(&proof)).await.unwrap();
+        assert!(r.auth.is_none(), "require_user_token must deny a login with no user_token");
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

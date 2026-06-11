@@ -33,7 +33,35 @@ export function LoginPage() {
    * just means the session isn't cached — login still works.
    */
   async function finalizeLogin(token: string, policies: string[]) {
-    setAuth(token, policies);
+    let sessionToken = token;
+    let sessionPolicies = policies;
+
+    // Combined machine+user auth: when this connection requires machine
+    // identity, bind the just-obtained user token to a fresh machine assertion.
+    // The server intersects policies, revokes the user token, and returns the
+    // combined session token, which becomes the actual session. The machine
+    // was already proven approved by the connect-time gate, so a non-approved
+    // result here is exceptional — surface it and abort (throwing skips the
+    // caller's navigate).
+    if (mode === "Remote" && remoteProfile?.require_machine_identity) {
+      const r = await api.ferrogateMachineLogin(
+        remoteProfile.address,
+        "",
+        "ferrogate",
+        300,
+        token,
+      );
+      if (!r.authenticated || !r.client_token) {
+        throw new Error(r.message || "Machine identity binding failed");
+      }
+      // Validate + install the combined token into the Rust-side AppState so
+      // it replaces the now-revoked user token as the live session token.
+      const resp = await api.remoteLoginToken(r.client_token);
+      sessionToken = resp.token;
+      sessionPolicies = resp.policies.length > 0 ? resp.policies : r.policies;
+    }
+
+    setAuth(sessionToken, sessionPolicies);
     try {
       const list = await api.listVaultProfiles();
       if (list.lastUsedId) {
@@ -51,6 +79,7 @@ export function LoginPage() {
     }
   }
   const mode = useVaultStore((s) => s.mode);
+  const remoteProfile = useVaultStore((s) => s.remoteProfile);
   const [tab, setTab] = useState<Tab>("login");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);

@@ -39,6 +39,7 @@ pub mod operator_init;
 #[cfg(not(feature = "sync_handler"))]
 pub mod operator_backup;
 pub mod operator_export;
+pub mod operator_ferrogate;
 pub mod operator_import;
 #[cfg(unix)]
 pub mod ferrogate;

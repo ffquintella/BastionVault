@@ -76,6 +76,13 @@ pub struct RemoteProfile {
     /// → keep the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_probe_timeout_ms: Option<u32>,
+    /// When `true`, the connect flow requires a successful FerroGate machine
+    /// login (this host attested + operator-approved) BEFORE the user-login
+    /// screen — so vault access needs machine identity AND a user credential.
+    /// Optional/defaulted so old preference files load cleanly; defaults off
+    /// to avoid locking operators out of vaults that don't use ferrogate.
+    #[serde(default)]
+    pub require_machine_identity: bool,
 }
 
 fn default_cluster_discovery() -> bool {

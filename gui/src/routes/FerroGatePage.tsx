@@ -448,7 +448,13 @@ function MachineLoginPanel({
       const r = await api.ferrogateMachineLogin(audience, socket, mount, ttlNum);
       setResult(r);
       setSpiffe(r.spiffe_id || spiffe);
-      toast("success", "Machine authenticated — token issued");
+      if (r.authenticated) {
+        toast("success", "Machine authenticated — token issued");
+      } else if (r.enrolment === "rejected" || r.enrolment === "revoked") {
+        toast("error", r.message || `Machine ${r.enrolment}`);
+      } else {
+        toast("info", r.message || "Awaiting operator approval");
+      }
     } catch (e) {
       setResult(null);
       toast("error", extractError(e));
@@ -550,6 +556,20 @@ function MachineLoginPanel({
             </div>
           </Card>
         )}
+
+        {result && !result.authenticated && (
+          <Card>
+            <div className="flex items-center gap-2">
+              {statusBadge(result.enrolment)}
+              <span className="text-sm text-[var(--color-text-muted)]">
+                {result.message ||
+                  (result.enrolment === "pending"
+                    ? "Awaiting operator approval."
+                    : "This machine is not authorized.")}
+              </span>
+            </div>
+          </Card>
+        )}
       </div>
     </Card>
   );
@@ -575,6 +595,7 @@ function ConfigPanel({
   const [cmisSameHost, setCmisSameHost] = useState(config.cmis_same_host);
   const [bootstrap, setBootstrap] = useState(config.bootstrap_root_auto_approve);
   const [bootstrapPolicies, setBootstrapPolicies] = useState((config.bootstrap_policies || []).join(","));
+  const [requireUserToken, setRequireUserToken] = useState(config.require_user_token);
   const [saving, setSaving] = useState(false);
   const [autofilling, setAutofilling] = useState(false);
 
@@ -618,6 +639,7 @@ function ConfigPanel({
         cmisSameHost,
         bootstrapRootAutoApprove: bootstrap,
         bootstrapPolicies,
+        requireUserToken,
       });
       toast("success", "Configuration saved");
       await onSaved();
@@ -666,6 +688,10 @@ function ConfigPanel({
           <label className="flex items-center gap-2">
             <input type="checkbox" checked={acceptSvid} onChange={(e) => setAcceptSvid(e.target.checked)} />
             Accept direct SVID (weaker)
+          </label>
+          <label className="flex items-center gap-2" title="Require a user token on every machine login and mint a token whose policies are the intersection of the machine's and the user's. Enforces combined machine+user auth server-side.">
+            <input type="checkbox" checked={requireUserToken} onChange={(e) => setRequireUserToken(e.target.checked)} />
+            Require user token (machine + user)
           </label>
         </div>
       </div>

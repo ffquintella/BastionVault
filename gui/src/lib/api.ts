@@ -482,6 +482,7 @@ export const ferrogateWriteConfig = (cfg: {
   cmisSameHost: boolean;
   bootstrapRootAutoApprove: boolean;
   bootstrapPolicies: string;
+  requireUserToken: boolean;
 }) =>
   invoke<void>("ferrogate_write_config", {
     trustDomain: cfg.trustDomain,
@@ -495,6 +496,7 @@ export const ferrogateWriteConfig = (cfg: {
     cmisSameHost: cfg.cmisSameHost,
     bootstrapRootAutoApprove: cfg.bootstrapRootAutoApprove,
     bootstrapPolicies: cfg.bootstrapPolicies,
+    requireUserToken: cfg.requireUserToken,
   });
 export const ferrogateListMachines = () => invoke<FerroGateMachine[]>("ferrogate_list_machines");
 export const ferrogateApprove = (id: string, policies: string, ttlSeconds: number, comment: string) =>
@@ -519,8 +521,20 @@ export type FerroGateAutoConfig = {
 };
 export const ferrogateAutoconfig = (audience: string) =>
   invoke<FerroGateAutoConfig>("ferrogate_autoconfig", { audience });
-export const ferrogateMachineLogin = (audience: string, socket: string, mount: string, ttl: number) =>
-  invoke<FerroGateLoginResult>("ferrogate_machine_login", { audience, socket, mount, ttl });
+export const ferrogateMachineLogin = (
+  audience: string,
+  socket: string,
+  mount: string,
+  ttl: number,
+  userToken?: string,
+) =>
+  invoke<FerroGateLoginResult>("ferrogate_machine_login", {
+    audience,
+    socket,
+    mount,
+    ttl,
+    userToken,
+  });
 export const ferrogateMachineStatus = (audience: string, socket: string, mount: string, ttl: number) =>
   invoke<unknown>("ferrogate_machine_status", { audience, socket, mount, ttl });
 export const ferrogateWhoami = (socket: string) => invoke<string>("ferrogate_whoami", { socket });

@@ -180,6 +180,21 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   `_login_denied_total{reason}`, `_pending_total`, `_approved_total`) registered in the metrics manager. Wrote
   the operator + threat-model guide at [`docs/ferrogate-machine-auth.md`](../docs/ferrogate-machine-auth.md).
   Tests: SVID `accept_svid` gate + CRL-enforced direct-SVID approve→mint.
+- **Phase 8 shipped — combined machine+user auth & enrolment lifecycle.** `auth/ferrogate/login` accepts an
+  optional `user_token`; when bound, the minted token's policies are the **intersection** of the machine's
+  approved set and the user token's set (`default` re-injected by the token store), the combined token carries
+  the *user's* `entity_id`/`username` (ownership/ACL) alongside the attesting `spiffe_id`, and the broader
+  intermediate user token is revoked. A `require_user_token` config flag enforces the user factor server-side
+  (a login without a valid `user_token` is denied; root tokens can't be bound). New operator CLI
+  `bvault operator ferrogate {list,approve,reject,revoke}` administers the queue against the running server
+  with a root token and **does not require an approved machine** — the bootstrap escape hatch (address a
+  machine by handle or SPIFFE id). The GUI gains a per-connection "Require machine identity" option: the
+  connect flow gates on machine approval before user login (approved → bind user token into a combined
+  session; pending/unknown → enrolment dialog with the SPIFFE id + `operator ferrogate approve` hint +
+  Recheck; rejected/revoked → hard access-denied), `ferrogate_machine_login` returns a typed
+  `enrolment`/`message`, and the config page exposes a "Require user token" toggle. Covered by
+  `test_ferrogate_combined_user_binding` (intersection, non-shared-policy drop, user-token revocation,
+  `require_user_token` enforcement).
 - Caveats: `cmis_grpc` is async-build only (the `sync_handler` feature is independently broken repo-wide);
   child-token revocation on the `static_jwks` source relies on short token TTL (the CRL is enforced on the SVID
   path); audit events are structured log lines (no dedicated audit-store rows).

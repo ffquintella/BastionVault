@@ -11,7 +11,7 @@ import {
 } from "../components/ui";
 import { useVaultStore } from "../stores/vaultStore";
 import { useAuthStore } from "../stores/authStore";
-import type { RemoteProfile } from "../lib/types";
+import type { RemoteProfile, FerroGateEnrolment } from "../lib/types";
 import type { VaultProfile, VaultSpec } from "../lib/api";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
@@ -133,6 +133,22 @@ export function ConnectPage() {
   // type a literal URL (skipped automatically) or untick this for
   // diagnostics against one HA node.
   const [clusterDiscovery, setClusterDiscovery] = useState(true);
+  // Require a FerroGate machine login before the user-login screen for
+  // this connection (machine identity + user credential). Off by default.
+  const [remoteMachineIdentity, setRemoteMachineIdentity] = useState(false);
+
+  // Machine-identity gate modal state. Populated when a `require_machine_
+  // identity` connection's startup machine login comes back not-approved:
+  // `pending` → enrolment dialog (recheck/await approval); `rejected` /
+  // `revoked` → hard access-denied (no proceed). `null` when no gate is open.
+  const [machineGate, setMachineGate] = useState<{
+    targetId: string;
+    audience: string;
+    spiffe: string;
+    enrolment: FerroGateEnrolment;
+    message: string;
+  } | null>(null);
+  const [machineGateBusy, setMachineGateBusy] = useState(false);
 
   // Cloud add-form fields.
   const [cloudProvider, setCloudProvider] = useState<CloudProvider>("s3");
@@ -320,6 +336,75 @@ export function ConnectPage() {
     return true;
   }
 
+  /**
+   * Run the per-connection FerroGate machine-identity gate. Dials the local
+   * MIA, mints an attested child token, and exchanges it at the server's
+   * `ferrogate` mount. Returns `true` when the caller should STOP the connect
+   * flow (gate not yet satisfied — either a hard error was surfaced, or a
+   * pending/denied modal is now driving the rest), or `false` when the machine
+   * is approved and the flow may proceed to user login.
+   */
+  async function runMachineGate(
+    profile: RemoteProfile,
+    targetId: string,
+  ): Promise<boolean> {
+    // Audience must match the mount's `expected_audience`; the operator
+    // configures that to the server address in the common case, mirroring the
+    // CLI's default. Socket "" resolves the installed MIA's configured path.
+    const audience = profile.address;
+    let r;
+    try {
+      r = await api.ferrogateMachineLogin(audience, "", "ferrogate", 300);
+    } catch (e) {
+      // Transport / token-verification / config failure — a hard error, not an
+      // enrolment decision. Surface it and stop.
+      setError(`Machine identity check failed: ${extractError(e)}`);
+      return true;
+    }
+    if (r.authenticated) return false; // machine approved → proceed
+    setMachineGate({
+      targetId,
+      audience,
+      spiffe: r.spiffe_id,
+      enrolment: r.enrolment,
+      message: r.message,
+    });
+    return true;
+  }
+
+  /** Continue the connect flow once the machine gate is satisfied: restore a
+   *  cached user session if present, else send the operator to user login. */
+  async function proceedAfterGate(targetId: string) {
+    if (await tryResumeSession(targetId)) return;
+    navigate("/login");
+  }
+
+  /** Re-attempt the machine login from the pending enrolment dialog. On
+   *  approval, closes the gate and proceeds; otherwise updates the dialog. */
+  async function recheckMachineGate() {
+    if (!machineGate) return;
+    setMachineGateBusy(true);
+    try {
+      const r = await api.ferrogateMachineLogin(machineGate.audience, "", "ferrogate", 300);
+      if (r.authenticated) {
+        const targetId = machineGate.targetId;
+        setMachineGate(null);
+        await proceedAfterGate(targetId);
+        return;
+      }
+      setMachineGate({
+        ...machineGate,
+        spiffe: r.spiffe_id || machineGate.spiffe,
+        enrolment: r.enrolment,
+        message: r.message,
+      });
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setMachineGateBusy(false);
+    }
+  }
+
   async function openProfile(profile: VaultProfile, recordDefault = true) {
     setOpening(profile.id);
     setError(null);
@@ -397,6 +482,12 @@ export function ConnectPage() {
             setSelectedNode(null);
           }
           if (recordDefault) await api.setLastUsedVault(profile.id);
+          // Machine-identity gate: when this connection requires it, the host
+          // must attest + be operator-approved before user login. A pending or
+          // denied result parks the connect flow behind the gate modal.
+          if (profile.spec.profile.require_machine_identity) {
+            if (await runMachineGate(profile.spec.profile, targetId)) return;
+          }
           if (await tryResumeSession(targetId)) return;
           navigate("/login");
           return;
@@ -716,6 +807,7 @@ export function ConnectPage() {
           tls_skip_verify: tlsSkipVerify,
           ca_cert_path: caCertPath || undefined,
           cluster_discovery: clusterDiscovery,
+          require_machine_identity: remoteMachineIdentity,
         };
         spec = { kind: "remote", profile };
       } else if (addKind === "cloud") {
@@ -1265,6 +1357,18 @@ export function ConnectPage() {
                 placeholder="/path/to/ca.pem"
                 hint="Optional: path to PEM-encoded CA certificate"
               />
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={remoteMachineIdentity}
+                  onChange={(e) => setRemoteMachineIdentity(e.target.checked)}
+                  className="rounded"
+                />
+                <span className="text-[var(--color-text-muted)]">
+                  Require machine identity (FerroGate) — attest this host via
+                  the local MIA and require operator approval before user login
+                </span>
+              </label>
             </>
           )}
 
@@ -1532,6 +1636,85 @@ export function ConnectPage() {
             </>
           )}
         </div>
+      </Modal>
+
+      {/* Machine-identity gate. `pending` offers enrolment + recheck; an
+          explicit `rejected`/`revoked` is a hard denial with no proceed. */}
+      <Modal
+        open={machineGate !== null}
+        onClose={() => setMachineGate(null)}
+        title={
+          machineGate?.enrolment === "pending"
+            ? "Machine awaiting approval"
+            : "Machine access denied"
+        }
+        size="md"
+        actions={
+          machineGate?.enrolment === "pending" ? (
+            <>
+              <Button variant="ghost" onClick={() => setMachineGate(null)}>
+                Cancel
+              </Button>
+              <Button onClick={() => void recheckMachineGate()} loading={machineGateBusy}>
+                {machineGateBusy ? "Rechecking…" : "Recheck"}
+              </Button>
+            </>
+          ) : (
+            <Button variant="ghost" onClick={() => setMachineGate(null)}>
+              Close
+            </Button>
+          )
+        }
+      >
+        {machineGate && (
+          <div className="space-y-3 text-sm">
+            {machineGate.enrolment === "pending" ? (
+              <p className="text-[var(--color-text-muted)]">
+                This host has attested to the server but is not yet approved.
+                An operator must authorize it before you can sign in. Ask an
+                administrator to approve it, then click <b>Recheck</b>.
+              </p>
+            ) : (
+              <p className="text-red-400">
+                Access for this host was{" "}
+                {machineGate.enrolment === "revoked" ? "revoked" : "denied"} by
+                an operator. You cannot sign in from this machine.
+                {machineGate.message ? ` (${machineGate.message})` : ""}
+              </p>
+            )}
+
+            <div>
+              <div className="mb-1 text-xs text-[var(--color-text-muted)]">
+                This host&apos;s SPIFFE ID
+              </div>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 break-all rounded bg-[var(--color-bg-subtle)] px-2 py-1 font-mono text-xs">
+                  {machineGate.spiffe || "(unknown)"}
+                </code>
+                {machineGate.spiffe && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => void copyToClipboard(machineGate.spiffe, "SPIFFE ID")}
+                  >
+                    Copy
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            {machineGate.enrolment === "pending" && (
+              <div>
+                <div className="mb-1 text-xs text-[var(--color-text-muted)]">
+                  An operator can approve it on the server with:
+                </div>
+                <code className="block break-all rounded bg-[var(--color-bg-subtle)] px-2 py-1 font-mono text-xs">
+                  bvault operator ferrogate approve {machineGate.spiffe || "<spiffe-id>"}
+                </code>
+              </div>
+            )}
+          </div>
+        )}
       </Modal>
     </AuthLayout>
   );

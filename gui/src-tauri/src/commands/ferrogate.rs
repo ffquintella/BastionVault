@@ -43,6 +43,8 @@ pub struct FerroGateConfig {
     pub bootstrap_root_auto_approve: bool,
     #[serde(default)]
     pub bootstrap_policies: Vec<String>,
+    #[serde(default)]
+    pub require_user_token: bool,
 }
 
 /// A machine enrolment summary as listed by the admin endpoint.
@@ -104,6 +106,7 @@ pub async fn ferrogate_write_config(
     cmis_same_host: bool,
     bootstrap_root_auto_approve: bool,
     bootstrap_policies: String,
+    require_user_token: bool,
 ) -> CmdResult<()> {
     let mut body = Map::new();
     body.insert("trust_domain".into(), Value::String(trust_domain));
@@ -119,6 +122,7 @@ pub async fn ferrogate_write_config(
     body.insert("cmis_same_host".into(), Value::Bool(cmis_same_host));
     body.insert("bootstrap_root_auto_approve".into(), Value::Bool(bootstrap_root_auto_approve));
     body.insert("bootstrap_policies".into(), Value::String(bootstrap_policies));
+    body.insert("require_user_token".into(), Value::Bool(require_user_token));
 
     make_request(&state, Operation::Write, "auth/ferrogate/config".into(), Some(body)).await?;
     Ok(())
@@ -202,6 +206,19 @@ pub struct FerroGateLoginResult {
     pub spiffe_id: String,
     /// True when the server minted a vault token (machine is approved).
     pub authenticated: bool,
+    /// Classified enrolment outcome, so the UI can branch without parsing
+    /// free-text error strings:
+    /// - `approved` — token issued (`authenticated == true`)
+    /// - `pending`  — known/first-seen but awaiting operator approval
+    /// - `rejected` — operator explicitly denied this machine
+    /// - `revoked`  — previously approved, now revoked
+    ///
+    /// Transport / verification / config failures are NOT represented here —
+    /// they surface as a command `Err` so the UI shows them as hard errors.
+    pub enrolment: String,
+    /// Human-readable server reason for a non-approved outcome (empty when
+    /// `authenticated`). Mirrors the server's `error_response` text.
+    pub message: String,
     /// The issued vault token, when `authenticated`. The GUI displays it for
     /// copy-out; it deliberately does NOT replace the operator's admin
     /// session token, so exercising this tab cannot log the admin out.
@@ -210,6 +227,24 @@ pub struct FerroGateLoginResult {
     pub policies: Vec<String>,
     /// Token lease lifetime in seconds, when known.
     pub lease_duration: u64,
+}
+
+/// Map a `ferrogate` login `error_response` text to a stable enrolment status,
+/// or `None` when the failure is not an enrolment-gate decision (e.g. rate
+/// limiting, token verification, JWKS resolution) and should surface as a hard
+/// error instead. Keep these prefixes in sync with the server's `login`
+/// handler in `src/modules/credential/ferrogate/path_machines.rs`.
+#[cfg(unix)]
+fn classify_enrolment_error(text: &str) -> Option<&'static str> {
+    if text.starts_with("enrolment_pending") {
+        Some("pending")
+    } else if text.starts_with("enrolment_rejected") {
+        Some("rejected")
+    } else if text.starts_with("machine_revoked") {
+        Some("revoked")
+    } else {
+        None
+    }
 }
 
 /// Mint a child token from the MIA and build its DPoP proof. Runs the blocking
@@ -294,6 +329,7 @@ pub async fn ferrogate_machine_login(
     socket: String,
     mount: String,
     ttl: u32,
+    user_token: Option<String>,
 ) -> CmdResult<FerroGateLoginResult> {
     let socket = norm_socket(socket);
     let mount = norm_mount(mount);
@@ -304,6 +340,12 @@ pub async fn ferrogate_machine_login(
     let mut body = Map::new();
     body.insert("token".into(), Value::String(jws));
     body.insert("dpop".into(), Value::String(proof));
+    // Combined machine+user binding: when the caller hands us an already-
+    // authenticated user token, the server intersects its policies with the
+    // machine's and revokes the user token, returning the combined session.
+    if let Some(ut) = user_token.filter(|t| !t.trim().is_empty()) {
+        body.insert("user_token".into(), Value::String(ut));
+    }
 
     let resp = super::dispatch_with_token(
         &state,
@@ -321,8 +363,29 @@ pub async fn ferrogate_machine_login(
         .unwrap_or_default()
         .to_string();
 
+    // No token minted: the server either denied enrolment (a gate decision we
+    // classify and hand back as a typed result) or failed for a harder reason
+    // (rate limit, bad token, JWKS) which we propagate as a command error.
     if client_token.is_empty() {
-        return Err("login did not return a token (machine not approved)".into());
+        let reason = resp
+            .as_ref()
+            .and_then(|r| r.data.as_ref())
+            .and_then(|d| d.get("error"))
+            .and_then(|e| e.as_str())
+            .unwrap_or("login did not return a token")
+            .to_string();
+        match classify_enrolment_error(&reason) {
+            Some(status) => {
+                return Ok(FerroGateLoginResult {
+                    spiffe_id: spiffe,
+                    authenticated: false,
+                    enrolment: status.to_string(),
+                    message: reason,
+                    ..Default::default()
+                });
+            }
+            None => return Err(reason.into()),
+        }
     }
 
     let policies = auth
@@ -336,7 +399,15 @@ pub async fn ferrogate_machine_login(
         .or_else(|| resp.as_ref().and_then(|r| r.lease_duration))
         .unwrap_or(0);
 
-    Ok(FerroGateLoginResult { spiffe_id: spiffe, authenticated: true, client_token, policies, lease_duration })
+    Ok(FerroGateLoginResult {
+        spiffe_id: spiffe,
+        authenticated: true,
+        enrolment: "approved".to_string(),
+        message: String::new(),
+        client_token,
+        policies,
+        lease_duration,
+    })
 }
 
 /// Report this machine's enrolment status without minting a vault token.
@@ -397,6 +468,7 @@ pub async fn ferrogate_machine_login(
     _socket: String,
     _mount: String,
     _ttl: u32,
+    _user_token: Option<String>,
 ) -> CmdResult<FerroGateLoginResult> {
     Err("FerroGate MIA login is only available on Unix (the MIA helper socket is not supported on this platform yet)".into())
 }
