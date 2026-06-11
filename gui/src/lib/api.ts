@@ -35,6 +35,7 @@ import type {
   SecretIdAccessorList,
   SecretIdAccessorInfo,
   FerroGateConfig,
+  FerroGateRequirement,
   FerroGateMachine,
   FerroGateLoginResult,
   GroupKind,
@@ -469,6 +470,7 @@ export const destroySecretIdAccessor = (name: string, accessor: string) =>
   invoke<void>("destroy_secret_id_accessor", { name, accessor });
 
 // FerroGate machine auth
+export const ferrogateRequirement = () => invoke<FerroGateRequirement>("ferrogate_requirement");
 export const ferrogateReadConfig = () => invoke<FerroGateConfig>("ferrogate_read_config");
 export const ferrogateWriteConfig = (cfg: {
   trustDomain: string;
@@ -483,6 +485,7 @@ export const ferrogateWriteConfig = (cfg: {
   bootstrapRootAutoApprove: boolean;
   bootstrapPolicies: string;
   requireUserToken: boolean;
+  requireMachineIdentity: boolean;
 }) =>
   invoke<void>("ferrogate_write_config", {
     trustDomain: cfg.trustDomain,
@@ -497,6 +500,7 @@ export const ferrogateWriteConfig = (cfg: {
     bootstrapRootAutoApprove: cfg.bootstrapRootAutoApprove,
     bootstrapPolicies: cfg.bootstrapPolicies,
     requireUserToken: cfg.requireUserToken,
+    requireMachineIdentity: cfg.requireMachineIdentity,
   });
 export const ferrogateListMachines = () => invoke<FerroGateMachine[]>("ferrogate_list_machines");
 export const ferrogateApprove = (id: string, policies: string, ttlSeconds: number, comment: string) =>

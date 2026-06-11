@@ -138,6 +138,17 @@ pub struct FerroGateConfig {
     /// logins working for deployments that don't require a user factor.
     #[serde(default)]
     pub require_user_token: bool,
+    /// Server-enforced machine-identity requirement. When `true`, EVERY
+    /// authenticated request to this server must present a FerroGate
+    /// machine-bound token (or a root token); a plain user/token/approle
+    /// session is rejected at the token layer. This is the server's
+    /// declaration that machine identity is mandatory — clients discover it
+    /// via the unauthenticated `auth/ferrogate/requirement` endpoint and can
+    /// neither opt out of nor bypass it. Independent of `require_user_token`
+    /// (which governs the ferrogate login itself); set both for full combined
+    /// machine+user enforcement. Default `false`.
+    #[serde(default)]
+    pub require_machine_identity: bool,
 }
 
 fn default_clock_leeway() -> i64 {
@@ -179,6 +190,7 @@ impl Default for FerroGateConfig {
             bootstrap_root_auto_approve: true,
             bootstrap_policies: default_bootstrap_policies(),
             require_user_token: false,
+            require_machine_identity: false,
         }
     }
 }
@@ -282,12 +294,13 @@ impl FerroGateBackend {
 
     pub fn new_backend(&self) -> LogicalBackend {
         let mut backend = new_logical_backend!({
-            unauth_paths: ["login", "status"],
+            unauth_paths: ["login", "status", "requirement"],
             root_paths: ["config", "register", "machines", "machines/*"],
             help: FERROGATE_BACKEND_HELP,
         });
 
         backend.paths.push(Arc::new(self.config_path()));
+        backend.paths.push(Arc::new(self.requirement_path()));
         backend.paths.push(Arc::new(self.register_path()));
         backend.paths.push(Arc::new(self.machines_list_path()));
         backend.paths.push(Arc::new(self.machine_path()));
@@ -592,6 +605,99 @@ mod test {
         test_write_api(&core, &root_token, "auth/ferrogate/config", true, cfg2).await.unwrap();
         let r = do_login(&core, &jws, Some(&proof)).await.unwrap();
         assert!(r.auth.is_none(), "require_user_token must deny a login with no user_token");
+    }
+
+    /// Server-enforced machine identity: with `require_machine_identity` set,
+    /// the unauthenticated `requirement` endpoint advertises it, a plain user
+    /// token is rejected on a protected path, a root token is exempt, and a
+    /// FerroGate machine-bound token is accepted.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_ferrogate_require_machine_identity_enforced() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_ferrogate_require_machine_identity_enforced").await;
+        test_mount_auth_api(&core, &root_token, "ferrogate", "ferrogate").await;
+        test_mount_auth_api(&core, &root_token, "userpass", "userpass").await;
+
+        let (sk, pk) = CompositeSecretKey::generate().unwrap();
+        let kid = "host-test-rmi";
+        let aud = "https://vault.example.com";
+        let iss = "spiffe://ferrogate.test/host/rmi";
+        let now = now_secs();
+        let ed_sk = SigningKey::from_bytes(&[5u8; 32]);
+        let (proof, jkt) = mint_dpop(&ed_sk, "POST", aud, now);
+        let jws = mint_child(&sk, kid, iss, aud, &jkt, now, now + 3600);
+
+        // Configure the trust anchor AND turn on server-enforced machine identity.
+        let cfg = json!({
+            "trust_domain": "ferrogate.test",
+            "expected_audience": aud,
+            "jwks_source": "static_jwks",
+            "static_jwks": jwks_json(kid, &pk),
+            "require_machine_identity": true,
+        })
+        .as_object()
+        .cloned();
+        test_write_api(&core, &root_token, "auth/ferrogate/config", true, cfg).await.unwrap();
+
+        // The flag round-trips through read_config.
+        let rc = test_read_api(&core, &root_token, "auth/ferrogate/config", true).await.unwrap().unwrap();
+        assert_eq!(rc.data.unwrap()["require_machine_identity"], true);
+
+        // The unauthenticated requirement endpoint advertises it (no token).
+        let mut rq = Request::new("auth/ferrogate/requirement");
+        rq.operation = Operation::Read;
+        let resp = core.handle_request(&mut rq).await.unwrap().expect("requirement response");
+        let data = resp.data.unwrap();
+        assert_eq!(data["require_machine_identity"], true);
+        assert_eq!(data["expected_audience"], aud);
+
+        // A plain userpass token is now rejected on a protected (non-unauth,
+        // non-root) path.
+        let user_token = make_user_token(&core, &root_token, "bob", "default").await;
+        let mut lk = Request::new("auth/token/lookup-self");
+        lk.operation = Operation::Read;
+        lk.client_token = user_token.clone();
+        assert!(
+            core.handle_request(&mut lk).await.is_err(),
+            "plain user token must be denied when the server requires machine identity"
+        );
+
+        // A root token stays exempt (bootstrap / break-glass).
+        let mut lkr = Request::new("auth/token/lookup-self");
+        lkr.operation = Operation::Read;
+        lkr.client_token = root_token.clone();
+        assert!(
+            core.handle_request(&mut lkr).await.is_ok(),
+            "root token must remain exempt from the machine-identity gate"
+        );
+
+        // A FerroGate machine-bound token is accepted. Record (pending) → approve
+        // with root → combined login mints a token carrying `spiffe_id`.
+        do_login(&core, &jws, Some(&proof)).await.unwrap();
+        let id = machine_id(iss);
+        let appr = json!({ "policies": "default", "ttl_seconds": 600 }).as_object().cloned();
+        test_write_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}/approve"), true, appr)
+            .await
+            .unwrap();
+        let machine_token = {
+            let mut req = Request::new("auth/ferrogate/login");
+            req.operation = Operation::Write;
+            req.body = Some(
+                json!({ "token": jws, "dpop": proof, "user_token": user_token })
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+            );
+            let resp = core.handle_request(&mut req).await.unwrap().unwrap();
+            resp.auth.expect("combined login mints a machine-bound token").client_token
+        };
+        let mut lkm = Request::new("auth/token/lookup-self");
+        lkm.operation = Operation::Read;
+        lkm.client_token = machine_token;
+        assert!(
+            core.handle_request(&mut lkm).await.is_ok(),
+            "a FerroGate machine-bound token must be accepted"
+        );
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

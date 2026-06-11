@@ -45,6 +45,30 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+- **Server-enforced FerroGate machine identity** (`src/modules/credential/ferrogate/`, `src/core.rs`,
+  `src/modules/auth/token_store.rs`) -- a new `require_machine_identity` flag on the
+  `auth/ferrogate/config` mount makes machine authentication a property of the **server**, not the
+  client. When set, the token layer rejects every authenticated request whose token is not FerroGate
+  machine-bound (carries `spiffe_id` in its metadata); root tokens stay exempt so bootstrap/approval
+  and break-glass admin keep working. The flag is mirrored to the system view and an in-memory atomic
+  loaded at unseal, so enforcement is a single atomic read on the hot path with no per-request storage
+  hit. Independent of `require_user_token`; set both for full combined machine+user enforcement.
+- **Unauthenticated `auth/ferrogate/requirement` discovery endpoint** -- lets a client learn, before
+  login, whether a server mandates machine identity (plus the expected audience / trust domain). A
+  new `ferrogate_requirement` Tauri command + GUI API exposes it.
+
+### Changed
+
+- **The connect-time machine-identity gate is now server-driven** (`gui/src/routes/ConnectPage.tsx`,
+  `gui/src/routes/LoginPage.tsx`) -- the GUI queries the server's `requirement` endpoint on connect
+  and runs the machine gate from the server's answer. The client-side "Require machine identity"
+  toggle on the Add/Edit-vault form is removed; `RemoteProfile.require_machine_identity` is now only
+  an internal cached hint. A non-cooperating client can no longer skip machine auth — the server
+  enforces it regardless. The FerroGate admin config page gains a "Require machine identity (all
+  sessions)" toggle that sets the server flag.
+
 ## [0.13.1] - 2026-06-11
 
 ### Added

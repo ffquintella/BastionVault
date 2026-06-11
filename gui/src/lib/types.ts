@@ -25,10 +25,13 @@ export interface RemoteProfile {
   /** Per-probe deadline in milliseconds (default 1500). */
   health_probe_timeout_ms?: number;
   /**
-   * Require a successful FerroGate machine login before the user-login
-   * screen. When `true`, the connect flow attests this host via the local
-   * MIA and gates on operator approval, so vault access needs machine
-   * identity AND a user credential. Defaults off.
+   * Internal cached hint: whether the *server* last reported it requires
+   * FerroGate machine identity. This is NOT an operator toggle — the
+   * authority is the server, discovered via `ferrogateRequirement()` on every
+   * connect and refreshed into this field. The connect flow and
+   * `finalizeLogin` read it, but a stale/false value can never let a client
+   * bypass a server that requires machine identity (the server enforces it at
+   * the token layer regardless). Defaults off / unknown.
    */
   require_machine_identity?: boolean;
 }
@@ -482,6 +485,23 @@ export interface FerroGateConfig {
   bootstrap_root_auto_approve: boolean;
   bootstrap_policies: string[];
   require_user_token: boolean;
+  /**
+   * Server-enforced: when true, EVERY authenticated request to this server
+   * must present a FerroGate machine-bound token (or a root token). Clients
+   * discover this via `ferrogateRequirement()` and cannot bypass it.
+   */
+  require_machine_identity: boolean;
+}
+
+/**
+ * The server's machine-identity requirement, from the unauthenticated
+ * `auth/ferrogate/requirement` endpoint. The connect flow gates on this
+ * (the server's answer), never on a client-side toggle.
+ */
+export interface FerroGateRequirement {
+  require_machine_identity: boolean;
+  expected_audience: string;
+  trust_domain: string;
 }
 
 export interface FerroGateMachine {

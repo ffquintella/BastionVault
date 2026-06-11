@@ -195,6 +195,18 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   `enrolment`/`message`, and the config page exposes a "Require user token" toggle. Covered by
   `test_ferrogate_combined_user_binding` (intersection, non-shared-policy drop, user-token revocation,
   `require_user_token` enforcement).
+- **Phase 8.1 shipped — server-enforced machine identity.** A `require_machine_identity` config flag makes
+  machine authentication a property of the **server**, not the client. When set, `TokenStore::pre_route`
+  rejects every authenticated request whose token is not FerroGate machine-bound (lacks `spiffe_id` in its
+  metadata); root tokens stay exempt so bootstrap/approval and break-glass admin keep working. The flag is
+  mirrored to the system view (`core/ferrogate-require-machine-identity`) and an in-memory `Core` atomic loaded
+  at `post_unseal`, so enforcement is one atomic read on the hot path. A new unauthenticated
+  `auth/ferrogate/requirement` endpoint advertises the flag (+ expected audience / trust domain); the GUI
+  connect flow now queries it and runs the machine gate from the **server's** answer rather than a local
+  toggle (the per-connection "Require machine identity" client checkbox is removed; the server config page
+  gains a "Require machine identity (all sessions)" toggle). Independent of `require_user_token` — set both for
+  full combined enforcement. Covered by `test_ferrogate_require_machine_identity_enforced` (user-token denied,
+  root exempt, machine-bound accepted, `requirement` endpoint unauthenticated, flag round-trip).
 - Caveats: `cmis_grpc` is async-build only (the `sync_handler` feature is independently broken repo-wide);
   child-token revocation on the `static_jwks` source relies on short token TTL (the CRL is enforced on the SVID
   path); audit events are structured log lines (no dedicated audit-store rows).

@@ -596,6 +596,7 @@ function ConfigPanel({
   const [bootstrap, setBootstrap] = useState(config.bootstrap_root_auto_approve);
   const [bootstrapPolicies, setBootstrapPolicies] = useState((config.bootstrap_policies || []).join(","));
   const [requireUserToken, setRequireUserToken] = useState(config.require_user_token);
+  const [requireMachineIdentity, setRequireMachineIdentity] = useState(config.require_machine_identity);
   const [saving, setSaving] = useState(false);
   const [autofilling, setAutofilling] = useState(false);
 
@@ -640,6 +641,7 @@ function ConfigPanel({
         bootstrapRootAutoApprove: bootstrap,
         bootstrapPolicies,
         requireUserToken,
+        requireMachineIdentity,
       });
       toast("success", "Configuration saved");
       await onSaved();
@@ -692,6 +694,10 @@ function ConfigPanel({
           <label className="flex items-center gap-2" title="Require a user token on every machine login and mint a token whose policies are the intersection of the machine's and the user's. Enforces combined machine+user auth server-side.">
             <input type="checkbox" checked={requireUserToken} onChange={(e) => setRequireUserToken(e.target.checked)} />
             Require user token (machine + user)
+          </label>
+          <label className="flex items-center gap-2" title="Server-enforced: every authenticated request to this server must present a FerroGate machine-bound token (or a root token). Clients discover this on connect and cannot bypass it.">
+            <input type="checkbox" checked={requireMachineIdentity} onChange={(e) => setRequireMachineIdentity(e.target.checked)} />
+            Require machine identity (all sessions)
           </label>
         </div>
       </div>

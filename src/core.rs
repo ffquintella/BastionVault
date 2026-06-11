@@ -9,7 +9,10 @@
 
 use std::{
     ops::{Deref, DerefMut},
-    sync::{Arc, Weak},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Weak,
+    },
 };
 
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -32,7 +35,7 @@ use crate::{
     shamir::{ShamirSecret, SHAMIR_OVERHEAD},
     storage::{
         barrier::SecurityBarrier, barrier_view::BarrierView, new_barrier, physical, Backend as PhysicalBackend,
-        BackendEntry as PhysicalBackendEntry, BarrierType,
+        BackendEntry as PhysicalBackendEntry, BarrierType, Storage, StorageEntry,
     },
     utils::BHashSet,
 };
@@ -41,6 +44,11 @@ pub type LogicalBackendNewFunc = dyn Fn(Arc<Core>) -> Result<Arc<dyn Backend>, R
 
 const SEAL_CONFIG_PATH: &str = "core/seal-config";
 const DEPRECATED_UNSEAL_KEY_SET_PATH: &str = "core/used-unseal-keys-set";
+/// System-view key mirroring the FerroGate `require_machine_identity` flag.
+/// The canonical operator value lives in the `auth/ferrogate/config` blob; this
+/// mirror is the restart-durable enforcement cache the token layer reads
+/// (loaded into [`Core::require_machine_identity`] at unseal).
+const FERROGATE_REQUIRE_MI_PATH: &str = "core/ferrogate-require-machine-identity";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SealConfig {
@@ -103,6 +111,14 @@ pub struct Core {
     /// process-local on purpose: previews carry decrypted plaintext, so
     /// keeping them out of the barrier minimises the persistence surface.
     pub exchange_preview_store: crate::exchange::PreviewStore,
+    /// Fast-path mirror of the FerroGate mount's `require_machine_identity`
+    /// flag. When `true`, every authenticated request must present a
+    /// FerroGate machine-bound token (or a root token) — enforced in
+    /// [`crate::modules::auth::token_store::TokenStore::pre_route`]. Loaded
+    /// from the system view at `post_unseal` and updated whenever the
+    /// `auth/ferrogate/config` write handler runs, so the token layer never
+    /// touches storage to read it.
+    pub require_machine_identity: Arc<AtomicBool>,
 }
 
 impl Default for CoreState {
@@ -139,6 +155,7 @@ impl Default for Core {
             state: ArcSwap::from_pointee(CoreState::default()),
             audit_broker: ArcSwapOption::empty(),
             exchange_preview_store: crate::exchange::PreviewStore::default(),
+            require_machine_identity: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -262,6 +279,38 @@ impl Core {
 
     pub fn get_system_view(&self) -> Option<Arc<BarrierView>> {
         self.state.load().system_view.clone()
+    }
+
+    /// Persist the FerroGate `require_machine_identity` enforcement flag to the
+    /// system view and update the in-memory fast-path mirror. Called by the
+    /// `auth/ferrogate/config` write handler. A `false` value is persisted too
+    /// (rather than deleting the key) so the stored state is unambiguous.
+    pub async fn set_require_machine_identity(&self, required: bool) -> Result<(), RvError> {
+        if let Some(view) = self.get_system_view() {
+            let entry = StorageEntry {
+                key: FERROGATE_REQUIRE_MI_PATH.to_string(),
+                value: if required { b"true".to_vec() } else { b"false".to_vec() },
+            };
+            view.put(&entry).await?;
+        }
+        self.require_machine_identity.store(required, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Load the FerroGate `require_machine_identity` flag from the system view
+    /// into the in-memory mirror. Absent key (mount never configured) ⇒
+    /// `false`. Called once at `post_unseal` so the very first authenticated
+    /// request after unseal sees the correct, restart-durable value.
+    pub async fn load_require_machine_identity(&self) -> Result<(), RvError> {
+        let required = match self.get_system_view() {
+            Some(view) => view
+                .get(FERROGATE_REQUIRE_MI_PATH)
+                .await?
+                .is_some_and(|e| e.value == b"true"),
+            None => false,
+        };
+        self.require_machine_identity.store(required, Ordering::Relaxed);
+        Ok(())
     }
 
     pub fn get_logical_backend(&self, logical_type: &str) -> Result<Arc<LogicalBackendNewFunc>, RvError> {
@@ -567,6 +616,14 @@ impl Core {
         self.mounts_router.setup(self.self_ptr.upgrade().unwrap().clone())?;
 
         self.module_manager.init(self).await?;
+
+        // Load the restart-durable FerroGate machine-identity enforcement flag
+        // into its in-memory mirror before serving requests. Best-effort: a
+        // read failure leaves the safe default (false) rather than blocking
+        // unseal — operators can re-assert it via the config endpoint.
+        if let Err(e) = self.load_require_machine_identity().await {
+            log::warn!("failed to load ferrogate require_machine_identity flag: {e}");
+        }
 
         if let Some(mounts_monitor) = self.mounts_monitor.load().as_ref() {
             mounts_monitor.add_mounts_router(self.mounts_router.clone());

@@ -106,6 +106,11 @@ impl FerroGateBackend {
                     field_type: FieldType::Bool,
                     required: false,
                     description: "Require a user_token on login and intersect its policies with the machine's (combined machine+user auth)."
+                },
+                "require_machine_identity": {
+                    field_type: FieldType::Bool,
+                    required: false,
+                    description: "Server-enforced: when true, EVERY authenticated request must present a FerroGate machine-bound token (or a root token). Clients discover this via auth/ferrogate/requirement and cannot bypass it."
                 }
             },
             operations: [
@@ -113,6 +118,22 @@ impl FerroGateBackend {
                 {op: Operation::Write, handler: write_ref.write_config}
             ],
             help: r#"Configure the FerroGate trust anchor (keys, audience, bootstrap behaviour)."#
+        })
+    }
+
+    /// Unauthenticated discovery endpoint. Lets a client learn, before login,
+    /// whether this server mandates FerroGate machine identity (and the
+    /// audience/trust-domain it expects) so the connect flow can run the
+    /// machine gate from the server's answer rather than a local toggle.
+    /// Returns only non-secret policy knobs.
+    pub fn requirement_path(&self) -> Path {
+        let read_ref = self.inner.clone();
+        new_path!({
+            pattern: r"requirement$",
+            operations: [
+                {op: Operation::Read, handler: read_ref.read_requirement}
+            ],
+            help: r#"Report whether this server requires FerroGate machine identity (unauthenticated)."#
         })
     }
 }
@@ -199,8 +220,29 @@ impl FerroGateBackendInner {
         if let Ok(v) = req.get_data("require_user_token") {
             config.require_user_token = v.as_bool_ex().ok_or(RvError::ErrRequestFieldInvalid)?;
         }
+        if let Ok(v) = req.get_data("require_machine_identity") {
+            config.require_machine_identity = v.as_bool_ex().ok_or(RvError::ErrRequestFieldInvalid)?;
+        }
 
         self.set_config(req, &config).await?;
+
+        // Mirror the enforcement flag to the system view + in-memory fast path
+        // so the token layer can gate every request without a storage read.
+        self.core
+            .set_require_machine_identity(config.require_machine_identity)
+            .await?;
+
         Ok(None)
+    }
+
+    /// Unauthenticated handler: report whether this server requires FerroGate
+    /// machine identity, plus the audience/trust-domain a client should target.
+    pub async fn read_requirement(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let config = self.get_config(req).await?;
+        let mut data = serde_json::Map::new();
+        data.insert("require_machine_identity".to_string(), serde_json::Value::Bool(config.require_machine_identity));
+        data.insert("expected_audience".to_string(), serde_json::Value::String(config.expected_audience));
+        data.insert("trust_domain".to_string(), serde_json::Value::String(config.trust_domain));
+        Ok(Some(Response::data_response(Some(data))))
     }
 }

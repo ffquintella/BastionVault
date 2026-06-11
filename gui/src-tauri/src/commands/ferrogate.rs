@@ -45,6 +45,8 @@ pub struct FerroGateConfig {
     pub bootstrap_policies: Vec<String>,
     #[serde(default)]
     pub require_user_token: bool,
+    #[serde(default)]
+    pub require_machine_identity: bool,
 }
 
 /// A machine enrolment summary as listed by the admin endpoint.
@@ -82,6 +84,40 @@ pub struct FerroGateMachine {
     pub comment: String,
 }
 
+/// The server's machine-identity requirement, as advertised by the
+/// unauthenticated `auth/ferrogate/requirement` endpoint. This is the SERVER's
+/// declaration — the client obeys it and cannot turn it off.
+#[derive(Serialize, Deserialize, Default)]
+pub struct FerroGateRequirement {
+    /// When true, this server rejects any session that isn't FerroGate
+    /// machine-bound; the connect flow must run the machine gate.
+    #[serde(default)]
+    pub require_machine_identity: bool,
+    /// Audience the client should mint its child token for (the server's
+    /// configured `expected_audience`); empty when unset.
+    #[serde(default)]
+    pub expected_audience: String,
+    /// FerroGate trust domain the server expects; informational.
+    #[serde(default)]
+    pub trust_domain: String,
+}
+
+/// Ask the connected server whether it requires FerroGate machine identity.
+/// Unauthenticated (the endpoint is in the mount's `unauth_paths`). A server
+/// with no `ferrogate` mount — or any read failure — is treated as "not
+/// required", so this never blocks connecting to a non-FerroGate server.
+#[tauri::command]
+pub async fn ferrogate_requirement(state: State<'_, AppState>) -> CmdResult<FerroGateRequirement> {
+    match make_request(&state, Operation::Read, "auth/ferrogate/requirement".into(), None).await {
+        Ok(resp) => match resp.and_then(|r| r.data) {
+            Some(data) => Ok(serde_json::from_value(Value::Object(data)).unwrap_or_default()),
+            None => Ok(FerroGateRequirement::default()),
+        },
+        // No ferrogate mount / route absent / transport hiccup ⇒ not required.
+        Err(_) => Ok(FerroGateRequirement::default()),
+    }
+}
+
 #[tauri::command]
 pub async fn ferrogate_read_config(state: State<'_, AppState>) -> CmdResult<FerroGateConfig> {
     let resp = make_request(&state, Operation::Read, "auth/ferrogate/config".into(), None).await?;
@@ -107,6 +143,7 @@ pub async fn ferrogate_write_config(
     bootstrap_root_auto_approve: bool,
     bootstrap_policies: String,
     require_user_token: bool,
+    require_machine_identity: bool,
 ) -> CmdResult<()> {
     let mut body = Map::new();
     body.insert("trust_domain".into(), Value::String(trust_domain));
@@ -123,6 +160,7 @@ pub async fn ferrogate_write_config(
     body.insert("bootstrap_root_auto_approve".into(), Value::Bool(bootstrap_root_auto_approve));
     body.insert("bootstrap_policies".into(), Value::String(bootstrap_policies));
     body.insert("require_user_token".into(), Value::Bool(require_user_token));
+    body.insert("require_machine_identity".into(), Value::Bool(require_machine_identity));
 
     make_request(&state, Operation::Write, "auth/ferrogate/config".into(), Some(body)).await?;
     Ok(())

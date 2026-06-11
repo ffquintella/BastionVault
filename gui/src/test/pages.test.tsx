@@ -219,4 +219,120 @@ describe("ConnectPage", () => {
     });
     expect(screen.getByText("Prod")).toBeInTheDocument();
   });
+
+  it("asks the server whether machine identity is required and runs the gate when it is", async () => {
+    const calls: string[] = [];
+    mockInvoke.mockImplementation((cmd: string) => {
+      calls.push(cmd);
+      switch (cmd) {
+        case "list_vault_profiles":
+          return Promise.resolve({
+            vaults: [
+              {
+                id: "v1",
+                name: "Prod",
+                spec: {
+                  kind: "remote",
+                  profile: {
+                    name: "Prod",
+                    address: "https://vault.example.com:8200",
+                    tls_skip_verify: false,
+                  },
+                },
+              },
+            ],
+            lastUsedId: null,
+          });
+        case "connect_remote":
+          return Promise.resolve(null);
+        // The server reports it requires machine identity — the connect flow
+        // must obey this regardless of any client-side setting.
+        case "ferrogate_requirement":
+          return Promise.resolve({
+            require_machine_identity: true,
+            expected_audience: "https://vault.example.com:8200",
+            trust_domain: "ferrogate.test",
+          });
+        case "get_selected_node":
+          return Promise.resolve(null);
+        case "set_last_used_vault":
+          return Promise.resolve(null);
+        // Gate runs: a pending enrolment parks the flow (no navigation).
+        case "ferrogate_machine_login":
+          return Promise.resolve({
+            spiffe_id: "spiffe://ferrogate.test/host/x",
+            authenticated: false,
+            enrolment: "pending",
+            message: "enrolment_pending",
+            client_token: "",
+            policies: [],
+            lease_duration: 0,
+          });
+        default:
+          return Promise.reject(new Error(`unmocked: ${cmd}`));
+      }
+    });
+    const { ConnectPage } = await import("../routes/ConnectPage");
+    renderWithProviders(<ConnectPage />);
+
+    await waitFor(() => expect(screen.getByText("Prod")).toBeInTheDocument());
+    await userEvent.click(screen.getByText("Prod"));
+
+    // It consulted the server, then ran the machine gate purely off that answer.
+    await waitFor(() => expect(calls).toContain("ferrogate_requirement"));
+    await waitFor(() => expect(calls).toContain("ferrogate_machine_login"));
+  });
+
+  it("skips the machine gate when the server does not require it", async () => {
+    const calls: string[] = [];
+    mockInvoke.mockImplementation((cmd: string) => {
+      calls.push(cmd);
+      switch (cmd) {
+        case "list_vault_profiles":
+          return Promise.resolve({
+            vaults: [
+              {
+                id: "v1",
+                name: "Prod",
+                spec: {
+                  kind: "remote",
+                  profile: {
+                    name: "Prod",
+                    address: "https://vault.example.com:8200",
+                    tls_skip_verify: false,
+                  },
+                },
+              },
+            ],
+            lastUsedId: null,
+          });
+        case "connect_remote":
+          return Promise.resolve(null);
+        case "ferrogate_requirement":
+          return Promise.resolve({
+            require_machine_identity: false,
+            expected_audience: "",
+            trust_domain: "",
+          });
+        case "get_selected_node":
+          return Promise.resolve(null);
+        case "set_last_used_vault":
+          return Promise.resolve(null);
+        // tryResumeSession after the (skipped) gate — no cached session.
+        case "get_cached_session":
+          return Promise.resolve(null);
+        default:
+          return Promise.reject(new Error(`unmocked: ${cmd}`));
+      }
+    });
+    const { ConnectPage } = await import("../routes/ConnectPage");
+    renderWithProviders(<ConnectPage />);
+
+    await waitFor(() => expect(screen.getByText("Prod")).toBeInTheDocument());
+    await userEvent.click(screen.getByText("Prod"));
+
+    await waitFor(() => expect(calls).toContain("ferrogate_requirement"));
+    // The gate never runs when the server says machine identity isn't required.
+    expect(calls).not.toContain("ferrogate_machine_login");
+  });
 });

@@ -350,6 +350,7 @@ pub fn run() {
             commands::approle::lookup_secret_id_accessor,
             commands::approle::destroy_secret_id_accessor,
             // FerroGate machine auth
+            commands::ferrogate::ferrogate_requirement,
             commands::ferrogate::ferrogate_read_config,
             commands::ferrogate::ferrogate_write_config,
             commands::ferrogate::ferrogate_list_machines,

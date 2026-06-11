@@ -136,9 +136,6 @@ export function ConnectPage() {
   // type a literal URL (skipped automatically) or untick this for
   // diagnostics against one HA node.
   const [clusterDiscovery, setClusterDiscovery] = useState(true);
-  // Require a FerroGate machine login before the user-login screen for
-  // this connection (machine identity + user credential). Off by default.
-  const [remoteMachineIdentity, setRemoteMachineIdentity] = useState(false);
 
   // Machine-identity gate modal state. Populated when a `require_machine_
   // identity` connection's startup machine login comes back not-approved:
@@ -472,7 +469,23 @@ export function ConnectPage() {
         case "remote": {
           await api.connectRemote(profile.spec.profile);
           setMode("Remote");
-          setRemoteProfile(profile.spec.profile);
+          // The SERVER decides whether machine identity is required — ask it
+          // (unauthenticated) now that we're connected, rather than trusting a
+          // local toggle. A non-FerroGate server / read failure reports false.
+          // Fold the answer into the in-memory profile so the gate AND
+          // `finalizeLogin` read the server's truth; the server enforces it at
+          // the token layer regardless, so this is only UX.
+          let required = false;
+          try {
+            required = (await api.ferrogateRequirement()).require_machine_identity;
+          } catch {
+            required = false;
+          }
+          const effectiveProfile = {
+            ...profile.spec.profile,
+            require_machine_identity: required,
+          };
+          setRemoteProfile(effectiveProfile);
           // Pick up the cluster-discovery result (if any) so the
           // status bar can show "Connected to <cluster> via <node>".
           // `get_selected_node` returns null when discovery was
@@ -485,11 +498,11 @@ export function ConnectPage() {
             setSelectedNode(null);
           }
           if (recordDefault) await api.setLastUsedVault(profile.id);
-          // Machine-identity gate: when this connection requires it, the host
-          // must attest + be operator-approved before user login. A pending or
+          // Machine-identity gate: when the server requires it, the host must
+          // attest + be operator-approved before user login. A pending or
           // denied result parks the connect flow behind the gate modal.
-          if (profile.spec.profile.require_machine_identity) {
-            if (await runMachineGate(profile.spec.profile, targetId)) return;
+          if (required) {
+            if (await runMachineGate(effectiveProfile, targetId)) return;
           }
           if (await tryResumeSession(targetId)) return;
           navigate("/login");
@@ -717,7 +730,6 @@ export function ConnectPage() {
       setTlsSkipVerify(p.tls_skip_verify ?? false);
       setCaCertPath(p.ca_cert_path ?? "");
       setClusterDiscovery(p.cluster_discovery ?? true);
-      setRemoteMachineIdentity(p.require_machine_identity ?? false);
     } else if (profile.spec.kind === "local") {
       const s = profile.spec as { storage_kind: string; data_dir?: string | null };
       setAddKind("local");
@@ -872,7 +884,6 @@ export function ConnectPage() {
           tls_skip_verify: tlsSkipVerify,
           ca_cert_path: caCertPath || undefined,
           cluster_discovery: clusterDiscovery,
-          require_machine_identity: remoteMachineIdentity,
         };
         spec = { kind: "remote", profile };
       } else if (addKind === "cloud") {
@@ -1460,18 +1471,11 @@ export function ConnectPage() {
                 placeholder="/path/to/ca.pem"
                 hint="Optional: path to PEM-encoded CA certificate"
               />
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={remoteMachineIdentity}
-                  onChange={(e) => setRemoteMachineIdentity(e.target.checked)}
-                  className="rounded"
-                />
-                <span className="text-[var(--color-text-muted)]">
-                  Require machine identity (FerroGate) — attest this host via
-                  the local MIA and require operator approval before user login
-                </span>
-              </label>
+              <p className="text-xs text-[var(--color-text-muted)]">
+                FerroGate machine identity is enforced by the server, not
+                configured here: if this server requires it, the machine gate
+                runs automatically on connect.
+              </p>
             </>
           )}
 

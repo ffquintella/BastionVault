@@ -10,7 +10,10 @@ use std::pin::Pin;
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Weak},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Weak,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -127,6 +130,11 @@ pub struct TokenStore {
     /// is never stored — the key is the same non-reversible `salt_id`
     /// already used as the storage key.
     pub token_cache: Option<Arc<TokenCache>>,
+    /// Shared mirror of [`crate::core::Core::require_machine_identity`]. When
+    /// `true`, `pre_route` rejects any authenticated request whose token is not
+    /// FerroGate machine-bound (or root). Cloned from `Core` at construction so
+    /// the hot path reads an atomic, never storage.
+    pub require_machine_identity: Arc<AtomicBool>,
 }
 
 #[maybe_async::maybe_async]
@@ -167,6 +175,7 @@ impl TokenStore {
             auth_handlers: ArcSwap::new(core.auth_handlers.load().clone()),
             expiration,
             token_cache,
+            require_machine_identity: core.require_machine_identity.clone(),
         };
 
         if salt.is_some() {
@@ -866,6 +875,28 @@ impl Handler for TokenStore {
 
         req.name.clone_from(&auth.as_ref().unwrap().display_name);
         req.auth = auth;
+
+        // Server-enforced machine identity: when the FerroGate mount requires
+        // it, every authenticated request must ride a FerroGate machine-bound
+        // token. Such tokens carry `spiffe_id` in their metadata (set only by
+        // the ferrogate login handler — no other backend emits it). Root tokens
+        // are exempt so the bootstrap/approval chain and break-glass admin keep
+        // working; unauth paths already returned above. This is the single
+        // chokepoint every authenticated request crosses, so it covers all auth
+        // backends uniformly and cannot be bypassed by a non-cooperating client.
+        if self.require_machine_identity.load(Ordering::Relaxed) {
+            let a = req.auth.as_ref().unwrap();
+            let is_root = a.policies.iter().any(|p| p == "root");
+            let is_machine_bound = a.metadata.contains_key("spiffe_id");
+            if !is_root && !is_machine_bound {
+                log::warn!(
+                    target: "security",
+                    "request denied: server requires FerroGate machine identity but token is not machine-bound (path={}, display_name={})",
+                    req.path, a.display_name
+                );
+                return Err(RvError::ErrPermissionDenied);
+            }
+        }
 
         req.handle_phase = HandlePhase::PostAuth;
 
