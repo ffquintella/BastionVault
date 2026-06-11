@@ -73,6 +73,8 @@ describe("FerroGatePage", () => {
             bootstrap_root_auto_approve: true,
             bootstrap_policies: ["default"],
           });
+        case "list_policies":
+          return Promise.resolve({ policies: ["administrator", "reader", "default", "root"] });
         // Catch-all for Layout / nav commands so nothing rejects.
         default:
           return Promise.resolve({});
@@ -152,13 +154,18 @@ describe("FerroGatePage", () => {
     await waitFor(() => {
       expect(screen.getAllByRole("button", { name: /^approve$/i }).length).toBeGreaterThan(1);
     });
+
+    // Pick a policy from the multi-select (chips come from list_policies, so a
+    // mistyped name can't be submitted). Selecting "reader" must send it verbatim.
+    await user.click(await screen.findByRole("button", { name: /^reader$/i }));
+
     const approves = screen.getAllByRole("button", { name: /^approve$/i });
     await user.click(approves[approves.length - 1]);
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith(
         "ferrogate_approve",
-        expect.objectContaining({ id: PENDING.id, policies: "default" }),
+        expect.objectContaining({ id: PENDING.id, policies: "reader" }),
       );
     });
   });

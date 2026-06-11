@@ -52,20 +52,35 @@ export function FerroGatePage() {
 
   const [approveTarget, setApproveTarget] = useState<FerroGateMachine | null>(null);
   const [approveEditing, setApproveEditing] = useState(false);
-  const [approvePolicies, setApprovePolicies] = useState("default");
+  // Selected policies as an array (joined to a comma string on submit). A
+  // multi-select over the vault's existing policies — not free text — so a
+  // mistyped name (e.g. `adminitrator`) can't silently grant nothing.
+  const [approveSelectedPolicies, setApproveSelectedPolicies] = useState<string[]>([]);
+  // Named ACL policies that exist on the vault, for the selector. Excludes
+  // `root` (never grantable to a machine) and `default` (baseline, always on).
+  const [availablePolicies, setAvailablePolicies] = useState<string[]>([]);
   const [approveTtl, setApproveTtl] = useState("3600");
   const [approveComment, setApproveComment] = useState("");
+
+  function toggleApprovePolicy(policy: string) {
+    setApproveSelectedPolicies((prev) =>
+      prev.includes(policy) ? prev.filter((p) => p !== policy) : [...prev, policy],
+    );
+  }
 
   /**
    * Open the approve/edit modal. For a still-pending machine (`editing=false`)
    * the fields default to a fresh grant; for an already-approved machine
    * (`editing=true`) they are prefilled from the machine so the operator can
    * adjust the policies/TTL in place — re-approving updates the policy ceiling
-   * used by combined machine+user auth.
+   * used by combined machine+user auth. `default` is dropped from the selection
+   * since it's the always-on baseline, not a selectable grant.
    */
   function openApprove(m: FerroGateMachine, editing: boolean) {
     setApproveEditing(editing);
-    setApprovePolicies(editing && m.policies.length ? m.policies.join(",") : "default");
+    setApproveSelectedPolicies(
+      editing ? m.policies.filter((p) => p !== "default") : [],
+    );
     setApproveTtl(String(m.ttl_seconds || 3600));
     setApproveComment(m.comment || "");
     setApproveTarget(m);
@@ -86,6 +101,14 @@ export function FerroGatePage() {
         setConfig(await api.ferrogateReadConfig());
       } catch {
         /* config read may fail independently; leave as-is */
+      }
+      try {
+        const pol = await api.listPolicies();
+        setAvailablePolicies(pol.policies.filter((p) => p !== "root" && p !== "default"));
+      } catch {
+        // Listing policies needs admin; if it fails the modal falls back to a
+        // free-text field so the editor still works.
+        setAvailablePolicies([]);
       }
     } catch (e) {
       // A missing mount surfaces as an error here.
@@ -116,7 +139,7 @@ export function FerroGatePage() {
     try {
       await api.ferrogateApprove(
         approveTarget.id,
-        approvePolicies,
+        approveSelectedPolicies.join(","),
         parseInt(approveTtl || "0", 10) || 0,
         approveComment,
       );
@@ -346,12 +369,54 @@ export function FerroGatePage() {
             <p className="break-all text-sm text-[var(--color-text-muted)]">{approveTarget.spiffe_id}</p>
             <div className="grid grid-cols-2 gap-3">
               <div className="col-span-2">
-                <Input
-                  label="Policies (comma-separated)"
-                  value={approvePolicies}
-                  onChange={(e) => setApprovePolicies(e.target.value)}
-                  placeholder="default,reader"
-                />
+                <label className="block text-sm text-[var(--color-text-muted)] mb-1">Policies</label>
+                {availablePolicies.length === 0 ? (
+                  // Couldn't list policies (e.g. no admin on the policies path) —
+                  // fall back to free text so the editor still works.
+                  <Input
+                    value={approveSelectedPolicies.join(",")}
+                    onChange={(e) =>
+                      setApproveSelectedPolicies(
+                        e.target.value.split(",").map((s) => s.trim()).filter(Boolean),
+                      )
+                    }
+                    placeholder="reader,administrator"
+                  />
+                ) : (
+                  <>
+                    <div className="flex flex-wrap gap-2">
+                      {[
+                        ...availablePolicies,
+                        ...approveSelectedPolicies.filter((p) => !availablePolicies.includes(p)),
+                      ].map((policy) => {
+                        const selected = approveSelectedPolicies.includes(policy);
+                        const unknown = !availablePolicies.includes(policy);
+                        return (
+                          <button
+                            key={policy}
+                            type="button"
+                            onClick={() => toggleApprovePolicy(policy)}
+                            title={unknown ? "Not a known policy — click to remove" : undefined}
+                            className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
+                              selected
+                                ? unknown
+                                  ? "bg-amber-500 border-amber-500 text-white"
+                                  : "bg-[var(--color-primary)] border-[var(--color-primary)] text-white"
+                                : "bg-[var(--color-bg)] border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-text-muted)]"
+                            }`}
+                          >
+                            {unknown ? `${policy} ⚠` : policy}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="text-xs text-[var(--color-text-muted)] mt-1.5">
+                      {approveSelectedPolicies.length > 0
+                        ? `Selected: ${approveSelectedPolicies.join(", ")} — default is always included`
+                        : "No named policies selected — the machine gets only the default baseline."}
+                    </p>
+                  </>
+                )}
               </div>
               <Input
                 label="Token TTL (seconds)"

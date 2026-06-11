@@ -45,6 +45,20 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.13.5] - 2026-06-11
+
+### Changed
+
+- **FerroGate machine policy editor is now a multi-select, not free text**
+  (`gui/src/routes/FerroGatePage.tsx`) -- the approve / *Edit policies* modal replaces the
+  comma-separated text field with toggle-chips populated from the vault's existing ACL
+  policies (`list_policies`, excluding `root` and the always-on `default`). This prevents
+  typos that silently grant nothing (e.g. `adminitrator` instead of `administrator`, which
+  intersects to empty under combined machine+user auth). Any policy on the machine that is
+  not a known policy is shown as an amber ⚠ chip so a stale/mistyped grant is visible and
+  removable; if policy listing is unavailable (insufficient privileges) the field falls back
+  to free text.
+
 ## [0.13.4] - 2026-06-11
 
 ### Added
