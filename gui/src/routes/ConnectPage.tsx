@@ -348,10 +348,13 @@ export function ConnectPage() {
     profile: RemoteProfile,
     targetId: string,
   ): Promise<boolean> {
-    // Audience must match the mount's `expected_audience`; the operator
-    // configures that to the server address in the common case, mirroring the
-    // CLI's default. Socket "" resolves the installed MIA's configured path.
-    const audience = profile.address;
+    // The DPoP proof binds to the mount's `expected_audience` (captured from the
+    // server's requirement endpoint at connect time). This is often the
+    // trust-domain audience (e.g. `https://ferrogate.dev`), NOT the server
+    // address — signing with `profile.address` produces an htu mismatch ("DPoP
+    // proof does not match the request"). Fall back to the address only when the
+    // server left it unset. Socket "" resolves the installed MIA's configured path.
+    const audience = profile.expected_audience || profile.address;
     let r;
     try {
       r = await api.ferrogateMachineLogin(audience, "", "ferrogate", 300);
@@ -476,14 +479,18 @@ export function ConnectPage() {
           // `finalizeLogin` read the server's truth; the server enforces it at
           // the token layer regardless, so this is only UX.
           let required = false;
+          let expectedAudience = "";
           try {
-            required = (await api.ferrogateRequirement()).require_machine_identity;
+            const req = await api.ferrogateRequirement();
+            required = req.require_machine_identity;
+            expectedAudience = req.expected_audience;
           } catch {
             required = false;
           }
           const effectiveProfile = {
             ...profile.spec.profile,
             require_machine_identity: required,
+            expected_audience: expectedAudience,
           };
           setRemoteProfile(effectiveProfile);
           // Pick up the cluster-discovery result (if any) so the

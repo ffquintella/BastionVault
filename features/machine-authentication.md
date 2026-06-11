@@ -209,6 +209,19 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   root exempt, machine-bound accepted, `requirement` endpoint unauthenticated, flag round-trip). Operators can
   toggle it without curl via `bvault operator ferrogate require-machine-identity [on|off]` (no argument prints
   the current value); the server admin GUI exposes the same as a "Require machine identity (all sessions)" toggle.
+- **Fix — GUI DPoP audience derives from the server.** Both the connect-flow machine gate (`ConnectPage.tsx`
+  `runMachineGate`) **and** the combined machine+user user-login step (`LoginPage.tsx` `finalizeLogin`)
+  previously signed the DPoP proof with `profile.address` (the vault server URL), assuming
+  `expected_audience == <server URL>` as this doc describes. A mount configured with a *trust-domain* audience
+  (e.g. `https://ferrogate.dev`) then failed login with an `htu` binding mismatch ("DPoP proof does not match
+  the request"). The connect flow now captures the server-advertised `expected_audience` (from
+  `auth/ferrogate/requirement`) onto the in-memory `RemoteProfile`, and both signing paths read it, falling
+  back to `profile.address` only when the server leaves it unset.
+- **GUI — edit policies of an approved machine.** The *Machines (FerroGate)* page now exposes an **Edit
+  policies** action on approved machines (previously only revoke was available), reopening the approve modal
+  prefilled with the current policies/TTL/comment and re-approving in place. Because combined auth intersects
+  machine ∩ user policies, the machine's approved set is the ceiling; editing it is how an operator restores a
+  user's effective policies (e.g. raising a machine from `default` to `administrator`) without re-enrolling.
 - Caveats: `cmis_grpc` is async-build only (the `sync_handler` feature is independently broken repo-wide);
   child-token revocation on the `static_jwks` source relies on short token TTL (the CRL is enforced on the SVID
   path); audit events are structured log lines (no dedicated audit-store rows).

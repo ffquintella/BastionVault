@@ -34,6 +34,16 @@ export interface RemoteProfile {
    * the token layer regardless). Defaults off / unknown.
    */
   require_machine_identity?: boolean;
+  /**
+   * Internal cached hint: the server's advertised DPoP `expected_audience`
+   * (from `ferrogateRequirement()`), captured alongside
+   * `require_machine_identity` on every connect. The machine gate and
+   * `finalizeLogin` sign the DPoP proof with this rather than assuming the
+   * audience equals `address` — a mount whose audience is the trust domain
+   * (e.g. `https://ferrogate.dev`) would otherwise fail with an `htu`
+   * mismatch. Empty/unset → fall back to `address`.
+   */
+  expected_audience?: string;
 }
 
 export interface RemoteStatus {

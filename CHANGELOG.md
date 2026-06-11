@@ -45,6 +45,33 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.13.4] - 2026-06-11
+
+### Added
+
+- **Edit policies for approved FerroGate machines in the GUI**
+  (`gui/src/routes/FerroGatePage.tsx`) -- the *Machines (FerroGate)* admin page previously
+  only let operators set policies at first approval; an approved machine could only be
+  revoked. Approved machines now have an **Edit policies** action that reopens the approve
+  flow prefilled with the machine's current policies/TTL/comment and re-approves in place
+  (via the existing `ferrogate_approve` command). This matters because combined machine+user
+  auth grants the **intersection** of the machine's policies and the user's policies, so the
+  machine's approved policy set is the ceiling — adjusting it is how an operator restores a
+  user's access without re-enrolling the host.
+
+### Fixed
+
+- **GUI machine-identity login used the wrong DPoP audience**
+  (`gui/src/routes/ConnectPage.tsx`, `gui/src/routes/LoginPage.tsx`, `gui/src/lib/types.ts`)
+  -- both the connect-time machine gate (`runMachineGate`) and the combined machine+user
+  user-login step (`finalizeLogin`) signed the DPoP proof with `profile.address` (the vault
+  server URL), so connecting to a mount whose `expected_audience` is the trust domain
+  (e.g. `https://ferrogate.dev`) failed with *"token verification failed: DPoP proof does
+  not match the request"* — an `htu` binding mismatch. The connect flow now captures the
+  server-advertised `expected_audience` (from `ferrogate_requirement`) onto the in-memory
+  `RemoteProfile`, and both DPoP-signing paths use it, falling back to `profile.address`
+  only when the server leaves it unset.
+
 ## [0.13.3] - 2026-06-11
 
 ### Added

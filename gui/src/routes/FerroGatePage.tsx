@@ -51,9 +51,25 @@ export function FerroGatePage() {
   const { toast } = useToast();
 
   const [approveTarget, setApproveTarget] = useState<FerroGateMachine | null>(null);
+  const [approveEditing, setApproveEditing] = useState(false);
   const [approvePolicies, setApprovePolicies] = useState("default");
   const [approveTtl, setApproveTtl] = useState("3600");
   const [approveComment, setApproveComment] = useState("");
+
+  /**
+   * Open the approve/edit modal. For a still-pending machine (`editing=false`)
+   * the fields default to a fresh grant; for an already-approved machine
+   * (`editing=true`) they are prefilled from the machine so the operator can
+   * adjust the policies/TTL in place — re-approving updates the policy ceiling
+   * used by combined machine+user auth.
+   */
+  function openApprove(m: FerroGateMachine, editing: boolean) {
+    setApproveEditing(editing);
+    setApprovePolicies(editing && m.policies.length ? m.policies.join(",") : "default");
+    setApproveTtl(String(m.ttl_seconds || 3600));
+    setApproveComment(m.comment || "");
+    setApproveTarget(m);
+  }
 
   const [rejectTarget, setRejectTarget] = useState<FerroGateMachine | null>(null);
   const [rejectReason, setRejectReason] = useState("");
@@ -104,7 +120,10 @@ export function FerroGatePage() {
         parseInt(approveTtl || "0", 10) || 0,
         approveComment,
       );
-      toast("success", `Approved ${shortId(approveTarget.spiffe_id)}`);
+      toast(
+        "success",
+        `${approveEditing ? "Updated policies for" : "Approved"} ${shortId(approveTarget.spiffe_id)}`,
+      );
       setApproveTarget(null);
       setApproveComment("");
       await load();
@@ -223,7 +242,7 @@ export function FerroGatePage() {
                       header: "",
                       render: (m: FerroGateMachine) => (
                         <div className="flex justify-end gap-2">
-                          <Button size="sm" onClick={() => setApproveTarget(m)}>
+                          <Button size="sm" onClick={() => openApprove(m, false)}>
                             Approve
                           </Button>
                           <Button size="sm" variant="danger" onClick={() => setRejectTarget(m)}>
@@ -268,7 +287,10 @@ export function FerroGatePage() {
                       key: "actions",
                       header: "",
                       render: (m: FerroGateMachine) => (
-                        <div className="flex justify-end">
+                        <div className="flex justify-end gap-2">
+                          <Button size="sm" variant="secondary" onClick={() => openApprove(m, true)}>
+                            Edit policies
+                          </Button>
                           <Button size="sm" variant="danger" onClick={() => setRevokeTarget(m)}>
                             Revoke
                           </Button>
@@ -313,7 +335,12 @@ export function FerroGatePage() {
       </div>
 
       {/* Approve modal */}
-      <Modal open={!!approveTarget} onClose={() => setApproveTarget(null)} title="Approve machine" size="md">
+      <Modal
+        open={!!approveTarget}
+        onClose={() => setApproveTarget(null)}
+        title={approveEditing ? "Edit machine policies" : "Approve machine"}
+        size="md"
+      >
         {approveTarget && (
           <div className="space-y-3">
             <p className="break-all text-sm text-[var(--color-text-muted)]">{approveTarget.spiffe_id}</p>
@@ -344,7 +371,7 @@ export function FerroGatePage() {
               <Button variant="secondary" onClick={() => setApproveTarget(null)}>
                 Cancel
               </Button>
-              <Button onClick={() => void doApprove()}>Approve</Button>
+              <Button onClick={() => void doApprove()}>{approveEditing ? "Save policies" : "Approve"}</Button>
             </div>
           </div>
         )}

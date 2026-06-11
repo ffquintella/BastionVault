@@ -44,8 +44,13 @@ export function LoginPage() {
     // result here is exceptional — surface it and abort (throwing skips the
     // caller's navigate).
     if (mode === "Remote" && remoteProfile?.require_machine_identity) {
+      // Sign the DPoP proof with the server's advertised `expected_audience`
+      // (captured on the profile at connect time), matching the connect-time
+      // machine gate. Using `address` here would re-introduce the htu mismatch
+      // ("DPoP proof does not match the request") on the user-login step.
+      const audience = remoteProfile.expected_audience || remoteProfile.address;
       const r = await api.ferrogateMachineLogin(
-        remoteProfile.address,
+        audience,
         "",
         "ferrogate",
         300,
