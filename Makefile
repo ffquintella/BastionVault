@@ -268,13 +268,27 @@ INCLUDE_SHELL  ?= 1
 #   make container-image PLATFORM=linux/arm64    # default is linux/amd64
 PLATFORM ?= linux/amd64
 
+# Docker's BuildKit/buildx `docker-container` driver (Docker Desktop's default
+# builder) leaves the build result in the cache and does NOT place it in the
+# local image store unless `--load` is passed — so a subsequent `docker image
+# inspect` / `tag` (e.g. from container-image-push) can't see it. The classic
+# `docker` driver auto-loads, where `--load` is harmless. podman writes to local
+# storage natively and doesn't take the flag. `--load` requires a single
+# platform, so omit it for a comma-separated multi-arch PLATFORM.
+comma := ,
+ifeq ($(CONTAINER_TOOL),docker)
+ifeq ($(findstring $(comma),$(PLATFORM)),)
+_LOAD_FLAG := --load
+endif
+endif
+
 # Resolve the docker subcommand once: `buildx build` if BUILDX=1 (and
 # we're on docker), plain `build` otherwise.
 ifeq ($(CONTAINER_TOOL),docker)
 ifeq ($(BUILDX),1)
-_BUILD_CMD := docker buildx build --platform $(PLATFORM)
+_BUILD_CMD := docker buildx build --platform $(PLATFORM) $(_LOAD_FLAG)
 else
-_BUILD_CMD := docker build --platform $(PLATFORM)
+_BUILD_CMD := docker build --platform $(PLATFORM) $(_LOAD_FLAG)
 endif
 else
 _BUILD_CMD := $(CONTAINER_TOOL) build --platform $(PLATFORM)
