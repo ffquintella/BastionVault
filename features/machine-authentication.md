@@ -206,7 +206,9 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   toggle (the per-connection "Require machine identity" client checkbox is removed; the server config page
   gains a "Require machine identity (all sessions)" toggle). Independent of `require_user_token` — set both for
   full combined enforcement. Covered by `test_ferrogate_require_machine_identity_enforced` (user-token denied,
-  root exempt, machine-bound accepted, `requirement` endpoint unauthenticated, flag round-trip).
+  root exempt, machine-bound accepted, `requirement` endpoint unauthenticated, flag round-trip). Operators can
+  toggle it without curl via `bvault operator ferrogate require-machine-identity [on|off]` (no argument prints
+  the current value); the server admin GUI exposes the same as a "Require machine identity (all sessions)" toggle.
 - Caveats: `cmis_grpc` is async-build only (the `sync_handler` feature is independently broken repo-wide);
   child-token revocation on the `static_jwks` source relies on short token TTL (the CRL is enforced on the SVID
   path); audit events are structured log lines (no dedicated audit-store rows).

@@ -55,7 +55,13 @@ Approve a pending machine by handle (from `list`) or by SPIFFE id:
 Reject or revoke a machine:
 
     $ bvault operator ferrogate reject <handle> --reason "unrecognised host"
-    $ bvault operator ferrogate revoke <handle>"#
+    $ bvault operator ferrogate revoke <handle>
+
+Require machine identity for every session on this server (show / enable / disable):
+
+    $ bvault operator ferrogate require-machine-identity
+    $ bvault operator ferrogate require-machine-identity on
+    $ bvault operator ferrogate require-machine-identity off"#
 )]
 pub struct Ferrogate {
     #[command(subcommand)]
@@ -72,6 +78,9 @@ pub enum Commands {
     Reject(Reject),
     /// Revoke a previously-approved machine.
     Revoke(Revoke),
+    /// Show or set the server-wide "require machine identity" enforcement flag.
+    #[command(name = "require-machine-identity")]
+    RequireMachineIdentity(RequireMachineIdentity),
 }
 
 impl Ferrogate {
@@ -85,7 +94,18 @@ impl Ferrogate {
             Commands::Approve(c) => c.execute(),
             Commands::Reject(c) => c.execute(),
             Commands::Revoke(c) => c.execute(),
+            Commands::RequireMachineIdentity(c) => c.execute(),
         }
+    }
+}
+
+/// Parse an operator-supplied on/off state into a bool. Accepts the common
+/// affirmative/negative spellings so the command is forgiving.
+fn parse_state(s: &str) -> Option<bool> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "enable" | "enabled" | "yes" | "1" => Some(true),
+        "off" | "false" | "disable" | "disabled" | "no" | "0" => Some(false),
+        _ => None,
     }
 }
 
@@ -277,6 +297,76 @@ impl CommandExecutor for Revoke {
         let path = format!("auth/{}/machines/{}/revoke", self.mount.trim_matches('/'), id);
         client.logical().write(&path, None)?;
         println!("revoked machine {id}");
+        Ok(())
+    }
+}
+
+// ── require-machine-identity ───────────────────────────────────────────────
+
+#[derive(Parser, Deref)]
+#[command(
+    about = "Show or set server-wide require-machine-identity enforcement",
+    long_about = r#"Show or set the FerroGate `require_machine_identity` flag on the mount config.
+
+When enabled, EVERY authenticated request to this server must present a FerroGate
+machine-bound token (or a root token); a plain user/token/approle session is
+rejected at the token layer. Run with no argument to print the current value.
+
+    $ bvault operator ferrogate require-machine-identity        # show
+    $ bvault operator ferrogate require-machine-identity on     # enable
+    $ bvault operator ferrogate require-machine-identity off    # disable
+
+WARNING: before enabling, make sure the mount's trust anchor is configured and at
+least one machine is approved (and your host's MIA is reachable) — otherwise only
+a root token will be able to log in. Root is the break-glass path to disable it."#
+)]
+pub struct RequireMachineIdentity {
+    /// Desired state: on|off (true|false, enable|disable, yes|no, 1|0).
+    /// Omit to just show the current value.
+    #[arg(value_name = "STATE")]
+    state: Option<String>,
+
+    /// Mount path of the ferrogate auth method.
+    #[arg(long, default_value = "ferrogate")]
+    mount: String,
+
+    #[deref]
+    #[command(flatten, next_help_heading = "HTTP Options")]
+    http_options: command::HttpOptions,
+
+    #[command(flatten, next_help_heading = "Output Options")]
+    output: command::OutputOptions,
+}
+
+impl CommandExecutor for RequireMachineIdentity {
+    fn main(&self) -> Result<(), RvError> {
+        let client = self.client()?;
+        let path = format!("auth/{}/config", self.mount.trim_matches('/'));
+
+        // No argument → report the current value (read the canonical config).
+        let Some(state) = &self.state else {
+            let resp = client.logical().read(&path)?;
+            let current = resp
+                .response_data
+                .as_ref()
+                .and_then(|d| d.get("require_machine_identity"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            println!("require_machine_identity = {current}");
+            return Ok(());
+        };
+
+        let Some(enabled) = parse_state(state) else {
+            return Err(RvError::ErrResponse(format!(
+                "invalid state '{state}': expected on|off (true|false, enable|disable, yes|no, 1|0)"
+            )));
+        };
+
+        // Partial update — the write handler merges onto the existing config.
+        let mut body = Map::new();
+        body.insert("require_machine_identity".into(), Value::Bool(enabled));
+        client.logical().write(&path, Some(body))?;
+        println!("require_machine_identity = {enabled}");
         Ok(())
     }
 }

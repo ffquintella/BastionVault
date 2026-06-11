@@ -44,6 +44,12 @@ Configure the trust anchor (root/sudo-gated) at `auth/ferrogate/config`:
 | `bootstrap_root_auto_approve` | One-shot first-machine bootstrap (default `true`). |
 | `bootstrap_policies` | Policies granted to the bootstrapped machine (default `["default"]`). |
 | `login_rate_limit_per_min` | Per-source-IP login attempts/min (`0` = unlimited; default `10`). |
+| `require_user_token` | Require a `user_token` on every machine login and mint the **intersection** of machine and user policies (combined machine+user auth). Default `false`. |
+| `require_machine_identity` | **Server-enforced:** every authenticated request to this server must present a machine-bound token (or a root token); plain user/token/approle sessions are rejected at the token layer. Clients discover this via the unauthenticated `auth/ferrogate/requirement` endpoint and cannot bypass it. Independent of `require_user_token` — set both for full combined enforcement. Default `false`. |
+
+> **Before enabling `require_machine_identity`:** make sure the trust anchor is configured and at least
+> one machine is approved (and the admin host's MIA is reachable), or only a **root** token will be able
+> to log in. Root is the break-glass path to turn it back off.
 
 ### Computing a CMIS SPKI pin
 
@@ -66,8 +72,16 @@ bvault ferrogate login --audience https://vault.example.com
 bvault ferrogate status --audience https://vault.example.com
 bvault ferrogate whoami
 
-# Admin (GUI: Machines (FerroGate); or CLI against the mount):
-#   approve / reject / revoke a machine by its id (BLAKE3 hex of the SPIFFE id).
+# Admin (GUI: Machines (FerroGate); or CLI — run against the server with a root token):
+bvault operator ferrogate list --status pending
+bvault operator ferrogate approve <handle|spiffe-id> --policies default,reader
+bvault operator ferrogate reject <handle> --reason "unrecognised host"
+bvault operator ferrogate revoke <handle>
+
+# Server-wide enforcement: require machine identity for every session.
+bvault operator ferrogate require-machine-identity          # show current value
+bvault operator ferrogate require-machine-identity on       # enable
+bvault operator ferrogate require-machine-identity off      # disable
 ```
 
 ## Observability

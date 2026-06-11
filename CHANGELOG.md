@@ -45,6 +45,19 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-06-11
+
+### Added
+
+- **`bvault operator ferrogate require-machine-identity` CLI command**
+  (`src/cli/command/operator_ferrogate.rs`) -- show or set the server-wide
+  `require_machine_identity` enforcement flag without hand-writing a `curl` to `auth/ferrogate/config`.
+  Run with no argument to print the current value, or `on`/`off` (also accepts true/false,
+  enable/disable, yes/no, 1/0) to set it. Like the other `operator ferrogate` subcommands it runs
+  against the server with a root token and does not need an approved machine.
+
+## [0.13.2] - 2026-06-11
+
 ### Added
 
 - **Server-enforced FerroGate machine identity** (`src/modules/credential/ferrogate/`, `src/core.rs`,
