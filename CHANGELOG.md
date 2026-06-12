@@ -45,6 +45,20 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-06-12
+
+### Fixed
+
+- **Autofill from local MIA now supports SRV-advertised CMIS.** A `mia-<env>.toml`
+  that points at CMIS via a DNS SRV record (`[cmis].srv`, e.g. an HA cluster)
+  instead of a literal `[cmis].endpoint` previously failed autofill with "no CMIS
+  endpoint found". `read_cmis` now also reads `[cmis].srv`, and `build_autoconfig`
+  resolves it to a concrete `host:port` (RFC 2782 ordering — ascending priority,
+  descending weight — mirroring the MIA's own selection in
+  `ferrogate/crates/mia/src/endpoint.rs`) via the system DNS resolver, pinning the
+  selected node (a warning notes the cluster may change). Affects both the GUI
+  "Autofill from local MIA" button and `bvault ferrogate autoconfig`.
+
 ## [0.14.0] - 2026-06-12
 
 ### Added

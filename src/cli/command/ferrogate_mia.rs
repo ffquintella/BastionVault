@@ -214,12 +214,20 @@ fn read_helper_socket(path: &Path) -> Option<String> {
 /// the MIA trusts.
 #[derive(Debug, Clone)]
 pub struct CmisDiscovery {
-    /// CMIS host:port, scheme stripped (BastionVault's gRPC fetcher re-adds it).
+    /// CMIS host:port for a literal `[cmis].endpoint`, scheme stripped
+    /// (BastionVault's gRPC fetcher re-adds it). Empty when CMIS is advertised
+    /// via a DNS SRV record (see [`srv`](Self::srv)), which is resolved to a
+    /// concrete host:port later, in [`build_autoconfig`].
     pub endpoint: String,
+    /// DNS SRV owner name from `[cmis].srv` (e.g. `_ferrogate._tcp.example.com`)
+    /// — how a CMIS HA cluster is advertised. Mutually exclusive with a literal
+    /// `endpoint`.
+    pub srv: Option<String>,
     /// Lowercase-hex SHA-384 SPKI pin of the CMIS certificate (empty for an
     /// `http://` dev endpoint).
     pub spki_pin: String,
-    /// Dial CMIS over (PQ-)TLS. `false` only for a plaintext `http://` endpoint.
+    /// Dial CMIS over (PQ-)TLS. `false` only for a plaintext `http://` endpoint;
+    /// an SRV source is always TLS.
     pub tls_enable: bool,
 }
 
@@ -242,18 +250,71 @@ fn read_cmis(path: &Path) -> Option<CmisDiscovery> {
     let text = std::fs::read_to_string(path).ok()?;
     let doc = text.parse::<toml::Table>().ok()?;
     let cmis = doc.get("cmis")?.as_table()?;
-    let raw = cmis.get("endpoint")?.as_str()?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    let tls_enable = !raw.starts_with("http://");
-    let endpoint = raw
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_end_matches('/')
-        .to_string();
     let spki_pin = cmis.get("spki_pin").and_then(toml::Value::as_str).unwrap_or("").trim().to_string();
-    Some(CmisDiscovery { endpoint, spki_pin, tls_enable })
+
+    // A literal `endpoint` is a single static server; `srv` advertises one or
+    // more CMIS nodes via a DNS SRV record (an HA cluster). They are mutually
+    // exclusive in `mia.toml`; a literal endpoint takes precedence here.
+    let endpoint = cmis.get("endpoint").and_then(toml::Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+    if let Some(raw) = endpoint {
+        let tls_enable = !raw.starts_with("http://");
+        let endpoint = raw
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_string();
+        return Some(CmisDiscovery { endpoint, srv: None, spki_pin, tls_enable });
+    }
+    let srv = cmis.get("srv").and_then(toml::Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+    if let Some(srv) = srv {
+        // SRV is always dialed over (PQ-)TLS — there is no plaintext SRV path.
+        return Some(CmisDiscovery { endpoint: String::new(), srv: Some(srv.to_string()), spki_pin, tls_enable: true });
+    }
+    None
+}
+
+/// Resolve a CMIS `[cmis].srv` owner name to a single `host:port`, choosing the
+/// most-preferred record by RFC 2782 (ascending priority, then descending
+/// weight, then target name). Mirrors the MIA's own SRV selection
+/// (`ferrogate/crates/mia/src/endpoint.rs`) so the mount dials the same node the
+/// MIA would. BastionVault's `cmis_grpc` source takes a single static endpoint,
+/// so this picks the best candidate — a snapshot of the cluster at config time.
+async fn resolve_cmis_srv(name: &str) -> Result<String, String> {
+    use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+    use hickory_resolver::net::runtime::TokioRuntimeProvider;
+    use hickory_resolver::proto::rr::RData;
+    use hickory_resolver::TokioResolver;
+
+    if name.is_empty() {
+        return Err("CMIS SRV record name is empty".to_string());
+    }
+    let (cfg, opts) = hickory_resolver::system_conf::read_system_conf()
+        .unwrap_or_else(|_| (ResolverConfig::default(), ResolverOpts::default()));
+    let mut builder = TokioResolver::builder_with_config(cfg, TokioRuntimeProvider::default());
+    *builder.options_mut() = opts;
+    let resolver = builder.build().map_err(|e| format!("DNS resolver init failed: {e}"))?;
+
+    let resp = resolver.srv_lookup(name).await.map_err(|e| format!("SRV lookup for {name:?} failed: {e}"))?;
+
+    // (priority, weight, port, target); a "." target means "not available here"
+    // (RFC 2782) and is dropped.
+    let mut records: Vec<(u16, u16, u16, String)> = resp
+        .answers()
+        .iter()
+        .filter_map(|rec| match &rec.data {
+            RData::SRV(srv) => {
+                let target = srv.target.to_utf8().trim_end_matches('.').to_string();
+                (!target.is_empty()).then_some((srv.priority, srv.weight, srv.port, target))
+            }
+            _ => None,
+        })
+        .collect();
+    if records.is_empty() {
+        return Err(format!("SRV record {name:?} resolved to no usable CMIS targets"));
+    }
+    records.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)).then(a.3.cmp(&b.3)));
+    let (_, _, port, target) = records.into_iter().next().expect("non-empty checked above");
+    Ok(format!("{target}:{port}"))
 }
 
 /// Read the trust domain from the local signed allowlist for the default
@@ -352,16 +413,33 @@ pub async fn build_autoconfig(
     let cfg_name = config_filename(environment);
     let disc = read_cmis_config_for(environment).ok_or_else(|| {
         format!(
-            "no CMIS endpoint found in {cfg_name} ([cmis].endpoint) — is the FerroGate MIA \
-             installed on this host{}?",
+            "no CMIS endpoint found in {cfg_name} ([cmis].endpoint or [cmis].srv) — is the \
+             FerroGate MIA installed on this host{}?",
             environment.map(|e| format!(" for environment `{e}`")).unwrap_or_default()
         )
     })?;
     if disc.tls_enable && disc.spki_pin.is_empty() {
-        return Err(format!("{cfg_name} [cmis].endpoint is https but has no spki_pin; cannot verify CMIS"));
+        return Err(format!(
+            "{cfg_name} configures CMIS over TLS but has no [cmis].spki_pin; cannot verify CMIS"
+        ));
     }
 
     let mut warnings = Vec::new();
+
+    // CMIS may be advertised by a DNS SRV record (an HA cluster) rather than a
+    // literal endpoint; resolve it to a concrete host:port the mount can dial.
+    let cmis_endpoint = if disc.endpoint.is_empty() {
+        let srv = disc.srv.as_deref().unwrap_or_default();
+        let resolved = resolve_cmis_srv(srv).await?;
+        warnings.push(format!(
+            "CMIS endpoint resolved from SRV {srv} → {resolved}; the mount pins a single node — \
+             re-run autofill if the cluster changes"
+        ));
+        resolved
+    } else {
+        disc.endpoint.clone()
+    };
+
     let trust_domain = read_allowlist_trust_domain_for(environment).unwrap_or_else(|| {
         warnings.push(
             "could not read trust_domain from the local allowlist; set it manually if your \
@@ -373,7 +451,7 @@ pub async fn build_autoconfig(
 
     let pins: Vec<String> = if disc.spki_pin.is_empty() { Vec::new() } else { vec![disc.spki_pin.clone()] };
     let probe = FerroGateConfig {
-        cmis_endpoint: disc.endpoint.clone(),
+        cmis_endpoint: cmis_endpoint.clone(),
         cmis_spki_pins: pins.clone(),
         cmis_tls_enable: disc.tls_enable,
         ..FerroGateConfig::default()
@@ -395,7 +473,7 @@ pub async fn build_autoconfig(
         trust_domain,
         expected_audience,
         jwks_source: jwks_source::CMIS_GRPC.to_string(),
-        cmis_endpoint: disc.endpoint,
+        cmis_endpoint,
         cmis_spki_pins: pins,
         cmis_tls_enable: disc.tls_enable,
         fetched_jwks,
@@ -644,10 +722,41 @@ mod tests {
         assert!(!d.tls_enable, "http ⇒ plaintext");
         assert!(d.spki_pin.is_empty());
 
+        // SRV-advertised CMIS (HA cluster): no literal endpoint, but a `srv`
+        // owner name + pin. Endpoint is left empty for later DNS resolution;
+        // SRV always implies TLS.
+        let srv = dir.join("srv.toml");
+        std::fs::write(
+            &srv,
+            "[cmis]\nsrv = '_ferrogate-hml._tcp.esi.fgv.br'\nspki_pin = 'deadbeef'\n",
+        )
+        .unwrap();
+        let d = read_cmis(&srv).expect("parses");
+        assert!(d.endpoint.is_empty(), "srv source leaves endpoint unresolved");
+        assert_eq!(d.srv.as_deref(), Some("_ferrogate-hml._tcp.esi.fgv.br"));
+        assert_eq!(d.spki_pin, "deadbeef");
+        assert!(d.tls_enable, "srv ⇒ TLS");
+
+        // A literal endpoint wins over srv when both are (mis)configured.
+        let both = dir.join("both.toml");
+        std::fs::write(
+            &both,
+            "[cmis]\nendpoint = 'https://cmis.example.com:8443'\nsrv = '_x._tcp.example.com'\nspki_pin = 'abc'\n",
+        )
+        .unwrap();
+        let d = read_cmis(&both).expect("parses");
+        assert_eq!(d.endpoint, "cmis.example.com:8443");
+        assert!(d.srv.is_none(), "literal endpoint takes precedence");
+
         // No [cmis] table ⇒ None.
         let none = dir.join("none.toml");
         std::fs::write(&none, "log = 'info'\n").unwrap();
         assert!(read_cmis(&none).is_none());
+
+        // [cmis] present but neither endpoint nor srv ⇒ None.
+        let empty = dir.join("empty.toml");
+        std::fs::write(&empty, "[cmis]\nspki_pin = 'abc'\n").unwrap();
+        assert!(read_cmis(&empty).is_none());
     }
 
     #[test]

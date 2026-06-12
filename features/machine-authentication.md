@@ -230,7 +230,9 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   also adds an **MIA environment** selector to the Config + Machine Login tabs and a `--environment <env>` flag
   on `bvault ferrogate {login,status,whoami,autoconfig}`: a host running side-by-side FerroGate deployments has
   one `mia-<env>.toml` per environment (e.g. `mia-hml.toml`), and the selector reads that file's CMIS
-  endpoint/pin, allowlist, and helper socket instead of the default `mia.toml`. Environment selectors are
+  endpoint/pin, allowlist, and helper socket instead of the default `mia.toml`. CMIS may be configured
+  either as a literal `[cmis].endpoint` or as a DNS SRV record (`[cmis].srv`, an HA cluster) — the latter
+  is resolved to a concrete `host:port` by RFC 2782 ordering during autofill (v0.14.1). Environment selectors are
   validated as safe single path components; the GUI discovers installed environments by scanning the system and
   per-user config dirs (`ferrogate_list_environments`). The MIA helper layer gained `_for(environment)` variants
   (`resolve_mia_socket_for`, `read_cmis_config_for`, `read_allowlist_trust_domain_for`, `build_autoconfig`).
