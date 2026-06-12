@@ -55,6 +55,7 @@ export function LoginPage() {
         "ferrogate",
         300,
         token,
+        remoteProfile.mia_environment,
       );
       if (!r.authenticated || !r.client_token) {
         throw new Error(r.message || "Machine identity binding failed");

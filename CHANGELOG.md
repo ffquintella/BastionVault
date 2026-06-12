@@ -45,6 +45,26 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### FerroGate MIA environment persistence
+
+- **`mia_environment` config field for the `ferrogate` mount**
+  (`src/modules/credential/ferrogate/`). Records which MIA environment the
+  deployment belongs to (e.g. `hml` → clients read `mia-<env>.toml`) and is
+  advertised on the unauthenticated `auth/ferrogate/requirement` endpoint.
+  Validated server-side (no path syntax). (`features/machine-authentication.md`)
+
+### Fixed
+
+- **GUI: MIA environment is now saved with the FerroGate config and used on
+  every MIA dial.** Previously the Config tab's "MIA environment" field was
+  transient autofill state — it was lost on save, and the connect-time machine
+  gate, combined machine+user login, and the Machine Login tab always dialed
+  the default `mia.toml`. The field now persists in the mount config, prefills
+  the Config and Machine Login tabs, and the connect flow resolves the
+  server-advertised environment's `mia-<env>.toml` socket automatically.
+
 ## [0.14.3] - 2026-06-12
 
 ### Added

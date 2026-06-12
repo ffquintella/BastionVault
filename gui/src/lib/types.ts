@@ -44,6 +44,15 @@ export interface RemoteProfile {
    * mismatch. Empty/unset → fall back to `address`.
    */
   expected_audience?: string;
+  /**
+   * Internal cached hint: the server's advertised MIA environment (from
+   * `ferrogateRequirement()`), captured alongside `expected_audience` on
+   * every connect. The machine gate and `finalizeLogin` resolve the local
+   * MIA socket from this (`mia-<env>.toml`) so the client dials the MIA
+   * belonging to the deployment it is connecting to. Empty/unset → the
+   * default `mia.toml`.
+   */
+  mia_environment?: string;
 }
 
 export interface RemoteStatus {
@@ -502,6 +511,12 @@ export interface FerroGateConfig {
    * discover this via `ferrogateRequirement()` and cannot bypass it.
    */
   require_machine_identity: boolean;
+  /**
+   * MIA environment selector for this deployment: clients read
+   * `mia-<env>.toml` when minting child tokens for this server. Advertised
+   * via `ferrogateRequirement()`; empty = the default `mia.toml`.
+   */
+  mia_environment: string;
 }
 
 /**
@@ -513,6 +528,8 @@ export interface FerroGateRequirement {
   require_machine_identity: boolean;
   expected_audience: string;
   trust_domain: string;
+  /** MIA environment the client should dial (`mia-<env>.toml`); empty = default. */
+  mia_environment: string;
 }
 
 export interface FerroGateMachine {

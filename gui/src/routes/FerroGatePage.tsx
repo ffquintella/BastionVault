@@ -369,6 +369,7 @@ export function FerroGatePage() {
             {tab === "self" && (
               <MachineLoginPanel
                 expectedAudience={config?.expected_audience || ""}
+                miaEnvironment={config?.mia_environment || ""}
                 environments={environments}
                 toast={toast}
               />
@@ -512,15 +513,19 @@ export function FerroGatePage() {
 
 function MachineLoginPanel({
   expectedAudience,
+  miaEnvironment,
   environments,
   toast,
 }: {
   expectedAudience: string;
+  miaEnvironment: string;
   environments: string[];
   toast: (type: "success" | "error" | "info", message: string) => void;
 }) {
   const [socket, setSocket] = useState("");
-  const [environment, setEnvironment] = useState("");
+  // Seeded with the mount's saved `mia_environment` so the dial targets the
+  // MIA belonging to this deployment by default; the operator can override.
+  const [environment, setEnvironment] = useState(miaEnvironment);
   const [audience, setAudience] = useState(expectedAudience);
   const [mount, setMount] = useState("ferrogate");
   const [ttl, setTtl] = useState("300");
@@ -540,6 +545,12 @@ function MachineLoginPanel({
   useEffect(() => {
     setAudience((a) => (a ? a : expectedAudience));
   }, [expectedAudience]);
+  // Same for the environment: the config (and its saved mia_environment) may
+  // arrive after first render; fill the field only while the operator hasn't
+  // typed anything.
+  useEffect(() => {
+    setEnvironment((e) => (e ? e : miaEnvironment));
+  }, [miaEnvironment]);
 
   const ttlNum = parseInt(ttl || "0", 10) || 300;
 
@@ -742,8 +753,11 @@ function ConfigPanel({
   const [bootstrapPolicies, setBootstrapPolicies] = useState<string[]>(config.bootstrap_policies || []);
   const [requireUserToken, setRequireUserToken] = useState(config.require_user_token);
   const [requireMachineIdentity, setRequireMachineIdentity] = useState(config.require_machine_identity);
-  // MIA environment to autofill from (blank ⇒ the default mia.toml).
-  const [environment, setEnvironment] = useState("");
+  // MIA environment this deployment belongs to (blank ⇒ the default
+  // mia.toml). Persisted with the config: it picks which mia-<env>.toml the
+  // autofill reads AND is advertised to clients (via the requirement
+  // endpoint) so machine logins dial the matching local MIA.
+  const [environment, setEnvironment] = useState(config.mia_environment || "");
   const [saving, setSaving] = useState(false);
   const [autofilling, setAutofilling] = useState(false);
 
@@ -815,6 +829,7 @@ function ConfigPanel({
         bootstrapPolicies: bootstrapPolicies.join(","),
         requireUserToken,
         requireMachineIdentity,
+        miaEnvironment: environment.trim(),
       });
       toast("success", "Configuration saved");
       await onSaved();
@@ -898,7 +913,7 @@ function ConfigPanel({
               value={environment}
               onChange={(e) => setEnvironment(e.target.value)}
               placeholder="(default)"
-              hint="reads mia-<env>.toml"
+              hint="saved with the config; clients dial mia-<env>.toml"
             />
             <datalist id="ferrogate-config-environments">
               {environments.map((e) => (

@@ -36,7 +36,8 @@ Configure the trust anchor (root/sudo-gated) at `auth/ferrogate/config`:
 | `trust_domain` | FerroGate SPIFFE trust domain, e.g. `ferrogate.prod`. |
 | `expected_audience` | This vault's audience; matched against the child token `aud`. |
 | `jwks_source` | `static_jwks` (pasted keys) or `cmis_grpc` (fetch from CMIS). |
-| `cmis_endpoint` | CMIS `host:port` (for `cmis_grpc`). |
+| `cmis_endpoint` | CMIS `host:port` (for `cmis_grpc`). Ignored when `cmis_srv` is set. |
+| `cmis_srv` | DNS SRV owner name for a CMIS HA cluster (e.g. `_ferrogate-prod._tcp.example.com`). When set, the mount resolves it on each fetch and fails over across all advertised nodes (RFC 2782 order, per-node SPKI pin check); takes precedence over `cmis_endpoint`. |
 | `cmis_tls_enable` | `true` = hybrid PQ-TLS (`X25519MLKEM768`); `false` = cleartext (dev only). |
 | `cmis_spki_pins` | SHA-384 SPKI pins of the CMIS server cert (required when TLS is on). |
 | `static_jwks` | Pinned JWK set JSON (for `static_jwks`). |
@@ -45,6 +46,7 @@ Configure the trust anchor (root/sudo-gated) at `auth/ferrogate/config`:
 | `bootstrap_policies` | Policies granted to the bootstrapped machine (default `["default"]`). |
 | `login_rate_limit_per_min` | Per-source-IP login attempts/min (`0` = unlimited; default `10`). |
 | `require_user_token` | Require a `user_token` on every machine login and mint the **intersection** of machine and user policies (combined machine+user auth). Default `false`. |
+| `mia_environment` | MIA environment selector this deployment belongs to (e.g. `hml`): clients read `mia-<env>.toml` instead of the default `mia.toml` when dialing their local MIA for this server. Advertised on the unauthenticated `requirement` endpoint so the GUI's connect-time machine gate and combined-login binding pick the right MIA automatically. Empty = default environment. |
 | `require_machine_identity` | **Server-enforced:** every authenticated request to this server must present a machine-bound token (or a root token); plain user/token/approle sessions are rejected at the token layer. Clients discover this via the unauthenticated `auth/ferrogate/requirement` endpoint and cannot bypass it. Independent of `require_user_token` — set both for full combined enforcement. Default `false`. |
 
 > **Before enabling `require_machine_identity`:** make sure the trust anchor is configured and at least

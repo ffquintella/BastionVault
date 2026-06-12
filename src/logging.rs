@@ -106,7 +106,6 @@ pub struct LogConfig<'a> {
 /// call is a no-op — useful for tests that spin up multiple servers).
 pub fn init(cfg: LogConfig<'_>) -> Result<(), SetLoggerError> {
     let filter = LevelFilters::parse(cfg.level);
-    let level = filter.global;
     let rotate_size = if cfg.rotate_size_bytes == 0 {
         DEFAULT_ROTATE_SIZE_BYTES
     } else {

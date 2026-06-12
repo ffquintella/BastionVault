@@ -244,6 +244,13 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   validated as safe single path components; the GUI discovers installed environments by scanning the system and
   per-user config dirs (`ferrogate_list_environments`). The MIA helper layer gained `_for(environment)` variants
   (`resolve_mia_socket_for`, `read_cmis_config_for`, `read_allowlist_trust_domain_for`, `build_autoconfig`).
+- **MIA environment persisted + advertised (Unreleased, 2026-06-12).** The Config tab's MIA environment was
+  previously transient autofill state — lost on Save, and every GUI MIA dial (connect-time machine gate,
+  combined machine+user binding in `finalizeLogin`, Machine Login tab) used the default `mia.toml`. The mount
+  config now has a `mia_environment` field (validated as a safe single path component server-side), the
+  unauthenticated `requirement` endpoint advertises it, and clients capture it onto the in-memory
+  `RemoteProfile` (alongside `expected_audience`) so all machine logins resolve the matching
+  `mia-<env>.toml` socket automatically. The Config and Machine Login tabs prefill from the saved value.
 - Caveats: `cmis_grpc` is async-build only (the `sync_handler` feature is independently broken repo-wide);
   child-token revocation on the `static_jwks` source relies on short token TTL (the CRL is enforced on the SVID
   path); audit events are structured log lines (no dedicated audit-store rows).

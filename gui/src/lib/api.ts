@@ -487,6 +487,7 @@ export const ferrogateWriteConfig = (cfg: {
   bootstrapPolicies: string;
   requireUserToken: boolean;
   requireMachineIdentity: boolean;
+  miaEnvironment: string;
 }) =>
   invoke<void>("ferrogate_write_config", {
     trustDomain: cfg.trustDomain,
@@ -503,6 +504,7 @@ export const ferrogateWriteConfig = (cfg: {
     bootstrapPolicies: cfg.bootstrapPolicies,
     requireUserToken: cfg.requireUserToken,
     requireMachineIdentity: cfg.requireMachineIdentity,
+    miaEnvironment: cfg.miaEnvironment,
   });
 export const ferrogateListMachines = () => invoke<FerroGateMachine[]>("ferrogate_list_machines");
 export const ferrogateApprove = (id: string, policies: string, ttlSeconds: number, comment: string) =>
@@ -538,6 +540,7 @@ export const ferrogateMachineLogin = (
   mount: string,
   ttl: number,
   userToken?: string,
+  environment?: string,
 ) =>
   invoke<FerroGateLoginResult>("ferrogate_machine_login", {
     audience,
@@ -545,9 +548,22 @@ export const ferrogateMachineLogin = (
     mount,
     ttl,
     userToken,
+    environment: environment?.trim() || null,
   });
-export const ferrogateMachineStatus = (audience: string, socket: string, mount: string, ttl: number) =>
-  invoke<unknown>("ferrogate_machine_status", { audience, socket, mount, ttl });
+export const ferrogateMachineStatus = (
+  audience: string,
+  socket: string,
+  mount: string,
+  ttl: number,
+  environment?: string,
+) =>
+  invoke<unknown>("ferrogate_machine_status", {
+    audience,
+    socket,
+    mount,
+    ttl,
+    environment: environment?.trim() || null,
+  });
 export const ferrogateWhoami = (socket: string) => invoke<string>("ferrogate_whoami", { socket });
 
 // Identity groups

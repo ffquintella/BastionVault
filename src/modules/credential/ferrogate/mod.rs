@@ -162,6 +162,15 @@ pub struct FerroGateConfig {
     /// machine+user enforcement. Default `false`.
     #[serde(default)]
     pub require_machine_identity: bool,
+    /// MIA environment selector this deployment belongs to (e.g. `hml`,
+    /// `prod`): clients should read `mia-<env>.toml` rather than the default
+    /// `mia.toml` when minting child tokens for this server. Advertised on the
+    /// unauthenticated `requirement` endpoint so the connect flow dials the
+    /// right local MIA without operator input. Informational for the server
+    /// itself — verification is governed by the trust anchor above. Empty =
+    /// the default environment (`mia.toml`).
+    #[serde(default)]
+    pub mia_environment: String,
 }
 
 fn default_clock_leeway() -> i64 {
@@ -205,6 +214,7 @@ impl Default for FerroGateConfig {
             bootstrap_policies: default_bootstrap_policies(),
             require_user_token: false,
             require_machine_identity: false,
+            mia_environment: String::new(),
         }
     }
 }

@@ -49,6 +49,11 @@ pub struct FerroGateConfig {
     pub require_user_token: bool,
     #[serde(default)]
     pub require_machine_identity: bool,
+    /// MIA environment selector for this deployment — clients read
+    /// `mia-<env>.toml` when minting child tokens for this server. Empty =
+    /// the default `mia.toml`.
+    #[serde(default)]
+    pub mia_environment: String,
 }
 
 /// A machine enrolment summary as listed by the admin endpoint.
@@ -102,6 +107,10 @@ pub struct FerroGateRequirement {
     /// FerroGate trust domain the server expects; informational.
     #[serde(default)]
     pub trust_domain: String,
+    /// MIA environment the client should use to reach this server (selects
+    /// `mia-<env>.toml` for the local MIA dial); empty when unset.
+    #[serde(default)]
+    pub mia_environment: String,
 }
 
 /// Ask the connected server whether it requires FerroGate machine identity.
@@ -147,6 +156,7 @@ pub async fn ferrogate_write_config(
     bootstrap_policies: String,
     require_user_token: bool,
     require_machine_identity: bool,
+    mia_environment: String,
 ) -> CmdResult<()> {
     let mut body = Map::new();
     body.insert("trust_domain".into(), Value::String(trust_domain));
@@ -165,6 +175,7 @@ pub async fn ferrogate_write_config(
     body.insert("bootstrap_policies".into(), Value::String(bootstrap_policies));
     body.insert("require_user_token".into(), Value::Bool(require_user_token));
     body.insert("require_machine_identity".into(), Value::Bool(require_machine_identity));
+    body.insert("mia_environment".into(), Value::String(mia_environment));
 
     make_request(&state, Operation::Write, "auth/ferrogate/config".into(), Some(body)).await?;
     Ok(())
@@ -370,13 +381,23 @@ pub async fn ferrogate_autoconfig(_audience: String, _environment: Option<String
     Err("FerroGate autoconfig is only available on Unix (the MIA is not supported on this platform yet)".into())
 }
 
-fn norm_socket(socket: String) -> String {
+/// Resolve the MIA socket to dial: an explicit socket wins; otherwise resolve
+/// the installed MIA's configured path for `environment` (`mia-<env>.toml`,
+/// blank ⇒ the default `mia.toml`). The environment typically comes from the
+/// server's advertised `mia_environment` so the client dials the MIA that
+/// belongs to the deployment it is connecting to. An invalid environment name
+/// (e.g. path syntax) is refused rather than silently falling back.
+fn norm_socket(socket: String, environment: Option<String>) -> Result<String, String> {
     let s = socket.trim();
-    if s.is_empty() {
-        ferrogate_default_socket(None)
-    } else {
-        s.to_string()
+    if !s.is_empty() {
+        return Ok(s.to_string());
     }
+    let env = environment.as_deref().map(str::trim).filter(|e| !e.is_empty());
+    #[cfg(unix)]
+    if let Some(e) = env {
+        bastion_vault::cli::command::ferrogate_mia::validate_environment(e)?;
+    }
+    Ok(ferrogate_default_socket(env.map(str::to_string)))
 }
 
 fn norm_mount(mount: String) -> String {
@@ -396,8 +417,9 @@ pub async fn ferrogate_machine_login(
     mount: String,
     ttl: u32,
     user_token: Option<String>,
+    environment: Option<String>,
 ) -> CmdResult<FerroGateLoginResult> {
-    let socket = norm_socket(socket);
+    let socket = norm_socket(socket, environment)?;
     let mount = norm_mount(mount);
     let ttl = if ttl == 0 { 300 } else { ttl };
 
@@ -486,8 +508,9 @@ pub async fn ferrogate_machine_status(
     socket: String,
     mount: String,
     ttl: u32,
+    environment: Option<String>,
 ) -> CmdResult<Value> {
-    let socket = norm_socket(socket);
+    let socket = norm_socket(socket, environment)?;
     let mount = norm_mount(mount);
     let ttl = if ttl == 0 { 300 } else { ttl };
 
@@ -515,7 +538,7 @@ pub async fn ferrogate_machine_status(
 #[cfg(unix)]
 #[tauri::command]
 pub async fn ferrogate_whoami(socket: String) -> CmdResult<String> {
-    let socket = norm_socket(socket);
+    let socket = norm_socket(socket, None)?;
     let (_jws, _proof, spiffe) = mia_mint(socket, "urn:bvault:ferrogate:whoami".into(), 60).await?;
     if spiffe.is_empty() {
         return Err("could not read SPIFFE id from the minted token".into());
@@ -535,6 +558,7 @@ pub async fn ferrogate_machine_login(
     _mount: String,
     _ttl: u32,
     _user_token: Option<String>,
+    _environment: Option<String>,
 ) -> CmdResult<FerroGateLoginResult> {
     Err("FerroGate MIA login is only available on Unix (the MIA helper socket is not supported on this platform yet)".into())
 }
@@ -547,6 +571,7 @@ pub async fn ferrogate_machine_status(
     _socket: String,
     _mount: String,
     _ttl: u32,
+    _environment: Option<String>,
 ) -> CmdResult<Value> {
     Err("FerroGate MIA status is only available on Unix".into())
 }

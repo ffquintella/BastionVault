@@ -144,6 +144,8 @@ export function ConnectPage() {
   const [machineGate, setMachineGate] = useState<{
     targetId: string;
     audience: string;
+    /** Server-advertised MIA environment for the dial (mia-<env>.toml). */
+    environment: string;
     spiffe: string;
     enrolment: FerroGateEnrolment;
     message: string;
@@ -355,9 +357,12 @@ export function ConnectPage() {
     // proof does not match the request"). Fall back to the address only when the
     // server left it unset. Socket "" resolves the installed MIA's configured path.
     const audience = profile.expected_audience || profile.address;
+    // Dial the MIA the server says this deployment belongs to (its advertised
+    // mia_environment selects mia-<env>.toml); blank = the default mia.toml.
+    const environment = profile.mia_environment || "";
     let r;
     try {
-      r = await api.ferrogateMachineLogin(audience, "", "ferrogate", 300);
+      r = await api.ferrogateMachineLogin(audience, "", "ferrogate", 300, undefined, environment);
     } catch (e) {
       // Transport / token-verification / config failure — a hard error, not an
       // enrolment decision. Surface it and stop.
@@ -368,6 +373,7 @@ export function ConnectPage() {
     setMachineGate({
       targetId,
       audience,
+      environment,
       spiffe: r.spiffe_id,
       enrolment: r.enrolment,
       message: r.message,
@@ -388,7 +394,14 @@ export function ConnectPage() {
     if (!machineGate) return;
     setMachineGateBusy(true);
     try {
-      const r = await api.ferrogateMachineLogin(machineGate.audience, "", "ferrogate", 300);
+      const r = await api.ferrogateMachineLogin(
+        machineGate.audience,
+        "",
+        "ferrogate",
+        300,
+        undefined,
+        machineGate.environment,
+      );
       if (r.authenticated) {
         const targetId = machineGate.targetId;
         setMachineGate(null);
@@ -480,10 +493,12 @@ export function ConnectPage() {
           // the token layer regardless, so this is only UX.
           let required = false;
           let expectedAudience = "";
+          let miaEnvironment = "";
           try {
             const req = await api.ferrogateRequirement();
             required = req.require_machine_identity;
             expectedAudience = req.expected_audience;
+            miaEnvironment = req.mia_environment || "";
           } catch {
             required = false;
           }
@@ -491,6 +506,7 @@ export function ConnectPage() {
             ...profile.spec.profile,
             require_machine_identity: required,
             expected_audience: expectedAudience,
+            mia_environment: miaEnvironment,
           };
           setRemoteProfile(effectiveProfile);
           // Pick up the cluster-discovery result (if any) so the

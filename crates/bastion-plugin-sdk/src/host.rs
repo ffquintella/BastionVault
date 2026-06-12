@@ -441,7 +441,10 @@ mod bindings {
     }
 
     /// Test helpers — exposed via `bastion_plugin_sdk::test_support`
-    /// when the `host_test` feature is on.
+    /// when the `host_test` feature is on. Compiled only under that
+    /// feature: without it the parent `host` module is private, so
+    /// these helpers would be unreachable dead code.
+    #[cfg(feature = "host_test")]
     pub mod test_support {
         use super::STATE;
         use alloc::vec::Vec;
@@ -495,5 +498,5 @@ mod bindings {
     }
 }
 
-#[cfg(any(not(target_arch = "wasm32"), feature = "host_test"))]
+#[cfg(feature = "host_test")]
 pub use bindings::test_support;

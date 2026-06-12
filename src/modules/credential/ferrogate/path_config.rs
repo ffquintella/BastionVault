@@ -116,6 +116,11 @@ impl FerroGateBackend {
                     field_type: FieldType::Bool,
                     required: false,
                     description: "Server-enforced: when true, EVERY authenticated request must present a FerroGate machine-bound token (or a root token). Clients discover this via auth/ferrogate/requirement and cannot bypass it."
+                },
+                "mia_environment": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "MIA environment selector for this deployment (clients read mia-<env>.toml). Advertised via auth/ferrogate/requirement; empty = the default mia.toml."
                 }
             },
             operations: [
@@ -231,6 +236,23 @@ impl FerroGateBackendInner {
         if let Ok(v) = req.get_data("require_machine_identity") {
             config.require_machine_identity = v.as_bool_ex().ok_or(RvError::ErrRequestFieldInvalid)?;
         }
+        if let Ok(v) = req.get_data("mia_environment") {
+            let env = v.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.trim().to_string();
+            // Same charset rule as the MIA's own environment validation: the
+            // value is advertised to clients which turn it into a
+            // `mia-<env>.toml` file name, so it must never carry path syntax.
+            if !env.is_empty()
+                && !env.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            {
+                return Ok(Some(Response::error_response(
+                    "mia_environment is invalid: use only letters, digits, '.', '-', '_'",
+                )));
+            }
+            if env == "." || env == ".." {
+                return Ok(Some(Response::error_response("mia_environment is not a valid environment name")));
+            }
+            config.mia_environment = env;
+        }
 
         self.set_config(req, &config).await?;
 
@@ -251,6 +273,7 @@ impl FerroGateBackendInner {
         data.insert("require_machine_identity".to_string(), serde_json::Value::Bool(config.require_machine_identity));
         data.insert("expected_audience".to_string(), serde_json::Value::String(config.expected_audience));
         data.insert("trust_domain".to_string(), serde_json::Value::String(config.trust_domain));
+        data.insert("mia_environment".to_string(), serde_json::Value::String(config.mia_environment));
         Ok(Some(Response::data_response(Some(data))))
     }
 }
