@@ -216,8 +216,8 @@ fn read_helper_socket(path: &Path) -> Option<String> {
 pub struct CmisDiscovery {
     /// CMIS host:port for a literal `[cmis].endpoint`, scheme stripped
     /// (BastionVault's gRPC fetcher re-adds it). Empty when CMIS is advertised
-    /// via a DNS SRV record (see [`srv`](Self::srv)), which is resolved to a
-    /// concrete host:port later, in [`build_autoconfig`].
+    /// via a DNS SRV record (see [`srv`](Self::srv)), which is passed through to
+    /// the mount and resolved at fetch time (not here).
     pub endpoint: String,
     /// DNS SRV owner name from `[cmis].srv` (e.g. `_ferrogate._tcp.example.com`)
     /// — how a CMIS HA cluster is advertised. Mutually exclusive with a literal
@@ -271,50 +271,6 @@ fn read_cmis(path: &Path) -> Option<CmisDiscovery> {
         return Some(CmisDiscovery { endpoint: String::new(), srv: Some(srv.to_string()), spki_pin, tls_enable: true });
     }
     None
-}
-
-/// Resolve a CMIS `[cmis].srv` owner name to a single `host:port`, choosing the
-/// most-preferred record by RFC 2782 (ascending priority, then descending
-/// weight, then target name). Mirrors the MIA's own SRV selection
-/// (`ferrogate/crates/mia/src/endpoint.rs`) so the mount dials the same node the
-/// MIA would. BastionVault's `cmis_grpc` source takes a single static endpoint,
-/// so this picks the best candidate — a snapshot of the cluster at config time.
-async fn resolve_cmis_srv(name: &str) -> Result<String, String> {
-    use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-    use hickory_resolver::net::runtime::TokioRuntimeProvider;
-    use hickory_resolver::proto::rr::RData;
-    use hickory_resolver::TokioResolver;
-
-    if name.is_empty() {
-        return Err("CMIS SRV record name is empty".to_string());
-    }
-    let (cfg, opts) = hickory_resolver::system_conf::read_system_conf()
-        .unwrap_or_else(|_| (ResolverConfig::default(), ResolverOpts::default()));
-    let mut builder = TokioResolver::builder_with_config(cfg, TokioRuntimeProvider::default());
-    *builder.options_mut() = opts;
-    let resolver = builder.build().map_err(|e| format!("DNS resolver init failed: {e}"))?;
-
-    let resp = resolver.srv_lookup(name).await.map_err(|e| format!("SRV lookup for {name:?} failed: {e}"))?;
-
-    // (priority, weight, port, target); a "." target means "not available here"
-    // (RFC 2782) and is dropped.
-    let mut records: Vec<(u16, u16, u16, String)> = resp
-        .answers()
-        .iter()
-        .filter_map(|rec| match &rec.data {
-            RData::SRV(srv) => {
-                let target = srv.target.to_utf8().trim_end_matches('.').to_string();
-                (!target.is_empty()).then_some((srv.priority, srv.weight, srv.port, target))
-            }
-            _ => None,
-        })
-        .collect();
-    if records.is_empty() {
-        return Err(format!("SRV record {name:?} resolved to no usable CMIS targets"));
-    }
-    records.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)).then(a.3.cmp(&b.3)));
-    let (_, _, port, target) = records.into_iter().next().expect("non-empty checked above");
-    Ok(format!("{target}:{port}"))
 }
 
 /// Read the trust domain from the local signed allowlist for the default
@@ -382,8 +338,13 @@ pub struct FerrogateAutoConfig {
     pub expected_audience: String,
     /// Always `cmis_grpc`: keys are fetched + refreshed from CMIS.
     pub jwks_source: String,
-    /// CMIS host:port (from `mia.toml`).
+    /// CMIS host:port for a literal `[cmis].endpoint` (from `mia.toml`); empty
+    /// when CMIS is advertised via SRV (see `cmis_srv`).
     pub cmis_endpoint: String,
+    /// DNS SRV owner name from `[cmis].srv` (from `mia.toml`), passed through
+    /// verbatim so the mount resolves it and fails over across all advertised
+    /// nodes — mirroring the MIA. Empty when a literal endpoint is used.
+    pub cmis_srv: String,
     /// CMIS SPKI pin(s) (from `mia.toml`).
     pub cmis_spki_pins: Vec<String>,
     /// Dial CMIS over (PQ-)TLS.
@@ -427,17 +388,20 @@ pub async fn build_autoconfig(
     let mut warnings = Vec::new();
 
     // CMIS may be advertised by a DNS SRV record (an HA cluster) rather than a
-    // literal endpoint; resolve it to a concrete host:port the mount can dial.
-    let cmis_endpoint = if disc.endpoint.is_empty() {
-        let srv = disc.srv.as_deref().unwrap_or_default();
-        let resolved = resolve_cmis_srv(srv).await?;
+    // literal endpoint. Pass the SRV name through verbatim so the mount
+    // resolves it at every fetch and fails over across all advertised nodes —
+    // mirroring the MIA. (Storing a single resolved node here would pin the
+    // mount to one cluster member, unable to fail over if that node's cert
+    // diverged from the shared SPKI pin — the failure this autofill caused.)
+    let (cmis_endpoint, cmis_srv) = if disc.endpoint.is_empty() {
+        let srv = disc.srv.clone().unwrap_or_default();
         warnings.push(format!(
-            "CMIS endpoint resolved from SRV {srv} → {resolved}; the mount pins a single node — \
-             re-run autofill if the cluster changes"
+            "CMIS advertised via SRV {srv}; the mount resolves it on each fetch and fails over \
+             across all advertised nodes (mirrors the MIA)"
         ));
-        resolved
+        (String::new(), srv)
     } else {
-        disc.endpoint.clone()
+        (disc.endpoint.clone(), String::new())
     };
 
     let trust_domain = read_allowlist_trust_domain_for(environment).unwrap_or_else(|| {
@@ -452,6 +416,7 @@ pub async fn build_autoconfig(
     let pins: Vec<String> = if disc.spki_pin.is_empty() { Vec::new() } else { vec![disc.spki_pin.clone()] };
     let probe = FerroGateConfig {
         cmis_endpoint: cmis_endpoint.clone(),
+        cmis_srv: cmis_srv.clone(),
         cmis_spki_pins: pins.clone(),
         cmis_tls_enable: disc.tls_enable,
         ..FerroGateConfig::default()
@@ -474,6 +439,7 @@ pub async fn build_autoconfig(
         expected_audience,
         jwks_source: jwks_source::CMIS_GRPC.to_string(),
         cmis_endpoint,
+        cmis_srv,
         cmis_spki_pins: pins,
         cmis_tls_enable: disc.tls_enable,
         fetched_jwks,

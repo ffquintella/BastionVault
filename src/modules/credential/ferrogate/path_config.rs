@@ -45,7 +45,12 @@ impl FerroGateBackend {
                 "cmis_endpoint": {
                     field_type: FieldType::Str,
                     required: false,
-                    description: "CMIS gRPC endpoint (when jwks_source = cmis_grpc)."
+                    description: "CMIS gRPC endpoint (when jwks_source = cmis_grpc). Ignored when cmis_srv is set."
+                },
+                "cmis_srv": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "DNS SRV owner name for a CMIS HA cluster (e.g. _ferrogate-prod._tcp.example.com). When set, the mount resolves it and fails over across all advertised nodes; takes precedence over cmis_endpoint."
                 },
                 "cmis_spki_pins": {
                     field_type: FieldType::CommaStringSlice,
@@ -182,6 +187,9 @@ impl FerroGateBackendInner {
         }
         if let Ok(v) = req.get_data("cmis_endpoint") {
             config.cmis_endpoint = v.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        }
+        if let Ok(v) = req.get_data("cmis_srv") {
+            config.cmis_srv = v.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         }
         if let Ok(v) = req.get_data("cmis_spki_pins") {
             config.cmis_spki_pins = v.as_comma_string_slice().ok_or(RvError::ErrRequestFieldInvalid)?;

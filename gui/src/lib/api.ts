@@ -477,6 +477,7 @@ export const ferrogateWriteConfig = (cfg: {
   expectedAudience: string;
   jwksSource: string;
   cmisEndpoint: string;
+  cmisSrv: string;
   cmisSpkiPins: string;
   staticJwks: string;
   acceptSvid: boolean;
@@ -492,6 +493,7 @@ export const ferrogateWriteConfig = (cfg: {
     expectedAudience: cfg.expectedAudience,
     jwksSource: cfg.jwksSource,
     cmisEndpoint: cfg.cmisEndpoint,
+    cmisSrv: cfg.cmisSrv,
     cmisSpkiPins: cfg.cmisSpkiPins,
     staticJwks: cfg.staticJwks,
     acceptSvid: cfg.acceptSvid,
@@ -521,6 +523,7 @@ export type FerroGateAutoConfig = {
   expected_audience: string;
   jwks_source: string;
   cmis_endpoint: string;
+  cmis_srv: string;
   cmis_spki_pins: string[];
   cmis_tls_enable: boolean;
   fetched_jwks: string;

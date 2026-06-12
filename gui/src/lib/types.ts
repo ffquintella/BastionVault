@@ -484,6 +484,7 @@ export interface FerroGateConfig {
   expected_audience: string;
   jwks_source: string;
   cmis_endpoint: string;
+  cmis_srv: string;
   cmis_spki_pins: string[];
   static_jwks: string;
   accept_svid: boolean;

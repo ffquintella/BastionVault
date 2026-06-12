@@ -732,6 +732,7 @@ function ConfigPanel({
   const [expectedAudience, setExpectedAudience] = useState(config.expected_audience);
   const [jwksSource, setJwksSource] = useState(config.jwks_source || "static_jwks");
   const [cmisEndpoint, setCmisEndpoint] = useState(config.cmis_endpoint);
+  const [cmisSrv, setCmisSrv] = useState(config.cmis_srv);
   const [cmisSpkiPins, setCmisSpkiPins] = useState((config.cmis_spki_pins || []).join(","));
   const [staticJwks, setStaticJwks] = useState(config.static_jwks);
   const [acceptSvid, setAcceptSvid] = useState(config.accept_svid);
@@ -761,14 +762,20 @@ function ConfigPanel({
       const r = await api.ferrogateAutoconfig(expectedAudience.trim(), environment.trim() || undefined);
       if (r.trust_domain) setTrustDomain(r.trust_domain);
       setJwksSource(r.jwks_source || "cmis_grpc");
+      // The MIA advertises CMIS either as a literal endpoint or a DNS SRV
+      // record (an HA cluster). Carry through whichever it is; storing the SRV
+      // lets the mount fail over across nodes the way the MIA does, instead of
+      // pinning a single resolved node.
       setCmisEndpoint(r.cmis_endpoint);
+      setCmisSrv(r.cmis_srv);
       setCmisSpkiPins((r.cmis_spki_pins || []).join(","));
       setCmisTlsEnable(r.cmis_tls_enable);
       if (r.fetched_jwks) setStaticJwks(r.fetched_jwks);
       (r.warnings || []).forEach((w) => toast("info", w));
+      const cmis = r.cmis_srv ? `CMIS SRV ${r.cmis_srv}` : `CMIS ${r.cmis_endpoint}`;
       toast(
         "success",
-        `Filled from local MIA: CMIS ${r.cmis_endpoint}, ${(r.jwks_kids || []).length} key(s). Review and Save.`,
+        `Filled from local MIA: ${cmis}, ${(r.jwks_kids || []).length} key(s). Review and Save.`,
       );
     } catch (e) {
       toast("error", extractError(e));
@@ -798,6 +805,7 @@ function ConfigPanel({
         expectedAudience,
         jwksSource,
         cmisEndpoint,
+        cmisSrv,
         cmisSpkiPins,
         staticJwks,
         acceptSvid,
@@ -832,6 +840,13 @@ function ConfigPanel({
           ]}
         />
         <Input label="CMIS endpoint" value={cmisEndpoint} onChange={(e) => setCmisEndpoint(e.target.value)} placeholder="cmis.example.com:8443" />
+        <Input
+          label="CMIS SRV record"
+          value={cmisSrv}
+          onChange={(e) => setCmisSrv(e.target.value)}
+          placeholder="_ferrogate-prod._tcp.example.com"
+          title="DNS SRV name for a CMIS HA cluster. When set, the mount resolves it on each fetch and fails over across all advertised nodes (mirrors the MIA); takes precedence over the endpoint above. Leave blank to dial a single endpoint."
+        />
         <div className="col-span-2">
           <Input label="CMIS SPKI pins (comma-separated SHA-384 hex)" value={cmisSpkiPins} onChange={(e) => setCmisSpkiPins(e.target.value)} />
         </div>

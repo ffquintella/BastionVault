@@ -83,9 +83,22 @@ pub struct FerroGateConfig {
     /// One of [`jwks_source`].
     #[serde(default)]
     pub jwks_source: String,
-    /// CMIS gRPC endpoint (when `jwks_source == cmis_grpc`).
+    /// CMIS gRPC endpoint (when `jwks_source == cmis_grpc`). A single literal
+    /// `host:port`. Ignored when `cmis_srv` is set.
     #[serde(default)]
     pub cmis_endpoint: String,
+    /// DNS SRV owner name advertising a CMIS HA cluster, e.g.
+    /// `_ferrogate-prod._tcp.example.com`. When set, the mount resolves it at
+    /// each JWKS fetch and tries every advertised node in RFC 2782 order
+    /// (ascending priority, then descending weight) until one connects and
+    /// verifies its SPKI pin — mirroring the MIA's own SRV failover, so a node
+    /// whose cert has diverged from the cluster pin is skipped rather than
+    /// failing the whole fetch. The shared SPKI pin authenticates whichever
+    /// node answers. Takes precedence over `cmis_endpoint`; when set,
+    /// `cmis_same_host` host-local aliasing does not apply. Empty = dial the
+    /// single literal `cmis_endpoint`.
+    #[serde(default)]
+    pub cmis_srv: String,
     /// SHA-384 SPKI pins for the CMIS server certificate (hex), used for the
     /// hybrid-PQC TLS fetch.
     #[serde(default)]
@@ -178,6 +191,7 @@ impl Default for FerroGateConfig {
             expected_audience: String::new(),
             jwks_source: jwks_source::STATIC.to_string(),
             cmis_endpoint: String::new(),
+            cmis_srv: String::new(),
             cmis_spki_pins: Vec::new(),
             static_jwks: String::new(),
             accept_svid: false,
@@ -863,17 +877,23 @@ mod test {
     /// ```
     #[cfg(not(feature = "sync_handler"))]
     #[tokio::test]
-    #[ignore = "requires a live CMIS at $FERROGATE_CMIS_ENDPOINT (e.g. an SSH tunnel to segdc1vds0005:8443)"]
+    #[ignore = "requires a live CMIS at $FERROGATE_CMIS_ENDPOINT or $FERROGATE_CMIS_SRV (e.g. an SSH tunnel to segdc1vds0005:8443, or the HML SRV _ferrogate-hml._tcp.esi.fgv.br)"]
     async fn test_cmis_grpc_live_fetch() {
         use ferro_child_verify::JwkSet;
 
-        let endpoint = std::env::var("FERROGATE_CMIS_ENDPOINT").expect("set FERROGATE_CMIS_ENDPOINT");
+        // Either FERROGATE_CMIS_SRV (a DNS SRV owner name → HA failover path) or
+        // FERROGATE_CMIS_ENDPOINT (a single host:port) must be set; SRV takes
+        // precedence, matching the mount.
+        let srv = std::env::var("FERROGATE_CMIS_SRV").unwrap_or_default();
+        let endpoint = std::env::var("FERROGATE_CMIS_ENDPOINT").unwrap_or_default();
+        assert!(!srv.is_empty() || !endpoint.is_empty(), "set FERROGATE_CMIS_SRV or FERROGATE_CMIS_ENDPOINT");
         // If FERROGATE_CMIS_SPKI_PIN (hex SHA-384) is set, exercise the hybrid
         // PQ-TLS path; otherwise plaintext. CMIS >= 0.15.0 is TLS-only.
         let pin = std::env::var("FERROGATE_CMIS_SPKI_PIN").ok();
         let cfg = super::FerroGateConfig {
             jwks_source: super::jwks_source::CMIS_GRPC.to_string(),
             cmis_endpoint: endpoint,
+            cmis_srv: srv,
             cmis_tls_enable: pin.is_some(),
             cmis_spki_pins: pin.into_iter().collect(),
             // With FERROGATE_CMIS_SAME_HOST set, exercises the host-local

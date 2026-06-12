@@ -45,6 +45,33 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-06-12
+
+### Added
+
+#### FerroGate CMIS HA failover
+
+- **`cmis_srv` config field for the `ferrogate` mount**
+  (`src/modules/credential/ferrogate/`). Set a DNS SRV owner name (e.g.
+  `_ferrogate-prod._tcp.example.com`) and the mount resolves it on every JWKS
+  fetch, then dials every advertised CMIS node in RFC 2782 order (ascending
+  priority, then descending weight) until one connects *and* verifies its SPKI
+  pin. The shared pin authenticates whichever node answers. Takes precedence
+  over `cmis_endpoint`; exposed in the GUI config form and CLI. Mirrors the
+  MIA's own SRV failover. (`features/machine-authentication.md`)
+
+### Fixed
+
+- **CMIS client now fails over across HA nodes instead of pinning one.**
+  Previously the `cmis_grpc` source dialed a single configured `cmis_endpoint`
+  (plus host-local aliases) with no SRV resolution or failover, while the MIA
+  resolved the SRV and failed over automatically. When one cluster node's cert
+  SPKI diverged from the shared pin, BastionVault — pointed at that node by GUI
+  autofill — failed with "SPKI pin mismatch" while the MIA transparently used a
+  healthy sibling. The CMIS client and `Autofill from local MIA` now carry the
+  SRV through (rather than a single resolved node), so the mount fails over the
+  way the MIA does.
+
 ## [0.14.2] - 2026-06-12
 
 ### Changed

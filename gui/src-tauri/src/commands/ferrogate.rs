@@ -24,6 +24,8 @@ pub struct FerroGateConfig {
     #[serde(default)]
     pub cmis_endpoint: String,
     #[serde(default)]
+    pub cmis_srv: String,
+    #[serde(default)]
     pub cmis_spki_pins: Vec<String>,
     #[serde(default)]
     pub static_jwks: String,
@@ -135,6 +137,7 @@ pub async fn ferrogate_write_config(
     expected_audience: String,
     jwks_source: String,
     cmis_endpoint: String,
+    cmis_srv: String,
     cmis_spki_pins: String,
     static_jwks: String,
     accept_svid: bool,
@@ -152,6 +155,7 @@ pub async fn ferrogate_write_config(
         body.insert("jwks_source".into(), Value::String(jwks_source));
     }
     body.insert("cmis_endpoint".into(), Value::String(cmis_endpoint));
+    body.insert("cmis_srv".into(), Value::String(cmis_srv));
     body.insert("cmis_spki_pins".into(), Value::String(cmis_spki_pins));
     body.insert("static_jwks".into(), Value::String(static_jwks));
     body.insert("accept_svid".into(), Value::Bool(accept_svid));

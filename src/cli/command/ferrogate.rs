@@ -358,15 +358,22 @@ impl CommandExecutor for Autoconfig {
             body.insert("expected_audience".into(), Value::String(cfg.expected_audience.clone()));
             body.insert("jwks_source".into(), Value::String(cfg.jwks_source.clone()));
             body.insert("cmis_endpoint".into(), Value::String(cfg.cmis_endpoint.clone()));
+            body.insert("cmis_srv".into(), Value::String(cfg.cmis_srv.clone()));
             body.insert("cmis_spki_pins".into(), Value::String(cfg.cmis_spki_pins.join(",")));
             body.insert("cmis_tls_enable".into(), Value::Bool(cfg.cmis_tls_enable));
 
             let path = format!("auth/{}/config", self.mount.trim_matches('/'));
             client.logical().write(&path, Some(body))?;
+            // Report whichever CMIS locator was configured — the SRV name for
+            // an HA cluster, otherwise the literal endpoint.
+            let cmis = if cfg.cmis_srv.is_empty() {
+                format!("cmis_endpoint={}", cfg.cmis_endpoint)
+            } else {
+                format!("cmis_srv={}", cfg.cmis_srv)
+            };
             println!(
-                "configured {path}: trust_domain={:?}, cmis_endpoint={}, {} key(s) {:?}",
+                "configured {path}: trust_domain={:?}, {cmis}, {} key(s) {:?}",
                 cfg.trust_domain,
-                cfg.cmis_endpoint,
                 cfg.jwks_kids.len(),
                 cfg.jwks_kids
             );

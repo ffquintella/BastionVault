@@ -128,7 +128,12 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   container the host's own address hairpins into the container's empty namespace — so with the flag set the
   fetch tries `host.containers.internal:<port>`, then loopback, then the configured endpoint (SPKI pin
   authenticates the peer whichever name connects). Connect errors also unwrap tonic's `source()` chain so the
-  real cause (pin mismatch, refused, handshake alert) is surfaced instead of a bare `"transport error"`.
+  real cause (pin mismatch, refused, handshake alert) is surfaced instead of a bare `"transport error"`. A
+  `cmis_srv` config flag (2026-06-12) gives the mount the MIA's own SRV failover: set a DNS SRV owner name and
+  the CMIS client resolves it on each fetch, then dials every advertised node in RFC 2782 order until one
+  connects *and* verifies its SPKI pin — so a node whose cert has diverged from the shared cluster pin is
+  skipped rather than taking the mount down. Takes precedence over `cmis_endpoint`; *Autofill from local MIA*
+  now stores the SRV name (not a single resolved node) so the mount fails over the way the MIA does.
 - **Phase 5 shipped (Unix).** Client CLI `bvault ferrogate login|status|whoami` driving the FerroGate **MIA
   helper socket** (`/run/ferrogate/mia.sock`, length-delimited CBOR, mirrored from `mia::helper::proto`): `login`
   mints a DPoP-bound child token from the MIA, builds the RFC 9449 proof, and exchanges it at
@@ -231,8 +236,11 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   on `bvault ferrogate {login,status,whoami,autoconfig}`: a host running side-by-side FerroGate deployments has
   one `mia-<env>.toml` per environment (e.g. `mia-hml.toml`), and the selector reads that file's CMIS
   endpoint/pin, allowlist, and helper socket instead of the default `mia.toml`. CMIS may be configured
-  either as a literal `[cmis].endpoint` or as a DNS SRV record (`[cmis].srv`, an HA cluster) — the latter
-  is resolved to a concrete `host:port` by RFC 2782 ordering during autofill (v0.14.1). Environment selectors are
+  either as a literal `[cmis].endpoint` or as a DNS SRV record (`[cmis].srv`, an HA cluster) — for an SRV
+  source, autofill now carries the SRV owner name straight into the mount's `cmis_srv` field (2026-06-12)
+  so the mount resolves it on every fetch and fails over across all advertised nodes, rather than pinning the
+  single best node resolved at config time (the v0.14.1 behavior, which could not fail over if that node's cert
+  diverged from the shared pin). Environment selectors are
   validated as safe single path components; the GUI discovers installed environments by scanning the system and
   per-user config dirs (`ferrogate_list_environments`). The MIA helper layer gained `_for(environment)` variants
   (`resolve_mia_socket_for`, `read_cmis_config_for`, `read_allowlist_trust_domain_for`, `build_autoconfig`).
