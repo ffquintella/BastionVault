@@ -13,6 +13,8 @@ import {
   Modal,
   ConfirmModal,
   EmptyState,
+  PolicySelect,
+  unknownPolicies,
   useToast,
 } from "../components/ui";
 import type { FerroGateConfig, FerroGateMachine, FerroGateLoginResult } from "../lib/types";
@@ -59,6 +61,12 @@ export function FerroGatePage() {
   // Named ACL policies that exist on the vault, for the selector. Excludes
   // `root` (never grantable to a machine) and `default` (baseline, always on).
   const [availablePolicies, setAvailablePolicies] = useState<string[]>([]);
+  // False when listing policies failed (no admin on the policies path) — the
+  // selectors then fall back to free-text so the editor still works.
+  const [policiesListable, setPoliciesListable] = useState(true);
+  // MIA environment selectors installed on this host (`mia-<env>.toml`), for
+  // the autofill/socket environment autocomplete.
+  const [environments, setEnvironments] = useState<string[]>([]);
   const [approveTtl, setApproveTtl] = useState("3600");
   const [approveComment, setApproveComment] = useState("");
 
@@ -105,10 +113,18 @@ export function FerroGatePage() {
       try {
         const pol = await api.listPolicies();
         setAvailablePolicies(pol.policies.filter((p) => p !== "root" && p !== "default"));
+        setPoliciesListable(true);
       } catch {
-        // Listing policies needs admin; if it fails the modal falls back to a
+        // Listing policies needs admin; if it fails the selectors fall back to a
         // free-text field so the editor still works.
         setAvailablePolicies([]);
+        setPoliciesListable(false);
+      }
+      try {
+        const envs = await api.ferrogateListEnvironments();
+        setEnvironments(Array.isArray(envs) ? envs : []);
+      } catch {
+        setEnvironments([]);
       }
     } catch (e) {
       // A missing mount surfaces as an error here.
@@ -350,9 +366,24 @@ export function FerroGatePage() {
               </Card>
             )}
 
-            {tab === "self" && <MachineLoginPanel expectedAudience={config?.expected_audience || ""} toast={toast} />}
+            {tab === "self" && (
+              <MachineLoginPanel
+                expectedAudience={config?.expected_audience || ""}
+                environments={environments}
+                toast={toast}
+              />
+            )}
 
-            {tab === "config" && config && <ConfigPanel config={config} onSaved={load} toast={toast} />}
+            {tab === "config" && config && (
+              <ConfigPanel
+                config={config}
+                availablePolicies={availablePolicies}
+                policiesListable={policiesListable}
+                environments={environments}
+                onSaved={load}
+                toast={toast}
+              />
+            )}
           </>
         )}
       </div>
@@ -481,12 +512,15 @@ export function FerroGatePage() {
 
 function MachineLoginPanel({
   expectedAudience,
+  environments,
   toast,
 }: {
   expectedAudience: string;
+  environments: string[];
   toast: (type: "success" | "error" | "info", message: string) => void;
 }) {
   const [socket, setSocket] = useState("");
+  const [environment, setEnvironment] = useState("");
   const [audience, setAudience] = useState(expectedAudience);
   const [mount, setMount] = useState("ferrogate");
   const [ttl, setTtl] = useState("300");
@@ -495,11 +529,12 @@ function MachineLoginPanel({
   const [statusJson, setStatusJson] = useState("");
   const [result, setResult] = useState<FerroGateLoginResult | null>(null);
 
-  // Prefill the socket field with this platform's default MIA path so the
-  // operator does not have to know whether it is /run or /var/run.
+  // Prefill the socket field with the MIA path for the selected environment
+  // (blank ⇒ the default `mia.toml`), so the operator does not have to know the
+  // per-OS path and switching environments re-points the socket automatically.
   useEffect(() => {
-    void api.ferrogateDefaultSocket().then(setSocket).catch(() => {});
-  }, []);
+    void api.ferrogateDefaultSocket(environment).then(setSocket).catch(() => {});
+  }, [environment]);
   // Keep the audience in sync with the mount's configured expected_audience
   // until the operator edits it.
   useEffect(() => {
@@ -578,14 +613,25 @@ function MachineLoginPanel({
         </div>
 
         <div className="grid grid-cols-2 gap-3">
-          <div className="col-span-2">
-            <Input
-              label="MIA helper socket"
-              value={socket}
-              onChange={(e) => setSocket(e.target.value)}
-              placeholder="resolved from the installed MIA's config…"
-            />
-          </div>
+          <Input
+            label="MIA environment"
+            list="ferrogate-mia-environments"
+            value={environment}
+            onChange={(e) => setEnvironment(e.target.value)}
+            placeholder="(default)"
+            hint="reads mia-<env>.toml; blank uses the default mia.toml"
+          />
+          <datalist id="ferrogate-mia-environments">
+            {environments.map((e) => (
+              <option key={e} value={e} />
+            ))}
+          </datalist>
+          <Input
+            label="MIA helper socket"
+            value={socket}
+            onChange={(e) => setSocket(e.target.value)}
+            placeholder="resolved from the installed MIA's config…"
+          />
           <Input
             label="Audience"
             value={audience}
@@ -669,10 +715,16 @@ function MachineLoginPanel({
 
 function ConfigPanel({
   config,
+  availablePolicies,
+  policiesListable,
+  environments,
   onSaved,
   toast,
 }: {
   config: FerroGateConfig;
+  availablePolicies: string[];
+  policiesListable: boolean;
+  environments: string[];
   onSaved: () => Promise<void>;
   toast: (type: "success" | "error" | "info", message: string) => void;
 }) {
@@ -686,11 +738,19 @@ function ConfigPanel({
   const [cmisTlsEnable, setCmisTlsEnable] = useState(config.cmis_tls_enable);
   const [cmisSameHost, setCmisSameHost] = useState(config.cmis_same_host);
   const [bootstrap, setBootstrap] = useState(config.bootstrap_root_auto_approve);
-  const [bootstrapPolicies, setBootstrapPolicies] = useState((config.bootstrap_policies || []).join(","));
+  const [bootstrapPolicies, setBootstrapPolicies] = useState<string[]>(config.bootstrap_policies || []);
   const [requireUserToken, setRequireUserToken] = useState(config.require_user_token);
   const [requireMachineIdentity, setRequireMachineIdentity] = useState(config.require_machine_identity);
+  // MIA environment to autofill from (blank ⇒ the default mia.toml).
+  const [environment, setEnvironment] = useState("");
   const [saving, setSaving] = useState(false);
   const [autofilling, setAutofilling] = useState(false);
+
+  // Bootstrap policies are seeded into the first machine's grant, so `default`
+  // (the always-on baseline) is a legitimate choice here — unlike the approve
+  // modal, where it's stripped. Offer it alongside the named policies; `root`
+  // stays out of routine bootstrap config via the GUI.
+  const bootstrapPolicyOptions = ["default", ...availablePolicies];
 
   // Prefill trust domain + CMIS coordinates from the FerroGate MIA installed on
   // this host (mia.toml + signed allowlist) and verify CMIS is reachable by
@@ -698,7 +758,7 @@ function ConfigPanel({
   async function autofill() {
     setAutofilling(true);
     try {
-      const r = await api.ferrogateAutoconfig(expectedAudience.trim());
+      const r = await api.ferrogateAutoconfig(expectedAudience.trim(), environment.trim() || undefined);
       if (r.trust_domain) setTrustDomain(r.trust_domain);
       setJwksSource(r.jwks_source || "cmis_grpc");
       setCmisEndpoint(r.cmis_endpoint);
@@ -718,6 +778,19 @@ function ConfigPanel({
   }
 
   async function save() {
+    // Validator: refuse to save bootstrap policies that don't exist on the
+    // vault — a typo'd name would silently grant nothing to the first machine.
+    // Skipped when policies couldn't be listed (free-text fallback).
+    if (policiesListable) {
+      const unknown = unknownPolicies(bootstrapPolicies, bootstrapPolicyOptions);
+      if (unknown.length > 0) {
+        toast(
+          "error",
+          `Unknown ${unknown.length > 1 ? "policies" : "policy"}: ${unknown.join(", ")}. Remove or create them first.`,
+        );
+        return;
+      }
+    }
     setSaving(true);
     try {
       await api.ferrogateWriteConfig({
@@ -731,7 +804,7 @@ function ConfigPanel({
         cmisTlsEnable,
         cmisSameHost,
         bootstrapRootAutoApprove: bootstrap,
-        bootstrapPolicies,
+        bootstrapPolicies: bootstrapPolicies.join(","),
         requireUserToken,
         requireMachineIdentity,
       });
@@ -765,7 +838,15 @@ function ConfigPanel({
         <div className="col-span-2">
           <Textarea label="Static JWKS (JSON)" value={staticJwks} onChange={(e) => setStaticJwks(e.target.value)} rows={4} />
         </div>
-        <Input label="Bootstrap policies (comma-separated)" value={bootstrapPolicies} onChange={(e) => setBootstrapPolicies(e.target.value)} placeholder="default" />
+        <PolicySelect
+          label="Bootstrap policies"
+          selected={bootstrapPolicies}
+          options={bootstrapPolicyOptions}
+          onChange={setBootstrapPolicies}
+          fallbackFreeText={!policiesListable}
+          placeholder="default"
+          helpText="Granted to the first machine on bootstrap. Only existing policies; default is the baseline."
+        />
         <div className="flex flex-col justify-end gap-2 text-sm">
           <label className="flex items-center gap-2">
             <input type="checkbox" checked={cmisTlsEnable} onChange={(e) => setCmisTlsEnable(e.target.checked)} />
@@ -793,10 +874,27 @@ function ConfigPanel({
           </label>
         </div>
       </div>
-      <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
-        <Button variant="secondary" onClick={() => void autofill()} disabled={autofilling || saving}>
-          {autofilling ? "Reading MIA…" : "Autofill from local MIA"}
-        </Button>
+      <div className="mt-4 flex flex-wrap items-end justify-between gap-3">
+        <div className="flex items-end gap-2">
+          <div className="w-44">
+            <Input
+              label="MIA environment"
+              list="ferrogate-config-environments"
+              value={environment}
+              onChange={(e) => setEnvironment(e.target.value)}
+              placeholder="(default)"
+              hint="reads mia-<env>.toml"
+            />
+            <datalist id="ferrogate-config-environments">
+              {environments.map((e) => (
+                <option key={e} value={e} />
+              ))}
+            </datalist>
+          </div>
+          <Button variant="secondary" onClick={() => void autofill()} disabled={autofilling || saving}>
+            {autofilling ? "Reading MIA…" : "Autofill from local MIA"}
+          </Button>
+        </div>
         <Button onClick={() => void save()} disabled={saving || autofilling}>
           {saving ? "Saving…" : "Save configuration"}
         </Button>

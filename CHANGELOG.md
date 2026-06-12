@@ -45,6 +45,42 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-06-12
+
+### Added
+
+#### FerroGate MIA environments + validated bootstrap policies (GUI/CLI)
+- **MIA environment selector** -- the Machines (FerroGate) **Config** and
+  **Machine Login** tabs gain an "MIA environment" autocomplete. Selecting an
+  environment reads `mia-<env>.toml` (and its allowlist/socket) instead of the
+  default `mia.toml`, so a host carrying side-by-side deployments (e.g. `hml`,
+  `prod`) can autofill the right one. Suggestions are discovered by scanning the
+  system and per-user config dirs (`ferrogate_list_environments`).
+- **`bvault ferrogate {login,status,whoami,autoconfig} --environment <env>`** --
+  CLI parity for the same selector; mirrors `mia --environment <env>`. Names are
+  validated (`validate_environment`) before becoming a filename component.
+- Threaded an environment selector through the MIA helper layer
+  (`resolve_mia_socket_for`, `read_cmis_config_for`, `read_allowlist_trust_domain_for`,
+  `build_autoconfig`) in `src/cli/command/ferrogate_mia.rs`; the default-environment
+  wrappers are unchanged.
+
+### Changed
+
+- **Bootstrap policies are now a validated autocomplete** (Config tab) -- the
+  free-text "Bootstrap policies" field is replaced by a multi-select autocomplete
+  over the vault's existing ACL policies (new reusable `PolicySelect` component),
+  so a typo can't slip through. `default` is offered as the baseline; unknown
+  (mistyped/stale) selections render as amber ⚠ chips and block Save. Falls back
+  to free text when policies can't be listed.
+
+### Security
+
+- Validated bootstrap-policy names prevent a silent empty grant to the
+  first-bootstrapped machine (a misspelled policy under combined machine+user
+  auth intersects to nothing). Environment selectors are validated as safe
+  single path components before use, preventing path traversal via a
+  `mia-<env>.toml` filename.
+
 ## [0.13.5] - 2026-06-11
 
 ### Changed

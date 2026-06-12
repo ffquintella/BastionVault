@@ -510,7 +510,11 @@ export const ferrogateReject = (id: string, reason: string) =>
 export const ferrogateRevoke = (id: string) => invoke<void>("ferrogate_revoke", { id });
 export const ferrogateDeleteMachine = (id: string) => invoke<void>("ferrogate_delete_machine", { id });
 // FerroGate MIA client (self-bootstrap / machine login)
-export const ferrogateDefaultSocket = () => invoke<string>("ferrogate_default_socket");
+/** Resolve the local MIA helper socket; `environment` picks `mia-<env>.toml` (blank ⇒ default `mia.toml`). */
+export const ferrogateDefaultSocket = (environment?: string) =>
+  invoke<string>("ferrogate_default_socket", { environment: environment?.trim() || null });
+/** MIA environment selectors installed on this host (the `<env>` of each `mia-<env>.toml`). */
+export const ferrogateListEnvironments = () => invoke<string[]>("ferrogate_list_environments");
 /** A `ferrogate` mount config derived from the local MIA (snake_case from Rust). */
 export type FerroGateAutoConfig = {
   trust_domain: string;
@@ -523,8 +527,8 @@ export type FerroGateAutoConfig = {
   jwks_kids: string[];
   warnings: string[];
 };
-export const ferrogateAutoconfig = (audience: string) =>
-  invoke<FerroGateAutoConfig>("ferrogate_autoconfig", { audience });
+export const ferrogateAutoconfig = (audience: string, environment?: string) =>
+  invoke<FerroGateAutoConfig>("ferrogate_autoconfig", { audience, environment: environment?.trim() || null });
 export const ferrogateMachineLogin = (
   audience: string,
   socket: string,

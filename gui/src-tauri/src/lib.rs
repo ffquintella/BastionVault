@@ -360,6 +360,7 @@ pub fn run() {
             commands::ferrogate::ferrogate_delete_machine,
             // FerroGate MIA client (self-bootstrap / machine login)
             commands::ferrogate::ferrogate_default_socket,
+            commands::ferrogate::ferrogate_list_environments,
             commands::ferrogate::ferrogate_autoconfig,
             commands::ferrogate::ferrogate_machine_login,
             commands::ferrogate::ferrogate_machine_status,

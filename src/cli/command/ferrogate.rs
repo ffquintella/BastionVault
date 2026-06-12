@@ -62,6 +62,19 @@ pub enum Commands {
     Autoconfig(Autoconfig),
 }
 
+/// Resolve the MIA helper socket: an explicit `--socket` wins; otherwise read
+/// the socket the installed MIA wrote for `--environment` (default `mia.toml`).
+/// Validates the environment selector before it becomes part of a filename.
+fn resolve_socket(socket: Option<&str>, environment: Option<&str>) -> Result<String, RvError> {
+    if let Some(s) = socket {
+        return Ok(s.to_string());
+    }
+    if let Some(env) = environment {
+        ferrogate_mia::validate_environment(env).map_err(|e| bv_error_string!(e))?;
+    }
+    Ok(ferrogate_mia::resolve_mia_socket_for(environment))
+}
+
 impl Ferrogate {
     #[inline]
     pub fn execute(&mut self) -> ExitCode {
@@ -91,6 +104,12 @@ pub struct Login {
     /// configured with (`FERROGATE_HELPER_SOCKET`, then `mia.toml`).
     #[arg(long)]
     socket: Option<String>,
+
+    /// MIA environment selector: resolve the socket from `mia-<env>.toml`
+    /// instead of `mia.toml`. Mirrors `mia --environment <env>`. Ignored when
+    /// `--socket` is given.
+    #[arg(long)]
+    environment: Option<String>,
 
     /// Mount path of the ferrogate auth method.
     #[arg(long, default_value = "ferrogate")]
@@ -123,7 +142,7 @@ impl CommandExecutor for Login {
             None => self.resolved_address()?,
         };
 
-        let socket = self.socket.clone().unwrap_or_else(ferrogate_mia::resolve_mia_socket);
+        let socket = resolve_socket(self.socket.as_deref(), self.environment.as_deref())?;
         let dpop = DpopKey::generate();
         let child = ferrogate_mia::request_child_token(&socket, &audience, &dpop.jkt(), self.ttl)
             .map_err(|e| bv_error_string!(e))?;
@@ -183,6 +202,11 @@ pub struct Status {
     #[arg(long)]
     socket: Option<String>,
 
+    /// MIA environment selector: resolve the socket from `mia-<env>.toml`
+    /// instead of `mia.toml`. Ignored when `--socket` is given.
+    #[arg(long)]
+    environment: Option<String>,
+
     #[arg(long, default_value = "ferrogate")]
     mount: String,
 
@@ -203,7 +227,7 @@ impl CommandExecutor for Status {
             Some(a) => a.clone(),
             None => self.resolved_address()?,
         };
-        let socket = self.socket.clone().unwrap_or_else(ferrogate_mia::resolve_mia_socket);
+        let socket = resolve_socket(self.socket.as_deref(), self.environment.as_deref())?;
         let dpop = DpopKey::generate();
         let child = ferrogate_mia::request_child_token(&socket, &audience, &dpop.jkt(), self.ttl)
             .map_err(|e| bv_error_string!(e))?;
@@ -235,6 +259,11 @@ pub struct Whoami {
     #[arg(long)]
     socket: Option<String>,
 
+    /// MIA environment selector: resolve the socket from `mia-<env>.toml`
+    /// instead of `mia.toml`. Ignored when `--socket` is given.
+    #[arg(long)]
+    environment: Option<String>,
+
     /// Audience for the throwaway token minted to read the identity.
     #[arg(long, default_value = "urn:bvault:ferrogate:whoami")]
     audience: String,
@@ -242,7 +271,7 @@ pub struct Whoami {
 
 impl CommandExecutor for Whoami {
     fn main(&self) -> Result<(), RvError> {
-        let socket = self.socket.clone().unwrap_or_else(ferrogate_mia::resolve_mia_socket);
+        let socket = resolve_socket(self.socket.as_deref(), self.environment.as_deref())?;
         let dpop = DpopKey::generate();
         let child = ferrogate_mia::request_child_token(&socket, &self.audience, &dpop.jkt(), 60)
             .map_err(|e| bv_error_string!(e))?;
@@ -279,6 +308,12 @@ pub struct Autoconfig {
     #[arg(long, default_value = "ferrogate")]
     mount: String,
 
+    /// MIA environment selector: read `mia-<env>.toml` (CMIS endpoint/pin) and
+    /// the matching allowlist instead of `mia.toml`. Mirrors
+    /// `mia --environment <env>`.
+    #[arg(long)]
+    environment: Option<String>,
+
     /// Write the derived config to `auth/<mount>/config` instead of just
     /// printing it. Requires an authenticated token.
     #[arg(long)]
@@ -298,6 +333,9 @@ impl CommandExecutor for Autoconfig {
             Some(a) => a.clone(),
             None => self.resolved_address()?,
         };
+        if let Some(env) = &self.environment {
+            ferrogate_mia::validate_environment(env).map_err(|e| bv_error_string!(e))?;
+        }
 
         // build_autoconfig fetches the JWKS over async gRPC; the CLI has no
         // ambient runtime, so spin a single-threaded one for the call.
@@ -306,7 +344,7 @@ impl CommandExecutor for Autoconfig {
             .build()
             .map_err(|e| bv_error_string!(format!("could not start async runtime: {e}")))?;
         let cfg = rt
-            .block_on(ferrogate_mia::build_autoconfig(audience))
+            .block_on(ferrogate_mia::build_autoconfig(audience, self.environment.as_deref()))
             .map_err(|e| bv_error_string!(e))?;
 
         for w in &cfg.warnings {

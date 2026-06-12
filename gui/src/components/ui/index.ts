@@ -20,6 +20,7 @@ export { GroupHistoryPanel } from "./GroupHistoryPanel";
 export { PolicyHistoryPanel } from "./PolicyHistoryPanel";
 export { Textarea } from "./Textarea";
 export { Select } from "./Select";
+export { PolicySelect, unknownPolicies } from "./PolicySelect";
 export { Card } from "./Card";
 export { Modal, ConfirmModal } from "./Modal";
 export { CollapsibleSection } from "./CollapsibleSection";

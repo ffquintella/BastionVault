@@ -303,19 +303,39 @@ async fn mia_mint(socket: String, audience: String, ttl: u32) -> Result<(String,
 }
 
 /// The MIA helper socket path for this host — resolved by inspecting the
-/// installed MIA's own configuration (env override, then `mia.toml`, then the
-/// per-OS wizard default), so the GUI prefills wherever MIA actually listens
-/// rather than a hard-coded path that breaks when the operator moves it.
+/// installed MIA's own configuration (env override, then `mia.toml` /
+/// `mia-<env>.toml`, then the per-OS wizard default), so the GUI prefills
+/// wherever MIA actually listens rather than a hard-coded path that breaks when
+/// the operator moves it. `environment` selects which config file the MIA wrote
+/// (blank/None ⇒ the default `mia.toml`).
 #[tauri::command]
-pub fn ferrogate_default_socket() -> String {
+pub fn ferrogate_default_socket(environment: Option<String>) -> String {
     #[cfg(unix)]
     {
-        bastion_vault::cli::command::ferrogate_mia::resolve_mia_socket()
+        let env = environment.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        bastion_vault::cli::command::ferrogate_mia::resolve_mia_socket_for(env)
     }
     #[cfg(not(unix))]
     {
+        let _ = environment;
         String::new()
     }
+}
+
+/// The MIA environment selectors installed on this host (the `<env>` of each
+/// discovered `mia-<env>.toml`), so the GUI can offer them as autocomplete
+/// suggestions. The default environment (`mia.toml`) is implicit — selected by
+/// leaving the field blank — and is not listed.
+#[cfg(unix)]
+#[tauri::command]
+pub fn ferrogate_list_environments() -> Vec<String> {
+    bastion_vault::cli::command::ferrogate_mia::list_environments()
+}
+
+#[cfg(not(unix))]
+#[tauri::command]
+pub fn ferrogate_list_environments() -> Vec<String> {
+    Vec::new()
 }
 
 /// Derive a complete `ferrogate` mount config from the FerroGate MIA installed
@@ -329,23 +349,27 @@ pub fn ferrogate_default_socket() -> String {
 #[tauri::command]
 pub async fn ferrogate_autoconfig(
     audience: String,
+    environment: Option<String>,
 ) -> CmdResult<bastion_vault::cli::command::ferrogate_mia::FerrogateAutoConfig> {
+    use bastion_vault::cli::command::ferrogate_mia;
     let audience = audience.trim().to_string();
-    bastion_vault::cli::command::ferrogate_mia::build_autoconfig(audience)
-        .await
-        .map_err(Into::into)
+    let env = environment.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if let Some(e) = env {
+        ferrogate_mia::validate_environment(e).map_err(crate::error::CommandError::from)?;
+    }
+    ferrogate_mia::build_autoconfig(audience, env).await.map_err(Into::into)
 }
 
 #[cfg(not(unix))]
 #[tauri::command]
-pub async fn ferrogate_autoconfig(_audience: String) -> CmdResult<Value> {
+pub async fn ferrogate_autoconfig(_audience: String, _environment: Option<String>) -> CmdResult<Value> {
     Err("FerroGate autoconfig is only available on Unix (the MIA is not supported on this platform yet)".into())
 }
 
 fn norm_socket(socket: String) -> String {
     let s = socket.trim();
     if s.is_empty() {
-        ferrogate_default_socket()
+        ferrogate_default_socket(None)
     } else {
         s.to_string()
     }

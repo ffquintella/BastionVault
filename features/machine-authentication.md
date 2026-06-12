@@ -222,6 +222,18 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   prefilled with the current policies/TTL/comment and re-approving in place. Because combined auth intersects
   machine ∩ user policies, the machine's approved set is the ceiling; editing it is how an operator restores a
   user's effective policies (e.g. raising a machine from `default` to `administrator`) without re-enrolling.
+- **GUI/CLI — validated bootstrap policies + MIA environment selector (v0.13.5–v0.14.0).** v0.13.5 replaced the
+  approve-modal free-text policies field with a multi-select over the vault's existing ACL policies (a typo'd
+  name silently grants nothing under combined auth). v0.14.0 generalizes that into a reusable `PolicySelect`
+  autocomplete and applies it to the Config tab's **bootstrap policies** field — only existing policies are
+  selectable (`default` offered as the baseline), unknown names render as amber ⚠ chips and **block Save**. It
+  also adds an **MIA environment** selector to the Config + Machine Login tabs and a `--environment <env>` flag
+  on `bvault ferrogate {login,status,whoami,autoconfig}`: a host running side-by-side FerroGate deployments has
+  one `mia-<env>.toml` per environment (e.g. `mia-hml.toml`), and the selector reads that file's CMIS
+  endpoint/pin, allowlist, and helper socket instead of the default `mia.toml`. Environment selectors are
+  validated as safe single path components; the GUI discovers installed environments by scanning the system and
+  per-user config dirs (`ferrogate_list_environments`). The MIA helper layer gained `_for(environment)` variants
+  (`resolve_mia_socket_for`, `read_cmis_config_for`, `read_allowlist_trust_domain_for`, `build_autoconfig`).
 - Caveats: `cmis_grpc` is async-build only (the `sync_handler` feature is independently broken repo-wide);
   child-token revocation on the `static_jwks` source relies on short token TTL (the CRL is enforced on the SVID
   path); audit events are structured log lines (no dedicated audit-store rows).

@@ -36,24 +36,42 @@ pub const DEFAULT_MIA_SOCKET: &str = "/Library/Application Support/FerroGate/run
 #[cfg(not(target_os = "macos"))]
 pub const DEFAULT_MIA_SOCKET: &str = "/run/ferrogate/mia.sock";
 
+/// Resolve the MIA helper socket path for the default environment. Equivalent
+/// to [`resolve_mia_socket_for(None)`](resolve_mia_socket_for).
+#[must_use]
+pub fn resolve_mia_socket() -> String {
+    resolve_mia_socket_for(None)
+}
+
 /// Resolve the MIA helper socket path by asking the installed MIA where it is
 /// configured to listen, mirroring MIA's own precedence
 /// (`ferrogate/crates/mia/src/config.rs`):
 ///
-/// 1. the `FERROGATE_HELPER_SOCKET` environment override (highest);
-/// 2. `[helper].socket` from the first config file that exists and sets it —
-///    `$FERROGATE_CONFIG`, then the per-OS system path, then the per-user path;
+/// 1. the `FERROGATE_HELPER_SOCKET` environment override (highest) — honoured
+///    only for the default environment, since it names one explicit socket and
+///    MIA treats `--config`/explicit overrides and `--environment` as mutually
+///    exclusive;
+/// 2. `[helper].socket` from the first config file that exists and sets it — for
+///    the default environment `$FERROGATE_CONFIG`, then the per-OS system path,
+///    then the per-user path; for a named environment the system then per-user
+///    `mia-<env>.toml`;
 /// 3. [`DEFAULT_MIA_SOCKET`] (MIA's wizard default) when nothing else applies.
 ///
-/// This keeps the GUI/CLI in step with whatever the host's `mia.toml` says
-/// instead of hard-coding a path that breaks whenever MIA's default moves or an
-/// operator points the socket elsewhere.
+/// `environment` selects which config file the MIA wrote: `None` ⇒ `mia.toml`,
+/// `Some("hml")` ⇒ `mia-hml.toml`. This keeps the GUI/CLI in step with whatever
+/// the host's config says instead of hard-coding a path that breaks whenever
+/// MIA's default moves or an operator points the socket elsewhere.
 #[must_use]
-pub fn resolve_mia_socket() -> String {
-    if let Some(s) = env_socket_override() {
-        return s;
+pub fn resolve_mia_socket_for(environment: Option<&str>) -> String {
+    // The global socket override names one explicit socket; honour it for the
+    // default environment only, so selecting an environment actually reads that
+    // environment's `[helper].socket`.
+    if environment.is_none() {
+        if let Some(s) = env_socket_override() {
+            return s;
+        }
     }
-    if let Some(s) = mia_config_socket() {
+    if let Some(s) = mia_config_socket(environment) {
         return s;
     }
     DEFAULT_MIA_SOCKET.to_string()
@@ -66,45 +84,112 @@ fn env_socket_override() -> Option<String> {
 
 /// `[helper].socket` from the first MIA config file (in MIA's discovery order)
 /// that exists and sets it.
-fn mia_config_socket() -> Option<String> {
-    mia_config_candidates().iter().find_map(|p| read_helper_socket(p))
+fn mia_config_socket(environment: Option<&str>) -> Option<String> {
+    mia_config_candidates(environment).iter().find_map(|p| read_helper_socket(p))
 }
 
-/// MIA's config-file discovery order: `$FERROGATE_CONFIG`, then the system
-/// path, then the per-user path.
-fn mia_config_candidates() -> Vec<PathBuf> {
-    let mut out = Vec::with_capacity(3);
-    if let Some(p) = std::env::var_os("FERROGATE_CONFIG").filter(|s| !s.is_empty()) {
-        out.push(PathBuf::from(p));
+/// The base config filename for an environment selector, mirroring FerroGate
+/// MIA's own `config_filename`: `None` ⇒ `mia.toml`, `Some("hml")` ⇒
+/// `mia-hml.toml`. The name must already have passed [`validate_environment`].
+fn config_filename(environment: Option<&str>) -> String {
+    match environment {
+        Some(env) => format!("mia-{env}.toml"),
+        None => "mia.toml".to_string(),
     }
-    out.push(system_config_path());
-    if let Some(p) = user_config_path() {
+}
+
+/// Validate an environment selector, mirroring MIA's `validate_environment`. The
+/// name becomes part of a config filename (`mia-<env>.toml`), so it must be a
+/// safe single path component: non-empty, neither `.` nor `..`, and limited to
+/// ASCII letters, digits, `.`, `-`, and `_` — so it can neither inject a path
+/// separator nor traverse out of the config directory.
+pub fn validate_environment(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("environment name must not be empty".to_string());
+    }
+    if name == "." || name == ".." {
+        return Err(format!("environment name `{name}` is not a valid environment"));
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')) {
+        return Err(format!("environment name `{name}` is invalid: use only letters, digits, '.', '-', '_'"));
+    }
+    Ok(())
+}
+
+/// MIA's config-file discovery order for `environment`: for the default
+/// environment `$FERROGATE_CONFIG` (an explicit single file, default-only),
+/// then the system path, then the per-user path; for a named environment the
+/// system then per-user `mia-<env>.toml`.
+fn mia_config_candidates(environment: Option<&str>) -> Vec<PathBuf> {
+    let mut out = Vec::with_capacity(3);
+    if environment.is_none() {
+        if let Some(p) = std::env::var_os("FERROGATE_CONFIG").filter(|s| !s.is_empty()) {
+            out.push(PathBuf::from(p));
+        }
+    }
+    out.push(system_config_path(environment));
+    if let Some(p) = user_config_path(environment) {
         out.push(p);
     }
     out
 }
 
+/// The OS-idiomatic *system* config directory (`mia setup` writes here as root):
+/// macOS `/Library/Application Support/FerroGate`, else `/etc/ferrogate`.
 #[cfg(target_os = "macos")]
-fn system_config_path() -> PathBuf {
-    PathBuf::from("/Library/Application Support/FerroGate/mia.toml")
+fn system_config_dir() -> PathBuf {
+    PathBuf::from("/Library/Application Support/FerroGate")
 }
 #[cfg(not(target_os = "macos"))]
-fn system_config_path() -> PathBuf {
-    PathBuf::from("/etc/ferrogate/mia.toml")
+fn system_config_dir() -> PathBuf {
+    PathBuf::from("/etc/ferrogate")
 }
 
+/// The OS-idiomatic *per-user* config directory, or `None` if no home/config
+/// var resolves: macOS `~/Library/Application Support/FerroGate`, else
+/// `$XDG_CONFIG_HOME/ferrogate` (or `~/.config/ferrogate`).
 #[cfg(target_os = "macos")]
-fn user_config_path() -> Option<PathBuf> {
+fn user_config_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .filter(|s| !s.is_empty())
-        .map(|h| PathBuf::from(h).join("Library/Application Support/FerroGate/mia.toml"))
+        .map(|h| PathBuf::from(h).join("Library/Application Support/FerroGate"))
 }
 #[cfg(not(target_os = "macos"))]
-fn user_config_path() -> Option<PathBuf> {
+fn user_config_dir() -> Option<PathBuf> {
     if let Some(x) = std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()) {
-        return Some(PathBuf::from(x).join("ferrogate/mia.toml"));
+        return Some(PathBuf::from(x).join("ferrogate"));
     }
-    std::env::var_os("HOME").filter(|s| !s.is_empty()).map(|h| PathBuf::from(h).join(".config/ferrogate/mia.toml"))
+    std::env::var_os("HOME").filter(|s| !s.is_empty()).map(|h| PathBuf::from(h).join(".config/ferrogate"))
+}
+
+fn system_config_path(environment: Option<&str>) -> PathBuf {
+    system_config_dir().join(config_filename(environment))
+}
+fn user_config_path(environment: Option<&str>) -> Option<PathBuf> {
+    user_config_dir().map(|d| d.join(config_filename(environment)))
+}
+
+/// Discover the MIA environment selectors installed on this host by scanning the
+/// system and per-user config directories for `mia-<env>.toml` files. Returns
+/// the sorted, de-duplicated environment names (never including the default
+/// `mia.toml`, which is selected by passing `None`/an empty environment). Names
+/// that would not pass [`validate_environment`] are skipped.
+#[must_use]
+pub fn list_environments() -> Vec<String> {
+    let mut set = std::collections::BTreeSet::new();
+    for dir in [Some(system_config_dir()), user_config_dir()].into_iter().flatten() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if let Some(env) = name.strip_prefix("mia-").and_then(|s| s.strip_suffix(".toml")) {
+                if validate_environment(env).is_ok() {
+                    set.insert(env.to_string());
+                }
+            }
+        }
+    }
+    set.into_iter().collect()
 }
 
 /// Parse `path` as MIA's TOML config and return a non-blank `[helper].socket`.
@@ -138,12 +223,19 @@ pub struct CmisDiscovery {
     pub tls_enable: bool,
 }
 
-/// Read `[cmis].endpoint` + `spki_pin` from the first MIA config file found
-/// (same discovery order as [`resolve_mia_socket`]). `None` if no config sets a
-/// CMIS endpoint.
+/// Read `[cmis].endpoint` + `spki_pin` for the default environment. Equivalent
+/// to [`read_cmis_config_for(None)`](read_cmis_config_for).
 #[must_use]
 pub fn read_cmis_config() -> Option<CmisDiscovery> {
-    mia_config_candidates().iter().find_map(|p| read_cmis(p))
+    read_cmis_config_for(None)
+}
+
+/// Read `[cmis].endpoint` + `spki_pin` from the first MIA config file found for
+/// `environment` (same discovery order as [`resolve_mia_socket_for`]). `None` if
+/// no config sets a CMIS endpoint.
+#[must_use]
+pub fn read_cmis_config_for(environment: Option<&str>) -> Option<CmisDiscovery> {
+    mia_config_candidates(environment).iter().find_map(|p| read_cmis(p))
 }
 
 fn read_cmis(path: &Path) -> Option<CmisDiscovery> {
@@ -164,13 +256,22 @@ fn read_cmis(path: &Path) -> Option<CmisDiscovery> {
     Some(CmisDiscovery { endpoint, spki_pin, tls_enable })
 }
 
-/// Read `[allowlist].path` from `mia.toml`, decode the signed CBOR allowlist,
-/// and return its `trust_domain`. This is the most reliable local source of the
-/// trust domain: unlike reading it from a minted token's SPIFFE `iss`, it does
-/// not require the caller to already be allowlisted.
+/// Read the trust domain from the local signed allowlist for the default
+/// environment. Equivalent to
+/// [`read_allowlist_trust_domain_for(None)`](read_allowlist_trust_domain_for).
 #[must_use]
 pub fn read_allowlist_trust_domain() -> Option<String> {
-    let path = mia_config_candidates().iter().find_map(|p| read_allowlist_path(p))?;
+    read_allowlist_trust_domain_for(None)
+}
+
+/// Read `[allowlist].path` from the `environment`'s `mia.toml`, decode the
+/// signed CBOR allowlist, and return its `trust_domain`. This is the most
+/// reliable local source of the trust domain: unlike reading it from a minted
+/// token's SPIFFE `iss`, it does not require the caller to already be
+/// allowlisted.
+#[must_use]
+pub fn read_allowlist_trust_domain_for(environment: Option<&str>) -> Option<String> {
+    let path = mia_config_candidates(environment).iter().find_map(|p| read_allowlist_path(p))?;
     let bytes = std::fs::read(&path).ok()?;
     // Envelope: { body, signature }; trust_domain is a field of the inner body
     // (itself CBOR). The MIA serializes `body` as a `Vec<u8>`, which ciborium
@@ -242,20 +343,26 @@ pub struct FerrogateAutoConfig {
 /// (reusing BastionVault's own CMIS gRPC client, so the fetch path is exactly
 /// the one the running mount will use). `expected_audience` is operator-supplied
 /// — it identifies this vault and cannot come from the MIA.
-pub async fn build_autoconfig(expected_audience: String) -> Result<FerrogateAutoConfig, String> {
+pub async fn build_autoconfig(
+    expected_audience: String,
+    environment: Option<&str>,
+) -> Result<FerrogateAutoConfig, String> {
     use crate::modules::credential::ferrogate::{cmis, jwks_source, FerroGateConfig};
 
-    let disc = read_cmis_config().ok_or_else(|| {
-        "no CMIS endpoint found in mia.toml ([cmis].endpoint) — is the FerroGate MIA installed on \
-         this host?"
-            .to_string()
+    let cfg_name = config_filename(environment);
+    let disc = read_cmis_config_for(environment).ok_or_else(|| {
+        format!(
+            "no CMIS endpoint found in {cfg_name} ([cmis].endpoint) — is the FerroGate MIA \
+             installed on this host{}?",
+            environment.map(|e| format!(" for environment `{e}`")).unwrap_or_default()
+        )
     })?;
     if disc.tls_enable && disc.spki_pin.is_empty() {
-        return Err("mia.toml [cmis].endpoint is https but has no spki_pin; cannot verify CMIS".to_string());
+        return Err(format!("{cfg_name} [cmis].endpoint is https but has no spki_pin; cannot verify CMIS"));
     }
 
     let mut warnings = Vec::new();
-    let trust_domain = read_allowlist_trust_domain().unwrap_or_else(|| {
+    let trust_domain = read_allowlist_trust_domain_for(environment).unwrap_or_else(|| {
         warnings.push(
             "could not read trust_domain from the local allowlist; set it manually if your \
              deployment pins one"
@@ -541,6 +648,27 @@ mod tests {
         let none = dir.join("none.toml");
         std::fs::write(&none, "log = 'info'\n").unwrap();
         assert!(read_cmis(&none).is_none());
+    }
+
+    #[test]
+    fn config_filename_suffixes_environment() {
+        // Default ⇒ plain mia.toml; a selector ⇒ mia-<env>.toml. Must match the
+        // file the MIA's own `mia setup --environment <env>` writes.
+        assert_eq!(config_filename(None), "mia.toml");
+        assert_eq!(config_filename(Some("hml")), "mia-hml.toml");
+        assert_eq!(config_filename(Some("prod")), "mia-prod.toml");
+    }
+
+    #[test]
+    fn validate_environment_rejects_unsafe_names() {
+        // Mirrors MIA's rules: the name becomes a filename component, so a path
+        // separator or traversal must be refused before it reaches the disk.
+        for ok in ["hml", "prod", "staging-2", "us.east", "a_b"] {
+            assert!(validate_environment(ok).is_ok(), "{ok} should be valid");
+        }
+        for bad in ["", ".", "..", "a/b", "a b", "../etc", "x\\y", "a:b"] {
+            assert!(validate_environment(bad).is_err(), "{bad:?} should be rejected");
+        }
     }
 
     #[test]
