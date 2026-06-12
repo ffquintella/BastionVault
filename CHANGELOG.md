@@ -45,6 +45,20 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-06-12
+
+### Changed
+
+- **`log_level` now honors per-target directives** (`src/logging.rs`). The
+  file logger previously kept only the first token of an env_logger-style
+  filter, so a directive like `info,hiqlite=warn` silently collapsed to
+  `info`. The `FanoutLogger` now parses `target=level` overrides and applies
+  them by target prefix (longest-prefix-first), lifting the global `max_level`
+  ceiling so a more-verbose override isn't pre-filtered. Operators can quiet
+  chatty dependencies — e.g. set `log_level = "info,hiqlite=warn"` to suppress
+  the high-volume `hiqlite::network::raft_server` WebSocket connect logs in HA
+  deployments — without lowering the global level.
+
 ## [0.14.1] - 2026-06-12
 
 ### Fixed

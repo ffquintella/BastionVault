@@ -84,8 +84,10 @@ static ROTATE_POLICY: OnceLock<(u64, u32)> = OnceLock::new();
 /// Inputs for [`init`]. Kept as a plain struct so the CLI config
 /// layer is the only thing that knows about TOML/HCL field names.
 pub struct LogConfig<'a> {
-    /// `RUST_LOG`-style filter (e.g. `"info"`, `"debug,hyper=warn"`).
-    /// Empty falls back to `"info"`.
+    /// `RUST_LOG`-style filter. A bare level sets the global ceiling
+    /// (`"info"`, `"debug"`); `target=level` tokens override matching
+    /// targets by prefix (`"info,hiqlite=warn"` keeps everything at
+    /// info but quiets the chatty hiqlite raft logs). Empty → `"info"`.
     pub level: &'a str,
     /// Directory that will hold `operations.log`, `security.log`, and
     /// `audit.log`. Empty disables file logging entirely.
@@ -103,7 +105,8 @@ pub struct LogConfig<'a> {
 /// Install the global logger. Idempotent within a process (a second
 /// call is a no-op — useful for tests that spin up multiple servers).
 pub fn init(cfg: LogConfig<'_>) -> Result<(), SetLoggerError> {
-    let level = parse_level(cfg.level);
+    let filter = LevelFilters::parse(cfg.level);
+    let level = filter.global;
     let rotate_size = if cfg.rotate_size_bytes == 0 {
         DEFAULT_ROTATE_SIZE_BYTES
     } else {
@@ -139,13 +142,19 @@ pub fn init(cfg: LogConfig<'_>) -> Result<(), SetLoggerError> {
     // it on regardless of the caller's preference so the process
     // doesn't log to nowhere.
     let stderr = cfg.log_to_stderr || file_sink.is_none();
+    // The `log` crate's macros short-circuit on `max_level` before
+    // ever building a `Record`, so the global ceiling must be the
+    // *most verbose* level any directive can enable — otherwise a
+    // per-target override like `hiqlite=debug` under a `warn` global
+    // would be filtered out before `FanoutLogger::log` runs.
+    let max_level = filter.max_verbosity();
     let logger = FanoutLogger {
-        level,
+        filter,
         files: file_sink.map(Mutex::new),
         stderr,
     };
 
-    log::set_max_level(level);
+    log::set_max_level(max_level);
     match log::set_boxed_logger(Box::new(logger)) {
         Ok(()) => Ok(()),
         Err(e) => {
@@ -155,28 +164,78 @@ pub fn init(cfg: LogConfig<'_>) -> Result<(), SetLoggerError> {
     }
 }
 
-fn parse_level(s: &str) -> LevelFilter {
+/// A parsed `RUST_LOG`-style filter: one global level plus optional
+/// per-target overrides. Directives are comma/space separated; a bare
+/// token (`info`) sets the global level, a `target=level` token
+/// (`hiqlite=warn`) overrides everything whose target *starts with*
+/// that prefix. This lets operators quiet a chatty dependency
+/// (`info,hiqlite=warn`) without lowering the global level.
+struct LevelFilters {
+    global: LevelFilter,
+    /// Sorted longest-prefix-first so the most specific override wins.
+    targets: Vec<(String, LevelFilter)>,
+}
+
+impl LevelFilters {
+    fn parse(s: &str) -> Self {
+        let mut global = LevelFilter::Info;
+        let mut targets: Vec<(String, LevelFilter)> = Vec::new();
+
+        for token in s.split(&[',', ' '][..]).filter(|t| !t.trim().is_empty()) {
+            let token = token.trim();
+            match token.split_once('=') {
+                // `target=level` — per-target override.
+                Some((target, lvl)) => {
+                    let target = target.trim();
+                    if let (false, Some(level)) = (target.is_empty(), parse_one(lvl)) {
+                        targets.push((target.to_string(), level));
+                    }
+                }
+                // Bare token — global level.
+                None => {
+                    if let Some(level) = parse_one(token) {
+                        global = level;
+                    }
+                }
+            }
+        }
+
+        // Longest prefix first: `hiqlite::network=debug` should beat a
+        // broader `hiqlite=warn` for a matching target.
+        targets.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        Self { global, targets }
+    }
+
+    /// Effective level for a record target — the most specific
+    /// matching override, falling back to the global level.
+    fn level_for(&self, target: &str) -> LevelFilter {
+        for (prefix, level) in &self.targets {
+            if target == prefix.as_str() || target.starts_with(&format!("{prefix}::")) {
+                return *level;
+            }
+        }
+        self.global
+    }
+
+    /// The most verbose level any directive can enable. Used to set
+    /// the `log` crate's global `max_level` ceiling.
+    fn max_verbosity(&self) -> LevelFilter {
+        self.targets
+            .iter()
+            .map(|(_, l)| *l)
+            .fold(self.global, |acc, l| acc.max(l))
+    }
+}
+
+fn parse_one(s: &str) -> Option<LevelFilter> {
     match s.trim().to_ascii_lowercase().as_str() {
-        "" | "info" => LevelFilter::Info,
-        "trace" => LevelFilter::Trace,
-        "debug" => LevelFilter::Debug,
-        "warn" | "warning" => LevelFilter::Warn,
-        "error" => LevelFilter::Error,
-        "off" => LevelFilter::Off,
-        // env_logger-style directives ("info,hyper=warn") aren't
-        // honored by the custom logger; take the first token.
-        other => other
-            .split(&[',', ' '][..])
-            .next()
-            .and_then(|t| match t {
-                "trace" => Some(LevelFilter::Trace),
-                "debug" => Some(LevelFilter::Debug),
-                "info" => Some(LevelFilter::Info),
-                "warn" | "warning" => Some(LevelFilter::Warn),
-                "error" => Some(LevelFilter::Error),
-                _ => None,
-            })
-            .unwrap_or(LevelFilter::Info),
+        "info" => Some(LevelFilter::Info),
+        "trace" => Some(LevelFilter::Trace),
+        "debug" => Some(LevelFilter::Debug),
+        "warn" | "warning" => Some(LevelFilter::Warn),
+        "error" => Some(LevelFilter::Error),
+        "off" => Some(LevelFilter::Off),
+        _ => None,
     }
 }
 
@@ -297,14 +356,14 @@ fn open_append(path: &Path) -> io::Result<std::fs::File> {
 }
 
 struct FanoutLogger {
-    level: LevelFilter,
+    filter: LevelFilters,
     files: Option<Mutex<FileSink>>,
     stderr: bool,
 }
 
 impl Log for FanoutLogger {
     fn enabled(&self, meta: &Metadata) -> bool {
-        meta.level() <= self.level
+        meta.level() <= self.filter.level_for(meta.target())
     }
 
     fn log(&self, record: &Record) {
@@ -424,5 +483,55 @@ mod tests {
         assert!(content.contains("post-reopen"));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn per_target_override_quiets_dependency() {
+        // The motivating case: keep info globally but silence the
+        // chatty hiqlite raft WebSocket logs.
+        let f = LevelFilters::parse("info,hiqlite=warn");
+        assert_eq!(f.global, LevelFilter::Info);
+        assert_eq!(
+            f.level_for("hiqlite::network::raft_server"),
+            LevelFilter::Warn
+        );
+        // A WARN from hiqlite still passes; INFO does not.
+        assert!(LevelFilter::Warn >= LevelFilter::Warn);
+        assert!(f.level_for("hiqlite::network::raft_server") < LevelFilter::Info);
+        // Unrelated targets keep the global level.
+        assert_eq!(f.level_for("bastion_vault::core"), LevelFilter::Info);
+    }
+
+    #[test]
+    fn longest_prefix_wins() {
+        let f = LevelFilters::parse("warn,hiqlite=info,hiqlite::network=error");
+        assert_eq!(f.level_for("hiqlite::network::raft_server"), LevelFilter::Error);
+        assert_eq!(f.level_for("hiqlite::store"), LevelFilter::Info);
+        assert_eq!(f.level_for("other"), LevelFilter::Warn);
+    }
+
+    #[test]
+    fn bare_level_and_empty_default_to_info() {
+        assert_eq!(LevelFilters::parse("").global, LevelFilter::Info);
+        assert_eq!(LevelFilters::parse("debug").global, LevelFilter::Debug);
+        assert!(LevelFilters::parse("info").targets.is_empty());
+    }
+
+    #[test]
+    fn max_verbosity_covers_overrides() {
+        // Global warn but a debug override must lift the ceiling.
+        let f = LevelFilters::parse("warn,hiqlite=debug");
+        assert_eq!(f.max_verbosity(), LevelFilter::Debug);
+        // Quieter override doesn't lower the global ceiling.
+        let f = LevelFilters::parse("info,hiqlite=warn");
+        assert_eq!(f.max_verbosity(), LevelFilter::Info);
+    }
+
+    #[test]
+    fn prefix_does_not_match_unanchored() {
+        // `hiqlite` must not match `hiqlitemore` — only exact or `::`.
+        let f = LevelFilters::parse("info,hiqlite=warn");
+        assert_eq!(f.level_for("hiqlitemore::x"), LevelFilter::Info);
+        assert_eq!(f.level_for("hiqlite"), LevelFilter::Warn);
     }
 }

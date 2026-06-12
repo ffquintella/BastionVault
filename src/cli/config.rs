@@ -34,6 +34,10 @@ pub struct Config {
     pub api_addr: String,
     #[serde(default)]
     pub log_format: String,
+    /// `RUST_LOG`-style filter. A bare level sets the global ceiling
+    /// (`"info"`); `target=level` tokens quiet noisy dependencies by
+    /// prefix, e.g. `"info,hiqlite=warn"` to silence the hiqlite raft
+    /// WebSocket logs while keeping everything else at info.
     #[serde(default)]
     pub log_level: String,
     /// Directory the server writes structured log files into:
