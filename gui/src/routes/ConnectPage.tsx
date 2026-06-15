@@ -11,6 +11,7 @@ import {
 } from "../components/ui";
 import { useVaultStore } from "../stores/vaultStore";
 import { useAuthStore } from "../stores/authStore";
+import { useMiaEnvStore } from "../stores/miaEnvStore";
 import type { RemoteProfile, FerroGateEnrolment } from "../lib/types";
 import type { VaultProfile, VaultSpec } from "../lib/api";
 import * as api from "../lib/api";
@@ -357,9 +358,12 @@ export function ConnectPage() {
     // proof does not match the request"). Fall back to the address only when the
     // server left it unset. Socket "" resolves the installed MIA's configured path.
     const audience = profile.expected_audience || profile.address;
-    // Dial the MIA the server says this deployment belongs to (its advertised
-    // mia_environment selects mia-<env>.toml); blank = the default mia.toml.
-    const environment = profile.mia_environment || "";
+    // Dial the MIA for the environment selected in the GUI when the operator
+    // has picked one (shared store — set on the Machines screens); otherwise
+    // fall back to the one the server advertises for this deployment. Blank =
+    // the default mia.toml.
+    const stored = useMiaEnvStore.getState().environment;
+    const environment = stored ?? (profile.mia_environment || "");
     let r;
     try {
       r = await api.ferrogateMachineLogin(audience, "", "ferrogate", 300, undefined, environment);
@@ -455,6 +459,9 @@ export function ConnectPage() {
         // Drop the now-stale auth state; restoreSession will re-hydrate
         // it post-open when a cached token exists.
         clearAuth();
+        // Forget any MIA-environment selection from the previous deployment so
+        // the one we're switching to re-seeds from its own advertised value.
+        useMiaEnvStore.getState().reset();
       }
 
       switch (profile.spec.kind) {
@@ -499,6 +506,10 @@ export function ConnectPage() {
             required = req.require_machine_identity;
             expectedAudience = req.expected_audience;
             miaEnvironment = req.mia_environment || "";
+            // Establish the deployment's environment as the GUI default, unless
+            // the operator has already picked one this session (seed is a no-op
+            // once set) — so every screen shares the same selected environment.
+            useMiaEnvStore.getState().seedEnvironment(miaEnvironment);
           } catch {
             required = false;
           }

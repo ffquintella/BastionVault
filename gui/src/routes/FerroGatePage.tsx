@@ -20,6 +20,7 @@ import {
 import type { FerroGateConfig, FerroGateMachine, FerroGateLoginResult } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
+import { useMiaEnvStore } from "../stores/miaEnvStore";
 
 const MOUNT = "ferrogate/";
 
@@ -84,10 +85,12 @@ export function FerroGatePage() {
   // MIA environment selectors installed on this host (`mia-<env>.toml`), for
   // the autofill/socket environment autocomplete.
   const [environments, setEnvironments] = useState<string[]>([]);
-  // The MIA environment selected across this page. Seeded from the saved
-  // mount config (`mia_environment`) and shared between the Config and Machine
-  // Login panels so picking one in Config immediately re-targets the other.
-  const [selectedEnv, setSelectedEnv] = useState<string>("");
+  // The MIA environment selected in the GUI, held in a global store so a pick
+  // on any screen (here or the connect gate) becomes the default everywhere.
+  // Seeded from the saved mount config; an explicit pick wins over the seed.
+  const selectedEnv = useMiaEnvStore((s) => s.environment) ?? "";
+  const setSelectedEnv = useMiaEnvStore((s) => s.setEnvironment);
+  const seedSelectedEnv = useMiaEnvStore((s) => s.seedEnvironment);
   const [approveTtl, setApproveTtl] = useState("3600");
   const [approveComment, setApproveComment] = useState("");
 
@@ -129,7 +132,7 @@ export function FerroGatePage() {
       try {
         const cfg = await api.ferrogateReadConfig();
         setConfig(cfg);
-        setSelectedEnv(cfg.mia_environment || "");
+        seedSelectedEnv(cfg.mia_environment || "");
       } catch {
         /* config read may fail independently; leave as-is */
       }
@@ -157,7 +160,7 @@ export function FerroGatePage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [seedSelectedEnv]);
 
   useEffect(() => {
     void load();

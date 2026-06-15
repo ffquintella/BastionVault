@@ -45,6 +45,19 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.14.5] - 2026-06-15
+
+### Fixed
+
+- **GUI: the selected MIA environment is now shared across every screen, not
+  just within the Machines page.** The selection was page-local React state, so
+  picking an environment on the Machine Login (or Config) tab didn't reach the
+  connect-time machine gate or survive navigating away. It now lives in a small
+  global store (`gui/src/stores/miaEnvStore.ts`): an explicit pick on any screen
+  becomes the default everywhere for the session, the connect gate dials the
+  selected `mia-<env>.toml`, and the store seeds from the saved config /
+  server-advertised value and resets when switching deployments.
+
 ## [0.14.4] - 2026-06-15
 
 ### Added
