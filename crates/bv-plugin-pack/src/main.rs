@@ -30,8 +30,8 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use bv_crypto::MlDsa65Provider;
+use bv_plugin_manifest::{signing_message, PluginManifest};
 use clap::{Parser, Subcommand};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const MAGIC: &[u8; 4] = b"BVPL";
@@ -96,65 +96,6 @@ struct PackArgs {
     signing_key_name: Option<String>,
 }
 
-/// Mirrors `bastion_vault::plugins::manifest::ConfigField` exactly,
-/// including `#[serde(skip_serializing_if = ...)]` on optional fields,
-/// so the bundle's embedded manifest deserializes cleanly on the host
-/// without per-field tolerance for `null`.
-#[derive(Debug, Deserialize, Serialize)]
-struct ConfigField {
-    name: String,
-    kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    #[serde(default)]
-    required: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    default: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    options: Vec<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Default)]
-struct Capabilities {
-    #[serde(default)]
-    log_emit: bool,
-    #[serde(default)]
-    audit_emit: bool,
-    #[serde(default)]
-    storage_prefix: Option<String>,
-    #[serde(default)]
-    allowed_keys: Vec<String>,
-    #[serde(default)]
-    allowed_hosts: Vec<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct Manifest {
-    name: String,
-    version: String,
-    plugin_type: String,
-    runtime: String,
-    abi_version: String,
-    sha256: String,
-    size: u64,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    capabilities: Capabilities,
-    #[serde(default)]
-    config_schema: Vec<ConfigField>,
-    /// ML-DSA-65 signature over `sha256(binary) || canonical_manifest_json_without_signature`,
-    /// hex-encoded. Filled in only when `--signing-seed-hex` /
-    /// `--signing-seed-file` is supplied.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    signature: String,
-    /// Publisher identifier, must match the host's allowlist entry.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    signing_key: String,
-}
-
 fn main() {
     let cli = Cli::parse();
     let result = match cli.cmd {
@@ -183,7 +124,7 @@ fn main() {
 fn run(args: PackArgs) -> Result<(), Box<dyn std::error::Error>> {
     let toml_text = fs::read_to_string(&args.manifest)
         .map_err(|e| format!("reading manifest {}: {e}", args.manifest.display()))?;
-    let mut manifest: Manifest = toml::from_str(&toml_text)
+    let mut manifest: PluginManifest = toml::from_str(&toml_text)
         .map_err(|e| format!("parsing manifest {}: {e}", args.manifest.display()))?;
 
     let binary = fs::read(&args.binary)
@@ -218,13 +159,10 @@ fn run(args: PackArgs) -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("`--signing-key-name` is required when signing")?;
         manifest.signing_key = key_name;
         manifest.signature.clear();
-        // Canonical message must match `verifier::signing_message`:
-        //   sha256(binary) || canonical_manifest_json_without_signature
-        let bin_digest = hasher_digest(&binary);
-        let canonical = serde_json::to_vec(&manifest)?;
-        let mut message = Vec::with_capacity(bin_digest.len() + canonical.len());
-        message.extend_from_slice(&bin_digest);
-        message.extend_from_slice(&canonical);
+        // The signed message is built by the *shared* `signing_message`
+        // — the exact function the host verifier calls — so the
+        // signature verifies regardless of serde field ordering.
+        let message = signing_message(&manifest, &binary);
         let provider = MlDsa65Provider;
         let sig_bytes = provider
             .sign(&seed_bytes, &message, &[])
@@ -264,12 +202,6 @@ fn run(args: PackArgs) -> Result<(), Box<dyn std::error::Error>> {
         },
     );
     Ok(())
-}
-
-fn hasher_digest(binary: &[u8]) -> Vec<u8> {
-    let mut h = Sha256::new();
-    h.update(binary);
-    h.finalize().to_vec()
 }
 
 /// Resolve an ML-DSA-65 secret seed from one of the two CLI flags
@@ -400,7 +332,7 @@ default = "6"
         let mlen =
             u32::from_le_bytes(bundle[8..12].try_into().unwrap()) as usize;
         let manifest_json = &bundle[12..12 + mlen];
-        let parsed: Manifest = serde_json::from_slice(manifest_json).unwrap();
+        let parsed: PluginManifest = serde_json::from_slice(manifest_json).unwrap();
         assert_eq!(parsed.name, "totp");
         assert_eq!(parsed.size, 8); // length of the fake "wasm" we wrote
         assert_ne!(parsed.sha256, "0".repeat(64));

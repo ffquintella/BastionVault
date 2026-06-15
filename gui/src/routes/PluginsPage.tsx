@@ -472,6 +472,11 @@ function RegisterModal({
   const [fileName, setFileName] = useState("");
   const [sha256, setSha256] = useState("");
   const [fromBundle, setFromBundle] = useState(false);
+  // Full manifest parsed out of a `.bvplugin` bundle, retained verbatim
+  // so a publisher signature survives registration (the form fields
+  // below can't represent `signature` / `signing_key`).
+  const [bundleManifest, setBundleManifest] =
+    useState<api.PluginManifest | null>(null);
   const [configSchema, setConfigSchema] = useState<
     api.PluginConfigField[] | undefined
   >(undefined);
@@ -538,6 +543,7 @@ function RegisterModal({
     setFileName(displayName);
     setSha256(hex);
     setFromBundle(bundleManifest !== null);
+    setBundleManifest(bundleManifest);
 
     if (bundleManifest) {
       // Sanity-check the embedded sha256 against what we just computed
@@ -549,6 +555,7 @@ function RegisterModal({
         );
         setFileBytes(null);
         setFromBundle(false);
+        setBundleManifest(null);
         return;
       }
       // Prefill every field the manifest declared. Operators can still
@@ -612,29 +619,39 @@ function RegisterModal({
     }
     setBusy(true);
     try {
-      const manifest: PluginManifest = {
-        name: name.trim(),
-        version: version.trim() || "0.1.0",
-        plugin_type: pluginType.trim() || "secret-engine",
-        runtime,
-        abi_version: "1.0",
-        sha256,
-        size: fileBytes.length,
-        capabilities: {
-          log_emit: logEmit,
-          storage_prefix: storageEnabled ? storagePrefix : null,
-          audit_emit: auditEmit,
-          allowed_keys: [],
-          allowed_hosts: [],
-        },
-        description: description.trim(),
-        // Carry the bundle's config_schema through unchanged so the
-        // GUI's Configure modal can render the same form the plugin
-        // author declared.
-        ...(configSchema && configSchema.length > 0
-          ? { config_schema: configSchema }
-          : {}),
-      };
+      // A signed bundle's signature was computed over the publisher's
+      // exact manifest. Editing any field would invalidate it, and the
+      // form can't even represent `signature` / `signing_key`, so we
+      // forward the parsed manifest verbatim (only sha256/size are
+      // re-stamped from the bytes we actually read, and they already
+      // matched the embedded values via the check in `ingestFile`).
+      // Unsigned bundles and raw `.wasm` still build from the form.
+      const manifest: PluginManifest =
+        bundleManifest && bundleManifest.signature
+          ? { ...bundleManifest, sha256, size: fileBytes.length }
+          : {
+              name: name.trim(),
+              version: version.trim() || "0.1.0",
+              plugin_type: pluginType.trim() || "secret-engine",
+              runtime,
+              abi_version: "1.0",
+              sha256,
+              size: fileBytes.length,
+              capabilities: {
+                log_emit: logEmit,
+                storage_prefix: storageEnabled ? storagePrefix : null,
+                audit_emit: auditEmit,
+                allowed_keys: [],
+                allowed_hosts: [],
+              },
+              description: description.trim(),
+              // Carry the bundle's config_schema through unchanged so the
+              // GUI's Configure modal can render the same form the plugin
+              // author declared.
+              ...(configSchema && configSchema.length > 0
+                ? { config_schema: configSchema }
+                : {}),
+            };
       // Base64-encode the binary for the Tauri command boundary.
       let bin = "";
       for (let i = 0; i < fileBytes.length; i++) bin += String.fromCharCode(fileBytes[i]);

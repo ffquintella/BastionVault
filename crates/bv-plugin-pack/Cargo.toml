@@ -20,4 +20,8 @@ sha2 = "0.11"
 # `--signing-key-name` mode. Same provider the host's verifier uses so
 # the signature is byte-identical to what the host expects.
 bv_crypto = { path = "../bv_crypto" }
+# Shared manifest type + canonical `signing_message`, used verbatim by
+# the host verifier. Signing through it guarantees the host re-derives a
+# byte-identical message, so a signed bundle verifies.
+bv_plugin_manifest = { path = "../bv-plugin-manifest" }
 hex = "0.4"

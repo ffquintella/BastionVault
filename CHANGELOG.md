@@ -45,6 +45,34 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.14.7] - 2026-06-15
+
+### Fixed
+
+#### Plugin publisher signatures (signed `.bvplugin` registration)
+- Signed plugin bundles produced by `make plugins-sign` were rejected at
+  registration as `"... is unsigned and accept_unsigned is false"`. Two
+  defects:
+  - The desktop GUI rebuilt the manifest from form fields on register,
+    silently dropping the bundle's `signature` / `signing_key`. The
+    Register flow now forwards a signed bundle's parsed manifest verbatim
+    (re-stamping only `sha256` / `size`), and `api.PluginManifest` gained
+    the `signature` / `signing_key` fields.
+  - The host verifier re-serialised its own `PluginManifest` to rebuild
+    the signing message, but `bv-plugin-pack` signed over a *parallel*
+    struct whose serde field order (and field set: `long_lived`, empty
+    `config_schema`) differed — so even a correctly-transmitted signature
+    failed verification.
+
+### Changed
+- Extracted the plugin manifest types and a new key-sorted canonical
+  `signing_message` into a shared `bv_plugin_manifest` crate, used by
+  both the host verifier and the `bv-plugin-pack` signer. The canonical
+  message is now invariant to serde field order, so signer and verifier
+  agree by construction. **This changes the signed-message format**:
+  re-sign existing bundles with `make plugins-sign` (the reference
+  bundles in `plugins-ext/dist/` have been re-signed).
+
 ## [0.14.6] - 2026-06-15
 
 ### Added

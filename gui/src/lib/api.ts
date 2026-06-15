@@ -1258,6 +1258,16 @@ export interface PluginManifest {
   description: string;
   /** Operator-configurable knobs declared by the plugin author. */
   config_schema?: PluginConfigField[];
+  /**
+   * Hex ML-DSA-65 publisher signature, present on signed `.bvplugin`
+   * bundles (produced by `make plugins-sign`). Must be forwarded to the
+   * host unchanged — the host re-derives the canonical signing message
+   * and verifies it against the `signing_key` publisher. Empty/omitted
+   * for unsigned plugins.
+   */
+  signature?: string;
+  /** Publisher identifier the signature was made with; must match the host allowlist. */
+  signing_key?: string;
 }
 
 export interface PluginInvokeResult {

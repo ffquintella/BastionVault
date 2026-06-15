@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.14.6"
+version = "0.14.7"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -26,6 +26,7 @@ members = [
     "crates/bastion-plugin-sdk",
     "crates/bv-client",
     "crates/bv-plugin-pack",
+    "crates/bv-plugin-manifest",
     "crates/bv_plugin_surface",
     "gui/src-tauri",
 ]
@@ -46,6 +47,7 @@ resolver = "2"
 toml = "1.1.2"
 bv_crypto = { path = "crates/bv_crypto" }
 bv_plugin_surface = { path = "crates/bv_plugin_surface" }
+bv_plugin_manifest = { path = "crates/bv-plugin-manifest" }
 # Shared client crate — used by the CLI's `cluster discover`
 # subcommand and `HttpOptions::client_with_discovery` for SRV-based
 # cluster node selection. The bulk of bv-client (RemoteBackend HTTP

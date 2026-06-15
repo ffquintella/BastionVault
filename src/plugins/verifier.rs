@@ -8,11 +8,12 @@
 //! every load the host:
 //!
 //!   1. Looks up `manifest.signing_key` in the allowlist.
-//!   2. Reconstructs the canonical signing message: `sha256(binary)`
-//!      bytes followed by the canonical-JSON serialisation of the
-//!      manifest with the `signature` field stripped. Hashing the
-//!      binary first keeps the verifier message a fixed size even for
-//!      very large WASM modules.
+//!   2. Reconstructs the canonical signing message via
+//!      [`super::manifest::signing_message`] — `sha256(binary)` bytes
+//!      followed by the manifest serialised as **key-sorted** canonical
+//!      JSON with the `signature` field stripped. That function is
+//!      shared verbatim with the `bv-plugin-pack` signer, so the host
+//!      re-derives byte-for-byte what the publisher signed.
 //!   3. Calls `bv_crypto::MlDsa65Provider::verify` with the public
 //!      key, the message, and the supplied signature.
 //!
@@ -22,7 +23,6 @@
 //! off, an unsigned plugin is refused at registration and at load.
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::{
     errors::RvError,
@@ -130,7 +130,7 @@ pub async fn verify(
         RvError::ErrString("manifest.signature is not valid hex".into())
     })?;
 
-    let message = signing_message(manifest, binary)?;
+    let message = super::manifest::signing_message(manifest, binary);
 
     // Use FIPS 204 directly here rather than the `bv_crypto` wrapper,
     // because the wrapper's verify path takes a *seed* and rederives
@@ -165,26 +165,6 @@ pub async fn verify(
     }
 }
 
-/// Canonical signing message: `sha256(binary) || canonical_manifest_json`,
-/// where the canonical manifest JSON is the manifest with `signature`
-/// stripped and re-serialised. Stripping `signature` is what makes the
-/// verifier reconstructible client-side: the publisher signs the same
-/// bytes the host re-derives.
-fn signing_message(manifest: &PluginManifest, binary: &[u8]) -> Result<Vec<u8>, RvError> {
-    let mut h = Sha256::new();
-    h.update(binary);
-    let bin_digest = h.finalize();
-
-    let mut clone = manifest.clone();
-    clone.signature.clear();
-    let canonical = serde_json::to_vec(&clone)?;
-
-    let mut out = Vec::with_capacity(bin_digest.len() + canonical.len());
-    out.extend_from_slice(&bin_digest);
-    out.extend_from_slice(&canonical);
-    Ok(out)
-}
-
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
     if s.len() % 2 != 0 {
         return None;
@@ -201,8 +181,9 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::manifest::{Capabilities, RuntimeKind};
+    use crate::plugins::manifest::{signing_message, Capabilities, RuntimeKind};
     use bv_crypto::MlDsa65Provider;
+    use sha2::{Digest, Sha256};
 
     fn manifest_with(sig: &str, signer: &str, binary: &[u8]) -> PluginManifest {
         let mut h = Sha256::new();
@@ -226,10 +207,6 @@ mod tests {
         }
     }
 
-    fn hex_encode(b: &[u8]) -> String {
-        b.iter().map(|x| format!("{x:02x}")).collect()
-    }
-
     #[test]
     fn signing_message_strips_signature_field() {
         let bin = b"hello".to_vec();
@@ -237,10 +214,7 @@ mod tests {
         let m2 = manifest_with("AAAA", "pub-a", &bin);
         // Both should produce the same signing message: the second
         // one has `signature` stripped before canonicalisation.
-        assert_eq!(
-            signing_message(&m1, &bin).unwrap(),
-            signing_message(&m2, &bin).unwrap()
-        );
+        assert_eq!(signing_message(&m1, &bin), signing_message(&m2, &bin));
     }
 
     /// Test the canonical-message + ML-DSA-65 sign + verify round-trip
@@ -257,7 +231,7 @@ mod tests {
 
         let mut m = manifest_with("", "publisher-1", &bin);
         m.signing_key = "publisher-1".into();
-        let msg = signing_message(&m, &bin).unwrap();
+        let msg = signing_message(&m, &bin);
         let sig = provider.sign(kp.secret_seed(), &msg, &[]).unwrap();
 
         let pk_arr: [u8; fdsa::PK_LEN] = kp.public_key().try_into().unwrap();
@@ -268,7 +242,7 @@ mod tests {
         // Tamper with the binary → message changes → verify fails.
         let mut bad = bin.clone();
         bad[0] ^= 1;
-        let bad_msg = signing_message(&m, &bad).unwrap();
+        let bad_msg = signing_message(&m, &bad);
         assert!(!pk_obj.verify(&bad_msg, &sig_arr, &[]));
     }
 
