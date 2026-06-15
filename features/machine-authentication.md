@@ -251,6 +251,12 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   unauthenticated `requirement` endpoint advertises it, and clients capture it onto the in-memory
   `RemoteProfile` (alongside `expected_audience`) so all machine logins resolve the matching
   `mia-<env>.toml` socket automatically. The Config and Machine Login tabs prefill from the saved value.
+- **MIA environment combobox + cross-screen selection (Unreleased, 2026-06-12).** The Config and Machine Login
+  tabs now render the MIA environment as a dropdown built from the discovered `ferrogate_list_environments`
+  (plus a `(default)` entry and the saved value when its selector isn't installed locally), replacing the
+  free-text datalist. The selection is page-level shared state, so choosing an environment in the Config tab
+  immediately re-targets the Machine Login tab's socket; the Connect screen continues to read the advertised
+  value from the `requirement` endpoint after Save.
 - Caveats: `cmis_grpc` is async-build only (the `sync_handler` feature is independently broken repo-wide);
   child-token revocation on the `static_jwks` source relies on short token TTL (the CRL is enforced on the SVID
   path); audit events are structured log lines (no dedicated audit-store rows).

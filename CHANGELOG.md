@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.14.4] - 2026-06-15
+
 ### Added
 
 #### FerroGate MIA environment persistence
@@ -64,6 +66,18 @@ EXAMPLE ENTRY:
   the default `mia.toml`. The field now persists in the mount config, prefills
   the Config and Machine Login tabs, and the connect flow resolves the
   server-advertised environment's `mia-<env>.toml` socket automatically.
+
+### Changed
+
+- **GUI: the "MIA environment" field is now a combobox of the environments
+  discovered on this host, and the selection is shared across screens.** Both
+  the Config tab and the Machine Login tab now present a dropdown built from the
+  installed `mia-<env>.toml` selectors (plus a `(default)` entry and the saved
+  value if its selector isn't installed locally), replacing the free-text
+  autocomplete. Selecting an environment in the Config tab immediately re-targets
+  the Machine Login tab (and, on Save, the connect-time machine gate via the
+  requirement endpoint) instead of each screen tracking its own value.
+  (`gui/src/routes/FerroGatePage.tsx`)
 
 ## [0.14.3] - 2026-06-12
 

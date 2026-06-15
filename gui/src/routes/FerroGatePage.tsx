@@ -44,6 +44,23 @@ function statusBadge(status: string) {
   return <Badge variant={variant} label={status} />;
 }
 
+/**
+ * Build the option list for the MIA-environment combobox: a blank
+ * `(default)` entry (the default `mia.toml`), every `mia-<env>.toml`
+ * selector discovered on this host, and — when the saved/selected env
+ * isn't among them — the current value itself, flagged, so a deployment
+ * configured for an environment whose selector isn't installed locally
+ * is still shown and selectable rather than silently dropped.
+ */
+function miaEnvOptions(environments: string[], current: string) {
+  const opts = [{ value: "", label: "(default)" }];
+  for (const e of environments) opts.push({ value: e, label: e });
+  if (current && !environments.includes(current)) {
+    opts.push({ value: current, label: `${current} (not installed locally)` });
+  }
+  return opts;
+}
+
 export function FerroGatePage() {
   const [machines, setMachines] = useState<FerroGateMachine[]>([]);
   const [config, setConfig] = useState<FerroGateConfig | null>(null);
@@ -67,6 +84,10 @@ export function FerroGatePage() {
   // MIA environment selectors installed on this host (`mia-<env>.toml`), for
   // the autofill/socket environment autocomplete.
   const [environments, setEnvironments] = useState<string[]>([]);
+  // The MIA environment selected across this page. Seeded from the saved
+  // mount config (`mia_environment`) and shared between the Config and Machine
+  // Login panels so picking one in Config immediately re-targets the other.
+  const [selectedEnv, setSelectedEnv] = useState<string>("");
   const [approveTtl, setApproveTtl] = useState("3600");
   const [approveComment, setApproveComment] = useState("");
 
@@ -106,7 +127,9 @@ export function FerroGatePage() {
       setMachines(list);
       setMountEnabled(true);
       try {
-        setConfig(await api.ferrogateReadConfig());
+        const cfg = await api.ferrogateReadConfig();
+        setConfig(cfg);
+        setSelectedEnv(cfg.mia_environment || "");
       } catch {
         /* config read may fail independently; leave as-is */
       }
@@ -369,7 +392,8 @@ export function FerroGatePage() {
             {tab === "self" && (
               <MachineLoginPanel
                 expectedAudience={config?.expected_audience || ""}
-                miaEnvironment={config?.mia_environment || ""}
+                environment={selectedEnv}
+                setEnvironment={setSelectedEnv}
                 environments={environments}
                 toast={toast}
               />
@@ -381,6 +405,8 @@ export function FerroGatePage() {
                 availablePolicies={availablePolicies}
                 policiesListable={policiesListable}
                 environments={environments}
+                environment={selectedEnv}
+                setEnvironment={setSelectedEnv}
                 onSaved={load}
                 toast={toast}
               />
@@ -513,19 +539,20 @@ export function FerroGatePage() {
 
 function MachineLoginPanel({
   expectedAudience,
-  miaEnvironment,
+  environment,
+  setEnvironment,
   environments,
   toast,
 }: {
   expectedAudience: string;
-  miaEnvironment: string;
+  // Shared with the Config panel: selecting an environment in either place
+  // re-targets the other (and the socket below) to the matching mia-<env>.toml.
+  environment: string;
+  setEnvironment: (env: string) => void;
   environments: string[];
   toast: (type: "success" | "error" | "info", message: string) => void;
 }) {
   const [socket, setSocket] = useState("");
-  // Seeded with the mount's saved `mia_environment` so the dial targets the
-  // MIA belonging to this deployment by default; the operator can override.
-  const [environment, setEnvironment] = useState(miaEnvironment);
   const [audience, setAudience] = useState(expectedAudience);
   const [mount, setMount] = useState("ferrogate");
   const [ttl, setTtl] = useState("300");
@@ -545,12 +572,6 @@ function MachineLoginPanel({
   useEffect(() => {
     setAudience((a) => (a ? a : expectedAudience));
   }, [expectedAudience]);
-  // Same for the environment: the config (and its saved mia_environment) may
-  // arrive after first render; fill the field only while the operator hasn't
-  // typed anything.
-  useEffect(() => {
-    setEnvironment((e) => (e ? e : miaEnvironment));
-  }, [miaEnvironment]);
 
   const ttlNum = parseInt(ttl || "0", 10) || 300;
 
@@ -624,19 +645,17 @@ function MachineLoginPanel({
         </div>
 
         <div className="grid grid-cols-2 gap-3">
-          <Input
-            label="MIA environment"
-            list="ferrogate-mia-environments"
-            value={environment}
-            onChange={(e) => setEnvironment(e.target.value)}
-            placeholder="(default)"
-            hint="reads mia-<env>.toml; blank uses the default mia.toml"
-          />
-          <datalist id="ferrogate-mia-environments">
-            {environments.map((e) => (
-              <option key={e} value={e} />
-            ))}
-          </datalist>
+          <div>
+            <Select
+              label="MIA environment"
+              value={environment}
+              onChange={(e) => setEnvironment(e.target.value)}
+              options={miaEnvOptions(environments, environment)}
+            />
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+              reads mia-&lt;env&gt;.toml; (default) uses the default mia.toml
+            </p>
+          </div>
           <Input
             label="MIA helper socket"
             value={socket}
@@ -729,6 +748,8 @@ function ConfigPanel({
   availablePolicies,
   policiesListable,
   environments,
+  environment,
+  setEnvironment,
   onSaved,
   toast,
 }: {
@@ -736,6 +757,11 @@ function ConfigPanel({
   availablePolicies: string[];
   policiesListable: boolean;
   environments: string[];
+  // Shared with the page (and the Machine Login panel): the selected MIA
+  // environment. Picking one here re-targets the other screens immediately;
+  // it's persisted to the mount config on Save.
+  environment: string;
+  setEnvironment: (env: string) => void;
   onSaved: () => Promise<void>;
   toast: (type: "success" | "error" | "info", message: string) => void;
 }) {
@@ -753,11 +779,11 @@ function ConfigPanel({
   const [bootstrapPolicies, setBootstrapPolicies] = useState<string[]>(config.bootstrap_policies || []);
   const [requireUserToken, setRequireUserToken] = useState(config.require_user_token);
   const [requireMachineIdentity, setRequireMachineIdentity] = useState(config.require_machine_identity);
-  // MIA environment this deployment belongs to (blank ⇒ the default
-  // mia.toml). Persisted with the config: it picks which mia-<env>.toml the
-  // autofill reads AND is advertised to clients (via the requirement
-  // endpoint) so machine logins dial the matching local MIA.
-  const [environment, setEnvironment] = useState(config.mia_environment || "");
+  // MIA environment this deployment belongs to (blank ⇒ the default mia.toml)
+  // is page-level shared state (`environment`/`setEnvironment` props): picking
+  // it picks which mia-<env>.toml the autofill reads AND is advertised to
+  // clients (via the requirement endpoint) so machine logins dial the matching
+  // local MIA. Persisted with the config on Save.
   const [saving, setSaving] = useState(false);
   const [autofilling, setAutofilling] = useState(false);
 
@@ -906,20 +932,16 @@ function ConfigPanel({
       </div>
       <div className="mt-4 flex flex-wrap items-end justify-between gap-3">
         <div className="flex items-end gap-2">
-          <div className="w-44">
-            <Input
+          <div className="w-56">
+            <Select
               label="MIA environment"
-              list="ferrogate-config-environments"
               value={environment}
               onChange={(e) => setEnvironment(e.target.value)}
-              placeholder="(default)"
-              hint="saved with the config; clients dial mia-<env>.toml"
+              options={miaEnvOptions(environments, environment)}
             />
-            <datalist id="ferrogate-config-environments">
-              {environments.map((e) => (
-                <option key={e} value={e} />
-              ))}
-            </datalist>
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+              saved with the config; clients dial mia-&lt;env&gt;.toml
+            </p>
           </div>
           <Button variant="secondary" onClick={() => void autofill()} disabled={autofilling || saving}>
             {autofilling ? "Reading MIA…" : "Autofill from local MIA"}
