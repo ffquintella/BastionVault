@@ -56,6 +56,25 @@ const CLOUD_DEV_CONSOLES: Record<CloudProvider, { url: string; label: string }> 
 type AddKind = "local" | "remote" | "cloud" | null;
 
 /**
+ * Build the option list for the MIA-environment combobox shown in the
+ * Server add/edit form: a blank `(server default)` entry (dial the
+ * server-advertised env, falling back to the default `mia.toml`), every
+ * `mia-<env>.toml` selector discovered on this host, and — when the saved
+ * value isn't among them — the saved value itself, flagged, so a profile
+ * pinned to an env whose selector isn't installed locally is still shown
+ * and selectable rather than silently dropped. Mirrors the helper on the
+ * FerroGate Machines screens so both pickers offer the same choices.
+ */
+function miaEnvOptions(environments: string[], current: string) {
+  const opts = [{ value: "", label: "(server default)" }];
+  for (const e of environments) opts.push({ value: e, label: e });
+  if (current && !environments.includes(current)) {
+    opts.push({ value: current, label: `${current} (not installed locally)` });
+  }
+  return opts;
+}
+
+/**
  * Get Started / vault chooser.
  *
  * Loads the saved vault profiles list from preferences. If one is
@@ -137,6 +156,14 @@ export function ConnectPage() {
   // type a literal URL (skipped automatically) or untick this for
   // diagnostics against one HA node.
   const [clusterDiscovery, setClusterDiscovery] = useState(true);
+  // MIA environment pinned to this server profile. "" = use the env the
+  // server advertises (falling back to the default mia.toml). Selecting one
+  // here re-targets which `mia-<env>.toml` socket the connect-time machine
+  // gate dials — the fix for "this caller is not on the MIA's local
+  // allowlist" when the wrong MIA daemon is being asked. `miaEnvList` holds
+  // the `mia-<env>.toml` selectors discovered on this host.
+  const [remoteMiaEnv, setRemoteMiaEnv] = useState("");
+  const [miaEnvList, setMiaEnvList] = useState<string[]>([]);
 
   // Machine-identity gate modal state. Populated when a `require_machine_
   // identity` connection's startup machine login comes back not-approved:
@@ -227,6 +254,12 @@ export function ConnectPage() {
       .getOAuthRedirectUri()
       .then(setOauthRedirectUri)
       .catch(() => setOauthRedirectUri(""));
+    // Discover locally-installed mia-<env>.toml selectors so the Server
+    // form can offer them. Empty/failure → only "(server default)".
+    api
+      .ferrogateListEnvironments()
+      .then((envs) => setMiaEnvList(Array.isArray(envs) ? envs : []))
+      .catch(() => setMiaEnvList([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -492,6 +525,14 @@ export function ConnectPage() {
         case "remote": {
           await api.connectRemote(profile.spec.profile);
           setMode("Remote");
+          // A MIA environment pinned to this profile (Server form) is the
+          // operator's deliberate override of which `mia-<env>.toml` socket
+          // the machine gate dials, so it wins over the server-advertised
+          // value. Seed it first; the requirement seed below is then a no-op.
+          // An explicit session pick from the Machines screens still wins
+          // (seed never clobbers an already-set store value).
+          const savedEnv = (profile.spec.profile.mia_environment || "").trim();
+          if (savedEnv) useMiaEnvStore.getState().seedEnvironment(savedEnv);
           // The SERVER decides whether machine identity is required — ask it
           // (unauthenticated) now that we're connected, rather than trusting a
           // local toggle. A non-FerroGate server / read failure reports false.
@@ -500,12 +541,14 @@ export function ConnectPage() {
           // the token layer regardless, so this is only UX.
           let required = false;
           let expectedAudience = "";
-          let miaEnvironment = "";
+          // Default to the pinned env; only fall back to the server-advertised
+          // one when this profile hasn't pinned a choice.
+          let miaEnvironment = savedEnv;
           try {
             const req = await api.ferrogateRequirement();
             required = req.require_machine_identity;
             expectedAudience = req.expected_audience;
-            miaEnvironment = req.mia_environment || "";
+            if (!miaEnvironment) miaEnvironment = req.mia_environment || "";
             // Establish the deployment's environment as the GUI default, unless
             // the operator has already picked one this session (seed is a no-op
             // once set) — so every screen shares the same selected environment.
@@ -706,6 +749,7 @@ export function ConnectPage() {
     setAddKind(kind);
     setEditingId(null);
     setError(null);
+    setRemoteMiaEnv("");
     setCloudCredsReady(false);
     setS3AccessKeyId("");
     setS3SecretAccessKey("");
@@ -764,6 +808,7 @@ export function ConnectPage() {
       setTlsSkipVerify(p.tls_skip_verify ?? false);
       setCaCertPath(p.ca_cert_path ?? "");
       setClusterDiscovery(p.cluster_discovery ?? true);
+      setRemoteMiaEnv(p.mia_environment ?? "");
     } else if (profile.spec.kind === "local") {
       const s = profile.spec as { storage_kind: string; data_dir?: string | null };
       setAddKind("local");
@@ -918,6 +963,7 @@ export function ConnectPage() {
           tls_skip_verify: tlsSkipVerify,
           ca_cert_path: caCertPath || undefined,
           cluster_discovery: clusterDiscovery,
+          mia_environment: remoteMiaEnv.trim() || undefined,
         };
         spec = { kind: "remote", profile };
       } else if (addKind === "cloud") {
@@ -1505,10 +1551,26 @@ export function ConnectPage() {
                 placeholder="/path/to/ca.pem"
                 hint="Optional: path to PEM-encoded CA certificate"
               />
+              <div>
+                <Select
+                  label="MIA environment"
+                  value={remoteMiaEnv}
+                  onChange={(e) => setRemoteMiaEnv(e.target.value)}
+                  options={miaEnvOptions(miaEnvList, remoteMiaEnv)}
+                />
+                <p className="text-xs text-[var(--color-text-muted)] mt-1">
+                  Which local MIA daemon (<span className="font-mono">mia-&lt;env&gt;.toml</span>)
+                  the machine gate dials when this server requires machine
+                  identity. Leave on <span className="font-medium">(server
+                  default)</span> to use the env the server advertises. Pin one
+                  here if you get &ldquo;not on the MIA&apos;s local
+                  allowlist&rdquo; because the wrong MIA is being asked.
+                </p>
+              </div>
               <p className="text-xs text-[var(--color-text-muted)]">
-                FerroGate machine identity is enforced by the server, not
-                configured here: if this server requires it, the machine gate
-                runs automatically on connect.
+                FerroGate machine identity is enforced by the server: if this
+                server requires it, the machine gate runs automatically on
+                connect.
               </p>
             </>
           )}

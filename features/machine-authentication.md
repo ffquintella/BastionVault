@@ -257,6 +257,14 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   free-text datalist. The selection is page-level shared state, so choosing an environment in the Config tab
   immediately re-targets the Machine Login tab's socket; the Connect screen continues to read the advertised
   value from the `requirement` endpoint after Save.
+- **Per-server MIA environment override on the setup screen (Unreleased, 2026-06-15, v0.14.6).** The Server
+  add/edit form (`ConnectPage.tsx`) now has its own "MIA environment" combobox (same option builder: installed
+  `ferrogate_list_environments` selectors + a `(server default)` entry + the saved value when not installed
+  locally). The choice persists on the profile as `RemoteProfile.mia_environment` and, on connect, is seeded
+  into the shared env store *before* the `requirement` fetch, so a pinned environment takes precedence over the
+  server-advertised one when the machine gate dials `mia-<env>.toml`. Fixes the dead-end where a connect failed
+  with "not on the MIA's local allowlist" (wrong MIA daemon dialed) and the operator had no way to override the
+  environment from the Get Started screen.
 - Caveats: `cmis_grpc` is async-build only (the `sync_handler` feature is independently broken repo-wide);
   child-token revocation on the `static_jwks` source relies on short token TTL (the CRL is enforced on the SVID
   path); audit events are structured log lines (no dedicated audit-store rows).

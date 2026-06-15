@@ -45,6 +45,21 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.14.6] - 2026-06-15
+
+### Added
+
+- **GUI: pick the MIA environment when adding/editing a Server vault.** The
+  Server form (Get Started → Add/Edit Server) now has a "MIA environment"
+  combobox listing the `mia-<env>.toml` selectors installed on this host (plus
+  a `(server default)` entry and the saved value when its selector isn't local).
+  The choice is stored on the profile (`RemoteProfile.mia_environment`) and, on
+  connect, takes precedence over the server-advertised environment so the
+  machine gate dials the operator-chosen MIA daemon. This fixes the case where
+  connecting failed with "this caller is not on the MIA's local allowlist"
+  because the wrong `mia-<env>.toml` socket was being dialed and there was no
+  way to override it from the setup screen. (`gui/src/routes/ConnectPage.tsx`)
+
 ## [0.14.5] - 2026-06-15
 
 ### Fixed

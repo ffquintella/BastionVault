@@ -83,6 +83,15 @@ pub struct RemoteProfile {
     /// to avoid locking operators out of vaults that don't use ferrogate.
     #[serde(default)]
     pub require_machine_identity: bool,
+    /// MIA environment pinned to this server profile by the operator in the
+    /// GUI's Server form. Selects which `mia-<env>.toml` the connect-time
+    /// machine gate dials and takes precedence over the env the server
+    /// advertises — the override for "this caller is not on the MIA's local
+    /// allowlist" when the wrong MIA daemon would otherwise be asked. Empty /
+    /// missing → use the server-advertised environment (default `mia.toml`).
+    /// Optional/defaulted so old preference files load cleanly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mia_environment: Option<String>,
 }
 
 fn default_cluster_discovery() -> bool {
