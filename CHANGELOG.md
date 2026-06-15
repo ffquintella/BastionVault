@@ -45,6 +45,22 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.14.8] - 2026-06-15
+
+### Added
+- **`bvault status` daemon overview** (`src/cli/command/status.rs`) -- the
+  `status` subcommand now prints an aggregated daemon snapshot: reachability,
+  version, initialized/sealed state, key-share counts and unseal progress, the
+  storage cluster mode (`single` vs `clustered`), and -- when clustered -- this
+  node's id, leader role, and cluster health. Seal/init state is sourced from
+  `/sys/info` so it reports correctly even on an uninitialized vault, and an
+  unreachable daemon now exits non-zero with a clear error.
+
+### Changed
+- The `/sys/cluster-status` endpoint (`src/http/sys.rs`) now populates
+  `node_id` from the hiqlite backend so clients can report the local node
+  number without parsing raft metrics.
+
 ## [0.14.7] - 2026-06-15
 
 ### Fixed

@@ -836,6 +836,7 @@ async fn sys_cluster_status_request_handler(
         if let Some(hiqlite_backend) = backend_any.downcast_ref::<HiqliteBackend>() {
             resp.storage_type = "hiqlite".to_string();
             resp.cluster = true;
+            resp.node_id = Some(hiqlite_backend.node_id());
             resp.is_leader = Some(hiqlite_backend.is_leader().await);
             resp.cluster_healthy = Some(hiqlite_backend.is_healthy().await);
             resp.raft_metrics = hiqlite_backend.cluster_metrics().await.ok();
