@@ -206,7 +206,8 @@ Land the data model and the routing path. No identity/policy/audit scoping yet �
 | `src/modules/namespace/token_binding.rs` | Namespace-bound tokens; `child_visible` flag; enforcement in `Core::handle_request`; create-time binding via header; root bypass. | ✅ Done (explicit token-create binding); per-login binding deferred |
 | `{{namespace.path}}` / `{{namespace.id}}` policy templates (`src/modules/policy/policy_store.rs`) | Namespace-aware ACL templating. | ✅ Done |
 | `namespace` field on audit entries (`src/audit/entry.rs`) | Per-tenant audit attribution. | ✅ Done |
-| `src/modules/namespace/policy_scope.rs` — per-namespace policy *storage* + cross-namespace path refusal | Needs per-namespace policy stores (architectural). | ⏳ Not started |
+| `src/modules/namespace/policy_scope.rs` — cross-namespace path refusal (write-time guard, wired into policy write) | Refuses policies referencing another namespace's paths. | ✅ Done |
+| Per-namespace policy *storage* (separate policy documents per namespace) | Needs policy-store rework on the auth hot path (architectural). | ⏳ Not started |
 | `src/modules/namespace/audit_scope.rs` — per-namespace *broadcasters* + root mirror | Needs broker fan-out rework (global singleton today). | ⏳ Not started |
 | `src/modules/policy/*` (extension) | Compile policies against the calling namespace. | ⏳ Not started |
 

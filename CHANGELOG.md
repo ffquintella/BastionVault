@@ -108,6 +108,13 @@ EXAMPLE ENTRY:
   so a per-namespace auditor and the root SOC mirror can attribute events to a
   tenant. (foundation for per-namespace audit broadcasters)
 
+- **Cross-namespace policy path refusal** (`src/modules/namespace/policy_scope.rs`)
+  -- a policy authored inside a namespace (write carrying the namespace header)
+  may only reference paths owned by that namespace; referencing another
+  tenant's (or root's) path space is refused at write time with a `403`. Root
+  operators (no header) remain unrestricted. Write-time syntactic guard; does
+  not touch the authorization hot path.
+
 - **Scope note:** Phase 1 is functionally complete (container, registry,
   resolver, per-namespace mounts + dispatch, migration copy). Phase 2 token
   binding is enforced. Still not implemented: per-namespace policy scoping +

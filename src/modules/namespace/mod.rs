@@ -29,6 +29,7 @@ use crate::{core::Core, errors::RvError};
 
 pub mod migrate;
 pub mod mount_registry;
+pub mod policy_scope;
 pub mod router;
 pub mod store;
 pub mod token_binding;
@@ -388,5 +389,82 @@ mod tests {
         // Sibling namespace: token binding denies before any backend dispatch.
         let err = ns_req(&core, &token_a, Operation::Read, "cubby/foo", "tenant-b", None).await;
         assert_eq!(err.unwrap_err(), RvError::ErrPermissionDenied);
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_cross_namespace_policy_path_refusal() {
+        use crate::logical::{Operation, Request};
+        use std::collections::HashMap;
+
+        let (_bvault, core, root) =
+            new_unseal_test_bastion_vault("test_ns_policy_refusal").await;
+
+        async fn write_policy_in_ns(
+            core: &Arc<Core>,
+            token: &str,
+            name: &str,
+            hcl: &str,
+            ns: &str,
+        ) -> Result<Option<crate::logical::Response>, RvError> {
+            let mut req = Request::new(format!("sys/policy/{name}"));
+            req.operation = Operation::Write;
+            req.client_token = token.to_string();
+            req.body = json!({ "policy": hcl }).as_object().cloned();
+            let mut h = HashMap::new();
+            if !ns.is_empty() {
+                h.insert("x-bastionvault-namespace".to_string(), ns.to_string());
+            }
+            req.headers = Some(h);
+            core.handle_request(&mut req).await
+        }
+
+        let store = store_of(&core);
+        store.create("engineering", NamespaceQuotas::default(), false).await.unwrap();
+        store.create("marketing", NamespaceQuotas::default(), false).await.unwrap();
+
+        // Root may author a policy referencing any tenant's paths.
+        write_policy_in_ns(
+            &core,
+            &root,
+            "root-cross",
+            r#"path "marketing/secret/*" { capabilities = ["read"] }"#,
+            "",
+        )
+        .await
+        .unwrap();
+
+        // engineering-scoped write referencing its own namespace: allowed.
+        write_policy_in_ns(
+            &core,
+            &root,
+            "eng-ok",
+            r#"path "engineering/secret/*" { capabilities = ["read"] }"#,
+            "engineering",
+        )
+        .await
+        .unwrap();
+
+        // engineering-scoped write referencing marketing: refused.
+        let err = write_policy_in_ns(
+            &core,
+            &root,
+            "eng-bad",
+            r#"path "marketing/secret/*" { capabilities = ["read"] }"#,
+            "engineering",
+        )
+        .await;
+        assert!(err.is_err(), "cross-namespace policy path must be refused");
+
+        // engineering-scoped write with a bare (root-owned) path: refused too,
+        // since it does not belong to engineering.
+        let err = write_policy_in_ns(
+            &core,
+            &root,
+            "eng-bare",
+            r#"path "secret/*" { capabilities = ["read"] }"#,
+            "engineering",
+        )
+        .await;
+        assert!(err.is_err(), "bare root-owned path in a namespace policy must be refused");
     }
 }
