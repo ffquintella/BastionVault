@@ -45,6 +45,21 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+- **Graphical Policy Builder & Validator (planned)** -- spec + roadmap drafted for a
+  visual, block-based policy construction surface and an effectivity validator beside
+  the textual HCL editor on the Policies page. Hybrid evaluation engine: instant
+  client-side lint/preview plus an authoritative, stateless backend dry-run
+  (`POST /v1/sys/policies/acl/test`) that reuses the production ACL matcher to report
+  allow/deny + matched rule for `(path, capability)` cases without persisting. Savable
+  test cases (`policy-tests/<name>`) gate every save. 5 phases, no code yet.
+  (`features/policy-builder-validator.md`, `roadmaps/policy-builder-validator.md`)
+
+### Changed
+
+- **AppRole GUI** (`gui/src/routes/AppRolePage.tsx`) -- the Create AppRole "Token Policies" field now uses the `PolicySelect` autocomplete, validating entries against the vault's existing policies (chips, type-to-filter, ⚠ on unknown names) instead of an unvalidated comma-separated free-text input. Falls back to free text when the policy list can't be fetched.
+
 ## [0.14.8] - 2026-06-15
 
 ### Added
