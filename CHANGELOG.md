@@ -45,7 +45,21 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.14.9] - 2026-06-16
+
 ### Added
+
+- **GUI session-expiry monitor** (`gui/src/components/SessionMonitor.tsx`,
+  `gui/src-tauri/src/commands/auth.rs`) -- a background monitor mounted at the app
+  root polls a new `token_status` command (`auth/token/lookup-self`) on a 30s
+  interval and immediately on window focus/visibility change. When the active token
+  has expired or been revoked it tears the session down (`expireSession` in
+  `authStore`) and the route guard bounces to `/login` with a "Your session expired"
+  banner; a near-expiry warning toast fires once under 2 minutes of TTL. Transient
+  backend errors (network blip, briefly sealed vault) report `reachable: false` and
+  are ignored so a momentary hiccup never logs the operator out. Closes the gap where
+  an expired session was only discovered via confusing "permission denied" toasts on
+  the next data fetch.
 
 - **Graphical Policy Builder & Validator (planned)** -- spec + roadmap drafted for a
   visual, block-based policy construction surface and an effectivity validator beside

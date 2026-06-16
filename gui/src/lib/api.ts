@@ -5,6 +5,7 @@ import type {
   Preferences,
   InitResponse,
   LoginResponse,
+  TokenStatus,
   MountInfo,
   SecretData,
   SecretListResult,
@@ -267,6 +268,7 @@ export const loginToken = (token: string) =>
 export const loginUserpass = (username: string, password: string) =>
   invoke<LoginResponse>("login_userpass", { username, password });
 export const getCurrentToken = () => invoke<string | null>("get_current_token");
+export const tokenStatus = () => invoke<TokenStatus>("token_status");
 export const logout = () => invoke<void>("logout");
 
 // Secrets (mount/mountType passed for kv-v2 path handling)

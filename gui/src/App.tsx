@@ -36,6 +36,7 @@ import { ToastProvider } from "./components/ui";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ConnectPalette } from "./components/ConnectPalette";
 import { ServerInfoModal } from "./components/ServerInfoModal";
+import { SessionMonitor } from "./components/SessionMonitor";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
@@ -70,6 +71,10 @@ export default function App() {
             hidden. Cheap to keep here unconditionally; no state
             until first activation. */}
         <ServerInfoModal />
+        {/* Background session monitor — detects an expired/revoked
+            token and bounces to /login. Mounted inside ToastProvider
+            so it can surface the "session expired" toast. */}
+        <SessionMonitor />
         <HashRouter>
           <Routes>
             <Route path="/" element={<Navigate to="/connect" replace />} />

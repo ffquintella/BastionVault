@@ -21,6 +21,7 @@ interface SsoProviderOption {
 export function LoginPage() {
   const navigate = useNavigate();
   const setAuth = useAuthStore((s) => s.setAuth);
+  const sessionExpired = useAuthStore((s) => s.sessionExpired);
   const loadEntity = useAuthStore((s) => s.loadEntity);
   const rememberSession = useAuthStore((s) => s.rememberSession);
 
@@ -379,6 +380,16 @@ export function LoginPage() {
           </button>
         ))}
       </div>
+
+      {/* Explain an automatic bounce from a protected page: the
+          session monitor tore the session down because the token
+          expired or was revoked. Suppressed once a real login error
+          takes over the slot. Cleared on the next successful login. */}
+      {sessionExpired && !error && (
+        <div className="mb-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-400 text-sm">
+          Your session expired. Please sign in again.
+        </div>
+      )}
 
       {error && (
         <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">

@@ -136,6 +136,26 @@ export interface LoginResponse {
   policies: string[];
 }
 
+/**
+ * Liveness probe for the active session (see the `token_status` Tauri
+ * command). The session monitor polls this to detect a token that has
+ * expired or been revoked out from under the UI.
+ */
+export interface TokenStatus {
+  /** The stored token still authenticates against lookup-self. */
+  valid: boolean;
+  /**
+   * The backend gave a definitive answer. When false the probe could
+   * not reach the server (network blip, sealed vault) and `valid` is
+   * meaningless — the UI must leave the session untouched.
+   */
+  reachable: boolean;
+  /** Remaining TTL in seconds; 0/null means a non-expiring token. */
+  ttl_seconds: number | null;
+  /** RFC3339 absolute expiry, when reported. */
+  expire_time: string | null;
+}
+
 export interface MountInfo {
   path: string;
   mount_type: string;

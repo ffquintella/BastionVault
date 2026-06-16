@@ -240,6 +240,7 @@ pub fn run() {
             commands::auth::login_token,
             commands::auth::login_userpass,
             commands::auth::get_current_token,
+            commands::auth::token_status,
             commands::auth::logout,
             // Full-vault password-encrypted backup / restore
             commands::backup::backup_export,

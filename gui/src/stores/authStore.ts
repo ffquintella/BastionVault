@@ -38,6 +38,14 @@ interface AuthState {
    * its way back to the dashboard.
    */
   bootstrapping: boolean;
+  /**
+   * Set true when the session monitor detects the active token has
+   * expired or been revoked and tears the session down. The login
+   * page reads this to explain *why* the operator landed back there
+   * ("Your session expired") instead of a silent bounce. Cleared by
+   * `setAuth` (a fresh login) and on `clearAuth` (deliberate logout).
+   */
+  sessionExpired: boolean;
   /** Stable entity_id for the logged-in user, used by ownership and sharing features. */
   entityId: string;
   /** Principal username (UserPass) or role name (AppRole); for display only. */
@@ -53,6 +61,13 @@ interface AuthState {
   sessions: Record<string, VaultSession>;
   setAuth: (token: string, policies: string[]) => void;
   clearAuth: () => void;
+  /**
+   * Tear down the session because the token expired/was revoked while
+   * in use. Like `clearAuth` but raises the `sessionExpired` flag so
+   * the login page can surface the reason. The route guard then
+   * bounces any protected page to `/login`.
+   */
+  expireSession: () => void;
   /**
    * Re-hydrate auth from the Rust-side `AppState`. Idempotent —
    * called once on app mount (see App.tsx) and short-circuits if a
@@ -83,18 +98,40 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   bootstrapping: true,
   entityId: "",
   principal: "",
+  sessionExpired: false,
   sessions: {},
   setAuth: (token, policies) =>
-    set({ token, policies, isAuthenticated: true, bootstrapping: false }),
+    set({
+      token,
+      policies,
+      isAuthenticated: true,
+      bootstrapping: false,
+      sessionExpired: false,
+    }),
   clearAuth: () =>
     set({
       token: null,
       policies: [],
       isAuthenticated: false,
       bootstrapping: false,
+      sessionExpired: false,
       entityId: "",
       principal: "",
     }),
+  expireSession: () => {
+    // No-op if already signed out, so a stray poll after a manual
+    // logout can't resurrect the "session expired" banner.
+    if (!get().isAuthenticated) return;
+    set({
+      token: null,
+      policies: [],
+      isAuthenticated: false,
+      bootstrapping: false,
+      sessionExpired: true,
+      entityId: "",
+      principal: "",
+    });
+  },
   bootstrapAuth: async () => {
     if (get().isAuthenticated) {
       set({ bootstrapping: false });

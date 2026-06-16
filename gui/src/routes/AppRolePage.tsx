@@ -10,6 +10,7 @@ import {
   Modal,
   ConfirmModal,
   EmptyState,
+  PolicySelect,
   useToast,
 } from "../components/ui";
 import type { AppRoleInfo, SecretIdAccessorInfo } from "../lib/types";
@@ -31,12 +32,30 @@ export function AppRolePage() {
 
   // Create form
   const [newName, setNewName] = useState("");
-  const [newPolicies, setNewPolicies] = useState("");
+  const [newPolicies, setNewPolicies] = useState<string[]>([]);
   const [newBindSecretId, setNewBindSecretId] = useState(true);
+
+  // Known policy names for the create-modal autocomplete. When the list can't be
+  // fetched (caller lacks admin on the policies path) the selector degrades to a
+  // free-text field rather than locking the operator out.
+  const [availablePolicies, setAvailablePolicies] = useState<string[]>([]);
+  const [policiesListable, setPoliciesListable] = useState(true);
 
   useEffect(() => {
     loadRoles();
+    loadPolicies();
   }, []);
+
+  async function loadPolicies() {
+    try {
+      const pol = await api.listPolicies();
+      setAvailablePolicies(pol.policies);
+      setPoliciesListable(true);
+    } catch {
+      setAvailablePolicies([]);
+      setPoliciesListable(false);
+    }
+  }
 
   async function loadRoles() {
     setLoading(true);
@@ -87,11 +106,11 @@ export function AppRolePage() {
   async function handleCreate() {
     if (!newName) return;
     try {
-      await api.writeAppRole(newName, newBindSecretId, newPolicies, 0, "", "", "");
+      await api.writeAppRole(newName, newBindSecretId, newPolicies.join(","), 0, "", "", "");
       toast("success", `Role ${newName} created`);
       setShowCreate(false);
       setNewName("");
-      setNewPolicies("");
+      setNewPolicies([]);
       loadRoles();
       selectRole(newName);
       // approle write_role pre-provisions an entity alias on first
@@ -230,12 +249,14 @@ export function AppRolePage() {
               onChange={(e) => setNewName(e.target.value)}
               placeholder="my-app"
             />
-            <Input
+            <PolicySelect
               label="Token Policies"
-              value={newPolicies}
-              onChange={(e) => setNewPolicies(e.target.value)}
-              hint="Comma-separated policy names"
-              placeholder="default, my-policy"
+              selected={newPolicies}
+              options={availablePolicies}
+              onChange={setNewPolicies}
+              fallbackFreeText={!policiesListable}
+              placeholder="type to search policies…"
+              helpText="Only existing policies can be selected"
             />
             <label className="flex items-center gap-2 text-sm">
               <input
