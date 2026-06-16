@@ -98,6 +98,19 @@ async fn logical_request_handler_inner(
         r.headers.get_or_insert_with(Default::default).insert("dpop".to_string(), dpop.to_string());
     }
 
+    // Multi-tenancy namespace selector. Backends and the core router resolve
+    // the target namespace from this header (the equivalent path-prefix form
+    // needs no header). Stored under the canonical lower-case key.
+    if let Some(ns) = req
+        .headers()
+        .get("x-bastionvault-namespace")
+        .and_then(|v| v.to_str().ok())
+    {
+        r.headers
+            .get_or_insert_with(Default::default)
+            .insert("x-bastionvault-namespace".to_string(), ns.to_string());
+    }
+
     match method {
         Method::GET => {
             r.operation = Operation::Read;

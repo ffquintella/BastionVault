@@ -225,6 +225,76 @@ impl MountsRouter {
     }
 }
 
+#[maybe_async::maybe_async]
+impl MountsRouter {
+    /// Mount a single backend into this router, honouring the router's own
+    /// `barrier_prefix` and `router_prefix`. This is the multi-tenant analogue
+    /// of [`Core::mount`]: a namespace's router carries `barrier_prefix =
+    /// namespaces/<uuid>/logical/` and `router_prefix = <ns_path>/`, so the
+    /// same logic yields a mount that is storage-isolated under the namespace
+    /// and addressable at `<ns_path>/<mount>` in the shared router trie.
+    pub async fn mount_one(&self, core: Arc<Core>, me: &MountEntry, hmac_key: &[u8]) -> Result<(), RvError> {
+        let mut entry = me.clone();
+        if !entry.path.ends_with('/') {
+            entry.path += "/";
+        }
+        if is_protect_path(&PROTECTED_MOUNTS, &[&entry.path]) {
+            return Err(RvError::ErrMountPathProtected);
+        }
+        if entry.table.is_empty() {
+            entry.table = MOUNT_TABLE_TYPE.to_string();
+        }
+
+        let router_path = format!("{}{}", self.router_prefix, &entry.path);
+        if !self.router.matching_mount(&router_path)?.is_empty() {
+            return Err(RvError::ErrMountPathExist);
+        }
+
+        let backend_new_func = self.get_backend(&entry.logical_type)?;
+        let backend = backend_new_func(core)?;
+
+        entry.uuid = generate_uuid();
+        let barrier_path = format!("{}{}/", self.barrier_prefix, &entry.uuid);
+        let view = BarrierView::new(self.barrier.clone(), &barrier_path);
+
+        entry.calc_hmac(hmac_key)?;
+
+        let table_key = entry.path.clone();
+        let mount_entry = Arc::new(RwLock::new(entry));
+        self.router.mount(backend, &router_path, mount_entry.clone(), view)?;
+        self.mounts.entries.write()?.insert(table_key, mount_entry);
+
+        self.mounts.persist(self.barrier.as_storage()).await?;
+        Ok(())
+    }
+
+    /// Unmount a single mount from this router (namespace analogue of
+    /// [`Core::unmount`]). `path` is the mount-relative path (e.g. `secret/`).
+    pub async fn unmount_one(&self, path: &str) -> Result<(), RvError> {
+        let mut path = path.to_string();
+        if !path.ends_with('/') {
+            path += "/";
+        }
+        if is_protect_path(&PROTECTED_MOUNTS, &[&path]) {
+            return Err(RvError::ErrMountPathProtected);
+        }
+        let router_path = format!("{}{}", self.router_prefix, &path);
+        let match_mount = self.router.matching_mount(&router_path)?;
+        if match_mount.is_empty() || match_mount != router_path {
+            return Err(RvError::ErrMountNotMatch);
+        }
+
+        if let Some(view) = self.router.matching_view(&router_path)? {
+            self.router.taint(&router_path)?;
+            self.router.unmount(&router_path)?;
+            view.clear().await?;
+        }
+        self.mounts.delete(&path);
+        self.mounts.persist(self.barrier.as_storage()).await?;
+        Ok(())
+    }
+}
+
 impl MountEntry {
     pub fn new(table: &str, path: &str, logical_type: &str, desc: &str) -> Self {
         Self {

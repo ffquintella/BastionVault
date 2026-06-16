@@ -617,6 +617,36 @@ impl Core {
 
         self.module_manager.init(self).await?;
 
+        // Namespace re-rooting migration (copy + verify stage). Idempotent and
+        // non-destructive: it copies root-tenant data under
+        // `namespaces/<root_uuid>/...` and records a version marker, leaving the
+        // legacy keys authoritative. Activating the new prefix as the live root
+        // is a separate, operator-gated step (see
+        // `modules::namespace::migrate`). Best-effort: a copy failure is logged
+        // but does not block unseal, because the legacy data is untouched.
+        if let Some(core_arc) = self.self_ptr.upgrade() {
+            if let Some(ns_module) = self
+                .module_manager
+                .get_module::<crate::modules::namespace::NamespaceModule>(
+                    crate::modules::namespace::NAMESPACE_MODULE_NAME,
+                )
+            {
+                if let Some(store) = ns_module.store() {
+                    match crate::modules::namespace::migrate::migrate_root_copy(&core_arc, &store)
+                        .await
+                    {
+                        Ok(report) if !report.already_done => log::info!(
+                            "namespace re-root copy complete: {} keys copied, {} verified",
+                            report.keys_copied,
+                            report.keys_verified
+                        ),
+                        Ok(_) => {}
+                        Err(e) => log::warn!("namespace re-root copy failed (legacy data intact): {e}"),
+                    }
+                }
+            }
+        }
+
         // Load the restart-durable FerroGate machine-identity enforcement flag
         // into its in-memory mirror before serving requests. Best-effort: a
         // read failure leaves the safe default (false) rather than blocking
@@ -815,9 +845,26 @@ impl Core {
             return Err(RvError::ErrBarrierSealed);
         }
 
+        // Multi-tenancy: converge the X-BastionVault-Namespace header onto the
+        // path-prefix form so the shared router dispatches namespace mounts
+        // uniformly. No-op when no namespace header is present.
+        crate::modules::namespace::router::rewrite_request_for_namespace(self, req).await?;
+
         match self.handle_pre_route_phase(&handlers, req).await {
             Ok(ret) => resp = ret,
             Err(e) => err = Some(e),
+        }
+
+        // Multi-tenancy: enforce token namespace binding once auth is resolved
+        // and before any backend dispatch. A token may not be used outside its
+        // namespace (except a child_visible token into a descendant).
+        if resp.is_none() && err.is_none() {
+            if let Err(e) =
+                crate::modules::namespace::token_binding::enforce_request_token_binding(self, req)
+                    .await
+            {
+                err = Some(e);
+            }
         }
 
         if resp.is_none() && err.is_none() {

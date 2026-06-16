@@ -45,6 +45,78 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### Namespaces / Multi-tenancy (Phase 1 foundation)
+
+- **Hierarchical namespace container** (`src/modules/namespace/`) -- introduces
+  Vault-style multi-tenant namespaces so one deployment can host isolated
+  tenants. Each namespace has an immutable UUID, a mutable slash-delimited path,
+  a parent, per-namespace mount routing, and a quota record (enforcement lands in
+  Phase 4). The implicit root namespace is minted on first unseal.
+  (Phase 1, `features/namespaces-multitenancy.md`)
+- **Namespace CRUD API** under `v2/sys/namespaces` (served by the system
+  backend): `LIST sys/namespaces` (children of the caller's namespace), and
+  `READ` / `WRITE` (create-or-update) / `DELETE` on `sys/namespaces/<path>`.
+  Delete is refused for the root, for namespaces with children, and for
+  namespaces that still hold mounts. Namespace names containing `/`, `..`, `*`,
+  surrounding whitespace, or control characters are rejected.
+- **Request → namespace resolution** -- both Vault-compatible addressing forms
+  are supported: the `X-BastionVault-Namespace: <path>` header and the
+  `/<ns>/...` path prefix (longest-match). A request supplying neither targets
+  the root namespace.
+- **Per-namespace mount-router registry** -- each non-root namespace gets its
+  own mount table persisted at `namespaces/<uuid>/core/mounts`, barrier-isolated
+  under `namespaces/<uuid>/logical/`, reusing the existing `MountsRouter`
+  router-prefix mechanism (no new routing engine).
+- **Barrier re-root migration (copy + verify stage)** -- an idempotent,
+  **non-destructive** migration copies root-tenant data under
+  `namespaces/<root_uuid>/...` and records a verified version marker; legacy keys
+  remain authoritative. Activating the re-rooted prefix as the live root is a
+  separate, operator-gated step behind `BASTION_NAMESPACE_REROOT` (default off),
+  so upgrades stay reversible (restore a pre-migration BVBK backup to roll back).
+- 9 unit/integration tests cover path validation, registry CRUD + delete guards,
+  the request resolver, the `v2/sys/namespaces` API, and migration idempotence.
+- **End-to-end per-namespace mounts** (`MountsRouter::mount_one`/`unmount_one`,
+  namespace-aware `sys/mounts`, and a header→path rewrite in `Core::handle_request`)
+  -- a child namespace can mount secret engines that are storage-isolated under
+  `namespaces/<uuid>/logical/` and addressable via either the
+  `X-BastionVault-Namespace` header or the `/<ns>/...` path prefix. Cross-tenant
+  isolation is proven by test (tenant-b cannot see tenant-a's mount/secret).
+
+#### Namespaces / Multi-tenancy (Phase 2 — token binding)
+
+- **Namespace-bound tokens** (`src/modules/namespace/token_binding.rs`) -- every
+  token records the namespace it was issued in plus an opt-in, immutable
+  `child_visible` flag, carried in token metadata (legacy tokens read as
+  root-bound). A token may operate only in its own namespace, or — when
+  `child_visible` — in a descendant; never in a parent, sibling, or unrelated
+  namespace. Enforced in `Core::handle_request` right after auth resolution and
+  before any backend dispatch (cross-namespace use returns `permission_denied`).
+  Root tokens bypass (superuser). `sys/auth/token/create` accepts
+  `child_visible` and binds the new token to the namespace named by the request
+  header. (Phase 2, `features/namespaces-multitenancy.md`)
+
+- **Namespace policy templates** -- ACL policy paths now support
+  `{{namespace.path}}` (the token's bound namespace path; root = `""`, a valid
+  substitution) and `{{namespace.id}}` (the bound namespace UUID; fail-closed
+  when absent), alongside the existing `{{username}}` / `{{entity.id}}` /
+  `{{auth.mount}}` vocabulary.
+
+- **Audit namespace attribution** -- every audit entry now carries a
+  `namespace` field (the request token's bound namespace; omitted when root),
+  so a per-namespace auditor and the root SOC mirror can attribute events to a
+  tenant. (foundation for per-namespace audit broadcasters)
+
+- **Scope note:** Phase 1 is functionally complete (container, registry,
+  resolver, per-namespace mounts + dispatch, migration copy). Phase 2 token
+  binding is enforced. Still not implemented: per-namespace policy scoping +
+  cross-namespace path refusal, per-namespace audit broadcasters, Phase 3
+  (per-namespace identity + cross-tenant linking), and Phase 4 (quota
+  enforcement + GUI). Re-root *activation* remains gated behind
+  `BASTION_NAMESPACE_REROOT`. Auth-backend *logins* (userpass/approle/etc.) bind
+  to root in this increment; per-login namespace binding is a follow-up.
+
 ## [0.14.9] - 2026-06-16
 
 ### Added

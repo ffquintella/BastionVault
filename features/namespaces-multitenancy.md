@@ -15,6 +15,38 @@ The HTTP surface follows Vault Enterprise's: every endpoint accepts an `X-Bastio
 
 ## Current State
 
+> **Phase 1 foundation landed (in progress).** `src/modules/namespace/` now
+> implements the namespace container and registry (`store.rs` — path↔UUID
+> index, segment validation, parent/child lookup, CRUD with delete guards),
+> the request→namespace resolver (`router.rs` — `X-BastionVault-Namespace`
+> header *and* `/<ns>/...` path-prefix forms, longest-match), the
+> per-namespace mount-router registry (`mount_registry.rs` — reuses
+> `MountsRouter`'s `router_prefix`, barrier-isolated under
+> `namespaces/<uuid>/logical/`), and the idempotent **non-destructive** barrier
+> re-root *copy* (`migrate.rs`). CRUD is exposed under `v2/sys/namespaces` via
+> the system backend. The implicit root namespace is minted on first unseal.
+> 9 tests pass.
+>
+> **Deliberately deferred / not yet implemented:**
+> - End-to-end per-namespace *mount creation + request dispatch* (a child
+>   namespace can be created/listed/deleted but cannot yet hold mounts; the
+>   registry plumbing is in place for the next slice).
+> - **Activation** of the re-rooted prefix as the live root. The migration
+>   copies and verifies data under `namespaces/<root_uuid>/...` but leaves the
+>   legacy `logical/` + `sys/` keys authoritative. Pointing `Core`'s boot-time
+>   system view and root mount table at the new prefix is gated behind the
+>   `BASTION_NAMESPACE_REROOT` opt-in (default off) and requires the
+>   `post_unseal` reordering + operator validation against a backup — tracked as
+>   the Phase 1b activation step.
+> - Phases 2–4 (per-namespace policy/token/audit, per-namespace identity +
+>   cross-tenant linking, quotas enforcement + GUI).
+>
+> **API-prefix note:** the spec below shows `/v1/sys/namespaces` for Vault
+> parity, but per `agent.md` all new routes ship under `v2/`; the management
+> endpoints are therefore reached at `v2/sys/namespaces`. The
+> `X-BastionVault-Namespace` header applies to existing `v1` logical paths
+> (backward-compatible addressing), which is permitted.
+
 - **`namespace` keywords already appear in the auth path code** (e.g. `src/modules/credential/saml/verify.rs`, `src/modules/credential/oidc/path_roles.rs`, `src/modules/policy/acl.rs`). These are SAML/OIDC *protocol* namespaces (XML namespaces, claim namespaces), **not** the multi-tenant namespace concept this spec adds. Search hits there are unrelated to multi-tenancy.
 - **What ships today as "Partial":**
   - **Per-user scoping** — owner + share model with two baseline roles, ACL templating (`{{username}}`, `{{entity.id}}`), shared-resource scope, ownership-transfer admin endpoints, full GUI Sharing page. See [features/per-user-scoping.md](per-user-scoping.md).
@@ -155,23 +187,28 @@ Plus the cross-cutting changes: every existing `/v1/...` endpoint now accepts th
 
 Land the data model and the routing path. No identity/policy/audit scoping yet — those live in the root namespace as today, and child namespaces start out functionally empty.
 
-| File | Purpose |
-|---|---|
-| `src/modules/namespace/mod.rs` | Module + route registration. |
-| `src/modules/namespace/store.rs` | Namespace CRUD + path↔UUID index. |
-| `src/modules/namespace/router.rs` | Header / path-prefix → namespace resolver. |
-| `src/mount.rs` (extension) | Namespace-aware `MountsRouter`. |
-| `src/storage/barrier_*.rs` (extension) | Migrate root prefix into `namespaces/<root_uuid>/...`. |
+| File | Purpose | Status |
+|---|---|---|
+| `src/modules/namespace/mod.rs` | Module registration + tests. | ✅ Done |
+| `src/modules/namespace/store.rs` | Namespace CRUD + path↔UUID index + validation + delete guards. | ✅ Done |
+| `src/modules/namespace/router.rs` | Header / path-prefix → namespace resolver + prefix helpers. | ✅ Done |
+| `src/modules/namespace/mount_registry.rs` | Per-namespace `MountsRouter` registry (reuses router-prefix). | ✅ Done |
+| `src/modules/namespace/migrate.rs` | Idempotent non-destructive re-root *copy* + verify. | ✅ Done (copy); activation gated/deferred |
+| `src/modules/system/mod.rs` (extension) | `v2/sys/namespaces` CRUD handlers. | ✅ Done |
+| `src/core.rs` (extension) | Run migration copy at `post_unseal`. | ✅ Done |
+| Per-namespace mount creation + request dispatch (`mount.rs` `mount_one`/`unmount_one`, registry `mount`/`unmount`/`list_mounts`, header→path rewrite in `core.rs`, namespace-aware `sys/mounts`) | A child namespace holds mounts and routes end-to-end; cross-tenant isolation proven. | ✅ Done |
+| Re-root *activation* (Core boot-time prefix flip) | Make `namespaces/<root_uuid>/...` authoritative. | ⏳ Deferred (gated behind `BASTION_NAMESPACE_REROOT`) |
 
 ### Phase 2 — Per-Namespace Policy + Token + Audit
 
-| File | Purpose |
-|---|---|
-| `src/modules/namespace/token_binding.rs` | Namespace-bound tokens; `child_visible` flag. |
-| `src/modules/namespace/policy_scope.rs` | Policy storage scoping; cross-namespace path refusal. |
-| `src/modules/namespace/audit_scope.rs` | Per-namespace broadcaster registration. |
-| `src/modules/policy/*` (extension) | Compile policies against the calling namespace. |
-| `src/modules/audit/*` (extension) | Honour `namespace_id` on broadcaster lookups. |
+| File | Purpose | Status |
+|---|---|---|
+| `src/modules/namespace/token_binding.rs` | Namespace-bound tokens; `child_visible` flag; enforcement in `Core::handle_request`; create-time binding via header; root bypass. | ✅ Done (explicit token-create binding); per-login binding deferred |
+| `{{namespace.path}}` / `{{namespace.id}}` policy templates (`src/modules/policy/policy_store.rs`) | Namespace-aware ACL templating. | ✅ Done |
+| `namespace` field on audit entries (`src/audit/entry.rs`) | Per-tenant audit attribution. | ✅ Done |
+| `src/modules/namespace/policy_scope.rs` — per-namespace policy *storage* + cross-namespace path refusal | Needs per-namespace policy stores (architectural). | ⏳ Not started |
+| `src/modules/namespace/audit_scope.rs` — per-namespace *broadcasters* + root mirror | Needs broker fan-out rework (global singleton today). | ⏳ Not started |
+| `src/modules/policy/*` (extension) | Compile policies against the calling namespace. | ⏳ Not started |
 
 ### Phase 3 — Per-Namespace Identity + Cross-Tenant Linking
 

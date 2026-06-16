@@ -17,9 +17,10 @@ use crate::{
     errors::RvError,
     modules::{
         cert_lifecycle::CertLifecycleModule, files::FilesModule, identity::IdentityModule,
-        kv::KvModule, kv_v2::KvV2Module, ldap::LdapModule, pki::PkiModule,
-        resource::ResourceModule, resource_group::ResourceGroupModule, rustion::RustionModule,
-        ssh::SshModule, system::SystemModule, totp::TotpModule, transit::TransitModule, Module,
+        kv::KvModule, kv_v2::KvV2Module, ldap::LdapModule, namespace::NamespaceModule,
+        pki::PkiModule, resource::ResourceModule, resource_group::ResourceGroupModule,
+        rustion::RustionModule, ssh::SshModule, system::SystemModule, totp::TotpModule,
+        transit::TransitModule, Module,
     },
 };
 
@@ -48,6 +49,9 @@ impl ModuleManager {
             Arc::new(TransitModule::new(core.clone())),
             Arc::new(LdapModule::new(core.clone())),
             Arc::new(CertLifecycleModule::new(core.clone())),
+            // Namespace module must init before the system module's request
+            // handlers reference its store; it is the multi-tenancy registry.
+            Arc::new(NamespaceModule::new(core.clone())),
             Arc::new(SystemModule::new(core)),
         ];
         self.modules.store(Arc::new(modules));

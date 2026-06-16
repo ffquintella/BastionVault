@@ -39,6 +39,12 @@ pub struct AuditEntry {
     /// `"sha256:" + zero-hash` for the chain genesis.
     #[serde(default)]
     pub prev_hash: String,
+    /// Multi-tenancy: the namespace the request's token is bound to
+    /// (`""` = root). Lets a per-namespace auditor (and the root SOC
+    /// mirror) attribute every event to a tenant. Empty for legacy /
+    /// root / unauthenticated requests.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub namespace: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -152,10 +158,21 @@ impl AuditEntry {
             remote_address_derived: derived_addr.clone(),
         };
 
+        let namespace = req
+            .auth
+            .as_ref()
+            .and_then(|a| {
+                a.metadata
+                    .get(crate::modules::namespace::token_binding::NS_PATH_META)
+                    .cloned()
+            })
+            .unwrap_or_default();
+
         Self {
             time: Utc::now().to_rfc3339(),
             r#type: "request".to_string(),
             auth,
+            namespace,
             request: AuditRequest {
                 id: req.id.clone(),
                 operation: operation_str(req.operation).to_string(),
