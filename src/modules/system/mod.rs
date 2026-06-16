@@ -19,13 +19,17 @@ use crate::{
     modules::{
         auth::{AuthModule, AUTH_TABLE_TYPE},
         identity::IdentityModule,
+        namespace::{
+            router::namespace_header_from_map, NamespaceModule, NamespaceQuotas, NamespaceStore,
+            NAMESPACE_MODULE_NAME,
+        },
         policy::{acl::ACL, PolicyModule},
         resource_group::ResourceGroupModule,
         Module,
     },
     mount::{MountEntry, MOUNT_TABLE_TYPE},
     new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
-    bv_error_response_status,
+    bv_error_response_status, bv_error_string,
     storage::StorageEntry,
 };
 
@@ -143,6 +147,10 @@ impl SystemBackend {
         let sys_backend_sso_settings_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_sso_settings_write = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_sso_providers = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_namespace_list = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_namespace_read = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_namespace_write = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_namespace_delete = self.self_ptr.upgrade().unwrap().clone();
 
         let backend = new_logical_backend!({
             paths: [
@@ -615,9 +623,72 @@ impl SystemBackend {
                     operations: [
                         {op: Operation::Read, handler: sys_backend_sso_providers.handle_sso_providers}
                     ]
+                },
+                {
+                    // Multi-tenancy: list child namespaces of the caller's
+                    // namespace (root unless an X-BastionVault-Namespace header
+                    // scopes the request). Reached via the v2/ API prefix.
+                    pattern: "namespaces/?$",
+                    operations: [
+                        {op: Operation::List, handler: sys_backend_namespace_list.handle_namespace_list}
+                    ],
+                    help: "List child namespaces."
+                },
+                {
+                    // Read / create-or-update / delete a namespace by path.
+                    // `path` may be multi-segment (e.g. engineering/platform).
+                    pattern: r"namespaces/(?P<path>.+)$",
+                    fields: {
+                        "path": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Slash-delimited namespace path."
+                        },
+                        "max_storage_bytes": {
+                            field_type: FieldType::Int,
+                            default: 0,
+                            description: "Quota: max barrier-encrypted bytes (0 = unlimited)."
+                        },
+                        "max_leases": {
+                            field_type: FieldType::Int,
+                            default: 0,
+                            description: "Quota: max live leases (0 = unlimited)."
+                        },
+                        "request_rate": {
+                            field_type: FieldType::Int,
+                            default: 0,
+                            description: "Quota: requests/sec token-bucket rate (0 = unlimited)."
+                        },
+                        "max_mounts": {
+                            field_type: FieldType::Int,
+                            default: 0,
+                            description: "Quota: max mounts (0 = unlimited)."
+                        },
+                        "max_entities": {
+                            field_type: FieldType::Int,
+                            default: 0,
+                            description: "Quota: max identity entities (0 = unlimited)."
+                        },
+                        "max_child_namespaces": {
+                            field_type: FieldType::Int,
+                            default: 0,
+                            description: "Quota: max child namespaces (0 = unlimited)."
+                        },
+                        "child_visible_default": {
+                            field_type: FieldType::Bool,
+                            default: false,
+                            description: "Default child_visible flag for tokens minted in this namespace."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read,   handler: sys_backend_namespace_read.handle_namespace_read},
+                        {op: Operation::Write,  handler: sys_backend_namespace_write.handle_namespace_write},
+                        {op: Operation::Delete, handler: sys_backend_namespace_delete.handle_namespace_delete}
+                    ],
+                    help: "Read metadata + quotas, create/update, or delete a namespace."
                 }
             ],
-            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "seal", "raw/*", "revoke-prefix/*", "cache/flush", "owner/backfill", "sso/settings"],
+            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "seal", "raw/*", "revoke-prefix/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*"],
             unauth_paths: ["internal/ui/mounts", "internal/ui/mounts/*", "init", "seal-status", "unseal", "sso/providers"],
             help: SYSTEM_BACKEND_HELP,
         });
@@ -631,6 +702,18 @@ impl SystemBackend {
         _req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let mut data: Map<String, Value> = Map::new();
+
+        // Namespace-scoped mount table when the request carries a namespace
+        // header; otherwise the root mount table.
+        if let Some((uuid, path)) = self.resolve_request_namespace(_req).await? {
+            let registry = self.namespace_registry()?;
+            for (mount_path, logical_type, description) in
+                registry.list_mounts(&self.core, &uuid, &path).await?
+            {
+                data.insert(mount_path, json!({ "type": logical_type, "description": description }));
+            }
+            return Ok(Some(Response::data_response(Some(data))));
+        }
 
         let mounts = self.core.mounts_router.entries.read()?;
 
@@ -663,17 +746,27 @@ impl SystemBackend {
         let mut me = MountEntry::new(MOUNT_TABLE_TYPE, path, logical_type, description);
         me.options = options.as_map();
 
-        self.core.mount(&me).await?;
+        match self.resolve_request_namespace(req).await? {
+            Some((uuid, ns_path)) => {
+                self.namespace_registry()?.mount(&self.core, &uuid, &ns_path, &me).await?;
+            }
+            None => self.core.mount(&me).await?,
+        }
         Ok(None)
     }
 
     pub async fn handle_unmount(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
-        let suffix = req.path.trim_start_matches("mounts/");
+        let suffix = req.path.trim_start_matches("mounts/").to_string();
         if suffix.is_empty() {
             return Err(RvError::ErrRequestInvalid);
         }
 
-        self.core.unmount(suffix).await?;
+        match self.resolve_request_namespace(req).await? {
+            Some((uuid, ns_path)) => {
+                self.namespace_registry()?.unmount(&self.core, &uuid, &ns_path, &suffix).await?;
+            }
+            None => self.core.unmount(&suffix).await?,
+        }
         Ok(None)
     }
 
@@ -2022,6 +2115,157 @@ impl SystemBackend {
         .clone();
 
         info.clone()
+    }
+
+    fn resolve_namespace_store(&self) -> Result<Arc<NamespaceStore>, RvError> {
+        self.core
+            .module_manager
+            .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+            .and_then(|m| m.store())
+            .ok_or_else(|| bv_error_string!("namespace store unavailable"))
+    }
+
+    fn namespace_registry(
+        &self,
+    ) -> Result<Arc<crate::modules::namespace::NamespaceMountRegistry>, RvError> {
+        self.core
+            .module_manager
+            .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+            .map(|m| m.registry.clone())
+            .ok_or_else(|| bv_error_string!("namespace registry unavailable"))
+    }
+
+    /// Resolve the namespace a `sys/mounts*` request targets from its
+    /// `X-BastionVault-Namespace` header. Returns `None` for the root
+    /// namespace (operate on `Core`'s mount table) or `Some((uuid, path))` for
+    /// a child namespace (operate on the per-namespace registry).
+    async fn resolve_request_namespace(
+        &self,
+        req: &Request,
+    ) -> Result<Option<(String, String)>, RvError> {
+        let Some(raw) = namespace_header_from_map(req.headers.as_ref()) else {
+            return Ok(None);
+        };
+        let raw = raw.trim().to_string();
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        let store = self.resolve_namespace_store()?;
+        let ns = store
+            .get_by_path(&raw)
+            .await?
+            .ok_or_else(|| bv_error_response_status!(404, &format!("no such namespace: {raw:?}")))?;
+        if ns.is_root() {
+            Ok(None)
+        } else {
+            Ok(Some((ns.uuid, ns.path)))
+        }
+    }
+
+    fn namespace_to_response(ns: &crate::modules::namespace::Namespace) -> Response {
+        let q = &ns.quotas;
+        let data = json!({
+            "uuid": ns.uuid,
+            "path": ns.path,
+            "parent_uuid": ns.parent_uuid,
+            "created_at": ns.created_at,
+            "child_visible_default": ns.child_visible_default,
+            "quotas": {
+                "max_storage_bytes": q.max_storage_bytes,
+                "max_leases": q.max_leases,
+                "request_rate": q.request_rate,
+                "max_mounts": q.max_mounts,
+                "max_entities": q.max_entities,
+                "max_child_namespaces": q.max_child_namespaces,
+            },
+        })
+        .as_object()
+        .cloned();
+        Response::data_response(data)
+    }
+
+    pub async fn handle_namespace_list(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_namespace_store()?;
+        // List children of the caller's namespace: the namespace named by the
+        // X-BastionVault-Namespace header, defaulting to root.
+        let parent = namespace_header_from_map(req.headers.as_ref()).unwrap_or_default();
+        let children = store.list_children(&parent).await?;
+        Ok(Some(Response::list_response(&children)))
+    }
+
+    pub async fn handle_namespace_read(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_namespace_store()?;
+        let path = req.get_data_as_str("path")?;
+        match store.get_by_path(&path).await? {
+            Some(ns) => Ok(Some(Self::namespace_to_response(&ns))),
+            None => Err(bv_error_response_status!(404, &format!("no such namespace: {path:?}"))),
+        }
+    }
+
+    pub async fn handle_namespace_write(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_namespace_store()?;
+        let path = req.get_data_as_str("path")?;
+
+        let quotas = NamespaceQuotas {
+            max_storage_bytes: req.get_data_or_default("max_storage_bytes")?.as_u64().unwrap_or(0),
+            max_leases: req.get_data_or_default("max_leases")?.as_u64().unwrap_or(0),
+            request_rate: req.get_data_or_default("request_rate")?.as_u64().unwrap_or(0),
+            max_mounts: req.get_data_or_default("max_mounts")?.as_u64().unwrap_or(0),
+            max_entities: req.get_data_or_default("max_entities")?.as_u64().unwrap_or(0),
+            max_child_namespaces: req
+                .get_data_or_default("max_child_namespaces")?
+                .as_u64()
+                .unwrap_or(0),
+        };
+        let child_visible_default =
+            req.get_data_or_default("child_visible_default")?.as_bool().unwrap_or(false);
+
+        // Create-or-update (upsert): the logical operation model has no PATCH,
+        // so a Write to an existing namespace updates its quotas and
+        // child_visible default; a Write to a new path creates it.
+        let ns = if store.get_by_path(&path).await?.is_some() {
+            store.update(&path, Some(quotas), Some(child_visible_default)).await?
+        } else {
+            store.create(&path, quotas, child_visible_default).await?
+        };
+        Ok(Some(Self::namespace_to_response(&ns)))
+    }
+
+    pub async fn handle_namespace_delete(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_namespace_store()?;
+        let path = req.get_data_as_str("path")?;
+
+        // Refuse deletion while the namespace still holds mounts. The mount
+        // table lives in the per-namespace router registry, so resolve the
+        // namespace's UUID and ask the registry for its mount count.
+        let mount_count = match store.get_by_path(&path).await? {
+            Some(ns) => self
+                .core
+                .module_manager
+                .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+                .map(|m| m.registry.mount_count(&ns.uuid))
+                .unwrap_or(0),
+            None => 0,
+        };
+
+        store.delete(&path, mount_count).await?;
+        Ok(None)
     }
 }
 

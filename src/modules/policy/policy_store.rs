@@ -1825,6 +1825,10 @@ async fn resolve_asset_groups(core: &Weak<Core>, req_path: &str) -> Vec<String> 
 ///   `{{entity.id}}`  — `auth.metadata["entity_id"]`.
 ///   `{{auth.mount}}` — `auth.metadata["mount_path"]` (populated by
 ///                      the auth backend when available).
+///   `{{namespace.path}}` — the token's bound namespace path (root = "",
+///                      a legitimate value).
+///   `{{namespace.id}}`   — the token's bound namespace UUID (fail-closed
+///                      when absent, e.g. root/login tokens).
 fn apply_templates(
     policy: &Arc<Policy>,
     auth: &crate::logical::Auth,
@@ -1845,6 +1849,19 @@ fn apply_templates(
         .get("mount_path")
         .cloned()
         .unwrap_or_default();
+    // Multi-tenancy templates: the namespace the request's token is bound to.
+    // `namespace.path` defaults to the root namespace (empty string), which is
+    // a legitimate value; `namespace.id` is opaque and fail-closed when absent.
+    let namespace_path = auth
+        .metadata
+        .get(crate::modules::namespace::token_binding::NS_PATH_META)
+        .cloned()
+        .unwrap_or_default();
+    let namespace_id = auth
+        .metadata
+        .get(crate::modules::namespace::token_binding::NS_ID_META)
+        .cloned()
+        .unwrap_or_default();
 
     let mut cloned: Policy = Policy::clone(policy);
     let mut kept: Vec<crate::modules::policy::PolicyPathRules> =
@@ -1852,7 +1869,7 @@ fn apply_templates(
     let mut dropped = 0usize;
 
     for mut rule in cloned.paths.drain(..) {
-        match substitute_path(&rule.path, &username, &entity_id, &auth_mount) {
+        match substitute_path(&rule.path, &username, &entity_id, &auth_mount, &namespace_path, &namespace_id) {
             Some(new_path) => {
                 rule.path = new_path;
                 kept.push(rule);
@@ -1892,6 +1909,8 @@ fn substitute_path(
     username: &str,
     entity_id: &str,
     auth_mount: &str,
+    namespace_path: &str,
+    namespace_id: &str,
 ) -> Option<String> {
     let mut out = String::with_capacity(path.len());
     let mut rest = path;
@@ -1919,6 +1938,17 @@ fn substitute_path(
                     return None;
                 }
                 auth_mount
+            }
+            // Multi-tenancy: the root namespace's path is legitimately empty,
+            // so `namespace.path` is allowed to substitute the empty string.
+            "namespace.path" => namespace_path,
+            // The namespace id is opaque; an absent id is unresolved (root and
+            // login tokens carry no id today), so fail closed like other ids.
+            "namespace.id" => {
+                if namespace_id.is_empty() {
+                    return None;
+                }
+                namespace_id
             }
             _ => return None,
         };
@@ -2509,6 +2539,8 @@ mod templating_tests {
             "alice",
             "ent-123",
             "userpass/",
+            "",
+            "",
         );
         assert_eq!(got.as_deref(), Some("secret/data/users/alice/*"));
 
@@ -2516,6 +2548,8 @@ mod templating_tests {
             "kv/{{entity.id}}/inbox",
             "alice",
             "ent-123",
+            "",
+            "",
             "",
         );
         assert_eq!(got.as_deref(), Some("kv/ent-123/inbox"));
@@ -2525,15 +2559,59 @@ mod templating_tests {
             "alice",
             "ent-123",
             "userpass/",
+            "",
+            "",
         );
         assert_eq!(got.as_deref(), Some("userpass/login"));
+    }
+
+    #[test]
+    fn test_substitute_path_namespace_templates() {
+        // {{namespace.path}} substitutes the bound namespace path.
+        let got = substitute_path(
+            "{{namespace.path}}/secret/*",
+            "alice",
+            "ent-123",
+            "userpass/",
+            "engineering/platform",
+            "ns-uuid-1",
+        );
+        assert_eq!(got.as_deref(), Some("engineering/platform/secret/*"));
+
+        // Root namespace path is the empty string — a legitimate substitution.
+        let got = substitute_path(
+            "{{namespace.path}}secret/*",
+            "alice",
+            "ent-123",
+            "userpass/",
+            "",
+            "",
+        );
+        assert_eq!(got.as_deref(), Some("secret/*"));
+
+        // {{namespace.id}} substitutes the opaque id when present.
+        let got = substitute_path(
+            "audit/{{namespace.id}}",
+            "alice",
+            "ent-123",
+            "userpass/",
+            "engineering",
+            "ns-uuid-1",
+        );
+        assert_eq!(got.as_deref(), Some("audit/ns-uuid-1"));
+
+        // {{namespace.id}} fails closed when absent (root/login tokens).
+        assert_eq!(
+            substitute_path("audit/{{namespace.id}}", "alice", "ent-123", "userpass/", "", ""),
+            None
+        );
     }
 
     #[test]
     fn test_substitute_path_fail_closed_on_unknown_placeholder() {
         // Unknown key — typo — must drop the rule, not widen access.
         assert_eq!(
-            substitute_path("secret/{{uzername}}", "alice", "ent-123", "userpass/"),
+            substitute_path("secret/{{uzername}}", "alice", "ent-123", "userpass/", "", ""),
             None
         );
     }
@@ -2542,12 +2620,12 @@ mod templating_tests {
     fn test_substitute_path_fail_closed_on_missing_value() {
         // `{{username}}` but username is empty — drop.
         assert_eq!(
-            substitute_path("secret/{{username}}/*", "", "ent-123", "userpass/"),
+            substitute_path("secret/{{username}}/*", "", "ent-123", "userpass/", "", ""),
             None
         );
         // `{{entity.id}}` but entity_id empty — drop.
         assert_eq!(
-            substitute_path("secret/{{entity.id}}", "alice", "", "userpass/"),
+            substitute_path("secret/{{entity.id}}", "alice", "", "userpass/", "", ""),
             None
         );
     }
@@ -2555,7 +2633,7 @@ mod templating_tests {
     #[test]
     fn test_substitute_path_no_placeholders_is_identity() {
         assert_eq!(
-            substitute_path("secret/foo/bar", "alice", "ent-123", "userpass/").as_deref(),
+            substitute_path("secret/foo/bar", "alice", "ent-123", "userpass/", "", "").as_deref(),
             Some("secret/foo/bar")
         );
     }

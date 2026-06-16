@@ -85,6 +85,10 @@ struct TokenReqData {
     num_uses: u32,
     #[serde(default)]
     renewable: bool,
+    /// Multi-tenancy: make this token usable in descendant namespaces of the
+    /// namespace it is issued in. Opt-in, immutable after create.
+    #[serde(default)]
+    child_visible: bool,
     #[serde(default, deserialize_with = "deserialize_duration")]
     period: Duration,
     #[serde(default, deserialize_with = "deserialize_duration")]
@@ -607,6 +611,22 @@ impl TokenStore {
             num_uses: data.num_uses,
             ..TokenEntry::default()
         };
+
+        // Multi-tenancy: bind the new token to the namespace it is issued in
+        // (named by the X-BastionVault-Namespace header; root by default).
+        // The binding rides in the token metadata so it flows into
+        // `Auth.metadata` on lookup and is enforced on every routed request.
+        {
+            use crate::modules::namespace::{
+                router::namespace_header_from_map, store::normalize_path, token_binding,
+            };
+            let ns_path = namespace_header_from_map(req.headers.as_ref())
+                .and_then(|h| normalize_path(&h).ok())
+                .unwrap_or_default();
+            te.meta.insert(token_binding::NS_PATH_META.to_string(), ns_path);
+            te.meta
+                .insert(token_binding::CHILD_VISIBLE_META.to_string(), data.child_visible.to_string());
+        }
 
         let mut renewable = data.renewable;
 

@@ -104,6 +104,22 @@ impl PolicyModule {
         let mut policy = Policy::from_str(&policy_raw)?;
         policy.name = name.clone();
 
+        // Multi-tenancy: a policy authored inside a namespace may only
+        // reference paths that belong to that namespace. Refused at write time
+        // for non-root writers; a no-op for root-scoped writes.
+        {
+            let writer_ns = crate::modules::namespace::policy_scope::writer_namespace_path(
+                req.headers.as_ref(),
+            );
+            let paths: Vec<String> = policy.paths.iter().map(|r| r.path.clone()).collect();
+            crate::modules::namespace::policy_scope::refuse_cross_namespace_paths(
+                &self.core,
+                &writer_ns,
+                &paths,
+            )
+            .await?;
+        }
+
         if policy.policy_type == PolicyType::Egp || policy.policy_type == PolicyType::Rgp {
             policy.input_sentinel_policy_data(req)?;
         }
