@@ -2536,6 +2536,9 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
             web::resource("/scheduled-exports/{id}")
                 .route(web::get().to(sys_scheduled_exports_get_handler))
                 .route(web::put().to(sys_scheduled_exports_update_handler))
+                // POST alias: the GUI's remote backend maps a logical Write
+                // to POST, so accept it here too (PUT kept for REST clients).
+                .route(web::post().to(sys_scheduled_exports_update_handler))
                 .route(web::delete().to(sys_scheduled_exports_delete_handler)),
         )
         .service(

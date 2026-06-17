@@ -19,7 +19,7 @@ use crate::{
     errors::RvError,
     exchange::schema::{
         AssetGroupItem, ExchangeDocument, ExchangeItems, ExporterInfo, FileItem, KvItem,
-        ResourceGroupItem, ResourceItem, ScopeSelector, ScopeSpec,
+        ResourceGroupItem, ResourceItem, ScopeKind, ScopeSelector, ScopeSpec,
     },
     mount::LOGICAL_BARRIER_PREFIX,
     storage::{Storage, StorageEntry},
@@ -142,6 +142,15 @@ pub async fn export_to_document(
     let mut items = ExchangeItems::default();
     let mut warnings: Vec<String> = Vec::new();
 
+    // `Full` scope: enumerate everything the actor can read — every KV
+    // mount, every resource, every file blob, and every resource/asset
+    // group — without the caller having to hand-list selectors. The
+    // explicit `include` list is still honoured (normally empty for a
+    // full export); the dedup pass below collapses any overlap.
+    if scope.kind == ScopeKind::Full {
+        resolve_full(storage, mounts, &mut items, &mut warnings).await?;
+    }
+
     for selector in &scope.include {
         match selector {
             ScopeSelector::KvPath { mount, path } => {
@@ -183,6 +192,8 @@ pub async fn export_to_document(
     items.kv.dedup_by(|a, b| a.mount == b.mount && a.path == b.path);
     items.resources.dedup_by(|a, b| a.id == b.id);
     items.files.dedup_by(|a, b| a.id == b.id);
+    items.asset_groups.dedup_by(|a, b| a.id == b.id);
+    items.resource_groups.dedup_by(|a, b| a.id == b.id);
 
     let mut doc = ExchangeDocument::new(exporter, scope, items);
     doc.warnings = warnings;
@@ -191,6 +202,83 @@ pub async fn export_to_document(
 
 #[derive(Copy, Clone)]
 enum GroupKind { Asset, Resource }
+
+/// Enumerate the entire readable vault for a `ScopeKind::Full` export.
+///
+/// Walks every KV / KV-v2 mount recursively, every resource and file
+/// blob under each resource/files mount, and every resource-group record.
+/// Group expansion drags in member resources / secrets / files, which the
+/// caller's dedup pass collapses against the direct scans here. Listing
+/// failures on any single mount are downgraded to warnings so one
+/// unreadable mount can't sink the whole backup.
+async fn resolve_full(
+    storage: &dyn Storage,
+    mounts: &MountIndex,
+    items: &mut ExchangeItems,
+    warnings: &mut Vec<String>,
+) -> Result<(), RvError> {
+    // KV mounts: recursive walk, identical to a `KvPath { mount, "" }`
+    // selector so the bytes round-trip through `import_from_document`.
+    for ty in ["kv", "kv-v2"] {
+        for (mount_path, _uuid) in mounts.mounts_of_type(ty) {
+            let mount_norm = ensure_trailing_slash(mount_path);
+            let keys = list_recursive(storage, &mount_norm).await?;
+            for full_key in keys {
+                if let Some(entry) = storage.get(&full_key).await? {
+                    let value = entry_value_to_json(&entry);
+                    let relative =
+                        full_key.strip_prefix(&mount_norm).unwrap_or(&full_key).to_string();
+                    items.kv.push(KvItem {
+                        mount: mount_norm.clone(),
+                        path: relative,
+                        value,
+                    });
+                }
+            }
+        }
+    }
+
+    // Resources: ids live under `<barrier>/meta/<id>`.
+    for (_mount_path, uuid) in mounts.mounts_of_type("resource") {
+        let bp = mount_barrier_prefix(uuid);
+        let ids = storage.list(&format!("{bp}meta/")).await.unwrap_or_default();
+        for id in ids {
+            if id.ends_with('/') {
+                continue;
+            }
+            resolve_resource(storage, mounts, &id, items, warnings).await?;
+        }
+    }
+
+    // File blobs: same `meta/<id>` addressing on files-typed mounts.
+    for (_mount_path, uuid) in mounts.mounts_of_type("files") {
+        let bp = mount_barrier_prefix(uuid);
+        let ids = storage.list(&format!("{bp}meta/")).await.unwrap_or_default();
+        for id in ids {
+            if id.ends_with('/') {
+                continue;
+            }
+            resolve_file(storage, mounts, &id, items, warnings).await?;
+        }
+    }
+
+    // Resource / asset groups share one store keyed by name. They differ
+    // only in GUI labelling, so a full export records each as a resource
+    // group; the member resources / secrets / files come along via
+    // `resolve_group`.
+    let groups = storage
+        .list("sys/resource-group/group/")
+        .await
+        .unwrap_or_default();
+    for name in groups {
+        if name.ends_with('/') {
+            continue;
+        }
+        resolve_group(storage, mounts, &name, GroupKind::Resource, items, warnings).await?;
+    }
+
+    Ok(())
+}
 
 /// Read a single resource (and its embedded secrets / metadata / version
 /// history) from the first `resource`-typed mount in the index. Records
@@ -664,6 +752,40 @@ mod tests {
         assert_eq!(result.unchanged, 0);
         assert_eq!(result.skipped, 0);
         assert_eq!(dst.get("secret/myapp/db").await.unwrap().unwrap().value, serde_json::to_vec(&v1).unwrap());
+    }
+
+    #[tokio::test]
+    async fn full_scope_walks_every_kv_mount() {
+        let src = MemStorage::default();
+        populate(
+            &src,
+            &[
+                ("secret/app/db", &serde_json::json!({"u": "a"})),
+                ("secret/app/api", &serde_json::json!({"k": "v"})),
+                ("kv2/team/token", &serde_json::json!({"t": 1})),
+            ],
+        )
+        .await;
+
+        // Hand-build a MountIndex with two KV mounts (no resource/files
+        // mounts), as `MountIndex::from_core` would for a live vault.
+        let mut by_type: std::collections::HashMap<String, Vec<(String, String)>> =
+            std::collections::HashMap::new();
+        by_type.insert("kv".to_string(), vec![("secret/".to_string(), "uuid-secret".to_string())]);
+        by_type.insert("kv-v2".to_string(), vec![("kv2/".to_string(), "uuid-kv2".to_string())]);
+        let mounts = MountIndex { by_type };
+
+        // `Full` with an empty include list must still enumerate everything.
+        let scope = ScopeSpec { kind: ScopeKind::Full, include: vec![] };
+        let doc = export_to_document(&src, &mounts, ExporterInfo::default(), scope)
+            .await
+            .unwrap();
+
+        assert_eq!(doc.items.kv.len(), 3);
+        let paths: Vec<_> = doc.items.kv.iter().map(|k| (k.mount.as_str(), k.path.as_str())).collect();
+        assert!(paths.contains(&("secret/", "app/api")));
+        assert!(paths.contains(&("secret/", "app/db")));
+        assert!(paths.contains(&("kv2/", "team/token")));
     }
 
     #[tokio::test]

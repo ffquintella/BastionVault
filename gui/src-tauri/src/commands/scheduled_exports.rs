@@ -3,15 +3,61 @@
 //! Embedded mode: dispatches directly to
 //! `bastion_vault::scheduled_exports::ScheduleStore` against the open
 //! vault's barrier-decrypted storage.
+//!
+//! Remote mode: routes through the `bv_client::Backend` trait
+//! (`crate::commands::make_request`) to the server's HTTP API under
+//! `/v{1,2}/sys/scheduled-exports/*`. Without this branch every command
+//! failed with "Vault not open" whenever the GUI was connected to a
+//! remote server (where `AppState::vault` is always `None`).
 
 use bastion_vault::scheduled_exports::{
     runner, RunRecord, RunStatus, Schedule, ScheduleInput, ScheduleStore,
 };
+use bv_client::Operation;
 use serde::Serialize;
+use serde_json::{Map, Value};
 use tauri::State;
 
+use crate::commands::make_request;
 use crate::error::{CmdResult, CommandError};
-use crate::state::AppState;
+use crate::state::{AppState, VaultMode};
+
+/// True when the GUI is connected to a remote server rather than an
+/// in-process embedded vault.
+async fn is_remote(state: &State<'_, AppState>) -> bool {
+    matches!(*state.mode.lock().await, VaultMode::Remote)
+}
+
+/// Serialize a command input into the JSON object the HTTP API expects
+/// as a request body.
+fn body_of<T: Serialize>(input: &T) -> CmdResult<Map<String, Value>> {
+    match serde_json::to_value(input).map_err(|e| CommandError::from(e.to_string()))? {
+        Value::Object(map) => Ok(map),
+        _ => Err("failed to encode request body".into()),
+    }
+}
+
+/// Issue a logical request through the active backend and return its
+/// `data` map (the HTTP handlers reply with a bare object, so the
+/// client surfaces the whole body as `data`).
+async fn remote_data(
+    state: &State<'_, AppState>,
+    operation: Operation,
+    path: String,
+    body: Option<Map<String, Value>>,
+) -> CmdResult<Map<String, Value>> {
+    let resp = make_request(state, operation, path, body).await?;
+    Ok(resp.and_then(|r| r.data).unwrap_or_default())
+}
+
+fn parse_field<T: serde::de::DeserializeOwned>(
+    data: &Map<String, Value>,
+    key: &str,
+) -> CmdResult<T> {
+    let value = data.get(key).cloned().unwrap_or(Value::Null);
+    serde_json::from_value(value)
+        .map_err(|e| CommandError::from(format!("unexpected server response: {e}")))
+}
 
 #[derive(Debug, Serialize)]
 pub struct ScheduleListResult {
@@ -25,6 +71,11 @@ pub struct ScheduleRunsResult {
 
 #[tauri::command]
 pub async fn scheduled_exports_list(state: State<'_, AppState>) -> CmdResult<ScheduleListResult> {
+    if is_remote(&state).await {
+        let data = remote_data(&state, Operation::Read, "sys/scheduled-exports".into(), None).await?;
+        let schedules = parse_field(&data, "schedules")?;
+        return Ok(ScheduleListResult { schedules });
+    }
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
@@ -43,6 +94,12 @@ pub async fn scheduled_exports_create(
 ) -> CmdResult<Schedule> {
     use std::str::FromStr;
     cron::Schedule::from_str(&input.cron).map_err(|_| "invalid cron expression")?;
+
+    if is_remote(&state).await {
+        let body = body_of(&input)?;
+        let data = remote_data(&state, Operation::Write, "sys/scheduled-exports".into(), Some(body)).await?;
+        return parse_field(&data, "schedule");
+    }
 
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
@@ -81,6 +138,13 @@ pub async fn scheduled_exports_update(
     use std::str::FromStr;
     cron::Schedule::from_str(&input.cron).map_err(|_| "invalid cron expression")?;
 
+    if is_remote(&state).await {
+        let body = body_of(&input)?;
+        let path = format!("sys/scheduled-exports/{id}");
+        let data = remote_data(&state, Operation::Write, path, Some(body)).await?;
+        return parse_field(&data, "schedule");
+    }
+
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
@@ -114,6 +178,11 @@ pub async fn scheduled_exports_update(
 
 #[tauri::command]
 pub async fn scheduled_exports_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    if is_remote(&state).await {
+        let path = format!("sys/scheduled-exports/{id}");
+        remote_data(&state, Operation::Delete, path, None).await?;
+        return Ok(());
+    }
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
@@ -130,6 +199,12 @@ pub async fn scheduled_exports_runs(
     state: State<'_, AppState>,
     id: String,
 ) -> CmdResult<ScheduleRunsResult> {
+    if is_remote(&state).await {
+        let path = format!("sys/scheduled-exports/{id}/runs");
+        let data = remote_data(&state, Operation::Read, path, None).await?;
+        let runs = parse_field(&data, "runs")?;
+        return Ok(ScheduleRunsResult { runs });
+    }
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
@@ -147,6 +222,11 @@ pub async fn scheduled_exports_run_now(
     state: State<'_, AppState>,
     id: String,
 ) -> CmdResult<RunRecord> {
+    if is_remote(&state).await {
+        let path = format!("sys/scheduled-exports/{id}/run-now");
+        let data = remote_data(&state, Operation::Write, path, None).await?;
+        return parse_field(&data, "run");
+    }
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();

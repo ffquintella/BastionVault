@@ -693,8 +693,11 @@ function ScheduleEditorModal({
   const [destPath, setDestPath] = useState(
     schedule?.destination.kind === "local_path" ? schedule.destination.path : "",
   );
+  const [fullScope, setFullScope] = useState(schedule?.scope.kind === "full");
   const [scopes, setScopes] = useState<ExchangeScopeSelector[]>(
-    schedule?.scope.include ?? [{ type: "kv_path", mount: "secret/", path: "" }],
+    schedule?.scope.include?.length
+      ? schedule.scope.include
+      : [{ type: "kv_path", mount: "secret/", path: "" }],
   );
   const [pwMode, setPwMode] = useState<"literal" | "static_secret">(
     schedule?.password_ref?.kind ?? "literal",
@@ -731,7 +734,9 @@ function ScheduleEditorModal({
         name,
         cron,
         format,
-        scope: { kind: "selective", include: scopes },
+        scope: fullScope
+          ? { kind: "full", include: [] }
+          : { kind: "selective", include: scopes },
         destination: { kind: "local_path", path: destPath },
         password_ref:
           format === "bvx"
@@ -793,6 +798,21 @@ function ScheduleEditorModal({
 
         <div className="space-y-2">
           <p className="text-sm font-medium">Scope</p>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={fullScope}
+              onChange={(e) => setFullScope(e.target.checked)}
+            />
+            Back up everything (full vault — all KV mounts, resources, files, and groups)
+          </label>
+          {fullScope ? (
+            <p className="text-xs text-[var(--color-text-muted)]">
+              This schedule captures the entire vault as a portable export. Individual
+              scope selectors are ignored. Uncheck to pick specific paths instead.
+            </p>
+          ) : (
+          <>
           <ScopeTypeHelp />
           {scopes.map((s, idx) => (
             <div key={idx} className="grid grid-cols-12 gap-2 items-end">
@@ -848,6 +868,8 @@ function ScheduleEditorModal({
             </div>
           ))}
           <Button size="sm" variant="secondary" onClick={addScope}>+ Add scope</Button>
+          </>
+          )}
         </div>
 
         <Input

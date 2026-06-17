@@ -45,6 +45,32 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.15.4] - 2026-06-17
+
+### Added
+- **Full-vault portable backups for scheduled exports & the exchange engine.**
+  `ScopeKind::Full` is now honoured by `exchange::scope::export_to_document`
+  (`src/exchange/scope.rs`): a full export enumerates every KV / KV-v2 mount,
+  every resource and file blob, and every resource/asset group without the
+  operator hand-listing selectors. The GUI Schedules editor gains a **"Back up
+  everything (full vault)"** toggle (`gui/src/routes/ExchangePage.tsx`) that
+  saves the schedule with `scope.kind = "full"`. Applies to cron-driven runs,
+  "Run now", and the one-shot exchange export alike (single chokepoint).
+  (`features/scheduled-exports.md`, `features/import-export-module.md`)
+
+### Fixed
+- **Scheduled-export commands no longer fail with "Vault not open" in remote
+  mode.** The GUI `scheduled_exports_*` Tauri commands
+  (`gui/src-tauri/src/commands/scheduled_exports.rs`) were embedded-only — they
+  locked `AppState::vault`, which is always `None` when the desktop client is
+  connected to a remote server, so the Import/Export → Scheduled backups tab
+  surfaced a spurious error even with the vault unsealed. They now branch on
+  `VaultMode` and route through the `bv_client::Backend` HTTP API
+  (`/v{1,2}/sys/scheduled-exports/*`) when remote, matching the embedded path.
+  A `POST` alias was added to the server's `scheduled-exports/{id}` update route
+  (`src/http/sys.rs`) so the client's logical-`Write`→`POST` mapping reaches it
+  (the `PUT` route is retained for REST clients).
+
 ## [0.15.3] - 2026-06-17
 
 ### Added
