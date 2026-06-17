@@ -17,7 +17,12 @@ use crate::{
 /// `None` so the login still succeeds but the issued token carries no
 /// `entity_id` metadata (and therefore fails any `scopes = ["owner"]`
 /// check, as it should).
-pub(crate) async fn resolve_entity_id(core: &Arc<Core>, mount: &str, name: &str) -> Option<String> {
+pub(crate) async fn resolve_entity_id(
+    core: &Arc<Core>,
+    mount: &str,
+    name: &str,
+    ns_path: &str,
+) -> Option<String> {
     let Some(module) = core
         .module_manager
         .get_module::<IdentityModule>("identity")
@@ -39,7 +44,7 @@ pub(crate) async fn resolve_entity_id(core: &Arc<Core>, mount: &str, name: &str)
         );
         return None;
     };
-    match store.get_or_create_entity(mount, name).await {
+    match store.get_or_create_entity_ns(mount, name, ns_path).await {
         Ok(entity) => Some(entity.id),
         Err(e) => {
             log::warn!(
@@ -90,6 +95,7 @@ impl UserPassBackendInner {
         kind: GroupKind,
         member: &str,
         direct: &[String],
+        ns_path: &str,
     ) -> Vec<String> {
         let Some(module) = self.core.module_manager.get_module::<IdentityModule>("identity") else {
             return direct.to_vec();
@@ -97,7 +103,7 @@ impl UserPassBackendInner {
         let Some(store) = module.group_store() else {
             return direct.to_vec();
         };
-        match store.expand_policies(kind, member, direct).await {
+        match store.expand_policies_ns(kind, member, direct, ns_path).await {
             Ok(v) => v,
             Err(e) => {
                 log::warn!(
@@ -140,10 +146,18 @@ impl UserPassBackendInner {
             return Ok(Some(resp));
         }
 
+        // Multi-tenancy: bind this session to the namespace named by the
+        // request header (root when absent). The credential lives in the
+        // root auth mount, but the resulting identity, group expansion, and
+        // token are scoped to the login namespace. Fails closed if the header
+        // names a namespace that does not exist.
+        let (ns_path, ns_uuid) =
+            crate::modules::namespace::token_binding::resolve_login_namespace(&self.core, req).await?;
+
         // Union user's direct policies with any policies attached through
-        // identity user-groups the user is a member of.
+        // identity user-groups (of the login namespace) the user is a member of.
         let effective_policies = self
-            .expand_identity_group_policies(GroupKind::User, &username, &user.policies)
+            .expand_identity_group_policies(GroupKind::User, &username, &user.policies, &ns_path)
             .await;
 
         let mut auth = Auth {
@@ -166,9 +180,26 @@ impl UserPassBackendInner {
         // token. Silent on failure — the absence of entity_id just
         // narrows access (owner-scoped rules won't match) rather than
         // blocking login.
-        if let Some(entity_id) = resolve_entity_id(&self.core, "userpass/", &username).await {
+        // Quota: refuse a login that would create a *new* entity beyond the
+        // namespace's max_entities cap (existing principals are unaffected).
+        crate::modules::namespace::quota::check_entity_create(
+            &self.core,
+            "userpass/",
+            &username,
+            &ns_path,
+        )
+        .await?;
+        if let Some(entity_id) = resolve_entity_id(&self.core, "userpass/", &username, &ns_path).await {
             auth.metadata.insert("entity_id".to_string(), entity_id);
         }
+        // Stamp the namespace binding so the issued token may operate in its
+        // login namespace (and only there; child-visible is opt-in elsewhere).
+        crate::modules::namespace::token_binding::stamp_binding(
+            &mut auth.metadata,
+            &ns_path,
+            &ns_uuid,
+            false,
+        );
 
         // Ensure token_policies mirrors effective policies before
         // populate_token_auth (which overwrites auth.policies with
@@ -214,9 +245,12 @@ impl UserPassBackendInner {
         let user = user.unwrap();
 
         // Compare against the union of user.policies and group-derived
-        // policies, since the login path grants this union.
+        // policies (scoped to the token's bound namespace), since the login
+        // path grants this union.
+        let (ns_path, _) =
+            crate::modules::namespace::token_binding::binding_from_metadata(&auth.metadata);
         let effective = self
-            .expand_identity_group_policies(GroupKind::User, username, &user.policies)
+            .expand_identity_group_policies(GroupKind::User, username, &user.policies, &ns_path)
             .await;
         if !equivalent_policies(&effective, &auth.policies) {
             return Err(bv_error_string!("policies have changed, not renewing"));

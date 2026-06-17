@@ -333,15 +333,18 @@ impl RemoteBackend {
     }
 }
 
-#[async_trait]
-impl Backend for RemoteBackend {
-    async fn handle(
+impl RemoteBackend {
+    async fn dispatch(
         &self,
         operation: Operation,
         path: &str,
         body: Option<Map<String, Value>>,
         token: &str,
+        namespace: Option<&str>,
     ) -> Result<Option<JsonResponse>, ClientError> {
+        let namespace = namespace
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         let method = match operation {
             Operation::Read => "GET",
             Operation::Write => "POST",
@@ -366,6 +369,9 @@ impl Backend for RemoteBackend {
 
             if !path_owned.ends_with("/login") && !token.is_empty() {
                 builder = builder.header("X-BastionVault-Token", &token);
+            }
+            if let Some(ns) = &namespace {
+                builder = builder.header("X-BastionVault-Namespace", ns);
             }
             for (k, v) in &inner.headers {
                 builder = builder.header(k, v);
@@ -456,6 +462,30 @@ impl Backend for RemoteBackend {
                 ClientError::server(status, message),
             ))
         }
+    }
+}
+
+#[async_trait]
+impl Backend for RemoteBackend {
+    async fn handle(
+        &self,
+        operation: Operation,
+        path: &str,
+        body: Option<Map<String, Value>>,
+        token: &str,
+    ) -> Result<Option<JsonResponse>, ClientError> {
+        self.dispatch(operation, path, body, token, None).await
+    }
+
+    async fn handle_with_namespace(
+        &self,
+        operation: Operation,
+        path: &str,
+        body: Option<Map<String, Value>>,
+        token: &str,
+        namespace: Option<&str>,
+    ) -> Result<Option<JsonResponse>, ClientError> {
+        self.dispatch(operation, path, body, token, namespace).await
     }
 
     async fn active_surfaces(

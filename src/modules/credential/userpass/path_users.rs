@@ -310,7 +310,10 @@ impl UserPassBackendInner {
         // admins want to grant access up-front. Silent on failure
         // (module absent / store uninitialized); login will provision
         // lazily the same way it always has.
-        let _ = super::path_login::resolve_entity_id(&self.core, "userpass/", &username).await;
+        // Pre-provision in the root namespace; per-namespace entities are
+        // created lazily at login (`get_or_create_entity_ns`) keyed by the
+        // login's namespace header.
+        let _ = super::path_login::resolve_entity_id(&self.core, "userpass/", &username, "").await;
 
         // Audit: record the lifecycle event so the Admin → Audit page
         // shows who created/updated the user. Policies are the main

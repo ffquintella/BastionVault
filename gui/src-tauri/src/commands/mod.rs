@@ -22,7 +22,8 @@ pub async fn make_request(
     body: Option<Map<String, Value>>,
 ) -> CmdResult<Option<JsonResponse>> {
     let token = state.token.lock().await.clone().unwrap_or_default();
-    dispatch_with_token(state, operation, path, body, &token).await
+    let namespace = state.active_namespace.lock().await.clone();
+    dispatch_with_token_ns(state, operation, path, body, &token, namespace.as_deref()).await
 }
 
 /// Variant of [`make_request`] that takes an explicit token instead
@@ -36,6 +37,19 @@ pub async fn dispatch_with_token(
     body: Option<Map<String, Value>>,
     token: &str,
 ) -> CmdResult<Option<JsonResponse>> {
+    dispatch_with_token_ns(state, operation, path, body, token, None).await
+}
+
+/// Variant of [`dispatch_with_token`] that also scopes the request to a
+/// namespace (multi-tenancy). `None`/empty targets the root namespace.
+pub async fn dispatch_with_token_ns(
+    state: &State<'_, AppState>,
+    operation: Operation,
+    path: String,
+    body: Option<Map<String, Value>>,
+    token: &str,
+    namespace: Option<&str>,
+) -> CmdResult<Option<JsonResponse>> {
     let backend_guard = state.backend.lock().await;
     let backend = backend_guard
         .as_ref()
@@ -44,7 +58,7 @@ pub async fn dispatch_with_token(
     drop(backend_guard);
 
     backend
-        .handle(operation, &path, body, token)
+        .handle_with_namespace(operation, &path, body, token, namespace)
         .await
         .map_err(CommandError::from)
 }
@@ -73,6 +87,7 @@ pub mod plugins;
 pub mod plugin_surface;
 pub mod scheduled_exports;
 pub mod policies;
+pub mod namespaces;
 pub mod resources;
 pub mod rustion;
 pub mod secrets;

@@ -35,8 +35,8 @@ pub struct MountIndex {
 
 impl MountIndex {
     pub fn from_core(core: &Arc<Core>) -> Result<Self, RvError> {
-        let entries = core
-            .mounts_router
+        let mounts_router = core.mounts_router();
+        let entries = mounts_router
             .mounts
             .entries
             .read()

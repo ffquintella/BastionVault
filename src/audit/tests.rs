@@ -159,6 +159,98 @@ mod audit_integration_tests {
         assert!(devs.is_empty(), "list should be empty after disable");
     }
 
+    /// Per-namespace routing + superuser mirror + per-namespace chains.
+    ///
+    /// Three devices: a plain root device, a tenant-a device, and a root
+    /// device with `mirror = true`. A root event and two tenant-a events are
+    /// logged. The plain root device sees only the root event; the tenant
+    /// device sees only the tenant events; the mirror device sees all three.
+    /// Each device file is an independently-verifiable hash chain.
+    #[maybe_async::test(
+        feature = "sync_handler",
+        async(all(not(feature = "sync_handler")), tokio::test)
+    )]
+    async fn per_namespace_routing_and_mirror() {
+        let (_v, core, _rt) = new_unseal_test_bastion_vault("audit_per_ns").await;
+        let broker = core
+            .audit_broker
+            .load()
+            .as_ref()
+            .cloned()
+            .expect("broker installed at unseal");
+
+        let root_path = tmp_log_path("ns-root");
+        let a_path = tmp_log_path("ns-a");
+        let mirror_path = tmp_log_path("ns-mirror");
+
+        let dev_cfg = |path: &str, file: &PathBuf, namespace: &str, mirror: bool| {
+            let mut options = HashMap::new();
+            options.insert("file_path".to_string(), file.display().to_string());
+            crate::audit::AuditDeviceConfig {
+                path: path.to_string(),
+                device_type: "file".to_string(),
+                description: String::new(),
+                options,
+                namespace: namespace.to_string(),
+                mirror,
+            }
+        };
+
+        broker.enable_device(dev_cfg("root-dev", &root_path, "", false)).await.unwrap();
+        broker.enable_device(dev_cfg("a-dev", &a_path, "tenant-a", false)).await.unwrap();
+        broker.enable_device(dev_cfg("mirror-dev", &mirror_path, "", true)).await.unwrap();
+
+        let mk = |ns: &str, i: usize| {
+            let mut e = AuditEntry {
+                time: format!("2026-06-17T00:00:0{i}Z"),
+                r#type: "response".into(),
+                ..Default::default()
+            };
+            e.namespace = ns.to_string();
+            e.request.operation = "update".into();
+            e.request.path = format!("{ns}/p{i}").into();
+            e
+        };
+
+        let mut e_root = mk("", 0);
+        broker.log(&mut e_root).await.unwrap();
+        let mut e_a1 = mk("tenant-a", 1);
+        broker.log(&mut e_a1).await.unwrap();
+        let mut e_a2 = mk("tenant-a", 2);
+        broker.log(&mut e_a2).await.unwrap();
+
+        async fn read_entries(p: &PathBuf) -> Vec<AuditEntry> {
+            let body = tokio::fs::read_to_string(p).await.unwrap_or_default();
+            body.lines().map(|l| serde_json::from_str(l).expect("valid entry")).collect()
+        }
+        fn paths(entries: &[AuditEntry]) -> Vec<String> {
+            entries.iter().map(|e| e.request.path.to_string()).collect()
+        }
+
+        let root_entries = read_entries(&root_path).await;
+        let a_entries = read_entries(&a_path).await;
+        let mirror_entries = read_entries(&mirror_path).await;
+
+        // Plain root device: only the root event.
+        assert_eq!(paths(&root_entries), vec!["/p0".to_string()]);
+        // Tenant device: only the two tenant events, none from root.
+        assert_eq!(
+            paths(&a_entries),
+            vec!["tenant-a/p1".to_string(), "tenant-a/p2".to_string()]
+        );
+        // Mirror device: root event + both tenant events, tenant attribution kept.
+        assert_eq!(
+            paths(&mirror_entries),
+            vec!["/p0".to_string(), "tenant-a/p1".to_string(), "tenant-a/p2".to_string()]
+        );
+        assert_eq!(mirror_entries[1].namespace, "tenant-a");
+
+        // Each file is an independently-verifiable chain from genesis.
+        verify(&root_entries, &genesis()).expect("root chain verifies");
+        verify(&a_entries, &genesis()).expect("tenant-a chain verifies");
+        verify(&mirror_entries, &genesis()).expect("mirror chain verifies");
+    }
+
     /// Smoke test that the broker re-hydrates device configs on a
     /// fresh `Core::new`-then-unseal cycle. Covers persistence at
     /// `audit-devices/<path>`.

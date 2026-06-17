@@ -27,13 +27,16 @@ use arc_swap::ArcSwap;
 use super::Module;
 use crate::{core::Core, errors::RvError};
 
+pub mod identity_link;
 pub mod migrate;
 pub mod mount_registry;
 pub mod policy_scope;
+pub mod quota;
 pub mod router;
 pub mod store;
 pub mod token_binding;
 
+pub use identity_link::{IdentityLink, IdentityLinkMember, IdentityLinkStore};
 pub use mount_registry::NamespaceMountRegistry;
 pub use router::ResolvedNamespace;
 pub use store::{Namespace, NamespaceQuotas, NamespaceStore};
@@ -48,6 +51,12 @@ pub struct NamespaceModule {
     /// Per-namespace mount routers. Shared (cheap to clone) so the system
     /// backend and the request resolver see the same registered mounts.
     pub registry: Arc<NamespaceMountRegistry>,
+    /// Cross-tenant identity links (Phase 3). Installed at unseal alongside
+    /// the registry.
+    pub link_store: ArcSwap<Option<Arc<IdentityLinkStore>>>,
+    /// Per-namespace request-rate limiter (Phase 4 quota enforcement). Lives
+    /// for the module's lifetime; buckets are created lazily per namespace.
+    pub rate_limiter: quota::RateLimiter,
 }
 
 impl NamespaceModule {
@@ -57,11 +66,17 @@ impl NamespaceModule {
             core,
             store: ArcSwap::new(Arc::new(None)),
             registry: Arc::new(NamespaceMountRegistry::new()),
+            link_store: ArcSwap::new(Arc::new(None)),
+            rate_limiter: quota::RateLimiter::new(),
         }
     }
 
     pub fn store(&self) -> Option<Arc<NamespaceStore>> {
         self.store.load().as_ref().clone()
+    }
+
+    pub fn link_store(&self) -> Option<Arc<IdentityLinkStore>> {
+        self.link_store.load().as_ref().clone()
     }
 }
 
@@ -82,11 +97,14 @@ impl Module for NamespaceModule {
         // depend on, so it must succeed before either runs.
         store.ensure_root().await?;
         self.store.store(Arc::new(Some(store)));
+        let link_store = Arc::new(IdentityLinkStore::new(core)?);
+        self.link_store.store(Arc::new(Some(link_store)));
         Ok(())
     }
 
     fn cleanup(&self, _core: &Core) -> Result<(), RvError> {
         self.store.store(Arc::new(None));
+        self.link_store.store(Arc::new(None));
         Ok(())
     }
 }
@@ -350,16 +368,20 @@ mod tests {
         ns_req(&core, &root, Operation::Write, "sys/mounts/cubby/", "tenant-a", json!({"type":"kv"}).as_object().cloned()).await.unwrap();
         ns_req(&core, &root, Operation::Write, "cubby/foo", "tenant-a", json!({"v":"secret-a"}).as_object().cloned()).await.unwrap();
 
-        // Policy that (deliberately) permits the namespaced paths in both
-        // tenants, so ACL is never the differentiator — only token binding is.
-        let _ = test_write_api(
+        // Tenant-a-scoped policy permitting tenant-a's cubby paths. Authored
+        // *inside* tenant-a (header form) so it lands in tenant-a's own policy
+        // store; with per-namespace policy storage a token bound to tenant-a
+        // resolves "p-ns" from tenant-a, not from root. (A tenant policy may
+        // only reference its own namespace's paths, so the tenant-b rule that
+        // an earlier revision carried would now be refused at write time.)
+        ns_req(
             &core,
             &root,
+            Operation::Write,
             "sys/policy/p-ns",
-            true,
+            "tenant-a",
             json!({ "policy": r#"
                 path "tenant-a/cubby/*" { capabilities = ["read","create","update"] }
-                path "tenant-b/cubby/*" { capabilities = ["read","create","update"] }
             "# }).as_object().cloned(),
         )
         .await
@@ -466,5 +488,360 @@ mod tests {
         )
         .await;
         assert!(err.is_err(), "bare root-owned path in a namespace policy must be refused");
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_per_namespace_policy_storage_isolation() {
+        use crate::logical::{Operation, Request};
+        use std::collections::HashMap;
+
+        let (_bvault, core, root) =
+            new_unseal_test_bastion_vault("test_ns_policy_storage").await;
+
+        // Issue a request scoped to a namespace via the header form.
+        async fn ns_req(
+            core: &Arc<Core>,
+            token: &str,
+            op: Operation,
+            path: &str,
+            ns: &str,
+            body: Option<serde_json::Map<String, serde_json::Value>>,
+        ) -> Result<Option<crate::logical::Response>, RvError> {
+            let mut req = Request::new(path);
+            req.operation = op;
+            req.client_token = token.to_string();
+            req.body = body;
+            let mut h = HashMap::new();
+            if !ns.is_empty() {
+                h.insert("x-bastionvault-namespace".to_string(), ns.to_string());
+            }
+            req.headers = Some(h);
+            core.handle_request(&mut req).await
+        }
+
+        let store = store_of(&core);
+        store.create("tenant-a", NamespaceQuotas::default(), false).await.unwrap();
+        store.create("tenant-b", NamespaceQuotas::default(), false).await.unwrap();
+
+        // A policy named "admin" authored in each tenant — same name, different
+        // document, each referencing only its own namespace's paths.
+        ns_req(
+            &core,
+            &root,
+            Operation::Write,
+            "sys/policy/admin",
+            "tenant-a",
+            json!({ "policy": r#"path "tenant-a/cubby/*" { capabilities = ["read"] }"# })
+                .as_object()
+                .cloned(),
+        )
+        .await
+        .unwrap();
+        ns_req(
+            &core,
+            &root,
+            Operation::Write,
+            "sys/policy/admin",
+            "tenant-b",
+            json!({ "policy": r#"path "tenant-b/cubby/*" { capabilities = ["create","update","delete"] }"# })
+                .as_object()
+                .cloned(),
+        )
+        .await
+        .unwrap();
+
+        // Read back: each namespace sees its own "admin" document.
+        let a = ns_req(&core, &root, Operation::Read, "sys/policy/admin", "tenant-a", None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(a.data.unwrap()["rules"].as_str().unwrap().contains("tenant-a/cubby/*"));
+        let b = ns_req(&core, &root, Operation::Read, "sys/policy/admin", "tenant-b", None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(b.data.unwrap()["rules"].as_str().unwrap().contains("tenant-b/cubby/*"));
+
+        // List in tenant-a returns only tenant-a's policies — never the root
+        // seeded set (e.g. "default") and never the synthetic "root".
+        let list_a = ns_req(&core, &root, Operation::List, "sys/policy", "tenant-a", None)
+            .await
+            .unwrap()
+            .unwrap();
+        let keys_a = list_a.data.unwrap()["keys"].as_array().unwrap().clone();
+        assert!(keys_a.iter().any(|k| k == "admin"));
+        assert!(!keys_a.iter().any(|k| k == "default"));
+        assert!(!keys_a.iter().any(|k| k == "root"));
+
+        // Root list still carries the seeded set + "root", and NOT the tenant
+        // "admin" documents (different keyspace).
+        let list_root = ns_req(&core, &root, Operation::List, "sys/policy", "", None)
+            .await
+            .unwrap()
+            .unwrap();
+        let keys_root = list_root.data.unwrap()["keys"].as_array().unwrap().clone();
+        assert!(keys_root.iter().any(|k| k == "default"));
+        assert!(keys_root.iter().any(|k| k == "root"));
+
+        // Deleting tenant-a's "admin" leaves tenant-b's "admin" intact.
+        ns_req(&core, &root, Operation::Delete, "sys/policy/admin", "tenant-a", None)
+            .await
+            .unwrap();
+        let gone = ns_req(&core, &root, Operation::Read, "sys/policy/admin", "tenant-a", None).await;
+        assert!(gone.is_err(), "tenant-a admin must be deleted");
+        let still = ns_req(&core, &root, Operation::Read, "sys/policy/admin", "tenant-b", None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(still.data.unwrap()["rules"].as_str().unwrap().contains("tenant-b/cubby/*"));
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_per_namespace_identity_login() {
+        use crate::logical::{Operation, Request};
+        use crate::test_utils::{test_mount_auth_api, test_write_api};
+        use std::collections::HashMap;
+
+        let (_bvault, core, root) =
+            new_unseal_test_bastion_vault("test_ns_identity_login").await;
+
+        async fn ns_req(
+            core: &Arc<Core>,
+            token: &str,
+            op: Operation,
+            path: &str,
+            ns: &str,
+            body: Option<serde_json::Map<String, serde_json::Value>>,
+        ) -> Result<Option<crate::logical::Response>, RvError> {
+            let mut req = Request::new(path);
+            req.operation = op;
+            req.client_token = token.to_string();
+            req.body = body;
+            let mut h = HashMap::new();
+            if !ns.is_empty() {
+                h.insert("x-bastionvault-namespace".to_string(), ns.to_string());
+            }
+            req.headers = Some(h);
+            core.handle_request(&mut req).await
+        }
+
+        // Auth mount + a credential in the (root) userpass store.
+        test_mount_auth_api(&core, &root, "userpass", "userpass").await;
+        test_write_api(
+            &core,
+            &root,
+            "auth/userpass/users/alice",
+            true,
+            json!({ "password": "pw-123456" }).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+
+        let store = store_of(&core);
+        store.create("tenant-a", NamespaceQuotas::default(), false).await.unwrap();
+
+        // tenant-a policy "p" + a tenant-a user-group "devs" granting it to alice.
+        ns_req(
+            &core,
+            &root,
+            Operation::Write,
+            "sys/policy/p",
+            "tenant-a",
+            json!({ "policy": r#"path "tenant-a/cubby/*" { capabilities = ["read","create","update"] }"# })
+                .as_object()
+                .cloned(),
+        )
+        .await
+        .unwrap();
+        ns_req(
+            &core,
+            &root,
+            Operation::Write,
+            "identity/group/user/devs",
+            "tenant-a",
+            json!({ "members": ["alice"], "policies": ["p"] }).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+
+        // Mount + seed a secret in tenant-a.
+        ns_req(&core, &root, Operation::Write, "sys/mounts/cubby/", "tenant-a", json!({"type":"kv"}).as_object().cloned()).await.unwrap();
+        ns_req(&core, &root, Operation::Write, "cubby/foo", "tenant-a", json!({"v":"hi-a"}).as_object().cloned()).await.unwrap();
+
+        // Login helper.
+        async fn login(core: &Arc<Core>, ns: &str) -> crate::logical::Auth {
+            let mut req = Request::new("auth/userpass/login/alice");
+            req.operation = Operation::Write;
+            req.body = json!({ "password": "pw-123456" }).as_object().cloned();
+            let mut h = HashMap::new();
+            if !ns.is_empty() {
+                h.insert("x-bastionvault-namespace".to_string(), ns.to_string());
+            }
+            req.headers = Some(h);
+            core.handle_request(&mut req).await.unwrap().unwrap().auth.unwrap()
+        }
+
+        // Login into tenant-a: token bound there, entity created in tenant-a,
+        // and the tenant-a group grants policy "p".
+        let auth_a = login(&core, "tenant-a").await;
+        assert!(auth_a.policies.iter().any(|p| p == "p"), "tenant-a group must grant p");
+        let entity_a = auth_a.metadata.get("entity_id").cloned().unwrap_or_default();
+        assert!(!entity_a.is_empty());
+
+        // Login at root: a *different* entity, and no "p" (root has no devs group).
+        let auth_root = login(&core, "").await;
+        let entity_root = auth_root.metadata.get("entity_id").cloned().unwrap_or_default();
+        assert!(!entity_root.is_empty());
+        assert_ne!(entity_a, entity_root, "same principal must be a distinct entity per namespace");
+        assert!(!auth_root.policies.iter().any(|p| p == "p"), "root login must not see tenant-a's group");
+
+        // The tenant-a token can read tenant-a's secret.
+        let r = ns_req(&core, &auth_a.client_token, Operation::Read, "cubby/foo", "tenant-a", None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.data.unwrap()["v"], "hi-a");
+
+        // The tenant-a token is refused at root (namespace binding).
+        let err = ns_req(&core, &auth_a.client_token, Operation::Read, "cubby/foo", "", None).await;
+        assert!(err.is_err(), "tenant-a token must not operate at root");
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_namespace_quota_enforcement() {
+        use crate::logical::{Operation, Request};
+        use std::collections::HashMap;
+
+        let (_bvault, core, root) =
+            new_unseal_test_bastion_vault("test_ns_quota").await;
+
+        async fn ns_req(
+            core: &Arc<Core>,
+            token: &str,
+            op: Operation,
+            path: &str,
+            ns: &str,
+            body: Option<serde_json::Map<String, serde_json::Value>>,
+        ) -> Result<Option<crate::logical::Response>, RvError> {
+            let mut req = Request::new(path);
+            req.operation = op;
+            req.client_token = token.to_string();
+            req.body = body;
+            let mut h = HashMap::new();
+            if !ns.is_empty() {
+                h.insert("x-bastionvault-namespace".to_string(), ns.to_string());
+            }
+            req.headers = Some(h);
+            core.handle_request(&mut req).await
+        }
+
+        let store = store_of(&core);
+
+        // max_child_namespaces = 1: the second child under "acme" is refused.
+        let mut q = NamespaceQuotas::default();
+        q.max_child_namespaces = 1;
+        store.create("acme", q, false).await.unwrap();
+        store.create("acme/a", NamespaceQuotas::default(), false).await.unwrap();
+        let err = store.create("acme/b", NamespaceQuotas::default(), false).await;
+        assert!(err.is_err(), "second child must exceed max_child_namespaces=1");
+
+        // max_mounts = 1: the second mount in "lim" is refused.
+        let mut qm = NamespaceQuotas::default();
+        qm.max_mounts = 1;
+        store.create("lim", qm, false).await.unwrap();
+        ns_req(&core, &root, Operation::Write, "sys/mounts/one/", "lim", json!({"type":"kv"}).as_object().cloned())
+            .await
+            .unwrap();
+        let err = ns_req(&core, &root, Operation::Write, "sys/mounts/two/", "lim", json!({"type":"kv"}).as_object().cloned()).await;
+        assert!(err.is_err(), "second mount must exceed max_mounts=1");
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_namespace_accounting_quotas() {
+        use crate::logical::{Operation, Request};
+        use crate::test_utils::{test_mount_auth_api, test_write_api};
+        use std::collections::HashMap;
+
+        let (_bvault, core, root) =
+            new_unseal_test_bastion_vault("test_ns_acct_quota").await;
+
+        async fn ns_req(
+            core: &Arc<Core>,
+            token: &str,
+            op: Operation,
+            path: &str,
+            ns: &str,
+            body: Option<serde_json::Map<String, serde_json::Value>>,
+        ) -> Result<Option<crate::logical::Response>, RvError> {
+            let mut req = Request::new(path);
+            req.operation = op;
+            req.client_token = token.to_string();
+            req.body = body;
+            let mut h = HashMap::new();
+            if !ns.is_empty() {
+                h.insert("x-bastionvault-namespace".to_string(), ns.to_string());
+            }
+            req.headers = Some(h);
+            core.handle_request(&mut req).await
+        }
+
+        async fn login(core: &Arc<Core>, user: &str, ns: &str) -> Result<Option<crate::logical::Response>, RvError> {
+            let mut req = Request::new(format!("auth/userpass/login/{user}").as_str());
+            req.operation = Operation::Write;
+            req.body = json!({ "password": "pw-123456" }).as_object().cloned();
+            let mut h = HashMap::new();
+            if !ns.is_empty() {
+                h.insert("x-bastionvault-namespace".to_string(), ns.to_string());
+            }
+            req.headers = Some(h);
+            core.handle_request(&mut req).await
+        }
+
+        let store = store_of(&core);
+
+        // ---- max_entities = 1 ----
+        let mut qe = NamespaceQuotas::default();
+        qe.max_entities = 1;
+        store.create("ent", qe, false).await.unwrap();
+        test_mount_auth_api(&core, &root, "userpass", "userpass").await;
+        for u in ["alice", "bob"] {
+            test_write_api(&core, &root, &format!("auth/userpass/users/{u}"), true, json!({"password":"pw-123456"}).as_object().cloned()).await.unwrap();
+        }
+        // alice logs into "ent" → first entity, allowed.
+        login(&core, "alice", "ent").await.unwrap();
+        // alice re-login → existing entity, still allowed.
+        login(&core, "alice", "ent").await.unwrap();
+        // bob would create a 2nd entity → refused by max_entities=1.
+        assert!(login(&core, "bob", "ent").await.is_err(), "2nd entity must exceed max_entities=1");
+
+        // ---- max_storage_bytes ----
+        let mut qs = NamespaceQuotas::default();
+        qs.max_storage_bytes = 500;
+        store.create("stor", qs, false).await.unwrap();
+        ns_req(&core, &root, Operation::Write, "sys/mounts/cubby/", "stor", json!({"type":"kv"}).as_object().cloned()).await.unwrap();
+
+        let val = "x".repeat(80);
+        let mut first_ok = false;
+        let mut hit_limit = false;
+        for i in 0..50 {
+            let r = ns_req(
+                &core,
+                &root,
+                Operation::Write,
+                &format!("cubby/k{i}"),
+                "stor",
+                json!({ "v": val }).as_object().cloned(),
+            )
+            .await;
+            if i == 0 {
+                first_ok = r.is_ok();
+            }
+            if r.is_err() {
+                hit_limit = true;
+                break;
+            }
+        }
+        assert!(first_ok, "first write under the cap must succeed");
+        assert!(hit_limit, "writes must eventually be refused by max_storage_bytes");
     }
 }

@@ -86,6 +86,9 @@ pub struct ExpirationManager {
     pub token_view: Arc<BarrierView>,
     pub token_store: RwLock<Weak<TokenStore>>,
     queue: Arc<RwLock<PriorityQueue<Arc<LeaseEntry>, Reverse<u128>>>>,
+    /// Back-reference to Core for resolving per-namespace lease quotas at
+    /// registration time. Weak to avoid a cycle; tolerated absent in tests.
+    core: Weak<Core>,
 }
 
 impl Hash for LeaseEntry {
@@ -147,6 +150,7 @@ impl ExpirationManager {
             token_view: Arc::new(token_view),
             token_store: RwLock::new(Weak::new()),
             queue: Arc::new(RwLock::new(PriorityQueue::new())),
+            core: core.self_ptr.clone(),
         };
 
         Ok(expiration)
@@ -294,8 +298,53 @@ impl ExpirationManager {
 
     /// Registers a secret from a response for lease management.
     #[maybe_async::maybe_async]
+    /// Count live leases whose path falls under `ns_path` (a non-root
+    /// namespace). Used for `max_leases` quota enforcement. Root (`""`) returns
+    /// 0 since the root namespace is never lease-capped.
+    pub fn count_leases_for_namespace(&self, ns_path: &str) -> usize {
+        if ns_path.is_empty() {
+            return 0;
+        }
+        let prefix = format!("{ns_path}/");
+        self.queue
+            .read()
+            .map(|q| q.iter().filter(|(le, _)| le.path.starts_with(&prefix)).count())
+            .unwrap_or(0)
+    }
+
+    /// Enforce the target namespace's `max_leases` quota before a new secret
+    /// lease is registered. Resolves the namespace from the (already
+    /// namespace-normalised) request path. A no-op for root / unlimited / when
+    /// the namespace module is unavailable.
+    #[maybe_async::maybe_async]
+    async fn enforce_lease_quota(&self, req: &Request) -> Result<(), RvError> {
+        let Some(core) = self.core.upgrade() else {
+            return Ok(());
+        };
+        let Some(ns_module) = core
+            .module_manager
+            .get_module::<crate::modules::namespace::NamespaceModule>(
+                crate::modules::namespace::NAMESPACE_MODULE_NAME,
+            )
+        else {
+            return Ok(());
+        };
+        let Some(store) = ns_module.store() else {
+            return Ok(());
+        };
+        let resolved = store.resolve_request(None, &req.path).await?;
+        if resolved.namespace.is_root() {
+            return Ok(());
+        }
+        let limit = resolved.namespace.quotas.max_leases;
+        let current = self.count_leases_for_namespace(&resolved.namespace.path) as u64;
+        crate::modules::namespace::quota::check_lease_quota(&resolved.namespace.path, current, limit)
+    }
+
     pub async fn register_secret(&self, req: &mut Request, resp: &mut Response) -> Result<String, RvError> {
         if let Some(secret) = resp.secret.as_mut() {
+            // Quota: refuse a new lease beyond the namespace's max_leases cap.
+            self.enforce_lease_quota(req).await?;
             if secret.ttl.as_secs() == 0 {
                 secret.ttl = DEFAULT_LEASE_DURATION_SECS;
             }

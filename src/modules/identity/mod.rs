@@ -449,6 +449,14 @@ fn now_iso() -> String {
     Utc::now().to_rfc3339()
 }
 
+/// Resolve the namespace a group-management request targets from its
+/// `X-BastionVault-Namespace` header (canonicalised; `""` = root). Identity
+/// paths are not namespace-rewritten, so the header is read directly. Groups in
+/// a namespace are isolated from root and sibling namespaces.
+fn group_ns_from_req(req: &Request) -> String {
+    crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref())
+}
+
 /// Best-effort caller identity for audit entries. Prefers the `username`
 /// metadata field (populated by UserPass login), then `auth.display_name`,
 /// and falls back to `"unknown"` for root-token writes or paths where
@@ -692,9 +700,11 @@ impl IdentityBackendInner {
     async fn handle_group_list(
         &self,
         kind: GroupKind,
+        req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
-        let keys = store.list_groups(kind).await?;
+        let ns = group_ns_from_req(req);
+        let keys = store.list_groups_ns(kind, &ns).await?;
         Ok(Some(Response::list_response(&keys)))
     }
 
@@ -704,8 +714,9 @@ impl IdentityBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
+        let ns = group_ns_from_req(req);
         let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
-        match store.get_group(kind, &name).await? {
+        match store.get_group_ns(kind, &name, &ns).await? {
             Some(entry) => Ok(Some(group_to_response(&entry, kind))),
             None => Err(bv_error_response_status!(404, &format!("no {} group named: {}", kind, name))),
         }
@@ -717,6 +728,7 @@ impl IdentityBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
+        let ns = group_ns_from_req(req);
         let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
         if name.trim().is_empty() {
             return Err(bv_error_string!("group name missing"));
@@ -725,7 +737,7 @@ impl IdentityBackendInner {
         let payload = parse_write_payload(req)?;
 
         // Merge against any existing entry so partial updates preserve fields.
-        let existing = store.get_group(kind, &name).await?;
+        let existing = store.get_group_ns(kind, &name, &ns).await?;
         let mut entry = existing.clone().unwrap_or_default();
         entry.name = name.clone();
 
@@ -752,7 +764,7 @@ impl IdentityBackendInner {
             diff_with_values(existing.as_ref(), Some(&entry));
         let record_history = op == "create" || !changed_fields.is_empty();
 
-        store.set_group(kind, entry).await?;
+        store.set_group_ns(kind, entry, &ns).await?;
 
         if record_history {
             let hist = GroupHistoryEntry {
@@ -764,7 +776,7 @@ impl IdentityBackendInner {
                 after,
             };
             // History failures should not fail the write.
-            let _ = store.append_history(kind, &name, hist).await;
+            let _ = store.append_history_ns(kind, &name, hist, &ns).await;
         }
 
         Ok(None)
@@ -776,11 +788,12 @@ impl IdentityBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
+        let ns = group_ns_from_req(req);
         let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
 
         // Capture the full prior state so the delete entry retains the
         // group's final contents for audit and possible restoration.
-        let previous = store.get_group(kind, &name).await?;
+        let previous = store.get_group_ns(kind, &name, &ns).await?;
         let (changed_fields, before, _after) = diff_with_values(previous.as_ref(), None);
 
         let hist = GroupHistoryEntry {
@@ -791,9 +804,9 @@ impl IdentityBackendInner {
             before,
             after: Map::new(),
         };
-        let _ = store.append_history(kind, &name, hist).await;
+        let _ = store.append_history_ns(kind, &name, hist, &ns).await;
 
-        store.delete_group(kind, &name).await?;
+        store.delete_group_ns(kind, &name, &ns).await?;
         Ok(None)
     }
 
@@ -803,8 +816,9 @@ impl IdentityBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
+        let ns = group_ns_from_req(req);
         let name = req.get_data("name")?.as_str().unwrap_or("").to_string();
-        let entries = store.list_history(kind, &name).await?;
+        let entries = store.list_history_ns(kind, &name, &ns).await?;
 
         let arr = Value::Array(
             entries
@@ -840,9 +854,9 @@ impl IdentityBackendInner {
     pub async fn handle_user_group_list(
         &self,
         _backend: &dyn Backend,
-        _req: &mut Request,
+        req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        self.handle_group_list(GroupKind::User).await
+        self.handle_group_list(GroupKind::User, req).await
     }
 
     pub async fn handle_user_group_read(
@@ -882,9 +896,9 @@ impl IdentityBackendInner {
     pub async fn handle_app_group_list(
         &self,
         _backend: &dyn Backend,
-        _req: &mut Request,
+        req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        self.handle_group_list(GroupKind::App).await
+        self.handle_group_list(GroupKind::App, req).await
     }
 
     pub async fn handle_app_group_read(
@@ -1581,7 +1595,7 @@ impl IdentityBackendInner {
     pub async fn handle_entity_aliases_list(
         &self,
         _backend: &dyn Backend,
-        _req: &mut Request,
+        req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let module = self
             .core
@@ -1592,7 +1606,8 @@ impl IdentityBackendInner {
             .entity_store()
             .ok_or_else(|| bv_error_string!("entity store unavailable"))?;
 
-        let aliases = store.list_aliases().await?;
+        let ns = group_ns_from_req(req);
+        let aliases = store.list_aliases_ns(&ns).await?;
         let arr = Value::Array(
             aliases
                 .iter()

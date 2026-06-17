@@ -15,31 +15,35 @@ The HTTP surface follows Vault Enterprise's: every endpoint accepts an `X-Bastio
 
 ## Current State
 
-> **Phase 1 foundation landed (in progress).** `src/modules/namespace/` now
-> implements the namespace container and registry (`store.rs` — path↔UUID
-> index, segment validation, parent/child lookup, CRUD with delete guards),
-> the request→namespace resolver (`router.rs` — `X-BastionVault-Namespace`
-> header *and* `/<ns>/...` path-prefix forms, longest-match), the
-> per-namespace mount-router registry (`mount_registry.rs` — reuses
-> `MountsRouter`'s `router_prefix`, barrier-isolated under
-> `namespaces/<uuid>/logical/`), and the idempotent **non-destructive** barrier
-> re-root *copy* (`migrate.rs`). CRUD is exposed under `v2/sys/namespaces` via
-> the system backend. The implicit root namespace is minted on first unseal.
-> 9 tests pass.
+> **Phases 1–4 functionally complete.** `src/modules/namespace/` implements the
+> namespace container + registry (`store.rs`), the request→namespace resolver
+> (`router.rs` — header *and* path-prefix forms), the per-namespace mount-router
+> registry (`mount_registry.rs`) with end-to-end mount creation + dispatch, the
+> idempotent **non-destructive** barrier re-root copy (`migrate.rs`),
+> namespace-bound tokens + `child_visible` (`token_binding.rs`), per-login
+> namespace binding (userpass/approle), cross-namespace policy-path refusal
+> (`policy_scope.rs`), the cross-tenant identity-link primitive
+> (`identity_link.rs`, `v2/sys/namespace-links`), and counting + rate quota
+> enforcement (`quota.rs`). Per-namespace **policy storage** lives in
+> `src/modules/policy/policy_store.rs` (tenant ACL keyspaces + namespace-aware
+> ACL compilation); per-namespace **audit broadcasters** + the root superuser
+> mirror live in `src/audit/broker.rs`; per-namespace **identity** (entities,
+> aliases, groups) lives in `src/modules/identity/`. CRUD is exposed under
+> `v2/sys/namespaces`; a management GUI ships at the Namespaces page. The
+> implicit root namespace is minted on first unseal.
 >
-> **Deliberately deferred / not yet implemented:**
-> - End-to-end per-namespace *mount creation + request dispatch* (a child
->   namespace can be created/listed/deleted but cannot yet hold mounts; the
->   registry plumbing is in place for the next slice).
-> - **Activation** of the re-rooted prefix as the live root. The migration
->   copies and verifies data under `namespaces/<root_uuid>/...` but leaves the
->   legacy `logical/` + `sys/` keys authoritative. Pointing `Core`'s boot-time
->   system view and root mount table at the new prefix is gated behind the
->   `BASTION_NAMESPACE_REROOT` opt-in (default off) and requires the
->   `post_unseal` reordering + operator validation against a backup — tracked as
->   the Phase 1b activation step.
-> - Phases 2–4 (per-namespace policy/token/audit, per-namespace identity +
->   cross-tenant linking, quotas enforcement + GUI).
+> **Re-root activation is the unconditional default for every install** — no
+> opt-in. `namespaces/<root_uuid>/…` is the live root from first unseal on new
+> installs; existing installs migrate automatically on the next unseal (the
+> non-destructive copy + verify runs eagerly and the prefix flips only if it
+> verifies, else it retries next boot — unseal is never blocked). All six quotas
+> are enforced and a GUI namespace switcher ships.
+>
+> **Remaining follow-ups:**
+> - **`cert`-login** namespace binding, and **tenant self-service of `sys/*`**
+>   (today reachable only by root/sudo tokens carrying the namespace header).
+> - A recursive GUI namespace **tree + rename** (the page lists root children
+>   flat; server-side rename is also not yet implemented).
 >
 > **API-prefix note:** the spec below shows `/v1/sys/namespaces` for Vault
 > parity, but per `agent.md` all new routes ship under `v2/`; the management
@@ -197,7 +201,7 @@ Land the data model and the routing path. No identity/policy/audit scoping yet �
 | `src/modules/system/mod.rs` (extension) | `v2/sys/namespaces` CRUD handlers. | ✅ Done |
 | `src/core.rs` (extension) | Run migration copy at `post_unseal`. | ✅ Done |
 | Per-namespace mount creation + request dispatch (`mount.rs` `mount_one`/`unmount_one`, registry `mount`/`unmount`/`list_mounts`, header→path rewrite in `core.rs`, namespace-aware `sys/mounts`) | A child namespace holds mounts and routes end-to-end; cross-tenant isolation proven. | ✅ Done |
-| Re-root *activation* (Core boot-time prefix flip) | Make `namespaces/<root_uuid>/...` authoritative. | ⏳ Deferred (gated behind `BASTION_NAMESPACE_REROOT`) |
+| Re-root *activation* (Core boot-time prefix flip) | Make `namespaces/<root_uuid>/...` authoritative — **the unconditional default for every install** (no opt-in). `Core::post_unseal` resolves activation (`migrate::resolve_root_activation`) before any view/mount-table use and repoints `system_view` + the (now `ArcSwap`) root `mounts_router` + `root_storage_prefix`; `Core::mount` and `exchange/scope` derive the prefix from it. New installs activate immediately; existing installs run the non-destructive copy + verify eagerly the same boot and flip only if it verifies (fail-safe: retry next boot, never block unseal). Persistent one-way marker; legacy keys retained for BVBK rollback. | ✅ Done |
 
 ### Phase 2 — Per-Namespace Policy + Token + Audit
 
@@ -207,25 +211,28 @@ Land the data model and the routing path. No identity/policy/audit scoping yet �
 | `{{namespace.path}}` / `{{namespace.id}}` policy templates (`src/modules/policy/policy_store.rs`) | Namespace-aware ACL templating. | ✅ Done |
 | `namespace` field on audit entries (`src/audit/entry.rs`) | Per-tenant audit attribution. | ✅ Done |
 | `src/modules/namespace/policy_scope.rs` — cross-namespace path refusal (write-time guard, wired into policy write) | Refuses policies referencing another namespace's paths. | ✅ Done |
-| Per-namespace policy *storage* (separate policy documents per namespace) | Needs policy-store rework on the auth hot path (architectural). | ⏳ Not started |
-| `src/modules/namespace/audit_scope.rs` — per-namespace *broadcasters* + root mirror | Needs broker fan-out rework (global singleton today). | ⏳ Not started |
-| `src/modules/policy/*` (extension) | Compile policies against the calling namespace. | ⏳ Not started |
+| Per-namespace policy *storage* (separate policy documents per namespace, `src/modules/policy/policy_store.rs`) | Tenant ACL policies live in their own keyspace (`policy-ns/<b64(path)>/…`); root keeps the legacy keyspace. `get/set/list/delete/history` gain `_ns` variants; the `sys/policy*` handlers scope by the request namespace header. | ✅ Done |
+| `src/audit/broker.rs` — per-namespace *broadcasters* + root mirror | Devices carry a `namespace` + root-only `mirror` flag; `log` partitions fan-out by `entry.namespace` with a per-namespace hash chain and a superuser mirror on the root chain; `sys/audit` enable/disable/list scope by header. | ✅ Done |
+| `src/modules/policy/policy_store.rs` `new_acl_inner` (extension) | Compiles policies against the calling token's bound namespace (loads each named policy from that namespace's store). | ✅ Done |
 
 ### Phase 3 — Per-Namespace Identity + Cross-Tenant Linking
 
-| File | Purpose |
-|---|---|
-| `src/modules/identity/*` (extension) | Per-namespace entity / alias / group stores. |
-| `src/modules/namespace/identity_link.rs` | Parent-visible cross-tenant identity correlation. |
+| File | Purpose | Status |
+|---|---|---|
+| `src/modules/identity/entity_store.rs` (extension) | Per-namespace alias keyspace + `namespace` tag on each entity record (entity UUIDs stay globally unique, so `get_entity(id)` callers are unchanged); `_ns` get/create/forget/list variants. The same external principal resolves to a distinct entity per namespace. | ✅ Done |
+| `src/modules/identity/group_store.rs` (extension) | Per-namespace group + group-history keyspaces; `_ns` CRUD + history + `expand_policies_ns` so login-time group→policy expansion is namespace-scoped. | ✅ Done |
+| `src/modules/identity/mod.rs` (extension) | Group-management + entity-alias HTTP handlers scope by the `X-BastionVault-Namespace` header; `identity/` is exempted from path-rewrite so it stays header-scoped like `sys/`. | ✅ Done |
+| Per-login namespace binding (`credential/userpass`, `credential/approle`) | Login resolves the namespace header (fails closed on an unknown namespace), provisions/loads the entity and expands groups *in that namespace*, and stamps the token's namespace binding. Covers userpass password + userpass-FIDO2 + approle. (`cert` login: follow-up.) | ✅ Done |
+| `src/modules/namespace/identity_link.rs` + `v2/sys/namespace-links` | Parent-visible cross-tenant identity correlation: a namespace may link entities only within its own subtree (one-way), stored partitioned by owner so siblings/children never see it. List/create/read/delete via the system backend, scoped by header. | ✅ Done |
 
 ### Phase 4 — Quotas + GUI
 
-| File | Purpose |
-|---|---|
-| `src/modules/namespace/quota.rs` | Storage / lease / rate / mount / entity / child quotas. |
-| `gui/src/routes/NamespacesPage.tsx` | Tree view with create / rename / delete / quota editing. |
-| `gui/src/components/NamespaceSwitcher.tsx` | Top-bar namespace picker; persists in localStorage. |
-| `gui/src/lib/api.ts` (extension) | All API calls accept an optional namespace param that becomes the `X-BastionVault-Namespace` header. |
+| File | Purpose | Status |
+|---|---|---|
+| `src/modules/namespace/quota.rs` | **All six quotas enforced.** Counting/rate: `max_mounts` (at mount create), `max_child_namespaces` (at namespace create), `request_rate` (per-namespace token bucket, `429`). Accounting: `max_entities` (at login before a *new* entity is provisioned), `max_storage_bytes` (summed under the namespace logical prefix, incoming value added so the crossing write is the one refused, `507`), `max_leases` (live lease count under the namespace, enforced at lease registration). All accounting quotas apply to non-root namespaces only. | ✅ Done |
+| `gui/src/routes/NamespacesPage.tsx` + `gui/src-tauri/.../commands/namespaces.rs` + `gui/src/lib/api.ts` | Namespace management page: list root children, create (path + 6 quota fields + `child_visible_default`), edit quotas, delete. Tauri commands drive `v2/sys/namespaces`. | ✅ Done |
+| `gui/src/components/NamespaceSwitcher.tsx` + `bv_client::Backend::handle_with_namespace` | Top-of-sidebar namespace picker. Selecting a namespace sets the session's active namespace on the backend (`AppState.active_namespace`), and `make_request` carries the `X-BastionVault-Namespace` header on every authenticated request via the new `handle_with_namespace` trait method (overridden by both the embedded and remote backends). Reloads so all pages re-fetch under the tenant. | ✅ Done |
+| Tree view + rename in the GUI | The page lists root-level children flat; a recursive tree and rename are follow-ups (namespace rename is not yet implemented server-side either). | ⏳ Deferred |
 
 ### Not In Scope
 

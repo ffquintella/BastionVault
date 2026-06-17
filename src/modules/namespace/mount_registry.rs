@@ -94,7 +94,7 @@ impl NamespaceMountRegistry {
         // a child namespace can mount any secret engine the deployment knows.
         // The factories are stateless closures resolved per request, so cloning
         // the type→factory map from the root router is sufficient.
-        for kv in core.mounts_router.backends.iter() {
+        for kv in core.mounts_router().backends.iter() {
             let _ = mounts_router.add_backend(kv.key(), kv.value().clone());
         }
 

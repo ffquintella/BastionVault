@@ -66,4 +66,8 @@ pub struct DeviceEntry {
     pub device_type: String,
     pub description: String,
     pub device: Arc<dyn AuditDevice>,
+    /// Multi-tenancy: the namespace this device audits (`""` = root).
+    pub namespace: String,
+    /// Root-only superuser mirror flag (see [`broker::AuditDeviceConfig`]).
+    pub mirror: bool,
 }

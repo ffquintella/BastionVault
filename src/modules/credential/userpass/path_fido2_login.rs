@@ -159,11 +159,16 @@ impl UserPassBackendInner {
             .map_err(|e: serde_json::Error| RvError::ErrFido2AuthFailed(e.to_string()))?;
         self.set_user(req, &username, &user_entry).await?;
 
+        // Multi-tenancy: bind the FIDO2 session to the namespace named by the
+        // request header, exactly as the password-login path does.
+        let (ns_path, ns_uuid) =
+            crate::modules::namespace::token_binding::resolve_login_namespace(&self.core, req).await?;
+
         // Union direct policies with any attached through identity user-groups
-        // so FIDO2 logins receive the same group-derived policies as password
-        // logins for the same username.
+        // (of the login namespace) so FIDO2 logins receive the same
+        // group-derived policies as password logins for the same username.
         let effective_policies = self
-            .expand_identity_group_policies(GroupKind::User, &username, &user_entry.policies)
+            .expand_identity_group_policies(GroupKind::User, &username, &user_entry.policies, &ns_path)
             .await;
 
         if user_entry.token_policies.is_empty() && !effective_policies.is_empty() {
@@ -190,10 +195,16 @@ impl UserPassBackendInner {
         auth.metadata.insert("username".to_string(), username.to_string());
         auth.metadata.insert("mount_path".to_string(), "userpass/".to_string());
         if let Some(entity_id) =
-            super::path_login::resolve_entity_id(&self.core, "userpass/", &username).await
+            super::path_login::resolve_entity_id(&self.core, "userpass/", &username, &ns_path).await
         {
             auth.metadata.insert("entity_id".to_string(), entity_id);
         }
+        crate::modules::namespace::token_binding::stamp_binding(
+            &mut auth.metadata,
+            &ns_path,
+            &ns_uuid,
+            false,
+        );
         user_entry.populate_token_auth(&mut auth);
 
         if auth.policies.is_empty() && !effective_policies.is_empty() {

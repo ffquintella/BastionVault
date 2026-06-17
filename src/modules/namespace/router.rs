@@ -151,8 +151,16 @@ pub async fn rewrite_request_for_namespace(core: &Core, req: &mut Request) -> Re
         return Ok(());
     }
 
-    // Logical mounts only in Phase 1.
-    if req.path.starts_with("sys/") || req.path.starts_with("auth/") {
+    // Deployment-level backends are addressed at the root mount and scope
+    // themselves by the namespace *header* (not by path rewriting): `sys/`
+    // (incl. policy + audit + namespace CRUD), `auth/` logins, and the
+    // `identity/` backend (per-namespace entities/groups via the header). Their
+    // handlers read the header directly, so leave the path untouched — rewriting
+    // would misroute them into the namespace's logical mount table.
+    if req.path.starts_with("sys/")
+        || req.path.starts_with("auth/")
+        || req.path.starts_with("identity/")
+    {
         return Ok(());
     }
 

@@ -14,6 +14,9 @@ import type {
   PolicyListResult,
   PolicyContent,
   PolicyHistoryResult,
+  NamespaceListResult,
+  NamespaceInfo,
+  NamespaceQuotas,
   ResourceMetadata,
   ResourceListResult,
   ResourceSecretListResult,
@@ -372,6 +375,33 @@ export const writePolicy = (name: string, policy: string) =>
 export const deletePolicy = (name: string) => invoke<void>("delete_policy", { name });
 export const listPolicyHistory = (name: string) =>
   invoke<PolicyHistoryResult>("list_policy_history", { name });
+
+// Namespaces (multi-tenancy)
+export const listNamespaces = () =>
+  invoke<NamespaceListResult>("list_namespaces");
+export const readNamespace = (path: string) =>
+  invoke<NamespaceInfo>("read_namespace", { path });
+export const writeNamespace = (
+  path: string,
+  quotas: NamespaceQuotas,
+  childVisibleDefault: boolean,
+) =>
+  invoke<NamespaceInfo>("write_namespace", {
+    path,
+    maxStorageBytes: quotas.max_storage_bytes,
+    maxLeases: quotas.max_leases,
+    requestRate: quotas.request_rate,
+    maxMounts: quotas.max_mounts,
+    maxEntities: quotas.max_entities,
+    maxChildNamespaces: quotas.max_child_namespaces,
+    childVisibleDefault,
+  });
+export const deleteNamespace = (path: string) =>
+  invoke<void>("delete_namespace", { path });
+export const setActiveNamespace = (path: string) =>
+  invoke<void>("set_active_namespace", { path });
+export const getActiveNamespace = () =>
+  invoke<string>("get_active_namespace");
 
 // Resource type configuration
 export const resourceTypesRead = () =>

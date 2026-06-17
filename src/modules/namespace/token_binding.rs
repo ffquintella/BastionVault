@@ -18,6 +18,8 @@
 
 use std::collections::HashMap;
 
+use crate::errors::RvError;
+
 /// Metadata key holding the token's issuing-namespace path (canonical, no
 /// trailing slash; `""` = root). Absent ⇒ root.
 pub const NS_PATH_META: &str = "namespace_path";
@@ -68,6 +70,45 @@ pub fn stamp_binding(
     meta.insert(NS_PATH_META.to_string(), ns_path.to_string());
     meta.insert(NS_ID_META.to_string(), ns_uuid.to_string());
     meta.insert(CHILD_VISIBLE_META.to_string(), child_visible.to_string());
+}
+
+/// Resolve the namespace an auth-backend login targets, from the request's
+/// `X-BastionVault-Namespace` header. Returns `(path, uuid)` — root is
+/// `("", "")`. Fails closed: a header naming a namespace that does not exist
+/// (or set while namespaces are unavailable) is a hard error, so a login can
+/// never silently fall back to root when the caller asked for a tenant.
+///
+/// Used by auth backends to bind the issued token to the login namespace and to
+/// scope entity/group resolution. Login paths are not namespace-rewritten, so
+/// the header is read directly here.
+#[maybe_async::maybe_async]
+pub async fn resolve_login_namespace(
+    core: &crate::core::Core,
+    req: &crate::logical::Request,
+) -> Result<(String, String), crate::errors::RvError> {
+    use super::{router::namespace_header_from_map, NamespaceModule, NAMESPACE_MODULE_NAME};
+
+    let raw = namespace_header_from_map(req.headers.as_ref())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let Some(raw) = raw else {
+        return Ok((String::new(), String::new()));
+    };
+
+    let module = core
+        .module_manager
+        .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+        .ok_or_else(|| {
+            crate::bv_error_string!("namespace header set but the namespace module is unavailable")
+        })?;
+    let store = module
+        .store()
+        .ok_or_else(|| crate::bv_error_string!("namespace store not initialized"))?;
+    let ns = store.get_by_path(&raw).await?.ok_or_else(|| {
+        let p = super::store::normalize_path(&raw).unwrap_or(raw);
+        crate::bv_error_response_status!(404, &format!("no such namespace: {p:?}"))
+    })?;
+    Ok((ns.path, ns.uuid))
 }
 
 /// Enforce token namespace binding for a routed request. Called after the

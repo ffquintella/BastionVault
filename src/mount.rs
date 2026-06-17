@@ -611,8 +611,9 @@ impl MountsMonitor {
 #[maybe_async::maybe_async]
 impl Core {
     pub async fn mount(&self, me: &MountEntry) -> Result<(), RvError> {
+        let mounts_router = self.mounts_router();
         {
-            let mut table = self.mounts_router.entries.write()?;
+            let mut table = mounts_router.entries.write()?;
             let mut entry = me.clone();
 
             if !entry.path.ends_with('/') {
@@ -637,7 +638,10 @@ impl Core {
 
             entry.uuid = generate_uuid();
 
-            let prefix = format!("{}{}/", LOGICAL_BARRIER_PREFIX, &entry.uuid);
+            // Re-root aware: root mounts live under the active root logical
+            // prefix (`logical/` legacy, or `namespaces/<root_uuid>/logical/`
+            // when re-root activation is in effect).
+            let prefix = format!("{}{}/", self.root_logical_prefix(), &entry.uuid);
             let view = BarrierView::new(self.barrier.clone(), &prefix);
 
             let path = entry.path.clone();
@@ -651,7 +655,7 @@ impl Core {
             table.insert(path, mount_entry);
         }
 
-        self.mounts_router.persist(self.barrier.as_storage()).await?;
+        self.mounts_router().persist(self.barrier.as_storage()).await?;
 
         Ok(())
     }
@@ -737,18 +741,20 @@ impl Core {
         // on the table and the entry survives until restart even though the
         // router trie no longer routes to it.
         {
-            let mut entries = self.mounts_router.entries.write()?;
+            let mounts_router = self.mounts_router();
+            let mut entries = mounts_router.entries.write()?;
             if let Some(entry) = entries.remove(&src) {
                 entries.insert(dst.clone(), entry);
             }
         }
 
-        if let Err(e) = self.mounts_router.persist(self.barrier.as_storage()).await {
+        if let Err(e) = self.mounts_router().persist(self.barrier.as_storage()).await {
             // Best-effort rollback: put the entry back under its original key
             // and restore the path field so the in-memory state matches what
             // is on disk.
             {
-                let mut entries = self.mounts_router.entries.write()?;
+                let mounts_router = self.mounts_router();
+                let mut entries = mounts_router.entries.write()?;
                 if let Some(entry) = entries.remove(&dst) {
                     entries.insert(src.clone(), entry);
                 }
@@ -769,20 +775,20 @@ impl Core {
 
     pub fn unload_mounts(&self) -> Result<(), RvError> {
         let _ = self.router.clear();
-        let _ = self.mounts_router.clear();
+        let _ = self.mounts_router().clear();
         Ok(())
     }
 
     async fn taint_mount_entry(&self, path: &str) -> Result<(), RvError> {
-        if self.mounts_router.set_taint(path, true) {
-            self.mounts_router.persist(self.barrier.as_storage()).await?;
+        if self.mounts_router().set_taint(path, true) {
+            self.mounts_router().persist(self.barrier.as_storage()).await?;
         }
         Ok(())
     }
 
     async fn remove_mount_entry(&self, path: &str) -> Result<(), RvError> {
-        if self.mounts_router.delete(path) {
-            self.mounts_router.persist(self.barrier.as_storage()).await?;
+        if self.mounts_router().delete(path) {
+            self.mounts_router().persist(self.barrier.as_storage()).await?;
         }
         Ok(())
     }

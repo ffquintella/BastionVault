@@ -309,6 +309,13 @@ pub fn run() {
             commands::policies::write_policy,
             commands::policies::delete_policy,
             commands::policies::list_policy_history,
+            // Namespaces (multi-tenancy)
+            commands::namespaces::list_namespaces,
+            commands::namespaces::read_namespace,
+            commands::namespaces::write_namespace,
+            commands::namespaces::delete_namespace,
+            commands::namespaces::set_active_namespace,
+            commands::namespaces::get_active_namespace,
             // Resources
             commands::resources::resource_types_read,
             commands::resources::resource_types_write,

@@ -19,6 +19,8 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
 use super::{
     entry::AuditEntry,
     file_device::FileAuditDevice,
@@ -34,8 +36,20 @@ use crate::{
 
 const AUDIT_DEVICES_SUB_PATH: &str = "audit-devices/";
 
+/// Persisted-config storage key for a device. Root devices keep their bare
+/// path (backward compatible with pre-namespace deployments); tenant devices
+/// are stored under a URL-safe-base64 namespace segment so two namespaces may
+/// each enable a device with the same operator-facing path.
+fn config_key(namespace: &str, path: &str) -> String {
+    if namespace.is_empty() {
+        path.to_string()
+    } else {
+        format!("{}/{}", URL_SAFE_NO_PAD.encode(namespace.as_bytes()), path)
+    }
+}
+
 /// Persisted device configuration. Re-hydrated on unseal.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AuditDeviceConfig {
     pub path: String,
     pub device_type: String,
@@ -43,13 +57,30 @@ pub struct AuditDeviceConfig {
     pub description: String,
     #[serde(default)]
     pub options: HashMap<String, String>,
+    /// Multi-tenancy: the namespace this device audits (`""` = root).
+    /// A device only sees entries whose `namespace` matches — except a
+    /// root device with `mirror = true`, which additionally receives every
+    /// namespace's entries (the superuser SOC mirror). Legacy configs lack
+    /// this field and deserialize as root.
+    #[serde(default)]
+    pub namespace: String,
+    /// Root-only superuser mirror: when set on a root (`namespace == ""`)
+    /// device, that device additionally receives every other namespace's
+    /// audit stream. Ignored on non-root devices. Off by default.
+    #[serde(default)]
+    pub mirror: bool,
 }
 
 pub struct AuditBroker {
-    /// Registered devices keyed by operator-facing path.
+    /// Registered devices. Each carries the namespace it audits; routing in
+    /// [`AuditBroker::log`] partitions by namespace.
     devices: Mutex<Vec<DeviceEntry>>,
-    /// Chain head (hex-prefixed). Single chain across all devices.
-    last_hash: Mutex<String>,
+    /// Per-namespace chain heads (hex-prefixed), keyed by namespace path
+    /// (`""` = root). Each namespace's devices share one chain so a single
+    /// device file is a contiguous, independently-verifiable hash chain. The
+    /// superuser mirror reuses the root (`""`) chain, since mirror devices are
+    /// root devices that also receive every namespace's entries.
+    chains: Mutex<HashMap<String, String>>,
     /// HMAC key used for redaction. Derived from the barrier at
     /// broker construction and stable across the broker's lifetime.
     hmac_key: Vec<u8>,
@@ -70,7 +101,7 @@ impl AuditBroker {
 
         let broker = Arc::new(Self {
             devices: Mutex::new(Vec::new()),
-            last_hash: Mutex::new(genesis()),
+            chains: Mutex::new(HashMap::new()),
             hmac_key,
             config_view: config_view.clone(),
         });
@@ -94,32 +125,75 @@ impl AuditBroker {
         Ok(broker)
     }
 
-    /// Stamp `prev_hash`, redact sensitive fields, and forward to
-    /// every device. Fail-closed on any device error. On success
-    /// the broker's chain head advances.
+    /// Route an entry to the devices that should see it, maintaining a
+    /// per-namespace tamper-evident chain. Fail-closed on any device error.
+    ///
+    /// An entry tagged with namespace `N` is delivered to:
+    ///   1. every device bound to `N` (on `N`'s chain), and
+    ///   2. when `N` is non-root, every root device with `mirror = true`
+    ///      (on the root chain — the mirror device sees root events and all
+    ///      tenant events as one contiguous stream).
     pub async fn log(&self, entry: &mut AuditEntry) -> Result<(), RvError> {
-        {
-            let prev = self.last_hash.lock().unwrap().clone();
-            entry.prev_hash = prev;
-        }
+        let ns = entry.namespace.clone();
 
-        // Snapshot the device list so we don't hold the lock across
-        // the async writes.
-        let devices: Vec<Arc<dyn AuditDevice>> = {
+        // Snapshot the two target device groups without holding the lock
+        // across the async writes.
+        let (own_devices, mirror_devices): (Vec<Arc<dyn AuditDevice>>, Vec<Arc<dyn AuditDevice>>) = {
             let g = self.devices.lock().unwrap();
-            g.iter().map(|d| d.device.clone()).collect()
+            let own = g
+                .iter()
+                .filter(|d| d.namespace == ns)
+                .map(|d| d.device.clone())
+                .collect();
+            // Mirror only carries *tenant* events into root; a root event is
+            // already covered by `own` above (root mirror devices have
+            // namespace == "" == ns), so skip the mirror pass at root.
+            let mirror = if ns.is_empty() {
+                Vec::new()
+            } else {
+                g.iter()
+                    .filter(|d| d.mirror && d.namespace.is_empty())
+                    .map(|d| d.device.clone())
+                    .collect()
+            };
+            (own, mirror)
         };
 
-        for dev in &devices {
+        // The namespace's own devices, on the namespace chain.
+        self.fan(&ns, entry, &own_devices).await?;
+
+        // The superuser mirror, on the root chain. A separate clone carries
+        // its own prev_hash so the root chain stays contiguous; the entry's
+        // `namespace` field is preserved so the mirror attributes the event.
+        if !mirror_devices.is_empty() {
+            let mut mirrored = entry.clone();
+            self.fan("", &mut mirrored, &mirror_devices).await?;
+        }
+        Ok(())
+    }
+
+    /// Stamp the next `prev_hash` from `chain_key`'s head, forward to every
+    /// device in `devices`, and advance that chain only after all writes
+    /// succeed. A no-op (and chain-preserving) when `devices` is empty.
+    async fn fan(
+        &self,
+        chain_key: &str,
+        entry: &mut AuditEntry,
+        devices: &[Arc<dyn AuditDevice>],
+    ) -> Result<(), RvError> {
+        if devices.is_empty() {
+            return Ok(());
+        }
+        {
+            let chains = self.chains.lock().unwrap();
+            entry.prev_hash = chains.get(chain_key).cloned().unwrap_or_else(genesis);
+        }
+        for dev in devices {
             dev.log_entry(entry).await?;
         }
-
-        // Advance the chain head only after every device accepted
-        // the entry. A failed write leaves the chain unchanged, so
-        // a retry keyed off the same entry re-presents the same
-        // `prev_hash`.
+        // Advance the chain head only after every device accepted the entry.
         let next = digest(entry)?;
-        *self.last_hash.lock().unwrap() = next;
+        self.chains.lock().unwrap().insert(chain_key.to_string(), next);
         Ok(())
     }
 
@@ -136,46 +210,56 @@ impl AuditBroker {
         !self.devices.lock().unwrap().is_empty()
     }
 
-    /// Snapshot of the current device list for the `list` API.
-    pub fn list(&self) -> Vec<AuditDeviceConfig> {
+    /// Snapshot of the devices visible from `namespace`: that namespace's own
+    /// devices, plus the root superuser mirror device(s) when enabled (every
+    /// namespace is shown the mirror so tenants know their stream is shadowed).
+    pub fn list(&self, namespace: &str) -> Vec<AuditDeviceConfig> {
         self.devices
             .lock()
             .unwrap()
             .iter()
+            .filter(|d| d.namespace == namespace || (d.mirror && d.namespace.is_empty()))
             .map(|d| AuditDeviceConfig {
                 path: d.path.clone(),
                 device_type: d.device_type.clone(),
                 description: d.description.clone(),
                 options: HashMap::new(),
+                namespace: d.namespace.clone(),
+                mirror: d.mirror,
             })
             .collect()
     }
 
-    /// Register a device and persist its config.
-    pub async fn enable_device(&self, cfg: AuditDeviceConfig) -> Result<(), RvError> {
+    /// Register a device and persist its config. The device is scoped to
+    /// `cfg.namespace`; the `mirror` flag is honoured only for root devices.
+    pub async fn enable_device(&self, mut cfg: AuditDeviceConfig) -> Result<(), RvError> {
+        // `mirror` is meaningless outside the root namespace.
+        if !cfg.namespace.is_empty() {
+            cfg.mirror = false;
+        }
         {
             let g = self.devices.lock().unwrap();
-            if g.iter().any(|d| d.path == cfg.path) {
+            if g.iter().any(|d| d.path == cfg.path && d.namespace == cfg.namespace) {
                 return Err(bv_error_string!(format!(
-                    "audit: device path {} already in use",
-                    cfg.path
+                    "audit: device path {} already in use in namespace {:?}",
+                    cfg.path, cfg.namespace
                 )));
             }
         }
         self.instantiate_and_register(&cfg).await?;
-        let key = cfg.path.clone();
+        let key = config_key(&cfg.namespace, &cfg.path);
         let value = serde_json::to_vec(&cfg)?;
         self.config_view.put(&StorageEntry { key, value }).await?;
         Ok(())
     }
 
-    /// Remove a device and its persisted config. Idempotent.
-    pub async fn disable_device(&self, path: &str) -> Result<(), RvError> {
+    /// Remove a device and its persisted config from `namespace`. Idempotent.
+    pub async fn disable_device(&self, namespace: &str, path: &str) -> Result<(), RvError> {
         {
             let mut g = self.devices.lock().unwrap();
-            g.retain(|d| d.path != path);
+            g.retain(|d| !(d.path == path && d.namespace == namespace));
         }
-        self.config_view.delete(path).await?;
+        self.config_view.delete(&config_key(namespace, path)).await?;
         Ok(())
     }
 
@@ -193,6 +277,8 @@ impl AuditBroker {
             device_type: cfg.device_type.clone(),
             description: cfg.description.clone(),
             device,
+            namespace: cfg.namespace.clone(),
+            mirror: cfg.mirror && cfg.namespace.is_empty(),
         };
         self.devices.lock().unwrap().push(entry);
         Ok(())

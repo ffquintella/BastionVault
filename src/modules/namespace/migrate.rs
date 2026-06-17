@@ -6,29 +6,28 @@
 //!
 //! ## Safety posture
 //!
-//! Re-rooting rewrites barrier keys on the seal/unseal critical path. A bug
-//! that half-completes the move on a live secrets server risks unrecoverable
-//! data, so the migration is split into two stages with an explicit operator
-//! gate between them:
+//! Re-rooting is the **default for every install, with no opt-in** (see
+//! [`resolve_root_activation`]). It rewrites barrier keys on the seal/unseal
+//! critical path, so the design keeps two safety properties:
 //!
-//! 1. **Copy + verify (this module, idempotent, safe to run on upgrade).**
-//!    Every barrier key under `core/mounts`, `sys/`, and `logical/` is *copied*
-//!    (never moved) to `namespaces/<root_uuid>/...`. The original keys are left
-//!    in place. A version marker records that the copy completed and was
-//!    verified. Replaying the migration is a no-op once the marker is set.
+//! 1. **Copy + verify is non-destructive and idempotent.** Every barrier key
+//!    under `core/mounts`, `sys/`, and `logical/` is *copied* (never moved) to
+//!    `namespaces/<root_uuid>/...`; the original keys are left in place. Each
+//!    copied destination is read back and compared byte-for-byte before a
+//!    version marker records completion. Replaying the migration is a no-op once
+//!    the marker is set.
 //!
-//! 2. **Activation (operator-gated, deferred).** Pointing `Core`'s boot-time
-//!    system view and root mount table at the new prefix — so reads/writes
-//!    land there and the legacy keys can be retired — is a deliberate,
-//!    separately-validated step. It is gated behind the
-//!    `BASTION_NAMESPACE_REROOT` opt-in and is not performed automatically,
-//!    per `agent.md`'s "feature flags, staged rollouts, and format versioning
-//!    for risky migrations". Operators validate the copy against a BVBK backup
-//!    before activating; rollback is "restore the pre-migration backup".
+//! 2. **Activation only flips after a verified copy, and fails safe.** On a
+//!    brand-new install there is nothing to copy, so it activates immediately.
+//!    On an existing install the copy + verify runs eagerly on the same boot and
+//!    activation follows only if it succeeds; if verification fails, the legacy
+//!    layout stays authoritative for that boot and the migration retries on the
+//!    next unseal rather than blocking startup or pointing at unverified data.
+//!    Activation is recorded by a persistent registry marker and is one-way.
 //!
-//! Until activation, the copy is shadow data: correct, verified, and ready,
-//! but not yet authoritative. This keeps upgrades non-destructive and fully
-//! reversible while still landing the migration machinery the feature needs.
+//! Because the legacy keys are retained, rollback to a pre-namespace build is
+//! still "restore the pre-migration BVBK backup" (the legacy keys also remain in
+//! place on disk after activation, unused).
 
 use std::sync::Arc;
 
@@ -49,6 +48,11 @@ pub const REROOT_MIGRATION_VERSION: u32 = 1;
 /// completed-and-verified copy version. Absent ⇒ never migrated.
 const MIGRATION_VERSION_KEY: &str = "migration-version";
 
+/// Registry key recording that the re-rooted prefix is the *authoritative* root
+/// (activation is in effect). Once set it is permanent: an activated deployment
+/// always boots with `namespaces/<root_uuid>/…` as the live root.
+const ACTIVATION_MARKER_KEY: &str = "reroot-active";
+
 /// Legacy root prefixes that get copied under `namespaces/<root_uuid>/`.
 const LEGACY_LOGICAL_PREFIX: &str = "logical/";
 const LEGACY_SYSTEM_PREFIX: &str = "sys/";
@@ -62,11 +66,81 @@ pub struct MigrationReport {
     pub keys_verified: usize,
 }
 
-/// Whether the operator has opted into *activating* the re-rooted prefix as
-/// the authoritative root. Default false. The copy stage runs regardless; only
-/// activation (a future, separately-reviewed step) consults this.
-pub fn reroot_activation_opt_in() -> bool {
-    std::env::var("BASTION_NAMESPACE_REROOT").map(|v| v == "1").unwrap_or(false)
+#[maybe_async::maybe_async]
+async fn activation_active(barrier: &dyn Storage) -> Result<bool, RvError> {
+    let key = format!("{NAMESPACE_REGISTRY_PREFIX}{ACTIVATION_MARKER_KEY}");
+    Ok(barrier.get(&key).await?.is_some())
+}
+
+#[maybe_async::maybe_async]
+async fn set_activation_active(barrier: &dyn Storage) -> Result<(), RvError> {
+    let key = format!("{NAMESPACE_REGISTRY_PREFIX}{ACTIVATION_MARKER_KEY}");
+    barrier.put(&StorageEntry { key, value: b"1".to_vec() }).await
+}
+
+/// Decide whether the re-rooted prefix should be the authoritative root for
+/// this boot, and persist the decision. Returns `Some(root_uuid)` when
+/// activation is in effect (caller repoints `Core` to `namespaces/<uuid>/…`),
+/// `None` for the legacy layout (only when an existing install's copy could not
+/// be completed/verified this boot — a fail-safe, not a gate).
+///
+/// Re-root is the **default for every install, with no opt-in**:
+/// - **Already activated** (marker set) → activate. Activation is one-way and
+///   persistent.
+/// - **Brand-new install** (no legacy root mount table yet) → activate,
+///   recording the marker and marking the copy stage complete (nothing to copy).
+/// - **Existing pre-namespace install** → run the non-destructive copy + verify
+///   eagerly *this boot*, then activate. If the copy cannot be verified, stay on
+///   the legacy layout this boot (legacy keys are untouched) and retry next boot
+///   rather than block unseal or point at unverified data.
+#[maybe_async::maybe_async]
+pub async fn resolve_root_activation(
+    core: &Arc<Core>,
+    store: &NamespaceStore,
+) -> Result<Option<String>, RvError> {
+    let barrier = core.barrier.as_storage();
+    let root_uuid = store.root_uuid()?;
+
+    if activation_active(barrier).await? {
+        return Ok(Some(root_uuid));
+    }
+
+    // New-install detection: a fresh vault has no legacy root mount table yet
+    // (it is created later in `post_unseal` by `load_or_default`).
+    let legacy_present = barrier.get(LEGACY_MOUNT_CONFIG).await?.is_some();
+    if !legacy_present {
+        set_activation_active(barrier).await?;
+        // Nothing to copy on a new install; mark the copy stage done so the
+        // later copy pass is a no-op.
+        write_migration_version(barrier, REROOT_MIGRATION_VERSION).await?;
+        log::info!("namespace re-root activated by default for new install (root {root_uuid})");
+        return Ok(Some(root_uuid));
+    }
+
+    // Existing install: re-root by default. Copy + verify the legacy data under
+    // `namespaces/<root_uuid>/…` now (idempotent + non-destructive), then make
+    // it authoritative this boot. A copy/verify failure is a fail-safe: leave
+    // the legacy layout authoritative for this boot and retry on the next.
+    match migrate_root_copy(core, store).await {
+        Ok(report) => {
+            set_activation_active(barrier).await?;
+            log::info!(
+                "namespace re-root activated for existing install (root {root_uuid}): \
+                 {} keys copied, {} verified{}",
+                report.keys_copied,
+                report.keys_verified,
+                if report.already_done { " (copy already complete)" } else { "" },
+            );
+            Ok(Some(root_uuid))
+        }
+        Err(e) => {
+            log::warn!(
+                "namespace re-root copy failed (legacy layout stays authoritative this boot, \
+                 will retry next boot): {e}"
+            );
+            Ok(None)
+        }
+    }
 }
 
 #[maybe_async::maybe_async]
@@ -211,8 +285,8 @@ mod tests {
     use crate::test_utils::new_unseal_test_bastion_vault;
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn test_reroot_copy_is_idempotent_and_non_destructive() {
-        let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_ns_reroot_copy").await;
+    async fn test_reroot_activated_by_default_on_new_install() {
+        let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_ns_reroot_activation").await;
         let store = core
             .module_manager
             .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
@@ -222,15 +296,79 @@ mod tests {
         let root_uuid = store.root_uuid().unwrap();
         let barrier = core.barrier.as_storage();
 
-        // post_unseal already ran the copy once; the legacy mount config and
-        // its re-rooted copy must both be present (non-destructive), and a
-        // re-run must be a no-op.
-        assert!(barrier.get("core/mounts").await.unwrap().is_some(), "legacy data must survive");
+        // New installs activate re-rooting by default: the root tenant's mount
+        // table lives under `namespaces/<root_uuid>/`, the legacy location is
+        // never written, and Core is repointed at the active prefix.
         let dst = format!("namespaces/{root_uuid}/core/mounts");
-        assert!(barrier.get(&dst).await.unwrap().is_some(), "re-rooted copy must exist");
+        assert!(barrier.get(&dst).await.unwrap().is_some(), "activated mount table must exist");
+        assert!(
+            barrier.get("core/mounts").await.unwrap().is_none(),
+            "legacy mount table must not be written on an activated new install"
+        );
+        assert_eq!(
+            core.root_storage_prefix.load().as_str(),
+            format!("namespaces/{root_uuid}/").as_str(),
+            "Core must be repointed at the active root prefix"
+        );
 
+        // The copy stage is a no-op on a new install (nothing to copy; the
+        // version marker was set when activation was recorded).
         let report = migrate_root_copy(&core_arc, &store).await.unwrap();
-        assert!(report.already_done, "second run must be a no-op");
+        assert!(report.already_done, "copy must be a no-op for an activated new install");
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_reroot_activates_existing_install_by_default() {
+        let (_bvault, core, _root) = new_unseal_test_bastion_vault("test_ns_reroot_existing").await;
+        let store = core
+            .module_manager
+            .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+            .and_then(|m| m.store())
+            .unwrap();
+        let core_arc = core.self_ptr.upgrade().unwrap();
+        let barrier = core.barrier.as_storage();
+
+        // Simulate a pre-namespace existing install: a legacy root mount table
+        // + a legacy logical secret present, and the activation/version markers
+        // cleared so the decision runs as if upgrading for the first time.
+        barrier
+            .put(&StorageEntry { key: "core/mounts".into(), value: b"legacy-table".to_vec() })
+            .await
+            .unwrap();
+        barrier
+            .put(&StorageEntry { key: "logical/seed/secret".into(), value: b"legacy-secret".to_vec() })
+            .await
+            .unwrap();
+        barrier
+            .delete(&format!("{NAMESPACE_REGISTRY_PREFIX}{ACTIVATION_MARKER_KEY}"))
+            .await
+            .unwrap();
+        barrier
+            .delete(&format!("{NAMESPACE_REGISTRY_PREFIX}{MIGRATION_VERSION_KEY}"))
+            .await
+            .unwrap();
+        assert!(!activation_active(barrier).await.unwrap(), "precondition: not activated");
+
+        // Re-root is the default with no opt-in: an existing install copies +
+        // verifies and activates this boot.
+        let res = resolve_root_activation(&core_arc, &store).await.unwrap();
+        let root_uuid = res.expect("existing install must activate by default");
+
+        // The legacy secret was copied under the re-rooted prefix and the
+        // marker is now set; legacy keys are retained (non-destructive).
+        assert!(
+            barrier
+                .get(&format!("namespaces/{root_uuid}/logical/seed/secret"))
+                .await
+                .unwrap()
+                .is_some(),
+            "legacy data must be copied under the re-rooted prefix"
+        );
+        assert!(activation_active(barrier).await.unwrap(), "activation marker must be set");
+        assert!(
+            barrier.get("logical/seed/secret").await.unwrap().is_some(),
+            "legacy keys must be retained (non-destructive)"
+        );
     }
 
     #[test]

@@ -88,7 +88,8 @@ async fn tick(
     last_fired: Arc<Mutex<HashMap<String, Instant>>>,
 ) -> Result<(), RvError> {
     let lifecycle_mounts: Vec<(String, String)> = {
-        let entries = core.mounts_router.entries.read()?;
+        let mounts_router = core.mounts_router();
+        let entries = mounts_router.entries.read()?;
         entries
             .values()
             .filter_map(|me| {

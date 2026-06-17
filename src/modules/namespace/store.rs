@@ -312,6 +312,14 @@ impl NamespaceStore {
             bv_error_response_status!(404, &format!("parent namespace does not exist: {parent_path:?}"))
         })?;
 
+        // Quota: refuse when the parent is already at its child-namespace cap.
+        let child_count = self.list_children(&parent_path).await?.len();
+        super::quota::check_capacity(
+            "child namespaces",
+            child_count,
+            parent.quotas.max_child_namespaces,
+        )?;
+
         let ns = Namespace {
             uuid: generate_uuid(),
             path,

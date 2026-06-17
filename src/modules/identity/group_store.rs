@@ -13,6 +13,7 @@
 
 use std::{fmt, sync::Arc};
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -28,6 +29,12 @@ const GROUP_USER_SUB_PATH: &str = "identity/group/user/";
 const GROUP_APP_SUB_PATH: &str = "identity/group/app/";
 const HISTORY_USER_SUB_PATH: &str = "identity/group-history/user/";
 const HISTORY_APP_SUB_PATH: &str = "identity/group-history/app/";
+// Multi-tenancy: per-namespace group keyspace. Root keeps the legacy keyspaces
+// above; a non-root namespace gets its own groups so a group named `admins` in
+// one tenant is unrelated to `admins` in another. Layout:
+//   identity-ns/<b64url(ns_path)>/group/<kind>/<name>
+//   identity-ns/<b64url(ns_path)>/group-history/<kind>/<name>/<seq>
+const IDENTITY_NS_SUB_PATH: &str = "identity-ns/";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -106,6 +113,8 @@ pub struct GroupStore {
     app_view: Arc<BarrierView>,
     history_user_view: Arc<BarrierView>,
     history_app_view: Arc<BarrierView>,
+    /// Retained so per-namespace group sub-views can be derived on demand.
+    system_view: Arc<BarrierView>,
 }
 
 #[maybe_async::maybe_async]
@@ -125,21 +134,39 @@ impl GroupStore {
             app_view,
             history_user_view,
             history_app_view,
+            system_view,
         }))
     }
 
-    fn view(&self, kind: GroupKind) -> Arc<BarrierView> {
-        match kind {
-            GroupKind::User => self.user_view.clone(),
-            GroupKind::App => self.app_view.clone(),
+    /// Group keyspace view for `(kind, namespace)`. Root returns the legacy
+    /// view; a non-root namespace gets its own keyspace.
+    fn view_for(&self, kind: GroupKind, ns_path: &str) -> Arc<BarrierView> {
+        if ns_path.is_empty() {
+            return match kind {
+                GroupKind::User => self.user_view.clone(),
+                GroupKind::App => self.app_view.clone(),
+            };
         }
+        let b64 = URL_SAFE_NO_PAD.encode(ns_path.as_bytes());
+        Arc::new(
+            self.system_view
+                .new_sub_view(&format!("{IDENTITY_NS_SUB_PATH}{b64}/group/{}/", kind.as_str())),
+        )
     }
 
-    fn history_view(&self, kind: GroupKind) -> Arc<BarrierView> {
-        match kind {
-            GroupKind::User => self.history_user_view.clone(),
-            GroupKind::App => self.history_app_view.clone(),
+    /// Group-history keyspace view for `(kind, namespace)`.
+    fn history_view_for(&self, kind: GroupKind, ns_path: &str) -> Arc<BarrierView> {
+        if ns_path.is_empty() {
+            return match kind {
+                GroupKind::User => self.history_user_view.clone(),
+                GroupKind::App => self.history_app_view.clone(),
+            };
         }
+        let b64 = URL_SAFE_NO_PAD.encode(ns_path.as_bytes());
+        Arc::new(self.system_view.new_sub_view(&format!(
+            "{IDENTITY_NS_SUB_PATH}{b64}/group-history/{}/",
+            kind.as_str()
+        )))
     }
 
     fn sanitize_name(name: &str) -> Result<String, RvError> {
@@ -153,21 +180,39 @@ impl GroupStore {
         Ok(n)
     }
 
-    pub async fn set_group(&self, kind: GroupKind, mut entry: GroupEntry) -> Result<(), RvError> {
+    pub async fn set_group(&self, kind: GroupKind, entry: GroupEntry) -> Result<(), RvError> {
+        self.set_group_ns(kind, entry, "").await
+    }
+
+    pub async fn set_group_ns(
+        &self,
+        kind: GroupKind,
+        mut entry: GroupEntry,
+        ns_path: &str,
+    ) -> Result<(), RvError> {
         let name = Self::sanitize_name(&entry.name)?;
         entry.name = name.clone();
         // Normalize members + policies: trim, drop empties, dedup.
         entry.members = normalize(entry.members);
         entry.policies = normalize(entry.policies);
 
-        let view = self.view(kind);
+        let view = self.view_for(kind, ns_path);
         let value = serde_json::to_vec(&entry)?;
         view.put(&StorageEntry { key: name, value }).await
     }
 
     pub async fn get_group(&self, kind: GroupKind, name: &str) -> Result<Option<GroupEntry>, RvError> {
+        self.get_group_ns(kind, name, "").await
+    }
+
+    pub async fn get_group_ns(
+        &self,
+        kind: GroupKind,
+        name: &str,
+        ns_path: &str,
+    ) -> Result<Option<GroupEntry>, RvError> {
         let name = Self::sanitize_name(name)?;
-        let view = self.view(kind);
+        let view = self.view_for(kind, ns_path);
         let entry = view.get(&name).await?;
         match entry {
             Some(e) => {
@@ -179,15 +224,28 @@ impl GroupStore {
     }
 
     pub async fn list_groups(&self, kind: GroupKind) -> Result<Vec<String>, RvError> {
-        let view = self.view(kind);
+        self.list_groups_ns(kind, "").await
+    }
+
+    pub async fn list_groups_ns(&self, kind: GroupKind, ns_path: &str) -> Result<Vec<String>, RvError> {
+        let view = self.view_for(kind, ns_path);
         let mut keys = view.get_keys().await?;
         keys.sort();
         Ok(keys)
     }
 
     pub async fn delete_group(&self, kind: GroupKind, name: &str) -> Result<(), RvError> {
+        self.delete_group_ns(kind, name, "").await
+    }
+
+    pub async fn delete_group_ns(
+        &self,
+        kind: GroupKind,
+        name: &str,
+        ns_path: &str,
+    ) -> Result<(), RvError> {
         let name = Self::sanitize_name(name)?;
-        let view = self.view(kind);
+        let view = self.view_for(kind, ns_path);
         view.delete(&name).await
     }
 
@@ -200,8 +258,18 @@ impl GroupStore {
         name: &str,
         entry: GroupHistoryEntry,
     ) -> Result<(), RvError> {
+        self.append_history_ns(kind, name, entry, "").await
+    }
+
+    pub async fn append_history_ns(
+        &self,
+        kind: GroupKind,
+        name: &str,
+        entry: GroupHistoryEntry,
+        ns_path: &str,
+    ) -> Result<(), RvError> {
         let name = Self::sanitize_name(name)?;
-        let view = self.history_view(kind);
+        let view = self.history_view_for(kind, ns_path);
         let key = format!("{name}/{}", hist_seq());
         let value = serde_json::to_vec(&entry)?;
         view.put(&StorageEntry { key, value }).await
@@ -215,8 +283,17 @@ impl GroupStore {
         kind: GroupKind,
         name: &str,
     ) -> Result<Vec<GroupHistoryEntry>, RvError> {
+        self.list_history_ns(kind, name, "").await
+    }
+
+    pub async fn list_history_ns(
+        &self,
+        kind: GroupKind,
+        name: &str,
+        ns_path: &str,
+    ) -> Result<Vec<GroupHistoryEntry>, RvError> {
         let name = Self::sanitize_name(name)?;
-        let view = self.history_view(kind);
+        let view = self.history_view_for(kind, ns_path);
         let prefix = format!("{name}/");
         let mut keys = view.list(&prefix).await?;
         keys.sort();
@@ -243,12 +320,25 @@ impl GroupStore {
         member: &str,
         direct_policies: &[String],
     ) -> Result<Vec<String>, RvError> {
+        self.expand_policies_ns(kind, member, direct_policies, "").await
+    }
+
+    /// Namespace-scoped policy expansion: only groups in `ns_path` contribute,
+    /// so a token logging in to a namespace inherits that namespace's group
+    /// policies, never the root's or a sibling's.
+    pub async fn expand_policies_ns(
+        &self,
+        kind: GroupKind,
+        member: &str,
+        direct_policies: &[String],
+        ns_path: &str,
+    ) -> Result<Vec<String>, RvError> {
         let member_lc = member.trim().to_lowercase();
-        let groups = self.list_groups(kind).await?;
+        let groups = self.list_groups_ns(kind, ns_path).await?;
 
         let mut merged: Vec<String> = direct_policies.to_vec();
         for g_name in groups {
-            let Some(g) = self.get_group(kind, &g_name).await? else {
+            let Some(g) = self.get_group_ns(kind, &g_name, ns_path).await? else {
                 continue;
             };
             let is_member = g.members.iter().any(|m| m.trim().to_lowercase() == member_lc);

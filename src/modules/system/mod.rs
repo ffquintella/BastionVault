@@ -151,6 +151,10 @@ impl SystemBackend {
         let sys_backend_namespace_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_namespace_write = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_namespace_delete = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_nslink_list = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_nslink_create = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_nslink_read = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_nslink_delete = self.self_ptr.upgrade().unwrap().clone();
 
         let backend = new_logical_backend!({
             paths: [
@@ -484,6 +488,11 @@ impl SystemBackend {
                         "options": {
                             field_type: FieldType::Map,
                             description: r#"Configuration options for the audit backend."#
+                        },
+                        "mirror": {
+                            required: false,
+                            field_type: FieldType::Bool,
+                            description: r#"Root-only superuser mirror: when true on a root-namespace device, it additionally receives every namespace's audit stream."#
                         }
                     },
                     operations: [
@@ -686,9 +695,48 @@ impl SystemBackend {
                         {op: Operation::Delete, handler: sys_backend_namespace_delete.handle_namespace_delete}
                     ],
                     help: "Read metadata + quotas, create/update, or delete a namespace."
+                },
+                {
+                    // Cross-tenant identity links owned by the caller's namespace
+                    // (the X-BastionVault-Namespace header). List existing links
+                    // or create a new one. Distinct prefix from `namespaces/` so
+                    // it does not collide with the namespace catch-all pattern.
+                    pattern: "namespace-links/?$",
+                    fields: {
+                        "label": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Human-friendly label for the link (e.g. the person's name)."
+                        },
+                        "members": {
+                            field_type: FieldType::Array,
+                            required: false,
+                            description: "Array of {namespace, entity_id} objects to correlate. Each namespace must be the caller's namespace or a descendant."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::List,  handler: sys_backend_nslink_list.handle_namespace_link_list},
+                        {op: Operation::Write, handler: sys_backend_nslink_create.handle_namespace_link_create}
+                    ],
+                    help: "List or create cross-tenant identity links."
+                },
+                {
+                    pattern: r"namespace-links/(?P<id>.+)$",
+                    fields: {
+                        "id": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Identity-link UUID."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read,   handler: sys_backend_nslink_read.handle_namespace_link_read},
+                        {op: Operation::Delete, handler: sys_backend_nslink_delete.handle_namespace_link_delete}
+                    ],
+                    help: "Read or delete a cross-tenant identity link."
                 }
             ],
-            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "seal", "raw/*", "revoke-prefix/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*"],
+            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "seal", "raw/*", "revoke-prefix/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*", "namespace-links", "namespace-links/*"],
             unauth_paths: ["internal/ui/mounts", "internal/ui/mounts/*", "init", "seal-status", "unseal", "sso/providers"],
             help: SYSTEM_BACKEND_HELP,
         });
@@ -715,7 +763,8 @@ impl SystemBackend {
             return Ok(Some(Response::data_response(Some(data))));
         }
 
-        let mounts = self.core.mounts_router.entries.read()?;
+        let mounts_router = self.core.mounts_router();
+        let mounts = mounts_router.entries.read()?;
 
         for mount_entry in mounts.values() {
             let entry = mount_entry.read()?;
@@ -748,6 +797,16 @@ impl SystemBackend {
 
         match self.resolve_request_namespace(req).await? {
             Some((uuid, ns_path)) => {
+                // Quota: refuse when the namespace is already at its mount cap.
+                let store = self.resolve_namespace_store()?;
+                if let Some(ns) = store.get_by_path(&ns_path).await? {
+                    let current = self.namespace_registry()?.mount_count(&uuid);
+                    crate::modules::namespace::quota::check_capacity(
+                        "mounts",
+                        current,
+                        ns.quotas.max_mounts,
+                    )?;
+                }
                 self.namespace_registry()?.mount(&self.core, &uuid, &ns_path, &me).await?;
             }
             None => self.core.mount(&me).await?,
@@ -1169,7 +1228,7 @@ impl SystemBackend {
     pub async fn handle_audit_table(
         &self,
         _backend: &dyn Backend,
-        _req: &mut Request,
+        req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let Some(broker) = self.core.audit_broker.load().as_ref().cloned() else {
             let mut data = Map::new();
@@ -1177,13 +1236,19 @@ impl SystemBackend {
             return Ok(Some(Response::data_response(Some(data))));
         };
 
-        let entries = broker.list();
+        // Multi-tenancy: list only the caller's namespace devices (plus the
+        // root superuser mirror, which every namespace is shown).
+        let namespace =
+            crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
+        let entries = broker.list(&namespace);
         let mut arr: Vec<Value> = Vec::with_capacity(entries.len());
         for d in entries {
             let mut m = Map::new();
             m.insert("path".into(), Value::String(d.path));
             m.insert("type".into(), Value::String(d.device_type));
             m.insert("description".into(), Value::String(d.description));
+            m.insert("namespace".into(), Value::String(d.namespace));
+            m.insert("mirror".into(), Value::Bool(d.mirror));
             arr.push(Value::Object(m));
         }
         let mut data = Map::new();
@@ -1483,11 +1548,24 @@ impl SystemBackend {
             return Err(bv_error_response_status!(400, "path and type are required"));
         }
 
+        // Multi-tenancy: the device is scoped to the namespace named by the
+        // request header (root when absent). `mirror` is a root-only superuser
+        // flag that shadows every namespace's stream onto this device.
+        let namespace =
+            crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
+        let mirror = req
+            .get_data("mirror")
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         let cfg = crate::audit::AuditDeviceConfig {
             path,
             device_type,
             description,
             options,
+            namespace,
+            mirror,
         };
         broker.enable_device(cfg).await?;
         Ok(None)
@@ -1700,7 +1778,9 @@ impl SystemBackend {
         if path.trim().is_empty() {
             return Err(bv_error_response_status!(400, "path is required"));
         }
-        broker.disable_device(&path).await?;
+        let namespace =
+            crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
+        broker.disable_device(&namespace, &path).await?;
         Ok(None)
     }
 
@@ -1985,7 +2065,8 @@ impl SystemBackend {
             }
         };
 
-        let entries = self.core.mounts_router.entries.read()?;
+        let mounts_router = self.core.mounts_router();
+        let entries = mounts_router.entries.read()?;
         for (path, entry) in entries.iter() {
             let me = entry.read()?;
             if has_access(&me) {
@@ -2004,7 +2085,8 @@ impl SystemBackend {
             }
         }
 
-        let entries = self.core.mounts_router.entries.read()?;
+        let mounts_router = self.core.mounts_router();
+        let entries = mounts_router.entries.read()?;
         for (path, entry) in entries.iter() {
             let me = entry.read()?;
             if has_access(&me) {
@@ -2079,7 +2161,7 @@ impl SystemBackend {
         };
 
         let mount_entry =
-            self.core.mounts_router.router.matching_mount_entry(&path)?.ok_or(RvError::ErrPermissionDenied)?;
+            self.core.mounts_router().router.matching_mount_entry(&path)?.ok_or(RvError::ErrPermissionDenied)?;
         let me = mount_entry.read()?;
 
         let full_path =
@@ -2265,6 +2347,109 @@ impl SystemBackend {
         };
 
         store.delete(&path, mount_count).await?;
+        Ok(None)
+    }
+
+    fn resolve_namespace_link_store(
+        &self,
+    ) -> Result<Arc<crate::modules::namespace::IdentityLinkStore>, RvError> {
+        self.core
+            .module_manager
+            .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+            .and_then(|m| m.link_store())
+            .ok_or_else(|| bv_error_string!("namespace identity-link store unavailable"))
+    }
+
+    fn link_to_response(link: &crate::modules::namespace::IdentityLink) -> Response {
+        let members: Vec<Value> = link
+            .members
+            .iter()
+            .map(|m| json!({ "namespace": m.namespace, "entity_id": m.entity_id }))
+            .collect();
+        let data = json!({
+            "id": link.id,
+            "parent_namespace": link.parent_namespace,
+            "label": link.label,
+            "members": members,
+            "created_at": link.created_at,
+        })
+        .as_object()
+        .cloned();
+        Response::data_response(data)
+    }
+
+    pub async fn handle_namespace_link_list(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let links = self.resolve_namespace_link_store()?;
+        let parent = namespace_header_from_map(req.headers.as_ref()).unwrap_or_default();
+        let mut ids: Vec<String> = links.list(&parent).await?.into_iter().map(|l| l.id).collect();
+        ids.sort();
+        Ok(Some(Response::list_response(&ids)))
+    }
+
+    pub async fn handle_namespace_link_create(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let links = self.resolve_namespace_link_store()?;
+        let ns_store = self.resolve_namespace_store()?;
+        let parent = namespace_header_from_map(req.headers.as_ref()).unwrap_or_default();
+        let label = req
+            .get_data("label")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+
+        let members_val = req.get_data("members")?;
+        let arr = members_val
+            .as_array()
+            .ok_or_else(|| bv_error_response_status!(400, "members must be an array"))?;
+        let mut members = Vec::with_capacity(arr.len());
+        for m in arr {
+            let namespace = m
+                .get("namespace")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| bv_error_response_status!(400, "each member needs a namespace"))?
+                .to_string();
+            let entity_id = m
+                .get("entity_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| bv_error_response_status!(400, "each member needs an entity_id"))?
+                .to_string();
+            members.push(crate::modules::namespace::IdentityLinkMember { namespace, entity_id });
+        }
+
+        let link = links.create(&ns_store, &parent, &label, members).await?;
+        Ok(Some(Self::link_to_response(&link)))
+    }
+
+    pub async fn handle_namespace_link_read(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let links = self.resolve_namespace_link_store()?;
+        let parent = namespace_header_from_map(req.headers.as_ref()).unwrap_or_default();
+        let id = req.get_data_as_str("id")?;
+        match links.get(&parent, &id).await? {
+            Some(link) => Ok(Some(Self::link_to_response(&link))),
+            None => Err(bv_error_response_status!(404, &format!("no such identity link: {id:?}"))),
+        }
+    }
+
+    pub async fn handle_namespace_link_delete(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let links = self.resolve_namespace_link_store()?;
+        let parent = namespace_header_from_map(req.headers.as_ref()).unwrap_or_default();
+        let id = req.get_data_as_str("id")?;
+        links.delete(&parent, &id).await?;
         Ok(None)
     }
 }

@@ -32,6 +32,23 @@ pub trait Backend: Send + Sync {
         token: &str,
     ) -> Result<Option<JsonResponse>, ClientError>;
 
+    /// Multi-tenancy variant of [`Backend::handle`]: scopes the request to
+    /// `namespace` (the `X-BastionVault-Namespace` header / per-namespace
+    /// addressing). `None` or `Some("")` targets the root namespace. The
+    /// default impl ignores the namespace and delegates to `handle`, so
+    /// backends that have not wired multi-tenancy keep compiling and behave
+    /// exactly as before.
+    async fn handle_with_namespace(
+        &self,
+        operation: Operation,
+        path: &str,
+        body: Option<Map<String, Value>>,
+        token: &str,
+        _namespace: Option<&str>,
+    ) -> Result<Option<JsonResponse>, ClientError> {
+        self.handle(operation, path, body, token).await
+    }
+
     /// Plugin Extensibility v1 — fetch the aggregated active-surface
     /// bundle. Implementations supply `etag` (from a prior fetch) so
     /// the server can return [`SurfaceFetch::NotModified`] cheaply.

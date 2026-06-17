@@ -21,12 +21,16 @@ use crate::{
 /// still succeeds (with no `entity_id` metadata, which means any
 /// `scopes = ["owner"]` policy will not match — correct fail-closed
 /// behavior).
-pub(crate) async fn resolve_approle_entity_id(core: &Arc<Core>, role_name: &str) -> Option<String> {
+pub(crate) async fn resolve_approle_entity_id(
+    core: &Arc<Core>,
+    role_name: &str,
+    ns_path: &str,
+) -> Option<String> {
     let module = core
         .module_manager
         .get_module::<IdentityModule>("identity")?;
     let store = module.entity_store()?;
-    match store.get_or_create_entity("approle/", role_name).await {
+    match store.get_or_create_entity_ns("approle/", role_name, ns_path).await {
         Ok(entity) => Some(entity.id),
         Err(e) => {
             log::warn!(
@@ -85,6 +89,7 @@ impl AppRoleBackendInner {
         kind: GroupKind,
         member: &str,
         direct: &[String],
+        ns_path: &str,
     ) -> Vec<String> {
         let Some(module) = self.core.module_manager.get_module::<IdentityModule>("identity") else {
             return direct.to_vec();
@@ -92,7 +97,7 @@ impl AppRoleBackendInner {
         let Some(store) = module.group_store() else {
             return direct.to_vec();
         };
-        match store.expand_policies(kind, member, direct).await {
+        match store.expand_policies_ns(kind, member, direct, ns_path).await {
             Ok(v) => v,
             Err(e) => {
                 log::warn!(
@@ -272,24 +277,47 @@ impl AppRoleBackendInner {
         metadata.insert("role_name".to_string(), role_entry.name.clone());
         metadata.insert("mount_path".to_string(), "approle/".to_string());
 
-        // AppRole sits in its own entity namespace (mount-qualified).
-        // An `approle:payments-api` entity is distinct from any user
-        // named "payments-api" on userpass/.
-        if let Some(entity_id) = resolve_approle_entity_id(&self.core, &role_entry.name).await {
+        // Multi-tenancy: bind the session to the namespace named by the request
+        // header (root when absent). Fails closed on an unknown namespace.
+        let (ns_path, ns_uuid) =
+            crate::modules::namespace::token_binding::resolve_login_namespace(&self.core, req).await?;
+
+        // AppRole sits in its own entity namespace (mount-qualified), further
+        // partitioned by the login namespace. An `approle:payments-api` entity
+        // in tenant-a is distinct from the same role in tenant-b.
+        // Quota: refuse a login that would create a *new* entity beyond the
+        // namespace's max_entities cap (existing roles are unaffected).
+        crate::modules::namespace::quota::check_entity_create(
+            &self.core,
+            "approle/",
+            &role_entry.name,
+            &ns_path,
+        )
+        .await?;
+        if let Some(entity_id) =
+            resolve_approle_entity_id(&self.core, &role_entry.name, &ns_path).await
+        {
             metadata.insert("entity_id".to_string(), entity_id);
         }
 
         let mut auth = Auth { metadata, ..Default::default() };
         auth.internal_data.insert("role_name".to_string(), role_entry.name.clone());
+        crate::modules::namespace::token_binding::stamp_binding(
+            &mut auth.metadata,
+            &ns_path,
+            &ns_uuid,
+            false,
+        );
 
         // Union token_policies with policies attached through identity
-        // app-groups that list this role as a member.
+        // app-groups (of the login namespace) that list this role as a member.
         let mut effective_role = role_entry.clone();
         effective_role.token_policies = self
             .expand_identity_group_policies(
                 GroupKind::App,
                 &role_entry.name,
                 &role_entry.token_policies,
+                &ns_path,
             )
             .await;
         effective_role.populate_token_auth(&mut auth);

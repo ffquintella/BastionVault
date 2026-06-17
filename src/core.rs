@@ -88,7 +88,14 @@ pub struct Core {
     pub self_ptr: Weak<Core>,
     pub physical: Arc<dyn PhysicalBackend>,
     pub barrier: Arc<dyn SecurityBarrier>,
-    pub mounts_router: Arc<MountsRouter>,
+    /// Root-namespace mount router. Swappable so re-root activation can rebuild
+    /// it at unseal pointing at `namespaces/<root_uuid>/…` (see
+    /// [`Core::root_storage_prefix`]). Access via [`Core::mounts_router`].
+    pub mounts_router_swap: ArcSwap<MountsRouter>,
+    /// Storage-prefix root for the root tenant. Empty (legacy `logical/`,
+    /// `sys/`, `core/mounts`) unless re-root activation is in effect, in which
+    /// case it is `namespaces/<root_uuid>/`. Set at `post_unseal`.
+    pub root_storage_prefix: ArcSwap<String>,
     pub router: Arc<Router>,
     pub handlers: ArcSwap<Vec<Arc<dyn Handler>>>,
     pub auth_handlers: ArcSwap<Vec<Arc<dyn AuthHandler>>>,
@@ -138,13 +145,14 @@ impl Default for Core {
             physical: backend,
             barrier: barrier.clone(),
             router: router.clone(),
-            mounts_router: Arc::new(MountsRouter::new(
+            mounts_router_swap: ArcSwap::from_pointee(MountsRouter::new(
                 Arc::new(MountTable::new(CORE_MOUNT_CONFIG_PATH)),
                 router.clone(),
                 barrier.clone(),
                 LOGICAL_BARRIER_PREFIX,
                 "",
             )),
+            root_storage_prefix: ArcSwap::from_pointee(String::new()),
             handlers: ArcSwap::from_pointee(vec![router]),
             auth_handlers: ArcSwap::from_pointee(Vec::new()),
             module_manager: ModuleManager::new(),
@@ -175,7 +183,7 @@ impl Core {
             physical: backend,
             barrier: barrier.clone(),
             router: router.clone(),
-            mounts_router: Arc::new(MountsRouter::new(
+            mounts_router_swap: ArcSwap::from_pointee(MountsRouter::new(
                 Arc::new(MountTable::new(CORE_MOUNT_CONFIG_PATH)),
                 router,
                 barrier,
@@ -196,6 +204,54 @@ impl Core {
         }
 
         wrap_self
+    }
+
+    /// The current root-namespace mount router. Cheap `Arc` clone; callers hold
+    /// it for the duration of an operation. Swapped only at unseal by re-root
+    /// activation, so a held handle stays consistent for the call.
+    pub fn mounts_router(&self) -> Arc<MountsRouter> {
+        self.mounts_router_swap.load_full()
+    }
+
+    /// Barrier prefix for the root tenant's logical mounts — `logical/` by
+    /// default, or `namespaces/<root_uuid>/logical/` when re-root activation is
+    /// in effect.
+    pub fn root_logical_prefix(&self) -> String {
+        format!("{}{}", self.root_storage_prefix.load(), LOGICAL_BARRIER_PREFIX)
+    }
+
+    /// Barrier prefix for the root tenant's system view.
+    pub fn root_system_prefix(&self) -> String {
+        format!("{}{}", self.root_storage_prefix.load(), SYSTEM_BARRIER_PREFIX)
+    }
+
+    /// Barrier key for the root tenant's mount-table config.
+    pub fn root_mount_config_path(&self) -> String {
+        format!("{}{}", self.root_storage_prefix.load(), CORE_MOUNT_CONFIG_PATH)
+    }
+
+    /// Repoint the root tenant's storage at `namespaces/<root_uuid>/…` (re-root
+    /// activation). Sets [`Core::root_storage_prefix`], rebuilds the system view
+    /// and the root mount router at the new prefix. Called once at the top of
+    /// `post_unseal`, before any view/mount-table use, so every downstream
+    /// subsystem (policies, identity, audit, mounts) builds on the active root.
+    fn activate_reroot(&self, root_uuid: &str) -> Result<(), RvError> {
+        self.root_storage_prefix.store(Arc::new(format!("namespaces/{root_uuid}/")));
+
+        let mut state = (*self.state.load_full()).clone();
+        state.system_view =
+            Some(Arc::new(BarrierView::new(self.barrier.clone(), &self.root_system_prefix())));
+        self.state.store(Arc::new(state));
+
+        let new_router = MountsRouter::new(
+            Arc::new(MountTable::new(&self.root_mount_config_path())),
+            self.router.clone(),
+            self.barrier.clone(),
+            &self.root_logical_prefix(),
+            "",
+        );
+        self.mounts_router_swap.store(Arc::new(new_router));
+        Ok(())
     }
 
     pub async fn inited(&self) -> Result<bool, RvError> {
@@ -314,15 +370,15 @@ impl Core {
     }
 
     pub fn get_logical_backend(&self, logical_type: &str) -> Result<Arc<LogicalBackendNewFunc>, RvError> {
-        self.mounts_router.get_backend(logical_type)
+        self.mounts_router().get_backend(logical_type)
     }
 
     pub fn add_logical_backend(&self, logical_type: &str, backend: Arc<LogicalBackendNewFunc>) -> Result<(), RvError> {
-        self.mounts_router.add_backend(logical_type, backend)
+        self.mounts_router().add_backend(logical_type, backend)
     }
 
     pub fn delete_logical_backend(&self, logical_type: &str) -> Result<(), RvError> {
-        self.mounts_router.delete_backend(logical_type)
+        self.mounts_router().delete_backend(logical_type)
     }
 
     pub fn add_handler(&self, handler: Arc<dyn Handler>) -> Result<(), RvError> {
@@ -606,46 +662,36 @@ impl Core {
     }
 
     async fn post_unseal(&self) -> Result<(), RvError> {
+        // Multi-tenancy: re-root activation is the default for every install. We
+        // decide and (for existing installs) run the non-destructive copy +
+        // verify *before* any system view or root mount table is built, so the
+        // root tenant's reads and writes land at the active prefix from the
+        // first operation. Fails safe: an unverifiable copy leaves the legacy
+        // layout authoritative for this boot (see
+        // `modules::namespace::migrate::resolve_root_activation`).
+        if let Some(core_arc) = self.self_ptr.upgrade() {
+            let store = crate::modules::namespace::store::NamespaceStore::new(&core_arc)?;
+            store.ensure_root().await?;
+            if let Some(root_uuid) =
+                crate::modules::namespace::migrate::resolve_root_activation(&core_arc, &store).await?
+            {
+                self.activate_reroot(&root_uuid)?;
+            }
+        }
+
         self.module_manager.setup(self)?;
 
         // Perform initial setup
-        self.mounts_router
+        self.mounts_router()
             .load_or_default(self.barrier.as_storage(), Some(&self.state.load().hmac_key), self.mount_entry_hmac_level)
             .await?;
 
-        self.mounts_router.setup(self.self_ptr.upgrade().unwrap().clone())?;
+        self.mounts_router().setup(self.self_ptr.upgrade().unwrap().clone())?;
 
         self.module_manager.init(self).await?;
 
-        // Namespace re-rooting migration (copy + verify stage). Idempotent and
-        // non-destructive: it copies root-tenant data under
-        // `namespaces/<root_uuid>/...` and records a version marker, leaving the
-        // legacy keys authoritative. Activating the new prefix as the live root
-        // is a separate, operator-gated step (see
-        // `modules::namespace::migrate`). Best-effort: a copy failure is logged
-        // but does not block unseal, because the legacy data is untouched.
-        if let Some(core_arc) = self.self_ptr.upgrade() {
-            if let Some(ns_module) = self
-                .module_manager
-                .get_module::<crate::modules::namespace::NamespaceModule>(
-                    crate::modules::namespace::NAMESPACE_MODULE_NAME,
-                )
-            {
-                if let Some(store) = ns_module.store() {
-                    match crate::modules::namespace::migrate::migrate_root_copy(&core_arc, &store)
-                        .await
-                    {
-                        Ok(report) if !report.already_done => log::info!(
-                            "namespace re-root copy complete: {} keys copied, {} verified",
-                            report.keys_copied,
-                            report.keys_verified
-                        ),
-                        Ok(_) => {}
-                        Err(e) => log::warn!("namespace re-root copy failed (legacy data intact): {e}"),
-                    }
-                }
-            }
-        }
+        // (Re-root copy + activation already ran at the top of post_unseal, via
+        // `resolve_root_activation`, before any view/mount-table was built.)
 
         // Load the restart-durable FerroGate machine-identity enforcement flag
         // into its in-memory mirror before serving requests. Best-effort: a
@@ -656,7 +702,7 @@ impl Core {
         }
 
         if let Some(mounts_monitor) = self.mounts_monitor.load().as_ref() {
-            mounts_monitor.add_mounts_router(self.mounts_router.clone());
+            mounts_monitor.add_mounts_router(self.mounts_router().clone());
             mounts_monitor.start();
         }
 
@@ -694,6 +740,7 @@ impl Core {
                                 device_type: "file".to_string(),
                                 description: "default file audit device".to_string(),
                                 options: opts,
+                                ..Default::default()
                             };
                             if let Err(e) = broker.enable_device(cfg).await {
                                 log::warn!(
@@ -828,7 +875,7 @@ impl Core {
         // one tied to the new hmac_key.
         self.audit_broker.store(None);
         if let Some(mounts_monitor) = self.mounts_monitor.load().as_ref() {
-            mounts_monitor.remove_mounts_router(self.mounts_router.clone());
+            mounts_monitor.remove_mounts_router(self.mounts_router().clone());
             mounts_monitor.stop();
         }
         self.module_manager.cleanup(self)?;
@@ -862,6 +909,24 @@ impl Core {
             if let Err(e) =
                 crate::modules::namespace::token_binding::enforce_request_token_binding(self, req)
                     .await
+            {
+                err = Some(e);
+            }
+        }
+
+        // Multi-tenancy: per-namespace request-rate quota (429 when exhausted).
+        // A no-op for root / unlimited namespaces.
+        if resp.is_none() && err.is_none() {
+            if let Err(e) = crate::modules::namespace::quota::enforce_request_rate(self, req).await {
+                err = Some(e);
+            }
+        }
+
+        // Multi-tenancy: per-namespace storage-bytes quota (507 when the write
+        // would cross the cap). A no-op for non-writes / root / unlimited.
+        if resp.is_none() && err.is_none() {
+            if let Err(e) =
+                crate::modules::namespace::quota::enforce_write_storage_quota(self, req).await
             {
                 err = Some(e);
             }

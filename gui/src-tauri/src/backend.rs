@@ -34,14 +34,14 @@ mod embedded {
         }
     }
 
-    #[async_trait]
-    impl Backend for EmbeddedBackend {
-        async fn handle(
+    impl EmbeddedBackend {
+        async fn dispatch(
             &self,
             operation: Operation,
             path: &str,
             body: Option<Map<String, Value>>,
             token: &str,
+            namespace: Option<&str>,
         ) -> Result<Option<JsonResponse>, ClientError> {
             use bastion_vault::logical::{Operation as ServerOp, Request};
 
@@ -57,6 +57,13 @@ mod embedded {
             req.path = path.to_string();
             req.client_token = token.to_string();
             req.body = body;
+            // Multi-tenancy: carry the active namespace as the request header
+            // the server resolver reads (case-insensitive). Root / empty omits.
+            if let Some(ns) = namespace.map(str::trim).filter(|s| !s.is_empty()) {
+                let mut h = std::collections::HashMap::new();
+                h.insert("x-bastionvault-namespace".to_string(), ns.to_string());
+                req.headers = Some(h);
+            }
 
             let resp = core
                 .handle_request(&mut req)
@@ -64,6 +71,30 @@ mod embedded {
                 .map_err(|e| ClientError::backend(e.to_string()))?;
 
             Ok(resp.map(logical_response_to_json))
+        }
+    }
+
+    #[async_trait]
+    impl Backend for EmbeddedBackend {
+        async fn handle(
+            &self,
+            operation: Operation,
+            path: &str,
+            body: Option<Map<String, Value>>,
+            token: &str,
+        ) -> Result<Option<JsonResponse>, ClientError> {
+            self.dispatch(operation, path, body, token, None).await
+        }
+
+        async fn handle_with_namespace(
+            &self,
+            operation: Operation,
+            path: &str,
+            body: Option<Map<String, Value>>,
+            token: &str,
+            namespace: Option<&str>,
+        ) -> Result<Option<JsonResponse>, ClientError> {
+            self.dispatch(operation, path, body, token, namespace).await
         }
     }
 

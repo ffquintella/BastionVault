@@ -19,6 +19,7 @@ import { RecordingsPage } from "./routes/RecordingsPage";
 import { RustionLiveSessionsPage } from "./routes/RustionLiveSessionsPage";
 import { SessionReplayWindow } from "./routes/SessionReplayWindow";
 import { PoliciesPage } from "./routes/PoliciesPage";
+import { NamespacesPage } from "./routes/NamespacesPage";
 import { MountsPage } from "./routes/MountsPage";
 import { SettingsPage } from "./routes/SettingsPage";
 import { ExchangePage } from "./routes/ExchangePage";
@@ -144,6 +145,10 @@ export default function App() {
             <Route
               path="/mounts"
               element={<ProtectedRoute><MountsPage /></ProtectedRoute>}
+            />
+            <Route
+              path="/namespaces"
+              element={<ProtectedRoute><NamespacesPage /></ProtectedRoute>}
             />
             <Route
               path="/settings"

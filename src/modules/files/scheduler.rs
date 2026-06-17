@@ -124,7 +124,8 @@ pub fn start_files_sync_scheduler(core: Arc<Core>) -> tokio::task::JoinHandle<()
 #[maybe_async::maybe_async]
 pub async fn run_tick(core: &Arc<Core>) -> Result<(), RvError> {
     let mounts: Vec<(String, String)> = {
-        let entries = core.mounts_router.entries.read()?;
+        let mounts_router = core.mounts_router();
+        let entries = mounts_router.entries.read()?;
         entries
             .values()
             .filter_map(|me| {

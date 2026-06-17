@@ -46,11 +46,14 @@ impl PolicyModule {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let mut policies = self.policy_store.load().list_policy(PolicyType::Acl).await?;
+        let ns = crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
+        let mut policies = self.policy_store.load().list_policy_ns(PolicyType::Acl, &ns).await?;
 
-        // TODO: After the "namespace" feature is added here, it is necessary to determine whether it is the root
-        // namespace before the root can be added.
-        policies.push("root".into());
+        // The synthetic `root` policy is a deployment-wide superuser document;
+        // it is only meaningful (and only listed) in the root namespace.
+        if ns.is_empty() {
+            policies.push("root".into());
+        }
 
         let mut resp = Response::list_response(&policies);
 
@@ -67,7 +70,10 @@ impl PolicyModule {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let name = req.get_data_as_str("name")?;
-        if let Some(policy) = self.policy_store.load().get_policy(&name, PolicyType::Acl).await? {
+        let ns = crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
+        if let Some(policy) =
+            self.policy_store.load().get_policy_ns(&name, PolicyType::Acl, &ns).await?
+        {
             let mut resp_data = Map::new();
             resp_data.insert("name".into(), Value::String(name));
 
@@ -106,11 +112,11 @@ impl PolicyModule {
 
         // Multi-tenancy: a policy authored inside a namespace may only
         // reference paths that belong to that namespace. Refused at write time
-        // for non-root writers; a no-op for root-scoped writes.
+        // for non-root writers; a no-op for root-scoped writes. The same
+        // namespace scopes where the policy document is *stored* below.
+        let writer_ns =
+            crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
         {
-            let writer_ns = crate::modules::namespace::policy_scope::writer_namespace_path(
-                req.headers.as_ref(),
-            );
             let paths: Vec<String> = policy.paths.iter().map(|r| r.path.clone()).collect();
             crate::modules::namespace::policy_scope::refuse_cross_namespace_paths(
                 &self.core,
@@ -118,6 +124,17 @@ impl PolicyModule {
                 &paths,
             )
             .await?;
+        }
+
+        // Sentinel (RGP/EGP) policies are deployment-global; they cannot be
+        // authored inside a tenant namespace.
+        if !writer_ns.is_empty()
+            && (policy.policy_type == PolicyType::Egp || policy.policy_type == PolicyType::Rgp)
+        {
+            return Err(bv_error_response_status!(
+                400,
+                "sentinel (RGP/EGP) policies cannot be created inside a namespace"
+            ));
         }
 
         if policy.policy_type == PolicyType::Egp || policy.policy_type == PolicyType::Rgp {
@@ -131,7 +148,7 @@ impl PolicyModule {
         let store = self.policy_store.load();
         let previous_raw = if policy.policy_type == PolicyType::Acl {
             store
-                .get_policy(&name, PolicyType::Acl)
+                .get_policy_ns(&name, PolicyType::Acl, &writer_ns)
                 .await?
                 .map(|p| p.raw.clone())
         } else {
@@ -168,7 +185,7 @@ impl PolicyModule {
             }
         }
 
-        store.set_policy(policy).await?;
+        store.set_policy_ns(policy, &writer_ns).await?;
 
         if matches!(op, "create" | "update")
             && previous_raw.as_deref() != Some(new_raw.as_str())
@@ -181,7 +198,7 @@ impl PolicyModule {
                 after_raw: new_raw,
             };
             // History failures must not fail the write.
-            let _ = store.append_history(&name, entry).await;
+            let _ = store.append_history_ns(&name, entry, &writer_ns).await;
         }
 
         if warnings.is_empty() {
@@ -209,17 +226,18 @@ impl PolicyModule {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let name = req.get_data_as_str("name")?;
+        let ns = crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
 
         // Capture the current raw HCL *before* deletion so the audit
         // entry retains the full final state of the policy.
         let store = self.policy_store.load();
         let previous_raw = store
-            .get_policy(&name, PolicyType::Acl)
+            .get_policy_ns(&name, PolicyType::Acl, &ns)
             .await?
             .map(|p| p.raw.clone())
             .unwrap_or_default();
 
-        store.delete_policy(&name, PolicyType::Acl).await?;
+        store.delete_policy_ns(&name, PolicyType::Acl, &ns).await?;
 
         let entry = PolicyHistoryEntry {
             ts: now_iso(),
@@ -228,7 +246,7 @@ impl PolicyModule {
             before_raw: previous_raw,
             after_raw: String::new(),
         };
-        let _ = store.append_history(&name, entry).await;
+        let _ = store.append_history_ns(&name, entry, &ns).await;
 
         Ok(None)
     }
@@ -239,7 +257,8 @@ impl PolicyModule {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let name = req.get_data_as_str("name")?;
-        let entries = self.policy_store.load().list_history(&name).await?;
+        let ns = crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
+        let entries = self.policy_store.load().list_history_ns(&name, &ns).await?;
 
         let arr = Value::Array(
             entries

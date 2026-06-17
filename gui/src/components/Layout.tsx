@@ -4,6 +4,7 @@ import { useVaultStore } from "../stores/vaultStore";
 import { useAuthStore } from "../stores/authStore";
 import { StatusBadge } from "./StatusBadge";
 import { BackupModal } from "./BackupModal";
+import { NamespaceSwitcher } from "./NamespaceSwitcher";
 import { TitleBar } from "./TitleBar";
 import { AboutModal } from "./AboutModal";
 import * as api from "../lib/api";
@@ -114,6 +115,7 @@ const adminNav: NavItem[] = [
   { path: "/groups", label: "Identity Groups" },
   { path: "/asset-groups", label: "Asset Groups" },
   { path: "/policies", label: "Policies" },
+  { path: "/namespaces", label: "Namespaces" },
   { path: "/mounts", label: "Mounts" },
   { path: "/audit", label: "Audit" },
   { path: "/recordings", label: "Recordings" },
@@ -348,6 +350,7 @@ export function Layout({ children }: LayoutProps) {
         <div className="p-4 border-b border-[var(--color-border)]">
           <h1 className="text-lg font-bold">BastionVault</h1>
           <p className="text-xs text-[var(--color-text-muted)]">{subtitle}</p>
+          <NamespaceSwitcher />
         </div>
 
         <nav className="flex-1 p-2 space-y-0.5 overflow-y-auto">

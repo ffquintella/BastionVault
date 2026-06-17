@@ -209,6 +209,29 @@ export interface UserInfo {
   policies: string[];
 }
 
+// Namespaces (multi-tenancy)
+export interface NamespaceQuotas {
+  max_storage_bytes: number;
+  max_leases: number;
+  request_rate: number;
+  max_mounts: number;
+  max_entities: number;
+  max_child_namespaces: number;
+}
+
+export interface NamespaceInfo {
+  uuid: string;
+  path: string;
+  parent_uuid: string;
+  created_at: string;
+  child_visible_default: boolean;
+  quotas: NamespaceQuotas;
+}
+
+export interface NamespaceListResult {
+  namespaces: string[];
+}
+
 // Policies
 export interface PolicyListResult {
   policies: string[];

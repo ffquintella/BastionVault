@@ -1175,7 +1175,7 @@ impl AppRoleBackendInner {
         // the role having to log in first. Same rationale as the
         // userpass user-create hook.
         if create {
-            let _ = super::path_login::resolve_approle_entity_id(&self.core, &role_entry.name).await;
+            let _ = super::path_login::resolve_approle_entity_id(&self.core, &role_entry.name, "").await;
         }
 
         // Audit: lifecycle event for the role.

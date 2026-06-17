@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-06-17
+
 ### Added
 
 #### Namespaces / Multi-tenancy (Phase 1 foundation)
@@ -115,14 +117,121 @@ EXAMPLE ENTRY:
   operators (no header) remain unrestricted. Write-time syntactic guard; does
   not touch the authorization hot path.
 
-- **Scope note:** Phase 1 is functionally complete (container, registry,
-  resolver, per-namespace mounts + dispatch, migration copy). Phase 2 token
-  binding is enforced. Still not implemented: per-namespace policy scoping +
-  cross-namespace path refusal, per-namespace audit broadcasters, Phase 3
-  (per-namespace identity + cross-tenant linking), and Phase 4 (quota
-  enforcement + GUI). Re-root *activation* remains gated behind
-  `BASTION_NAMESPACE_REROOT`. Auth-backend *logins* (userpass/approle/etc.) bind
-  to root in this increment; per-login namespace binding is a follow-up.
+#### Namespaces / Multi-tenancy (Phase 2 — per-namespace policy + audit)
+
+- **Per-namespace policy storage** (`src/modules/policy/policy_store.rs`) -- ACL
+  policies are now tenant-scoped: a policy named `admin` in one namespace is an
+  entirely separate document from `admin` in another. Tenant policies live in
+  their own barrier keyspace (`policy-ns/<b64(path)>/acl/…` and `…/history/…`);
+  the root namespace keeps its existing keyspace untouched, so upgrades are
+  byte-for-byte compatible. The `sys/policy*` read/write/list/delete/history
+  handlers scope by the request's `X-BastionVault-Namespace` header, and a list
+  inside a namespace returns only that namespace's policies (never the root
+  seeded set or the synthetic `root`). (Phase 2, `features/namespaces-multitenancy.md`)
+
+- **Namespace-aware ACL compilation** -- on the authorization hot path, each of
+  a token's named policies is loaded from the namespace the token is bound to,
+  so a token issued in tenant-a is authorized strictly against tenant-a's
+  policies. Root-bound tokens and all non-token callers resolve to the global
+  keyspace exactly as before. The synthetic `root` superuser policy resolves
+  identically in every namespace so a namespace-bound root token keeps working.
+
+- **Per-namespace audit broadcasters + superuser mirror** (`src/audit/broker.rs`)
+  -- audit devices are scoped to a namespace: a device enabled in tenant-a only
+  receives tenant-a's audit stream, with its own tamper-evident hash chain so a
+  single device file verifies independently. A root device may set `mirror: true`
+  to additionally receive every namespace's stream (the central-SOC view), kept
+  on the root chain and showing each event's originating namespace. `sys/audit`
+  enable/disable/list scope by the namespace header, and every namespace's
+  `sys/audit` list surfaces the mirror so tenants know their stream is shadowed.
+  Legacy persisted device configs deserialize as root, non-mirror.
+
+#### Namespaces / Multi-tenancy (Phase 3 — per-namespace identity)
+
+- **Per-namespace identities** (`src/modules/identity/`) -- entities, aliases,
+  and groups are now tenant-scoped. The same external principal
+  (`userpass/alice`) resolves to a *distinct* entity in each namespace, so one
+  customer's `alice` SSO claim grants nothing in another's. Entity records stay
+  globally keyed by UUID (callers that resolve `entity_id` are unchanged) but
+  carry a `namespace` tag; the alias index and the group + group-history
+  keyspaces are partitioned per namespace. (Phase 3, `features/namespaces-multitenancy.md`)
+
+- **Per-login namespace binding** -- `userpass` (password + FIDO2) and `approle`
+  logins read the `X-BastionVault-Namespace` header, provision/resolve the
+  entity and expand identity-group policies *in that namespace*, and bind the
+  issued token to it. A login naming a namespace that does not exist fails
+  closed. The shared credential lives in the root auth mount, but the resulting
+  session, identity, and group policies are namespace-scoped. (`cert` login
+  binding is a follow-up.)
+
+- **Namespace-scoped group management** -- the `identity/` group and
+  entity-alias HTTP endpoints scope by the namespace header, and `identity/` is
+  exempted from logical-path rewriting so it stays header-addressed like `sys/`.
+  A group named `admins` in one tenant is unrelated to `admins` in another.
+
+- **Cross-tenant identity links** (`src/modules/namespace/identity_link.rs`,
+  `v2/sys/namespace-links`) -- a namespace may declare that entities in its own
+  subtree are the same person, for audit correlation. Links are one-way: a
+  namespace may only reference itself or its descendants, and links are stored
+  partitioned by owner, so siblings and the linked children can never enumerate
+  them. List/create/read/delete via the system backend, scoped by header.
+
+#### Namespaces / Multi-tenancy (Phase 4 — quotas + GUI)
+
+- **Per-namespace quota enforcement** (`src/modules/namespace/quota.rs`) -- all
+  six namespace quotas are now enforced at admit time (`0` = unlimited):
+  `max_mounts` (mount create), `max_child_namespaces` (namespace create), and
+  `request_rate` (per-namespace token bucket → `429`); plus the accounting
+  quotas `max_entities` (refused before a login provisions a *new* identity in
+  the namespace — existing principals still authenticate), `max_storage_bytes`
+  (the namespace's barrier-byte total under its logical prefix plus the incoming
+  value, so the write that crosses the cap is the one refused with `507`), and
+  `max_leases` (the namespace's live lease count, enforced at lease
+  registration). Accounting quotas apply to non-root namespaces only.
+  (Phase 4, `features/namespaces-multitenancy.md`)
+
+- **Namespaces GUI** (`gui` → Namespaces page) -- a management page lists
+  namespaces and creates them by path with all six quota fields and the
+  `child_visible_default` flag, edits quotas, and deletes (refused while a
+  namespace still holds children or mounts). Backed by new Tauri commands over
+  `v2/sys/namespaces`.
+
+- **GUI namespace switcher** -- a top-of-sidebar picker scopes the whole session
+  to a namespace: selecting one records the active namespace on the backend and
+  every authenticated request thereafter carries the `X-BastionVault-Namespace`
+  header. Implemented via a new `bv_client::Backend::handle_with_namespace`
+  method overridden by both the embedded (in-process `Core`) and remote (HTTP)
+  backends; the embedded path injects the request header, the remote path sets
+  the HTTP header. Single-tenant deployments never see the switcher.
+
+- **Re-root activation — the default for every install, no opt-in.** All
+  deployments now store the root tenant's data under `namespaces/<root_uuid>/…`,
+  so every tenant (including the implicit root) lives under a uniform prefix.
+  `Core` resolves the activation decision at the top of `post_unseal` (before any
+  view or mount table is built) and repoints its system view, root mount router,
+  and a new `root_storage_prefix`; `Core.mounts_router` became swappable
+  (`ArcSwap`) and the previously-hardcoded legacy prefixes in `Core::mount` and
+  `exchange/scope` now derive from the active root. **New installs** activate
+  immediately (nothing to copy). **Existing installs** activate automatically on
+  the next unseal: the non-destructive copy + byte-for-byte verify of the legacy
+  `sys/` / `logical/` / `core/mounts` data runs eagerly on the *same* boot and
+  the prefix flips only if it succeeds — a copy that cannot be verified leaves
+  the legacy layout authoritative for that boot and retries next unseal (fail
+  safe; unseal is never blocked). The legacy `BASTION_NAMESPACE_REROOT` opt-in is
+  removed. Activation is recorded by a persistent, one-way registry marker; the
+  legacy keys are retained on disk so a pre-namespace build can still be restored
+  from a BVBK backup. The full library test suite (836 tests) runs green under
+  activation. (Phase 1b, `features/namespaces-multitenancy.md`)
+
+- **Scope note:** Phases 1–4 are complete — container/registry/resolver,
+  per-namespace mounts + dispatch, token binding, namespace-scoped policy
+  storage + ACL compilation, cross-namespace path refusal, per-namespace audit
+  broadcasters + root mirror, per-namespace identity + per-login binding +
+  cross-tenant links, **all six quotas enforced**, a namespace-management GUI, a
+  **GUI namespace switcher**, and **re-root activation (the unconditional
+  default for every install)**. Remaining follow-ups: `cert`-login namespace binding, tenant
+  self-service of `sys/*` (today reachable only by root/sudo tokens carrying the
+  namespace header), and a recursive GUI namespace tree + rename.
 
 ## [0.14.9] - 2026-06-16
 

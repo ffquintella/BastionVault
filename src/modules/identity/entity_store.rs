@@ -15,6 +15,7 @@
 
 use std::sync::Arc;
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +28,13 @@ use crate::{
 
 const ENTITY_SUB_PATH: &str = "identity/entity/";
 const ALIAS_SUB_PATH: &str = "identity/alias/";
+// Multi-tenancy: per-namespace alias keyspace. Entity *records* stay in the
+// flat `identity/entity/<uuid>` keyspace (UUIDs are globally unique, so the many
+// `get_entity(id)` callers need no namespace context); only the alias index is
+// partitioned so the same external principal (`userpass/alice`) maps to a
+// *different* entity in each namespace. Root keeps the legacy alias keyspace.
+//   identity-ns/<b64url(ns_path)>/alias/<mount>/<name> -> <uuid>
+const IDENTITY_NS_SUB_PATH: &str = "identity-ns/";
 
 /// An entity represents a principal identity across tokens. The `id`
 /// is the stable identifier embedded in every issued token's metadata
@@ -44,6 +52,11 @@ pub struct Entity {
     #[serde(default)]
     pub aliases: Vec<EntityAlias>,
     pub created_at: String,
+    /// Multi-tenancy: the namespace this entity belongs to (`""` = root).
+    /// An entity in one namespace is distinct from one in another even when
+    /// both alias the same external principal. Legacy records read as root.
+    #[serde(default)]
+    pub namespace: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -55,6 +68,8 @@ pub struct EntityAlias {
 pub struct EntityStore {
     entity_view: Arc<BarrierView>,
     alias_view: Arc<BarrierView>,
+    /// Retained so per-namespace alias sub-views can be derived on demand.
+    system_view: Arc<BarrierView>,
 }
 
 #[maybe_async::maybe_async]
@@ -67,7 +82,20 @@ impl EntityStore {
         let entity_view = Arc::new(system_view.new_sub_view(ENTITY_SUB_PATH));
         let alias_view = Arc::new(system_view.new_sub_view(ALIAS_SUB_PATH));
 
-        Ok(Arc::new(Self { entity_view, alias_view }))
+        Ok(Arc::new(Self { entity_view, alias_view, system_view }))
+    }
+
+    /// Barrier sub-view holding a namespace's alias index. Root returns the
+    /// legacy alias view; a non-root namespace gets its own keyspace.
+    fn alias_view_for(&self, ns_path: &str) -> Arc<BarrierView> {
+        if ns_path.is_empty() {
+            return self.alias_view.clone();
+        }
+        let b64 = URL_SAFE_NO_PAD.encode(ns_path.as_bytes());
+        Arc::new(
+            self.system_view
+                .new_sub_view(&format!("{IDENTITY_NS_SUB_PATH}{b64}/alias/")),
+        )
     }
 
     /// Storage key under the alias view for a `(mount, name)` pair.
@@ -92,8 +120,18 @@ impl EntityStore {
         mount: &str,
         name: &str,
     ) -> Result<Option<Entity>, RvError> {
+        self.get_by_alias_ns(mount, name, "").await
+    }
+
+    /// Namespace-scoped alias lookup. Root delegates to the legacy keyspace.
+    pub async fn get_by_alias_ns(
+        &self,
+        mount: &str,
+        name: &str,
+        ns_path: &str,
+    ) -> Result<Option<Entity>, RvError> {
         let key = Self::alias_key(mount, name);
-        let Some(raw) = self.alias_view.get(&key).await? else {
+        let Some(raw) = self.alias_view_for(ns_path).get(&key).await? else {
             return Ok(None);
         };
         let uuid: String = serde_json::from_slice(&raw.value).unwrap_or_default();
@@ -120,7 +158,20 @@ impl EntityStore {
         mount: &str,
         name: &str,
     ) -> Result<Entity, RvError> {
-        if let Some(existing) = self.get_by_alias(mount, name).await? {
+        self.get_or_create_entity_ns(mount, name, "").await
+    }
+
+    /// Namespace-scoped get-or-create. The alias lives in the namespace's own
+    /// keyspace and the new entity record is tagged with `ns_path`, so the same
+    /// external principal resolves to a distinct entity per namespace. Root
+    /// (`ns_path == ""`) is byte-for-byte the legacy behaviour.
+    pub async fn get_or_create_entity_ns(
+        &self,
+        mount: &str,
+        name: &str,
+        ns_path: &str,
+    ) -> Result<Entity, RvError> {
+        if let Some(existing) = self.get_by_alias_ns(mount, name, ns_path).await? {
             return Ok(existing);
         }
 
@@ -131,6 +182,7 @@ impl EntityStore {
             primary_name: name.trim().to_lowercase(),
             aliases: Vec::new(),
             created_at: Utc::now().to_rfc3339(),
+            namespace: ns_path.to_string(),
         };
         let value = serde_json::to_vec(&entity)?;
         self.entity_view
@@ -139,7 +191,7 @@ impl EntityStore {
 
         let alias_key = Self::alias_key(mount, name);
         let alias_value = serde_json::to_vec(&id)?;
-        self.alias_view
+        self.alias_view_for(ns_path)
             .put(&StorageEntry { key: alias_key, value: alias_value })
             .await?;
 
@@ -155,14 +207,35 @@ impl EntityStore {
     ///
     /// Idempotent: missing keys are not errors.
     pub async fn forget_alias(&self, mount: &str, name: &str) -> Result<(), RvError> {
+        self.forget_alias_ns(mount, name, "").await
+    }
+
+    /// Namespace-scoped alias removal.
+    pub async fn forget_alias_ns(&self, mount: &str, name: &str, ns_path: &str) -> Result<(), RvError> {
         let key = Self::alias_key(mount, name);
-        self.alias_view.delete(&key).await
+        self.alias_view_for(ns_path).delete(&key).await
     }
 
     pub async fn list_entities(&self) -> Result<Vec<String>, RvError> {
         let mut keys = self.entity_view.get_keys().await?;
         keys.sort();
         Ok(keys)
+    }
+
+    /// Entity UUIDs belonging to `ns_path` (`""` = root). Filters the flat
+    /// entity keyspace by each record's `namespace` tag.
+    pub async fn list_entities_ns(&self, ns_path: &str) -> Result<Vec<String>, RvError> {
+        let keys = self.entity_view.get_keys().await?;
+        let mut out = Vec::new();
+        for id in keys {
+            if let Some(e) = self.get_entity(&id).await? {
+                if e.namespace == ns_path {
+                    out.push(id);
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
     }
 
     /// Enumerate every known alias as a `(mount, name, entity_id)`
@@ -174,7 +247,13 @@ impl EntityStore {
     /// with `/` to match the `mount_path` convention the rest of the
     /// system uses.
     pub async fn list_aliases(&self) -> Result<Vec<AliasRecord>, RvError> {
-        let keys = self.alias_view.get_keys().await?;
+        self.list_aliases_ns("").await
+    }
+
+    /// Namespace-scoped alias enumeration for the GUI user-picker.
+    pub async fn list_aliases_ns(&self, ns_path: &str) -> Result<Vec<AliasRecord>, RvError> {
+        let view = self.alias_view_for(ns_path);
+        let keys = view.get_keys().await?;
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
             // Keys are stored as `<mount>/<name>`. `get_keys` returns
@@ -183,7 +262,7 @@ impl EntityStore {
             let Some((mount, name)) = key.split_once('/') else {
                 continue;
             };
-            let uuid = match self.alias_view.get(&key).await? {
+            let uuid = match view.get(&key).await? {
                 Some(raw) => serde_json::from_slice::<String>(&raw.value).unwrap_or_default(),
                 None => continue,
             };

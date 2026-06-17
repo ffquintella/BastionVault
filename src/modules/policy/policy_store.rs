@@ -48,6 +48,7 @@ use crate::{
     storage::{barrier_view::BarrierView, Storage, StorageEntry},
 };
 use serde_json::Value;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
 // POLICY_ACL_SUB_PATH is the sub-path used for the policy store view. This is
 // nested under the system view. POLICY_RGP_SUB_PATH/POLICY_EGP_SUB_PATH are
@@ -60,6 +61,16 @@ const POLICY_EGP_SUB_PATH: &str = "policy-egp/";
 // in chronological order. History is retained when the policy is deleted
 // so the audit trail remains available after removal.
 const POLICY_HISTORY_SUB_PATH: &str = "policy-history/";
+
+// Multi-tenancy: per-namespace ACL policies and their history live under a
+// dedicated keyspace, keyed by the URL-safe base64 of the namespace path so a
+// policy named `admin` in one namespace is an entirely separate document from
+// `admin` in another. The root namespace ("") is NOT stored here — it keeps the
+// legacy `policy/` and `policy-history/` keyspaces, so existing data and the
+// root-tenant hot path are untouched. Layout:
+//   policy-ns/<b64url(ns_path)>/acl/<name>
+//   policy-ns/<b64url(ns_path)>/history/<name>/<seq>
+const POLICY_NS_SUB_PATH: &str = "policy-ns/";
 
 
 // DEFAULT_POLICY_NAME is the name of the default policy
@@ -752,6 +763,12 @@ pub struct PolicyStore {
     pub rgp_view: Option<Arc<BarrierView>>,
     pub egp_view: Option<Arc<BarrierView>>,
     pub history_view: Option<Arc<BarrierView>>,
+    /// The system barrier view. Retained so per-namespace ACL/history
+    /// sub-views can be derived on demand (see [`PolicyStore::acl_view_for`]).
+    /// Multi-tenancy: tenant policies live in their own keyspace under this
+    /// view; the root namespace keeps the legacy `acl_view`/`history_view`
+    /// keyspaces unchanged for backward compatibility.
+    pub system_view: Option<Arc<BarrierView>>,
     pub token_policies_lru: Option<Cache<String, Arc<Policy>>>,
     pub egp_lru: Option<Cache<String, Arc<Policy>>>,
     // Stores whether a token policy is ACL or RGP
@@ -791,6 +808,7 @@ impl PolicyStore {
             rgp_view: Some(Arc::new(rgp_view)),
             egp_view: Some(Arc::new(egp_view)),
             history_view: Some(Arc::new(history_view)),
+            system_view: Some(system_view.clone()),
             self_ptr: Weak::default(),
             ..Default::default()
         };
@@ -966,6 +984,183 @@ impl PolicyStore {
         }
     }
 
+    // -------------------------------------------------------------------
+    // Multi-tenancy: namespace-aware policy CRUD.
+    //
+    // The root namespace ("") delegates to the legacy global methods above so
+    // existing behaviour and storage are byte-for-byte unchanged. A non-root
+    // namespace stores ACL policies in its own keyspace (see
+    // POLICY_NS_SUB_PATH); tenant policies are ACL-only (sentinel RGP/EGP stay
+    // root-global). The cache index is namespace-scoped so a name collision
+    // across namespaces never poisons another tenant's cached document.
+    // -------------------------------------------------------------------
+
+    /// Barrier sub-view holding a namespace's ACL policies. Root returns the
+    /// legacy ACL view; a non-root namespace gets a per-namespace keyspace.
+    fn acl_view_for(&self, ns_path: &str) -> Result<Arc<BarrierView>, RvError> {
+        if ns_path.is_empty() {
+            return self.get_acl_view();
+        }
+        let sv = self
+            .system_view
+            .as_ref()
+            .ok_or_else(|| bv_error_string!("system view unavailable for namespace policy storage"))?;
+        let b64 = URL_SAFE_NO_PAD.encode(ns_path.as_bytes());
+        Ok(Arc::new(sv.new_sub_view(&format!("{POLICY_NS_SUB_PATH}{b64}/acl/"))))
+    }
+
+    /// Barrier sub-view holding a namespace's ACL policy history.
+    fn history_view_for(&self, ns_path: &str) -> Result<Arc<BarrierView>, RvError> {
+        if ns_path.is_empty() {
+            return self
+                .history_view
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| bv_error_string!("policy history view unavailable"));
+        }
+        let sv = self
+            .system_view
+            .as_ref()
+            .ok_or_else(|| bv_error_string!("system view unavailable for namespace policy storage"))?;
+        let b64 = URL_SAFE_NO_PAD.encode(ns_path.as_bytes());
+        Ok(Arc::new(sv.new_sub_view(&format!("{POLICY_NS_SUB_PATH}{b64}/history/"))))
+    }
+
+    /// Namespace-scoped cache index. Root keeps the bare name (so cached root
+    /// documents are unchanged); a non-root namespace prefixes with the path
+    /// and a unit-separator that can never appear in a policy name.
+    fn ns_cache_key(&self, ns_path: &str, name: &str) -> String {
+        if ns_path.is_empty() {
+            self.cache_key(name)
+        } else {
+            format!("ns:{ns_path}\u{1f}{name}")
+        }
+    }
+
+    /// Get an ACL policy from a specific namespace. Root delegates to the
+    /// global [`get_policy`]; a non-root namespace reads from its own keyspace.
+    /// The synthetic `root` policy and the request's bound namespace are handled
+    /// by the caller; here `name == "root"` always resolves to the global
+    /// full-access policy so a namespace-bound root token keeps working.
+    pub async fn get_policy_ns(
+        &self,
+        name: &str,
+        policy_type: PolicyType,
+        ns_path: &str,
+    ) -> Result<Option<Arc<Policy>>, RvError> {
+        if ns_path.is_empty() {
+            return self.get_policy(name, policy_type).await;
+        }
+        let name = self.sanitize_name(name);
+        // `root` is synthetic everywhere; never stored, never tenant-shadowable.
+        if name == "root" {
+            return self.get_policy("root", PolicyType::Acl).await;
+        }
+        let index = self.ns_cache_key(ns_path, &name);
+        if let Some(lru) = &self.token_policies_lru {
+            if let Some(p) = lru.get(&index) {
+                crate::metrics::cache_metrics::cache_metrics()
+                    .record_hit(crate::metrics::cache_metrics::CacheLayer::Policy);
+                return Ok(Some(p.value().clone()));
+            }
+            crate::metrics::cache_metrics::cache_metrics()
+                .record_miss(crate::metrics::cache_metrics::CacheLayer::Policy);
+        }
+        let view = self.acl_view_for(ns_path)?;
+        let entry = match view.get(&name).await? {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+        let policy_entry: PolicyEntry = serde_json::from_slice(entry.value.as_slice())?;
+        let mut policy = Policy::from_str(&policy_entry.raw)?;
+        policy.name = name;
+        policy.policy_type = PolicyType::Acl;
+        policy.templated = policy_entry.templated;
+        let p = Arc::new(policy);
+        if let Some(lru) = &self.token_policies_lru {
+            lru.insert(index, p.clone(), 1);
+        }
+        Ok(Some(p))
+    }
+
+    /// Set an ACL policy in a specific namespace. Root delegates to the global
+    /// [`set_policy`]; a non-root namespace persists into its own keyspace.
+    /// Tenant namespaces only accept ACL policies — sentinel policies remain
+    /// root-global and are rejected here.
+    pub async fn set_policy_ns(&self, policy: Policy, ns_path: &str) -> Result<(), RvError> {
+        if ns_path.is_empty() {
+            return self.set_policy(policy).await;
+        }
+        if policy.name.is_empty() {
+            return Err(bv_error_string!("policy name missing"));
+        }
+        if policy.policy_type != PolicyType::Acl {
+            return Err(bv_error_response_status!(
+                400,
+                "only ACL policies may be created inside a namespace"
+            ));
+        }
+        let name = self.sanitize_name(&policy.name);
+        if IMMUTABLE_POLICIES.contains(&name.as_str()) {
+            return Err(bv_error_string!(format!("cannot update {} policy", name)));
+        }
+        let pe = PolicyEntry {
+            version: 2,
+            templated: policy.templated,
+            raw: policy.raw.clone(),
+            policy_type: PolicyType::Acl,
+            sentinal_policy: policy.sentinal_policy,
+        };
+        let entry = StorageEntry::new(&name, &pe)?;
+        let view = self.acl_view_for(ns_path)?;
+        view.put(&entry).await?;
+        let index = self.ns_cache_key(ns_path, &name);
+        let mut stored = policy;
+        stored.name = name;
+        self.save_token_policy_cache(index, Arc::new(stored))?;
+        Ok(())
+    }
+
+    /// List ACL policy names in a specific namespace. Root delegates to the
+    /// global [`list_policy`]; a non-root namespace lists only its own keyspace.
+    pub async fn list_policy_ns(
+        &self,
+        policy_type: PolicyType,
+        ns_path: &str,
+    ) -> Result<Vec<String>, RvError> {
+        if ns_path.is_empty() {
+            return self.list_policy(policy_type).await;
+        }
+        let view = self.acl_view_for(ns_path)?;
+        let mut keys = view.get_keys().await?;
+        keys.retain(|s| !NON_ASSIGNABLE_POLICIES.iter().any(|&x| s == x));
+        Ok(keys)
+    }
+
+    /// Delete an ACL policy from a specific namespace. Root delegates to the
+    /// global [`delete_policy`].
+    pub async fn delete_policy_ns(
+        &self,
+        name: &str,
+        policy_type: PolicyType,
+        ns_path: &str,
+    ) -> Result<(), RvError> {
+        if ns_path.is_empty() {
+            return self.delete_policy(name, policy_type).await;
+        }
+        let name = self.sanitize_name(name);
+        if IMMUTABLE_POLICIES.contains(&name.as_str()) {
+            return Err(bv_error_response_status!(400, format!("cannot delete {} policy", name)));
+        }
+        if name == "default" {
+            return Err(bv_error_response_status!(400, "cannot delete default policy"));
+        }
+        let view = self.acl_view_for(ns_path)?;
+        view.delete(&name).await?;
+        self.remove_token_policy_cache(&self.ns_cache_key(ns_path, &name))?;
+        Ok(())
+    }
+
     /// Delete a policy from the policy store.
     /// This function removes the policy from the appropriate view, updates the cache, and handles sentinel policy invalidation.
     pub async fn delete_policy(&self, name: &str, policy_type: PolicyType) -> Result<(), RvError> {
@@ -1118,9 +1313,19 @@ impl PolicyStore {
         additional_policies: Option<Vec<Arc<Policy>>>,
         auth: Option<&crate::logical::Auth>,
     ) -> Result<ACL, RvError> {
+        // Multi-tenancy: load each named policy from the namespace the calling
+        // token is bound to. Root-bound tokens (and every non-auth caller)
+        // resolve `ns_path == ""`, which delegates to the global keyspace and
+        // preserves the pre-namespace hot path exactly.
+        let ns_path = auth
+            .map(|a| crate::modules::namespace::token_binding::binding_from_metadata(&a.metadata).0)
+            .unwrap_or_default();
         let mut all_policies: Vec<Arc<Policy>> = vec![];
         for policy_name in policy_names.iter() {
-            if let Some(policy) = self.get_policy(policy_name.as_str(), PolicyType::Token).await? {
+            if let Some(policy) = self
+                .get_policy_ns(policy_name.as_str(), PolicyType::Token, &ns_path)
+                .await?
+            {
                 all_policies.push(policy);
             }
         }
@@ -1352,6 +1557,51 @@ impl PolicyStore {
         keys.sort();
         keys.reverse();
 
+        let mut entries = Vec::with_capacity(keys.len());
+        for k in keys {
+            let full = format!("{prefix}{k}");
+            if let Some(e) = view.get(&full).await? {
+                if let Ok(h) = serde_json::from_slice::<PolicyHistoryEntry>(&e.value) {
+                    entries.push(h);
+                }
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Namespace-scoped variant of [`append_history`]. Root delegates to the
+    /// global history keyspace; a non-root namespace keeps its own audit trail.
+    pub async fn append_history_ns(
+        &self,
+        name: &str,
+        entry: PolicyHistoryEntry,
+        ns_path: &str,
+    ) -> Result<(), RvError> {
+        if ns_path.is_empty() {
+            return self.append_history(name, entry).await;
+        }
+        let view = self.history_view_for(ns_path)?;
+        let name = self.sanitize_name(name);
+        let key = format!("{name}/{}", hist_seq());
+        let value = serde_json::to_vec(&entry)?;
+        view.put(&StorageEntry { key, value }).await
+    }
+
+    /// Namespace-scoped variant of [`list_history`].
+    pub async fn list_history_ns(
+        &self,
+        name: &str,
+        ns_path: &str,
+    ) -> Result<Vec<PolicyHistoryEntry>, RvError> {
+        if ns_path.is_empty() {
+            return self.list_history(name).await;
+        }
+        let view = self.history_view_for(ns_path)?;
+        let name = self.sanitize_name(name);
+        let prefix = format!("{name}/");
+        let mut keys = view.list(&prefix).await?;
+        keys.sort();
+        keys.reverse();
         let mut entries = Vec::with_capacity(keys.len());
         for k in keys {
             let full = format!("{prefix}{k}");

@@ -104,7 +104,8 @@ async fn tick(
 ) -> Result<(), RvError> {
     // Snapshot the mount table; release the read lock before any awaits.
     let ldap_mounts: Vec<(String, String)> = {
-        let entries = core.mounts_router.entries.read()?;
+        let mounts_router = core.mounts_router();
+        let entries = mounts_router.entries.read()?;
         entries
             .values()
             .filter_map(|me| {

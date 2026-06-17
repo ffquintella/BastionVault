@@ -99,7 +99,8 @@ async fn tick(core: &Arc<Core>, last_fired: Arc<Mutex<HashMap<String, Instant>>>
     // Snapshot the mount table — we drop the read lock immediately so the
     // sweeps below don't hold it across awaits.
     let pki_mounts: Vec<(String, String)> = {
-        let entries = core.mounts_router.entries.read()?;
+        let mounts_router = core.mounts_router();
+        let entries = mounts_router.entries.read()?;
         entries
             .values()
             .filter_map(|me| {
