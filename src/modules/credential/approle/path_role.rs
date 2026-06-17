@@ -3218,12 +3218,10 @@ mod test {
         .cloned();
         let _ = test_write_api(&core, &root_token, "auth/approle/role/role1", true, role_data).await;
 
-        let cases = vec![
-            json!({"name": "finite num_uses and ttl", "payload": {"secret_id": "finite", "ttl": 5, "num_uses": 5}}),
+        let cases = [json!({"name": "finite num_uses and ttl", "payload": {"secret_id": "finite", "ttl": 5, "num_uses": 5}}),
             json!({"name": "infinite num_uses and ttl", "payload": {"secret_id": "infinite", "ttl": 0, "num_uses": 0}}),
             json!({"name": "finite num_uses and infinite ttl", "payload": {"secret_id": "maxed1", "ttl": 0, "num_uses": 5}}),
-            json!({"name": "infinite num_uses and finite ttl", "payload": {"secret_id": "maxed2", "ttl": 5, "num_uses": 0}}),
-        ];
+            json!({"name": "infinite num_uses and finite ttl", "payload": {"secret_id": "maxed2", "ttl": 5, "num_uses": 0}})];
 
         for case in cases.iter() {
             let secret_id_data = case["payload"].as_object().unwrap().clone();
@@ -3271,8 +3269,7 @@ mod test {
         // Mount approle auth to path: auth/approle
         test_mount_auth_api(&core, &root_token, "approle", "approle").await;
 
-        let cases = vec![
-            json!({
+        let cases = [json!({
                 "name": "infinite role secret id ttl",
                 "options": {
                     "secret_id_num_uses": 1,
@@ -3324,8 +3321,7 @@ mod test {
                     "payload": {"secret_id": "abcd123", "ttl": 0, "num_uses": -1},
                     "expected": "num_uses cannot be negative",
                 }],
-            }),
-        ];
+            })];
 
         for (i, case) in cases.iter().enumerate() {
             let mut role_data = json!({
@@ -3501,7 +3497,7 @@ mod test {
         let resp = test_read_api(&core, &root_token, "auth/approle/role/role1/bind-secret-id", true).await;
         assert!(resp.is_ok());
         let resp_data = resp.unwrap().unwrap().data.unwrap();
-        assert_eq!(resp_data["bind_secret_id"].as_bool().unwrap(), true);
+        assert!(resp_data["bind_secret_id"].as_bool().unwrap());
 
         // RUD for policies field
         let resp = test_read_api(&core, &root_token, "auth/approle/role/role1/policies", true).await;
@@ -4089,11 +4085,9 @@ mod test {
         .unwrap()
         .clone();
 
-        let cases = vec![
-            json!({"name": "zero ttl", "role_name": "role-zero-ttl", "ttl": 0, "sys_ttl_cap": false}),
+        let cases = [json!({"name": "zero ttl", "role_name": "role-zero-ttl", "ttl": 0, "sys_ttl_cap": false}),
             json!({"name": "custom ttl", "role_name": "role-custom-ttl", "ttl": 60, "sys_ttl_cap": false}),
-            json!({"name": "system ttl capped", "role_name": "role-sys-ttl-cap", "ttl": 700000000, "sys_ttl_cap": true}),
-        ];
+            json!({"name": "system ttl capped", "role_name": "role-sys-ttl-cap", "ttl": 700000000, "sys_ttl_cap": true})];
 
         for case in cases.iter() {
             let role_name = case["role_name"].as_str().unwrap();

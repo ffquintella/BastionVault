@@ -47,16 +47,18 @@ mod embedded {
 
             let core = self.vault.core.load();
 
-            let mut req = Request::default();
-            req.operation = match operation {
-                Operation::Read => ServerOp::Read,
-                Operation::Write => ServerOp::Write,
-                Operation::Delete => ServerOp::Delete,
-                Operation::List => ServerOp::List,
+            let mut req = Request {
+                operation: match operation {
+                    Operation::Read => ServerOp::Read,
+                    Operation::Write => ServerOp::Write,
+                    Operation::Delete => ServerOp::Delete,
+                    Operation::List => ServerOp::List,
+                },
+                path: path.to_string(),
+                client_token: token.to_string(),
+                body,
+                ..Default::default()
             };
-            req.path = path.to_string();
-            req.client_token = token.to_string();
-            req.body = body;
             // Multi-tenancy: carry the active namespace as the request header
             // the server resolver reads (case-insensitive). Root / empty omits.
             if let Some(ns) = namespace.map(str::trim).filter(|s| !s.is_empty()) {
@@ -103,8 +105,10 @@ mod embedded {
     /// handler at `src/http/logical.rs::response_logical` writes onto
     /// the wire so the embedded path is observably equivalent.
     fn logical_response_to_json(resp: bastion_vault::logical::Response) -> JsonResponse {
-        let mut out = JsonResponse::default();
-        out.data = resp.data;
+        let mut out = JsonResponse {
+            data: resp.data,
+            ..Default::default()
+        };
         if let Some(secret) = &resp.secret {
             out.lease_id = Some(secret.lease_id.clone());
             out.renewable = Some(secret.lease.renewable);

@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 use tauri::State;
 
 use crate::error::CmdResult;
-use crate::state::{AppState, VaultMode};
+use crate::state::AppState;
 
 use super::make_request;
 
@@ -27,14 +27,10 @@ pub async fn capabilities_self(
     state: State<'_, AppState>,
     paths: Vec<String>,
 ) -> CmdResult<CapabilitiesResult> {
-    // capabilities-self is a v2-only route. In embedded mode the request
-    // routes by logical path (`sys/capabilities-self`); in remote mode the
-    // leading slash bypasses bv-client's default `/v1` prefix so it lands
-    // on `/v2/sys/capabilities-self`.
-    let path = match *state.mode.lock().await {
-        VaultMode::Embedded => "sys/capabilities-self".to_string(),
-        VaultMode::Remote => "/v2/sys/capabilities-self".to_string(),
-    };
+    // capabilities-self is a v2-only route. Embedded mode routes by logical
+    // path; the remote backend now defaults to the `/v2` prefix, so the same
+    // relative path lands on `/v2/sys/capabilities-self` in both modes.
+    let path = "sys/capabilities-self".to_string();
 
     let mut body = Map::new();
     body.insert(

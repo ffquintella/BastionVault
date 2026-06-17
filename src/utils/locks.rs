@@ -50,7 +50,7 @@ mod test {
         let _locked = lock_entry.lock.write().await;
         sleep(Duration::from_secs(5));
         let mut num = data.num.write().unwrap();
-        *num = *num * 2;
+        *num *= 2;
         *num
     }
 

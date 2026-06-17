@@ -56,7 +56,7 @@ mod audit_integration_tests {
                 ..Default::default()
             };
             e.request.operation = "read".into();
-            e.request.path = format!("secret/data/e{i}").into();
+            e.request.path = format!("secret/data/e{i}");
             e.auth.client_token = format!("hmac:{}", hmac_redact(hmac_key, b"fake"));
             dev.log_entry(&e).await.unwrap();
             prev = crate::audit::hash_chain::digest(&e).unwrap();
@@ -208,7 +208,7 @@ mod audit_integration_tests {
             };
             e.namespace = ns.to_string();
             e.request.operation = "update".into();
-            e.request.path = format!("{ns}/p{i}").into();
+            e.request.path = format!("{ns}/p{i}");
             e
         };
 

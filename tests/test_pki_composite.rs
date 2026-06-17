@@ -9,10 +9,11 @@
 //!   `2.16.840.1.114027.80.8.1.28` (id-MLDSA65-ECDSA-P256-SHA512).
 //! - The leaf's composite signature parses as `SEQUENCE { BIT STRING,
 //!   BIT STRING }` and *each half* verifies independently:
-//!   - the PQ half against the CA's ML-DSA-65 sub-key, using `fips204` directly
-//!   - the classical half against the CA's ECDSA-P256 sub-key, using `p256`
-//!   This proves both halves are real, signed-by-the-CA bits — not just
-//!   well-formed DER.
+//!     - the PQ half against the CA's ML-DSA-65 sub-key, using `fips204` directly
+//!     - the classical half against the CA's ECDSA-P256 sub-key, using `p256`
+//!
+//! This proves both halves are real, signed-by-the-CA bits — not just
+//! well-formed DER.
 //! - The CRL signed by a composite CA carries the composite OID and lists the
 //!   revoked serial.
 //! - Mixed-chain rejection: a composite role on a classical CA fails.

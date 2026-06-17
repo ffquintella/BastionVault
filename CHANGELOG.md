@@ -45,6 +45,36 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-06-17
+
+### Changed
+
+- **GUI remote backend now targets the `/v2` API prefix** (`gui/src-tauri/src/commands/connection.rs`)
+  -- the `bv_client::RemoteBackend` is built with `with_api_version(2)`, so all
+  logical requests (including the namespace admin routes) hit `/v2/...` rather
+  than the legacy `/v1`. This aligns the desktop client with `agent.md`'s
+  v2-forward HTTP policy and lets the `capabilities-self` command drop its
+  hardcoded `/v2/...` absolute-path workaround (`commands/capabilities.rs`).
+  **Note:** the `/v2` router rejects plain **kv-v1** mounts with
+  `ErrApiVersionMismatch`; remote kv-v1 read/write/list is therefore no longer
+  supported from the GUI (kv-v2, the default, is unaffected and the Secrets page
+  is already kv-v2-only).
+
+### Fixed
+
+- **Workspace-wide clippy cleanup** -- `cargo clippy --workspace --all-targets`
+  is now warning-clean (was ~250 lints, including one `uninit_vec` *error* in
+  `crates/bastion-plugin-sdk` that broke the lint build). Fixes span both
+  machine-applicable rustfix suggestions and manual ones: De Morgan boolean
+  simplifications in the plugin storage-prefix checks (`src/plugins/runtime.rs`,
+  `process_runtime.rs` — behavior-preserving), an infallible `Any` conversion in
+  `src/modules/pki/x509.rs`, `sort_by_key`/`to_vec`/`enumerate`/`slice::from_ref`
+  idiom fixes, struct-init and dead-import cleanups, doc-comment list
+  formatting, `#[allow]` annotations for intentional patterns (detached
+  scheduler `JoinHandle`s in `Core::post_unseal`, Tauri commands with many
+  args, the plugin host-fill ABI). No behavior changes; full lib + GUI test
+  suites remain green.
+
 ## [0.15.1] - 2026-06-17
 
 ### Fixed

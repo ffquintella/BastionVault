@@ -552,7 +552,7 @@ mod test {
         test_write_api(core, root_token, &format!("auth/userpass/users/{user}"), true, body)
             .await
             .unwrap();
-        let mut req = Request::new(&format!("auth/userpass/login/{user}"));
+        let mut req = Request::new(format!("auth/userpass/login/{user}"));
         req.operation = Operation::Write;
         req.body = Some(json!({ "password": "pw" }).as_object().cloned().unwrap());
         let resp = core.handle_request(&mut req).await.unwrap().expect("userpass login response");

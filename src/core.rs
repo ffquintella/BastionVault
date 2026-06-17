@@ -661,6 +661,11 @@ impl Core {
         ShamirSecret::split(kek.as_slice(), config.secret_shares, config.secret_threshold)
     }
 
+    // The background schedulers below are spawned tasks whose `JoinHandle` is
+    // dropped on purpose (detached): the loops run until the process exits. The
+    // `let _ = start_*()` form is therefore intentional, not an un-awaited
+    // future, so the `let_underscore_future` lint is allowed for this method.
+    #[allow(clippy::let_underscore_future)]
     async fn post_unseal(&self) -> Result<(), RvError> {
         // Multi-tenancy: re-root activation is the default for every install. We
         // decide and (for existing installs) run the non-destructive copy +
@@ -1073,6 +1078,7 @@ mod test {
     use crate::{errors::RvError, test_utils::new_unseal_test_bastion_vault};
 
     #[test]
+    #[allow(clippy::let_underscore_future)]
     fn test_core_init() {
         let _ = new_unseal_test_bastion_vault("test_core_init");
     }
@@ -1394,6 +1400,6 @@ mod test {
         let result = core.unseal_once(&keys3[3]).await;
         assert!(matches!(result, Err(RvError::ErrBarrierUnsealing)));
         let result = core.unseal_once(&keys3[4]).await;
-        assert!(matches!(result, Ok(_)));
+        assert!(result.is_ok());
     }
 }

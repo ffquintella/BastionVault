@@ -368,6 +368,6 @@ mod tests {
             Some(stored.clone())
         });
         assert!(r.is_err());
-        assert!(format!("{}", r.err().unwrap()).contains("consumed"));
+        assert!(r.err().unwrap().to_string().contains("consumed"));
     }
 }

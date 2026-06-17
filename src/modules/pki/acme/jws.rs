@@ -229,7 +229,7 @@ fn field_str(jwk: &Value, name: &str) -> Result<String, JwsError> {
     Ok(jwk
         .get(name)
         .and_then(|v| v.as_str())
-        .ok_or_else(|| JwsError::Malformed("jwk field missing"))?
+        .ok_or(JwsError::Malformed("jwk field missing"))?
         .to_string())
 }
 

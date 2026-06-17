@@ -5,7 +5,7 @@
 //! module compiles out completely; the default build carries zero
 //! OneDrive code and no additional deps (OneDrive reuses `ureq`
 //! + `serde_json` that are already in the tree, plus the shared
-//! `oauth` + `creds` modules from earlier phases).
+//!   `oauth` + `creds` modules from earlier phases).
 //!
 //! Scope sandbox. We only ever request `Files.ReadWrite.AppFolder`
 //! (see `oauth::well_known_provider("onedrive")`), which restricts
@@ -680,7 +680,7 @@ mod tests {
             "@odata.nextLink": "https://graph.microsoft.com/v1.0/..."
         }"#;
         let parsed: ChildrenResponse = serde_json::from_str(body).unwrap();
-        assert!(parsed.next_link.unwrap().contains("nextLink") == false);
+        assert!(!parsed.next_link.unwrap().contains("nextLink"));
     }
 
     #[test]

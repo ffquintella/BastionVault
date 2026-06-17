@@ -628,7 +628,7 @@ fn sniff_pkcs8_algorithm_oid(pem: &str) -> Option<String> {
     let der = parsed.contents();
     // PrivateKeyInfo := SEQUENCE { INT version, AlgorithmIdentifier { OID, ... }, ... }
     // Walk the outer SEQUENCE → version INTEGER → algorithm SEQUENCE → OID.
-    fn take_tlv<'a>(input: &'a [u8], expected: u8) -> Option<(&'a [u8], &'a [u8])> {
+    fn take_tlv(input: &[u8], expected: u8) -> Option<(&[u8], &[u8])> {
         if input.first() != Some(&expected) {
             return None;
         }

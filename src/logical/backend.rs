@@ -407,13 +407,13 @@ mod test {
 
         assert_eq!(logical_backend.paths.len(), 2);
         assert_eq!(&logical_backend.paths[0].pattern, "/(?P<bar>.+?)");
-        assert!(logical_backend.paths[0].fields.get("mytype").is_some());
+        assert!(logical_backend.paths[0].fields.contains_key("mytype"));
         assert_eq!(logical_backend.paths[0].fields["mytype"].field_type, FieldType::Int);
         assert_eq!(logical_backend.paths[0].fields["mytype"].description, "haha");
-        assert!(logical_backend.paths[0].fields.get("mypath").is_some());
+        assert!(logical_backend.paths[0].fields.contains_key("mypath"));
         assert_eq!(logical_backend.paths[0].fields["mypath"].field_type, FieldType::Str);
         assert_eq!(logical_backend.paths[0].fields["mypath"].description, "hehe");
-        assert!(logical_backend.paths[0].fields.get("xxfield").is_none());
+        assert!(!logical_backend.paths[0].fields.contains_key("xxfield"));
         assert_eq!(logical_backend.paths[0].operations[0].op, Operation::Read);
         assert_eq!(logical_backend.paths[0].operations[1].op, Operation::Write);
         assert_eq!(logical_backend.paths[0].operations.len(), 3);

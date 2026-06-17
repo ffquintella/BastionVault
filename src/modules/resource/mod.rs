@@ -1011,7 +1011,7 @@ impl ResourceBackendInner {
             .iter()
             .filter_map(|(k, v)| k.parse::<u64>().ok().map(|n| (n, v)))
             .collect();
-        versions.sort_by(|a, b| b.0.cmp(&a.0));
+        versions.sort_by_key(|v| std::cmp::Reverse(v.0));
 
         let mut entries = Vec::with_capacity(versions.len());
         for (ver, vm) in versions {
@@ -1093,6 +1093,30 @@ impl ResourceModule {
     }
 }
 
+impl Module for ResourceModule {
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
+    }
+
+    fn setup(&self, core: &Core) -> Result<(), RvError> {
+        let backend = self.backend.clone();
+        let backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
+            let mut b = backend.new_backend();
+            b.init()?;
+            Ok(Arc::new(b))
+        };
+        core.add_logical_backend("resource", Arc::new(backend_new_func))
+    }
+
+    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
+        core.delete_logical_backend("resource")
+    }
+}
+
 // ── Unit tests ─────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1153,29 +1177,5 @@ mod tests {
         assert_eq!(a.len(), 20);
         assert_eq!(b.len(), 20);
         assert!(a < b, "expected {a} < {b}");
-    }
-}
-
-impl Module for ResourceModule {
-    fn name(&self) -> String {
-        self.name.clone()
-    }
-
-    fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
-        self
-    }
-
-    fn setup(&self, core: &Core) -> Result<(), RvError> {
-        let backend = self.backend.clone();
-        let backend_new_func = move |_c: Arc<Core>| -> Result<Arc<dyn Backend>, RvError> {
-            let mut b = backend.new_backend();
-            b.init()?;
-            Ok(Arc::new(b))
-        };
-        core.add_logical_backend("resource", Arc::new(backend_new_func))
-    }
-
-    fn cleanup(&self, core: &Core) -> Result<(), RvError> {
-        core.delete_logical_backend("resource")
     }
 }

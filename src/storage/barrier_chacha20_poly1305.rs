@@ -368,7 +368,7 @@ mod tests {
 
         let barrier = ChaCha20Poly1305Barrier {
             backend,
-            barrier_info: ArcSwap::from_pointee(BarrierInfo { sealed: true, key: Some(key), ..Default::default() }),
+            barrier_info: ArcSwap::from_pointee(BarrierInfo { sealed: true, key: Some(key) }),
         };
 
         let path = "test/";

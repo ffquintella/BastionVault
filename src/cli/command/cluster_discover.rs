@@ -63,8 +63,8 @@ impl CommandExecutor for ClusterDiscover {
         // The Target column is the bulkiest field so it gets the
         // slack; everything else is right-aligned for skimming.
         println!(
-            "{:<40} {:>4} {:>4} {:<14} {:>8}  {}",
-            "Target", "Pri", "Wt", "State", "RTT(ms)", "Cluster ID"
+            "{:<40} {:>4} {:>4} {:<14} {:>8}  Cluster ID",
+            "Target", "Pri", "Wt", "State", "RTT(ms)"
         );
         println!("{}", "-".repeat(80));
         for p in &probes {

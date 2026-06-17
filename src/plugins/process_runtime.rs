@@ -467,7 +467,8 @@ pub(super) async fn handle_host_call(
                     .trim_end_matches('/');
                 let req_norm = prefix.trim_start_matches('/').trim_end_matches('/');
                 if !prefix_norm.is_empty()
-                    && !(req_norm == prefix_norm || req_norm.starts_with(&format!("{prefix_norm}/")))
+                    && req_norm != prefix_norm
+                    && !req_norm.starts_with(&format!("{prefix_norm}/"))
                 {
                     return Err("forbidden".to_string());
                 }
@@ -516,7 +517,8 @@ fn rebase_key(manifest: &PluginManifest, requested: &str) -> Option<String> {
     let prefix_norm = prefix.trim_end_matches('/');
     let req_norm = requested.trim_start_matches('/');
     if !prefix_norm.is_empty()
-        && !(req_norm == prefix_norm || req_norm.starts_with(&format!("{prefix_norm}/")))
+        && req_norm != prefix_norm
+        && !req_norm.starts_with(&format!("{prefix_norm}/"))
     {
         return None;
     }

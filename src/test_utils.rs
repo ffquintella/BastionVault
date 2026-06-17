@@ -76,7 +76,7 @@ pub struct TestHttpServer {
 #[maybe_async::maybe_async]
 impl TestHttpServer {
     pub async fn new(name: &str, tls_enable: bool) -> Self {
-        let root_token;
+        
         let seal_config = SealConfig { secret_shares: 10, secret_threshold: 5 };
         let mut test_http_server = TestHttpServer::new_without_init(name, tls_enable);
 
@@ -96,7 +96,7 @@ impl TestHttpServer {
         let result = unseal_test_bastion_vault_core(core.as_ref(), &k).await;
         assert!(result);
 
-        root_token = init_result.root_token.clone();
+        let root_token = init_result.root_token.clone();
         println!("root_token: {:?}", root_token);
 
         test_http_server.root_token = root_token;
@@ -104,19 +104,19 @@ impl TestHttpServer {
         test_http_server
     }
 
-    pub fn new_without_init(name: &str, tls_enable: bool) -> Self {
+    pub fn new_without_init(name: &str, _tls_enable: bool) -> Self {
         let barrier = Arc::new(Barrier::new(2));
         let (stop_tx, stop_rx) = oneshot::channel();
         let bvault = new_test_bastion_vault(name);
         let core = bvault.core.load().clone();
 
-        let mut scheme = "http";
-        let mut ca_cert_pem = "".into();
-        let mut ca_key_pem = "".into();
-        let mut server_cert_pem = "".into();
-        let mut server_key_pem = "".into();
-        let mut test_tls_config = None;
-        let mut cert_dir = "".into();
+        let scheme = "http";
+        let ca_cert_pem = "".into();
+        let ca_key_pem = "".into();
+        let server_cert_pem = "".into();
+        let server_key_pem = "".into();
+        let test_tls_config = None;
+        let cert_dir = "".into();
 
         // TLS test certificate generation was removed with OpenSSL; fall back to plaintext
         let tls_enable = false;
@@ -149,20 +149,20 @@ impl TestHttpServer {
         }
     }
 
-    pub fn new_with_backend(backend: Arc<dyn Backend>, tls_enable: bool) -> Self {
+    pub fn new_with_backend(backend: Arc<dyn Backend>, _tls_enable: bool) -> Self {
         let config = Config::default();
         let barrier = Arc::new(Barrier::new(2));
         let (stop_tx, stop_rx) = oneshot::channel();
         let bvault = BastionVault::new(backend, Some(&config)).unwrap();
         let core = bvault.core.load().clone();
 
-        let mut scheme = "http";
-        let mut ca_cert_pem = "".into();
-        let mut ca_key_pem = "".into();
-        let mut server_cert_pem = "".into();
-        let mut server_key_pem = "".into();
-        let mut test_tls_config = None;
-        let mut cert_dir = "".into();
+        let scheme = "http";
+        let ca_cert_pem = "".into();
+        let ca_key_pem = "".into();
+        let server_cert_pem = "".into();
+        let server_key_pem = "".into();
+        let test_tls_config = None;
+        let cert_dir = "".into();
 
         // TLS test certificate generation was removed with OpenSSL; fall back to plaintext
         let tls_enable = false;
@@ -195,18 +195,18 @@ impl TestHttpServer {
         }
     }
 
-    pub async fn new_with_prometheus(name: &str, tls_enable: bool) -> Self {
+    pub async fn new_with_prometheus(name: &str, _tls_enable: bool) -> Self {
         let barrier = Arc::new(Barrier::new(2));
         let (stop_tx, stop_rx) = oneshot::channel();
         let (_bvault, core, root_token) = new_unseal_test_bastion_vault(name).await;
 
-        let mut scheme = "http";
-        let mut ca_cert_pem = "".into();
-        let mut ca_key_pem = "".into();
-        let mut server_cert_pem = "".into();
-        let mut server_key_pem = "".into();
-        let mut test_tls_config = None;
-        let mut cert_dir = "".into();
+        let scheme = "http";
+        let ca_cert_pem = "".into();
+        let ca_key_pem = "".into();
+        let server_cert_pem = "".into();
+        let server_key_pem = "".into();
+        let test_tls_config = None;
+        let cert_dir = "".into();
 
         // TLS test certificate generation was removed with OpenSSL; fall back to plaintext
         let tls_enable = false;
@@ -633,6 +633,13 @@ pub fn cert_to_x509(
     Err(bv_error_string!("OpenSSL-based X.509 test conversion has been removed"))
 }
 
+/// # Safety
+///
+/// This is a vestigial `unsafe` stub kept only for signature
+/// compatibility after the OpenSSL-based test CRL generation was
+/// removed. It performs no unsafe operations and always returns an
+/// error, so callers have no invariant to uphold; the `unsafe` marker
+/// is retained solely so existing call sites continue to type-check.
 pub unsafe fn new_test_crl(_revoked_cert_pem: &str, _ca_cert_pem: &str, _ca_key_pem: &str) -> Result<String, RvError> {
     Err(bv_error_string!("OpenSSL-based test CRL generation has been removed"))
 }
@@ -694,7 +701,7 @@ pub async fn unseal_test_bastion_vault_core(core: &Core, keys: &[&[u8]]) -> bool
 #[maybe_async::maybe_async]
 pub async fn new_unseal_test_bastion_vault(name: &str) -> (BastionVault, Arc<Core>, String) {
     let seal_config = SealConfig { secret_shares: 9, secret_threshold: 5 };
-    let root_token;
+    
 
     let bvault = new_test_bastion_vault(name);
     let init_result = init_test_bastion_vault(&bvault, &seal_config).await;
@@ -712,7 +719,7 @@ pub async fn new_unseal_test_bastion_vault(name: &str) -> (BastionVault, Arc<Cor
     let result = unseal_test_bastion_vault(&bvault, &k).await;
     assert!(result);
 
-    root_token = init_result.root_token.clone();
+    let root_token = init_result.root_token.clone();
     println!("root_token: {:?}", root_token);
 
     let core = bvault.core.load().clone();

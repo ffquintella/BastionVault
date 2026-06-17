@@ -21,7 +21,7 @@ lazy_static! {
 
         map.insert("token".into(), Arc::new(TokenCliHandler));
         map.insert("userpass".into(), Arc::new(UsesPassCliHandler::default()));
-        map.insert("cert".into(), Arc::new(CertAuthCliHandler::default()));
+        map.insert("cert".into(), Arc::new(CertAuthCliHandler));
 
         map
     };

@@ -596,6 +596,9 @@ mod test {
             {
                 req.operation = Operation::Write;
                 req.path = "tidy/secret-id".to_string();
+                // The returned future is intentionally dropped (fire-and-forget) to
+                // exercise the CAS guard race; not awaited on purpose.
+                #[allow(clippy::let_underscore_future)]
                 let _ = mock_backend.handle_request(&mut req);
             }
 

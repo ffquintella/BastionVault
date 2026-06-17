@@ -61,6 +61,12 @@ impl CachedToken {
         self.bytes.len()
     }
 
+    /// Returns `true` if the cached payload is empty.
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Test-only: expose the raw bytes so a regression test can scan for
     /// plaintext markers. Not available in release builds.
     #[cfg(test)]

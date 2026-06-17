@@ -32,6 +32,7 @@
 
 use bastion_plugin_sdk::{register, Host, LogLevel, Plugin, Request, Response};
 
+#[allow(dead_code)]
 struct Echo;
 
 impl Plugin for Echo {

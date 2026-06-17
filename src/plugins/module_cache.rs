@@ -74,8 +74,8 @@ impl ModuleCache {
         // `async_support(true)` toggle was removed (and made a no-op
         // deprecation in newer minor releases). The async stack budget
         // and max wasm stack remain meaningful and stay configurable.
-        config.async_stack_size(1 * 1024 * 1024);
-        config.max_wasm_stack(1 * 1024 * 1024);
+        config.async_stack_size(1024 * 1024);
+        config.max_wasm_stack(1024 * 1024);
         let engine = Engine::new(&config).map_err(|e| RuntimeError::Engine(e.to_string()))?;
         Ok(Self {
             engine,

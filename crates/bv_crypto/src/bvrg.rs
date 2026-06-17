@@ -471,7 +471,7 @@ pub fn unix_now() -> i64 {
 mod serde_bytes_wrapper {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    pub fn serialize<S: Serializer>(bytes: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
         serde_bytes::Bytes::new(bytes).serialize(s)
     }
 

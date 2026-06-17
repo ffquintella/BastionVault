@@ -736,6 +736,7 @@ fn scoped_rule_matches(rule: &ScopedRule, path: &str) -> bool {
 ///     that corresponds to the current operation. Resolved once
 ///     during `post_auth` and stashed on `req.target_shared_caps`.
 ///     Expired shares are excluded at resolution time.
+///
 /// Unknown scope values are ignored (treated as not matching) so a
 /// typo doesn't silently widen access.
 fn scope_passes(rule: &ScopedRule, req: &Request) -> bool {
@@ -1389,7 +1390,7 @@ path "kv/deny" {
 
         let acl = ACL::new(&[Arc::new(policy1), Arc::new(policy2)]).unwrap();
 
-        assert_eq!(acl.root, false);
+        assert!(!acl.root);
         assert_eq!(
             acl.exact_rules.get("path1/").unwrap().capabilities_bitmap,
             Capability::Read.to_bits() | Capability::List.to_bits()
@@ -1658,7 +1659,7 @@ path "kv/deny" {
                     .allowed_parameters
                     .iter()
                     .map(|(key, value)| {
-                        let array: Vec<Value> = value.iter().map(|s| s.clone()).collect();
+                        let array: Vec<Value> = value.to_vec();
                         (key.clone(), Value::Array(array))
                     })
                     .collect();
@@ -1669,7 +1670,7 @@ path "kv/deny" {
                     .denied_parameters
                     .iter()
                     .map(|(key, value)| {
-                        let array: Vec<Value> = value.iter().map(|s| s.clone()).collect();
+                        let array: Vec<Value> = value.to_vec();
                         (key.clone(), Value::Array(array))
                     })
                     .collect();
@@ -1786,10 +1787,8 @@ path "kv/deny" {
             let mut req = Request { operation: Operation::Write, path: case.0.to_string(), ..Default::default() };
 
             let mut data: Map<String, Value> = Map::new();
-            let mut i = 0;
-            for parameter in case.1.iter() {
+            for (i, parameter) in case.1.iter().enumerate() {
                 data.insert(parameter.to_string(), case.2[i].clone());
-                i += 1;
             }
 
             req.body = Some(data);
@@ -1930,7 +1929,7 @@ path "kv/deny" {
                 if Instant::now() >= stop_time {
                     break;
                 }
-                assert!(ACL::new(&[p.clone()]).is_ok());
+                assert!(ACL::new(std::slice::from_ref(&p)).is_ok());
             }));
         }
 

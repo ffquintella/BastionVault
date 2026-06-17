@@ -176,7 +176,7 @@ pub fn read_persisted_token() -> Option<String> {
 /// via the printed value.
 pub fn write_persisted_token(token: &str) -> std::io::Result<PathBuf> {
     let path = token_helper_path()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "no token helper path"))?;
+        .ok_or_else(|| std::io::Error::other("no token helper path"))?;
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;

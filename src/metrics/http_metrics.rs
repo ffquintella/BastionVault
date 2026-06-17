@@ -78,7 +78,7 @@ impl HttpMetrics {
 mod tests {
     use std::collections::HashMap;
 
-    use rand::Rng;
+    
     use regex::Regex;
     use serde_json::json;
 

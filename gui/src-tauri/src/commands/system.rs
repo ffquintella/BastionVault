@@ -378,7 +378,7 @@ pub async fn recover_unseal_key(
     // The embedded-vault init writes a 32-byte key, i.e. 64 hex
     // chars. We reject anything else up-front rather than letting
     // the downstream unseal fail with an opaque error.
-    if trimmed.len() % 2 != 0 {
+    if !trimmed.len().is_multiple_of(2) {
         return Err("unseal key hex string has odd length".into());
     }
     if !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {

@@ -286,7 +286,7 @@ fn unix_now() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
     use crate::modules::ldap::policy::StaticRole;
     use std::time::Duration;
 

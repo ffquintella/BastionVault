@@ -200,6 +200,7 @@ pub async fn create_file(
     read_file_meta(state, id).await
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn update_file_content(
     state: State<'_, AppState>,

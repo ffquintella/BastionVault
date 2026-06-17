@@ -151,13 +151,11 @@ mod ha_tests {
 
         /// Clear the test table on all running nodes.
         async fn clear_all(&self) {
-            for node_opt in &self.nodes {
-                if let Some(node) = node_opt {
-                    let _ = node
-                        .client()
-                        .batch(Cow::Borrowed("DELETE FROM vault_ha_test"))
-                        .await;
-                }
+            for node in self.nodes.iter().flatten() {
+                let _ = node
+                    .client()
+                    .batch(Cow::Borrowed("DELETE FROM vault_ha_test"))
+                    .await;
             }
         }
 

@@ -1671,6 +1671,7 @@ async fn parse_rustion_ticket_bundle(
 /// resource can still launch a session. Returns [`ConnectRoute::Direct`]
 /// when the policy does not route through a bastion — the caller then falls
 /// back to the client-side resolution path.
+#[allow(clippy::too_many_arguments)]
 async fn open_rustion_session_v2_ssh(
     state: &State<'_, AppState>,
     resource_name: &str,

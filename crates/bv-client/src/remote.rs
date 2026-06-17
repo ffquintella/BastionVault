@@ -354,7 +354,6 @@ impl RemoteBackend {
 
         let url = self.build_url(path);
         let inner = Arc::clone(&self.inner);
-        let body = body;
         let token = token.to_string();
         let path_owned = path.to_string();
 

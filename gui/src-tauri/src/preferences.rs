@@ -84,6 +84,7 @@ fn default_local_storage_kind() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct Preferences {
     /// All saved vault profiles. Order is preserved from the on-disk
     /// file so operators who hand-edit the JSON control the UI's
@@ -111,18 +112,6 @@ pub struct Preferences {
     pub cloud_storage: Option<CloudStorageConfig>,
 }
 
-impl Default for Preferences {
-    fn default() -> Self {
-        Self {
-            vaults: Vec::new(),
-            last_used_id: None,
-            password_policy: PasswordPolicy::default(),
-            mode: None,
-            remote_profile: None,
-            cloud_storage: None,
-        }
-    }
-}
 
 impl Preferences {
     /// One-time in-memory migration: if the on-disk file was written

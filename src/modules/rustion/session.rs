@@ -14,7 +14,7 @@
 //!
 //! Phase 3 ships the orchestration; the GUI-side wiring (Tauri command
 //! + Connection-tab editor) and the resource-side connection-profile
-//! shape land in follow-up commits.
+//!   shape land in follow-up commits.
 
 #![deny(unsafe_code)]
 

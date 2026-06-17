@@ -484,7 +484,7 @@ pub async fn fido2_native_register(
         let _ = handle.emit("fido2-status", "insert-key");
 
         service.register(timeout_ms, register_args, status_tx, callback)
-            .map_err(|e| CommandError::from(e))?;
+            .map_err(CommandError::from)?;
 
         match result_rx.recv_timeout(Duration::from_millis(timeout_ms + 5000)) {
             Ok(Ok(register_result)) => Ok(register_result),
@@ -659,7 +659,7 @@ pub async fn fido2_native_login(
         let _ = handle.emit("fido2-status", "insert-key");
 
         service.sign(timeout_ms, sign_args, status_tx, callback)
-            .map_err(|e| CommandError::from(e))?;
+            .map_err(CommandError::from)?;
 
         match result_rx.recv_timeout(Duration::from_millis(timeout_ms + 5000)) {
             Ok(Ok(result)) => Ok(result),

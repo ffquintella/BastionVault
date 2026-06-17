@@ -91,17 +91,14 @@ impl ShareTargetKind {
 /// one policy whose `metadata.group_shared_resources = "true"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ShareGranteeKind {
+    #[default]
     Entity,
     GroupUser,
     GroupApp,
 }
 
-impl Default for ShareGranteeKind {
-    fn default() -> Self {
-        ShareGranteeKind::Entity
-    }
-}
 
 impl ShareGranteeKind {
     pub fn as_str(self) -> &'static str {

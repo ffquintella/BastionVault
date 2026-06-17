@@ -270,7 +270,7 @@ fn handle_callback(mut stream: TcpStream) -> Result<OidcCallback, String> {
 }
 
 fn parse_callback_request(line: &str) -> Result<OidcCallback, String> {
-    let trimmed = line.trim_end_matches(&['\r', '\n']);
+    let trimmed = line.trim_end_matches(['\r', '\n']);
     let mut it = trimmed.splitn(3, ' ');
     let method = it
         .next()

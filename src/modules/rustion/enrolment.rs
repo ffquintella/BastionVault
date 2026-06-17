@@ -197,7 +197,7 @@ pub async fn deenrol_bastion(
     let built = envelope::build_deenrol(master, target, operator, reason)
         .map_err(|e| EnrolmentError::Envelope(format!("{e}")))?;
 
-    let client = super::http::build_client_for(&target, Duration::from_secs(10))
+    let client = super::http::build_client_for(target, Duration::from_secs(10))
         .map_err(|e| EnrolmentError::Transport(format!("{e}")))?;
     let url = format!(
         "https://{}/v1/authorities/deenrol",

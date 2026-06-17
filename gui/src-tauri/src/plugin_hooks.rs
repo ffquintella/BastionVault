@@ -172,7 +172,7 @@ pub fn run_hook(
     let packed = entry
         .call(&mut store, (in_ptr, in_len))
         .map_err(|e| HookError::Invocation(e.to_string()))?;
-    let out_ptr = (packed >> 32) as i64 as i32;
+    let out_ptr = (packed >> 32) as i32;
     let out_len = (packed as u32) as i32;
 
     if out_len < 0 || (out_len as usize) > MAX_PAYLOAD_BYTES {
@@ -181,7 +181,7 @@ pub fn run_hook(
     let out_ptr_u = out_ptr as usize;
     let out_len_u = out_len as usize;
     let mem_size = memory.data_size(&store);
-    if out_ptr_u.checked_add(out_len_u).map_or(true, |end| end > mem_size) {
+    if out_ptr_u.checked_add(out_len_u).is_none_or(|end| end > mem_size) {
         return Err(HookError::OutputOutOfBounds);
     }
     let mut buf = vec![0u8; out_len_u];

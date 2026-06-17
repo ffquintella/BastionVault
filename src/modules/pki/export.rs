@@ -224,17 +224,20 @@ const ID_HMAC_WITH_SHA256: ObjectIdentifier =
 /// Build a password-encrypted PKCS#12 (`.p12`) bundle.
 ///
 /// Layout (interoperable with OpenSSL / Java / Windows / macOS):
+///
+/// ```text
 ///   * AuthenticatedSafe = SEQUENCE OF [
-///       ContentInfo(id-encryptedData, EncryptedData(PBES2 over
-///         SafeContents containing one or more CertBags — leaf + chain)),
-///       (when private_key_pem is supplied)
-///       ContentInfo(id-data, SafeContents containing one
-///         pkcs8-shrouded-key bag with the leaf's PKCS#8 wrapped in
-///         a PBES2 EncryptedPrivateKeyInfo).
+///     ContentInfo(id-encryptedData, EncryptedData(PBES2 over
+///       SafeContents containing one or more CertBags — leaf + chain)),
+///     (when private_key_pem is supplied)
+///     ContentInfo(id-data, SafeContents containing one
+///       pkcs8-shrouded-key bag with the leaf's PKCS#8 wrapped in
+///       a PBES2 EncryptedPrivateKeyInfo).
 ///     ]
 ///   * Outer ContentInfo = id-data wrapping the AuthenticatedSafe DER.
 ///   * MacData = HMAC-SHA256 over the AuthenticatedSafe DER, key
 ///     derived via the PKCS#12 KDF (RFC 7292 Appendix B.2).
+/// ```
 ///
 /// Both encrypted sections use the *same* `password` so importers
 /// only prompt once. The salts and IVs are freshly random per

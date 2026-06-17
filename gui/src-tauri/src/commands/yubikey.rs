@@ -109,7 +109,7 @@ pub async fn yubikey_enable_keychain_slot() -> CmdResult<()> {
 /// and offer the "Re-enable keychain unlock" recovery button.
 #[tauri::command]
 pub async fn yubikey_keychain_slot_present() -> CmdResult<bool> {
-    Ok(crate::local_keystore::keychain_slot_present()?)
+    crate::local_keystore::keychain_slot_present()
 }
 
 #[tauri::command]

@@ -345,7 +345,7 @@ fn classical_signature_alg_id(
     let null_params: Option<x509_cert::der::Any> = {
         // ASN.1 NULL is `0x05 0x00`. Build it via AnyRef::null() and own.
         let any_ref = AnyRef::from(x509_cert::der::asn1::Null);
-        Some(any_ref.try_into().map_err(rcgen_die)?)
+        Some(any_ref.into())
     };
 
     let (oid, parameters): (const_oid::ObjectIdentifier, Option<x509_cert::der::Any>) = match alg {
@@ -389,14 +389,6 @@ fn classical_signature_alg_id(
         | KeyAlgorithm::CompositeEcdsaP384MlDsa87 => return Err(RvError::ErrPkiKeyTypeInvalid),
     };
     Ok(x509_cert::spki::AlgorithmIdentifierOwned { oid, parameters })
-}
-
-/// Constant-error helper for the alg-id construction path. The error
-/// types from the `der` crate are bulky `Debug`-only; treat any failure
-/// as an internal misconfiguration.
-fn rcgen_die(e: impl std::fmt::Debug) -> RvError {
-    log::error!("pki: classical signature AlgorithmIdentifier construction failed: {e:?}");
-    RvError::ErrPkiInternal
 }
 
 /// One revoked-cert record persisted in storage and folded into each new CRL.

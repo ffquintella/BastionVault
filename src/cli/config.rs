@@ -494,7 +494,7 @@ mod test {
         assert_eq!(json_config.log_level.as_str(), "debug");
         assert_eq!(json_config.pid_file.as_str(), "/tmp/bastion_vault.pid");
         assert_eq!(json_config.work_dir.as_str(), "");
-        assert_eq!(json_config.daemon, false);
+        assert!(!json_config.daemon);
         assert_eq!(json_config.daemon_user.as_str(), "");
         assert_eq!(json_config.daemon_group.as_str(), "");
         assert_eq!(json_config.mount_entry_hmac_level, MountEntryHMACLevel::None);
@@ -616,7 +616,7 @@ mod test {
         assert_eq!(hcl_config.log_level.as_str(), "debug");
         assert_eq!(hcl_config.pid_file.as_str(), "/tmp/bastion_vault.pid");
         assert_eq!(hcl_config.work_dir.as_str(), "");
-        assert_eq!(hcl_config.daemon, false);
+        assert!(!hcl_config.daemon);
         assert_eq!(hcl_config.daemon_user.as_str(), "");
         assert_eq!(hcl_config.daemon_group.as_str(), "");
         assert_eq!(hcl_config.mount_entry_hmac_level, MountEntryHMACLevel::High);
@@ -624,12 +624,12 @@ mod test {
         let (_, listener) = hcl_config.listener.iter().next().unwrap();
         assert_eq!(listener.ltype.as_str(), "tcp");
         assert_eq!(listener.address.as_str(), "127.0.0.1:8200");
-        assert_eq!(listener.tls_disable, false);
+        assert!(!listener.tls_disable);
         assert_eq!(listener.tls_cert_file.as_str(), "./cert/test.crt");
         assert_eq!(listener.tls_key_file.as_str(), "./cert/test.key");
         assert_eq!(listener.tls_client_ca_file.as_str(), "./cert/ca.pem");
-        assert_eq!(listener.tls_disable_client_certs, false);
-        assert_eq!(listener.tls_require_and_verify_client_cert, false);
+        assert!(!listener.tls_disable_client_certs);
+        assert!(!listener.tls_require_and_verify_client_cert);
         assert_eq!(listener.tls_min_version, TlsVersion::Tls12);
         assert_eq!(listener.tls_max_version, TlsVersion::Tls13);
 

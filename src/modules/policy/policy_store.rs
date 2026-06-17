@@ -656,6 +656,7 @@ path "cubbyhole/*" {
 ///   * force a static-role rotation,
 ///   * check out / check in pool accounts + read pool status,
 ///   * list configured roles + sets.
+///
 /// Does NOT grant role / set lifecycle, connection config, or the
 /// `rotate-root` endpoint — those are admin-only.
 static LDAP_USER_POLICY_NAME: &str = "ldap-user";
@@ -3155,7 +3156,7 @@ mod mod_policy_store_tests {
         policy_store.load_default_acl_policy().await.unwrap();
 
         // Create a new ACL
-        let acl = policy_store.new_acl(&vec![policy1_name.to_string(), policy2_name.to_string()], None).await.unwrap();
+        let acl = policy_store.new_acl(&[policy1_name.to_string(), policy2_name.to_string()], None).await.unwrap();
 
         // Verify the ACL contains the policies
         assert_eq!(

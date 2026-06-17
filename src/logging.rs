@@ -201,7 +201,7 @@ impl LevelFilters {
 
         // Longest prefix first: `hiqlite::network=debug` should beat a
         // broader `hiqlite=warn` for a matching target.
-        targets.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        targets.sort_by_key(|t| std::cmp::Reverse(t.0.len()));
         Self { global, targets }
     }
 

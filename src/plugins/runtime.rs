@@ -507,7 +507,7 @@ fn register_host_imports(
             "bv",
             "crypto_random",
             |mut caller: Caller<'_, PluginCtx>, n_bytes: i32, out_ptr: i32, out_max: i32| -> i32 {
-                if n_bytes < 0 || n_bytes > 4096 {
+                if !(0..=4096).contains(&n_bytes) {
                     return STORAGE_INTERNAL_ERROR;
                 }
                 if n_bytes > out_max {
@@ -598,6 +598,7 @@ fn register_host_imports(
 /// Common crypto-op dispatcher. The plugin sends:
 ///   * `key`: Transit key path (`"transit/keys/<name>"`)
 ///   * `in_bytes`: operation-specific input
+///
 /// The host validates the key against the allowlist, base64-encodes
 /// the input as needed, calls the Transit backend through `Core`,
 /// pulls the relevant field out of the response, and writes the
@@ -841,7 +842,8 @@ async fn storage_list_impl(
             .trim_end_matches('/');
         let req_norm = prefix.trim_start_matches('/').trim_end_matches('/');
         if !prefix_norm.is_empty()
-            && !(req_norm == prefix_norm || req_norm.starts_with(&format!("{prefix_norm}/")))
+            && req_norm != prefix_norm
+            && !req_norm.starts_with(&format!("{prefix_norm}/"))
         {
             return STORAGE_FORBIDDEN;
         }
@@ -915,7 +917,7 @@ fn read_bytes(caller: &mut Caller<'_, PluginCtx>, ptr: i32, len: i32) -> Option<
     }
     let memory = caller.get_export("memory").and_then(|e| e.into_memory())?;
     let mut buf = vec![0u8; len as usize];
-    memory.read(&caller.as_context_mut(), ptr as usize, &mut buf).ok()?;
+    memory.read(caller.as_context_mut(), ptr as usize, &mut buf).ok()?;
     Some(buf)
 }
 

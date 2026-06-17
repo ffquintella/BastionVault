@@ -401,7 +401,7 @@ fn pkcs1v15_sha256_encode(input: &[u8], key_size_bytes: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(key_size_bytes);
     out.push(0x00);
     out.push(0x01);
-    out.extend(std::iter::repeat(0xffu8).take(padding_len));
+    out.extend(std::iter::repeat_n(0xffu8, padding_len));
     out.push(0x00);
     out.extend_from_slice(SHA256_DIGEST_INFO_PREFIX);
     out.extend_from_slice(&digest);

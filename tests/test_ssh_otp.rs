@@ -43,8 +43,7 @@ async fn write_err(
     req.body = Some(body);
     core.handle_request(&mut req)
         .await
-        .err()
-        .expect("expected write to fail")
+        .expect_err("expected write to fail")
 }
 
 #[maybe_async::test(

@@ -83,6 +83,7 @@ pub async fn read_approle(state: State<'_, AppState>, name: String) -> CmdResult
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn write_approle(
     state: State<'_, AppState>,

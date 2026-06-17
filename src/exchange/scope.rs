@@ -67,8 +67,10 @@ impl MountIndex {
 /// What to do when an imported item collides with an existing target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ConflictPolicy {
     /// Keep the existing version; the import is a no-op for this item.
+    #[default]
     Skip,
     /// Replace the existing version with the imported one.
     Overwrite,
@@ -77,11 +79,6 @@ pub enum ConflictPolicy {
     Rename,
 }
 
-impl Default for ConflictPolicy {
-    fn default() -> Self {
-        Self::Skip
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]

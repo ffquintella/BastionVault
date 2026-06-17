@@ -422,14 +422,14 @@ pub async fn init_embedded() -> Result<InitOutcome, CommandError> {
     eprintln!("embedded: init_embedded starting (storage = {:?})", storage_kind());
     let backend = build_backend().await?;
     eprintln!("embedded: backend built, creating vault");
-    let vault = BastionVault::new(backend, None).map_err(|e| CommandError::from(e))?;
+    let vault = BastionVault::new(backend, None).map_err(CommandError::from)?;
 
     let seal_config = SealConfig {
         secret_shares: 1,
         secret_threshold: 1,
     };
 
-    let init_result = vault.init(&seal_config).await.map_err(|e| CommandError::from(e))?;
+    let init_result = vault.init(&seal_config).await.map_err(CommandError::from)?;
 
     // Store the unseal key and root token in the local keystore,
     // indexed by the active vault profile's id. `local_keystore`
@@ -445,7 +445,7 @@ pub async fn init_embedded() -> Result<InitOutcome, CommandError> {
 
     // Unseal immediately.
     let key_bytes = &init_result.secret_shares[0];
-    vault.unseal(&[key_bytes.as_slice()]).await.map_err(|e| CommandError::from(e))?;
+    vault.unseal(&[key_bytes.as_slice()]).await.map_err(CommandError::from)?;
 
     // Create default policies and enable auth methods.
     create_default_policies(&vault, &root_token).await?;
@@ -511,11 +511,13 @@ path "sys/unseal" {
     let mut body = Map::new();
     body.insert("policy".to_string(), Value::String(admin_policy.trim().to_string()));
 
-    let mut req = Request::default();
-    req.operation = Operation::Write;
-    req.path = "sys/policies/acl/admin".to_string();
-    req.client_token = root_token.to_string();
-    req.body = Some(body);
+    let mut req = Request {
+        operation: Operation::Write,
+        path: "sys/policies/acl/admin".to_string(),
+        client_token: root_token.to_string(),
+        body: Some(body),
+        ..Default::default()
+    };
 
     core.handle_request(&mut req).await.map_err(CommandError::from)?;
 
@@ -535,11 +537,13 @@ path "auth/token/lookup-self" {
     let mut body = Map::new();
     body.insert("policy".to_string(), Value::String(default_policy.trim().to_string()));
 
-    let mut req = Request::default();
-    req.operation = Operation::Write;
-    req.path = "sys/policies/acl/default".to_string();
-    req.client_token = root_token.to_string();
-    req.body = Some(body);
+    let mut req = Request {
+        operation: Operation::Write,
+        path: "sys/policies/acl/default".to_string(),
+        client_token: root_token.to_string(),
+        body: Some(body),
+        ..Default::default()
+    };
 
     core.handle_request(&mut req).await.map_err(CommandError::from)?;
 
@@ -556,11 +560,13 @@ async fn enable_default_auth_methods(vault: &BastionVault, root_token: &str) -> 
     body.insert("type".to_string(), Value::String("userpass".to_string()));
     body.insert("description".to_string(), Value::String("Username & password authentication".to_string()));
 
-    let mut req = Request::default();
-    req.operation = Operation::Write;
-    req.path = "sys/auth/userpass/".to_string();
-    req.client_token = root_token.to_string();
-    req.body = Some(body);
+    let mut req = Request {
+        operation: Operation::Write,
+        path: "sys/auth/userpass/".to_string(),
+        client_token: root_token.to_string(),
+        body: Some(body),
+        ..Default::default()
+    };
 
     // Ignore errors if already mounted.
     let _ = core.handle_request(&mut req).await;
@@ -571,11 +577,13 @@ async fn enable_default_auth_methods(vault: &BastionVault, root_token: &str) -> 
     body.insert("rp_origin".to_string(), Value::String("https://localhost".to_string()));
     body.insert("rp_name".to_string(), Value::String("BastionVault".to_string()));
 
-    let mut req = Request::default();
-    req.operation = Operation::Write;
-    req.path = "auth/userpass/fido2/config".to_string();
-    req.client_token = root_token.to_string();
-    req.body = Some(body);
+    let mut req = Request {
+        operation: Operation::Write,
+        path: "auth/userpass/fido2/config".to_string(),
+        client_token: root_token.to_string(),
+        body: Some(body),
+        ..Default::default()
+    };
 
     let _ = core.handle_request(&mut req).await;
 
@@ -585,7 +593,7 @@ async fn enable_default_auth_methods(vault: &BastionVault, root_token: &str) -> 
 /// Open and unseal an existing embedded vault using keys from the OS keychain.
 pub async fn open_embedded() -> Result<Arc<BastionVault>, CommandError> {
     let backend = build_backend().await?;
-    let vault = BastionVault::new(backend, None).map_err(|e| CommandError::from(e))?;
+    let vault = BastionVault::new(backend, None).map_err(CommandError::from)?;
 
     // Look up the unseal key for the currently-selected vault
     // profile. Falls back to the legacy single-entry keychain slot
@@ -599,7 +607,7 @@ pub async fn open_embedded() -> Result<Arc<BastionVault>, CommandError> {
     let unseal_key = hex::decode(&unseal_key_hex)
         .map_err(|_| CommandError::from("Invalid unseal key in local keystore"))?;
 
-    vault.unseal(&[&unseal_key]).await.map_err(|e| CommandError::from(e))?;
+    vault.unseal(&[&unseal_key]).await.map_err(CommandError::from)?;
 
     Ok(Arc::new(vault))
 }
@@ -610,7 +618,7 @@ pub async fn open_embedded() -> Result<Arc<BastionVault>, CommandError> {
 /// helper has no callers.
 #[cfg(feature = "embedded_vault")]
 pub async fn seal_vault(vault: &BastionVault) -> Result<(), CommandError> {
-    vault.core.load().seal().await.map_err(|e| CommandError::from(e))
+    vault.core.load().seal().await.map_err(CommandError::from)
 }
 
 /// Probe the cloud bucket for init markers. Returns `Ok(true)` when

@@ -102,7 +102,7 @@ fn read_otp_from_stdin() -> Result<String, String> {
         .read_to_string(&mut buf)
         .map_err(|e| format!("read stdin: {e}"))?;
     let trimmed = buf
-        .trim_end_matches(|c: char| c == '\0' || c == '\n' || c == '\r')
+        .trim_end_matches(['\0', '\n', '\r'])
         .to_string();
     if trimmed.is_empty() {
         return Err("empty OTP on stdin".into());

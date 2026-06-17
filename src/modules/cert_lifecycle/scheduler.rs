@@ -215,7 +215,7 @@ async fn consider_target(
     // engine somewhere other than `cert-lifecycle/`).
     let trimmed_mount = mount_path.trim_end_matches('/');
     let mut renew_req =
-        Request::new(&format!("{trimmed_mount}/renew/{name}"));
+        Request::new(format!("{trimmed_mount}/renew/{name}"));
     renew_req.operation = Operation::Write;
     renew_req.client_token = cfg.client_token.clone();
     renew_req.body = Some(Map::new());

@@ -24,6 +24,7 @@
 
 use bastion_plugin_sdk::{register, Host, HostError, LogLevel, Plugin, Request, Response};
 
+#[allow(dead_code)]
 struct KvCache;
 
 impl Plugin for KvCache {

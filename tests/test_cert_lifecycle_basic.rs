@@ -210,7 +210,7 @@ async fn test_cert_lifecycle_basic_l5() {
 
     let r1 = write_ok(&core, &token, "cert-lifecycle/renew/pinned", Map::new()).await;
     let cert1 = fs::read_to_string(out_dir2.join("cert.pem")).unwrap();
-    assert_eq!(r1["serial_number"].as_str().unwrap().is_empty(), false);
+    assert!(!r1["serial_number"].as_str().unwrap().is_empty());
 
     let _r2 = write_ok(&core, &token, "cert-lifecycle/renew/pinned", Map::new()).await;
     let cert2 = fs::read_to_string(out_dir2.join("cert.pem")).unwrap();

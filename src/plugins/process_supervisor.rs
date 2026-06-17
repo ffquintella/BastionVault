@@ -140,6 +140,7 @@ struct Worker {
     next_id: u64,
 }
 
+#[derive(Default)]
 struct Supervised {
     /// `None` until the first successful spawn.
     worker: Option<Worker>,
@@ -154,16 +155,6 @@ struct Supervised {
     last_attempt_at: Option<Instant>,
 }
 
-impl Default for Supervised {
-    fn default() -> Self {
-        Self {
-            worker: None,
-            crashes: Vec::new(),
-            consecutive_failures: 0,
-            last_attempt_at: None,
-        }
-    }
-}
 
 impl Supervised {
     fn prune_window(&mut self) {
@@ -187,7 +178,7 @@ impl Supervised {
             return Duration::ZERO;
         }
         let exp = (self.consecutive_failures - 1).min(8);
-        let raw = INITIAL_BACKOFF * 2u32.pow(exp as u32);
+        let raw = INITIAL_BACKOFF * 2u32.pow(exp);
         std::cmp::min(raw, MAX_BACKOFF)
     }
 

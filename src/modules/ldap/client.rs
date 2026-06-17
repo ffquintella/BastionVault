@@ -48,9 +48,9 @@ pub trait Directory: Send + Sync {
     /// password to `new_password`. For AD this is one
     /// `Replace(unicodePwd, [UTF-16LE-quoted-bytes])`; for OpenLDAP
     /// this is `Replace(userPassword, [utf8-bytes])`.
-    fn password_modify_op<'a>(
+    fn password_modify_op(
         &self,
-        new_password: &'a str,
+        new_password: &str,
     ) -> Vec<Mod<Vec<u8>>>;
 }
 

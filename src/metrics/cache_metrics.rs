@@ -81,6 +81,7 @@ pub struct CacheLabel {
 /// Clone-cheap collection of cache-subsystem Prometheus metrics. See the
 /// module docstring for how callers get at the shared instance.
 #[derive(Clone)]
+#[derive(Default)]
 pub struct CacheMetrics {
     hits: Family<CacheLabel, Counter>,
     misses: Family<CacheLabel, Counter>,
@@ -88,16 +89,6 @@ pub struct CacheMetrics {
     size: Family<CacheLabel, Gauge<i64, AtomicI64>>,
 }
 
-impl Default for CacheMetrics {
-    fn default() -> Self {
-        Self {
-            hits: Family::default(),
-            misses: Family::default(),
-            evictions: Family::default(),
-            size: Family::default(),
-        }
-    }
-}
 
 static GLOBAL: OnceLock<CacheMetrics> = OnceLock::new();
 

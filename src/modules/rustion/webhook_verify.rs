@@ -141,7 +141,7 @@ fn parse_header(s: &str) -> Result<(String, String), VerifyError> {
 mod tests {
     use super::*;
     use ed25519_dalek::Signer;
-    use fips204::traits::{KeyGen, Signer as PqcSigner};
+    use fips204::traits::Signer as PqcSigner;
 
     fn synth() -> (String, String, [u8; 32], fips204::ml_dsa_65::PrivateKey) {
         // Deterministic seed is fine here — these tests round-trip

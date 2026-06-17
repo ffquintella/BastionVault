@@ -48,6 +48,12 @@ pub struct Host {
     _private: (),
 }
 
+impl Default for Host {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Host {
     /// Construct a host handle. The [`crate::register!`] macro calls
     /// this from inside `bv_run`; plugin authors don't normally
@@ -163,7 +169,7 @@ impl Host {
             let rc = bindings::config_get(key.as_bytes(), &mut buf);
             if rc >= 0 {
                 buf.truncate(rc as usize);
-                return Some(String::from_utf8(buf).ok()?);
+                return String::from_utf8(buf).ok();
             }
             if rc == -3 && cap < 64 * 1024 {
                 cap *= 2;

@@ -197,8 +197,10 @@ async fn discovery_picks_leader_among_healthy_nodes() {
 
     // Tell `discovery::resolve` to use `http://` so the probe
     // listeners don't have to terminate TLS.
-    let mut cfg = DiscoveryConfig::default();
-    cfg.default_scheme = "http".to_string();
+    let cfg = DiscoveryConfig {
+        default_scheme: "http".to_string(),
+        ..Default::default()
+    };
     let resolved = discovery::resolve("vault.test.local", &cfg, &resolver)
         .await
         .unwrap();

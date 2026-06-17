@@ -253,34 +253,34 @@ mod mod_string_tests {
         let patterns: Vec<Value> = vec![json!("*abc*"), json!("*def"), json!("ghi*"), json!("jkl"), json!("m*n*o")];
         let empty_patterns: Vec<Value> = vec![];
 
-        assert_eq!(empty_patterns.glob_contains(&json!("any_string")), true);
+        assert!(empty_patterns.glob_contains(&json!("any_string")));
 
-        assert_eq!(patterns.glob_contains(&json!("defabcghi")), true); // *abc*
-        assert_eq!(patterns.glob_contains(&json!("def")), true); // *def
-        assert_eq!(patterns.glob_contains(&json!("ghijkl")), true); // ghi*
-        assert_eq!(patterns.glob_contains(&json!("jkl")), true); // jkl
+        assert!(patterns.glob_contains(&json!("defabcghi"))); // *abc*
+        assert!(patterns.glob_contains(&json!("def"))); // *def
+        assert!(patterns.glob_contains(&json!("ghijkl"))); // ghi*
+        assert!(patterns.glob_contains(&json!("jkl"))); // jkl
 
-        assert_eq!(patterns.glob_contains(&json!("mnop")), false);
-        assert_eq!(patterns.glob_contains(&json!("xyz")), false);
-        assert_eq!(patterns.glob_contains(&json!("ab")), false);
-        assert_eq!(patterns.glob_contains(&json!("efg")), false);
-        assert_eq!(patterns.glob_contains(&json!("hij")), false);
-        assert_eq!(patterns.glob_contains(&json!("k")), false);
-        assert_eq!(patterns.glob_contains(&json!("lmn")), false);
+        assert!(!patterns.glob_contains(&json!("mnop")));
+        assert!(!patterns.glob_contains(&json!("xyz")));
+        assert!(!patterns.glob_contains(&json!("ab")));
+        assert!(!patterns.glob_contains(&json!("efg")));
+        assert!(!patterns.glob_contains(&json!("hij")));
+        assert!(!patterns.glob_contains(&json!("k")));
+        assert!(!patterns.glob_contains(&json!("lmn")));
 
-        assert_eq!(patterns.glob_contains(&json!(42)), false);
-        assert_eq!(patterns.glob_contains(&json!(true)), false);
-        assert_eq!(patterns.glob_contains(&json!({"key": "value"})), false);
-        assert_eq!(patterns.glob_contains(&json!([1, 2, 3])), false);
+        assert!(!patterns.glob_contains(&json!(42)));
+        assert!(!patterns.glob_contains(&json!(true)));
+        assert!(!patterns.glob_contains(&json!({"key": "value"})));
+        assert!(!patterns.glob_contains(&json!([1, 2, 3])));
 
         let mixed_patterns: Vec<Value> =
             vec![json!("*abc*"), json!(42), json!(true), json!({"key": "value"}), json!([1, 2, 3])];
 
-        assert_eq!(mixed_patterns.glob_contains(&json!("defabcghi")), true); // *abc*
-        assert_eq!(mixed_patterns.glob_contains(&json!(42)), true); // 42
-        assert_eq!(mixed_patterns.glob_contains(&json!(true)), true); // true
-        assert_eq!(mixed_patterns.glob_contains(&json!({"key": "value"})), true); // {"key": "value"}
-        assert_eq!(mixed_patterns.glob_contains(&json!([1, 2, 3])), true); // [1, 2, 3]
+        assert!(mixed_patterns.glob_contains(&json!("defabcghi"))); // *abc*
+        assert!(mixed_patterns.glob_contains(&json!(42))); // 42
+        assert!(mixed_patterns.glob_contains(&json!(true))); // true
+        assert!(mixed_patterns.glob_contains(&json!({"key": "value"}))); // {"key": "value"}
+        assert!(mixed_patterns.glob_contains(&json!([1, 2, 3]))); // [1, 2, 3]
     }
 
     #[test]

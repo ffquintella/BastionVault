@@ -207,7 +207,7 @@ pub fn parse_iso8601_utc(s: &str) -> Result<u64, RvError> {
         .and_then(|v| v.parse().ok())
         .ok_or_else(|| bad(s))?;
 
-    if month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || min > 59 || sec > 60 {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 60 {
         return Err(bad(s));
     }
 

@@ -154,7 +154,7 @@ async fn test_pki_phase5_2_two_issuers_default_swap() {
     // pki/issuer/eu-root returns root B.
     let eu = read(&core, &token, "pki/issuer/eu-root").await;
     assert_eq!(eu["certificate"].as_str().unwrap(), root_b_pem);
-    assert_eq!(eu["is_default"].as_bool().unwrap(), false);
+    assert!(!eu["is_default"].as_bool().unwrap());
 
     // Swap default to eu-root.
     write(
@@ -411,7 +411,7 @@ async fn test_pki_phase5_2_legacy_migration_shim() {
     let info = listed["key_info"].as_object().unwrap();
     let entry = info[&lifted_id].as_object().unwrap();
     assert_eq!(entry["name"].as_str().unwrap(), "default");
-    assert_eq!(entry["is_default"].as_bool().unwrap(), true);
+    assert!(entry["is_default"].as_bool().unwrap());
 }
 
 fn parse_crl_serials(crl_pem: &str) -> Vec<String> {

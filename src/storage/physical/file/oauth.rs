@@ -386,7 +386,7 @@ impl ConsentSession {
 /// request shape is unexpected or the query lacks one of the two
 /// required params.
 fn parse_request_line(line: &str) -> Result<CallbackParams, RvError> {
-    let trimmed = line.trim_end_matches(&['\r', '\n']);
+    let trimmed = line.trim_end_matches(['\r', '\n']);
     let mut it = trimmed.splitn(3, ' ');
     let method = it
         .next()

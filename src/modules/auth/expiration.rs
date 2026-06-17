@@ -1035,7 +1035,7 @@ mod mod_expiration_tests {
         let result = expiration.renew(&lease_id, Duration::from_secs(3));
         assert!(result.is_ok());
         let renew_flag_locked = renew_flag.lock().unwrap();
-        assert_eq!(*renew_flag_locked, true);
+        assert!(*renew_flag_locked);
 
         println!("sleep 10s");
         sleep(Duration::from_secs(10));
@@ -1181,7 +1181,7 @@ mod mod_expiration_tests {
         for i in 0..n {
             let mut secret = SecretData::default();
             secret.ttl = Duration::from_secs(400);
-            let mut request = Request::new(&format!("secret/{}", i));
+            let mut request = Request::new(format!("secret/{}", i));
             request.client_token = "root".into();
 
             let mut response = Response {

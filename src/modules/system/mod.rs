@@ -2935,7 +2935,8 @@ mod mod_system_tests {
         // (resolves to felipe's entity_id), auth/token/ via
         // auth/token/lookup-self etc. No assertion that these must
         // be present — only that the hidden mounts are absent.
-        for forbidden_auth in ["pass/"] {
+        {
+            let forbidden_auth = "pass/";
             assert!(
                 !auth.contains_key(forbidden_auth),
                 "felipe must not see {forbidden_auth} auth mount, got {:?}",

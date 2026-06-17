@@ -91,6 +91,7 @@ pub struct PolicyPathRules {
     ///   - "owner"  — target's `owner_entity_id` == caller's entity_id
     ///   - "shared" — (future) an explicit SecretShare exists
     ///   - "any"    — equivalent to omitting `scopes` entirely
+    ///
     /// Multiple scopes are additive (OR). Empty means legacy
     /// unscoped semantics (no ownership check).
     pub scopes: Vec<String>,
@@ -777,7 +778,7 @@ mod mod_policy_tests {
         assert_eq!(policy.raw, hcl_policy);
         assert_eq!(policy.paths.len(), 1);
         assert_eq!(policy.paths[0].path, "secret/");
-        assert_eq!(policy.paths[0].is_prefix, true);
+        assert!(policy.paths[0].is_prefix);
         assert_eq!(
             policy.paths[0].permissions.capabilities_bitmap,
             Capability::Read.to_bits() | Capability::List.to_bits()
@@ -895,7 +896,7 @@ mod mod_policy_tests {
         }
 
         assert_eq!(policy.paths[i].path, "secret/ak1");
-        assert_eq!(policy.paths[i].is_prefix, false);
+        assert!(!policy.paths[i].is_prefix);
         assert_eq!(
             policy.paths[i].permissions.capabilities_bitmap,
             Capability::Read.to_bits() | Capability::List.to_bits() | Capability::Create.to_bits()
@@ -906,10 +907,10 @@ mod mod_policy_tests {
         assert_eq!(policy.paths[i].permissions.denied_parameters.len(), 1);
         assert_eq!(policy.paths[i].permissions.required_parameters.len(), 0);
         assert_eq!(policy.paths[i].capabilities, vec![Capability::Read, Capability::List, Capability::Create]);
-        assert_eq!(policy.paths[i].has_segment_wildcards, false);
+        assert!(!policy.paths[i].has_segment_wildcards);
 
         assert_eq!(policy.paths[j].path, "secret/ak2");
-        assert_eq!(policy.paths[j].is_prefix, false);
+        assert!(!policy.paths[j].is_prefix);
         assert_eq!(
             policy.paths[j].permissions.capabilities_bitmap,
             Capability::Read.to_bits()
@@ -926,10 +927,10 @@ mod mod_policy_tests {
             policy.paths[j].capabilities,
             vec![Capability::Read, Capability::List, Capability::Create, Capability::Update]
         );
-        assert_eq!(policy.paths[j].has_segment_wildcards, false);
+        assert!(!policy.paths[j].has_segment_wildcards);
 
         assert_eq!(policy.paths[k].path, "secret/akn/");
-        assert_eq!(policy.paths[k].is_prefix, true);
+        assert!(policy.paths[k].is_prefix);
         assert_eq!(
             policy.paths[k].permissions.capabilities_bitmap,
             Capability::Read.to_bits()
@@ -947,6 +948,6 @@ mod mod_policy_tests {
             policy.paths[k].capabilities,
             vec![Capability::Read, Capability::List, Capability::Create, Capability::Update, Capability::Delete]
         );
-        assert_eq!(policy.paths[k].has_segment_wildcards, false);
+        assert!(!policy.paths[k].has_segment_wildcards);
     }
 }

@@ -85,6 +85,7 @@ pub async fn connect_remote(
     // mid-session inconsistencies.
     let mut bv_builder = RemoteBackend::builder()
         .with_address(&effective_address)
+        .with_api_version(2)
         .with_cluster_discovery(false);
     if let Some(tls) = tls_for_bv {
         bv_builder = bv_builder.with_tls_config(tls);
@@ -138,6 +139,7 @@ async fn resolve_remote_address(
     let probe_backend = {
         let mut b = RemoteBackend::builder()
             .with_address(&profile.address)
+            .with_api_version(2)
             .with_cluster_discovery(true)
             .with_discovery_config(discovery_cfg)
             .with_health_config(health_cfg);

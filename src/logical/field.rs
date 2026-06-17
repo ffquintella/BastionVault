@@ -413,12 +413,12 @@ mod test {
         field.default = json!([1, 2, 3]);
         assert!(field.get_default().is_ok());
         let val_int = json!([1, 2, 3]);
-        let val_str = vec!["1", "2", "3"];
+        let val_str = ["1", "2", "3"];
         let val = field.get_default().unwrap();
         assert_eq!(val.as_comma_string_slice(), Some(val_str.iter().map(|&s| s.to_string()).collect::<Vec<String>>()));
         assert_eq!(val, val_int);
         field.default = json!("a,b,c");
-        let val_str = vec!["a", "b", "c"];
+        let val_str = ["a", "b", "c"];
         let val = field.get_default().unwrap();
         assert_eq!(val.as_comma_string_slice(), Some(val_str.iter().map(|&s| s.to_string()).collect::<Vec<String>>()));
         field.default = json!("a ,, b , c,");

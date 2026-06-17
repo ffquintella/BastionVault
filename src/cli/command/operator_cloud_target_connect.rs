@@ -170,13 +170,11 @@ impl CloudTargetConnect {
             oauth::exchange_code(&provider, &creds_obj, &callback.code, &verifier, &redirect_uri)?;
 
         let refresh_token = token_response.refresh_token.as_deref().ok_or_else(|| {
-            RvError::ErrString(format!(
-                "cloud-target connect: provider returned no refresh_token \
+            RvError::ErrString("cloud-target connect: provider returned no refresh_token \
                  (check that the `offline_access` scope is granted and \
                  that your OAuth application is configured for a refresh \
                  token; for Google you may need --target=gdrive which \
-                 automatically sets access_type=offline)"
-            ))
+                 automatically sets access_type=offline)".to_string())
         })?;
 
         creds::persist(&self.credentials_ref, refresh_token.as_bytes())?;

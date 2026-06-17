@@ -212,10 +212,10 @@ async fn test_pki_phase4_tidy_end_to_end() {
     )
     .await;
     let cfg = read(&core, &token, "pki/config/auto-tidy").await.unwrap();
-    assert_eq!(cfg["enabled"].as_bool().unwrap(), true);
+    assert!(cfg["enabled"].as_bool().unwrap());
     assert_eq!(cfg["interval"].as_str().unwrap(), "21600s");
-    assert_eq!(cfg["tidy_cert_store"].as_bool().unwrap(), true);
-    assert_eq!(cfg["tidy_revoked_certs"].as_bool().unwrap(), false);
+    assert!(cfg["tidy_cert_store"].as_bool().unwrap());
+    assert!(!cfg["tidy_revoked_certs"].as_bool().unwrap());
     assert_eq!(cfg["safety_buffer"].as_str().unwrap(), "86400s");
 
     // Pre-Phase-4 records (not_after_unix == 0) must NOT be swept. Synthesize

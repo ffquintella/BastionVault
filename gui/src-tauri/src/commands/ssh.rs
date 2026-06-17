@@ -8,8 +8,8 @@
 //! drive both from the same UI.
 //!
 //! Phase 4 surface only — the engine itself ships Phases 1-3 (CA mode
-//! + Ed25519 / ML-DSA-65, OTP mode + helper, role policy enforcement);
-//! this file is the GUI's view of it.
+//! with Ed25519 / ML-DSA-65, OTP mode plus helper, role policy
+//! enforcement); this file is the GUI's view of it.
 
 use bv_client::{JsonResponse, Operation};
 use serde::{Deserialize, Serialize};

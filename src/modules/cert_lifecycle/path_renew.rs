@@ -149,7 +149,7 @@ async fn perform_renewal(
     }
 
     let mut sub_req =
-        Request::new(&format!("{}/issue/{}", target.pki_mount.trim_end_matches('/'), target.role_ref));
+        Request::new(format!("{}/issue/{}", target.pki_mount.trim_end_matches('/'), target.role_ref));
     sub_req.operation = Operation::Write;
     sub_req.client_token = token.to_string();
     sub_req.body = Some(body);

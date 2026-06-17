@@ -117,7 +117,7 @@ async fn test_pki_phase1_end_to_end() {
     // Read the role back.
     let role = read(&core, &token, "pki/roles/web").await.unwrap();
     assert_eq!(role["key_type"].as_str().unwrap(), "ec");
-    assert_eq!(role["allow_any_name"].as_bool().unwrap(), true);
+    assert!(role["allow_any_name"].as_bool().unwrap());
 
     // List roles.
     let mut req = Request::new("pki/roles/");

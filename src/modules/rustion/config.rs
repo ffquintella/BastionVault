@@ -38,9 +38,9 @@ pub struct RustionTarget {
     /// Pinned hybrid **signing** pubkey of the Rustion identity
     /// keypair. Rustion signs its outbound `recording.ready` webhook
     /// + signed-nonce health responses with the matching private
-    /// key; BV verifies inbound payloads from Rustion with this.
-    /// Operators rotate via `rustion control-plane identity rotate`
-    /// on the Rustion side, then re-paste here.
+    ///   key; BV verifies inbound payloads from Rustion with this.
+    ///   Operators rotate via `rustion control-plane identity rotate`
+    ///   on the Rustion side, then re-paste here.
     pub public_key: HybridPubKey,
     /// Pinned **KEM** pubkey of the Rustion identity keypair.
     /// Base64-encoded ML-KEM-768 public key (1184 bytes raw → 1580
@@ -122,18 +122,15 @@ fn default_enabled() -> bool {
 /// doesn't get traffic before its first health check confirms reach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum HealthStatus {
     Up,
     Degraded,
     Down,
+    #[default]
     Unknown,
 }
 
-impl Default for HealthStatus {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
 
 impl HealthStatus {
     /// True when the dispatcher is allowed to route traffic to this

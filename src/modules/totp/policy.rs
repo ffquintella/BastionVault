@@ -22,8 +22,10 @@ pub const DEFAULT_QR_SIZE: u32 = 200;
 /// consumer apps support only `SHA1`. SHA-256 / SHA-512 are exposed
 /// for callers (e.g. YubiKey OATH) that handle them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum Algorithm {
     #[serde(rename = "SHA1", alias = "sha1")]
+    #[default]
     Sha1,
     #[serde(rename = "SHA256", alias = "sha256")]
     Sha256,
@@ -52,11 +54,6 @@ impl Algorithm {
     }
 }
 
-impl Default for Algorithm {
-    fn default() -> Self {
-        Algorithm::Sha1
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyPolicy {

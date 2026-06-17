@@ -162,23 +162,23 @@ mod mod_lease_tests {
                 "valid request, good bounds, increment is preferred",
                 Duration::from_secs(30 * 60 * 60), // 30h
                 Duration::from_secs(5 * 60 * 60),  // 5h
-                Duration::from_secs(1 * 60 * 60),  // 1h
+                Duration::from_secs(60 * 60),  // 1h
                 Duration::ZERO,
                 Duration::from_secs(30 * 60 * 60), // 30h
                 Duration::ZERO,
                 Duration::ZERO,
-                Duration::from_secs(1 * 60 * 60), //1h
+                Duration::from_secs(60 * 60), //1h
             ),
             Case(
                 "valid request, zero backend default, uses increment",
                 Duration::from_secs(30 * 60 * 60),
                 Duration::from_secs(5 * 60 * 60),
-                Duration::from_secs(1 * 60 * 60),
+                Duration::from_secs(60 * 60),
                 Duration::ZERO,
                 Duration::ZERO,
                 Duration::ZERO,
                 Duration::ZERO,
-                Duration::from_secs(1 * 60 * 60),
+                Duration::from_secs(60 * 60),
             ),
             Case(
                 "lease increment is zero, uses backend default",
@@ -262,11 +262,11 @@ mod mod_lease_tests {
                 Duration::from_secs(30 * 60 * 60),
                 Duration::from_secs(5 * 60 * 60),
                 Duration::from_secs(3 * 60 * 60),
-                Duration::from_secs(1 * 60 * 60),
+                Duration::from_secs(60 * 60),
                 Duration::from_secs(4 * 60 * 60),
                 Duration::from_secs(2 * 60 * 60),
                 Duration::ZERO,
-                Duration::from_secs(1 * 60 * 60),
+                Duration::from_secs(60 * 60),
             ),
             Case(
                 "period too large, explicit max ttl is preferred",
@@ -276,8 +276,8 @@ mod mod_lease_tests {
                 Duration::from_secs(2 * 60 * 60),
                 Duration::ZERO,
                 Duration::ZERO,
-                Duration::from_secs(1 * 60 * 60),
-                Duration::from_secs(1 * 60 * 60),
+                Duration::from_secs(60 * 60),
+                Duration::from_secs(60 * 60),
             ),
             Case(
                 "period too large, capped by backend max",
@@ -286,9 +286,9 @@ mod mod_lease_tests {
                 Duration::ZERO,
                 Duration::from_secs(2 * 60 * 60),
                 Duration::ZERO,
-                Duration::from_secs(1 * 60 * 60),
+                Duration::from_secs(60 * 60),
                 Duration::ZERO,
-                Duration::from_secs(1 * 60 * 60),
+                Duration::from_secs(60 * 60),
             ),
         ];
 

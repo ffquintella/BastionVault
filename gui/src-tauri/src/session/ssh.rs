@@ -549,7 +549,7 @@ fn openssh_sha256_fingerprint(key: &PublicKey) -> String {
     use russh::keys::PublicKeyBase64;
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(&key.public_key_bytes());
+    h.update(key.public_key_bytes());
     format!("SHA256:{}", STANDARD_NO_PAD.encode(h.finalize()))
 }
 

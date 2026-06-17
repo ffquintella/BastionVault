@@ -246,7 +246,7 @@ pub async fn list_secret_versions(
         }
     }
     // Newest version first.
-    versions.sort_by(|a, b| b.version.cmp(&a.version));
+    versions.sort_by_key(|x| std::cmp::Reverse(x.version));
 
     Ok(SecretVersionListResult {
         current_version,

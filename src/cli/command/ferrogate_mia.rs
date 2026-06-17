@@ -600,6 +600,16 @@ pub fn request_child_token(
     }
 }
 
+/// Decode (without verifying) the claims segment of a compact JWS and return
+/// the requested string field — used by `whoami` to read the local SPIFFE id
+/// from a freshly minted token.
+pub fn jws_claim_str(jws: &str, field: &str) -> Option<String> {
+    let seg = jws.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD.decode(seg).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    v.get(field)?.as_str().map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -771,14 +781,4 @@ mod tests {
         // Missing file ⇒ None, never an error.
         assert_eq!(read_helper_socket(&dir.join("does-not-exist.toml")), None);
     }
-}
-
-/// Decode (without verifying) the claims segment of a compact JWS and return
-/// the requested string field — used by `whoami` to read the local SPIFFE id
-/// from a freshly minted token.
-pub fn jws_claim_str(jws: &str, field: &str) -> Option<String> {
-    let seg = jws.split('.').nth(1)?;
-    let bytes = URL_SAFE_NO_PAD.decode(seg).ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    v.get(field)?.as_str().map(str::to_string)
 }

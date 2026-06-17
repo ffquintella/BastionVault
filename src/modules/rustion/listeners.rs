@@ -36,6 +36,7 @@ use super::config::RustionTarget;
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Deserialize)]
+#[derive(Default)]
 pub struct ListenerInfo {
     #[serde(default)]
     pub advertised_host: String,
@@ -55,15 +56,6 @@ pub struct ListenersResponse {
     pub rdp: ListenerInfo,
 }
 
-impl Default for ListenerInfo {
-    fn default() -> Self {
-        Self {
-            advertised_host: String::new(),
-            port: 0,
-            advertised: false,
-        }
-    }
-}
 
 /// Pull `GET /v1/listeners` from a target's control plane. No auth
 /// header is required by Rustion (matches `/v1/health` posture); the

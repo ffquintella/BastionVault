@@ -6,18 +6,15 @@ use crate::exchange::ScopeSpec;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ExportFormat {
     /// Argon2id + XChaCha20-Poly1305 password-encrypted envelope.
+    #[default]
     Bvx,
     /// Plaintext canonical JSON. Refused unless `allow_plaintext` is set.
     Json,
 }
 
-impl Default for ExportFormat {
-    fn default() -> Self {
-        Self::Bvx
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]

@@ -36,6 +36,10 @@ use crate::{
 
 const AUDIT_DEVICES_SUB_PATH: &str = "audit-devices/";
 
+/// Snapshot of fan-out targets for one entry: the devices on the entry's
+/// own namespace chain, and the root mirror devices that also receive it.
+type FanoutTargets = (Vec<Arc<dyn AuditDevice>>, Vec<Arc<dyn AuditDevice>>);
+
 /// Persisted-config storage key for a device. Root devices keep their bare
 /// path (backward compatible with pre-namespace deployments); tenant devices
 /// are stored under a URL-safe-base64 namespace segment so two namespaces may
@@ -138,7 +142,7 @@ impl AuditBroker {
 
         // Snapshot the two target device groups without holding the lock
         // across the async writes.
-        let (own_devices, mirror_devices): (Vec<Arc<dyn AuditDevice>>, Vec<Arc<dyn AuditDevice>>) = {
+        let (own_devices, mirror_devices): FanoutTargets = {
             let g = self.devices.lock().unwrap();
             let own = g
                 .iter()

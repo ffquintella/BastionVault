@@ -250,13 +250,13 @@ mod test {
 
         assert_eq!(&path.pattern, "/aa");
         assert_eq!(&path.help, "testhelp");
-        assert!(path.fields.get("mytype").is_some());
+        assert!(path.fields.contains_key("mytype"));
         assert_eq!(path.fields["mytype"].field_type, FieldType::Int);
         assert_eq!(path.fields["mytype"].description, "haha");
-        assert!(path.fields.get("mypath").is_some());
+        assert!(path.fields.contains_key("mypath"));
         assert_eq!(path.fields["mypath"].field_type, FieldType::Str);
         assert_eq!(path.fields["mypath"].description, "hehe");
-        assert!(path.fields.get("xxfield").is_none());
+        assert!(!path.fields.contains_key("xxfield"));
         assert_eq!(path.operations[0].op, Operation::Read);
         assert_eq!(path.operations[1].op, Operation::Write);
         assert_eq!(path.operations.len(), 2);

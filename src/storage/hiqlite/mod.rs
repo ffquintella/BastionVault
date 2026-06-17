@@ -779,8 +779,8 @@ mod test {
             eprintln!("Skipping hiqlite test (set CARGO_TEST_HIQLITE=1 to enable)");
             return;
         }
-        use std::sync::Arc;
-        use crate::storage::{new_backend, migrate::migrate_backend, Backend, BackendEntry};
+        
+        use crate::storage::{new_backend, migrate::migrate_backend, BackendEntry};
 
         // Create source file backend with test data
         let source_dir = env::temp_dir().join(*TEST_DIR).join("test_migrate_source");

@@ -315,9 +315,7 @@ fn seal_v2(plaintext: &[u8], slot_seeds: &[SlotSealInput]) -> Result<Vec<u8>, Co
     // above is not externally accessible but a stack-local clone
     // would be. AEAD ciphers consume the key by value, so we rely
     // on stack unwinding to drop them after their last use.
-    for b in &mut content_key {
-        *b = 0;
-    }
+    content_key.fill(0);
 
     let header = FileHeaderV2 { version: 2, slots };
     let header_json = serde_json::to_vec(&header)
@@ -435,9 +433,7 @@ fn try_open_slot(
         .decrypt(Nonce::from_slice(payload_nonce), payload_ct)
         .map_err(|e| CommandError::from(format!("aead decrypt payload: {e}")))?;
 
-    for b in &mut content_key {
-        *b = 0;
-    }
+    content_key.fill(0);
     Ok(plain)
 }
 

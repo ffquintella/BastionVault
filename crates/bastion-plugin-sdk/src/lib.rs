@@ -154,7 +154,10 @@ pub mod abi {
         let mut v: Vec<u8> = Vec::with_capacity(len as usize);
         // SAFETY: we set len to the requested capacity; the host fills
         // it before any read. Out of bounds is the host's bug, not the
-        // plugin's.
+        // plugin's. The `uninit_vec` lint is deliberately allowed here:
+        // exposing uninitialized capacity is the entire point of the
+        // host-fill ABI.
+        #[allow(clippy::uninit_vec)]
         unsafe {
             v.set_len(len as usize);
         }
@@ -368,6 +371,7 @@ macro_rules! register {
 mod tests {
     use super::*;
 
+    #[allow(dead_code)]
     struct Echo;
     impl Plugin for Echo {
         fn handle(req: Request<'_>, _host: &Host) -> Response {

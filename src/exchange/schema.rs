@@ -49,6 +49,7 @@ impl ExchangeDocument {
 /// Who produced the document. The `vault_fingerprint_b64` is a non-secret
 /// identity hash so the importer can warn on cross-vault imports.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Default)]
 pub struct ExporterInfo {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub vault_fingerprint_b64: String,
@@ -58,15 +59,6 @@ pub struct ExporterInfo {
     pub actor_display_name: Option<String>,
 }
 
-impl Default for ExporterInfo {
-    fn default() -> Self {
-        Self {
-            vault_fingerprint_b64: String::new(),
-            namespace: String::new(),
-            actor_display_name: None,
-        }
-    }
-}
 
 /// What was selected for export. The `include` list is replayable; an
 /// importer with the right ACL can recompute which items the exporter

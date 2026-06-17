@@ -601,7 +601,7 @@ mod tests {
         let data = sealbox.get().unwrap();
         assert_eq!(data.message, "Modified message");
         assert_eq!(data.number, 200);
-        assert_eq!(data.flag, true);
+        assert!(data.flag);
     }
 
     #[test]
