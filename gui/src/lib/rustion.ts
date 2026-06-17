@@ -535,3 +535,48 @@ export const rustionTelemetryList = () =>
 
 export const rustionTelemetryPoll = () =>
   invoke<RustionTelemetryTarget[]>("rustion_telemetry_poll");
+
+// ─── Phase 9.3: dispatcher preview ──────────────────────────────
+
+export interface RustionDispatcherCandidate {
+  id: string;
+  name: string;
+  /** up | degraded | down | unknown */
+  status: RustionHealthStatus;
+}
+
+export interface RustionDispatcherDropped {
+  id: string;
+  name: string;
+  /** disabled | not-registered | not-up:<status> */
+  reason: string;
+}
+
+export interface RustionDispatcherPreview {
+  /** ordered-fallback | random-pool | group */
+  mode: string;
+  /** group name when mode === "group", else "" */
+  groupName: string;
+  /** which policy tier supplied the bastion list */
+  sourceTier: string;
+  /** healthy candidates, in the order the next Connect would try them */
+  candidates: RustionDispatcherCandidate[];
+  /** targets the dispatcher skipped, with the reason */
+  dropped: RustionDispatcherDropped[];
+}
+
+/** Preview the dispatcher's bastion candidate ordering for a resource,
+ *  without opening a session. Drives the Connection tab's
+ *  "Will try: A → B" line. */
+export const rustionDispatcherPreview = (request: {
+  resourceId?: string;
+  resourceType?: string;
+  assetGroupIds?: string[];
+}) =>
+  invoke<RustionDispatcherPreview>("rustion_dispatcher_preview", {
+    request: {
+      resourceId: request.resourceId ?? "",
+      resourceType: request.resourceType ?? "",
+      assetGroupIds: request.assetGroupIds ?? [],
+    },
+  });

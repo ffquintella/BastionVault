@@ -234,6 +234,7 @@ impl RustionBackend {
         let h_policy_res_write = self.inner.clone();
         let h_policy_force_rustion = self.inner.clone();
         let h_policy_effective = self.inner.clone();
+        let h_dispatcher_preview = self.inner.clone();
         let h_target_listeners_refresh = self.inner.clone();
         let h_telemetry_all = self.inner.clone();
         let h_telemetry_poll = self.inner.clone();
@@ -783,6 +784,23 @@ impl RustionBackend {
                         {op: Operation::Write, handler: h_policy_effective.handle_policy_effective}
                     ],
                     help: "Phase 7.4 — Resolve the effective Rustion policy (transport / bastions / recording) for a given resource without opening a session. Used by the GUI Connect path to gate direct dials against rustion-required."
+                },
+                {
+                    // POST rustion/dispatcher/preview — Phase 9.3. Resolves
+                    // the effective policy, then runs the dispatcher against
+                    // the live health cache and returns the candidate
+                    // ordering the next Connect would walk, plus skipped
+                    // targets. Drives the Connection tab's "Will try: A → B".
+                    pattern: r"dispatcher/preview$",
+                    fields: {
+                        "resource_id": { field_type: FieldType::Str, required: false, description: "Resource id for per-resource policy lookup." },
+                        "resource_type": { field_type: FieldType::Str, required: false, description: "Resource type for per-type policy lookup." },
+                        "asset_group_ids": { field_type: FieldType::CommaStringSlice, required: false, description: "Asset group ids the resource belongs to (per-AG resolution)." }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_dispatcher_preview.handle_dispatcher_preview}
+                    ],
+                    help: "Phase 9.3 — Preview the dispatcher's bastion candidate ordering for a resource (mode, group, source tier, healthy candidates in try-order, skipped targets) without opening a session."
                 },
                 {
                     // Read / update / delete a single bastion group.
@@ -1547,12 +1565,19 @@ impl RustionBackendInner {
         // pinned; else fall through to the dispatcher's random pool.
         let mut effective_bastions: Option<Vec<String>> =
             bastions_raw.filter(|v| !v.is_empty());
+        // When the list is resolved from a named group, remember the
+        // group name + its selection mode so the dispatcher can shuffle a
+        // `random` group and audit can attribute the choice to the group.
+        let mut resolved_bastion_group: Option<String> = None;
+        let mut group_shuffle = false;
         if !effective.bastions.is_empty() {
             effective_bastions = Some(effective.bastions.clone());
         } else if let Some(ref group_name) = effective.bastion_group {
             if let Some(grp) = policy_store.get_group(group_name).await? {
                 if !grp.members.is_empty() {
                     effective_bastions = Some(grp.members.clone());
+                    resolved_bastion_group = Some(grp.name.clone());
+                    group_shuffle = matches!(grp.selection, policy::Selection::Random);
                 }
             }
         }
@@ -1606,6 +1631,8 @@ impl RustionBackendInner {
             max_renewals: u8::try_from(pick_u("max_renewals", 3)).unwrap_or(3),
             recording: recording_choice,
             bastions: effective_bastions,
+            bastion_group: resolved_bastion_group,
+            bastion_shuffle: group_shuffle,
         };
 
         // Operator context from the calling token's metadata. Source-IP
@@ -2587,6 +2614,20 @@ impl RustionBackendInner {
             .strip_prefix("bastion-groups/")
             .unwrap_or("")
             .to_string();
+        // Refuse the delete while any locked policy tier still pins this
+        // group — otherwise a `rustion-required` lock would silently
+        // degrade to the random pool. The operator must repoint or unlock
+        // those tiers first.
+        let locked_refs = pol.locked_group_references(&name).await?;
+        if !locked_refs.is_empty() {
+            return Err(bv_error_response_status!(
+                409,
+                &format!(
+                    "bastion group `{name}` is pinned by locked tier(s): {}; repoint or unlock them before deleting",
+                    locked_refs.join(", ")
+                )
+            ));
+        }
         pol.delete_group(&name).await?;
         log::info!("{}: name={} (deleted)", audit::BASTION_GROUP_UPDATE, name);
         Ok(Some(Response::data_response(Some(Map::new()))))
@@ -2978,6 +3019,141 @@ impl RustionBackendInner {
             lvm.insert("detail".into(), Value::String(lv.detail.clone()));
             data.insert("lock_violation".into(), Value::Object(lvm));
         }
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// Phase 9.3 — dispatcher preview. Resolves the effective policy for
+    /// a resource exactly like `session/open`, then runs the dispatcher
+    /// against the *current* health cache and returns the candidate
+    /// ordering the next Connect would walk ("Will try: A → B"), plus the
+    /// targets it would skip and why. Read-only: opens no session, builds
+    /// no envelope.
+    pub async fn handle_dispatcher_preview(
+        &self,
+        _b: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let pick = |k: &str| -> String {
+            req.get_data(k)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_default()
+        };
+        let resource_id = pick("resource_id");
+        let resource_type = pick("resource_type");
+        let asset_group_ids = read_string_list(req, "asset_group_ids");
+
+        let pol = self.resolve_policy_store()?;
+        let global = pol.get_global().await?;
+        let type_policy = if resource_type.is_empty() {
+            None
+        } else {
+            pol.get_type(&resource_type).await?
+        };
+        let mut ag_policies: Vec<policy::AssetGroupPolicy> = Vec::new();
+        for ag_id in &asset_group_ids {
+            if let Some(p) = pol.get_asset_group(ag_id).await? {
+                ag_policies.push(p);
+            }
+        }
+        let resource_policy = if resource_id.is_empty() {
+            None
+        } else {
+            pol.get_resource(&resource_id).await?
+        };
+        let effective = policy::resolve(
+            &global,
+            type_policy.as_ref(),
+            &ag_policies,
+            resource_policy.as_ref(),
+        );
+
+        // Resolve the bastion list + group + selection (mirrors session/open).
+        let mut bastions = effective.bastions.clone();
+        let mut group_name: Option<String> = None;
+        let mut shuffle = false;
+        if bastions.is_empty() {
+            if let Some(ref g) = effective.bastion_group {
+                if let Some(grp) = pol.get_group(g).await? {
+                    bastions = grp.members.clone();
+                    group_name = Some(grp.name.clone());
+                    shuffle = matches!(grp.selection, policy::Selection::Random);
+                }
+            }
+        }
+
+        // Snapshot the registry + health the dispatcher keys off.
+        let store = self.resolve_store()?;
+        let ids = store.list_target_ids().await?;
+        let mut targets: Vec<RustionTarget> = Vec::with_capacity(ids.len());
+        for id in &ids {
+            if let Some(t) = store.get_target(id).await? {
+                targets.push(t);
+            }
+        }
+        let mut health_cache: Vec<(String, RustionTargetHealth)> = Vec::new();
+        for t in &targets {
+            if let Some(h) = store.get_health(&t.id).await? {
+                health_cache.push((t.id.clone(), h));
+            }
+        }
+        let health = |id: &str| -> Option<RustionTargetHealth> {
+            health_cache.iter().find(|(k, _)| k == id).map(|(_, v)| v.clone())
+        };
+
+        // Scope the ThreadRng to the synchronous planning step (it is `!Send`).
+        let plan = {
+            let mut rng = rand::rng();
+            if group_name.is_some() && !bastions.is_empty() {
+                dispatcher::plan_group(&bastions, shuffle, &targets, &health, &mut rng)
+            } else {
+                let pinned: Option<&[String]> =
+                    if bastions.is_empty() { None } else { Some(&bastions) };
+                dispatcher::plan(pinned, &targets, &health, &mut rng)
+            }
+        };
+
+        let candidates: Vec<Value> = plan
+            .candidates
+            .iter()
+            .map(|t| {
+                let status = health(&t.id).map(|h| h.status.as_str()).unwrap_or("unknown");
+                let mut m = Map::new();
+                m.insert("id".into(), Value::String(t.id.clone()));
+                m.insert("name".into(), Value::String(t.name.clone()));
+                m.insert("status".into(), Value::String(status.to_string()));
+                Value::Object(m)
+            })
+            .collect();
+        let dropped: Vec<Value> = plan
+            .dropped
+            .iter()
+            .map(|d| {
+                let reason = match d.reason {
+                    dispatcher::DropReason::Disabled => "disabled".to_string(),
+                    dispatcher::DropReason::NotRegistered => "not-registered".to_string(),
+                    dispatcher::DropReason::NotUp(s) => format!("not-up:{}", s.as_str()),
+                };
+                let mut m = Map::new();
+                m.insert("id".into(), Value::String(d.id.clone()));
+                m.insert("name".into(), Value::String(d.name.clone()));
+                m.insert("reason".into(), Value::String(reason));
+                Value::Object(m)
+            })
+            .collect();
+
+        let mut data = Map::new();
+        data.insert("mode".into(), Value::String(plan.mode.as_str().to_string()));
+        data.insert(
+            "group_name".into(),
+            Value::String(group_name.unwrap_or_default()),
+        );
+        data.insert(
+            "source_tier".into(),
+            Value::String(effective.bastions_source.to_string()),
+        );
+        data.insert("candidates".into(), Value::Array(candidates));
+        data.insert("dropped".into(), Value::Array(dropped));
         Ok(Some(Response::data_response(Some(data))))
     }
 

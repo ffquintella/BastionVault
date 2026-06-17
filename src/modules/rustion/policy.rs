@@ -531,6 +531,65 @@ impl PolicyStore {
             .map_err(|e| bv_error_string!(&format!("encode resource policy: {e}")))?;
         self.resource_view.put(&StorageEntry { key: id, value }).await
     }
+
+    pub async fn list_types(&self) -> Result<Vec<String>, RvError> {
+        let mut keys = self.type_view.get_keys().await?;
+        keys.sort();
+        Ok(keys)
+    }
+
+    pub async fn list_resources(&self) -> Result<Vec<String>, RvError> {
+        let mut keys = self.resource_view.get_keys().await?;
+        keys.sort();
+        Ok(keys)
+    }
+
+    // ─── Referential integrity ──────────────────────────────────
+
+    /// Scan every policy tier for **locked** references to `group_name`.
+    /// Returns a human-readable label per locked tier that pins this
+    /// group (e.g. `global`, `type "database"`, `asset-group "pci"`).
+    ///
+    /// Only *locked* references are reported: an unlocked tier that names
+    /// a now-deleted group simply falls through to the random pool at
+    /// resolve time, which is a benign (if sloppy) state. A locked tier,
+    /// by contrast, encodes a hard constraint — deleting the group out
+    /// from under it would silently turn `rustion-required` into
+    /// random-pool, defeating the lock. So those block the delete.
+    pub async fn locked_group_references(
+        &self,
+        group_name: &str,
+    ) -> Result<Vec<String>, RvError> {
+        let mut refs = Vec::new();
+        let pins = |t: &PolicyTier| t.lock && t.bastion_group.as_deref() == Some(group_name);
+
+        let global = self.get_global().await?;
+        if pins(&global.tier) {
+            refs.push("global".to_string());
+        }
+        for type_name in self.list_types().await? {
+            if let Some(p) = self.get_type(&type_name).await? {
+                if pins(&p.tier) {
+                    refs.push(format!("type \"{type_name}\""));
+                }
+            }
+        }
+        for ag_id in self.list_asset_groups().await? {
+            if let Some(p) = self.get_asset_group(&ag_id).await? {
+                if pins(&p.tier) {
+                    refs.push(format!("asset-group \"{ag_id}\""));
+                }
+            }
+        }
+        for res_id in self.list_resources().await? {
+            if let Some(p) = self.get_resource(&res_id).await? {
+                if pins(&p.tier) {
+                    refs.push(format!("resource \"{res_id}\""));
+                }
+            }
+        }
+        Ok(refs)
+    }
 }
 
 fn sanitize(s: &str) -> Result<String, RvError> {

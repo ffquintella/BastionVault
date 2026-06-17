@@ -256,6 +256,21 @@ The existing `ssh_session_open` / `rdp_session_open` commands take a new optiona
 
 All endpoints are policy-gated on `rustion/*` paths in the existing ACL grammar.
 
+### Multi-instance failover (BastionVault-side HA)
+
+Availability on the `rustion-required` path is provided here, in BastionVault, rather than by building active/passive HA inside Rustion. The pieces (all shipped — see Phases 1, 3.2, 7.1, 9.3):
+
+- **Many enrolled instances.** The `rustion/` registry holds N instances, each with its own pinned hybrid identity; removing or rotating one is local.
+- **Health-driven candidate selection.** A background pinger marks each instance `up`/`degraded`/`down`/`unknown`; the dispatcher only ever considers `up` targets.
+- **Three selection shapes**, all health-filtered:
+  - **`ordered-fallback`** — a profile/tier-pinned ordered list; tried top-to-bottom (primary → DR → …).
+  - **`group`** — a named bastion group resolved to its members, walked in declared order (`selection: ordered`) or shuffled (`selection: random`).
+  - **`random-pool`** — no list pinned; a uniform random draw from all healthy enabled targets (no shared state across BV HA replicas).
+- **Walk-and-advance.** On a transport error or 5xx the dispatcher advances to the next candidate; a 4xx (a real permission denial) halts so the operator isn't bounced across every bastion. If every candidate is unhealthy or rejects, Connect fails with `bastion_unavailable`.
+- **Single-session caveat.** A *session* is still bound to one instance; if that instance dies mid-session the operator reconnects as a *new* session on a sibling. The *service* has no single point of failure, but in-flight session migration is explicitly out of scope.
+
+Operators preview the live choice for a resource via `rustion_dispatcher_preview` ("Will try: rustion-eu-west-1 → rustion-eu-west-2"). Regulated deployments should enrol ≥2 instances in distinct failure domains and pin them with an ordered group.
+
 ### Worked example — a real multi-instance deployment
 
 A medium-size deployment with three regions, a PCI zone, and a DR pair might look like this. The example is illustrative — it shows how the four policy tiers compose without anybody having to hand-edit every resource.
@@ -730,7 +745,7 @@ Phase 3.1 follow-up shipped in 0.7.19 (BV) + 0.7.15 (Rustion):
 
 - **russh listener wire-up of `consume_ticket_for_login`** — `ServerHandler.auth_password` recognises `tkt_<32 hex>` passwords when wired up to a BV `SessionStore`, runs `consume_ticket_for_login`, stashes the matched session, and accepts auth. `ServerHandler::with_bv_session_store(store)` builder method opts into the path. `shell_request` learned a BV-session fast path that bypasses the user-store target ACL + interactive menu and dials the session's `target_host:target_port` with the decrypted `ssh-password` credential. Falls back to the classical user-store auth if the ticket lookup misses, so a Rustion user whose password happens to start with `tkt_` isn't locked out.
 - **Recording authority field** — `SessionMetadata` gained `authority` + `correlation_id` fields. `connect_to_target_and_relay` accepts an `Option<(String, String)>` and stamps them on the asciicast `rustion.{authority,correlation_id}` header. `auth_method` records as `bv_ticket` for BV-mediated sessions, distinguishing them from `password` in SOC tooling. Recording start-on-first-byte was already the default (the recorder buffers until the proxy loop starts dialing the target); the only change was making the header carry the BV chain-of-custody fields.
-- **E2E docker-compose scaffold** at [`tests/e2e/rustion-ssh/`](../tests/e2e/rustion-ssh/) — three-service stack (BV + Rustion + OpenSSH target) with a `run.sh` driver that walks the full pipeline cold-start → enrolment → probe → session-open → ticket-validated SSH to the target. The compose file references `bastion-vault:phase31-scaffold` + `rustion:phase31-scaffold` images that aren't yet committed (the Dockerfile slices land in a follow-up); the configs + driver + the `ssh-key` / `ssh-cert` credential-kind support for the proxy loop are the remaining gaps to demo against a real target.
+- **E2E docker-compose scaffold** at [`tests/e2e/rustion-ssh/`](../tests/e2e/rustion-ssh/) — three-service stack (BV + Rustion + OpenSSH target) with a `run.sh` driver that walks the full pipeline cold-start → enrolment → probe → session-open → ticket-validated SSH to the target. **Revived and validated live in BV 0.10.16**: the compose file now builds both services from committed `Dockerfile`s (`bastion-vault:phase32` + `rustion:phase32`, build contexts `../../..` and `../../../../rustion`) — the earlier `phase31-scaffold` placeholder images are gone. The driver additionally exercises the connect-only credential-hiding path (a connect-only token is denied a direct secret read yet proxies a real SSH shell through the bastion). See also [`features/connect-only-access.md`](connect-only-access.md).
 
 Phase 3.2 follow-up shipped in 0.7.20 (BV) + 0.7.16 (Rustion):
 
@@ -1221,8 +1236,27 @@ The Phase 9.1 in-memory authority projections now have on-disk YAML mirrors, an 
 **What's out of scope (recorded as separate tracks, not Phase 9.x):**
 
 - **Rustion admin web UI for approval** — the CLI fully covers the operator workflow; a single-page web admin is a Phase 7-style follow-up that doesn't gate v1.
-- **`attestation_renew_at` enforcement at envelope-verify time** — currently the AuthorityRecord doesn't carry the timestamp and the Phase 9.1 verify path doesn't check it. Adding the field + the `attestation_expired` 403 is a small follow-up that doesn't change Phase 9.2's CLI/timer surface.
+- ~~**`attestation_renew_at` enforcement at envelope-verify time**~~ — **shipped in Phase 9.3** (below).
 - **GUI surface for the new Tauri commands** — the commands are callable and tested; surfacing Re-attest / Deenrol buttons on the Bastions Settings card is a small `RustionBastionsTab.tsx` change that can ship incrementally.
+
+### Phase 9.3 — Multi-instance failover completion + `attestation_renew_at` enforcement — **Done**
+
+Two strands land together: the BastionVault-side **multi-instance failover** story (the chosen alternative to Rustion HA) is completed, and the **re-attestation deadline** is enforced end-to-end.
+
+**Multi-instance failover (BastionVault side):**
+
+- **Group `selection: random` is honoured.** `dispatcher::plan_group(members, shuffle, …)` health-filters a group's members in declared order and, when the group's `selection` is `random`, shuffles the survivors. A new `Mode::Group` (audit string `"group"`) distinguishes group-sourced candidate lists from a profile-pinned `ordered-fallback` list and the empty-list `random-pool`. The session-open resolver (`session/open`) threads the resolved group name + selection through `SessionOpenRequest.{bastion_group, bastion_shuffle}`. *(Before this, a group's members were always walked in declared order regardless of `selection`.)*
+- **`bastion_group` delete is referentially guarded.** `DELETE /v1/rustion/bastion-groups/{name}` now refuses with `409` while any **locked** policy tier (global / type / asset-group / resource) still pins the group — otherwise a `rustion-required` lock would silently degrade to the random pool. `PolicyStore::locked_group_references(name)` scans every tier; unlocked references are allowed through (they fall back benignly).
+- **Dispatcher preview.** `POST /v1/rustion/dispatcher/preview` + the `rustion_dispatcher_preview` Tauri command resolve the effective policy for a resource and run the dispatcher against the live health cache, returning `{mode, group_name, source_tier, candidates:[{id,name,status}], dropped:[{id,name,reason}]}`. The resource **Connection tab** renders this as a live "Will try: A → B" panel (`RustionDispatcherPreview.tsx`) with per-target health dots + a skipped-targets line.
+- **Two-instance failover harness.** `tests/e2e/rustion-ssh/` gains `docker-compose.failover.yaml` (adds `rustion-2`) and an opt-in **Step 9** (`E2E_FAILOVER=1`): enrol both bastions, pin an ordered group, open → primary; kill the primary, re-open → secondary; confirm the random pool also excludes the dead primary.
+
+**Re-attestation deadline (Rustion side):**
+
+- **`AuthorityRecord.attestation_renew_at: Option<DateTime<Utc>>`** + the matching `AuthorityYaml` field (round-tripped on disk; absent in v1 YAML → `None` → never enforced, backward-compatible).
+- **Set at approval.** `approve_pending` stamps `now + ATTESTATION_WINDOW` (14 days — comfortably longer than BV's 6-day re-attest timer, so one missed sweep doesn't lapse an authority).
+- **`POST /v1/authorities/attest`.** The route BV's weekly timer was already calling now exists: it verifies the `op = "attest"` envelope (signature + deployment-id binding + replay), bumps the deadline via `AuthorityStore::attest`, persists the bumped record to the active authorities dir so it survives a hot-reload, emits the `authority.attested` usage event, and returns `{attested_at, expires_at}`.
+- **Enforcement at verify.** `verify_and_replay` refuses any envelope from a lapsed authority with `403 attestation_expired` — **except** the `attest` op itself, so a lapsed-but-still-trusted authority can always re-attest its way back to healthy (deadlock-free recovery). A stolen key on a *different* deployment still trips `attestation_mismatch` first, so attest can't be abused to launder a stolen keypair.
+- **Tests.** Rustion control-plane integration tests cover the attest round-trip (returns a ~14-day deadline), a lapsed authority's `open` being refused with `attestation_expired`, and a lapsed authority still being able to attest; the disk round-trip test asserts the field survives serialisation. BV dispatcher unit tests cover the ordered-vs-random group paths.
 
 ### Phase 9 — Explicit enrolment-approval handshake + re-attestation + tombstones (original spec table)
 
@@ -1266,7 +1300,7 @@ The Phase 9.1 in-memory authority projections now have on-disk YAML mirrors, an 
 
 ## Open questions
 
-- **Two-way mTLS on the control plane?** Today the design relies entirely on the envelope signature for auth and uses TLS only for confidentiality / integrity of the transport. Adding mTLS gives belt-and-braces but requires a second cert lifecycle. Probably a Phase 7 follow-up rather than v1.
+- **Two-way mTLS on the control plane? — Resolved: not pursued.** Caller authenticity is already established cryptographically by the BVRG-v1 envelope signature (hybrid Ed25519 + ML-DSA-65) verified against the per-authority pinned pubkey, plus the deployment-id binding and (Phase 9.3) the re-attestation deadline. A client certificate would re-prove the same identity through a second, weaker channel (a TLS PKI) while adding a whole cert lifecycle to operate and rotate. TLS on the control plane stays — but purely for transport confidentiality/integrity, not authentication. (The `serve_tls` listener still *accepts* an optional client-CA bundle for operators who want belt-and-braces, but the integration does not require or rely on it.)
 - **Native Rustion auth bypass.** A session opened by BastionVault skips Rustion's own user store entirely — the *authority* is the trust anchor, the *user* is whatever BastionVault attests. Is that the right call for environments that already enrolled their humans in Rustion? Tentative answer: yes, because making humans authenticate twice is the workflow we're trying to remove. Authorities should be policy-scoped (`allowed_targets`, `allowed_actions`) tightly enough that a compromised BastionVault can't reach beyond what it already could.
 - **Recording redaction.** `input-redacted` mode is listed in the envelope but Rustion's current recorder either records keystrokes or doesn't. Deciding the policy default per resource type (probably "off" for SSH input, "always" for SSH output) is a Phase 6 sub-question.
-- **Rustion HA.** Rustion isn't itself HA today. If we put it on the critical path for Connect, do we need an active/passive pair before going to `rustion-required`? Probably yes, and that becomes a prerequisite for Phase 7 in regulated deployments.
+- **Rustion HA — Resolved: solved on the BastionVault side, not inside Rustion.** Rather than build an active/passive pair into Rustion, availability on the `rustion-required` path is provided by **multi-instance failover in BastionVault** (see *Multi-instance failover* under Design): operators enrol N Rustion instances, group them, and the dispatcher walks an ordered list (or a healthy random pool), failing over to a sibling bastion when one is `down`/unreachable. A single in-flight *session* is still bound to one instance — if that instance dies mid-session the operator reconnects as a new session on a sibling — but the *service* no longer has a single point of failure. This keeps Rustion itself stateless and simple. Regulated deployments should enrol at least two instances (ideally in distinct failure domains) and pin them via an ordered bastion group.

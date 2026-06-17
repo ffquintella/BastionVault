@@ -1504,6 +1504,104 @@ pub async fn rustion_policy_effective(
     })
 }
 
+// ─── Phase 9.3: dispatcher preview ───────────────────────────────
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionDispatcherCandidate {
+    pub id: String,
+    pub name: String,
+    /// `up | degraded | down | unknown`.
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionDispatcherDropped {
+    pub id: String,
+    pub name: String,
+    /// `disabled | not-registered | not-up:<status>`.
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustionDispatcherPreview {
+    /// `ordered-fallback | random-pool | group`.
+    pub mode: String,
+    /// Group name when `mode == "group"`, else empty.
+    pub group_name: String,
+    /// Which policy tier supplied the bastion list.
+    pub source_tier: String,
+    /// Healthy candidates in the order the next Connect would try them.
+    pub candidates: Vec<RustionDispatcherCandidate>,
+    /// Targets the dispatcher skipped, with the reason.
+    pub dropped: Vec<RustionDispatcherDropped>,
+}
+
+#[tauri::command]
+pub async fn rustion_dispatcher_preview(
+    state: State<'_, AppState>,
+    request: RustionPolicyEffectiveRequest,
+) -> CmdResult<RustionDispatcherPreview> {
+    let mut body = Map::new();
+    if !request.resource_id.is_empty() {
+        body.insert("resource_id".into(), Value::String(request.resource_id));
+    }
+    if !request.resource_type.is_empty() {
+        body.insert("resource_type".into(), Value::String(request.resource_type));
+    }
+    if !request.asset_group_ids.is_empty() {
+        body.insert(
+            "asset_group_ids".into(),
+            Value::Array(request.asset_group_ids.into_iter().map(Value::String).collect()),
+        );
+    }
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        format!("{RUSTION_MOUNT}dispatcher/preview"),
+        Some(body),
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    let candidates = data
+        .get("candidates")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_object())
+                .map(|m| RustionDispatcherCandidate {
+                    id: s(m, "id"),
+                    name: s(m, "name"),
+                    status: s(m, "status"),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let dropped = data
+        .get("dropped")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_object())
+                .map(|m| RustionDispatcherDropped {
+                    id: s(m, "id"),
+                    name: s(m, "name"),
+                    reason: s(m, "reason"),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(RustionDispatcherPreview {
+        mode: s(&data, "mode"),
+        group_name: s(&data, "group_name"),
+        source_tier: s(&data, "source_tier"),
+        candidates,
+        dropped,
+    })
+}
+
 // ─── Phase 8.1: telemetry ────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Default)]

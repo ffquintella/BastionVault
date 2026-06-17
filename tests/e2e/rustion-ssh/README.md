@@ -79,12 +79,27 @@ subsequent runs reuse the cached layers.
 To reuse an already-initialised `var/bv`, pass `BV_ROOT_TOKEN=…`. To
 start fresh, `docker compose down -v && rm -rf var/bv/* var/rustion/*`.
 
+### Multi-instance failover (`E2E_FAILOVER=1`)
+
+`E2E_FAILOVER=1 ./run.sh` loads the `docker-compose.failover.yaml`
+overlay (a second bastion, `rustion-2`) and appends **Step 9**, which
+proves BastionVault-side failover — the alternative to building HA
+inside Rustion:
+
+6. enrols `rustion-2` as a second target, creates an ordered bastion
+   group `[primary → secondary]`, and opens a session with an ordered
+   bastion list → it lands on the **primary**;
+7. **stops the primary**, re-probes, and re-opens → the dispatcher's
+   walk-and-advance loop falls through to the **secondary**, and a
+   random-pool open likewise excludes the dead primary.
+
 ## Layout
 
 ```
 tests/e2e/rustion-ssh/
   README.md                 — this file
   docker-compose.yaml       — three-service stack
+  docker-compose.failover.yaml — overlay adding rustion-2 (E2E_FAILOVER)
   run.sh                    — driver script
   config/
     bv-policy.hcl           — minimal admin policy for the test operator

@@ -45,6 +45,21 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-06-17
+
+### Added
+- **Rustion integration Phase 9.3 — multi-instance failover completion + re-attestation enforcement.**
+  - Dispatcher now honours a bastion group's `selection: random` (shuffles health-filtered members) vs `ordered`, with a new `group` selection mode surfaced for audit.
+  - `rustion_dispatcher_preview` Tauri command + `POST /v1/rustion/dispatcher/preview` route + a "Will try: A → B" panel on the resource Connection tab showing the dispatcher's candidate ordering and skipped targets with live health.
+  - `attestation_renew_at` enforced end-to-end: Rustion stamps a 14-day deadline at authority approval, the new `POST /v1/authorities/attest` route bumps it (persisted across hot-reload) and emits `authority.attested`, and the envelope-verify path refuses lapsed authorities with `403 attestation_expired` — exempting the `attest` op so a lapsed authority can recover.
+  - Two-instance kill-primary failover harness behind `E2E_FAILOVER=1` (`tests/e2e/rustion-ssh/docker-compose.failover.yaml` + run.sh Step 9).
+
+### Changed
+- **`DELETE /v1/rustion/bastion-groups/{name}` now refuses (409)** while any locked policy tier (global / type / asset-group / resource) still pins the group, preventing a `rustion-required` lock from silently degrading to the random pool.
+
+### Removed
+- **Dropped two-way mTLS on the Rustion control plane** as a planned item — caller authenticity rests on the BVRG-v1 hybrid (Ed25519 + ML-DSA-65) envelope signature plus deployment-id binding and the re-attestation deadline; control-plane TLS remains for transport confidentiality only. Rustion HA is likewise no longer pursued inside Rustion — availability on the `rustion-required` path is provided by BastionVault-side multi-instance failover groups.
+
 ## [0.15.2] - 2026-06-17
 
 ### Changed

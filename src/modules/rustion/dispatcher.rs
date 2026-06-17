@@ -44,6 +44,10 @@ pub enum Mode {
     /// Profile left the list empty — candidates are the global pool
     /// of healthy enabled targets, in random order.
     RandomPool,
+    /// Candidates came from a named bastion group. Members are
+    /// health-filtered, then either kept in declared order
+    /// (`selection: ordered`) or shuffled (`selection: random`).
+    Group,
 }
 
 impl Mode {
@@ -51,6 +55,7 @@ impl Mode {
         match self {
             Mode::OrderedFallback => "ordered-fallback",
             Mode::RandomPool => "random-pool",
+            Mode::Group => "group",
         }
     }
 }
@@ -106,14 +111,17 @@ pub fn plan<R: rand::Rng>(
     }
 }
 
-fn plan_pinned(
-    pinned: &[String],
+/// Walk an explicit id list, keeping the survivors in declared order
+/// and recording why each dropped one was excluded. Shared by the
+/// pinned-profile path and the named-group path.
+fn filter_in_order(
+    ids: &[String],
     targets: &[RustionTarget],
     health: &dyn Fn(&str) -> Option<RustionTargetHealth>,
-) -> DispatchPlan {
+) -> (Vec<RustionTarget>, Vec<DroppedTarget>) {
     let mut candidates = Vec::new();
     let mut dropped = Vec::new();
-    for id in pinned {
+    for id in ids {
         let Some(target) = targets.iter().find(|t| &t.id == id) else {
             dropped.push(DroppedTarget {
                 id: id.clone(),
@@ -141,8 +149,42 @@ fn plan_pinned(
         }
         candidates.push(target.clone());
     }
+    (candidates, dropped)
+}
+
+fn plan_pinned(
+    pinned: &[String],
+    targets: &[RustionTarget],
+    health: &dyn Fn(&str) -> Option<RustionTargetHealth>,
+) -> DispatchPlan {
+    let (candidates, dropped) = filter_in_order(pinned, targets, health);
     DispatchPlan {
         mode: Mode::OrderedFallback,
+        candidates,
+        dropped,
+    }
+}
+
+/// Resolve the candidates for a named bastion group. Members are
+/// health-filtered preserving declared order; when `shuffle` is set
+/// (the group's `selection: random`) the survivors are shuffled so the
+/// walk-and-advance loop spreads load across the pool instead of always
+/// hammering the first declared member. The mode is reported as
+/// [`Mode::Group`] regardless of `shuffle` so audit can attribute the
+/// choice to the group rather than a profile-pinned list.
+pub fn plan_group<R: rand::Rng>(
+    members: &[String],
+    shuffle: bool,
+    targets: &[RustionTarget],
+    health: &dyn Fn(&str) -> Option<RustionTargetHealth>,
+    rng: &mut R,
+) -> DispatchPlan {
+    let (mut candidates, dropped) = filter_in_order(members, targets, health);
+    if shuffle {
+        candidates.shuffle(rng);
+    }
+    DispatchPlan {
+        mode: Mode::Group,
         candidates,
         dropped,
     }
@@ -366,6 +408,67 @@ mod tests {
             assert!(ids_a.contains(&id));
             assert!(ids_b.contains(&id));
         }
+    }
+
+    #[test]
+    fn group_ordered_preserves_declared_order_and_filters_health() {
+        let targets = vec![
+            target("rt_a", "eu-1", true),
+            target("rt_b", "eu-2", true),
+            target("rt_c", "us-1", true),
+        ];
+        let members = ["rt_a".to_string(), "rt_b".to_string(), "rt_c".to_string()];
+        let health = health_map(&[
+            ("rt_a", HealthStatus::Up),
+            ("rt_b", HealthStatus::Down),
+            ("rt_c", HealthStatus::Up),
+        ]);
+        let plan = plan_group(&members, false, &targets, &health, &mut rng());
+        assert_eq!(plan.mode, Mode::Group);
+        assert_eq!(plan.mode.as_str(), "group");
+        // Ordered group keeps declared order, drops the down member.
+        assert_eq!(
+            plan.candidates.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["rt_a", "rt_c"]
+        );
+    }
+
+    #[test]
+    fn group_random_shuffles_but_keeps_the_same_healthy_set() {
+        let targets = vec![
+            target("rt_a", "eu-1", true),
+            target("rt_b", "eu-2", true),
+            target("rt_c", "us-1", true),
+            target("rt_d", "us-2", true),
+        ];
+        let members = [
+            "rt_a".to_string(),
+            "rt_b".to_string(),
+            "rt_c".to_string(),
+            "rt_d".to_string(),
+        ];
+        let health = health_map(&[
+            ("rt_a", HealthStatus::Up),
+            ("rt_b", HealthStatus::Up),
+            ("rt_c", HealthStatus::Up),
+            ("rt_d", HealthStatus::Up),
+        ]);
+        // Sample several seeds: every run must preserve the full healthy
+        // set, and across seeds we must observe more than one ordering —
+        // proving the shuffle is rng-driven rather than a no-op. (A single
+        // fixed seed can coincidentally yield the identity permutation.)
+        let mut orderings = std::collections::HashSet::new();
+        for seed in 0..16u64 {
+            let mut r = rand::rngs::StdRng::seed_from_u64(seed);
+            let plan = plan_group(&members, true, &targets, &health, &mut r);
+            assert_eq!(plan.mode, Mode::Group);
+            let mut ids: Vec<String> = plan.candidates.iter().map(|t| t.id.clone()).collect();
+            assert_eq!(ids.len(), 4, "all four healthy members survive");
+            orderings.insert(ids.join(","));
+            ids.sort();
+            assert_eq!(ids, vec!["rt_a", "rt_b", "rt_c", "rt_d"]);
+        }
+        assert!(orderings.len() > 1, "shuffle should produce varied orderings");
     }
 
     #[test]

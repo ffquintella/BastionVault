@@ -148,8 +148,14 @@ export function AuditPage() {
     {
       key: "target",
       header: "Target",
+      className: "max-w-[28rem]",
       render: (e: AuditEvent) => (
-        <span className="font-mono text-xs truncate">{e.target || "-"}</span>
+        <span
+          className="font-mono text-xs truncate block max-w-[28rem]"
+          title={e.target || undefined}
+        >
+          {e.target || "-"}
+        </span>
       ),
     },
     {
@@ -269,11 +275,13 @@ export function AuditPage() {
               }
             />
           ) : (
-            <Table
-              columns={columns}
-              data={filtered}
-              rowKey={(e) => `${e.ts}|${e.category}|${e.target}|${e.op}|${e.user}`}
-            />
+            <div className="overflow-x-auto">
+              <Table
+                columns={columns}
+                data={filtered}
+                rowKey={(e) => `${e.ts}|${e.category}|${e.target}|${e.op}|${e.user}`}
+              />
+            </div>
           )}
         </Card>
       </div>

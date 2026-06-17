@@ -1,0 +1,33 @@
+# Overlay that adds a SECOND Rustion instance so run.sh's opt-in
+# failover phase (E2E_FAILOVER=1) can prove BastionVault-side
+# multi-instance failover: pin an ordered bastion list, kill the
+# primary, and confirm the dispatcher walks to the secondary.
+#
+# Usage:
+#   E2E_FAILOVER=1 docker compose \
+#     -f docker-compose.yaml -f docker-compose.failover.yaml ... up
+# run.sh wires the -f flags automatically when E2E_FAILOVER is set.
+#
+# rustion-2 reuses the same image + rustion.toml + authority record
+# (both instances trust the same BV master pubkey) but gets its own
+# state dir, its own ML-KEM identity / webhook keypair / TLS leaf, and
+# distinct host ports. Inside the container it still binds 2222/9443.
+
+services:
+  rustion-2:
+    build:
+      context: ../../../../rustion
+      dockerfile: Dockerfile
+    image: rustion:phase32
+    container_name: rustion-2
+    networks:
+      - rustion-e2e
+    ports:
+      - "2224:2222"  # SSH listener (secondary)
+      - "9444:9443"  # Control-plane HTTP (secondary)
+    volumes:
+      - ./config/rustion.toml:/etc/rustion/rustion.toml:ro
+      - ./config/rustion-authorities:/etc/rustion/authorities:ro
+      - ./var/rustion-2:/var/lib/rustion
+    depends_on:
+      - openssh-target

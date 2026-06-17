@@ -68,6 +68,19 @@ pub struct SessionOpenRequest {
     /// global random pool. A non-empty list pins the order.
     #[serde(default)]
     pub bastions: Option<Vec<String>>,
+
+    /// When the `bastions` list was resolved from a named bastion group,
+    /// the group name — purely for audit attribution (`bastion_selection
+    /// = "group"`). `None` means the list came from a profile/tier
+    /// literal or the random pool.
+    #[serde(default)]
+    pub bastion_group: Option<String>,
+
+    /// Shuffle the (health-filtered) bastion list before walking it.
+    /// Set when the resolved group's `selection` is `random`. Ignored
+    /// unless `bastions` is a non-empty list.
+    #[serde(default)]
+    pub bastion_shuffle: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -271,8 +284,21 @@ pub async fn open_session_v2(
             .map(|(_, v)| v.clone())
     };
 
-    let pinned_ref: Option<&[String]> = request.bastions.as_deref();
-    let plan: DispatchPlan = dispatcher::plan(pinned_ref, &targets, &health, &mut rand::rng());
+    // Scope the (`!Send`) ThreadRng to the synchronous planning step so
+    // it is dropped before the `.await` loop below — otherwise the
+    // session-open future stops being `Send`.
+    let plan: DispatchPlan = {
+        let mut rng = rand::rng();
+        match (request.bastions.as_deref(), request.bastion_group.as_deref()) {
+            // List resolved from a named group → dispatch as Group,
+            // honouring the group's ordered/random selection.
+            (Some(members), Some(_group)) if !members.is_empty() => {
+                dispatcher::plan_group(members, request.bastion_shuffle, &targets, &health, &mut rng)
+            }
+            // Profile/tier literal list, or empty → existing pinned/random-pool logic.
+            (pinned, _) => dispatcher::plan(pinned, &targets, &health, &mut rng),
+        }
+    };
     if plan.candidates.is_empty() {
         return Err(SessionOpenError::NoCandidates);
     }

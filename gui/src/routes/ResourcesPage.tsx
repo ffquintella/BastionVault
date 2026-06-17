@@ -60,6 +60,7 @@ import { extractError } from "../lib/error";
 import { useAuthStore } from "../stores/authStore";
 import { useAssetGroupMap } from "../hooks/useAssetGroupMap";
 import { RustionPolicyTierEditor } from "../components/RustionPolicyTierEditor";
+import { RustionDispatcherPreview } from "../components/RustionDispatcherPreview";
 
 function parseTags(tags: unknown): string[] {
   if (Array.isArray(tags)) return tags.filter(Boolean);
@@ -625,6 +626,15 @@ export function ResourcesPage() {
               <RustionPolicyTierEditor
                 tier="resource"
                 id={String(resourceInfo.name)}
+              />
+              {/* Phase 9.3 — live preview of the dispatcher's bastion
+                  candidate ordering for this resource. */}
+              <RustionDispatcherPreview
+                resourceId={String(resourceInfo.name)}
+                resourceType={String(resourceInfo.type || "")}
+                assetGroupIds={
+                  assetGroups.map.byResource[String(resourceInfo.name)] || []
+                }
               />
             </>
           )}

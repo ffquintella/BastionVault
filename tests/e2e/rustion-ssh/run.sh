@@ -68,6 +68,17 @@ else TIMEOUT=(env); fi   # `env` is a transparent prefix (safe under bash 3.2 + 
 
 if docker compose version >/dev/null 2>&1; then DC=(docker compose); else DC=(docker-compose); fi
 
+# Opt-in two-instance failover phase (Step 9). When set, every compose
+# command also loads the overlay that adds `rustion-2`, and run.sh runs
+# the kill-primary failover assertions after the main flow.
+E2E_FAILOVER="${E2E_FAILOVER:-}"
+RUSTION2_CP="${RUSTION2_CP:-https://127.0.0.1:9444}"
+RUSTION2_ENDPOINT="${RUSTION2_ENDPOINT:-rustion-2:9443}"
+if [ -n "$E2E_FAILOVER" ]; then
+    DC+=(-f docker-compose.yaml -f docker-compose.failover.yaml)
+    log "E2E_FAILOVER set — rustion-2 overlay enabled"
+fi
+
 # curl helper: prints "<http_status>\n<body>"; callers split with read.
 api() {
     local method=$1 path=$2; shift 2
@@ -350,4 +361,155 @@ CO_TICKET=$(echo "$V2" | jq -r '.data.ticket // empty')
 [ -n "$CO_TICKET" ] && ssh_through "$CO_TICKET" "connect-only" || warn "v2 open returned no ticket: $V2"
 
 bold "Done — connect-only operator proxied an SSH session without ever reading the credential."
+
+#───────────────────────────────────────────────────────────────────
+# Step 9 — multi-instance failover (opt-in: E2E_FAILOVER=1)
+#
+# Brings up a SECOND Rustion (rustion-2), enrols it, then proves that an
+# ordered bastion list fails over to the secondary when the primary is
+# killed. This exercises the BastionVault-side dispatcher walk-and-advance
+# loop — the chosen alternative to building HA inside Rustion itself.
+#───────────────────────────────────────────────────────────────────
+if [ -n "$E2E_FAILOVER" ]; then
+    bold "Step 9 — multi-instance failover (rustion-2)"
+
+    # 9a. Stand up rustion-2's writable state (mirrors Step 4 for the
+    #     primary): own identity/keys, admin user, self-signed TLS leaf.
+    mkdir -p var/rustion-2/control-plane var/rustion-2/users var/rustion-2/targets \
+             var/rustion-2/roles var/rustion-2/audit var/rustion-2/audit-keys \
+             var/rustion-2/recordings
+    if [ ! -e var/rustion-2/users/admin.yaml ]; then
+        cat > var/rustion-2/users/admin.yaml <<'YAML'
+username: admin
+enabled: true
+roles:
+  - admin
+allowed_targets: []
+mfa: {}
+YAML
+    fi
+    if [ ! -s var/rustion-2/control-plane/tls.crt ]; then
+        log "minting self-signed control-plane TLS cert for rustion-2"
+        openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+            -keyout var/rustion-2/control-plane/tls.key \
+            -out    var/rustion-2/control-plane/tls.crt \
+            -subj "/CN=rustion-2" \
+            -addext "subjectAltName=DNS:rustion-2,DNS:localhost,IP:127.0.0.1" \
+            >/dev/null 2>&1
+    fi
+    "${DC[@]}" up -d --build rustion-2
+    log "waiting for rustion-2 control plane…"
+    tries=90
+    until curl -ksf "$RUSTION2_CP/v1/health" >/dev/null 2>&1; do
+        tries=$((tries-1)); [ "$tries" -le 0 ] && die "rustion-2 control plane never came up at $RUSTION2_CP"
+        sleep 1
+    done
+    log "rustion-2 is up"
+
+    # 9b. Enrol rustion-2 as a second BV target (mirrors Step 5).
+    tries=30
+    until [ -s var/rustion-2/identity.pub ]; do
+        tries=$((tries-1)); [ "$tries" -le 0 ] && die "rustion-2 never wrote identity.pub"
+        sleep 1
+    done
+    KEM2_B64=$(base64 < var/rustion-2/identity.pub | tr -d '\n')
+    WH2=$("${DC[@]}" exec -T rustion-2 /usr/local/bin/rustion-server \
+            control-plane webhook-key export --config /etc/rustion/rustion.toml \
+            --format json 2>/dev/null)
+    ED2_SPKI=$(echo "$WH2" | jq -r '.ed25519_spki_b64 // empty')
+    ML2_PUB=$(echo "$WH2"  | jq -r '.mldsa65_pub_b64 // empty')
+    [ -n "$ED2_SPKI" ] && [ -n "$ML2_PUB" ] || die "could not export rustion-2 webhook pubkeys: $WH2"
+    RUSTION2_CERT=$(openssl s_client -connect "${RUSTION2_CP#https://}" -servername rustion-2 \
+        </dev/null 2>/dev/null | openssl x509 -outform pem 2>/dev/null || true)
+    ADD2=$(jq -n \
+        --arg name rustion-e2e-2 --arg endpoint "$RUSTION2_ENDPOINT" \
+        --arg kem "$KEM2_B64" --arg cert "$RUSTION2_CERT" \
+        --arg ed "$ED2_SPKI" --arg ml "$ML2_PUB" \
+        '{name:$name, endpoint:$endpoint, kem_public_key:$kem,
+          public_key_ed25519:$ed, public_key_mldsa65:$ml,
+          tls_pinned_cert_pem:$cert, tags:"env=e2e,role=dr",
+          description:"e2e failover secondary", enabled:true}')
+    IFS=$'\n' read -r -d '' code body < <(
+        api POST /v1/rustion/targets "${RT[@]}" -H 'Content-Type: application/json' -d "$ADD2"; printf '\0')
+    [ "$code" = "200" ] || die "rustion-2 target add failed (HTTP $code): $body"
+    log "rustion-2 enrolled"
+
+    # 9c. Probe both targets healthy.
+    for _ in $(seq 1 20); do
+        api POST /v1/rustion/targets/probe "${RT[@]}" >/dev/null 2>&1 || true
+        sleep 1
+        HEALTH=$(curl -sk "$BV_ADDR/v1/rustion/targets/health" "${RT[@]}")
+        ups=$(echo "$HEALTH" | jq -r '[(.data.targets // .data // .)[] | select(.status=="up" or .status=="healthy")] | length' 2>/dev/null)
+        [ "${ups:-0}" -ge 2 ] && break
+    done
+    log "healthy targets: ${ups:-0}"
+
+    # Resolve the two target ids by name.
+    TARGETS=$(curl -sk "$BV_ADDR/v1/rustion/targets" "${RT[@]}")
+    ID1=$(echo "$TARGETS" | jq -r '(.data.targets // .data // .)[] | select(.name=="rustion-e2e") | .id' | head -1)
+    ID2=$(echo "$TARGETS" | jq -r '(.data.targets // .data // .)[] | select(.name=="rustion-e2e-2") | .id' | head -1)
+    [ -n "$ID1" ] && [ -n "$ID2" ] || die "could not resolve both target ids (id1=$ID1 id2=$ID2)"
+    log "primary=$ID1  secondary=$ID2"
+
+    # 9d. Create an ordered bastion group [primary, secondary] — exercises
+    #     group CRUD + the dispatcher's group path.
+    GRP=$(jq -n --arg n e2e-failover --arg a "$ID1" --arg b "$ID2" \
+        '{name:$n, members:[$a,$b], selection:"ordered", description:"e2e ordered failover"}')
+    api POST /v1/rustion/bastion-groups "${RT[@]}" -H 'Content-Type: application/json' -d "$GRP" >/dev/null
+    log "bastion group 'e2e-failover' = [primary → secondary] (ordered)"
+
+    open_on() {  # echoes the landed bastion_name for an ordered [id1,id2] open
+        curl -sk "$BV_ADDR/v1/rustion/session/open" "${RT[@]}" -H 'Content-Type: application/json' \
+            -d "{\"target_host\":\"target\",\"target_port\":$TARGET_PORT,\"target_protocol\":\"ssh\",
+                 \"credential_kind\":\"ssh-password\",\"credential_username\":\"$TARGET_USER\",
+                 \"credential_material\":\"$(printf '%s' "$TARGET_PASS" | base64)\",
+                 \"ttl_secs\":600,\"recording\":\"off\",
+                 \"bastions\":[\"$ID1\",\"$ID2\"]}"
+    }
+
+    # 9e. Open #1 — both up, ordered list → lands on the primary.
+    OPEN1=$(open_on)
+    LANDED1=$(echo "$OPEN1" | jq -r '.data.bastion_name // empty')
+    log "open #1 landed on: ${LANDED1:-<none>}"
+    if [ "$LANDED1" = "rustion-e2e" ]; then
+        log "  → ✅ ordered list picked the primary first"
+    else
+        warn "  → expected primary 'rustion-e2e', got '${LANDED1:-<none>}': $OPEN1"
+    fi
+
+    # 9f. Kill the primary, then re-probe so its health flips off `up`.
+    bold "Step 9g — kill the primary and re-open"
+    "${DC[@]}" stop rustion >/dev/null 2>&1 || true
+    log "primary stopped; re-probing…"
+    for _ in $(seq 1 10); do
+        api POST /v1/rustion/targets/probe "${RT[@]}" >/dev/null 2>&1 || true
+        sleep 1
+    done
+
+    # 9h. Open #2 — primary unreachable; the walk-and-advance loop (or the
+    #     health filter) falls through to the secondary.
+    OPEN2=$(open_on)
+    LANDED2=$(echo "$OPEN2" | jq -r '.data.bastion_name // empty')
+    TRIED=$(echo "$OPEN2" | jq -rc '.data.bastion_candidates_tried // []')
+    log "open #2 landed on: ${LANDED2:-<none>}  (candidates_tried=$TRIED)"
+    if [ "$LANDED2" = "rustion-e2e-2" ]; then
+        bold "✅ FAILOVER PROVEN — primary down, session opened on the secondary."
+    else
+        warn "❌ expected failover to 'rustion-e2e-2', got '${LANDED2:-<none>}': $OPEN2"
+    fi
+
+    # 9i. The killed primary is excluded from the random pool too.
+    POOL=$(curl -sk "$BV_ADDR/v1/rustion/session/open" "${RT[@]}" -H 'Content-Type: application/json' \
+        -d "{\"target_host\":\"target\",\"target_port\":$TARGET_PORT,\"target_protocol\":\"ssh\",
+             \"credential_kind\":\"ssh-password\",\"credential_username\":\"$TARGET_USER\",
+             \"credential_material\":\"$(printf '%s' "$TARGET_PASS" | base64)\",
+             \"ttl_secs\":600,\"recording\":\"off\"}")
+    POOL_LANDED=$(echo "$POOL" | jq -r '.data.bastion_name // empty')
+    if [ "$POOL_LANDED" = "rustion-e2e-2" ]; then
+        log "random-pool open also landed on the only healthy target (secondary) ✅"
+    else
+        warn "random-pool open landed on '${POOL_LANDED:-<none>}' (expected secondary)"
+    fi
+fi
+
 bold "Explore with: ${DC[*]} logs -f   |   tear down with: ${DC[*]} down -v"
