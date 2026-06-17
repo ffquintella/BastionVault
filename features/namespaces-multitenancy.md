@@ -49,7 +49,14 @@ The HTTP surface follows Vault Enterprise's: every endpoint accepts an `X-Bastio
 > parity, but per `agent.md` all new routes ship under `v2/`; the management
 > endpoints are therefore reached at `v2/sys/namespaces`. The
 > `X-BastionVault-Namespace` header applies to existing `v1` logical paths
-> (backward-compatible addressing), which is permitted.
+> (backward-compatible addressing), which is permitted. As of **0.15.1** the
+> namespace + namespace-link routes are wired into `configure_sys_routes`
+> (`src/http/sys.rs`) and served under **both** `/v1/sys` and `/v2/sys`: they
+> originally lived only on the sys backend's logical route table, so over HTTP
+> the explicit `/v1/sys` actix scope 404'd them before the `/v1/{path:.*}`
+> catch-all could handle them (they worked only in embedded vault mode). The
+> remote GUI defaults to the `/v1` prefix, so this is what made the Namespaces
+> page 404 against a remote server.
 
 - **`namespace` keywords already appear in the auth path code** (e.g. `src/modules/credential/saml/verify.rs`, `src/modules/credential/oidc/path_roles.rs`, `src/modules/policy/acl.rs`). These are SAML/OIDC *protocol* namespaces (XML namespaces, claim namespaces), **not** the multi-tenant namespace concept this spec adds. Search hits there are unrelated to multi-tenancy.
 - **What ships today as "Partial":**

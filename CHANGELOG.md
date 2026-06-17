@@ -45,6 +45,24 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-06-17
+
+### Fixed
+
+- **Namespace HTTP routes unreachable in remote mode** (`src/http/sys.rs`) -- the
+  multi-tenancy namespace endpoints (`sys/namespaces`, `sys/namespaces/{path}`,
+  `sys/namespace-links`, `sys/namespace-links/{id}`) lived only on the sys
+  backend's *logical* route table, so they were reachable in embedded vault mode
+  but the explicit `/v1/sys` actix scope returned a bare `HTTP 404 (no body)`
+  before the request could fall through to the `/v1/{path:.*}` logical catch-all.
+  The desktop GUI's Namespaces page (and any remote API client) consequently
+  404'd on every list/CRUD call. Added explicit HTTP shims in
+  `configure_sys_routes` that forward to the logical handlers, including the
+  `LIST` verb and the `X-BastionVault-Namespace` header copy that the logical
+  catch-all performs (without it, child-namespace scoping silently resolved to
+  root). Added end-to-end HTTP regression tests so the routes can no longer
+  regress to embedded-only.
+
 ## [0.15.0] - 2026-06-17
 
 ### Added

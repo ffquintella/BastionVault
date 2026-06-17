@@ -16,7 +16,7 @@ use crate::{
         response_json_ok,
         response_ok,
     },
-    logical::Operation,
+    logical::{Operation, Request},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -273,6 +273,115 @@ async fn sys_owner_backfill_request_handler(
     r.path = "sys/owner/backfill".to_string();
     r.operation = Operation::Write;
     r.body = Some(payload);
+    handle_request(core, &mut r).await
+}
+
+/// The non-standard `LIST` HTTP verb the BastionVault clients use for
+/// `Operation::List`. Mirrors the verb the `/v1/{path:.*}` logical
+/// catch-all matches in `logical.rs`.
+fn list_method() -> actix_web::http::Method {
+    actix_web::http::Method::from_bytes(b"LIST").expect("LIST is a valid HTTP method token")
+}
+
+/// Copy the multi-tenancy namespace selector (`X-BastionVault-Namespace`)
+/// into a forwarded logical request. `request_auth` only carries the token,
+/// so sys-layer HTTP shims that target namespace-scoped logical routes must
+/// replicate the header copy the `/v1/{path:.*}` catch-all performs in
+/// `logical.rs`; otherwise child-namespace scoping silently always resolves
+/// to root.
+fn copy_namespace_header(req: &HttpRequest, r: &mut Request) {
+    if let Some(ns) = req
+        .headers()
+        .get("x-bastionvault-namespace")
+        .and_then(|v| v.to_str().ok())
+    {
+        r.headers
+            .get_or_insert_with(Default::default)
+            .insert("x-bastionvault-namespace".to_string(), ns.to_string());
+    }
+}
+
+/// LIST `/sys/namespaces` — list child namespaces of the caller's namespace.
+/// Thin HTTP shim over the sys-backend logical route `namespaces`. Without an
+/// explicit shim the `/v1/sys` scope 404s the request before it reaches the
+/// `/v1/{path:.*}` logical catch-all where the namespace pattern lives, so the
+/// route only worked in embedded vault mode.
+async fn sys_namespace_list_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/namespaces".to_string();
+    r.operation = Operation::List;
+    copy_namespace_header(&req, &mut r);
+    handle_request(core, &mut r).await
+}
+
+/// GET / POST|PUT / DELETE `/sys/namespaces/{path}` — read metadata + quotas,
+/// create-or-update, or delete a namespace by slash-delimited path. HTTP shim
+/// over the sys-backend logical route `namespaces/{path}`.
+async fn sys_namespace_path_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    path: web::Path<String>,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = format!("sys/namespaces/{}", path.into_inner());
+    copy_namespace_header(&req, &mut r);
+    match *req.method() {
+        actix_web::http::Method::POST | actix_web::http::Method::PUT => {
+            r.operation = Operation::Write;
+            if !body.is_empty() {
+                r.body = Some(serde_json::from_slice(&body)?);
+                body.clear();
+            }
+        }
+        actix_web::http::Method::DELETE => r.operation = Operation::Delete,
+        _ => r.operation = Operation::Read,
+    }
+    handle_request(core, &mut r).await
+}
+
+/// LIST / POST `/sys/namespace-links` — list existing cross-tenant identity
+/// links owned by the caller's namespace, or create a new one. HTTP shim over
+/// the sys-backend logical route `namespace-links`.
+async fn sys_namespace_links_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/namespace-links".to_string();
+    copy_namespace_header(&req, &mut r);
+    if *req.method() == actix_web::http::Method::POST || *req.method() == actix_web::http::Method::PUT {
+        r.operation = Operation::Write;
+        if !body.is_empty() {
+            r.body = Some(serde_json::from_slice(&body)?);
+            body.clear();
+        }
+    } else {
+        r.operation = Operation::List;
+    }
+    handle_request(core, &mut r).await
+}
+
+/// GET / DELETE `/sys/namespace-links/{id}` — read or delete a cross-tenant
+/// identity link by UUID. HTTP shim over the sys-backend logical route
+/// `namespace-links/{id}`.
+async fn sys_namespace_link_path_request_handler(
+    req: HttpRequest,
+    path: web::Path<String>,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = format!("sys/namespace-links/{}", path.into_inner());
+    copy_namespace_header(&req, &mut r);
+    r.operation = if *req.method() == actix_web::http::Method::DELETE {
+        Operation::Delete
+    } else {
+        Operation::Read
+    };
     handle_request(core, &mut r).await
 }
 
@@ -2582,6 +2691,34 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
             web::resource("/owner/backfill")
                 .route(web::post().to(sys_owner_backfill_request_handler)),
         )
+        // Multi-tenancy namespace routes. Like the owner routes above, these
+        // live on the sys backend's logical route table but need an explicit
+        // HTTP shim — otherwise the `/v1/sys` scope 404s them before they
+        // reach the `/v1/{path:.*}` logical catch-all, so they only worked in
+        // embedded vault mode. `LIST` is the verb the clients use for list ops.
+        .service(
+            web::resource("/namespaces")
+                .route(web::method(list_method()).to(sys_namespace_list_request_handler))
+                .route(web::get().to(sys_namespace_list_request_handler)),
+        )
+        .service(
+            web::resource("/namespaces/{path:.*}")
+                .route(web::get().to(sys_namespace_path_request_handler))
+                .route(web::post().to(sys_namespace_path_request_handler))
+                .route(web::put().to(sys_namespace_path_request_handler))
+                .route(web::delete().to(sys_namespace_path_request_handler)),
+        )
+        .service(
+            web::resource("/namespace-links")
+                .route(web::method(list_method()).to(sys_namespace_links_request_handler))
+                .route(web::get().to(sys_namespace_links_request_handler))
+                .route(web::post().to(sys_namespace_links_request_handler)),
+        )
+        .service(
+            web::resource("/namespace-links/{id}")
+                .route(web::get().to(sys_namespace_link_path_request_handler))
+                .route(web::delete().to(sys_namespace_link_path_request_handler)),
+        )
         // Owner self-claim and admin transfer routes. These have always
         // been registered on the sys backend's logical route table, but
         // without an explicit HTTP-layer shim a request to
@@ -2661,4 +2798,73 @@ fn default_plugin_register_body_limit() -> usize {
 /// matches the register / logical / batch limits.
 fn default_plugin_invoke_body_limit() -> usize {
     32 * 1024 * 1024
+}
+
+#[cfg(test)]
+mod namespace_route_tests {
+    //! Regression tests for the multi-tenancy namespace HTTP routes.
+    //!
+    //! These routes live on the sys backend's *logical* route table and were
+    //! only reachable in embedded vault mode: over HTTP the explicit `/v1/sys`
+    //! actix scope 404'd them before they could fall through to the
+    //! `/v1/{path:.*}` logical catch-all. The shims in `configure_sys_routes`
+    //! fix that — these tests drive the real HTTP pipeline to lock it in so a
+    //! `LIST /v1/sys/namespaces` never silently 404s again.
+
+    use serde_json::json;
+
+    use crate::test_utils::TestHttpServer;
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_list_namespaces_reachable_over_http() {
+        let mut server = TestHttpServer::new("test_list_namespaces_http", true).await;
+        server.token = server.root_token.clone();
+
+        let (status, resp) = server
+            .list("sys/namespaces", Some(&server.root_token.clone()))
+            .unwrap();
+        // The bug: actix returns a bare 404 here. The fix routes the request
+        // to the logical namespace-list handler, which returns 200 with a
+        // (possibly empty) `keys` list.
+        assert_eq!(status, 200, "LIST /v1/sys/namespaces must reach the logical handler: {resp:?}");
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_namespace_crud_roundtrip_over_http() {
+        let mut server = TestHttpServer::new("test_namespace_crud_http", true).await;
+        server.token = server.root_token.clone();
+        let token = server.root_token.clone();
+
+        // Create (POST). The bug 404'd this at the actix scope; the shim now
+        // routes it to the logical write handler.
+        let (status, resp) = server
+            .request("POST", "sys/namespaces/team-alpha", json!({}).as_object().cloned(), Some(&token), None)
+            .unwrap();
+        assert!(status == 200 || status == 204, "create namespace failed: {status} {resp:?}");
+
+        // Read it back (GET) — proves the create persisted and the path route
+        // reaches the logical read handler rather than the actix 404.
+        let (status, resp) = server
+            .request("GET", "sys/namespaces/team-alpha", None, Some(&token), None)
+            .unwrap();
+        assert_eq!(status, 200, "read-after-create must reach handler and find ns: {resp:?}");
+
+        // Delete it (DELETE).
+        let (status, _resp) = server
+            .request("DELETE", "sys/namespaces/team-alpha", None, Some(&token), None)
+            .unwrap();
+        assert!(status == 200 || status == 204, "delete namespace failed: {status}");
+
+        // After delete the read must 404 with the *logical* not-found error
+        // (handler reached), not the actix mount-not-found 404 the bug produced.
+        let (status, resp) = server
+            .request("GET", "sys/namespaces/team-alpha", None, Some(&token), None)
+            .unwrap();
+        assert_eq!(status, 404, "read-after-delete should be not-found: {resp:?}");
+        let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            err.contains("no such namespace"),
+            "404 must come from the logical handler, not the actix scope: {resp:?}"
+        );
+    }
 }
