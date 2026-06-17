@@ -444,10 +444,12 @@ YAML
     done
     log "healthy targets: ${ups:-0}"
 
-    # Resolve the two target ids by name.
-    TARGETS=$(curl -sk "$BV_ADDR/v1/rustion/targets" "${RT[@]}")
-    ID1=$(echo "$TARGETS" | jq -r '(.data.targets // .data // .)[] | select(.name=="rustion-e2e") | .id' | head -1)
-    ID2=$(echo "$TARGETS" | jq -r '(.data.targets // .data // .)[] | select(.name=="rustion-e2e-2") | .id' | head -1)
+    # Resolve the two target ids by name. The LIST op isn't served over
+    # HTTP (logical-only), but the health endpoint returns id+name+status
+    # objects — use those.
+    HEALTH_ALL=$(curl -sk "$BV_ADDR/v1/rustion/targets/health" "${RT[@]}")
+    ID1=$(echo "$HEALTH_ALL" | jq -r '(.data.targets // .data) | .[] | select(.name=="rustion-e2e")   | .id' | head -1)
+    ID2=$(echo "$HEALTH_ALL" | jq -r '(.data.targets // .data) | .[] | select(.name=="rustion-e2e-2") | .id' | head -1)
     [ -n "$ID1" ] && [ -n "$ID2" ] || die "could not resolve both target ids (id1=$ID1 id2=$ID2)"
     log "primary=$ID1  secondary=$ID2"
 
