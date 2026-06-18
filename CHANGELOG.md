@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.15.5] - 2026-06-18
+
+### Security
+
+- **GUI dependency audit** -- run `npm audit fix` to resolve 7 advisories (1 critical, 4 high, 1 moderate, 1 low) across `vitest`, `vite`, `react-router`/`react-router-dom`, `ws`, `postcss`, and `@babel/core`. All semver-compatible patch/minor bumps; `npm audit` now reports 0 vulnerabilities. TypeScript check, `vite build`, and the 120 vitest tests all pass.
+
 ## [0.15.4] - 2026-06-17
 
 ### Added
