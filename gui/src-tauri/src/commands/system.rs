@@ -718,6 +718,71 @@ pub async fn list_audit_events(
     Ok(out)
 }
 
+// ── Dashboard summary ──────────────────────────────────────────────
+//
+// One-shot operational snapshot for the GUI Dashboard landing page.
+// Routes through the Backend trait (`make_request`) so it works in
+// both embedded and remote mode. Counts are computed server-side,
+// ACL- and namespace-scoped, so the dashboard makes a single call
+// instead of fanning out N list requests.
+
+#[derive(Serialize, Default)]
+pub struct DashboardSeal {
+    pub sealed: bool,
+    pub initialized: bool,
+}
+
+#[derive(Serialize, Default)]
+pub struct DashboardCounts {
+    pub secret_mounts: u64,
+    pub auth_mounts: u64,
+    pub policies: u64,
+    pub entities: u64,
+}
+
+#[derive(Serialize, Default)]
+pub struct DashboardSummary {
+    pub version: String,
+    pub namespace: String,
+    pub seal: DashboardSeal,
+    pub counts: DashboardCounts,
+    pub audit_24h_total: u64,
+}
+
+#[tauri::command]
+pub async fn dashboard_summary(state: State<'_, AppState>) -> CmdResult<DashboardSummary> {
+    let resp = crate::commands::make_request(
+        &state,
+        Operation::Read,
+        "sys/dashboard/summary".to_string(),
+        None,
+    )
+    .await?;
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+
+    let counts = data.get("counts").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+    let seal = data.get("seal").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+    let audit = data.get("audit_24h").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+    let u = |m: &serde_json::Map<String, Value>, k: &str| m.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+    let b = |m: &serde_json::Map<String, Value>, k: &str| m.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+
+    Ok(DashboardSummary {
+        version: data.get("version").and_then(|v| v.as_str()).unwrap_or("1").to_string(),
+        namespace: data.get("namespace").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        seal: DashboardSeal {
+            sealed: b(&seal, "sealed"),
+            initialized: b(&seal, "initialized"),
+        },
+        counts: DashboardCounts {
+            secret_mounts: u(&counts, "secret_mounts"),
+            auth_mounts: u(&counts, "auth_mounts"),
+            policies: u(&counts, "policies"),
+            entities: u(&counts, "entities"),
+        },
+        audit_24h_total: u(&audit, "total"),
+    })
+}
+
 // ── SSO discovery + admin toggle ───────────────────────────────────
 //
 // `sys/sso/providers` is unauthenticated on the backend so the login

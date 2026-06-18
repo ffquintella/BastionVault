@@ -265,6 +265,23 @@ export const listAuthMethods = () => invoke<MountInfo[]>("list_auth_methods");
 export const listAuditEvents = (from: string, to: string, limit?: number) =>
   invoke<AuditEvent[]>("list_audit_events", { from, to, limit });
 
+export interface DashboardSummary {
+  version: string;
+  namespace: string;
+  seal: { sealed: boolean; initialized: boolean };
+  counts: {
+    secret_mounts: number;
+    auth_mounts: number;
+    policies: number;
+    entities: number;
+  };
+  audit_24h_total: number;
+}
+// One-shot operational snapshot for the Dashboard landing page. Routes
+// through the Backend trait server-side, so it works embedded + remote.
+export const dashboardSummary = () =>
+  invoke<DashboardSummary>("dashboard_summary");
+
 // Auth
 export const loginToken = (token: string) =>
   invoke<LoginResponse>("login_token", { token });

@@ -1,46 +1,88 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Layout } from "../components/Layout";
-import { StatusBadge } from "../components/StatusBadge";
 import { useVaultStore } from "../stores/vaultStore";
 import { useAuthStore } from "../stores/authStore";
-import type { MountInfo } from "../lib/types";
+import type { AuditEvent } from "../lib/types";
 import * as api from "../lib/api";
+import type { DashboardSummary, ServerInfo } from "../lib/api";
+import {
+  rustionTelemetryList,
+  rustionTargetHealthAll,
+  type RustionTelemetryTarget,
+  type RustionTargetHealth,
+} from "../lib/rustion";
 import { extractError } from "../lib/error";
+import { KpiTile } from "../components/dashboard/KpiTile";
+import { HealthStrip } from "../components/dashboard/HealthStrip";
+import { SessionActivityChart } from "../components/dashboard/SessionActivityChart";
+import { RecentAuditCard } from "../components/dashboard/RecentAuditCard";
+import { LiveSessionsCard } from "../components/dashboard/LiveSessionsCard";
+import { AttentionPanel } from "../components/dashboard/AttentionPanel";
+import { QuickActions } from "../components/dashboard/QuickActions";
+
+const POLL_MS = 5000;
 
 export function DashboardPage() {
   const setStatus = useVaultStore((s) => s.setStatus);
   const status = useVaultStore((s) => s.status);
-  const policies = useAuthStore((s) => s.policies);
   const principal = useAuthStore((s) => s.principal);
   const entityId = useAuthStore((s) => s.entityId);
   const loadEntity = useAuthStore((s) => s.loadEntity);
-  const [mounts, setMounts] = useState<MountInfo[]>([]);
-  const [authMethods, setAuthMethods] = useState<MountInfo[]>([]);
+
+  const [summary, setSummary] = useState<DashboardSummary | null>(null);
+  const [server, setServer] = useState<ServerInfo | null>(null);
+  const [audit, setAudit] = useState<AuditEvent[]>([]);
+  const [telemetry, setTelemetry] = useState<RustionTelemetryTarget[] | null>(null);
+  const [health, setHealth] = useState<RustionTargetHealth[] | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const liveLoaded = useRef(false);
 
   useEffect(() => {
     loadDashboard();
-    // Hydrate the logged-in user's display name on first mount. The
-    // store keeps `principal` empty until something asks `entity/self`
-    // — without this call, opening the app straight on /dashboard
-    // would show an empty greeting until the user visited Sharing.
     if (!principal) loadEntity().catch(() => {});
+    const id = setInterval(pollLive, POLL_MS);
+    return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function loadDashboard() {
-    try {
-      const [st, m, a] = await Promise.all([
-        api.getVaultStatus(),
-        api.listMounts().catch(() => [] as MountInfo[]),
-        api.listAuthMethods().catch(() => [] as MountInfo[]),
-      ]);
-      setStatus(st);
-      setMounts(m);
-      setAuthMethods(a);
-    } catch (e: unknown) {
-      setError(extractError(e));
-    }
+    const now = Date.now();
+    const from = new Date(now - 24 * 3600_000).toISOString();
+    const to = new Date(now).toISOString();
+
+    const [st, sum, srv, ev, tel, hl] = await Promise.allSettled([
+      api.getVaultStatus(),
+      api.dashboardSummary(),
+      api.getServerInfo(),
+      api.listAuditEvents(from, to, 200),
+      rustionTelemetryList(),
+      rustionTargetHealthAll(),
+    ]);
+
+    if (st.status === "fulfilled") setStatus(st.value);
+    else setError(extractError(st.reason));
+
+    setSummary(sum.status === "fulfilled" ? sum.value : null);
+    setServer(srv.status === "fulfilled" ? srv.value : null);
+    setAudit(ev.status === "fulfilled" ? ev.value : []);
+    setTelemetry(tel.status === "fulfilled" ? tel.value : null);
+    setHealth(hl.status === "fulfilled" ? hl.value : null);
+    liveLoaded.current = true;
+    setNowMs(Date.now());
+    setLoading(false);
+  }
+
+  // Only the live-session widgets poll; the rest is manual-refresh.
+  async function pollLive() {
+    const [tel, hl] = await Promise.allSettled([
+      rustionTelemetryList(),
+      rustionTargetHealthAll(),
+    ]);
+    if (tel.status === "fulfilled") setTelemetry(tel.value);
+    if (hl.status === "fulfilled") setHealth(hl.value);
+    setNowMs(Date.now());
   }
 
   async function handleSeal() {
@@ -53,27 +95,40 @@ export function DashboardPage() {
     }
   }
 
+  const sealed = status ? status.sealed : summary ? summary.seal.sealed : null;
+
+  // Bastion health rollup.
+  const enabledHealth = health?.filter((h) => h.enabled) ?? null;
+  const healthyCount = enabledHealth?.filter((h) => h.status === "up").length ?? null;
+  const totalCount = enabledHealth?.length ?? null;
+  const problemCount =
+    enabledHealth?.filter((h) => h.status === "down" || h.status === "degraded").length ?? 0;
+
+  // Active session rollup.
+  const activeSessions =
+    telemetry?.reduce((n, t) => n + (t.stats?.active ?? t.active.length), 0) ?? null;
+
+  // Audit 24h: prefer the server-computed total; fall back to the
+  // fetched window length when the summary endpoint is unavailable.
+  const audit24h = summary ? summary.audit_24h_total : audit.length > 0 ? audit.length : null;
+
   return (
     <Layout>
-      <div className="space-y-6">
-        <div className="flex items-center justify-between">
-          <div>
+      <div className="space-y-5">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="min-w-0">
             <h1 className="text-2xl font-bold">Dashboard</h1>
             {principal && (
               <p
                 className="text-sm text-[var(--color-text-muted)] mt-0.5"
                 title={entityId || undefined}
               >
-                Signed in as <span className="font-medium text-[var(--color-text)]">{principal}</span>
+                {summary?.namespace ? `${summary.namespace} · ` : ""}Signed in as{" "}
+                <span className="font-medium text-[var(--color-text)]">{principal}</span>
               </p>
             )}
           </div>
-          {status && (
-            <StatusBadge
-              status={status.sealed ? "error" : "ok"}
-              label={status.sealed ? "Sealed" : "Unsealed"}
-            />
-          )}
+          <HealthStrip sealed={sealed} server={server} />
         </div>
 
         {error && (
@@ -82,115 +137,71 @@ export function DashboardPage() {
           </div>
         )}
 
-        {/* Status cards */}
-        <div className="grid grid-cols-3 gap-4">
-          <Card title="Vault Status">
-            {status ? (
-              <div className="space-y-2 text-sm">
-                <Row label="Initialized" value={status.initialized ? "Yes" : "No"} />
-                <Row label="Sealed" value={status.sealed ? "Yes" : "No"} />
-              </div>
-            ) : (
-              <span className="text-[var(--color-text-muted)] text-sm">Loading...</span>
-            )}
-          </Card>
-
-          <Card title="Policies">
-            <div className="space-y-1">
-              {policies.length > 0 ? (
-                policies.map((p) => (
-                  <span
-                    key={p}
-                    className="inline-block mr-1 mb-1 px-2 py-0.5 bg-[var(--color-bg)] rounded text-xs"
-                  >
-                    {p}
-                  </span>
-                ))
-              ) : (
-                <span className="text-[var(--color-text-muted)] text-sm">None</span>
-              )}
-            </div>
-          </Card>
-
-          <Card title="Actions">
-            <button
-              onClick={handleSeal}
-              disabled={status?.sealed}
-              className="px-3 py-1.5 bg-red-500/20 text-red-400 border border-red-500/30 rounded-lg text-sm hover:bg-red-500/30 disabled:opacity-50 transition-colors"
-            >
-              Seal Vault
-            </button>
-          </Card>
+        {/* KPI tiles */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+          <KpiTile
+            label="Live sessions"
+            value={activeSessions}
+            sub={activeSessions ? "through bastion" : undefined}
+            subTone="muted"
+            unavailableHint="no bastion"
+            to="/rustion-sessions"
+            loading={loading}
+          />
+          <KpiTile
+            label="Bastions healthy"
+            value={totalCount === null ? null : `${healthyCount}/${totalCount}`}
+            sub={problemCount > 0 ? `${problemCount} need attention` : "all up"}
+            subTone={problemCount > 0 ? "warning" : "success"}
+            unavailableHint="no bastion"
+            to="/rustion-sessions"
+            loading={loading}
+          />
+          <KpiTile
+            label="Secret engines"
+            value={summary ? summary.counts.secret_mounts : null}
+            sub={summary ? `${summary.counts.auth_mounts} auth methods` : undefined}
+            unavailableHint="unavailable"
+            to="/mounts"
+            loading={loading}
+          />
+          <KpiTile
+            label="Policies"
+            value={summary ? summary.counts.policies : null}
+            unavailableHint="unavailable"
+            to="/policies"
+            loading={loading}
+          />
+          <KpiTile
+            label="Identities"
+            value={summary ? summary.counts.entities : null}
+            unavailableHint="unavailable"
+            to="/users"
+            loading={loading}
+          />
+          <KpiTile
+            label="Audit events 24h"
+            value={audit24h}
+            unavailableHint="unavailable"
+            to="/audit"
+            loading={loading}
+          />
         </div>
 
-        {/* Secret Engines */}
-        <Card title="Secret Engines">
-          {mounts.length > 0 ? (
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-[var(--color-text-muted)] text-left">
-                  <th className="pb-2 font-medium">Path</th>
-                  <th className="pb-2 font-medium">Type</th>
-                  <th className="pb-2 font-medium">Description</th>
-                </tr>
-              </thead>
-              <tbody>
-                {mounts.map((m) => (
-                  <tr key={m.path} className="border-t border-[var(--color-border)]">
-                    <td className="py-2 font-mono text-[var(--color-primary)]">{m.path}</td>
-                    <td className="py-2">{m.mount_type}</td>
-                    <td className="py-2 text-[var(--color-text-muted)]">{m.description || "-"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <span className="text-[var(--color-text-muted)] text-sm">No secret engines mounted</span>
-          )}
-        </Card>
+        {/* Activity chart + attention */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <SessionActivityChart events={audit} nowMs={nowMs} loading={loading} />
+          <AttentionPanel sealed={sealed} health={health} loading={loading} />
+        </div>
 
-        {/* Auth Methods */}
-        <Card title="Auth Methods">
-          {authMethods.length > 0 ? (
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-[var(--color-text-muted)] text-left">
-                  <th className="pb-2 font-medium">Path</th>
-                  <th className="pb-2 font-medium">Type</th>
-                </tr>
-              </thead>
-              <tbody>
-                {authMethods.map((m) => (
-                  <tr key={m.path} className="border-t border-[var(--color-border)]">
-                    <td className="py-2 font-mono text-[var(--color-primary)]">{m.path}</td>
-                    <td className="py-2">{m.mount_type}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <span className="text-[var(--color-text-muted)] text-sm">No auth methods enabled</span>
-          )}
-        </Card>
+        {/* Live sessions + recent audit */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <LiveSessionsCard targets={telemetry} nowMs={nowMs} loading={loading} />
+          <RecentAuditCard events={audit} nowMs={nowMs} loading={loading} />
+        </div>
+
+        <QuickActions sealed={sealed} onSeal={handleSeal} />
       </div>
     </Layout>
-  );
-}
-
-function Card({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-xl p-4">
-      <h3 className="text-sm font-medium text-[var(--color-text-muted)] mb-3">{title}</h3>
-      {children}
-    </div>
-  );
-}
-
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex justify-between">
-      <span className="text-[var(--color-text-muted)]">{label}</span>
-      <span>{value}</span>
-    </div>
   );
 }

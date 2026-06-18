@@ -45,13 +45,24 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-06-18
+
+### Added
+
+#### GUI Dashboard Redesign (operational PAM landing view)
+
+Replaces the static Dashboard (mounts + auth-methods listing) with a statistics-driven landing view modelled on CyberArk / Delinea / BeyondTrust / HashiCorp Vault / Teleport. ([features/gui-dashboard-redesign.md](features/gui-dashboard-redesign.md))
+
+- **`GET /v1/sys/dashboard/summary`** (`src/modules/system/mod.rs` `handle_dashboard_summary`, actix shim `sys_dashboard_summary_request_handler` in `src/http/sys.rs`) -- one read-only call returning `{ version, namespace, seal{sealed,initialized}, counts{secret_mounts, auth_mounts, policies, entities}, audit_24h{total} }`. Counts are ACL-gated (mount visibility resolved from the caller's token like `handle_internal_ui_mounts_read`) and namespace-scoped (`list_policy_ns` / `list_entities_ns`; child-namespace mounts via the namespace registry). The 24h audit total reuses a new `collect_audit_events()` helper factored out of `handle_audit_events` (shared, no duplication). Backend test `test_dashboard_summary_basic`.
+- **`dashboard_summary` Tauri command** (`gui/src-tauri/src/commands/system.rs`) routed through `make_request` / the `Backend` trait so it works embedded **and** remote; typed `dashboardSummary()` wrapper in `gui/src/lib/api.ts`.
+- **Rewritten `DashboardPage`** + `gui/src/components/dashboard/` (`KpiTile`, `HealthStrip`, `SessionActivityChart` with exported `bucketByHour`, `RecentAuditCard`, `LiveSessionsCard`, `AttentionPanel`, `QuickActions`). One summary call + `Promise.allSettled` for live/audit data, per-tile graceful degradation (`—` + hint when a mount or the route is absent), 5s poll on the live-session widgets only. KPI row: live sessions, healthy bastions, secret engines, policies, identities, audit events 24h. 10 new vitest cases (`gui/src/test/dashboard.test.tsx`); suite now 130 passing.
+- **Deferred (no data source yet):** `audit_24h.denied` / audit-write-failure counts and the certs-expiring / credentials-due / failed-login attention rows -- BastionVault's audit trail is a change-history aggregation, not a request-level allow/deny log. The shipped `AttentionPanel` surfaces what is derivable today (sealed vault, down/degraded bastions).
+
 ## [0.16.1] - 2026-06-18
 
 ### Added
 
 - **Per-principal namespace assignment (login-restriction)** (`src/modules/namespace/ns_assignment.rs`, Phase 5 of [features/namespaces-multitenancy.md](features/namespaces-multitenancy.md)) -- restrict which namespaces a credential may authenticate into. The auth mount is shared across namespaces, so by default any credential can bind to any namespace; an operator can now record an explicit allowed-namespace list per principal. With **no record a principal is unrestricted** (unchanged behavior, so single-tenant installs are unaffected); a non-empty record permits login only at a listed namespace **or a descendant of one**, and a login at any other namespace is refused with `permission_denied` (fails closed — no silent fallback to root). Enforced at login for userpass (password + FIDO2) and approle — the backends that bind a login namespace today. New root-scoped management surface `v2/sys/identity/ns-assignment/<mount>/<name>` (Read/Write/Delete) + `v2/sys/identity/ns-assignment` (List), reachable over HTTP via `configure_sys_routes`. The GUI Users and AppRole pages gain an "Allowed namespaces" multi-select (empty ⇒ unrestricted), shown only when child namespaces exist. *(cert auth is disabled in the OpenSSL-free default build and the standalone FIDO2 backend is not namespace-aware, so enforcement there awaits the separate namespace-binding follow-up; the store and endpoints already accept any mount.)*
-
-- **GUI Dashboard Redesign spec** ([features/gui-dashboard-redesign.md](features/gui-dashboard-redesign.md)) -- planning doc for replacing the current static Dashboard (mounts + auth-methods listing) with an operational, statistics-driven PAM landing view: a header health strip (seal + HA nodes), a five-tile KPI row (live sessions, healthy bastions, secrets stored, active tokens, audit events 24h), a 24h session-activity chart, live-sessions + recent-audit panels, and a needs-attention panel (expiring certs, due rotations, failed logins, audit-write failures). Modelled on the landing views of CyberArk / Delinea / BeyondTrust / HashiCorp Vault / Teleport. Backend-first: Phase 1 is a server-side `GET /v1/sys/dashboard/summary` aggregation endpoint (ACL- and namespace-scoped, actix shim for HTTP, Tauri command via the `Backend` trait) so the dashboard makes one call for its counters; Phases 2–5 render the GUI against it, with `Promise.allSettled` client-side fallback + per-tile graceful degradation when a mount or the route is absent. Roadmap row added under Infrastructure. No implementation yet.
 
 ### Fixed
 

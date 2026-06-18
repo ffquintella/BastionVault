@@ -143,6 +143,7 @@ impl SystemBackend {
         let sys_backend_internal_ui_mount_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_cache_flush = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_capabilities_self = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_dashboard_summary = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_owner_backfill = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_sso_settings_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_sso_settings_write = self.self_ptr.upgrade().unwrap().clone();
@@ -553,6 +554,16 @@ impl SystemBackend {
                     },
                     operations: [
                         {op: Operation::Write, handler: sys_backend_capabilities_self.handle_capabilities_self}
+                    ]
+                },
+                {
+                    // One-shot operational snapshot for the GUI Dashboard
+                    // landing page: seal state + ACL-gated mount / policy /
+                    // entity counts + a 24h audit-event total. Read-only;
+                    // HTTP shim registered under /v1/sys.
+                    pattern: "dashboard/summary$",
+                    operations: [
+                        {op: Operation::Read, handler: sys_backend_dashboard_summary.handle_dashboard_summary}
                     ]
                 },
                 {
@@ -1319,12 +1330,6 @@ impl SystemBackend {
         _backend: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        use crate::modules::{
-            identity::{GroupKind, IdentityModule},
-            policy::PolicyModule,
-            resource_group::ResourceGroupModule,
-        };
-
         let from = req
             .get_data("from")
             .ok()
@@ -1340,6 +1345,51 @@ impl SystemBackend {
             .ok()
             .and_then(|v| v.as_u64())
             .unwrap_or(500) as usize;
+
+        let mut events = self.collect_audit_events().await;
+
+        // Sort newest-first. Timestamps are RFC3339 strings;
+        // lexicographic order matches chronological for that format.
+        events.sort_by(|a, b| b.ts.cmp(&a.ts));
+
+        // Apply from/to bounds (string comparison, which is fine for
+        // RFC3339). Malformed filters are ignored rather than
+        // surfacing errors — the GUI always passes well-formed values.
+        let filtered: Vec<_> = events
+            .into_iter()
+            .filter(|e| {
+                if let Some(f) = &from {
+                    if e.ts < *f {
+                        return false;
+                    }
+                }
+                if let Some(t) = &to {
+                    if e.ts > *t {
+                        return false;
+                    }
+                }
+                true
+            })
+            .take(limit)
+            .collect();
+
+        let arr = Value::Array(filtered.into_iter().map(|e| e.into_value()).collect());
+        let mut data = Map::new();
+        data.insert("events".into(), arr);
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// Gather every change-history event across the subsystems we track
+    /// (ACL policies, identity user/app groups, asset groups, shares,
+    /// user/role lifecycle, file resources) into one unsorted Vec.
+    /// Shared by `handle_audit_events` (which sorts / filters / serializes
+    /// it) and `handle_dashboard_summary` (which counts a 24h window).
+    async fn collect_audit_events(&self) -> Vec<AuditEventBuilder> {
+        use crate::modules::{
+            identity::{GroupKind, IdentityModule},
+            policy::PolicyModule,
+            resource_group::ResourceGroupModule,
+        };
 
         let mut events: Vec<AuditEventBuilder> = Vec::new();
 
@@ -1513,35 +1563,7 @@ impl SystemBackend {
             }
         }
 
-        // Sort newest-first. Timestamps are RFC3339 strings;
-        // lexicographic order matches chronological for that format.
-        events.sort_by(|a, b| b.ts.cmp(&a.ts));
-
-        // Apply from/to bounds (string comparison, which is fine for
-        // RFC3339). Malformed filters are ignored rather than
-        // surfacing errors — the GUI always passes well-formed values.
-        let filtered: Vec<_> = events
-            .into_iter()
-            .filter(|e| {
-                if let Some(f) = &from {
-                    if e.ts < *f {
-                        return false;
-                    }
-                }
-                if let Some(t) = &to {
-                    if e.ts > *t {
-                        return false;
-                    }
-                }
-                true
-            })
-            .take(limit)
-            .collect();
-
-        let arr = Value::Array(filtered.into_iter().map(|e| e.into_value()).collect());
-        let mut data = Map::new();
-        data.insert("events".into(), arr);
-        Ok(Some(Response::data_response(Some(data))))
+        events
     }
 
     pub async fn handle_audit_enable(
@@ -2064,6 +2086,150 @@ impl SystemBackend {
         data.insert("capabilities".into(), Value::Object(capabilities));
 
         Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// `GET sys/dashboard/summary` — one-shot operational snapshot for
+    /// the GUI Dashboard landing page. Aggregates seal state, ACL-gated
+    /// secret-engine / auth-method / policy / entity counts, and a 24h
+    /// audit-event total so the dashboard makes a single call instead of
+    /// fanning out N list requests. Every count respects the caller's
+    /// effective ACL and the active namespace; a caller only ever sees
+    /// totals their policies permit.
+    pub async fn handle_dashboard_summary(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        use crate::modules::{identity::IdentityModule, policy::PolicyModule};
+
+        let policy_module = self.get_module::<PolicyModule>("policy")?;
+        let auth_module = self.get_module::<AuthModule>("auth")?;
+
+        // Build the caller's ACL from their token (this is a Read route,
+        // so we resolve it the same way handle_internal_ui_mounts_read
+        // does rather than relying on req.auth). No policies → no mount
+        // visibility.
+        let Some(token_store) = auth_module.token_store.load_full() else {
+            return Err(RvError::ErrPermissionDenied);
+        };
+        let acl: Option<ACL> = match token_store.check_token(&req.path, &req.client_token).await? {
+            Some(auth) if !auth.policies.is_empty() => Some(
+                policy_module
+                    .policy_store
+                    .load()
+                    .new_acl_for_request(&auth.policies, None, &auth)
+                    .await?,
+            ),
+            _ => None,
+        };
+
+        // Resolve the active namespace (None == root).
+        let ns = self.resolve_request_namespace(req).await?;
+        let ns_path = ns.as_ref().map(|(_, p)| p.clone()).unwrap_or_default();
+
+        // --- Mount counts (secret engines + auth methods) -------------
+        // Root: walk Core's mount table gated by the caller's ACL
+        // (mirrors handle_internal_ui_mounts_read). Child namespace:
+        // count the registry's mounts, already tenant-scoped.
+        let (mut secret_mounts, mut auth_mounts) = (0usize, 0usize);
+        if let Some((uuid, path)) = ns.as_ref() {
+            if let Ok(registry) = self.namespace_registry() {
+                if let Ok(mounts) = registry.list_mounts(&self.core, uuid, path).await {
+                    for (_p, logical_type, _desc) in mounts {
+                        if logical_type != "system" {
+                            secret_mounts += 1;
+                        }
+                    }
+                }
+            }
+        } else {
+            let mounts_router = self.core.mounts_router();
+            let entries = mounts_router.entries.read()?;
+            for entry in entries.values() {
+                let me = entry.read()?;
+                let visible = acl
+                    .as_ref()
+                    .map(|a| {
+                        if me.table == AUTH_TABLE_TYPE {
+                            a.has_mount_access(&format!("{}/{}", AUTH_TABLE_TYPE, me.path))
+                        } else {
+                            a.has_mount_access(me.path.as_str())
+                        }
+                    })
+                    .unwrap_or(false);
+                if !visible {
+                    continue;
+                }
+                if me.table == AUTH_TABLE_TYPE {
+                    auth_mounts += 1;
+                } else if me.logical_type != "system" {
+                    secret_mounts += 1;
+                }
+            }
+        }
+
+        // --- Policy count ---------------------------------------------
+        let policy_store = policy_module.policy_store.load();
+        let policies = if ns_path.is_empty() {
+            policy_store.list_policy(crate::modules::policy::PolicyType::Acl).await
+        } else {
+            policy_store
+                .list_policy_ns(crate::modules::policy::PolicyType::Acl, &ns_path)
+                .await
+        }
+        .map(|v| v.len())
+        .unwrap_or(0);
+
+        // --- Entity count ---------------------------------------------
+        let entities = if let Ok(identity_module) = self.get_module::<IdentityModule>("identity") {
+            if let Some(es) = identity_module.entity_store() {
+                if ns_path.is_empty() {
+                    es.list_entities().await
+                } else {
+                    es.list_entities_ns(&ns_path).await
+                }
+                .map(|v| v.len())
+                .unwrap_or(0)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        // --- 24h audit-event total ------------------------------------
+        // Reuse the change-history aggregation; count events whose
+        // RFC3339 timestamp is >= (now - 24h). Lexicographic comparison
+        // is valid for RFC3339.
+        let cutoff = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+        let audit_24h = self
+            .collect_audit_events()
+            .await
+            .into_iter()
+            .filter(|e| e.ts >= cutoff)
+            .count();
+
+        let data = json!({
+            "version": "1",
+            "seal": {
+                "sealed": self.core.sealed(),
+                "initialized": self.core.inited().await.unwrap_or(false),
+            },
+            "namespace": ns_path,
+            "counts": {
+                "secret_mounts": secret_mounts,
+                "auth_mounts": auth_mounts,
+                "policies": policies,
+                "entities": entities,
+            },
+            "audit_24h": {
+                "total": audit_24h,
+            },
+        })
+        .as_object()
+        .cloned();
+
+        Ok(Some(Response::data_response(data)))
     }
 
     pub async fn handle_internal_ui_mounts_read(
@@ -2988,6 +3154,51 @@ mod mod_system_tests {
         });
         assert!(has_policy, "expected policy event in {events:?}");
         assert!(has_group, "expected identity-group-user event in {events:?}");
+    }
+
+    /// `sys/dashboard/summary` returns the operational snapshot: an
+    /// unsealed/initialized seal block, non-zero secret-engine and
+    /// policy counts (a default vault mounts `secret/` and we add a
+    /// policy here), and a 24h audit total that includes that policy's
+    /// create event.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_dashboard_summary_basic() {
+        let mut server = TestHttpServer::new("test_dashboard_summary_basic", true).await;
+        server.token = server.root_token.clone();
+
+        let _ = server
+            .write(
+                "sys/policies/acl/dash-test-pol",
+                serde_json::json!({ "policy": r#"path "secret/*" { capabilities = ["read"] }"# })
+                    .as_object()
+                    .cloned(),
+                None,
+            )
+            .unwrap();
+
+        let ret = server.read("sys/dashboard/summary", None).unwrap().1;
+
+        let seal = ret.get("seal").and_then(|v| v.as_object()).expect("seal block");
+        assert_eq!(seal.get("sealed").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(seal.get("initialized").and_then(|v| v.as_bool()), Some(true));
+
+        let counts = ret.get("counts").and_then(|v| v.as_object()).expect("counts block");
+        assert!(
+            counts.get("secret_mounts").and_then(|v| v.as_u64()).unwrap_or(0) >= 1,
+            "root should see at least the secret/ engine: {ret:?}"
+        );
+        assert!(
+            counts.get("policies").and_then(|v| v.as_u64()).unwrap_or(0) >= 1,
+            "the policy we just wrote should be counted: {ret:?}"
+        );
+
+        let audit_total = ret
+            .get("audit_24h")
+            .and_then(|v| v.as_object())
+            .and_then(|m| m.get("total"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert!(audit_total >= 1, "the policy create should be in the 24h total: {ret:?}");
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

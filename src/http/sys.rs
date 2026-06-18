@@ -206,6 +206,16 @@ async fn sys_list_mounts_request_handler(
 }
 
 /// GET `/sys/audit` — list enabled audit devices.
+async fn sys_dashboard_summary_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/dashboard/summary".to_string();
+    r.operation = Operation::Read;
+    handle_request(core, &mut r).await
+}
+
 async fn sys_audit_list_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
@@ -2689,6 +2699,10 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
             web::resource("/unseal")
                 .route(web::post().to(sys_unseal_request_handler))
                 .route(web::put().to(sys_unseal_request_handler)),
+        )
+        .service(
+            web::resource("/dashboard/summary")
+                .route(web::get().to(sys_dashboard_summary_request_handler)),
         )
         .service(web::resource("/mounts").route(web::get().to(sys_list_mounts_request_handler)))
         .service(

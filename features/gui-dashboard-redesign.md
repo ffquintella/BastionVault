@@ -30,9 +30,20 @@ The feature is **backend-first**: Phase 1 ships a single server-side aggregation
 
 ## Current State
 
-**Status: Todo.** Spec drafted; no code yet.
+**Status: Done.** All five phases shipped — the operational dashboard replaces the old static mounts/auth listing.
 
-The existing [DashboardPage.tsx](../gui/src/routes/DashboardPage.tsx) fetches `getVaultStatus()`, `listMounts()`, `listAuthMethods()`, and `loadEntity()` (for the display name), and renders a three-card row (Vault Status / Policies / Actions) plus the two mount tables. It uses an inline `Card`/`Row` helper rather than the shared `ui/Card` component.
+- **Phase 1 — backend summary endpoint.** `GET /v1/sys/dashboard/summary` is a read-only logical route in `src/modules/system/mod.rs` (`handle_dashboard_summary`) with an actix HTTP shim in `src/http/sys.rs` (`sys_dashboard_summary_request_handler`) so it works embedded *and* over HTTP. It returns `{ version, namespace, seal{sealed,initialized}, counts{secret_mounts, auth_mounts, policies, entities}, audit_24h{total} }`. Counts are ACL-gated (mount visibility resolved from the caller's token exactly like `handle_internal_ui_mounts_read`) and namespace-scoped (policy/entity counts use the `*_ns` variants; child-namespace mounts come from the namespace registry). The 24h audit total reuses a new `collect_audit_events()` helper factored out of `handle_audit_events` (no duplication). Tauri command `dashboard_summary` (`gui/src-tauri/src/commands/system.rs`) routes through `make_request` / the `Backend` trait so it works in remote mode; typed wrapper `dashboardSummary()` in `gui/src/lib/api.ts`.
+- **Phases 2–5 — GUI.** [DashboardPage.tsx](../gui/src/routes/DashboardPage.tsx) is rewritten around one `dashboardSummary()` call plus `Promise.allSettled` for the live/audit data, with per-tile graceful degradation (tiles show `—` + a hint when a mount or the summary route is absent). New presentational components under `gui/src/components/dashboard/`: `KpiTile`, `HealthStrip`, `SessionActivityChart` (pure-CSS 24-bar hourly chart with an exported `bucketByHour` for tests), `RecentAuditCard`, `LiveSessionsCard` (5s-polled), `AttentionPanel` (fed by real signals — seal state + bastion health), `QuickActions` (preserves the Seal control + deep-links). Only the live-session widgets poll; the rest is load-once.
+- **Tests.** Backend `test_dashboard_summary_basic` (`src/modules/system/mod.rs`) asserts the response shape + ACL/audit counts; the refactored `handle_audit_events` keeps its three existing tests green. GUI `gui/src/test/dashboard.test.tsx` covers `bucketByHour` (5 cases), `KpiTile` null/value states, and `AttentionPanel` severity rows (10 tests). Full suite: 130 vitest passing, `tsc` + `vite build` clean.
+
+### Honest deltas from the original design
+
+Two items in the widget catalog below describe data the current backend audit model does not record, so they are **deferred** rather than faked:
+
+- **`audit_24h.denied` / `write_failures`** — BastionVault's audit trail is a *change-history* aggregation (policy/identity/share/file lifecycle), not a request-level allow/deny log, so there is no per-request denial or audit-write-failure signal to count. The summary returns `audit_24h.total` only. Surfacing denials/write-failures needs a request-level audit source first.
+- **"Needs attention" certs-expiring / credentials-due / failed-logins** — these need PKI cert enumeration, LDAP role rotation timestamps, and a request-level auth log respectively. The shipped `AttentionPanel` instead surfaces the concerns we *can* derive truthfully today: a sealed vault and down/degraded bastions (from `rustionTargetHealthAll`). Expanding it is a follow-up gated on those data sources.
+
+The original (pre-implementation) design notes are retained below for reference.
 
 ## Design
 
