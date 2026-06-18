@@ -30,6 +30,7 @@ use crate::{core::Core, errors::RvError};
 pub mod identity_link;
 pub mod migrate;
 pub mod mount_registry;
+pub mod ns_assignment;
 pub mod policy_scope;
 pub mod quota;
 pub mod router;
@@ -38,6 +39,7 @@ pub mod token_binding;
 
 pub use identity_link::{IdentityLink, IdentityLinkMember, IdentityLinkStore};
 pub use mount_registry::NamespaceMountRegistry;
+pub use ns_assignment::{NsAssignment, NsAssignmentStore};
 pub use router::ResolvedNamespace;
 pub use store::{Namespace, NamespaceQuotas, NamespaceStore};
 
@@ -705,6 +707,117 @@ mod tests {
         // The tenant-a token is refused at root (namespace binding).
         let err = ns_req(&core, &auth_a.client_token, Operation::Read, "cubby/foo", "", None).await;
         assert!(err.is_err(), "tenant-a token must not operate at root");
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_namespace_login_assignment_enforced() {
+        use crate::logical::{Operation, Request};
+        use crate::test_utils::{test_mount_auth_api, test_write_api};
+        use std::collections::HashMap;
+
+        let (_bvault, core, root) =
+            new_unseal_test_bastion_vault("test_ns_login_assignment").await;
+
+        // Root-token sys request scoped to a namespace header.
+        async fn ns_req(
+            core: &Arc<Core>,
+            token: &str,
+            op: Operation,
+            path: &str,
+            ns: &str,
+            body: Option<serde_json::Map<String, serde_json::Value>>,
+        ) -> Result<Option<crate::logical::Response>, RvError> {
+            let mut req = Request::new(path);
+            req.operation = op;
+            req.client_token = token.to_string();
+            req.body = body;
+            let mut h = HashMap::new();
+            if !ns.is_empty() {
+                h.insert("x-bastionvault-namespace".to_string(), ns.to_string());
+            }
+            req.headers = Some(h);
+            core.handle_request(&mut req).await
+        }
+
+        // Returns Ok/Err so we can assert both success and denial.
+        async fn try_login(core: &Arc<Core>, ns: &str) -> Result<(), RvError> {
+            let mut req = Request::new("auth/userpass/login/alice");
+            req.operation = Operation::Write;
+            req.body = json!({ "password": "pw-123456" }).as_object().cloned();
+            let mut h = HashMap::new();
+            if !ns.is_empty() {
+                h.insert("x-bastionvault-namespace".to_string(), ns.to_string());
+            }
+            req.headers = Some(h);
+            core.handle_request(&mut req).await.map(|_| ())
+        }
+
+        test_mount_auth_api(&core, &root, "userpass", "userpass").await;
+        test_write_api(
+            &core,
+            &root,
+            "auth/userpass/users/alice",
+            true,
+            json!({ "password": "pw-123456" }).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+
+        let store = store_of(&core);
+        store.create("tenant-a", NamespaceQuotas::default(), false).await.unwrap();
+        store.create("tenant-a/sub", NamespaceQuotas::default(), false).await.unwrap();
+        store.create("tenant-b", NamespaceQuotas::default(), false).await.unwrap();
+
+        // No assignment ⇒ unrestricted: alice may log in everywhere.
+        try_login(&core, "tenant-a").await.unwrap();
+        try_login(&core, "tenant-b").await.unwrap();
+        try_login(&core, "").await.unwrap();
+
+        // Assign alice → tenant-a via the sys endpoint (root-scoped).
+        ns_req(
+            &core,
+            &root,
+            Operation::Write,
+            "sys/identity/ns-assignment/userpass/alice",
+            "",
+            json!({ "namespaces": ["tenant-a"] }).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+
+        // Readback reflects the assignment.
+        let read = ns_req(
+            &core,
+            &root,
+            Operation::Read,
+            "sys/identity/ns-assignment/userpass/alice",
+            "",
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(read.data.unwrap()["namespaces"][0], "tenant-a");
+
+        // tenant-a and its descendant are allowed; tenant-b and root are denied.
+        try_login(&core, "tenant-a").await.unwrap();
+        try_login(&core, "tenant-a/sub").await.unwrap();
+        assert!(try_login(&core, "tenant-b").await.is_err(), "unassigned namespace must be denied");
+        assert!(try_login(&core, "").await.is_err(), "root must be denied once restricted");
+
+        // Clearing the restriction (empty list) restores unrestricted access.
+        ns_req(
+            &core,
+            &root,
+            Operation::Write,
+            "sys/identity/ns-assignment/userpass/alice",
+            "",
+            json!({ "namespaces": [] }).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+        try_login(&core, "tenant-b").await.unwrap();
+        try_login(&core, "").await.unwrap();
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

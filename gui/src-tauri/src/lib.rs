@@ -316,6 +316,9 @@ pub fn run() {
             commands::namespaces::delete_namespace,
             commands::namespaces::set_active_namespace,
             commands::namespaces::get_active_namespace,
+            commands::namespaces::get_ns_assignment,
+            commands::namespaces::set_ns_assignment,
+            commands::namespaces::delete_ns_assignment,
             // Resources
             commands::resources::resource_types_read,
             commands::resources::resource_types_write,

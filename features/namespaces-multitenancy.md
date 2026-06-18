@@ -39,11 +39,18 @@ The HTTP surface follows Vault Enterprise's: every endpoint accepts an `X-Bastio
 > verifies, else it retries next boot — unseal is never blocked). All six quotas
 > are enforced and a GUI namespace switcher ships.
 >
+> **In progress (Phase 5):** per-principal **namespace assignment**
+> (login-restriction) — restrict which namespaces a credential may authenticate
+> into, across all auth backends, unrestricted by default. See the "Namespace
+> Assignment (Login-Restriction)" design section and the Phase 5 scope table.
+>
 > **Remaining follow-ups:**
 > - **`cert`-login** namespace binding, and **tenant self-service of `sys/*`**
 >   (today reachable only by root/sudo tokens carrying the namespace header).
 > - A recursive GUI namespace **tree + rename** (the page lists root children
 >   flat; server-side rename is also not yet implemented).
+> - **Namespace-scoped auth mounts** (per-tenant credentials) — the larger
+>   alternative to Phase 5's login-restriction model; deferred.
 >
 > **API-prefix note:** the spec below shows `/v1/sys/namespaces` for Vault
 > parity, but per `agent.md` all new routes ship under `v2/`; the management
@@ -139,6 +146,119 @@ Templated policies (the existing `{{username}}` / `{{entity.id}}` / `{{auth.moun
 Each namespace has its own identity tree. An entity in `engineering` is a *different entity* from one in `marketing`, even if both are aliased to the same external SSO subject. This is the right default — one company's "alice" SSO claim shouldn't grant her anything in another customer's namespace just because both happen to use the same IdP.
 
 For the SaaS / MSP case where a single human really does span tenants, the **identity-link** primitive (Phase 3) lets the parent namespace explicitly declare "entity X in child A and entity Y in child B are the same person, for audit-correlation purposes." The link is one-way visible from the parent, never from siblings.
+
+### Namespace Assignment (Login-Restriction)
+
+> **Status: planned (Phase 5).** Design decisions recorded below; implementation
+> tracked in the Phase 5 scope table.
+
+#### Background — how a login picks up a namespace today
+
+Auth *mounts* are **not** namespace-scoped in the current phases. The namespace
+router deliberately skips path-rewriting `auth/`, `sys/`, and `identity/`
+(`router.rs` — a documented Phase-1 limitation), so a single global
+`auth/userpass/users/` table (and one `auth/approle/role/`, `auth/cert/`, …)
+backs every namespace. What *is* already namespaced at login time:
+
+- **The token** is bound to the namespace named by the `X-BastionVault-Namespace`
+  header at login (`token_binding::resolve_login_namespace` →
+  `stamp_binding`), and that binding is enforced on every subsequent request
+  (`enforce_request_token_binding`).
+- **The entity** is provisioned/loaded in the login namespace — the same
+  external principal resolves to a *distinct* entity per namespace
+  (`entity_store`, partitioned alias keyspace).
+- **Policies** are loaded from the login namespace's keyspace, and identity
+  groups are expanded there.
+
+The consequence — and the **gap** this feature closes: a single credential
+(`alice` with one password) can authenticate against **any** namespace today.
+She simply gets bound to whichever one she names in the header. There is no
+notion of "alice belongs to engineering," so isolation depends entirely on every
+namespace having no useful policies for unexpected principals — a weak, implicit
+guarantee.
+
+#### Design decisions
+
+These were settled explicitly before implementation:
+
+1. **Model: login-restriction, not namespace-scoped auth mounts.** We keep the
+   single global auth mount and add an explicit per-principal *assignment list*
+   of allowed namespaces, enforced at login. We did **not** adopt full
+   Vault-style per-namespace auth mounts (where `alice@engineering` and
+   `alice@marketing` are separate credentials with separate passwords); that
+   would require lifting the Phase-1 `auth/` rewrite skip and per-namespace auth
+   mount tables — a much larger change deferred as possible future work. Under
+   the chosen model, the same username is the same person across namespaces;
+   assignment only governs *where they may authenticate*.
+2. **Scope: all identity types.** Userpass users, AppRoles, and the
+   certificate / FIDO2 backends are all covered by the same assignment
+   mechanism and the same enforcement helper.
+3. **Default: unrestricted (assignment only narrows).** A principal with **no
+   assignment record** may log in at any namespace — exactly today's behavior,
+   so the change is fully backward-compatible and single-tenant installs are
+   unaffected. A **non-empty** record restricts: login is permitted only at a
+   listed namespace **or a descendant of one** (reusing
+   `token_binding::is_descendant`, so assigning `engineering` also covers
+   `engineering/platform`). Enforcement **fails closed** — a record that does
+   not permit the target namespace returns `permission_denied`; it never
+   silently falls back to root.
+4. **Delivery: end-to-end in one initiative** — backend core, enforcement across
+   all backends, `v2` management endpoints, and GUI, with tests.
+
+#### Storage
+
+```
+sys/identity/ns-assignment/<mount>/<name>   -> { "namespaces": ["engineering", "engineering/platform"] }
+```
+
+Keyed by auth mount + principal name (`userpass/alice`, `approle/ci-deploy`,
+`cert/<name>`, …). Stored at the **barrier root** (above every per-tenant
+prefix, alongside the rest of the global identity keyspace): the record governs
+cross-namespace access, so it must be readable from root regardless of the
+caller's active namespace. JSON is versioned via `#[serde(default)]` for
+forward-compatible field additions. An **empty `namespaces` list is normalized
+to no record** (deleting the restriction) so "unrestricted" has a single
+representation.
+
+#### Enforcement
+
+A shared helper `ns_assignment::enforce_login_assignment(core, mount, name,
+ns_path)` is called in each login handler immediately **after**
+`resolve_login_namespace(...)` and before the token is stamped. It loads the
+record; if one exists and does not permit `ns_path`, the login fails with
+`permission_denied`. The decision core is a pure, unit-testable
+`namespace_allowed(allowed, request_ns) -> bool` (empty ⇒ `true`; otherwise
+exact-or-descendant match).
+
+Wiring sites: `credential/userpass/path_login.rs`,
+`credential/userpass/path_fido2_login.rs`, `credential/approle/path_login.rs`,
+the `cert` login path (`credential/cert/`), and standalone
+`credential/fido2/path_login.rs`.
+
+#### HTTP surface
+
+Per `agent.md`, new routes ship under `v2/` and are registered in
+`configure_sys_routes` (so they are served over HTTP, not only in embedded
+vault mode — the same sys-logical-route shimming the namespace CRUD needed):
+
+```
+GET    /v2/sys/identity/ns-assignment/<mount>/<name>   # read a principal's allowed namespaces
+POST   /v2/sys/identity/ns-assignment/<mount>/<name>   # set the list ({ "namespaces": [...] })
+DELETE /v2/sys/identity/ns-assignment/<mount>/<name>   # remove the restriction (back to unrestricted)
+LIST   /v2/sys/identity/ns-assignment                  # list principals that have an assignment
+```
+
+These are **root-scoped** management endpoints (the assignment is a deployment-
+level authorization fact, authored by an operator with the appropriate root
+policy), so the GUI commands reach them via `make_request_root`.
+
+#### GUI
+
+The Users page and AppRole page gain a **"Namespaces" multi-select** (options =
+`listNamespaces()` + the root entry). An empty selection renders as an
+"All namespaces (unrestricted)" state and persists as *no record*. Tauri
+commands `get_ns_assignment` / `set_ns_assignment` / `delete_ns_assignment`
+drive the `v2/sys/identity/ns-assignment` endpoints.
 
 ### Audit Wiring
 
@@ -241,8 +361,25 @@ Land the data model and the routing path. No identity/policy/audit scoping yet �
 | `gui/src/components/NamespaceSwitcher.tsx` + `bv_client::Backend::handle_with_namespace` | Top-of-sidebar namespace picker. Selecting a namespace sets the session's active namespace on the backend (`AppState.active_namespace`), and `make_request` carries the `X-BastionVault-Namespace` header on every authenticated request via the new `handle_with_namespace` trait method (overridden by both the embedded and remote backends). Reloads so all pages re-fetch under the tenant. | ✅ Done |
 | Tree view + rename in the GUI | The page lists root-level children flat; a recursive tree and rename are follow-ups (namespace rename is not yet implemented server-side either). | ⏳ Deferred |
 
+### Phase 5 — Per-Principal Namespace Assignment (Login-Restriction)
+
+Restrict *which namespaces a credential may authenticate into*. Backward-
+compatible: no assignment record ⇒ unrestricted (today's behavior). See the
+"Namespace Assignment (Login-Restriction)" design section above for the settled
+decisions and rationale.
+
+| File | Purpose | Status |
+|---|---|---|
+| `src/modules/namespace/ns_assignment.rs` | New module: `NsAssignmentStore` (barrier-root CRUD, empty-list ⇒ delete), pure `namespace_allowed(allowed, request_ns)` decision (empty ⇒ all; exact-or-descendant via `is_descendant`), and `enforce_login_assignment(core, mount, name, ns_path)` (fail-closed `permission_denied`). Unit + store-roundtrip tests. | ✅ Done |
+| `src/modules/credential/userpass/path_login.rs`, `…/path_fido2_login.rs`, `src/modules/credential/approle/path_login.rs` | Call `enforce_login_assignment` after `resolve_login_namespace`, before token stamping. Covers userpass password, the GUI's userpass-FIDO2, and approle — the three backends that bind a login namespace today. | ✅ Done |
+| `cert` / standalone `fido2/` backends | **Not gated yet, by necessity.** The legacy `cert` auth method is disabled in the OpenSSL-free default build (produces no `Auth`), and the standalone `fido2/` backend is not namespace-aware (it never resolves a login namespace). Assignment enforcement for these is contingent on the separate "`cert`-login namespace binding" follow-up; the assignment **store and endpoints already accept any mount**, so records can be authored ahead of that work. | ⏳ Deferred (prereq: namespace binding) |
+| `src/modules/system/mod.rs` + `src/http/sys.rs` | `v2/sys/identity/ns-assignment/<mount>/<name>` Read/Write/Delete + `v2/sys/identity/ns-assignment` List, registered in `configure_sys_routes` so they serve over HTTP (not embedded-only). The mount segment is normalized to the trailing-slash form (`userpass/`) so API-written records match what the login paths key on. | ✅ Done |
+| `gui/src-tauri/src/commands/namespaces.rs` + `gui/src/lib/api.ts` | `get/set/delete_ns_assignment` Tauri commands (root-scoped via `make_request_root`) + api wrappers. | ✅ Done |
+| `gui/src/routes/UsersPage.tsx` + `gui/src/routes/AppRolePage.tsx` | "Allowed namespaces" multi-select (empty ⇒ unrestricted), shown only when child namespaces exist. Users page edits load/save the current assignment; AppRole page sets it at create. | ✅ Done |
+
 ### Not In Scope
 
+- **Namespace-scoped auth mounts.** Phase 5 restricts *where a global credential may authenticate*; it does not give each namespace its own auth mount / user table. Per-namespace credentials (separate `alice` per tenant, separate passwords) would require lifting the Phase-1 `auth/` rewrite skip and are deferred as possible future work.
 - **Cross-namespace mount sharing** (one mount visible from two namespaces). Each namespace gets its own mount instance; if two need the same backend, they each mount it. Cross-mount sharing breaks the blast-radius story.
 - **Performant introspection across all namespaces** beyond what the audit mirror gives. Listing every secret across every namespace as a single root-level operation is intentionally absent.
 - **Hierarchical policy inheritance.** A child namespace does not inherit the parent's policies. Operators replicate policies they want in every child via the catalog (Phase 4 GUI helps).
@@ -257,12 +394,14 @@ Land the data model and the routing path. No identity/policy/audit scoping yet �
 - Token binding: a token issued in `engineering` cannot operate in `marketing`; with `child_visible=true` it can operate in `engineering/platform`; never in `engineering/peer-team`.
 - Policy compile-time refusal: a policy with `path "marketing/secret/*"` written from inside `engineering` is rejected at PUT time.
 - Quota enforcement: 1001st mount in a `max_mounts=1000` namespace fails with the right error; rate limiter token bucket refills correctly.
+- Namespace assignment (`namespace_allowed`): empty list ⇒ every namespace allowed; an exact path match is allowed; a descendant of an assigned path is allowed; a sibling/parent/unrelated namespace is refused.
 
 ### Integration Tests
 
 - Create root + two siblings (`tenant-a`, `tenant-b`); mount `secret/` in each; write `foo` in tenant-a; confirm tenant-b's `secret/foo` is `404`. Audit logs show the access only in tenant-a's broadcaster.
 - Migration: start with a vault containing existing root-level data, upgrade to namespace-aware build, confirm all data is reachable at the new `namespaces/<root_uuid>/...` prefix and that no client-visible API breaks.
 - Child-visible token: parent admin issues a `child_visible=true` token; uses it in `tenant-a`; admin actions succeed; switches header to `tenant-b`, same actions succeed; switches header to `tenant-c` (sibling of issuer), action fails.
+- Namespace assignment (login-restriction): assign `userpass/alice → [engineering]`; her login with header `engineering` succeeds and her login with header `marketing` is refused with `permission_denied`; after the assignment is deleted both succeed again; a principal that was never assigned logs in everywhere (unrestricted default). Regression-proves the deny cannot silently regress to the unrestricted path.
 - Audit mirror: enable root mirror, write in `tenant-a`, confirm event appears in tenant-a's broadcaster *and* the root broadcaster, with the `namespace` field populated.
 - Quota: set `max_storage_bytes=1MiB` on `tenant-a`, write 1.1MiB across many secrets, confirm the write that crosses the threshold fails with `507`; later writes after a delete succeed.
 
@@ -288,6 +427,7 @@ Land the data model and the routing path. No identity/policy/audit scoping yet �
 - **Migration is idempotent and reversible at the storage level.** The first launch on the new build creates the root-namespace prefix and re-roots existing data; the migration script is checked in and can be replayed if needed. Until Phase 4 ships in production-stable form, customers can roll back to a pre-namespace build by restoring from a pre-migration backup (the BVBK format already supports this).
 - **No cryptographic isolation between namespaces.** The barrier is single-keyed; an attacker with full barrier access can read every namespace. Customers needing cryptographic per-tenant isolation must deploy separate BastionVault instances. Documented loud and clear in the user-facing namespaces page.
 - **Identity-link is one-way.** A parent namespace can declare two child entities are the same person; child namespaces cannot see the link. This prevents a child operator from enumerating which of their users also exist in sibling namespaces.
+- **Namespace assignment fails closed and only narrows.** With no record a credential is unrestricted (preserving single-tenant behavior); with a record, a login at a non-permitted namespace is refused with `permission_denied` — never a silent fallback to root. Because the global auth mount is shared, the assignment is the *only* gate on where a credential may bind; it is therefore a root-authored, deployment-level authorization fact stored above every tenant prefix and not writable from within a tenant. It restricts authentication, not authorization within a namespace — a principal still needs policies in the namespace to do anything once bound.
 
 ## Tracking
 

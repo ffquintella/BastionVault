@@ -32,11 +32,15 @@ export function UsersPage() {
 
   // Available policies (fetched from vault, excluding "root")
   const [availablePolicies, setAvailablePolicies] = useState<string[]>([]);
+  // Available child namespaces (multi-tenancy). Empty on single-tenant installs.
+  const [availableNamespaces, setAvailableNamespaces] = useState<string[]>([]);
 
   // Form state
   const [formUsername, setFormUsername] = useState("");
   const [formPassword, setFormPassword] = useState("");
   const [formSelectedPolicies, setFormSelectedPolicies] = useState<string[]>([]);
+  // Allowed namespaces (login-restriction). Empty ⇒ unrestricted (any namespace).
+  const [formSelectedNamespaces, setFormSelectedNamespaces] = useState<string[]>([]);
 
   // FIDO2 state for the edit modal
   const [editFido2Keys, setEditFido2Keys] = useState(0);
@@ -141,7 +145,7 @@ export function UsersPage() {
     } catch (e) {
       toast("error", `Could not list auth methods: ${extractError(e)}`);
     }
-    await Promise.all([loadUsers(), loadPolicies()]);
+    await Promise.all([loadUsers(), loadPolicies(), loadNamespaces()]);
   }
 
   async function loadUsers() {
@@ -176,11 +180,26 @@ export function UsersPage() {
     }
   }
 
+  async function loadNamespaces() {
+    try {
+      const result = await api.listNamespaces();
+      setAvailableNamespaces(result.namespaces);
+    } catch {
+      setAvailableNamespaces([]);
+    }
+  }
+
   function togglePolicy(policy: string) {
     setFormSelectedPolicies((prev) =>
       prev.includes(policy)
         ? prev.filter((p) => p !== policy)
         : [...prev, policy],
+    );
+  }
+
+  function toggleNamespace(ns: string) {
+    setFormSelectedNamespaces((prev) =>
+      prev.includes(ns) ? prev.filter((p) => p !== ns) : [...prev, ns],
     );
   }
 
@@ -196,6 +215,8 @@ export function UsersPage() {
     try {
       const policies = formSelectedPolicies.join(",");
       await api.createUser(mountPath, formUsername, formPassword, policies);
+      // Persist the namespace login-restriction (empty ⇒ unrestricted).
+      await api.setNsAssignment(mountPath, formUsername, formSelectedNamespaces);
       toast("success", `User ${formUsername} created`);
       setShowCreate(false);
       resetForm();
@@ -225,6 +246,8 @@ export function UsersPage() {
     try {
       const policies = formSelectedPolicies.join(",");
       await api.updateUser(mountPath, editUser, formPassword, policies);
+      // Persist the namespace login-restriction (empty ⇒ clears it).
+      await api.setNsAssignment(mountPath, editUser, formSelectedNamespaces);
       toast("success", `User ${editUser} updated`);
       setEditUser(null);
       resetForm();
@@ -250,16 +273,18 @@ export function UsersPage() {
 
   async function openEdit(username: string) {
     try {
-      const [info, fido2Info] = await Promise.all([
+      const [info, fido2Info, assignment] = await Promise.all([
         api.getUser(mountPath, username),
         api.fido2ListCredentials(username).catch(() => null),
+        api.getNsAssignment(mountPath, username).catch(() => ({ namespaces: [] })),
       ]);
       setEditUser(username);
       setFormPassword("");
       setFormSelectedPolicies(info.policies);
+      setFormSelectedNamespaces(assignment.namespaces);
       setEditFido2Keys(fido2Info?.registered_keys ?? 0);
       setEditFido2Enabled(fido2Info?.fido2_enabled ?? false);
-      await loadPolicies();
+      await Promise.all([loadPolicies(), loadNamespaces()]);
     } catch (e: unknown) {
       toast("error", extractError(e));
     }
@@ -267,13 +292,15 @@ export function UsersPage() {
 
   async function openCreate() {
     setShowCreate(true);
-    await loadPolicies();
+    setFormSelectedNamespaces([]);
+    await Promise.all([loadPolicies(), loadNamespaces()]);
   }
 
   function resetForm() {
     setFormUsername("");
     setFormPassword("");
     setFormSelectedPolicies([]);
+    setFormSelectedNamespaces([]);
     setEditFido2Keys(0);
     setEditFido2Enabled(false);
   }
@@ -347,6 +374,46 @@ export function UsersPage() {
             Selected: {formSelectedPolicies.join(", ")}
           </p>
         )}
+      </div>
+    );
+  }
+
+  // Namespace login-restriction picker. Hidden on single-tenant installs (no
+  // child namespaces). An empty selection means the user may authenticate into
+  // any namespace; selecting one or more restricts login to those (and their
+  // descendants). The root namespace is offered as the "root" chip (value "").
+  function NamespaceSelector() {
+    if (availableNamespaces.length === 0) return null;
+    const options = ["", ...availableNamespaces];
+    return (
+      <div>
+        <label className="block text-sm text-[var(--color-text-muted)] mb-1">
+          Allowed namespaces
+        </label>
+        <div className="flex flex-wrap gap-2">
+          {options.map((ns) => {
+            const selected = formSelectedNamespaces.includes(ns);
+            return (
+              <button
+                key={ns || "__root__"}
+                type="button"
+                onClick={() => toggleNamespace(ns)}
+                className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
+                  selected
+                    ? "bg-[var(--color-primary)] border-[var(--color-primary)] text-white"
+                    : "bg-[var(--color-bg)] border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-text-muted)]"
+                }`}
+              >
+                {ns === "" ? "root" : ns}
+              </button>
+            );
+          })}
+        </div>
+        <p className="text-xs text-[var(--color-text-muted)] mt-1.5">
+          {formSelectedNamespaces.length === 0
+            ? "No restriction — this user may log in to any namespace."
+            : `Login restricted to: ${formSelectedNamespaces.map((n) => n || "root").join(", ")} (and descendants).`}
+        </p>
       </div>
     );
   }
@@ -443,6 +510,7 @@ export function UsersPage() {
               }
             />
             <PolicySelector />
+            <NamespaceSelector />
           </div>
         </Modal>
 
@@ -489,6 +557,7 @@ export function UsersPage() {
               />
             )}
             <PolicySelector />
+            <NamespaceSelector />
 
             {/* FIDO2 Security Keys section */}
             <div className="pt-3 border-t border-[var(--color-border)]">

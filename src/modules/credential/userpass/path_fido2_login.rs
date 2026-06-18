@@ -164,6 +164,17 @@ impl UserPassBackendInner {
         let (ns_path, ns_uuid) =
             crate::modules::namespace::token_binding::resolve_login_namespace(&self.core, req).await?;
 
+        // Multi-tenancy: refuse the login if this principal's namespace
+        // assignment does not include the login namespace (no record ⇒
+        // unrestricted; fails closed on a non-matching record).
+        crate::modules::namespace::ns_assignment::enforce_login_assignment(
+            &self.core,
+            "userpass/",
+            &username,
+            &ns_path,
+        )
+        .await?;
+
         // Union direct policies with any attached through identity user-groups
         // (of the login namespace) so FIDO2 logins receive the same
         // group-derived policies as password logins for the same username.

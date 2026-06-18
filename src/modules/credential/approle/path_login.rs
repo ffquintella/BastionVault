@@ -282,6 +282,17 @@ impl AppRoleBackendInner {
         let (ns_path, ns_uuid) =
             crate::modules::namespace::token_binding::resolve_login_namespace(&self.core, req).await?;
 
+        // Multi-tenancy: refuse the login if this role's namespace assignment
+        // does not include the login namespace (no record ⇒ unrestricted; fails
+        // closed on a non-matching record).
+        crate::modules::namespace::ns_assignment::enforce_login_assignment(
+            &self.core,
+            "approle/",
+            &role_entry.name,
+            &ns_path,
+        )
+        .await?;
+
         // AppRole sits in its own entity namespace (mount-qualified), further
         // partitioned by the login namespace. An `approle:payments-api` entity
         // in tenant-a is distinct from the same role in tenant-b.

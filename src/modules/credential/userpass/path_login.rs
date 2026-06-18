@@ -154,6 +154,17 @@ impl UserPassBackendInner {
         let (ns_path, ns_uuid) =
             crate::modules::namespace::token_binding::resolve_login_namespace(&self.core, req).await?;
 
+        // Multi-tenancy: refuse the login if this principal is assigned to a set
+        // of namespaces that does not include the login namespace. No assignment
+        // record ⇒ unrestricted (fails closed on a non-matching record).
+        crate::modules::namespace::ns_assignment::enforce_login_assignment(
+            &self.core,
+            "userpass/",
+            &username,
+            &ns_path,
+        )
+        .await?;
+
         // Union user's direct policies with any policies attached through
         // identity user-groups (of the login namespace) the user is a member of.
         let effective_policies = self

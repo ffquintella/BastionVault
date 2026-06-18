@@ -155,6 +155,10 @@ impl SystemBackend {
         let sys_backend_nslink_create = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_nslink_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_nslink_delete = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_nsassign_list = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_nsassign_read = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_nsassign_write = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_nsassign_delete = self.self_ptr.upgrade().unwrap().clone();
 
         let backend = new_logical_backend!({
             paths: [
@@ -734,9 +738,50 @@ impl SystemBackend {
                         {op: Operation::Delete, handler: sys_backend_nslink_delete.handle_namespace_link_delete}
                     ],
                     help: "Read or delete a cross-tenant identity link."
+                },
+                {
+                    // Per-principal namespace assignment (login-restriction).
+                    // List every principal that has a restriction on record.
+                    // Root-scoped: these govern *where a credential may
+                    // authenticate* and are operator-authored, independent of
+                    // the request's active namespace.
+                    pattern: "identity/ns-assignment/?$",
+                    operations: [
+                        {op: Operation::List, handler: sys_backend_nsassign_list.handle_ns_assignment_list}
+                    ],
+                    help: "List principals that have a namespace assignment."
+                },
+                {
+                    // Address one principal by mount + name. `mount` is a single
+                    // path segment (e.g. `userpass`); `name` is the remainder
+                    // (the username or role name).
+                    pattern: r"identity/ns-assignment/(?P<mount>[^/]+)/(?P<name>.+)$",
+                    fields: {
+                        "mount": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Auth mount the principal belongs to (e.g. userpass, approle)."
+                        },
+                        "name": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Principal name (username or role name)."
+                        },
+                        "namespaces": {
+                            field_type: FieldType::Array,
+                            required: false,
+                            description: "Allowed namespace paths (canonical; \"\" = root). An empty array clears the restriction (unrestricted)."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read,   handler: sys_backend_nsassign_read.handle_ns_assignment_read},
+                        {op: Operation::Write,  handler: sys_backend_nsassign_write.handle_ns_assignment_write},
+                        {op: Operation::Delete, handler: sys_backend_nsassign_delete.handle_ns_assignment_delete}
+                    ],
+                    help: "Read, set, or clear a principal's allowed namespaces."
                 }
             ],
-            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "seal", "raw/*", "revoke-prefix/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*", "namespace-links", "namespace-links/*"],
+            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "seal", "raw/*", "revoke-prefix/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*", "namespace-links", "namespace-links/*", "identity/ns-assignment", "identity/ns-assignment/*"],
             unauth_paths: ["internal/ui/mounts", "internal/ui/mounts/*", "init", "seal-status", "unseal", "sso/providers"],
             help: SYSTEM_BACKEND_HELP,
         });
@@ -2450,6 +2495,97 @@ impl SystemBackend {
         let parent = namespace_header_from_map(req.headers.as_ref()).unwrap_or_default();
         let id = req.get_data_as_str("id")?;
         links.delete(&parent, &id).await?;
+        Ok(None)
+    }
+
+    fn resolve_ns_assignment_store(
+        &self,
+    ) -> Result<crate::modules::namespace::NsAssignmentStore, RvError> {
+        crate::modules::namespace::NsAssignmentStore::new(&self.core)
+    }
+
+    /// Normalize a captured mount segment (e.g. `userpass`) to the
+    /// trailing-slash form the login paths key on (`userpass/`), so a record
+    /// written via the API is found by `enforce_login_assignment`.
+    fn normalize_assignment_mount(mount: &str) -> String {
+        format!("{}/", mount.trim_end_matches('/'))
+    }
+
+    fn ns_assignment_to_response(mount: &str, name: &str, namespaces: &[String], updated_at: &str) -> Response {
+        let data = json!({
+            "mount": mount,
+            "name": name,
+            "namespaces": namespaces,
+            "updated_at": updated_at,
+        })
+        .as_object()
+        .cloned();
+        Response::data_response(data)
+    }
+
+    pub async fn handle_ns_assignment_list(
+        &self,
+        _backend: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_ns_assignment_store()?;
+        let mut records = store.list().await?;
+        records.sort_by(|a, b| (a.mount.as_str(), a.name.as_str()).cmp(&(b.mount.as_str(), b.name.as_str())));
+        let assignments: Vec<Value> = records
+            .iter()
+            .map(|a| json!({ "mount": a.mount, "name": a.name, "namespaces": a.namespaces, "updated_at": a.updated_at }))
+            .collect();
+        Ok(Some(Response::data_response(
+            json!({ "assignments": assignments }).as_object().cloned(),
+        )))
+    }
+
+    pub async fn handle_ns_assignment_read(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_ns_assignment_store()?;
+        let mount = Self::normalize_assignment_mount(&req.get_data_as_str("mount")?);
+        let name = req.get_data_as_str("name")?;
+        match store.get(&mount, &name).await? {
+            Some(a) => Ok(Some(Self::ns_assignment_to_response(&a.mount, &a.name, &a.namespaces, &a.updated_at))),
+            // No record ⇒ unrestricted; report it explicitly (empty list) rather
+            // than 404 so the GUI can render the "all namespaces" state.
+            None => Ok(Some(Self::ns_assignment_to_response(&mount, &name, &[], ""))),
+        }
+    }
+
+    pub async fn handle_ns_assignment_write(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_ns_assignment_store()?;
+        let ns_store = self.resolve_namespace_store()?;
+        let mount = Self::normalize_assignment_mount(&req.get_data_as_str("mount")?);
+        let name = req.get_data_as_str("name")?;
+        let namespaces: Vec<String> = req
+            .get_data("namespaces")
+            .ok()
+            .and_then(|v| v.as_array().cloned())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        match store.set(&ns_store, &mount, &name, namespaces).await? {
+            Some(a) => Ok(Some(Self::ns_assignment_to_response(&a.mount, &a.name, &a.namespaces, &a.updated_at))),
+            None => Ok(None), // empty list cleared the restriction
+        }
+    }
+
+    pub async fn handle_ns_assignment_delete(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_ns_assignment_store()?;
+        let mount = Self::normalize_assignment_mount(&req.get_data_as_str("mount")?);
+        let name = req.get_data_as_str("name")?;
+        store.delete(&mount, &name).await?;
         Ok(None)
     }
 }

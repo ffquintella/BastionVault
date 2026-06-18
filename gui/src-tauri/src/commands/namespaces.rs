@@ -15,7 +15,7 @@ use tauri::State;
 use crate::error::CmdResult;
 use crate::state::AppState;
 
-use super::make_request;
+use super::make_request_root;
 
 #[derive(Serialize, Default)]
 pub struct NamespaceQuotas {
@@ -84,7 +84,8 @@ fn to_info(data: Option<&Map<String, Value>>, fallback_path: &str) -> NamespaceI
 
 #[tauri::command]
 pub async fn list_namespaces(state: State<'_, AppState>) -> CmdResult<NamespaceListResult> {
-    let resp = make_request(&state, Operation::List, "sys/namespaces".to_string(), None).await?;
+    let resp =
+        make_request_root(&state, Operation::List, "sys/namespaces".to_string(), None).await?;
     match resp {
         Some(r) => {
             let namespaces = r
@@ -103,7 +104,7 @@ pub async fn list_namespaces(state: State<'_, AppState>) -> CmdResult<NamespaceL
 #[tauri::command]
 pub async fn read_namespace(state: State<'_, AppState>, path: String) -> CmdResult<NamespaceInfo> {
     let resp =
-        make_request(&state, Operation::Read, format!("sys/namespaces/{path}"), None).await?;
+        make_request_root(&state, Operation::Read, format!("sys/namespaces/{path}"), None).await?;
     match resp {
         Some(r) => Ok(to_info(r.data.as_ref(), &path)),
         None => Err("Namespace not found".into()),
@@ -132,14 +133,85 @@ pub async fn write_namespace(
     body.insert("max_child_namespaces".into(), Value::from(max_child_namespaces));
     body.insert("child_visible_default".into(), Value::Bool(child_visible_default));
 
-    let resp =
-        make_request(&state, Operation::Write, format!("sys/namespaces/{path}"), Some(body)).await?;
+    let resp = make_request_root(&state, Operation::Write, format!("sys/namespaces/{path}"), Some(body))
+        .await?;
     Ok(to_info(resp.and_then(|r| r.data).as_ref(), &path))
 }
 
 #[tauri::command]
 pub async fn delete_namespace(state: State<'_, AppState>, path: String) -> CmdResult<()> {
-    make_request(&state, Operation::Delete, format!("sys/namespaces/{path}"), None).await?;
+    make_request_root(&state, Operation::Delete, format!("sys/namespaces/{path}"), None).await?;
+    Ok(())
+}
+
+#[derive(Serialize, Default)]
+pub struct NsAssignmentResult {
+    /// Allowed namespace paths (canonical; `""` = root). Empty ⇒ unrestricted.
+    pub namespaces: Vec<String>,
+}
+
+fn ns_paths_from(data: Option<&Map<String, Value>>) -> Vec<String> {
+    data.and_then(|d| d.get("namespaces"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default()
+}
+
+/// Read a principal's namespace assignment (login-restriction). An empty list
+/// means unrestricted — the principal may authenticate into any namespace.
+/// Root-scoped: the assignment is a deployment-level fact, independent of the
+/// session's active namespace.
+#[tauri::command]
+pub async fn get_ns_assignment(
+    state: State<'_, AppState>,
+    mount: String,
+    name: String,
+) -> CmdResult<NsAssignmentResult> {
+    let resp = make_request_root(
+        &state,
+        Operation::Read,
+        format!("sys/identity/ns-assignment/{mount}{name}"),
+        None,
+    )
+    .await?;
+    Ok(NsAssignmentResult { namespaces: ns_paths_from(resp.and_then(|r| r.data).as_ref()) })
+}
+
+/// Set a principal's allowed namespaces. An empty list clears the restriction
+/// (back to unrestricted).
+#[tauri::command]
+pub async fn set_ns_assignment(
+    state: State<'_, AppState>,
+    mount: String,
+    name: String,
+    namespaces: Vec<String>,
+) -> CmdResult<()> {
+    let mut body = Map::new();
+    body.insert("namespaces".into(), Value::from(namespaces));
+    make_request_root(
+        &state,
+        Operation::Write,
+        format!("sys/identity/ns-assignment/{mount}{name}"),
+        Some(body),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Remove a principal's restriction (back to unrestricted). Idempotent.
+#[tauri::command]
+pub async fn delete_ns_assignment(
+    state: State<'_, AppState>,
+    mount: String,
+    name: String,
+) -> CmdResult<()> {
+    make_request_root(
+        &state,
+        Operation::Delete,
+        format!("sys/identity/ns-assignment/{mount}{name}"),
+        None,
+    )
+    .await?;
     Ok(())
 }
 

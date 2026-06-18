@@ -34,6 +34,9 @@ export function AppRolePage() {
   const [newName, setNewName] = useState("");
   const [newPolicies, setNewPolicies] = useState<string[]>([]);
   const [newBindSecretId, setNewBindSecretId] = useState(true);
+  // Namespace login-restriction (empty ⇒ unrestricted). Hidden single-tenant.
+  const [newNamespaces, setNewNamespaces] = useState<string[]>([]);
+  const [availableNamespaces, setAvailableNamespaces] = useState<string[]>([]);
 
   // Known policy names for the create-modal autocomplete. When the list can't be
   // fetched (caller lacks admin on the policies path) the selector degrades to a
@@ -44,7 +47,17 @@ export function AppRolePage() {
   useEffect(() => {
     loadRoles();
     loadPolicies();
+    loadNamespaces();
   }, []);
+
+  async function loadNamespaces() {
+    try {
+      const result = await api.listNamespaces();
+      setAvailableNamespaces(result.namespaces);
+    } catch {
+      setAvailableNamespaces([]);
+    }
+  }
 
   async function loadPolicies() {
     try {
@@ -107,10 +120,13 @@ export function AppRolePage() {
     if (!newName) return;
     try {
       await api.writeAppRole(newName, newBindSecretId, newPolicies.join(","), 0, "", "", "");
+      // Persist the namespace login-restriction (empty ⇒ unrestricted).
+      await api.setNsAssignment("approle/", newName, newNamespaces);
       toast("success", `Role ${newName} created`);
       setShowCreate(false);
       setNewName("");
       setNewPolicies([]);
+      setNewNamespaces([]);
       loadRoles();
       selectRole(newName);
       // approle write_role pre-provisions an entity alias on first
@@ -269,6 +285,41 @@ export function AppRolePage() {
                 Require Secret ID for login
               </span>
             </label>
+            {availableNamespaces.length > 0 && (
+              <div>
+                <label className="block text-sm text-[var(--color-text-muted)] mb-1">
+                  Allowed namespaces
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {["", ...availableNamespaces].map((ns) => {
+                    const sel = newNamespaces.includes(ns);
+                    return (
+                      <button
+                        key={ns || "__root__"}
+                        type="button"
+                        onClick={() =>
+                          setNewNamespaces((prev) =>
+                            prev.includes(ns) ? prev.filter((p) => p !== ns) : [...prev, ns],
+                          )
+                        }
+                        className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
+                          sel
+                            ? "bg-[var(--color-primary)] border-[var(--color-primary)] text-white"
+                            : "bg-[var(--color-bg)] border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-text-muted)]"
+                        }`}
+                      >
+                        {ns === "" ? "root" : ns}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-xs text-[var(--color-text-muted)] mt-1.5">
+                  {newNamespaces.length === 0
+                    ? "No restriction — this role may log in to any namespace."
+                    : `Login restricted to: ${newNamespaces.map((n) => n || "root").join(", ")} (and descendants).`}
+                </p>
+              </div>
+            )}
           </div>
         </Modal>
 

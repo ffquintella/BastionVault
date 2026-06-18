@@ -403,6 +403,19 @@ export const setActiveNamespace = (path: string) =>
 export const getActiveNamespace = () =>
   invoke<string>("get_active_namespace");
 
+/** Per-principal namespace assignment (login-restriction). An empty
+ *  `namespaces` list means the principal is unrestricted (may authenticate
+ *  into any namespace). `mount` is the auth mount (e.g. "userpass/"). */
+export interface NsAssignmentResult {
+  namespaces: string[];
+}
+export const getNsAssignment = (mount: string, name: string) =>
+  invoke<NsAssignmentResult>("get_ns_assignment", { mount, name });
+export const setNsAssignment = (mount: string, name: string, namespaces: string[]) =>
+  invoke<void>("set_ns_assignment", { mount, name, namespaces });
+export const deleteNsAssignment = (mount: string, name: string) =>
+  invoke<void>("delete_ns_assignment", { mount, name });
+
 // Resource type configuration
 export const resourceTypesRead = () =>
   invoke<Record<string, unknown> | null>("resource_types_read");

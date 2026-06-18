@@ -45,6 +45,18 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-06-18
+
+### Added
+
+- **Per-principal namespace assignment (login-restriction)** (`src/modules/namespace/ns_assignment.rs`, Phase 5 of [features/namespaces-multitenancy.md](features/namespaces-multitenancy.md)) -- restrict which namespaces a credential may authenticate into. The auth mount is shared across namespaces, so by default any credential can bind to any namespace; an operator can now record an explicit allowed-namespace list per principal. With **no record a principal is unrestricted** (unchanged behavior, so single-tenant installs are unaffected); a non-empty record permits login only at a listed namespace **or a descendant of one**, and a login at any other namespace is refused with `permission_denied` (fails closed — no silent fallback to root). Enforced at login for userpass (password + FIDO2) and approle — the backends that bind a login namespace today. New root-scoped management surface `v2/sys/identity/ns-assignment/<mount>/<name>` (Read/Write/Delete) + `v2/sys/identity/ns-assignment` (List), reachable over HTTP via `configure_sys_routes`. The GUI Users and AppRole pages gain an "Allowed namespaces" multi-select (empty ⇒ unrestricted), shown only when child namespaces exist. *(cert auth is disabled in the OpenSSL-free default build and the standalone FIDO2 backend is not namespace-aware, so enforcement there awaits the separate namespace-binding follow-up; the store and endpoints already accept any mount.)*
+
+- **GUI Dashboard Redesign spec** ([features/gui-dashboard-redesign.md](features/gui-dashboard-redesign.md)) -- planning doc for replacing the current static Dashboard (mounts + auth-methods listing) with an operational, statistics-driven PAM landing view: a header health strip (seal + HA nodes), a five-tile KPI row (live sessions, healthy bastions, secrets stored, active tokens, audit events 24h), a 24h session-activity chart, live-sessions + recent-audit panels, and a needs-attention panel (expiring certs, due rotations, failed logins, audit-write failures). Modelled on the landing views of CyberArk / Delinea / BeyondTrust / HashiCorp Vault / Teleport. Backend-first: Phase 1 is a server-side `GET /v1/sys/dashboard/summary` aggregation endpoint (ACL- and namespace-scoped, actix shim for HTTP, Tauri command via the `Backend` trait) so the dashboard makes one call for its counters; Phases 2–5 render the GUI against it, with `Promise.allSettled` client-side fallback + per-tile graceful degradation when a mount or the route is absent. Roadmap row added under Infrastructure. No implementation yet.
+
+### Fixed
+
+- **GUI namespace switcher reverted to root after selecting a child** (`gui/src-tauri/src/commands/namespaces.rs`, `gui/src-tauri/src/commands/mod.rs`) -- selecting a namespace (e.g. `test`) flickered and snapped back to `root` with the child entry vanishing from the dropdown. The `sys/namespaces` CRUD commands are documented to operate from the root namespace's view, but they routed through `make_request`, which attaches the session's active-namespace header. After the switcher set the active namespace, `list_namespaces` was scoped to the just-selected child and returned *its* (empty) children, so the dropdown re-rendered with only the `root` option and the `<select value="test">` matched nothing. Added a root-pinned `make_request_root` helper (forces `namespace = None`) and routed `list`/`read`/`write`/`delete` namespace commands through it, so namespace management always addresses the root view regardless of the active tenant.
+
 ## [0.16.0] - 2026-06-18
 
 ### Added

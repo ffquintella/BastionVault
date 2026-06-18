@@ -385,6 +385,47 @@ async fn sys_namespace_link_path_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// LIST `/sys/identity/ns-assignment` — list principals that have a namespace
+/// assignment (login-restriction). HTTP shim over the sys-backend logical route
+/// `identity/ns-assignment`; without it the `/v1/sys` and `/v2/sys` scopes 404
+/// the request before the logical catch-all sees it (embedded-only otherwise).
+async fn sys_ns_assignment_list_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/identity/ns-assignment".to_string();
+    r.operation = Operation::List;
+    copy_namespace_header(&req, &mut r);
+    handle_request(core, &mut r).await
+}
+
+/// GET / POST|PUT / DELETE `/sys/identity/ns-assignment/{mount}/{name}` — read,
+/// set, or clear a principal's allowed namespaces. HTTP shim over the
+/// sys-backend logical route `identity/ns-assignment/{mount}/{name}`.
+async fn sys_ns_assignment_path_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    path: web::Path<String>,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = format!("sys/identity/ns-assignment/{}", path.into_inner());
+    copy_namespace_header(&req, &mut r);
+    match *req.method() {
+        actix_web::http::Method::POST | actix_web::http::Method::PUT => {
+            r.operation = Operation::Write;
+            if !body.is_empty() {
+                r.body = Some(serde_json::from_slice(&body)?);
+                body.clear();
+            }
+        }
+        actix_web::http::Method::DELETE => r.operation = Operation::Delete,
+        _ => r.operation = Operation::Read,
+    }
+    handle_request(core, &mut r).await
+}
+
 /// POST `/sys/kv-owner/transfer` — admin-only ownership reassignment
 /// of a KV path. Thin HTTP shim over the sys-backend logical route
 /// `kv-owner/transfer`; the same body shape applies
@@ -2725,6 +2766,20 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
             web::resource("/namespace-links/{id}")
                 .route(web::get().to(sys_namespace_link_path_request_handler))
                 .route(web::delete().to(sys_namespace_link_path_request_handler)),
+        )
+        // Per-principal namespace assignment (login-restriction). Same
+        // embedded-vs-HTTP shimming rationale as the namespace routes above.
+        .service(
+            web::resource("/identity/ns-assignment")
+                .route(web::method(list_method()).to(sys_ns_assignment_list_request_handler))
+                .route(web::get().to(sys_ns_assignment_list_request_handler)),
+        )
+        .service(
+            web::resource("/identity/ns-assignment/{path:.*}")
+                .route(web::get().to(sys_ns_assignment_path_request_handler))
+                .route(web::post().to(sys_ns_assignment_path_request_handler))
+                .route(web::put().to(sys_ns_assignment_path_request_handler))
+                .route(web::delete().to(sys_ns_assignment_path_request_handler)),
         )
         // Owner self-claim and admin transfer routes. These have always
         // been registered on the sys backend's logical route table, but

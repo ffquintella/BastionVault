@@ -26,6 +26,22 @@ pub async fn make_request(
     dispatch_with_token_ns(state, operation, path, body, &token, namespace.as_deref()).await
 }
 
+/// Variant of [`make_request`] pinned to the root namespace, ignoring the
+/// session's active namespace. The `sys/namespaces` CRUD surface is always
+/// addressed from the root's view (paths are full slash-delimited), so its
+/// requests must not pick up the namespace the switcher just selected —
+/// otherwise switching into a child scopes `list_namespaces` to that child,
+/// returning its (empty) children and hiding every sibling.
+pub async fn make_request_root(
+    state: &State<'_, AppState>,
+    operation: Operation,
+    path: String,
+    body: Option<Map<String, Value>>,
+) -> CmdResult<Option<JsonResponse>> {
+    let token = state.token.lock().await.clone().unwrap_or_default();
+    dispatch_with_token_ns(state, operation, path, body, &token, None).await
+}
+
 /// Variant of [`make_request`] that takes an explicit token instead
 /// of reading `AppState::token`. Used by login flows that either need
 /// to validate a user-supplied token (`auth/token/lookup-self`) or
