@@ -126,6 +126,11 @@ pub struct Core {
     /// `auth/ferrogate/config` write handler runs, so the token layer never
     /// touches storage to read it.
     pub require_machine_identity: Arc<AtomicBool>,
+    /// Process-wide request-outcome counters (denied requests, failed
+    /// logins, audit-write failures) surfaced on the GUI Dashboard via
+    /// `sys/dashboard/summary`. Always present; incremented from the
+    /// request hot path in [`Core::handle_request`].
+    pub stats: Arc<crate::stats::DashboardStats>,
 }
 
 impl Default for CoreState {
@@ -164,6 +169,7 @@ impl Default for Core {
             audit_broker: ArcSwapOption::empty(),
             exchange_preview_store: crate::exchange::PreviewStore::default(),
             require_machine_identity: Arc::new(AtomicBool::new(false)),
+            stats: Arc::new(crate::stats::DashboardStats::default()),
         }
     }
 }
@@ -892,6 +898,7 @@ impl Core {
         let mut resp = None;
         let mut err: Option<RvError> = None;
         let handlers = self.handlers.load();
+        let now = chrono::Utc::now().timestamp();
 
         if self.state.load().sealed {
             return Err(RvError::ErrBarrierSealed);
@@ -951,14 +958,55 @@ impl Core {
         }
 
         if err.is_none() {
-            self.handle_log_phase(&handlers, req, &mut resp).await?;
+            if let Err(e) = self.handle_log_phase(&handlers, req, &mut resp).await {
+                // The audit-broker fan-out is the only fallible step in
+                // the log phase; a device write failure (which must
+                // never go unnoticed) lands here. Count it before
+                // propagating — the request still fails closed.
+                self.stats.record_audit_write_failure(now);
+                err = Some(e);
+            }
         }
+
+        // Request-outcome statistics for the operational dashboard.
+        self.record_request_stats(req, &resp, err.as_ref(), now);
 
         if err.is_some() {
             return Err(err.unwrap());
         }
 
         Ok(resp)
+    }
+
+    /// Tally one request's outcome into the in-memory dashboard
+    /// counters. Cheap (a few relaxed atomics + a path check) and called
+    /// for every request.
+    ///
+    /// A failed login is any attempt on a `/login` route that did not
+    /// yield an auth token — that covers both hard errors *and* the
+    /// `Ok(error_response)` path the credential backends use for a bad
+    /// password (no `auth` on the response). A denial is
+    /// `ErrPermissionDenied` on any route. A denied login increments
+    /// both, since they answer different operator questions.
+    fn record_request_stats(
+        &self,
+        req: &Request,
+        resp: &Option<Response>,
+        err: Option<&RvError>,
+        now: i64,
+    ) {
+        self.stats.record_request(now);
+
+        if req.path.contains("/login") {
+            let authenticated = resp.as_ref().map(|r| r.auth.is_some()).unwrap_or(false);
+            if !authenticated {
+                self.stats.record_auth_failure(now);
+            }
+        }
+
+        if matches!(err, Some(RvError::ErrPermissionDenied)) {
+            self.stats.record_denied(now);
+        }
     }
 
     async fn handle_pre_route_phase(

@@ -182,6 +182,12 @@ export function DashboardPage() {
           <KpiTile
             label="Audit events 24h"
             value={audit24h}
+            sub={
+              summary && summary.audit_24h_denied > 0
+                ? `${summary.audit_24h_denied} denied`
+                : undefined
+            }
+            subTone="danger"
             unavailableHint="unavailable"
             to="/audit"
             loading={loading}
@@ -191,7 +197,13 @@ export function DashboardPage() {
         {/* Activity chart + attention */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <SessionActivityChart events={audit} nowMs={nowMs} loading={loading} />
-          <AttentionPanel sealed={sealed} health={health} loading={loading} />
+          <AttentionPanel
+            sealed={sealed}
+            health={health}
+            auditWriteFailures={summary ? summary.audit_24h_write_failures : null}
+            failedLogins1h={summary ? summary.failed_logins_1h : null}
+            loading={loading}
+          />
         </div>
 
         {/* Live sessions + recent audit */}

@@ -74,6 +74,7 @@ pub mod router;
 pub mod schema;
 pub mod server_info;
 pub mod shamir;
+pub mod stats;
 pub mod storage;
 pub mod utils;
 

@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-06-18
+
+### Added
+
+- **Request-level statistics aggregator** (`src/stats.rs` `DashboardStats`, instrumented in `Core::handle_request`) -- a lock-free ring of 24 hourly buckets per metric (`denied`, `auth_failures`, `audit_write_failures`, `requests`) held on `Core`, incremented from the request hot path. Closes the dashboard deferral: BastionVault's audit *trail* is a change-history aggregation (no per-request allow/deny), so these live operational signals are now counted as requests happen. A denial is `ErrPermissionDenied` on any route; a failed login is any `/login`-route attempt whose response carries no `auth` (covers hard errors **and** the `Ok(error_response)` bad-password path); an audit-write failure is a log-phase error. Process-wide and in-memory by design (live gauges, not persisted history — the audit devices remain the durable record). Surfaced via `sys/dashboard/summary` as `audit_24h.denied`, `audit_24h.write_failures`, and `attention.failed_logins_1h`; the GUI shows "N denied" on the audit KPI and adds audit-write-failure (danger) + failed-login (warning) rows to the dashboard attention panel. Tests: `stats::tests::*` (windowing / hour-boundary reset / age-off) + `test_dashboard_summary_counts_denials_and_failed_logins` (end-to-end) + 2 `AttentionPanel` vitest cases. *(Certs-expiring / credentials-due attention rows remain deferred — the data exists (`pki` `not_after_unix`, `ldap` `rotation_period`) but per-load enumeration across every mount is the open cost question.)*
+
 ## [0.17.0] - 2026-06-18
 
 ### Added

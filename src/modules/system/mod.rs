@@ -2201,13 +2201,22 @@ impl SystemBackend {
         // Reuse the change-history aggregation; count events whose
         // RFC3339 timestamp is >= (now - 24h). Lexicographic comparison
         // is valid for RFC3339.
-        let cutoff = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+        let now = chrono::Utc::now();
+        let cutoff = (now - chrono::Duration::hours(24)).to_rfc3339();
         let audit_24h = self
             .collect_audit_events()
             .await
             .into_iter()
             .filter(|e| e.ts >= cutoff)
             .count();
+
+        // Request-level outcome counters from the in-memory aggregator
+        // (denied requests / failed logins / audit-write failures). These
+        // are process-wide (not per-namespace) — they describe the
+        // server's health, which is the same question regardless of which
+        // tenant the operator is viewing.
+        let now_secs = now.timestamp();
+        let stats = &self.core.stats;
 
         let data = json!({
             "version": "1",
@@ -2224,6 +2233,11 @@ impl SystemBackend {
             },
             "audit_24h": {
                 "total": audit_24h,
+                "denied": stats.denied_24h(now_secs),
+                "write_failures": stats.audit_write_failures_24h(now_secs),
+            },
+            "attention": {
+                "failed_logins_1h": stats.failed_logins_1h(now_secs),
             },
         })
         .as_object()
@@ -3199,6 +3213,80 @@ mod mod_system_tests {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         assert!(audit_total >= 1, "the policy create should be in the 24h total: {ret:?}");
+    }
+
+    /// A permission-denied request and a failed login flow through the
+    /// request hot path into the in-memory stats aggregator, and show up
+    /// in `sys/dashboard/summary` as `audit_24h.denied` and
+    /// `attention.failed_logins_1h`.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_dashboard_summary_counts_denials_and_failed_logins() {
+        let mut server =
+            TestHttpServer::new("test_dashboard_summary_counts_denials_and_failed_logins", true)
+                .await;
+        server.token = server.root_token.clone();
+
+        // Provision a low-privilege user (default policy only).
+        let _ = server
+            .write("sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), None)
+            .unwrap();
+        let _ = server
+            .write(
+                "auth/pass/users/lowpriv",
+                serde_json::json!({ "password": "hunter22XX!", "token_policies": "default", "ttl": 0 })
+                    .as_object()
+                    .cloned(),
+                None,
+            )
+            .unwrap();
+
+        // A failed login (wrong password) on a `/login` route → counted
+        // as an auth failure.
+        let _ = server.write(
+            "auth/pass/login/lowpriv",
+            serde_json::json!({ "password": "WRONG" }).as_object().cloned(),
+            None,
+        );
+
+        // A successful login to get a low-priv token.
+        let token = server
+            .write(
+                "auth/pass/login/lowpriv",
+                serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                None,
+            )
+            .unwrap()
+            .1
+            .get("auth")
+            .and_then(|a| a.get("client_token"))
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+
+        // A denied write — default policy cannot create ACL policies.
+        let denied = server
+            .write(
+                "sys/policies/acl/should-be-denied",
+                serde_json::json!({ "policy": r#"path "x" { capabilities = ["read"] }"# })
+                    .as_object()
+                    .cloned(),
+                Some(&token),
+            )
+            .unwrap();
+        assert_eq!(denied.0, 403, "low-priv policy write must be forbidden");
+
+        // Read the summary as root and confirm the counters moved.
+        let ret = server.read("sys/dashboard/summary", Some(&server.root_token)).unwrap().1;
+        let audit = ret.get("audit_24h").and_then(|v| v.as_object()).expect("audit_24h");
+        assert!(
+            audit.get("denied").and_then(|v| v.as_u64()).unwrap_or(0) >= 1,
+            "the forbidden write should be counted as denied: {ret:?}"
+        );
+        let attention = ret.get("attention").and_then(|v| v.as_object()).expect("attention");
+        assert!(
+            attention.get("failed_logins_1h").and_then(|v| v.as_u64()).unwrap_or(0) >= 1,
+            "the wrong-password login should be counted as a failed login: {ret:?}"
+        );
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

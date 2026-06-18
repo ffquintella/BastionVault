@@ -747,6 +747,9 @@ pub struct DashboardSummary {
     pub seal: DashboardSeal,
     pub counts: DashboardCounts,
     pub audit_24h_total: u64,
+    pub audit_24h_denied: u64,
+    pub audit_24h_write_failures: u64,
+    pub failed_logins_1h: u64,
 }
 
 #[tauri::command]
@@ -763,6 +766,7 @@ pub async fn dashboard_summary(state: State<'_, AppState>) -> CmdResult<Dashboar
     let counts = data.get("counts").and_then(|v| v.as_object()).cloned().unwrap_or_default();
     let seal = data.get("seal").and_then(|v| v.as_object()).cloned().unwrap_or_default();
     let audit = data.get("audit_24h").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+    let attention = data.get("attention").and_then(|v| v.as_object()).cloned().unwrap_or_default();
     let u = |m: &serde_json::Map<String, Value>, k: &str| m.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
     let b = |m: &serde_json::Map<String, Value>, k: &str| m.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -780,6 +784,9 @@ pub async fn dashboard_summary(state: State<'_, AppState>) -> CmdResult<Dashboar
             entities: u(&counts, "entities"),
         },
         audit_24h_total: u(&audit, "total"),
+        audit_24h_denied: u(&audit, "denied"),
+        audit_24h_write_failures: u(&audit, "write_failures"),
+        failed_logins_1h: u(&attention, "failed_logins_1h"),
     })
 }
 

@@ -87,4 +87,24 @@ describe("AttentionPanel", () => {
     expect(screen.getByText(/1 bastion down/i)).toBeTruthy();
     expect(screen.getByText(/1 bastion degraded/i)).toBeTruthy();
   });
+
+  it("flags audit-write failures and failed logins from the stats aggregator", () => {
+    wrap(
+      <AttentionPanel
+        sealed={false}
+        health={[h("up")]}
+        auditWriteFailures={2}
+        failedLogins1h={5}
+      />,
+    );
+    expect(screen.getByText(/2 audit-write failures/i)).toBeTruthy();
+    expect(screen.getByText(/5 failed logins/i)).toBeTruthy();
+  });
+
+  it("stays all-clear when stats counters are zero", () => {
+    wrap(
+      <AttentionPanel sealed={false} health={[h("up")]} auditWriteFailures={0} failedLogins1h={0} />,
+    );
+    expect(screen.getByText(/All clear/i)).toBeTruthy();
+  });
 });

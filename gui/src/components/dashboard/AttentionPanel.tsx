@@ -13,17 +13,42 @@ interface AttentionPanelProps {
   sealed: boolean | null;
   /** null = Rustion not mounted (no bastion health to assess). */
   health: RustionTargetHealth[] | null;
+  /** Request-level counters from the dashboard summary (null when the
+   *  summary endpoint is unavailable). */
+  auditWriteFailures?: number | null;
+  failedLogins1h?: number | null;
   loading?: boolean;
 }
 
 /** Surfaces operational concerns we can derive from data the dashboard
- *  already loads: seal state and bastion health. Renders "All clear"
- *  when there is nothing to flag. */
-export function AttentionPanel({ sealed, health, loading }: AttentionPanelProps) {
+ *  already loads: seal state, bastion health, and the request-level
+ *  stats aggregator (audit-write failures, failed logins). Renders
+ *  "All clear" when there is nothing to flag. */
+export function AttentionPanel({
+  sealed,
+  health,
+  auditWriteFailures,
+  failedLogins1h,
+  loading,
+}: AttentionPanelProps) {
   const rows: Row[] = [];
 
   if (sealed) {
     rows.push({ severity: "danger", label: "Vault is sealed — secrets are inaccessible" });
+  }
+  if (auditWriteFailures && auditWriteFailures > 0) {
+    rows.push({
+      severity: "danger",
+      label: `${auditWriteFailures} audit-write failure${auditWriteFailures === 1 ? "" : "s"} (24h)`,
+      to: "/audit",
+    });
+  }
+  if (failedLogins1h && failedLogins1h > 0) {
+    rows.push({
+      severity: "warning",
+      label: `${failedLogins1h} failed login${failedLogins1h === 1 ? "" : "s"} (last hour)`,
+      to: "/audit",
+    });
   }
   if (health) {
     const down = health.filter((h) => h.enabled && h.status === "down").length;

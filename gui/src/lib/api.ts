@@ -276,6 +276,9 @@ export interface DashboardSummary {
     entities: number;
   };
   audit_24h_total: number;
+  audit_24h_denied: number;
+  audit_24h_write_failures: number;
+  failed_logins_1h: number;
 }
 // One-shot operational snapshot for the Dashboard landing page. Routes
 // through the Backend trait server-side, so it works embedded + remote.

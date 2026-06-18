@@ -36,12 +36,20 @@ The feature is **backend-first**: Phase 1 ships a single server-side aggregation
 - **Phases 2–5 — GUI.** [DashboardPage.tsx](../gui/src/routes/DashboardPage.tsx) is rewritten around one `dashboardSummary()` call plus `Promise.allSettled` for the live/audit data, with per-tile graceful degradation (tiles show `—` + a hint when a mount or the summary route is absent). New presentational components under `gui/src/components/dashboard/`: `KpiTile`, `HealthStrip`, `SessionActivityChart` (pure-CSS 24-bar hourly chart with an exported `bucketByHour` for tests), `RecentAuditCard`, `LiveSessionsCard` (5s-polled), `AttentionPanel` (fed by real signals — seal state + bastion health), `QuickActions` (preserves the Seal control + deep-links). Only the live-session widgets poll; the rest is load-once.
 - **Tests.** Backend `test_dashboard_summary_basic` (`src/modules/system/mod.rs`) asserts the response shape + ACL/audit counts; the refactored `handle_audit_events` keeps its three existing tests green. GUI `gui/src/test/dashboard.test.tsx` covers `bucketByHour` (5 cases), `KpiTile` null/value states, and `AttentionPanel` severity rows (10 tests). Full suite: 130 vitest passing, `tsc` + `vite build` clean.
 
-### Honest deltas from the original design
+### Request-level statistics aggregator
 
-Two items in the widget catalog below describe data the current backend audit model does not record, so they are **deferred** rather than faked:
+The original design's `audit_24h.denied` / `write_failures` / failed-login signals were initially deferred because BastionVault's audit *trail* is a change-history aggregation (policy/identity/share/file lifecycle), not a request-level allow/deny log. That gap is now closed by a **server-side stats aggregator** (`src/stats.rs`, `DashboardStats` on `Core`):
 
-- **`audit_24h.denied` / `write_failures`** — BastionVault's audit trail is a *change-history* aggregation (policy/identity/share/file lifecycle), not a request-level allow/deny log, so there is no per-request denial or audit-write-failure signal to count. The summary returns `audit_24h.total` only. Surfacing denials/write-failures needs a request-level audit source first.
-- **"Needs attention" certs-expiring / credentials-due / failed-logins** — these need PKI cert enumeration, LDAP role rotation timestamps, and a request-level auth log respectively. The shipped `AttentionPanel` instead surfaces the concerns we *can* derive truthfully today: a sealed vault and down/degraded bastions (from `rustionTargetHealthAll`). Expanding it is a follow-up gated on those data sources.
+- A lock-free ring of 24 hourly buckets per metric (`denied`, `auth_failures`, `audit_write_failures`, `requests`), recording into a stale bucket resets it — so it always covers the trailing 24h with no background sweeper.
+- Incremented from the request hot path in `Core::handle_request` (`record_request_stats`): a denial is `ErrPermissionDenied` on any route; a failed login is any `/login`-route attempt whose response carries no `auth` (covers both hard errors *and* the `Ok(error_response)` bad-password path the credential backends use); an audit-write failure is a log-phase error (the audit-broker fan-out is the only fallible step there).
+- The summary endpoint reports `audit_24h.denied`, `audit_24h.write_failures`, and `attention.failed_logins_1h`. The GUI shows "N denied" on the audit KPI and adds audit-write-failure (danger) + failed-login (warning) rows to the `AttentionPanel`.
+- Process-wide, not per-namespace: these describe server health, which is the same question regardless of which tenant the operator is viewing. In-memory by design — they're live gauges, not persisted history (the audit *devices* remain the durable record).
+
+Backend tests: `stats::tests::*` (4 cases — windowing, hour-boundary reset, ageing-off) and `test_dashboard_summary_counts_denials_and_failed_logins` (end-to-end: a forbidden write + a wrong-password login move the counters). GUI: two more `AttentionPanel` cases.
+
+### Still deferred
+
+- **"Needs attention" certs-expiring / credentials-due** — the *data* is available server-side (PKI stores `not_after_unix` per cert; LDAP static roles carry `rotation_period`), so this is no longer a data-availability gap — only a cost one: counting them means enumerating every cert / role across every PKI / LDAP mount per dashboard load. Deferred until that enumeration is either cheap (an index) or acceptable to run on a slower cadence than the 5s live poll.
 
 The original (pre-implementation) design notes are retained below for reference.
 
