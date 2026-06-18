@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-06-18
+
+### Changed
+
+- **Regenerate Tauri GUI capability schemas** (`gui/src-tauri/gen/schemas/*.json`) -- pick up the dev-only `mcp-bridge` capability (local Tauri MCP bridge, gated behind the `mcp_local_dev` Cargo feature and `BASTION_TAURI_MCP=1` at runtime; inert in release builds). Generated artifacts only; no runtime behavior change for shipped builds.
+
 ## [0.17.1] - 2026-06-18
 
 ### Added
