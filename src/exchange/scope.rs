@@ -21,16 +21,39 @@ use crate::{
         AssetGroupItem, ExchangeDocument, ExchangeItems, ExporterInfo, FileItem, KvItem,
         ResourceGroupItem, ResourceItem, ScopeKind, ScopeSelector, ScopeSpec,
     },
-    mount::LOGICAL_BARRIER_PREFIX,
+    mount::{LOGICAL_BARRIER_PREFIX, SYSTEM_BARRIER_PREFIX},
     storage::{Storage, StorageEntry},
 };
 
 /// Resolver context: maps `logical_type` to a list of (mount_path, uuid)
 /// pairs so the resource / group selectors can find the right per-mount
 /// barrier prefix without re-scanning the table on every call.
-#[derive(Default, Clone)]
+///
+/// `logical_prefix` / `system_prefix` carry the **active root-tenant storage
+/// prefixes** so the resolver addresses keys at the same place the live vault
+/// does. Re-root activation is the default for every install, so in
+/// production these are `namespaces/<root_uuid>/logical/` and
+/// `namespaces/<root_uuid>/sys/` — not the bare `logical/` / `sys/`. The
+/// resolver reads through the raw barrier (`core.barrier.as_storage()`), so it
+/// MUST prepend these prefixes or every list/get misses and the export comes
+/// out empty (see `Core::root_logical_prefix`).
+#[derive(Clone)]
 pub struct MountIndex {
     by_type: HashMap<String, Vec<(String, String)>>,
+    logical_prefix: String,
+    system_prefix: String,
+}
+
+impl Default for MountIndex {
+    fn default() -> Self {
+        // Bare prefixes — the pre-re-root layout. Only used by `empty()` and
+        // tests; `from_core` always overrides with the live core's prefixes.
+        Self {
+            by_type: HashMap::new(),
+            logical_prefix: LOGICAL_BARRIER_PREFIX.to_string(),
+            system_prefix: SYSTEM_BARRIER_PREFIX.to_string(),
+        }
+    }
 }
 
 impl MountIndex {
@@ -49,7 +72,11 @@ impl MountIndex {
                 .or_default()
                 .push((path.clone(), me.uuid.clone()));
         }
-        Ok(Self { by_type })
+        Ok(Self {
+            by_type,
+            logical_prefix: core.root_logical_prefix(),
+            system_prefix: core.root_system_prefix(),
+        })
     }
 
     pub fn empty() -> Self {
@@ -61,6 +88,47 @@ impl MountIndex {
             .get(logical_type)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Barrier-storage prefix for a logical mount's data, e.g.
+    /// `namespaces/<root_uuid>/logical/<uuid>/`.
+    fn barrier_prefix(&self, uuid: &str) -> String {
+        format!("{}{uuid}/", self.logical_prefix)
+    }
+
+    /// Barrier-storage prefix for the root tenant's system view, e.g.
+    /// `namespaces/<root_uuid>/sys/`.
+    fn system_prefix(&self) -> &str {
+        &self.system_prefix
+    }
+
+    /// Find the uuid of a `kv` / `kv-v2` mount by its mount path
+    /// (trailing-slash form, e.g. `secret/`).
+    fn kv_uuid_for_mount(&self, mount_path: &str) -> Option<&str> {
+        for ty in ["kv", "kv-v2"] {
+            for (path, uuid) in self.mounts_of_type(ty) {
+                if path == mount_path {
+                    return Some(uuid);
+                }
+            }
+        }
+        None
+    }
+
+    /// Test-only constructor that fixes the mount table and storage prefixes
+    /// explicitly so a re-rooted (`namespaces/<uuid>/…`) layout can be
+    /// exercised without a live `Core`.
+    #[cfg(test)]
+    fn for_test(
+        by_type: HashMap<String, Vec<(String, String)>>,
+        logical_prefix: &str,
+        system_prefix: &str,
+    ) -> Self {
+        Self {
+            by_type,
+            logical_prefix: logical_prefix.to_string(),
+            system_prefix: system_prefix.to_string(),
+        }
     }
 }
 
@@ -155,19 +223,7 @@ pub async fn export_to_document(
         match selector {
             ScopeSelector::KvPath { mount, path } => {
                 let mount_norm = ensure_trailing_slash(mount);
-                let prefix = format!("{mount_norm}{path}");
-                let keys = list_recursive(storage, &prefix).await?;
-                for full_key in keys {
-                    if let Some(entry) = storage.get(&full_key).await? {
-                        let value = entry_value_to_json(&entry);
-                        let relative = full_key.strip_prefix(&mount_norm).unwrap_or(&full_key).to_string();
-                        items.kv.push(KvItem {
-                            mount: mount_norm.clone(),
-                            path: relative,
-                            value,
-                        });
-                    }
-                }
+                read_kv_mount(storage, mounts, &mount_norm, Some(path), &mut items).await?;
             }
             ScopeSelector::Resource { id } => {
                 resolve_resource(storage, mounts, id, &mut items, &mut warnings).await?;
@@ -217,30 +273,20 @@ async fn resolve_full(
     items: &mut ExchangeItems,
     warnings: &mut Vec<String>,
 ) -> Result<(), RvError> {
-    // KV mounts: recursive walk, identical to a `KvPath { mount, "" }`
-    // selector so the bytes round-trip through `import_from_document`.
+    // KV mounts: capture each mount's entire barrier subtree (kv-v1 leaves,
+    // kv-v2 `data/` + `metadata/` + `config`) so the bytes round-trip through
+    // `import_from_document`. Keys live under the mount's barrier prefix
+    // (`<root>logical/<uuid>/`), NOT the bare mount path.
     for ty in ["kv", "kv-v2"] {
         for (mount_path, _uuid) in mounts.mounts_of_type(ty) {
             let mount_norm = ensure_trailing_slash(mount_path);
-            let keys = list_recursive(storage, &mount_norm).await?;
-            for full_key in keys {
-                if let Some(entry) = storage.get(&full_key).await? {
-                    let value = entry_value_to_json(&entry);
-                    let relative =
-                        full_key.strip_prefix(&mount_norm).unwrap_or(&full_key).to_string();
-                    items.kv.push(KvItem {
-                        mount: mount_norm.clone(),
-                        path: relative,
-                        value,
-                    });
-                }
-            }
+            read_kv_mount(storage, mounts, &mount_norm, None, items).await?;
         }
     }
 
     // Resources: ids live under `<barrier>/meta/<id>`.
     for (_mount_path, uuid) in mounts.mounts_of_type("resource") {
-        let bp = mount_barrier_prefix(uuid);
+        let bp = mounts.barrier_prefix(uuid);
         let ids = storage.list(&format!("{bp}meta/")).await.unwrap_or_default();
         for id in ids {
             if id.ends_with('/') {
@@ -252,7 +298,7 @@ async fn resolve_full(
 
     // File blobs: same `meta/<id>` addressing on files-typed mounts.
     for (_mount_path, uuid) in mounts.mounts_of_type("files") {
-        let bp = mount_barrier_prefix(uuid);
+        let bp = mounts.barrier_prefix(uuid);
         let ids = storage.list(&format!("{bp}meta/")).await.unwrap_or_default();
         for id in ids {
             if id.ends_with('/') {
@@ -267,7 +313,7 @@ async fn resolve_full(
     // group; the member resources / secrets / files come along via
     // `resolve_group`.
     let groups = storage
-        .list("sys/resource-group/group/")
+        .list(&format!("{}resource-group/group/", mounts.system_prefix()))
         .await
         .unwrap_or_default();
     for name in groups {
@@ -305,7 +351,7 @@ async fn resolve_resource(
     // configure one).
     let mut found = false;
     for (mount_path, uuid) in resource_mounts {
-        let bp = mount_barrier_prefix(uuid);
+        let bp = mounts.barrier_prefix(uuid);
         let meta_key = format!("{bp}meta/{id}");
         if let Some(meta_entry) = storage.get(&meta_key).await? {
             if found {
@@ -402,7 +448,7 @@ async fn resolve_group(
     warnings: &mut Vec<String>,
 ) -> Result<(), RvError> {
     let canonical = id.trim().to_lowercase();
-    let group_key = format!("sys/resource-group/group/{canonical}");
+    let group_key = format!("{}resource-group/group/{canonical}", mounts.system_prefix());
     let entry = match storage.get(&group_key).await? {
         Some(e) => e,
         None => {
@@ -472,17 +518,21 @@ async fn drag_in_secret_path(
         warnings.push(format!("secret path {canonical_path} did not match any KV mount"));
         return Ok(());
     };
-    let bp = mount_barrier_prefix(uuid);
-    let abs = format!("{bp}{rel}");
-    if let Some(entry) = storage.get(&abs).await? {
-        items.kv.push(KvItem {
-            mount: ensure_trailing_slash(mount_path),
-            path: rel,
-            value: parse_json_or_b64(&entry.value),
-        });
-    } else {
-        warnings.push(format!("secret path {canonical_path} not found in storage"));
+    let bp = mounts.barrier_prefix(uuid);
+    // KvItem.path is the barrier-relative key so it round-trips through
+    // `import_from_document`. kv-v2 keeps the live value under `data/<key>`;
+    // kv-v1 stores it directly. Try the kv-v2 layout first.
+    for barrier_rel in [format!("data/{rel}"), rel.clone()] {
+        if let Some(entry) = storage.get(&format!("{bp}{barrier_rel}")).await? {
+            items.kv.push(KvItem {
+                mount: ensure_trailing_slash(mount_path),
+                path: barrier_rel,
+                value: parse_json_or_b64(&entry.value),
+            });
+            return Ok(());
+        }
     }
+    warnings.push(format!("secret path {canonical_path} not found in storage"));
     Ok(())
 }
 
@@ -499,7 +549,7 @@ async fn resolve_file(
         return Ok(());
     }
     for (_mount_path, uuid) in file_mounts {
-        let bp = mount_barrier_prefix(uuid);
+        let bp = mounts.barrier_prefix(uuid);
         let meta_key = format!("{bp}meta/{id}");
         if let Some(meta_entry) = storage.get(&meta_key).await? {
             let metadata = parse_json_or_b64(&meta_entry.value);
@@ -522,8 +572,70 @@ async fn resolve_file(
     Ok(())
 }
 
-fn mount_barrier_prefix(uuid: &str) -> String {
-    format!("{LOGICAL_BARRIER_PREFIX}{uuid}/")
+/// Capture a `kv` / `kv-v2` mount's secrets from its barrier subtree
+/// (`<root>logical/<uuid>/…`), emitting one `KvItem` per leaf key. The stored
+/// `path` is the key **relative to the mount's barrier prefix** (e.g.
+/// `data/myapp/db`, `metadata/myapp/db` for kv-v2; `myapp/db` for kv-v1), so
+/// `import_from_document` can write it straight back under the destination
+/// mount's barrier prefix.
+///
+/// `logical_filter` scopes a selective `KvPath` export to a logical secret
+/// path: a kv-v2 key `data/<lp>` / `metadata/<lp>` (or a kv-v1 key `<lp>`) is
+/// kept only when `<lp>` is under the requested path. `None` captures the
+/// whole mount (full-vault export).
+///
+/// If the mount has no entry in the index (e.g. a hand-built document or a
+/// legacy bare-path layout), falls back to listing the mount path directly so
+/// older flows keep working.
+async fn read_kv_mount(
+    storage: &dyn Storage,
+    mounts: &MountIndex,
+    mount_norm: &str,
+    logical_filter: Option<&str>,
+    items: &mut ExchangeItems,
+) -> Result<(), RvError> {
+    let (scan_prefix, barrier_addressed) = match mounts.kv_uuid_for_mount(mount_norm) {
+        Some(uuid) => (mounts.barrier_prefix(uuid), true),
+        None => (mount_norm.to_string(), false),
+    };
+    let keys = list_recursive(storage, &scan_prefix).await?;
+    for full_key in keys {
+        let relative = full_key
+            .strip_prefix(&scan_prefix)
+            .unwrap_or(&full_key)
+            .to_string();
+        if let Some(lp) = logical_filter {
+            let matches = if barrier_addressed {
+                kv_logical_key_matches(&relative, lp)
+            } else {
+                relative.starts_with(strip_leading_slash(lp))
+            };
+            if !matches {
+                continue;
+            }
+        }
+        if let Some(entry) = storage.get(&full_key).await? {
+            items.kv.push(KvItem {
+                mount: mount_norm.to_string(),
+                path: relative,
+                value: entry_value_to_json(&entry),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Does a kv-v2 / kv-v1 barrier-relative key fall under the logical secret
+/// path `lp`? Strips the kv-v2 `data/` or `metadata/` tree prefix before
+/// comparing; kv-v1 keys are compared directly.
+fn kv_logical_key_matches(relative: &str, lp: &str) -> bool {
+    let lp = strip_leading_slash(lp);
+    for tree in ["data/", "metadata/"] {
+        if let Some(rest) = relative.strip_prefix(tree) {
+            return rest.starts_with(lp);
+        }
+    }
+    relative.starts_with(lp)
 }
 
 /// Parse storage bytes as JSON; fall back to a `{"_base64": "..."}` wrapper
@@ -542,6 +654,7 @@ fn parse_json_or_b64(bytes: &[u8]) -> Value {
 /// policy. Returns a per-item result so the caller can audit each write.
 pub async fn import_from_document(
     storage: &dyn Storage,
+    mounts: &MountIndex,
     document: &ExchangeDocument,
     policy: ConflictPolicy,
 ) -> Result<ImportResult, RvError> {
@@ -551,7 +664,15 @@ pub async fn import_from_document(
 
     for kv in &document.items.kv {
         let mount = ensure_trailing_slash(&kv.mount);
-        let full_path = format!("{mount}{}", strip_leading_slash(&kv.path));
+        let rel = strip_leading_slash(&kv.path);
+        // `kv.path` is barrier-relative (e.g. `data/myapp/db`); write it back
+        // under the destination mount's barrier prefix so it lands where the
+        // live kv backend reads. Fall back to the bare mount path when the
+        // mount is unknown (hand-built documents / legacy layouts).
+        let full_path = match mounts.kv_uuid_for_mount(&mount) {
+            Some(uuid) => format!("{}{rel}", mounts.barrier_prefix(uuid)),
+            None => format!("{mount}{rel}"),
+        };
         let new_bytes = json_value_to_storage_bytes(&kv.value)?;
 
         let existing = storage.get(&full_path).await?;
@@ -718,12 +839,41 @@ mod tests {
         }
     }
 
+    /// Re-root activation is the default for every install, so the live
+    /// barrier keys are `namespaces/<root_uuid>/…`. Tests model that layout.
+    const ROOT_LOGICAL: &str = "namespaces/root-uuid/logical/";
+    const ROOT_SYSTEM: &str = "namespaces/root-uuid/sys/";
+
+    /// Build a re-rooted `MountIndex` from `(logical_type, mount_path, uuid)`
+    /// triples.
+    fn reroot_index(mounts: &[(&str, &str, &str)]) -> MountIndex {
+        let mut by_type: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for (ty, path, uuid) in mounts {
+            by_type
+                .entry((*ty).to_string())
+                .or_default()
+                .push(((*path).to_string(), (*uuid).to_string()));
+        }
+        MountIndex::for_test(by_type, ROOT_LOGICAL, ROOT_SYSTEM)
+    }
+
     #[tokio::test]
     async fn export_import_round_trip() {
         let src = MemStorage::default();
         let v1 = serde_json::json!({"u":"alice","p":"hunter2"});
         let v2 = serde_json::json!({"k":"v"});
-        populate(&src, &[("secret/myapp/db", &v1), ("secret/myapp/api", &v2)]).await;
+        // kv-v2 stores live values under `data/<key>` in the mount's barrier
+        // subtree. `other/` must be excluded by the `myapp/` path filter.
+        populate(
+            &src,
+            &[
+                ("namespaces/root-uuid/logical/u-secret/data/myapp/db", &v1),
+                ("namespaces/root-uuid/logical/u-secret/data/myapp/api", &v2),
+                ("namespaces/root-uuid/logical/u-secret/data/other/x", &v2),
+            ],
+        )
+        .await;
+        let mounts = reroot_index(&[("kv-v2", "secret/", "u-secret")]);
 
         let scope = ScopeSpec {
             kind: ScopeKind::Selective,
@@ -732,26 +882,33 @@ mod tests {
                 path: "myapp/".to_string(),
             }],
         };
-        let doc = export_to_document(&src, &MountIndex::empty(), ExporterInfo::default(), scope)
+        let doc = export_to_document(&src, &mounts, ExporterInfo::default(), scope)
             .await
             .unwrap();
+        // Only the two `myapp/` secrets, captured as barrier-relative paths.
         assert_eq!(doc.items.kv.len(), 2);
-        // Deterministic ordering.
-        assert_eq!(doc.items.kv[0].path, "myapp/api");
-        assert_eq!(doc.items.kv[1].path, "myapp/db");
+        assert_eq!(doc.items.kv[0].path, "data/myapp/api");
+        assert_eq!(doc.items.kv[1].path, "data/myapp/db");
 
         // Round-trip canonical JSON.
         let bytes_a = to_canonical_vec(&doc).unwrap();
         let bytes_b = to_canonical_vec(&doc).unwrap();
         assert_eq!(bytes_a, bytes_b);
 
-        // Import into a fresh vault.
+        // Import into a fresh vault — must land back under the barrier prefix.
         let dst = MemStorage::default();
-        let result = import_from_document(&dst, &doc, ConflictPolicy::Skip).await.unwrap();
+        let result = import_from_document(&dst, &mounts, &doc, ConflictPolicy::Skip).await.unwrap();
         assert_eq!(result.written, 2);
         assert_eq!(result.unchanged, 0);
         assert_eq!(result.skipped, 0);
-        assert_eq!(dst.get("secret/myapp/db").await.unwrap().unwrap().value, serde_json::to_vec(&v1).unwrap());
+        assert_eq!(
+            dst.get("namespaces/root-uuid/logical/u-secret/data/myapp/db")
+                .await
+                .unwrap()
+                .unwrap()
+                .value,
+            serde_json::to_vec(&v1).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -760,20 +917,16 @@ mod tests {
         populate(
             &src,
             &[
-                ("secret/app/db", &serde_json::json!({"u": "a"})),
-                ("secret/app/api", &serde_json::json!({"k": "v"})),
-                ("kv2/team/token", &serde_json::json!({"t": 1})),
+                ("namespaces/root-uuid/logical/u-secret/data/app/db", &serde_json::json!({"u": "a"})),
+                ("namespaces/root-uuid/logical/u-secret/data/app/api", &serde_json::json!({"k": "v"})),
+                ("namespaces/root-uuid/logical/u-kv2/data/team/token", &serde_json::json!({"t": 1})),
             ],
         )
         .await;
-
-        // Hand-build a MountIndex with two KV mounts (no resource/files
-        // mounts), as `MountIndex::from_core` would for a live vault.
-        let mut by_type: std::collections::HashMap<String, Vec<(String, String)>> =
-            std::collections::HashMap::new();
-        by_type.insert("kv".to_string(), vec![("secret/".to_string(), "uuid-secret".to_string())]);
-        by_type.insert("kv-v2".to_string(), vec![("kv2/".to_string(), "uuid-kv2".to_string())]);
-        let mounts = MountIndex { by_type };
+        let mounts = reroot_index(&[
+            ("kv", "secret/", "u-secret"),
+            ("kv-v2", "kv2/", "u-kv2"),
+        ]);
 
         // `Full` with an empty include list must still enumerate everything.
         let scope = ScopeSpec { kind: ScopeKind::Full, include: vec![] };
@@ -783,9 +936,67 @@ mod tests {
 
         assert_eq!(doc.items.kv.len(), 3);
         let paths: Vec<_> = doc.items.kv.iter().map(|k| (k.mount.as_str(), k.path.as_str())).collect();
-        assert!(paths.contains(&("secret/", "app/api")));
-        assert!(paths.contains(&("secret/", "app/db")));
-        assert!(paths.contains(&("kv2/", "team/token")));
+        assert!(paths.contains(&("secret/", "data/app/api")));
+        assert!(paths.contains(&("secret/", "data/app/db")));
+        assert!(paths.contains(&("kv2/", "data/team/token")));
+    }
+
+    /// Regression test for the reported bug: a full-vault export of a
+    /// re-rooted vault (`namespaces/<uuid>/…`, the default layout) must
+    /// capture KV secrets, file blobs, resources, and groups — not come back
+    /// empty. The pre-fix resolver hardcoded the bare `logical/` / `sys/`
+    /// prefixes and produced a zero-item document.
+    #[tokio::test]
+    async fn full_scope_reroot_captures_all_mount_types() {
+        let src = MemStorage::default();
+        let secret_val = serde_json::json!({"password": "s3cr3t"});
+        let resource_meta = serde_json::json!({"id": "t12", "kind": "host"});
+        let file_meta = serde_json::json!({"name": "doc.bin", "sha256": "ab"});
+        let group_val = serde_json::json!({"name": "grp", "members": [], "secrets": [], "files": []});
+        populate(
+            &src,
+            &[
+                ("namespaces/root-uuid/logical/u-secret/data/myapp/db", &secret_val),
+                ("namespaces/root-uuid/logical/u-res/meta/t12", &resource_meta),
+                ("namespaces/root-uuid/logical/u-files/meta/f1", &file_meta),
+                ("namespaces/root-uuid/sys/resource-group/group/grp", &group_val),
+            ],
+        )
+        .await;
+        // The file blob is raw bytes (non-JSON) addressed by id.
+        src.put(&StorageEntry {
+            key: "namespaces/root-uuid/logical/u-files/blob/f1".to_string(),
+            value: vec![1u8, 2, 3, 4],
+        })
+        .await
+        .unwrap();
+
+        let mounts = reroot_index(&[
+            ("kv-v2", "secret/", "u-secret"),
+            ("resource", "resources/", "u-res"),
+            ("files", "files/", "u-files"),
+        ]);
+
+        let scope = ScopeSpec { kind: ScopeKind::Full, include: vec![] };
+        let doc = export_to_document(&src, &mounts, ExporterInfo::default(), scope)
+            .await
+            .unwrap();
+
+        assert_eq!(doc.items.kv.len(), 1, "KV secret must be captured");
+        assert_eq!(doc.items.kv[0].path, "data/myapp/db");
+        assert_eq!(doc.items.resources.len(), 1, "resource must be captured");
+        assert_eq!(doc.items.resources[0].id, "t12");
+        assert_eq!(doc.items.files.len(), 1, "file blob must be captured");
+        assert_eq!(doc.items.files[0].id, "f1");
+        use base64::Engine;
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(doc.items.files[0].content_b64.as_bytes())
+                .unwrap(),
+            vec![1u8, 2, 3, 4]
+        );
+        assert_eq!(doc.items.resource_groups.len(), 1, "group must be captured");
+        assert_eq!(doc.items.resource_groups[0].id, "grp");
     }
 
     #[tokio::test]
@@ -807,7 +1018,7 @@ mod tests {
             },
         );
 
-        let result = import_from_document(&store, &doc, ConflictPolicy::Skip).await.unwrap();
+        let result = import_from_document(&store, &MountIndex::empty(), &doc, ConflictPolicy::Skip).await.unwrap();
         assert_eq!(result.skipped, 1);
         assert_eq!(result.written, 0);
         let after = store.get("secret/x/y").await.unwrap().unwrap();
@@ -833,7 +1044,7 @@ mod tests {
             },
         );
 
-        let result = import_from_document(&store, &doc, ConflictPolicy::Rename).await.unwrap();
+        let result = import_from_document(&store, &MountIndex::empty(), &doc, ConflictPolicy::Rename).await.unwrap();
         assert_eq!(result.renamed, 1);
         let after = store.get("secret/x/y").await.unwrap().unwrap();
         assert_eq!(after.value, serde_json::to_vec(&original).unwrap());
@@ -862,7 +1073,7 @@ mod tests {
             },
         );
 
-        let result = import_from_document(&store, &doc, ConflictPolicy::Skip).await.unwrap();
+        let result = import_from_document(&store, &MountIndex::empty(), &doc, ConflictPolicy::Skip).await.unwrap();
         assert_eq!(result.unchanged, 1);
         assert_eq!(result.written, 0);
     }

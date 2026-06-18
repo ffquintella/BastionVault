@@ -6,7 +6,7 @@ use sysexits::ExitCode;
 
 use crate::{cli::command::CommandExecutor, EXIT_CODE_INSUFFICIENT_PARAMS};
 
-use super::{exchange_export, exchange_import};
+use super::{exchange_export, exchange_import, exchange_verify};
 
 #[derive(Parser)]
 #[command(
@@ -36,6 +36,7 @@ pub struct Exchange {
 pub enum Commands {
     Export(exchange_export::ExchangeExport),
     Import(exchange_import::ExchangeImport),
+    Verify(exchange_verify::ExchangeVerify),
 }
 
 impl Commands {
@@ -43,6 +44,7 @@ impl Commands {
         match self {
             Commands::Export(c) => c.execute(),
             Commands::Import(c) => c.execute(),
+            Commands::Verify(c) => c.execute(),
         }
     }
 }

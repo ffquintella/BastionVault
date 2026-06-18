@@ -333,11 +333,13 @@ pub async fn exchange_apply(
         .consume(&token, &owner)
         .map_err(CommandError::from)?;
 
-    let result = exchange::scope::import_from_document(core.barrier.as_storage(), &document, policy)
-        .await
-        .map_err(CommandError::from)?;
-
     let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
+    let mounts = exchange::scope::MountIndex::from_core(&core_arc).map_err(CommandError::from)?;
+    let result =
+        exchange::scope::import_from_document(core.barrier.as_storage(), &mounts, &document, policy)
+            .await
+            .map_err(CommandError::from)?;
+
     drop(vault_guard);
     let mut audit_body = serde_json::Map::new();
     audit_body.insert(

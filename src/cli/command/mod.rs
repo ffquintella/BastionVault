@@ -48,6 +48,7 @@ pub mod ferrogate_mia;
 pub mod exchange;
 pub mod exchange_export;
 pub mod exchange_import;
+pub mod exchange_verify;
 #[cfg(not(feature = "sync_handler"))]
 pub mod operator_migrate;
 #[cfg(not(feature = "sync_handler"))]

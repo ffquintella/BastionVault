@@ -1422,8 +1422,10 @@ async fn sys_exchange_import_apply_handler(
             .exchange_preview_store
             .consume(&payload.token, &owner_header)?;
 
+        let mounts = crate::exchange::scope::MountIndex::from_core(&core.get_ref().clone())?;
         let result = crate::exchange::scope::import_from_document(
             core.barrier.as_storage(),
+            &mounts,
             &document,
             payload.conflict_policy,
         )
@@ -2433,8 +2435,10 @@ async fn sys_exchange_import_request_handler(
         let document: crate::exchange::ExchangeDocument =
             serde_json::from_slice(&document_bytes).map_err(|_| RvError::ErrRequestInvalid)?;
 
+        let mounts = crate::exchange::scope::MountIndex::from_core(&core.get_ref().clone())?;
         let result = crate::exchange::scope::import_from_document(
             core.barrier.as_storage(),
+            &mounts,
             &document,
             payload.conflict_policy,
         )

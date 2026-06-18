@@ -45,6 +45,16 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-06-18
+
+### Added
+
+- **`bvault exchange verify` — offline backup integrity check** (`src/cli/command/exchange_verify.rs`, `src/exchange/verify.rs`). Validates a `.bvx` or plaintext `bvx.v1` file with no running vault or network, so it can run directly against a scheduled-export destination (e.g. `/backups`). Checks: envelope decrypts under the password (XChaCha20-Poly1305 AEAD authenticity), payload parses with the `bvx.v1` schema tag, every embedded file blob re-hashes to its recorded `sha256` + `size_bytes`, and the document is non-empty (a backup that captured nothing **fails** — guarding against the empty-export regression). Exit 0 on success, 1 on failure; `--json` for machine-readable output. Reusable library entry point `exchange::verify_backup_bytes` returns a structured `VerifyReport`.
+
+### Fixed
+
+- **Full-vault `.bvx` exports came back empty** (`src/exchange/scope.rs`) -- the exchange / scheduled-export scope resolver hardcoded the bare `logical/` and `sys/` storage prefixes, but re-root activation (the default for every install) stores root-tenant data under `namespaces/<root_uuid>/logical/` and `.../sys/`. Every list/get missed, so a `scope.kind = "full"` backup produced a zero-item document (~577-byte envelope). `MountIndex` now carries the active `Core::root_logical_prefix()` / `root_system_prefix()` and all KV/resource/file/group reads address through it. The KV branch also no longer reads the bare mount path (`secret/`) -- it walks the mount's barrier subtree (`<root>logical/<uuid>/`), capturing kv-v2 `data/`/`metadata/` leaves -- and `import_from_document` writes KV back through the same barrier prefix so backups round-trip. Added a re-root regression test covering KV, resources, file blobs, and groups.
+
 ## [0.15.5] - 2026-06-18
 
 ### Security
