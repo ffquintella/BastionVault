@@ -45,6 +45,10 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Changed
+
+- **Stop tracking generated Tauri schemas** (`gui/src-tauri/gen/schemas/`) -- the capability / permission schemas are regenerated on every GUI build and absorb the dev-only `mcp-bridge` capability when the `mcp_local_dev` feature is on, producing constant churn. They are now gitignored (`gui/src-tauri/.gitignore`) and removed from tracking; the build recreates them from the committed capability files. Reverses the v0.17.2 commit of those artifacts.
+
 ## [0.17.2] - 2026-06-18
 
 ### Changed
