@@ -1,5 +1,5 @@
 use bv_client::Operation;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tauri::State;
 
@@ -151,6 +151,133 @@ pub async fn list_policy_history(
         }
         None => Ok(PolicyHistoryResult { entries: vec![] }),
     }
+}
+
+/// One `(path, capability)` assertion to evaluate against a draft policy.
+#[derive(Deserialize)]
+pub struct PolicyTestCaseInput {
+    pub path: String,
+    pub capability: String,
+}
+
+/// Per-case verdict from the stateless dry-run endpoint.
+#[derive(Serialize, Deserialize, Default)]
+pub struct PolicyTestResultRow {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub capability: String,
+    #[serde(default)]
+    pub allowed: bool,
+    #[serde(default)]
+    pub matched_path: Option<String>,
+    #[serde(default)]
+    pub match_kind: String,
+    #[serde(default)]
+    pub denied_by_deny: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Full response from `POST /v2/sys/policies/acl/test`.
+#[derive(Serialize, Deserialize, Default)]
+pub struct PolicyTestResult {
+    #[serde(default)]
+    pub parse_ok: bool,
+    #[serde(default)]
+    pub errors: Vec<String>,
+    #[serde(default)]
+    pub results: Vec<PolicyTestResultRow>,
+}
+
+/// Dry-run a draft policy: parse it and evaluate each `(path, capability)`
+/// case against the authoritative ACL matcher, without ever persisting.
+/// Backs the Validate & test panel of the graphical policy builder.
+#[tauri::command]
+pub async fn policy_test(
+    state: State<'_, AppState>,
+    policy: String,
+    cases: Vec<PolicyTestCaseInput>,
+) -> CmdResult<PolicyTestResult> {
+    let mut body = Map::new();
+    body.insert("policy".to_string(), Value::String(policy));
+    let cases_json: Vec<Value> = cases
+        .into_iter()
+        .map(|c| {
+            let mut m = Map::new();
+            m.insert("path".to_string(), Value::String(c.path));
+            m.insert("capability".to_string(), Value::String(c.capability));
+            Value::Object(m)
+        })
+        .collect();
+    body.insert("cases".to_string(), Value::Array(cases_json));
+
+    let resp = make_request(
+        &state,
+        Operation::Write,
+        "sys/policies/acl/test".to_string(),
+        Some(body),
+    )
+    .await?;
+
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    let result: PolicyTestResult =
+        serde_json::from_value(Value::Object(data)).map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
+/// A savable effectivity test case attached to a policy.
+#[derive(Serialize, Deserialize, Default, Clone)]
+pub struct PolicyTestCase {
+    pub path: String,
+    pub capability: String,
+    /// "allow" | "deny"
+    pub expect: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+/// Read the saved effectivity test cases attached to a policy (empty when
+/// none are saved). Stored alongside, not inside, the policy HCL.
+#[tauri::command]
+pub async fn read_policy_tests(
+    state: State<'_, AppState>,
+    name: String,
+) -> CmdResult<Vec<PolicyTestCase>> {
+    let resp = make_request(
+        &state,
+        Operation::Read,
+        format!("sys/policy-tests/{name}"),
+        None,
+    )
+    .await?;
+
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    let cases = data.get("cases").cloned().unwrap_or_else(|| Value::Array(vec![]));
+    Ok(serde_json::from_value(cases).unwrap_or_default())
+}
+
+/// Overwrite the saved effectivity test cases attached to a policy. An
+/// empty list clears them.
+#[tauri::command]
+pub async fn write_policy_tests(
+    state: State<'_, AppState>,
+    name: String,
+    cases: Vec<PolicyTestCase>,
+) -> CmdResult<()> {
+    let mut body = Map::new();
+    body.insert(
+        "cases".to_string(),
+        serde_json::to_value(&cases).map_err(|e| e.to_string())?,
+    );
+    make_request(
+        &state,
+        Operation::Write,
+        format!("sys/policy-tests/{name}"),
+        Some(body),
+    )
+    .await?;
+    Ok(())
 }
 
 #[tauri::command]

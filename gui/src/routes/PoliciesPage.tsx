@@ -12,9 +12,13 @@ import {
   PolicyHistoryPanel,
   useToast,
 } from "../components/ui";
-import type { PolicyHistoryEntry } from "../lib/types";
+import { PolicyBlockEditor } from "../components/PolicyBlockEditor";
+import { PolicyValidatorPanel } from "../components/PolicyValidatorPanel";
+import type { PolicyHistoryEntry, PolicyTestCase } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
+
+type PolicyTab = "editor" | "builder" | "validate" | "history";
 
 const DEFAULT_POLICY = `# Example policy
 path "secret/data/*" {
@@ -33,9 +37,13 @@ export function PoliciesPage() {
   const [newContent, setNewContent] = useState(DEFAULT_POLICY);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
-  const [tab, setTab] = useState<"editor" | "history">("editor");
+  const [tab, setTab] = useState<PolicyTab>("editor");
   const [history, setHistory] = useState<PolicyHistoryEntry[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [savedCases, setSavedCases] = useState<PolicyTestCase[]>([]);
+  // When saved test cases fail against the draft, the save is blocked and
+  // this holds the failure summary so the operator can override.
+  const [gatePrompt, setGatePrompt] = useState<{ failed: number; total: number } | null>(null);
 
   useEffect(() => {
     loadPolicies();
@@ -61,6 +69,12 @@ export function PoliciesPage() {
       setDirty(false);
       setTab("editor");
       setHistory([]);
+      // Load any saved effectivity test cases (used as the save-time gate).
+      try {
+        setSavedCases(await api.readPolicyTests(name));
+      } catch {
+        setSavedCases([]);
+      }
     } catch (e: unknown) {
       toast("error", extractError(e));
     }
@@ -97,7 +111,28 @@ export function PoliciesPage() {
     }
   }
 
-  async function handleSave() {
+  /**
+   * Run the saved test cases against the current draft via the
+   * authoritative backend dry-run. Returns the number of failing cases
+   * (a case fails when its verdict disagrees with its `expect`). A parse
+   * failure is reported as all cases failing so save is gated.
+   */
+  async function runRegressionGate(): Promise<{ failed: number; total: number }> {
+    if (savedCases.length === 0) return { failed: 0, total: 0 };
+    const res = await api.policyTest(
+      policyContent,
+      savedCases.map((c) => ({ path: c.path, capability: c.capability })),
+    );
+    if (!res.parse_ok) return { failed: savedCases.length, total: savedCases.length };
+    let failed = 0;
+    res.results.forEach((r, i) => {
+      const expectAllow = savedCases[i]?.expect === "allow";
+      if (r.allowed !== expectAllow) failed++;
+    });
+    return { failed, total: savedCases.length };
+  }
+
+  async function doSave() {
     if (!selected) return;
     try {
       await api.writePolicy(selected, policyContent);
@@ -106,6 +141,22 @@ export function PoliciesPage() {
     } catch (e: unknown) {
       toast("error", extractError(e));
     }
+  }
+
+  async function handleSave() {
+    if (!selected) return;
+    try {
+      const gate = await runRegressionGate();
+      if (gate.failed > 0) {
+        setGatePrompt(gate);
+        return;
+      }
+    } catch (e: unknown) {
+      // A gate evaluation failure must not silently let a bad policy save.
+      toast("error", `Could not evaluate test cases: ${extractError(e)}`);
+      return;
+    }
+    await doSave();
   }
 
   async function handleCreate() {
@@ -200,13 +251,25 @@ export function PoliciesPage() {
                 >
                   <Tabs
                     tabs={[
-                      { id: "editor", label: "Editor" },
+                      { id: "builder", label: "Visual builder" },
+                      { id: "editor", label: "HCL source" },
+                      { id: "validate", label: "Validate & test" },
                       { id: "history", label: "History" },
                     ]}
                     active={tab}
-                    onChange={(t) => setTab(t as "editor" | "history")}
+                    onChange={(t) => setTab(t as PolicyTab)}
                   />
                 </Card>
+
+                {tab === "builder" && (
+                  <PolicyBlockEditor
+                    value={policyContent}
+                    onChange={(hcl) => {
+                      setPolicyContent(hcl);
+                      setDirty(true);
+                    }}
+                  />
+                )}
 
                 {tab === "editor" && (
                   <Card>
@@ -219,6 +282,16 @@ export function PoliciesPage() {
                       className="min-h-[400px]"
                     />
                   </Card>
+                )}
+
+                {tab === "validate" && (
+                  <PolicyValidatorPanel
+                    name={selected}
+                    hcl={policyContent}
+                    savedCases={savedCases}
+                    onSavedCasesChange={setSavedCases}
+                    toast={toast}
+                  />
                 )}
 
                 {tab === "history" && (
@@ -283,6 +356,25 @@ export function PoliciesPage() {
           title="Delete Policy"
           message={`Are you sure you want to delete policy "${deleteTarget}"?`}
           confirmLabel="Delete"
+        />
+
+        {/* Save-time regression gate: saved test cases fail against the draft */}
+        <ConfirmModal
+          open={gatePrompt !== null}
+          onClose={() => setGatePrompt(null)}
+          onConfirm={() => {
+            setGatePrompt(null);
+            void doSave();
+          }}
+          title="Saved test cases fail"
+          message={
+            gatePrompt
+              ? `${gatePrompt.failed} of ${gatePrompt.total} saved test case${
+                  gatePrompt.total === 1 ? "" : "s"
+                } do not match this draft. Save anyway?`
+              : ""
+          }
+          confirmLabel="Save anyway"
         />
       </div>
     </Layout>

@@ -61,6 +61,13 @@ const POLICY_EGP_SUB_PATH: &str = "policy-egp/";
 // in chronological order. History is retained when the policy is deleted
 // so the audit trail remains available after removal.
 const POLICY_HISTORY_SUB_PATH: &str = "policy-history/";
+// POLICY_TESTS_SUB_PATH stores savable effectivity test cases attached to
+// an ACL policy (the graphical builder's regression gate). One key per
+// policy name holding a JSON array of `PolicyTestCase`. Kept separate from
+// the policy document so a policy's HCL is never polluted with test
+// metadata, and a restore of a historical policy version does not clobber
+// the present-day test cases. See `features/policy-builder-validator.md`.
+const POLICY_TESTS_SUB_PATH: &str = "policy-tests/";
 
 // Multi-tenancy: per-namespace ACL policies and their history live under a
 // dedicated keyspace, keyed by the URL-safe base64 of the namespace path so a
@@ -751,6 +758,20 @@ pub struct PolicyHistoryEntry {
     pub after_raw: String,
 }
 
+/// One savable effectivity test case attached to a policy: an assertion
+/// that the policy should `allow` or `deny` `capability` on `path`. These
+/// double as documentation of operator intent and as a regression gate on
+/// every save. `note` is an optional human description.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PolicyTestCase {
+    pub path: String,
+    pub capability: String,
+    /// "allow" | "deny" — the expected verdict.
+    pub expect: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
 /// The main policy store structure.
 #[derive(Default)]
 pub struct PolicyStore {
@@ -764,6 +785,10 @@ pub struct PolicyStore {
     pub rgp_view: Option<Arc<BarrierView>>,
     pub egp_view: Option<Arc<BarrierView>>,
     pub history_view: Option<Arc<BarrierView>>,
+    /// Barrier sub-view holding savable effectivity test cases, one key
+    /// per policy name (root namespace). Non-root namespaces derive their
+    /// own keyspace on demand via [`PolicyStore::tests_view_for`].
+    pub tests_view: Option<Arc<BarrierView>>,
     /// The system barrier view. Retained so per-namespace ACL/history
     /// sub-views can be derived on demand (see [`PolicyStore::acl_view_for`]).
     /// Multi-tenancy: tenant policies live in their own keyspace under this
@@ -799,6 +824,7 @@ impl PolicyStore {
         let rgp_view = system_view.new_sub_view(POLICY_RGP_SUB_PATH);
         let egp_view = system_view.new_sub_view(POLICY_EGP_SUB_PATH);
         let history_view = system_view.new_sub_view(POLICY_HISTORY_SUB_PATH);
+        let tests_view = system_view.new_sub_view(POLICY_TESTS_SUB_PATH);
 
         let keys = acl_view.get_keys().await?;
 
@@ -809,6 +835,7 @@ impl PolicyStore {
             rgp_view: Some(Arc::new(rgp_view)),
             egp_view: Some(Arc::new(egp_view)),
             history_view: Some(Arc::new(history_view)),
+            tests_view: Some(Arc::new(tests_view)),
             system_view: Some(system_view.clone()),
             self_ptr: Weak::default(),
             ..Default::default()
@@ -1613,6 +1640,59 @@ impl PolicyStore {
             }
         }
         Ok(entries)
+    }
+
+    /// Barrier sub-view holding a namespace's policy test cases. Root
+    /// returns the legacy tests view; a non-root namespace gets its own
+    /// keyspace, mirroring [`PolicyStore::history_view_for`].
+    fn tests_view_for(&self, ns_path: &str) -> Result<Arc<BarrierView>, RvError> {
+        if ns_path.is_empty() {
+            return self
+                .tests_view
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| bv_error_string!("policy tests view unavailable"));
+        }
+        let sv = self
+            .system_view
+            .as_ref()
+            .ok_or_else(|| bv_error_string!("system view unavailable for namespace policy storage"))?;
+        let b64 = URL_SAFE_NO_PAD.encode(ns_path.as_bytes());
+        Ok(Arc::new(sv.new_sub_view(&format!("{POLICY_NS_SUB_PATH}{b64}/tests/"))))
+    }
+
+    /// Return the saved effectivity test cases for a policy (empty when
+    /// none have been saved). Namespace-scoped; root passes `""`.
+    pub async fn get_policy_tests_ns(
+        &self,
+        name: &str,
+        ns_path: &str,
+    ) -> Result<Vec<PolicyTestCase>, RvError> {
+        let view = self.tests_view_for(ns_path)?;
+        let name = self.sanitize_name(name);
+        match view.get(&name).await? {
+            Some(e) => Ok(serde_json::from_slice::<Vec<PolicyTestCase>>(&e.value).unwrap_or_default()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Overwrite the saved effectivity test cases for a policy. An empty
+    /// list deletes the stored entry so a policy with no cases leaves no
+    /// residue. Namespace-scoped; root passes `""`.
+    pub async fn set_policy_tests_ns(
+        &self,
+        name: &str,
+        cases: &[PolicyTestCase],
+        ns_path: &str,
+    ) -> Result<(), RvError> {
+        let view = self.tests_view_for(ns_path)?;
+        let name = self.sanitize_name(name);
+        if cases.is_empty() {
+            view.delete(&name).await?;
+            return Ok(());
+        }
+        let value = serde_json::to_vec(cases)?;
+        view.put(&StorageEntry { key: name, value }).await
     }
 }
 

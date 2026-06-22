@@ -14,6 +14,9 @@ import type {
   PolicyListResult,
   PolicyContent,
   PolicyHistoryResult,
+  PolicyTestCaseInput,
+  PolicyTestResult,
+  PolicyTestCase,
   NamespaceListResult,
   NamespaceInfo,
   NamespaceQuotas,
@@ -395,6 +398,20 @@ export const writePolicy = (name: string, policy: string) =>
 export const deletePolicy = (name: string) => invoke<void>("delete_policy", { name });
 export const listPolicyHistory = (name: string) =>
   invoke<PolicyHistoryResult>("list_policy_history", { name });
+/**
+ * Dry-run a draft policy: parse it and evaluate `(path, capability)`
+ * cases against the authoritative backend ACL matcher, without
+ * persisting. Returns parse errors (when the draft is invalid) and a
+ * per-case allow/deny verdict with the matched rule.
+ */
+export const policyTest = (policy: string, cases: PolicyTestCaseInput[]) =>
+  invoke<PolicyTestResult>("policy_test", { policy, cases });
+/** Read the saved effectivity test cases attached to a policy. */
+export const readPolicyTests = (name: string) =>
+  invoke<PolicyTestCase[]>("read_policy_tests", { name });
+/** Overwrite the saved effectivity test cases attached to a policy. */
+export const writePolicyTests = (name: string, cases: PolicyTestCase[]) =>
+  invoke<void>("write_policy_tests", { name, cases });
 
 // Namespaces (multi-tenancy)
 export const listNamespaces = () =>

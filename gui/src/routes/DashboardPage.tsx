@@ -48,15 +48,16 @@ export function DashboardPage() {
   }, []);
 
   async function loadDashboard() {
-    const now = Date.now();
-    const from = new Date(now - 24 * 3600_000).toISOString();
-    const to = new Date(now).toISOString();
-
+    // Fetch the latest events with no time window — the "Recent activity"
+    // feed shows the most recent happenings regardless of age (their
+    // relative-time labels make the age obvious), while the chart + KPI
+    // scope to 24h client-side. This keeps the dashboard correct even if
+    // the server were to ignore the window params.
     const [st, sum, srv, ev, tel, hl] = await Promise.allSettled([
       api.getVaultStatus(),
       api.dashboardSummary(),
       api.getServerInfo(),
-      api.listAuditEvents(from, to, 200),
+      api.listAuditEvents("", "", 200),
       rustionTelemetryList(),
       rustionTargetHealthAll(),
     ]);
@@ -108,9 +109,15 @@ export function DashboardPage() {
   const activeSessions =
     telemetry?.reduce((n, t) => n + (t.stats?.active ?? t.active.length), 0) ?? null;
 
-  // Audit 24h: prefer the server-computed total; fall back to the
-  // fetched window length when the summary endpoint is unavailable.
-  const audit24h = summary ? summary.audit_24h_total : audit.length > 0 ? audit.length : null;
+  // Audit 24h: prefer the server-computed total; otherwise count the
+  // fetched events that fall within the last 24h (the fetch is unwindowed,
+  // so we must filter here, not use the raw length).
+  const cutoff24h = nowMs - 24 * 3600_000;
+  const audit24h = summary
+    ? summary.audit_24h_total
+    : audit.length > 0
+      ? audit.filter((e) => Date.parse(e.ts) >= cutoff24h).length
+      : null;
 
   return (
     <Layout>

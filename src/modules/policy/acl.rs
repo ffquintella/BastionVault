@@ -642,6 +642,147 @@ impl ACL {
 
         acl_cap_given
     }
+
+    /// Stateless dry-run: does this ACL grant `capability` on `path`?
+    ///
+    /// The verdict (`allowed`, `denied_by_deny`, `is_root`) is produced by
+    /// the production matcher via `allow_operation(check_only)`, so it can
+    /// never silently drift from live authorization. `matched_path` /
+    /// `match_kind` are *advisory* — a best-effort identification of the
+    /// rule that decided the verdict, surfaced so operators can reason
+    /// about precedence; see [`ACL::locate_match`].
+    ///
+    /// Group- and scope-gated rules cannot fully resolve without a caller
+    /// identity and a concrete request target, so a stateless dry-run
+    /// reflects only the ungated grant for those rules (LIST is the one
+    /// exception the matcher already special-cases). This is documented in
+    /// `features/policy-builder-validator.md`.
+    pub fn explain_capability(&self, path: &str, capability: Capability) -> CapabilityExplain {
+        let path = ensure_no_leading_slash(path);
+
+        // `check_only` returns the full capability bitmap for the matched
+        // permission set without running data/parameter checks. LIST uses
+        // a slightly different lookup (trailing-slash handling); every
+        // other capability resolves identically, so map LIST to a List op
+        // and all others to Read.
+        let op = if capability == Capability::List { Operation::List } else { Operation::Read };
+        let req = Request { operation: op, path: path.clone(), ..Default::default() };
+
+        let result = self.allow_operation(&req, true).unwrap_or_default();
+
+        if result.is_root {
+            return CapabilityExplain {
+                allowed: true,
+                is_root: true,
+                matched_path: Some("*".to_string()),
+                match_kind: MatchKind::Prefix,
+                denied_by_deny: false,
+            };
+        }
+
+        let bitmap = result.capabilities_bitmap;
+        let denied_by_deny = bitmap & Capability::Deny.to_bits() != 0;
+        let allowed = !denied_by_deny && (bitmap & capability.to_bits() != 0);
+
+        let (matched_path, match_kind) = self.locate_match(&path);
+
+        CapabilityExplain { allowed, matched_path, match_kind, denied_by_deny, is_root: false }
+    }
+
+    /// Best-effort identification of the rule that governs `path`, used
+    /// only for the advisory `matched_path` / `match_kind` fields of the
+    /// dry-run. Mirrors the production precedence — exact beats the winner
+    /// among prefix and segment-wildcard rules — but is purely diagnostic:
+    /// the authoritative verdict is computed separately by the real
+    /// matcher in [`ACL::explain_capability`].
+    fn locate_match(&self, path: &str) -> (Option<String>, MatchKind) {
+        if self.exact_rules.get(path).is_some() {
+            return (Some(path.to_string()), MatchKind::Exact);
+        }
+        // The matcher also probes the trailing-slash-trimmed exact key for
+        // LIST; mirror that so a list rule isn't misreported as a prefix.
+        let trimmed = path.trim_end_matches('/');
+        if trimmed != path && self.exact_rules.get(trimmed).is_some() {
+            return (Some(trimmed.to_string()), MatchKind::Exact);
+        }
+
+        // Longest matching prefix rule (the radix-trie ancestor is the
+        // longest prefix). Stored keys have the trailing `*` stripped at
+        // parse time, so re-append it for display.
+        let prefix_match: Option<(String, usize)> = self
+            .prefix_rules
+            .get_ancestor(path)
+            .and_then(|item| item.key().cloned())
+            .map(|k| {
+                let len = k.len();
+                (format!("{k}*"), len)
+            });
+
+        // Best matching segment-wildcard rule. Rank by the count of
+        // literal (non-`+`) characters so the most specific wildcard wins,
+        // approximating the WcPathDescr ordering used by the live matcher.
+        let mut seg_best: Option<(String, usize)> = None;
+        for item in self.segment_wildcard_paths.iter() {
+            let key = item.key();
+            if key.is_empty() {
+                continue;
+            }
+            let is_prefix = key.ends_with('*');
+            let rule_path = if is_prefix { &key[..key.len() - 1] } else { key.as_str() };
+            if segment_wildcard_matches(rule_path, is_prefix, path) {
+                let literal_len = rule_path.chars().filter(|c| *c != '+').count();
+                if seg_best.as_ref().map(|(_, l)| literal_len > *l).unwrap_or(true) {
+                    seg_best = Some((key.clone(), literal_len));
+                }
+            }
+        }
+
+        match (prefix_match, seg_best) {
+            (Some((pp, pl)), Some((sp, sl))) => {
+                if pl >= sl {
+                    (Some(pp), MatchKind::Prefix)
+                } else {
+                    (Some(sp), MatchKind::SegmentWildcard)
+                }
+            }
+            (Some((pp, _)), None) => (Some(pp), MatchKind::Prefix),
+            (None, Some((sp, _))) => (Some(sp), MatchKind::SegmentWildcard),
+            (None, None) => (None, MatchKind::None),
+        }
+    }
+}
+
+/// Outcome of a stateless dry-run evaluation of one `(path, capability)`
+/// case against an [`ACL`]. See [`ACL::explain_capability`].
+#[derive(Debug, Clone, Default)]
+pub struct CapabilityExplain {
+    pub allowed: bool,
+    pub matched_path: Option<String>,
+    pub match_kind: MatchKind,
+    pub denied_by_deny: bool,
+    pub is_root: bool,
+}
+
+/// How the matched rule's path related to the evaluated path. Serialized
+/// to the snake-case strings the dry-run endpoint returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MatchKind {
+    Exact,
+    Prefix,
+    SegmentWildcard,
+    #[default]
+    None,
+}
+
+impl MatchKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MatchKind::Exact => "exact",
+            MatchKind::Prefix => "prefix",
+            MatchKind::SegmentWildcard => "segment_wildcard",
+            MatchKind::None => "none",
+        }
+    }
 }
 
 /// Does `path` match this group-gated rule's path shape?
@@ -2129,5 +2270,74 @@ path "kv/deny" {
         assert!(!check_path_capability(&rules, "/root"));
         assert!(!check_path_capability(&rules, ""));
         assert!(check_path_capability(&rules, "/api"));
+    }
+
+    #[test]
+    fn test_explain_capability_match_kinds_and_verdicts() {
+        let policy = create_test_policy(
+            "explain",
+            r#"
+            path "secret/data/exact" {
+                capabilities = ["read", "list"]
+            }
+            path "secret/data/team/*" {
+                capabilities = ["read", "create", "update"]
+            }
+            path "secret/data/team/+/config" {
+                capabilities = ["read"]
+            }
+            path "secret/data/locked/*" {
+                capabilities = ["deny"]
+            }
+            "#,
+        );
+        let acl = ACL::new(&[Arc::new(policy)]).unwrap();
+
+        // Exact rule, capability granted.
+        let ex = acl.explain_capability("secret/data/exact", Capability::Read);
+        assert!(ex.allowed);
+        assert!(!ex.denied_by_deny);
+        assert_eq!(ex.match_kind, MatchKind::Exact);
+        assert_eq!(ex.matched_path.as_deref(), Some("secret/data/exact"));
+
+        // Exact rule, capability NOT granted (no create on the exact rule).
+        let ex = acl.explain_capability("secret/data/exact", Capability::Create);
+        assert!(!ex.allowed);
+        assert!(!ex.denied_by_deny);
+        assert_eq!(ex.match_kind, MatchKind::Exact);
+
+        // Prefix rule.
+        let ex = acl.explain_capability("secret/data/team/anything/here", Capability::Create);
+        assert!(ex.allowed);
+        assert_eq!(ex.match_kind, MatchKind::Prefix);
+        assert_eq!(ex.matched_path.as_deref(), Some("secret/data/team/*"));
+
+        // Segment-wildcard rule wins on an exact-arity path it matches.
+        let ex = acl.explain_capability("secret/data/team/alpha/config", Capability::Read);
+        assert!(ex.allowed);
+        assert_eq!(ex.match_kind, MatchKind::SegmentWildcard);
+        assert_eq!(ex.matched_path.as_deref(), Some("secret/data/team/+/config"));
+
+        // Explicit deny.
+        let ex = acl.explain_capability("secret/data/locked/thing", Capability::Read);
+        assert!(!ex.allowed);
+        assert!(ex.denied_by_deny);
+        assert_eq!(ex.match_kind, MatchKind::Prefix);
+
+        // No matching rule at all.
+        let ex = acl.explain_capability("nowhere/at/all", Capability::Read);
+        assert!(!ex.allowed);
+        assert!(!ex.denied_by_deny);
+        assert_eq!(ex.match_kind, MatchKind::None);
+        assert!(ex.matched_path.is_none());
+    }
+
+    #[test]
+    fn test_explain_capability_root_grants_all() {
+        let acl = ACL::new(&[Arc::new(Policy { name: "root".into(), ..Default::default() })]).unwrap();
+        let ex = acl.explain_capability("any/path/at/all", Capability::Sudo);
+        assert!(ex.allowed);
+        assert!(ex.is_root);
+        assert!(!ex.denied_by_deny);
     }
 }

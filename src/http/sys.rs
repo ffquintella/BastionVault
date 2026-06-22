@@ -567,20 +567,18 @@ async fn sys_audit_disable_request_handler(
 /// logical pipeline too (the Tauri command path).
 async fn sys_audit_events_request_handler(
     req: HttpRequest,
+    payload: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, RvError> {
     let mut r = request_auth(&req);
     r.path = "sys/audit/events".to_string();
     r.operation = Operation::Read;
 
-    // Parse query string (`?from=...&to=...&limit=...`) into the
-    // request body so the logical handler's field-declaration-based
-    // `req.get_data(...)` lookups resolve. We accept the values
-    // verbatim — RFC3339 timestamps and integers don't need URL
-    // decoding, and any clients that need arbitrary characters can
-    // just POST a JSON body instead.
+    let mut body = serde_json::Map::new();
+
+    // Query string (`?from=...&to=...&limit=...`) — used by curl and any
+    // caller that puts the filters on the URL.
     if let Some(qs) = req.uri().query() {
-        let mut body = serde_json::Map::new();
         for pair in qs.split('&') {
             let Some((k, v)) = pair.split_once('=') else { continue };
             if k == "limit" {
@@ -591,9 +589,25 @@ async fn sys_audit_events_request_handler(
                 body.insert(k.into(), serde_json::Value::String(v.to_string()));
             }
         }
-        if !body.is_empty() {
-            r.body = Some(body);
+    }
+
+    // JSON request body. The `bv-client` remote backend sends a GET with
+    // its `from`/`to`/`limit` in the JSON body, NOT on the query string,
+    // so without this merge those filters (and the limit) are silently
+    // dropped in remote mode — the dashboard then shows an unwindowed,
+    // unbounded event list. Body values take precedence over the query
+    // string when both are present.
+    if !payload.is_empty() {
+        if let Ok(serde_json::Value::Object(m)) = serde_json::from_slice::<serde_json::Value>(&payload)
+        {
+            for (k, v) in m {
+                body.insert(k, v);
+            }
         }
+    }
+
+    if !body.is_empty() {
+        r.body = Some(body);
     }
 
     handle_request(core, &mut r).await
@@ -868,6 +882,55 @@ async fn sys_capabilities_self_request_handler(
 
     let mut r = request_auth(&req);
     r.path = "sys/capabilities-self".to_string();
+    r.operation = Operation::Write;
+    r.body = Some(payload);
+
+    handle_request(core, &mut r).await
+}
+
+/// GET `/v2/sys/policy-tests/{name}` — read a policy's saved effectivity
+/// test cases. v2-only; dedicated shim so remote (HTTP) GUI mode reaches
+/// the logical `policy-tests/...` route without colliding with the
+/// `policies/acl/{name}` catch-all.
+async fn sys_policy_tests_read_request_handler(
+    req: HttpRequest,
+    name: web::Path<String>,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let policy_name = name.into_inner();
+    if policy_name.is_empty() {
+        return Ok(response_error(StatusCode::NOT_FOUND, ""));
+    }
+
+    let mut r = request_auth(&req);
+    r.path = format!("sys/policy-tests/{policy_name}");
+    r.operation = Operation::Read;
+
+    handle_request(core, &mut r).await
+}
+
+/// POST `/v2/sys/policy-tests/{name}` — overwrite a policy's saved
+/// effectivity test cases. v2-only. Body: `{ "cases": [ ... ] }`.
+async fn sys_policy_tests_write_request_handler(
+    req: HttpRequest,
+    name: web::Path<String>,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let payload: serde_json::Map<String, serde_json::Value> = if body.is_empty() {
+        serde_json::Map::new()
+    } else {
+        serde_json::from_slice(&body)?
+    };
+    body.clear();
+
+    let policy_name = name.into_inner();
+    if policy_name.is_empty() {
+        return Ok(response_error(StatusCode::NOT_FOUND, ""));
+    }
+
+    let mut r = request_auth(&req);
+    r.path = format!("sys/policy-tests/{policy_name}");
     r.operation = Operation::Write;
     r.body = Some(payload);
 
@@ -2849,6 +2912,13 @@ pub fn init_sys_service(cfg: &mut web::ServiceConfig) {
             .service(
                 web::resource("/capabilities-self")
                     .route(web::post().to(sys_capabilities_self_request_handler)),
+            )
+            // Policy effectivity test-case persistence (graphical builder
+            // regression gate). v2-only; sibling to capabilities-self.
+            .service(
+                web::resource("/policy-tests/{name:.*}")
+                    .route(web::get().to(sys_policy_tests_read_request_handler))
+                    .route(web::post().to(sys_policy_tests_write_request_handler)),
             ),
     );
 }

@@ -262,6 +262,64 @@ export interface PolicyHistoryResult {
   entries: PolicyHistoryEntry[];
 }
 
+/** The ten ACL capabilities, matching the backend `Capability` enum. */
+export type PolicyCapability =
+  | "deny"
+  | "create"
+  | "read"
+  | "update"
+  | "delete"
+  | "list"
+  | "patch"
+  | "sudo"
+  | "connect"
+  | "root";
+
+/** A single `(path, capability)` assertion to evaluate against a draft. */
+export interface PolicyTestCaseInput {
+  path: string;
+  capability: string;
+}
+
+/** How the rule that decided a verdict related to the evaluated path. */
+export type PolicyMatchKind = "exact" | "prefix" | "segment_wildcard" | "none";
+
+/** Per-case verdict from the stateless dry-run endpoint. */
+export interface PolicyTestResultRow {
+  path: string;
+  capability: string;
+  allowed: boolean;
+  /** The rule that decided the verdict; null when nothing matched. Advisory. */
+  matched_path: string | null;
+  match_kind: PolicyMatchKind;
+  denied_by_deny: boolean;
+  /** Present only when the capability name was unrecognized. */
+  error?: string;
+}
+
+/** Full response from the `policy_test` dry-run command. */
+export interface PolicyTestResult {
+  /** False when the draft HCL failed to parse. */
+  parse_ok: boolean;
+  /** Parse/lint errors (with messages) when `parse_ok` is false. */
+  errors: string[];
+  /** One row per submitted case (empty when `parse_ok` is false). */
+  results: PolicyTestResultRow[];
+}
+
+/**
+ * A savable effectivity test case attached to a policy. Doubles as
+ * documentation of operator intent and as a regression gate on save.
+ */
+export interface PolicyTestCase {
+  path: string;
+  capability: string;
+  /** The expected verdict. */
+  expect: "allow" | "deny";
+  /** Optional human description. */
+  note?: string;
+}
+
 // Resources
 export interface ResourceMetadata {
   name: string;

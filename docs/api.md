@@ -205,6 +205,73 @@ Request body:
 DELETE /v1/sys/policy/{name}
 ~~~
 
+**Dry-run a draft policy** (graphical builder / validator)
+
+Parse a *draft* policy and evaluate `(path, capability)` cases against it
+using the production parser and ACL matcher, **without persisting**.
+Requires the same capability as a policy write (`sys/policies/acl/*`).
+`test` is a reserved policy name because of this route.
+
+~~~
+POST /v2/sys/policies/acl/test
+~~~
+
+Request body:
+
+~~~json
+{
+  "policy": "path \"secret/data/*\" { capabilities = [\"read\", \"list\"] }",
+  "cases": [
+    { "path": "secret/data/x", "capability": "read" },
+    { "path": "secret/data/x", "capability": "delete" }
+  ]
+}
+~~~
+
+Response (`parse_ok = false` with `errors` when the draft fails to parse):
+
+~~~json
+{
+  "parse_ok": true,
+  "errors": [],
+  "results": [
+    {
+      "path": "secret/data/x",
+      "capability": "read",
+      "allowed": true,
+      "matched_path": "secret/data/*",
+      "match_kind": "prefix",
+      "denied_by_deny": false
+    }
+  ]
+}
+~~~
+
+`match_kind` is one of `exact` | `prefix` | `segment_wildcard` | `none`.
+`matched_path` / `match_kind` are advisory; `allowed` / `denied_by_deny`
+are authoritative (produced by the real matcher).
+
+**Read / write saved test cases**
+
+Effectivity test cases attached to a policy (documentation of intent + a
+save-time regression gate). Stored alongside, not inside, the policy HCL.
+
+~~~
+GET  /v2/sys/policy-tests/{name}
+POST /v2/sys/policy-tests/{name}
+~~~
+
+Write body (an empty `cases` array clears them):
+
+~~~json
+{
+  "cases": [
+    { "path": "secret/data/x", "capability": "read", "expect": "allow", "note": "sre reads" },
+    { "path": "secret/data/x", "capability": "delete", "expect": "deny" }
+  ]
+}
+~~~
+
 ### Server Info
 
 Returns identity + lifecycle facts the GUI's *Server Info* dialog

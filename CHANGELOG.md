@@ -45,6 +45,24 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-06-22
+
+### Added
+
+#### Graphical Policy Builder & Validator (`features/policy-builder-validator.md`)
+
+- **Stateless policy dry-run endpoint** (`POST /v2/sys/policies/acl/test`) -- parse a *draft* ACL policy and evaluate `(path, capability)` cases against it using the production HCL parser and ACL matcher, **without ever persisting**. Each result reports the authoritative allow/deny verdict plus the matched rule (`matched_path` + `match_kind`: `exact` | `prefix` | `segment_wildcard` | `none`) and whether an explicit `deny` decided it. Lets operators prove what a policy grants before applying it to live tokens, instead of saving it and minting a test token. Gated by the same `sys/policies/acl/*` capability as a policy write. Note: `test` is now a reserved policy name. (Phase 1)
+- **Savable effectivity test cases** (`GET`/`POST /v2/sys/policy-tests/{name}`) -- attach `(path, capability, expect)` assertions to a policy as documentation of intent and as a regression gate. Stored alongside, not inside, the policy HCL (so a historical restore never clobbers present-day cases). A failing saved case blocks save in the GUI with an explicit "save anyway" override. (Phase 4)
+- **Visual policy builder** (`gui/src/components/PolicyBlockEditor.tsx`) -- a block-based editor beside the textual HCL editor on the Policies page. Each path rule is a card with a glob lint badge, capability toggle chips (`deny` greys the rest; `sudo` warned; `connect` hinted; `root` disabled), reorder controls, and collapsible TTL / parameter / asset-group / ownership-scope editors. Round-trips losslessly to and from HCL, which remains the source of truth. (Phase 3)
+- **Validate & test panel** (`gui/src/components/PolicyValidatorPanel.tsx`) -- shows client-side lint/parse findings over the draft and runs editable test-case rows through the authoritative backend dry-run, displaying the verdict and matched rule, a pass/fail summary, and a save action for the regression gate. (Phase 4)
+- **Client-side policy tooling** (`gui/src/lib/policyHcl.ts`) -- a dependency-free HCL ⇄ block-model parser/serializer, capability/glob/TTL linter, and a non-authoritative preview matcher mirroring the backend's exact > prefix > segment precedence, for instant feedback while typing. Covered by `vitest` (round-trip stability, lint detection, matcher precedence). (Phase 2)
+- **Tauri commands + TS API** -- `policy_test`, `read_policy_tests`, `write_policy_tests` wrap the new endpoints for both embedded and remote GUI modes.
+
+### Fixed
+
+- **Audit-event filters dropped in remote mode** (`src/http/sys.rs` `sys_audit_events_request_handler`) -- the `sys/audit/events` HTTP shim only parsed `from` / `to` / `limit` from the URL query string, but the `bv-client` remote backend sends a `GET` with those params in the JSON **body**. So a remote desktop GUI got an unwindowed, unbounded event list: the dashboard's "Recent activity" panel showed stale events while the 24h KPI (computed separately, server-side) correctly read zero — a confusing mismatch. The shim now merges the JSON request body with the query string (body wins), so the window + limit are honored on the remote path. Verified live via the Tauri MCP bridge (remote mode: `limit:3` returned all 13 events before the fix); regression test `test_audit_events_filters_from_json_body` exercises a GET-with-body at the HTTP layer.
+- **Dashboard "Recent activity" stayed empty in a quiet vault** (`gui/src/routes/DashboardPage.tsx`) -- now that the window filter works, the feed fetches the latest N events with **no** time window (so it stays useful — relative-time labels make their age clear), while the activity chart and the "Audit events 24h" KPI scope to 24h client-side. The KPI's fallback (when the summary endpoint is unavailable) now counts events within the last 24h rather than the raw fetched length.
+
 ### Changed
 
 - **Stop tracking generated Tauri schemas** (`gui/src-tauri/gen/schemas/`) -- the capability / permission schemas are regenerated on every GUI build and absorb the dev-only `mcp-bridge` capability when the `mcp_local_dev` feature is on, producing constant churn. They are now gitignored (`gui/src-tauri/.gitignore`) and removed from tracking; the build recreates them from the committed capability files. Reverses the v0.17.2 commit of those artifacts.

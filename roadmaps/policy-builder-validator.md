@@ -15,11 +15,13 @@ Adds a visual, block-based policy construction surface and an effectivity valida
 
 | Phase | Title | Status |
 |---|---|---|
-| 1 | Backend dry-run endpoint | `[ ]` Todo |
-| 2 | Client lint + simulator (TS) | `[ ]` Todo |
-| 3 | Visual builder tab | `[ ]` Todo |
-| 4 | Validate & test tab + test-case persistence | `[ ]` Todo |
-| 5 | Polish, tests & docs | `[ ]` Todo |
+| 1 | Backend dry-run endpoint | `[x]` Complete |
+| 2 | Client lint + simulator (TS) | `[x]` Complete |
+| 3 | Visual builder tab | `[x]` Complete |
+| 4 | Validate & test tab + test-case persistence | `[x]` Complete |
+| 5 | Polish, tests & docs | `[x]` Complete |
+
+> **Implemented under `v2/`.** Two deviations from the original draft below, per `agent.md`'s "new HTTP routes are v2-only" rule and to avoid route collisions: the dry-run is `POST /v2/sys/policies/acl/test` (not `v1`), and saved test cases live at `GET`/`POST /v2/sys/policy-tests/{name}` (a sibling top-level route, not `/v1/sys/policies/acl/<name>/tests`, which the `policies/acl/{name}` catch-all would shadow). `test` is therefore a reserved policy name. See the feature spec's Current State for the full rationale.
 
 ## Sequencing rationale
 

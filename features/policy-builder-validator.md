@@ -18,7 +18,16 @@ The two are complementary: the builder reduces the chance of writing a bad polic
 
 ## Current State
 
-- **Not started.** This spec and the companion [roadmap](../roadmaps/policy-builder-validator.md) are drafted; no code yet.
+- **Complete (all 5 phases).** Implemented end-to-end with automated coverage. Two deliberate deviations from this spec's original draft, both noted inline below:
+  1. **`v2/` not `v1/`.** Per `agent.md` (which `CLAUDE.md` says overrides everything), all new HTTP routes are introduced under `v2/`. The dry-run is `POST /v2/sys/policies/acl/test`; `v1` remains frozen for Vault compatibility.
+  2. **Test-case persistence path.** Saved cases live at `GET`/`POST /v2/sys/policy-tests/{name}` (a sibling top-level route, like `capabilities-self`) rather than `/v1/sys/policies/acl/<name>/tests`. This avoids the `policies/acl/{name}` catch-all route shadowing the sub-resource and works in both embedded and remote GUI modes through a dedicated HTTP shim. `test` is consequently a reserved policy name (the dry-run owns `policies/acl/test`).
+- Backend: `ACL::explain_capability` ([`acl.rs`](../src/modules/policy/acl.rs)) reuses the production matcher for the verdict; `PolicyModule::handle_policy_test` / `handle_policy_tests_*` ([`mod.rs`](../src/modules/policy/mod.rs)); `PolicyStore::{get,set}_policy_tests_ns` ([`policy_store.rs`](../src/modules/policy/policy_store.rs)). Rust tests: `test_explain_capability_*`, `test_policy_acl_dry_run_endpoint`, `test_policy_tests_persistence_endpoint`.
+- Client: [`gui/src/lib/policyHcl.ts`](../gui/src/lib/policyHcl.ts) (parser/serializer/lint/preview, 22 `vitest` cases in [`policyHcl.test.ts`](../gui/src/test/policyHcl.test.ts)); [`PolicyBlockEditor.tsx`](../gui/src/components/PolicyBlockEditor.tsx) and [`PolicyValidatorPanel.tsx`](../gui/src/components/PolicyValidatorPanel.tsx); Tauri commands `policy_test` / `read_policy_tests` / `write_policy_tests`.
+- The Policies page now has four tabs: **Visual builder**, **HCL source**, **Validate & test**, **History**. Interactive (live-app) verification requires `make run-dev-gui` — the browser preview has no Tauri `invoke` bridge.
+
+### Original draft note
+
+- The companion [roadmap](../roadmaps/policy-builder-validator.md) was drafted alongside this spec.
 - The existing Policies page already provides the foundation this builds on: Editor / History tabs, a plain `<textarea>` HCL editor with dirty-state tracking, a Create modal, [`PolicyHistoryPanel`](../gui/src/components/PolicyHistoryPanel.tsx) with before/after diffs + restore, and full CRUD wired through the Tauri commands `list_policies` / `read_policy` / `write_policy` / `delete_policy` / `list_policy_history` ([`gui/src-tauri/src/commands/policies.rs`](../gui/src-tauri/src/commands/policies.rs)).
 - The backend HCL parser and ACL evaluator already model everything the builder and simulator need: the 10 capabilities, `+`/`*` wildcards, parameter and TTL constraints, and asset-group / ownership-scope filters ([`src/modules/policy/policy.rs`](../src/modules/policy/policy.rs), [`acl.rs`](../src/modules/policy/acl.rs)).
 

@@ -18,6 +18,7 @@
 
 - Desktop GUI
   - [Overview & tour](gui.md)
+  - [Policy builder & validator](policy-builder-validator.md)
 
 - Architecture
   - [Design](design.md)

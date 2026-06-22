@@ -278,6 +278,180 @@ impl PolicyModule {
         data.insert("entries".into(), arr);
         Ok(Some(Response::data_response(Some(data))))
     }
+
+    /// Stateless dry-run for the graphical policy builder/validator.
+    ///
+    /// Parses a *draft* HCL policy (never persisted), constructs an
+    /// in-memory `ACL` from it via the production builder, and evaluates
+    /// each supplied `(path, capability)` case with the production
+    /// matcher. Returns, per case, the authoritative allow/deny verdict
+    /// plus an advisory identification of the rule that decided it.
+    ///
+    /// A parse failure is reported as a normal result
+    /// (`parse_ok = false` + the message) rather than an error, so the
+    /// GUI can surface syntax problems inline. The endpoint requires the
+    /// same ACL capability as a policy write because it shares the
+    /// `sys/policies/acl/*` path prefix; it discloses nothing the caller
+    /// could not already author. See
+    /// `features/policy-builder-validator.md` (Phase 1).
+    pub async fn handle_policy_test(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        use crate::modules::policy::acl::ACL;
+        use crate::modules::policy::policy::Capability;
+
+        // Accept either raw or base64-encoded HCL, mirroring policy write.
+        let policy_str = req.get_data("policy")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let policy_raw = if let Ok(bytes) = STANDARD.decode(&policy_str) {
+            String::from_utf8_lossy(&bytes).to_string()
+        } else {
+            policy_str
+        };
+
+        // Cases parse independently of the policy so the GUI can still
+        // render rows when the draft fails to parse.
+        let cases: Vec<(String, String)> = match req.get_data("cases") {
+            Ok(Value::Array(arr)) => arr
+                .iter()
+                .filter_map(|v| {
+                    let o = v.as_object()?;
+                    let path = o.get("path")?.as_str()?.to_string();
+                    let cap = o.get("capability")?.as_str()?.to_string();
+                    Some((path, cap))
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        let mut data = Map::new();
+
+        let mut policy = match Policy::from_str(&policy_raw) {
+            Ok(p) => p,
+            Err(e) => {
+                data.insert("parse_ok".into(), Value::Bool(false));
+                data.insert("errors".into(), Value::Array(vec![Value::String(e.to_string())]));
+                data.insert("results".into(), Value::Array(vec![]));
+                return Ok(Some(Response::data_response(Some(data))));
+            }
+        };
+        // ACL::new requires a name; a lone "root" policy would build a
+        // superuser ACL, so reject that here — a dry-run must evaluate the
+        // literal rules, not synthesize root.
+        if policy.name == "root" {
+            return Err(bv_error_response_status!(
+                400,
+                "a draft policy named \"root\" cannot be dry-run; root is a synthetic superuser policy"
+            ));
+        }
+        if policy.name.is_empty() {
+            policy.name = "__draft__".into();
+        }
+
+        // Throwaway ACL built from the single draft policy. Never stored.
+        let acl = ACL::new(&[Arc::new(policy)])?;
+
+        let mut results = Vec::with_capacity(cases.len());
+        for (path, cap_str) in &cases {
+            let mut row = Map::new();
+            row.insert("path".into(), Value::String(path.clone()));
+            row.insert("capability".into(), Value::String(cap_str.clone()));
+            match Capability::from_str(cap_str) {
+                Ok(cap) => {
+                    let ex = acl.explain_capability(path, cap);
+                    row.insert("allowed".into(), Value::Bool(ex.allowed));
+                    row.insert("denied_by_deny".into(), Value::Bool(ex.denied_by_deny));
+                    row.insert("match_kind".into(), Value::String(ex.match_kind.as_str().into()));
+                    row.insert(
+                        "matched_path".into(),
+                        ex.matched_path.map(Value::String).unwrap_or(Value::Null),
+                    );
+                }
+                Err(_) => {
+                    row.insert("allowed".into(), Value::Bool(false));
+                    row.insert("denied_by_deny".into(), Value::Bool(false));
+                    row.insert("match_kind".into(), Value::String("none".into()));
+                    row.insert("matched_path".into(), Value::Null);
+                    row.insert("error".into(), Value::String(format!("unknown capability: {cap_str}")));
+                }
+            }
+            results.push(Value::Object(row));
+        }
+
+        data.insert("parse_ok".into(), Value::Bool(true));
+        data.insert("errors".into(), Value::Array(vec![]));
+        data.insert("results".into(), Value::Array(results));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// `GET sys/policy-tests/<name>` — return the saved effectivity test
+    /// cases attached to a policy. Empty when none are saved. Test cases
+    /// are stored alongside, not inside, the policy HCL.
+    pub async fn handle_policy_tests_read(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let name = req.get_data_as_str("name")?;
+        let ns = crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
+        let cases = self.policy_store.load().get_policy_tests_ns(&name, &ns).await?;
+
+        let arr = Value::Array(
+            cases
+                .iter()
+                .map(|c| {
+                    let mut m = Map::new();
+                    m.insert("path".into(), Value::String(c.path.clone()));
+                    m.insert("capability".into(), Value::String(c.capability.clone()));
+                    m.insert("expect".into(), Value::String(c.expect.clone()));
+                    m.insert("note".into(), Value::String(c.note.clone()));
+                    Value::Object(m)
+                })
+                .collect(),
+        );
+        let mut data = Map::new();
+        data.insert("cases".into(), arr);
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// `POST sys/policy-tests/<name>` — overwrite the saved effectivity
+    /// test cases attached to a policy. An empty array clears them.
+    pub async fn handle_policy_tests_write(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        use crate::modules::policy::policy_store::PolicyTestCase;
+
+        let name = req.get_data_as_str("name")?;
+        let ns = crate::modules::namespace::policy_scope::writer_namespace_path(req.headers.as_ref());
+
+        let cases: Vec<PolicyTestCase> = match req.get_data("cases") {
+            Ok(Value::Array(arr)) => arr
+                .iter()
+                .filter_map(|v| {
+                    let o = v.as_object()?;
+                    let path = o.get("path")?.as_str()?.to_string();
+                    let capability = o.get("capability")?.as_str()?.to_string();
+                    // Default to "allow" so a malformed/absent expectation
+                    // fails closed toward the stricter assertion at gate time.
+                    let expect = o
+                        .get("expect")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| *s == "allow" || *s == "deny")
+                        .unwrap_or("allow")
+                        .to_string();
+                    let note = o.get("note").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    Some(PolicyTestCase { path, capability, expect, note })
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        self.policy_store.load().set_policy_tests_ns(&name, &cases, &ns).await?;
+        Ok(None)
+    }
 }
 
 /// Collect the deduped list of asset-group names referenced via

@@ -143,6 +143,9 @@ impl SystemBackend {
         let sys_backend_internal_ui_mount_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_cache_flush = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_capabilities_self = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_policy_test = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_policy_tests_read = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_policy_tests_write = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_dashboard_summary = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_owner_backfill = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_sso_settings_read = self.self_ptr.upgrade().unwrap().clone();
@@ -325,6 +328,54 @@ impl SystemBackend {
                     },
                     operations: [
                         {op: Operation::Read, handler: sys_backend_policies_history.handle_policy_history}
+                    ]
+                },
+                {
+                    // Stateless dry-run for the graphical policy
+                    // builder/validator: parse a *draft* HCL policy and
+                    // evaluate `(path, capability)` cases against it
+                    // without ever persisting. Shares the
+                    // `sys/policies/acl/*` ACL prefix so a policy author
+                    // is already authorized. MUST be ordered before the
+                    // `policies/acl/(?P<name>.+)` catch-all below; as a
+                    // result `test` is a reserved policy name (writing a
+                    // policy literally named "test" is not possible — see
+                    // features/policy-builder-validator.md).
+                    pattern: r"policies/acl/test$",
+                    fields: {
+                        "policy": {
+                            field_type: FieldType::Str,
+                            description: r#"The draft policy to evaluate, in HCL (or base64-encoded HCL)."#
+                        },
+                        "cases": {
+                            field_type: FieldType::Array,
+                            description: r#"Array of { path, capability } cases to evaluate against the draft."#
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: sys_backend_policy_test.handle_policy_test}
+                    ]
+                },
+                {
+                    // Savable effectivity test cases attached to a policy
+                    // (the builder's regression gate). Stored alongside,
+                    // not inside, the policy HCL — see
+                    // features/policy-builder-validator.md. v2-only HTTP
+                    // shim registered under /v2/sys.
+                    pattern: r"policy-tests/(?P<name>.+)",
+                    fields: {
+                        "name": {
+                            field_type: FieldType::Str,
+                            description: r#"The name of the policy the test cases belong to."#
+                        },
+                        "cases": {
+                            field_type: FieldType::Array,
+                            description: r#"Array of { path, capability, expect, note? } test cases."#
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read, handler: sys_backend_policy_tests_read.handle_policy_tests_read},
+                        {op: Operation::Write, handler: sys_backend_policy_tests_write.handle_policy_tests_write}
                     ]
                 },
                 {
@@ -1071,6 +1122,36 @@ impl SystemBackend {
         let policy_module = self.get_module::<PolicyModule>("policy")?;
 
         policy_module.handle_policy_history(backend, req).await
+    }
+
+    pub async fn handle_policy_test(
+        &self,
+        backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let policy_module = self.get_module::<PolicyModule>("policy")?;
+
+        policy_module.handle_policy_test(backend, req).await
+    }
+
+    pub async fn handle_policy_tests_read(
+        &self,
+        backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let policy_module = self.get_module::<PolicyModule>("policy")?;
+
+        policy_module.handle_policy_tests_read(backend, req).await
+    }
+
+    pub async fn handle_policy_tests_write(
+        &self,
+        backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let policy_module = self.get_module::<PolicyModule>("policy")?;
+
+        policy_module.handle_policy_tests_write(backend, req).await
     }
 
     /// Admin-only: overwrite the KV-secret owner record with a new
@@ -2947,6 +3028,192 @@ mod mod_system_tests {
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_policy_acl_dry_run_endpoint() {
+        let mut server = TestHttpServer::new("test_policy_acl_dry_run", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+        // Dry-run lives under /v2 (project rule: new routes are v2-only);
+        // strip the harness's hardcoded `/v1` so `v2/...` resolves.
+        server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
+
+        // --- A draft exercising every match_kind + deny precedence ----
+        let draft = r#"
+            path "secret/data/exact" { capabilities = ["read"] }
+            path "secret/data/team/*" { capabilities = ["read", "create"] }
+            path "secret/data/team/+/config" { capabilities = ["update"] }
+            path "secret/data/locked/*" { capabilities = ["deny"] }
+        "#;
+        let cases = serde_json::json!([
+            { "path": "secret/data/exact", "capability": "read" },
+            { "path": "secret/data/exact", "capability": "delete" },
+            { "path": "secret/data/team/x/y", "capability": "create" },
+            { "path": "secret/data/team/alpha/config", "capability": "update" },
+            { "path": "secret/data/locked/thing", "capability": "read" },
+            { "path": "nowhere/here", "capability": "read" }
+        ]);
+        let (status, resp) = server
+            .request(
+                "POST",
+                "v2/sys/policies/acl/test",
+                serde_json::json!({ "policy": draft, "cases": cases }).as_object().cloned(),
+                Some(&root),
+                None,
+            )
+            .unwrap();
+        assert_eq!(status, 200, "dry-run must succeed: {resp:?}");
+        assert_eq!(resp["parse_ok"], Value::Bool(true), "{resp:?}");
+        let results = resp["results"].as_array().unwrap();
+        assert_eq!(results.len(), 6);
+
+        // exact grant
+        assert_eq!(results[0]["allowed"], Value::Bool(true));
+        assert_eq!(results[0]["match_kind"], "exact");
+        assert_eq!(results[0]["matched_path"], "secret/data/exact");
+        // exact rule present but capability absent
+        assert_eq!(results[1]["allowed"], Value::Bool(false));
+        assert_eq!(results[1]["match_kind"], "exact");
+        // prefix grant
+        assert_eq!(results[2]["allowed"], Value::Bool(true));
+        assert_eq!(results[2]["match_kind"], "prefix");
+        assert_eq!(results[2]["matched_path"], "secret/data/team/*");
+        // segment-wildcard grant
+        assert_eq!(results[3]["allowed"], Value::Bool(true));
+        assert_eq!(results[3]["match_kind"], "segment_wildcard");
+        assert_eq!(results[3]["matched_path"], "secret/data/team/+/config");
+        // explicit deny
+        assert_eq!(results[4]["allowed"], Value::Bool(false));
+        assert_eq!(results[4]["denied_by_deny"], Value::Bool(true));
+        // no match
+        assert_eq!(results[5]["allowed"], Value::Bool(false));
+        assert_eq!(results[5]["denied_by_deny"], Value::Bool(false));
+        assert_eq!(results[5]["match_kind"], "none");
+        assert_eq!(results[5]["matched_path"], Value::Null);
+
+        // --- Parse error is a normal result, not an HTTP error --------
+        let (status, resp) = server
+            .request(
+                "POST",
+                "v2/sys/policies/acl/test",
+                serde_json::json!({ "policy": "path \"x\" { capabilities = [", "cases": [] })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+                None,
+            )
+            .unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(resp["parse_ok"], Value::Bool(false), "{resp:?}");
+        assert!(!resp["errors"].as_array().unwrap().is_empty());
+
+        // --- The forbidden `+*` wildcard combo is reported as a parse
+        //     error (the parser rejects it before save). --------------
+        let (_status, resp) = server
+            .request(
+                "POST",
+                "v2/sys/policies/acl/test",
+                serde_json::json!({ "policy": "path \"secret/+*\" { capabilities = [\"read\"] }", "cases": [] })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+                None,
+            )
+            .unwrap();
+        assert_eq!(resp["parse_ok"], Value::Bool(false), "{resp:?}");
+
+        // --- Correct verdict for a built-in: administrator grants every
+        //     capability on every path via a `*` prefix rule. ----------
+        let (status, admin) = server.read("v1/sys/policies/acl/administrator", Some(&root)).unwrap();
+        assert_eq!(status, 200, "{admin:?}");
+        let admin_hcl = admin["policy"].as_str().expect("administrator policy HCL");
+        let (status, resp) = server
+            .request(
+                "POST",
+                "v2/sys/policies/acl/test",
+                serde_json::json!({
+                    "policy": admin_hcl,
+                    "cases": [ { "path": "secret/data/anything", "capability": "sudo" } ]
+                })
+                .as_object()
+                .cloned(),
+                Some(&root),
+                None,
+            )
+            .unwrap();
+        assert_eq!(status, 200, "{resp:?}");
+        assert_eq!(resp["parse_ok"], Value::Bool(true));
+        assert_eq!(resp["results"][0]["allowed"], Value::Bool(true));
+        assert_eq!(resp["results"][0]["match_kind"], "prefix");
+
+        // --- The dry-run never persists. The draft above had no `name`
+        //     (stored internally as `__draft__`); it must not appear in
+        //     the policy list, and the built-ins are untouched. --------
+        let (status, list) = server.read("v1/sys/policies/acl", Some(&root)).unwrap();
+        assert_eq!(status, 200, "{list:?}");
+        let keys: Vec<String> = list["keys"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        assert!(!keys.iter().any(|k| k == "__draft__"), "dry-run must not persist: {keys:?}");
+        assert!(keys.iter().any(|k| k == "administrator"), "built-ins intact: {keys:?}");
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_policy_tests_persistence_endpoint() {
+        let mut server = TestHttpServer::new("test_policy_tests_persistence", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+        server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
+
+        // Empty by default.
+        let (status, resp) = server.read("v2/sys/policy-tests/my-policy", Some(&root)).unwrap();
+        assert_eq!(status, 200, "{resp:?}");
+        assert_eq!(resp["cases"].as_array().unwrap().len(), 0);
+
+        // Save two cases.
+        let (status, _) = server
+            .request(
+                "POST",
+                "v2/sys/policy-tests/my-policy",
+                serde_json::json!({
+                    "cases": [
+                        { "path": "secret/data/x", "capability": "read", "expect": "allow", "note": "sre reads" },
+                        { "path": "secret/data/x", "capability": "delete", "expect": "deny" }
+                    ]
+                })
+                .as_object()
+                .cloned(),
+                Some(&root),
+                None,
+            )
+            .unwrap();
+        assert_eq!(status, 204, "write returns No Content");
+
+        // Read them back intact.
+        let (_status, resp) = server.read("v2/sys/policy-tests/my-policy", Some(&root)).unwrap();
+        let cases = resp["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 2);
+        assert_eq!(cases[0]["path"], "secret/data/x");
+        assert_eq!(cases[0]["capability"], "read");
+        assert_eq!(cases[0]["expect"], "allow");
+        assert_eq!(cases[0]["note"], "sre reads");
+        assert_eq!(cases[1]["expect"], "deny");
+
+        // An empty array clears them.
+        let (status, _) = server
+            .request(
+                "POST",
+                "v2/sys/policy-tests/my-policy",
+                serde_json::json!({ "cases": [] }).as_object().cloned(),
+                Some(&root),
+                None,
+            )
+            .unwrap();
+        assert_eq!(status, 204);
+        let (_status, resp) = server.read("v2/sys/policy-tests/my-policy", Some(&root)).unwrap();
+        assert_eq!(resp["cases"].as_array().unwrap().len(), 0);
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_cache_flush_endpoint_as_root_succeeds() {
         let mut server = TestHttpServer::new("test_cache_flush_endpoint", true).await;
         server.token = server.root_token.clone();
@@ -3168,6 +3435,64 @@ mod mod_system_tests {
         });
         assert!(has_policy, "expected policy event in {events:?}");
         assert!(has_group, "expected identity-group-user event in {events:?}");
+    }
+
+    /// Regression: the `bv-client` remote backend sends a GET whose
+    /// `from`/`to`/`limit` live in the JSON *body*, not the query string.
+    /// The HTTP shim must read the body too, otherwise remote callers
+    /// (the desktop GUI in remote mode) get an unwindowed, unbounded
+    /// event list — which made the dashboard's "Recent activity" panel
+    /// show stale events while the 24h KPI correctly read zero.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_audit_events_filters_from_json_body() {
+        let mut server =
+            TestHttpServer::new("test_audit_events_filters_from_json_body", true).await;
+        server.token = server.root_token.clone();
+
+        for n in ["p-alpha", "p-beta", "p-gamma"] {
+            let _ = server
+                .write(
+                    &format!("sys/policies/acl/{n}"),
+                    serde_json::json!({ "policy": r#"path "secret/*" { capabilities = ["read"] }"# })
+                        .as_object()
+                        .cloned(),
+                    None,
+                )
+                .unwrap();
+        }
+
+        let count =
+            |v: &Value| v.get("events").and_then(|e| e.as_array()).map(|a| a.len()).unwrap_or(0);
+
+        // Baseline: no params → every event present.
+        let all = server.read("sys/audit/events", None).unwrap().1;
+        assert!(count(&all) >= 3, "expected the three policy events: {all:?}");
+
+        // `limit` in the JSON body of the GET must cap the result.
+        let limited = server
+            .request(
+                "GET",
+                "sys/audit/events",
+                serde_json::json!({ "limit": 2 }).as_object().cloned(),
+                Some(&server.root_token),
+                None,
+            )
+            .unwrap()
+            .1;
+        assert_eq!(count(&limited), 2, "limit in the JSON body must cap results: {limited:?}");
+
+        // A far-future `from` in the body must window everything out.
+        let windowed = server
+            .request(
+                "GET",
+                "sys/audit/events",
+                serde_json::json!({ "from": "2099-01-01T00:00:00+00:00" }).as_object().cloned(),
+                Some(&server.root_token),
+                None,
+            )
+            .unwrap()
+            .1;
+        assert_eq!(count(&windowed), 0, "a future `from` must filter all events out: {windowed:?}");
     }
 
     /// `sys/dashboard/summary` returns the operational snapshot: an
