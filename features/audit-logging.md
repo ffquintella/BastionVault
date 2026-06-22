@@ -58,9 +58,26 @@ Pending / later phases:
 - CLI commands (`bvault audit enable/disable/list`).
 - The GUI Admin → Audit page currently surfaces the *aggregated*
   audit trail (policy / identity-group / asset-group / share /
-  user histories). The broker-driven append-only log lives on disk
-  via the file device; a browser view for it can be a later
-  addition.
+  user / file histories **and login events**). The broker-driven
+  append-only log lives on disk via the file device; a browser
+  view for it can be a later addition.
+
+**Login events (shipped)** — every authentication attempt, success
+and failure, is recorded to a flat system-view store
+(`src/modules/credential/login_audit_store.rs`,
+`sys/login-audit/<nanos>`, mirroring `FileAuditStore`) and surfaces
+on the aggregated Audit page under the `login` category. The
+userpass, approle, and fido2 login handlers wrap their credential
+check (`login` → `login_inner`, `login_complete` →
+`login_complete_inner`) with a best-effort `record_login` call that
+never blocks or alters the login result. Each row carries the
+principal (`<mount>/<name>`), peer address (`from=…`), and granted
+policies (success) or rejection reason (failure); the aggregator
+maps them to op `login` / `login-failed`. AppRole failures record
+`(unknown)` because the `role_id` is an opaque secret that must not
+be logged. Note this is distinct from the tamper-evident HMAC
+broker chain (which logs every authenticated request); this store
+is the operator-facing login view.
 
 ### Original design notes
 

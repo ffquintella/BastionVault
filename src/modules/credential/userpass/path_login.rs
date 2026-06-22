@@ -115,7 +115,35 @@ impl UserPassBackendInner {
         }
     }
 
-    pub async fn login(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+    /// Public entry point: runs the credential check via `login_inner`
+    /// and records the outcome (success or failure) to the login-audit
+    /// trail so every attempt surfaces on the admin Audit page. The
+    /// audit write is best-effort and never blocks or alters the login
+    /// result.
+    pub async fn login(&self, backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let username = req
+            .get_data("username")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_lowercase()))
+            .unwrap_or_else(|| "(unknown)".to_string());
+        let remote_addr = req.connection.as_ref().map(|c| c.peer_addr.clone()).unwrap_or_default();
+
+        let result = self.login_inner(backend, req).await;
+        let (success, details) =
+            crate::modules::credential::login_audit_store::login_outcome(&result);
+        crate::modules::credential::login_audit_store::record_login(
+            &self.core,
+            "userpass/",
+            &username,
+            success,
+            &remote_addr,
+            &details,
+        )
+        .await;
+        result
+    }
+
+    async fn login_inner(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let err_info = "invalid username or password";
         let username_value = req.get_data("username")?;
         let username = username_value.as_str().unwrap().to_lowercase();

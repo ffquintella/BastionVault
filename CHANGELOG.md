@@ -45,6 +45,16 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-06-22
+
+### Added
+
+- **Login events in the audit trail** (`src/modules/credential/login_audit_store.rs`) -- every authentication attempt is now recorded, success and failure alike, and surfaces on the admin Audit page under a new `login` category. A flat, timestamp-keyed system-view store (mirroring `FileAuditStore`) is appended by the userpass, approle, and fido2 login handlers via a best-effort wrapper that never blocks or alters the login result. Rows show the principal (`userpass/<user>`, `approle/<role>`, `fido2/<user>`), the peer address (`from=…`), and the granted policies (success) or the rejection reason (failure). AppRole failures log `(unknown)` since the `role_id` is an opaque secret. The aggregator (`sys/audit/events`) maps these to op `login` / `login-failed`, and the GUI (`gui/src/routes/AuditPage.tsx`) gains a "Login" category badge, green/red op badges, and matching Operation-filter options.
+
+### Fixed
+
+- **SSH role dropdowns now filter by mode** (`gui/src/routes/SshPage.tsx`) -- the "OTP Creds" tab listed CA-mode roles (and "Sign Cert" listed OTP-mode roles), so selecting one returned `HTTP 500: role is 'ca', not 'otp'`. A new `useRolesOfMode` hook reads each role's `key_type` and shows only roles valid for the active operation.
+
 ## [0.18.0] - 2026-06-22
 
 ### Added

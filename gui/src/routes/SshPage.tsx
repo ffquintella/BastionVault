@@ -678,21 +678,57 @@ function RoleForm({
   );
 }
 
+// ── Mode-filtered role loader ─────────────────────────────────────
+// `ssh_list_roles` returns names only, so to know whether a role is in
+// CA or OTP mode we read each one. Roles lists are small, so the N+1
+// is cheap; the payoff is dropdowns that never offer a role the engine
+// will reject (e.g. a CA-mode role under "Mint OTP" → HTTP 500).
+function useRolesOfMode(mount: string, mode: "ca" | "otp") {
+  const [roles, setRoles] = useState<string[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const names = await api.sshListRoles(mount);
+        const configs = await Promise.all(
+          names.map((name) =>
+            api
+              .sshReadRole(mount, name)
+              .then((cfg) => ({ name, key_type: cfg.key_type }))
+              .catch(() => null),
+          ),
+        );
+        if (cancelled) return;
+        setRoles(
+          configs
+            .filter((c): c is { name: string; key_type: string } => c !== null)
+            .filter((c) => c.key_type === mode)
+            .map((c) => c.name),
+        );
+      } catch {
+        if (!cancelled) setRoles([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [mount, mode]);
+
+  return roles;
+}
+
 // ── Sign Tab ──────────────────────────────────────────────────────
 
 function SignTab({ mount }: { mount: string }) {
   const { toast } = useToast();
-  const [roles, setRoles] = useState<string[]>([]);
+  const roles = useRolesOfMode(mount, "ca");
   const [role, setRole] = useState("");
   const [publicKey, setPublicKey] = useState("");
   const [validPrincipals, setValidPrincipals] = useState("");
   const [ttl, setTtl] = useState("");
   const [keyId, setKeyId] = useState("");
   const [result, setResult] = useState<SshSignResult | null>(null);
-
-  useEffect(() => {
-    api.sshListRoles(mount).then(setRoles).catch(() => setRoles([]));
-  }, [mount]);
 
   const onSign = async () => {
     if (!role || !publicKey.trim()) return;
@@ -791,21 +827,15 @@ function SignTab({ mount }: { mount: string }) {
 
 function CredsTab({ mount }: { mount: string }) {
   const { toast } = useToast();
-  const [roles, setRoles] = useState<string[]>([]);
+  // Only OTP-mode roles can mint OTPs; CA-mode roles are filtered out
+  // so the operator can't pick one and trip the engine's HTTP 500.
+  const roles = useRolesOfMode(mount, "otp");
   const [role, setRole] = useState("");
   const [ip, setIp] = useState("");
   const [username, setUsername] = useState("");
   const [ttl, setTtl] = useState("");
   const [result, setResult] = useState<SshCredsResult | null>(null);
   const [lookupRoles, setLookupRoles] = useState<string[] | null>(null);
-
-  useEffect(() => {
-    // List roles and (optimistically) drop CA-only roles client-side
-    // by reading each — but that's an N-call; we accept a list with
-    // both modes and let the server reject CA-mode roles if the user
-    // picks one by mistake. Cheap and honest.
-    api.sshListRoles(mount).then(setRoles).catch(() => setRoles([]));
-  }, [mount]);
 
   const onMint = async () => {
     if (!role || !ip.trim()) return;

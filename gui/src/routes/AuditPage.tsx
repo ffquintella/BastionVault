@@ -23,6 +23,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   share: "Share",
   user: "User / Role",
   file: "File",
+  login: "Login",
 };
 
 const CATEGORY_VARIANTS: Record<
@@ -36,6 +37,7 @@ const CATEGORY_VARIANTS: Record<
   share: "info",
   user: "neutral",
   file: "info",
+  login: "info",
 };
 
 const OP_VARIANTS: Record<string, "info" | "success" | "warning" | "error" | "neutral"> = {
@@ -47,6 +49,8 @@ const OP_VARIANTS: Record<string, "info" | "success" | "warning" | "error" | "ne
   "cascade-revoke": "warning",
   "password-change": "warning",
   restore: "warning",
+  login: "success",
+  "login-failed": "error",
 };
 
 /**
@@ -254,6 +258,8 @@ export function AuditPage() {
                   { value: "revoke", label: "Revoke share" },
                   { value: "cascade-revoke", label: "Cascade revoke" },
                   { value: "password-change", label: "Password change" },
+                  { value: "login", label: "Login" },
+                  { value: "login-failed", label: "Login failed" },
                 ]}
               />
             </div>

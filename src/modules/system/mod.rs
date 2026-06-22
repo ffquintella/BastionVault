@@ -1644,6 +1644,39 @@ impl SystemBackend {
             }
         }
 
+        // Authentication events (successful and failed logins) from the
+        // credential backends. Constructed lazily from the system view,
+        // same as the file branch — skipped silently when sealed.
+        {
+            if let Ok(store) =
+                crate::modules::credential::login_audit_store::LoginAuditStore::from_core(&self.core)
+            {
+                if let Ok(entries) = store.list_all().await {
+                    for e in entries {
+                        let mut fields = Vec::new();
+                        if !e.remote_addr.is_empty() {
+                            fields.push(format!("from={}", e.remote_addr));
+                        }
+                        if !e.details.is_empty() {
+                            fields.push(e.details.clone());
+                        }
+                        events.push(AuditEventBuilder {
+                            ts: e.ts,
+                            // The principal name is the most useful "who"
+                            // for a login row; it is not an entity id, so
+                            // the GUI renders it verbatim.
+                            user: e.username.clone(),
+                            op: if e.success { "login".into() } else { "login-failed".into() },
+                            category: "login".into(),
+                            target: format!("{}{}", e.mount, e.username),
+                            changed_fields: fields,
+                            summary: String::new(),
+                        });
+                    }
+                }
+            }
+        }
+
         events
     }
 

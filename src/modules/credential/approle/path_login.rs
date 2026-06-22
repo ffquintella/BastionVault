@@ -109,7 +109,39 @@ impl AppRoleBackendInner {
         }
     }
 
-    pub async fn login(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+    /// Public entry point: runs `login_inner` and records the outcome
+    /// to the login-audit trail. The `role_id` is an opaque secret, so
+    /// the principal is identified by the role name the issued token
+    /// carries — known only on success; failed attempts are logged with
+    /// `"(unknown)"`. The audit write is best-effort.
+    pub async fn login(&self, backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let remote_addr = req.connection.as_ref().map(|c| c.peer_addr.clone()).unwrap_or_default();
+
+        let result = self.login_inner(backend, req).await;
+        let (success, details) =
+            crate::modules::credential::login_audit_store::login_outcome(&result);
+        let role_name = match &result {
+            Ok(Some(resp)) => resp
+                .auth
+                .as_ref()
+                .and_then(|a| a.metadata.get("role_name"))
+                .cloned()
+                .unwrap_or_else(|| "(unknown)".to_string()),
+            _ => "(unknown)".to_string(),
+        };
+        crate::modules::credential::login_audit_store::record_login(
+            &self.core,
+            "approle/",
+            &role_name,
+            success,
+            &remote_addr,
+            &details,
+        )
+        .await;
+        result
+    }
+
+    async fn login_inner(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let role_id = req.get_data_as_str("role_id")?;
 
         let role_id_entry = self.get_role_id(req, &role_id).await?;
