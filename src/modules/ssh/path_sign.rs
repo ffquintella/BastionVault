@@ -44,6 +44,7 @@ use ssh_key::{
 
 use super::{SshBackend, SshBackendInner};
 use crate::{
+    bv_error_response_status,
     context::Context,
     errors::RvError,
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
@@ -143,8 +144,9 @@ impl SshBackendInner {
             )));
         }
         if role.pqc_only {
-            return Err(RvError::ErrString(
-                "role has pqc_only=true but the CA is classical; configure a PQC CA first".into(),
+            return Err(bv_error_response_status!(
+                400,
+                "role has pqc_only=true but the CA is classical; configure a PQC CA first"
             ));
         }
         let ca_private_key = PrivateKey::from_openssh(ca.private_key_openssh.as_bytes())
@@ -369,12 +371,14 @@ impl SshBackendInner {
             Some(b) => b,
             None => {
                 if role.pqc_only {
-                    return Err(RvError::ErrString(
-                        "role has pqc_only=true; client public key must be ssh-mldsa65@openssh.com".into(),
+                    return Err(bv_error_response_status!(
+                        400,
+                        "role has pqc_only=true; client public key must be ssh-mldsa65@openssh.com"
                     ));
                 }
-                return Err(RvError::ErrString(
-                    "PQC CA can only sign ML-DSA-65 client public keys; supply an `ssh-mldsa65@openssh.com` key".into(),
+                return Err(bv_error_response_status!(
+                    400,
+                    "PQC CA can only sign ML-DSA-65 client public keys; supply an `ssh-mldsa65@openssh.com` key"
                 ));
             }
         };

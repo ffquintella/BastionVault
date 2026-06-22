@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-06-22
+
+### Fixed
+
+- **SSH sign-cert client-input errors now return HTTP 400 instead of 500** (`src/modules/ssh/path_sign.rs`) -- rejecting a `pqc_only` role's sign request with a classical/malformed client public key, or hitting a `pqc_only`-on-classical-CA misconfiguration, previously surfaced as `RvError::ErrString`, which falls through to the `_ => INTERNAL_SERVER_ERROR` arm in `response_status()`. These are client-input validation failures, so they now use `bv_error_response_status!(400, …)` (`ErrResponseStatus`) and return a `400 Bad Request` with the explanatory message preserved in the body. `ErrString` is left untouched so genuine internal faults still report 500.
+
 ### Added
 
 - **Identity Provider feature specification** (`features/identity-provider.md`) -- design of record for turning BastionVault into an **outbound** identity provider so administrators reach servers, firewalls, and appliances *as themselves* instead of as shared `root`/`admin` accounts. Three pillars: (1) a canonical workforce identity with an immutable, environment-consistent, never-reused POSIX `(login, uid, gid)` mapping; (2) entitlement-gated, identity-bearing credential issuance; (3) lifecycle-driven revocation that blocks disabled/removed identities at the destinations (OpenSSH KRL + signed, versioned deny feed). Downstream projections cover Linux (SSH certificate principals + `AuthorizedPrincipalsCommand`/NSS helper), FortiGate and network gear (RADIUS/RadSec with vendor attribute templates), generic SSO (SAML IdP + OIDC OP), and LDAP-only systems (read-only LDAP-compat directory). Sequenced into 7 phases (all Pending); composes the existing SSH CA engine, entity model, namespaces, policy engine, and audit chain. Added to `roadmap.md` (Todo).
