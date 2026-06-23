@@ -421,6 +421,14 @@ pub async fn remote_login_token(
         .map(|arr| arr.iter().filter_map(|p| p.as_str().map(String::from)).collect())
         .unwrap_or_else(|| vec!["default".to_string()]);
 
+    // Record the token sign-in on the server's login-audit trail so it
+    // surfaces on the Admin → Audit page alongside password / FIDO2 /
+    // SSO logins. Mirrors the embedded `login_token` path; best-effort,
+    // so a token whose policy lacks the grant still logs in cleanly. Done
+    // before dropping the client guard since it reuses the bound client.
+    let audit_endpoint = format!("{}/auth/token/audit-login", client.api_prefix());
+    let _ = bound.request_write(audit_endpoint, None);
+
     drop(client_guard);
     *state.token.lock().await = Some(token.clone());
     Ok(crate::commands::auth::LoginResponse { token, policies })

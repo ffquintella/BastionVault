@@ -71,7 +71,45 @@ impl OidcBackend {
 
 #[maybe_async::maybe_async]
 impl OidcBackendInner {
+    /// Public entry point: runs the consent-finishing exchange via
+    /// `callback_inner` and records the outcome to the login-audit trail
+    /// under the `oidc/` mount, so SSO sign-ins surface on the admin
+    /// Audit page alongside password / FIDO2 / token logins. The
+    /// principal is the resolved display name on success and `(unknown)`
+    /// on a rejected attempt (the user is only known once the ID token
+    /// verifies). The audit write is best-effort and never alters the
+    /// login result.
     pub async fn callback(
+        &self,
+        backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let remote_addr = req.connection.as_ref().map(|c| c.peer_addr.clone()).unwrap_or_default();
+        let result = self.callback_inner(backend, req).await;
+        let (success, details) =
+            crate::modules::credential::login_audit_store::login_outcome(&result);
+        let username = match &result {
+            Ok(Some(resp)) => resp
+                .auth
+                .as_ref()
+                .map(|a| a.display_name.clone())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "(unknown)".to_string()),
+            _ => "(unknown)".to_string(),
+        };
+        crate::modules::credential::login_audit_store::record_login(
+            &self.core,
+            "oidc/",
+            &username,
+            success,
+            &remote_addr,
+            &details,
+        )
+        .await;
+        result
+    }
+
+    async fn callback_inner(
         &self,
         _backend: &dyn Backend,
         req: &mut Request,

@@ -213,6 +213,7 @@ impl TokenStore {
         let ts_inner_arc6 = self.self_ptr.upgrade().unwrap().clone();
         let ts_inner_arc7 = self.self_ptr.upgrade().unwrap().clone();
         let ts_inner_arc8 = self.self_ptr.upgrade().unwrap().clone();
+        let ts_inner_arc9 = self.self_ptr.upgrade().unwrap().clone();
 
         let backend = new_logical_backend!({
             paths: [
@@ -278,6 +279,13 @@ impl TokenStore {
                         {op: Operation::Write, handler: ts_inner_arc8.handle_revoke_self}
                     ],
                     help: "This endpoint revokes the calling token and its child tokens (logout)."
+                },
+                {
+                    pattern: "audit-login$",
+                    operations: [
+                        {op: Operation::Write, handler: ts_inner_arc9.handle_audit_login}
+                    ],
+                    help: "This endpoint records a `login` event for the calling token (GUI token sign-in)."
                 },
                 {
                     pattern: "revoke/(?P<token>.+)",
@@ -829,6 +837,57 @@ impl TokenStore {
                 &mount,
                 &username,
                 &remote_addr,
+            )
+            .await;
+        }
+
+        Ok(None)
+    }
+
+    /// `auth/token/audit-login` — record a `login` event for the calling
+    /// token. Presenting an existing token to the GUI (the "Login with
+    /// token" path) is not a credential-backend login, so it produces no
+    /// `record_login` call on the server. The GUI invokes this endpoint
+    /// once after it has validated the token via `lookup-self`, so the
+    /// sign-in surfaces on the admin Audit page alongside password / FIDO2
+    /// / SSO logins. The token's own ACL (the `default` policy grants it)
+    /// gates access, and the principal is derived server-side from the
+    /// authenticated request — never trusted from the caller.
+    ///
+    /// The liveness probe (`token_status`) also calls `lookup-self`, but
+    /// never this endpoint, so repeated probes do not spam the trail.
+    /// Recording is best-effort and never fails the request.
+    pub async fn handle_audit_login(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        // Identity comes from the authenticated request (populated by
+        // `pre_route` from the token entry), mirroring how
+        // `handle_revoke_self` resolves the logout principal: prefer the
+        // mapped `username` metadata, then the token's display name.
+        let auth = req.auth.as_ref();
+        let username = auth
+            .and_then(|a| a.metadata.get("username").cloned())
+            .filter(|s| !s.is_empty())
+            .or_else(|| auth.map(|a| a.display_name.clone()).filter(|s| !s.is_empty()))
+            .unwrap_or_else(|| "(token)".to_string());
+        let policies = auth.map(|a| a.policies.join(",")).unwrap_or_default();
+        let details = if policies.is_empty() {
+            String::new()
+        } else {
+            format!("policies={policies}")
+        };
+        let remote_addr = req.connection.as_ref().map(|c| c.peer_addr.clone()).unwrap_or_default();
+
+        if let Some(system_view) = self.system_view.as_ref() {
+            crate::modules::credential::login_audit_store::record_login_via_view(
+                system_view,
+                "token/",
+                &username,
+                true,
+                &remote_addr,
+                &details,
             )
             .await;
         }

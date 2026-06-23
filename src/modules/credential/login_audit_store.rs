@@ -149,6 +149,37 @@ pub async fn record_login(
     }
 }
 
+/// Best-effort append of a login event for callers that hold a system
+/// view rather than a `Core`. Mirrors [`record_login`] but mirrors the
+/// reachability of [`record_logout`] — used by the token store's
+/// `audit-login` handler, which records a GUI token sign-in (presenting
+/// an existing token is not a credential-backend login, so it has no
+/// natural `record_login` call site). Never fails the request: storage
+/// errors are logged at WARN and swallowed.
+#[maybe_async::maybe_async]
+pub async fn record_login_via_view(
+    system_view: &Arc<BarrierView>,
+    mount: &str,
+    username: &str,
+    success: bool,
+    remote_addr: &str,
+    details: &str,
+) {
+    let store = LoginAuditStore::from_system_view(system_view);
+    let entry = LoginAuditEntry {
+        ts: String::new(),
+        username: username.to_string(),
+        mount: mount.to_string(),
+        success,
+        action: "login".to_string(),
+        remote_addr: remote_addr.to_string(),
+        details: details.to_string(),
+    };
+    if let Err(e) = store.append(entry).await {
+        log::warn!(target: "security", "login audit append failed: {e}");
+    }
+}
+
 /// Best-effort append of a logout (session-end) event. Mirrors
 /// [`record_login`] but is reachable from callers that hold a system
 /// view rather than a `Core` — namely the token store's `revoke-self`

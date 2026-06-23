@@ -80,6 +80,33 @@ Each row carries the principal (`<mount>/<name>`), peer address
 AppRole failures record `(unknown)` because the `role_id` is an
 opaque secret that must not be logged.
 
+**Token and SSO logins (shipped)** — the two GUI sign-in paths that
+are not credential-backend logins are also recorded:
+
+- **Token login** (`token/` mount) — presenting an existing token is
+  not a server-side login event, and `lookup-self` doubles as the
+  liveness probe, so neither can be the hook. A self-service
+  `auth/token/audit-login` endpoint (`token_store.rs`,
+  `handle_audit_login`) records a `login` event, deriving the
+  principal server-side from the authenticated request (preferring the
+  `username` metadata, then the token display name — never trusted
+  from the caller). The GUI calls it once after a pasted token
+  validates via `lookup-self`, in both embedded (`login_token`) and
+  remote (`remote_login_token`) mode. The built-in `default` /
+  `standard-user` / role policies grant `update` on this path so any
+  token can record its own sign-in.
+- **SSO login** (`oidc/` / `saml/` mounts) — the OIDC `callback` and
+  SAML `handle_callback` handlers run through an audited wrapper +
+  private `*_inner` (mirroring the userpass pattern), recording
+  success and failure. The principal is the resolved display name /
+  `NameID` on success and `(unknown)` on a rejected attempt. Used by
+  the GUI's `oidcLoginComplete` flow, which POSTs the IdP `code` /
+  `state` back to `auth/<mount>/callback`.
+
+Both reuse the same store and aggregator: token logins go through
+`record_login_via_view` (system-view variant, like `record_logout`);
+SSO logins go through `record_login` from the backend's `Core`.
+
 Logout is the Vault-compatible `auth/token/revoke-self` endpoint
 (`src/modules/auth/token_store.rs`, `handle_revoke_self`): it
 revokes the calling token (and its tree) and appends a `logout`

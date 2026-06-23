@@ -45,6 +45,15 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.18.5] - 2026-06-23
+
+### Added
+
+- **Token and SSO (OIDC/SAML) sign-ins are now audited** -- login auditing previously covered only the credential backends (userpass password, userpass-integrated FIDO2, standalone `fido2/`, approle), so the two remaining GUI sign-in paths left no row on the Admin → Audit page.
+  - **Token login** -- presenting an existing token is not a credential-backend login, so the server had no signal a sign-in happened (and `lookup-self` is also the liveness probe, so it cannot be the hook). A new self-service `auth/token/audit-login` endpoint (`src/modules/auth/token_store.rs`, `handle_audit_login`) records a `login` event under the `token/` mount, deriving the principal server-side from the authenticated request (never trusted from the caller). The GUI calls it once after validating a pasted token via `lookup-self` — in both embedded (`gui/src-tauri/src/commands/auth.rs`, `login_token`) and remote (`gui/src-tauri/src/commands/connection.rs`, `remote_login_token`) mode. The endpoint is granted by the built-in `default` / `standard-user` / role policies (`src/modules/policy/policy_store.rs`), so any valid token can record its own sign-in; the liveness probe deliberately does not call it, so repeated probes don't spam the trail.
+  - **SSO (OIDC / SAML) login** -- the OIDC `callback` (`src/modules/credential/oidc/path_callback.rs`) and SAML `handle_callback` (`src/modules/credential/saml/path_callback.rs`) handlers now run through an audited wrapper + private `*_inner`, recording success and failure under the `oidc/` / `saml/` mount (mirroring the userpass pattern). The principal is the resolved display name / `NameID` on success and `(unknown)` on a rejected attempt.
+  - New helper `record_login_via_view` (`src/modules/credential/login_audit_store.rs`) appends a `login` event for callers holding a system view rather than a `Core` (the token store). Covered by the new `test_audit_events_includes_token_login` and `test_audit_events_includes_sso_callback_failure` regression tests (`src/modules/system/mod.rs`).
+
 ## [0.18.4] - 2026-06-23
 
 ### Fixed

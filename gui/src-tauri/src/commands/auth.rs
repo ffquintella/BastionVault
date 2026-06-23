@@ -159,6 +159,24 @@ pub async fn login_token(state: State<'_, AppState>, token: String) -> CmdResult
 
     *state.token.lock().await = Some(token.clone());
 
+    // Record the token sign-in on the server's login-audit trail so it
+    // surfaces on the Admin → Audit page alongside password / FIDO2 /
+    // SSO logins. Presenting a token is not a credential-backend login,
+    // so the server has no other signal that a sign-in happened; this
+    // explicit call after a successful `lookup-self` provides it. The
+    // liveness probe (`token_status`) deliberately does NOT call this,
+    // so repeated probes don't spam the trail. Best-effort — a failure
+    // here (e.g. a token whose policy lacks the grant) must not block a
+    // valid login.
+    let _ = dispatch_with_token(
+        &state,
+        Operation::Write,
+        "auth/token/audit-login".to_string(),
+        None,
+        &token,
+    )
+    .await;
+
     Ok(LoginResponse { token, policies })
 }
 

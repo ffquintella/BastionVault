@@ -98,6 +98,13 @@ path "auth/token/revoke-self" {
     capabilities = ["update"]
 }
 
+# Allow tokens to record their own GUI sign-in (presenting an existing
+# token) to the login-audit trail. The handler only ever records the
+# calling token's own identity, so this is safe for every token.
+path "auth/token/audit-login" {
+    capabilities = ["update"]
+}
+
 # Allow a token to look up its own capabilities on a path
 path "sys/capabilities-self" {
     capabilities = ["update"]
@@ -263,6 +270,9 @@ path "auth/token/renew-self" {
 path "auth/token/revoke-self" {
     capabilities = ["update"]
 }
+path "auth/token/audit-login" {
+    capabilities = ["update"]
+}
 path "sys/capabilities-self" {
     capabilities = ["update"]
 }
@@ -355,6 +365,7 @@ static STANDARD_USER_READONLY_POLICY: &str = r#"
 path "auth/token/lookup-self" { capabilities = ["read"] }
 path "auth/token/renew-self"  { capabilities = ["update"] }
 path "auth/token/revoke-self" { capabilities = ["update"] }
+path "auth/token/audit-login" { capabilities = ["update"] }
 path "sys/capabilities-self"  { capabilities = ["update"] }
 path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
 
@@ -399,6 +410,7 @@ static SECRET_AUTHOR_POLICY: &str = r#"
 path "auth/token/lookup-self" { capabilities = ["read"] }
 path "auth/token/renew-self"  { capabilities = ["update"] }
 path "auth/token/revoke-self" { capabilities = ["update"] }
+path "auth/token/audit-login" { capabilities = ["update"] }
 path "sys/capabilities-self"  { capabilities = ["update"] }
 path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
 
@@ -464,6 +476,7 @@ static PKI_USER_POLICY: &str = r#"
 path "auth/token/lookup-self" { capabilities = ["read"] }
 path "auth/token/renew-self"  { capabilities = ["update"] }
 path "auth/token/revoke-self" { capabilities = ["update"] }
+path "auth/token/audit-login" { capabilities = ["update"] }
 path "sys/capabilities-self"  { capabilities = ["update"] }
 path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
 
@@ -508,6 +521,7 @@ static PKI_ADMIN_POLICY: &str = r#"
 path "auth/token/lookup-self" { capabilities = ["read"] }
 path "auth/token/renew-self"  { capabilities = ["update"] }
 path "auth/token/revoke-self" { capabilities = ["update"] }
+path "auth/token/audit-login" { capabilities = ["update"] }
 path "sys/capabilities-self"  { capabilities = ["update"] }
 path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
 
@@ -541,6 +555,7 @@ static TOTP_USER_POLICY: &str = r#"
 path "auth/token/lookup-self" { capabilities = ["read"] }
 path "auth/token/renew-self"  { capabilities = ["update"] }
 path "auth/token/revoke-self" { capabilities = ["update"] }
+path "auth/token/audit-login" { capabilities = ["update"] }
 path "sys/capabilities-self"  { capabilities = ["update"] }
 path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
 
@@ -569,6 +584,7 @@ static TOTP_ADMIN_POLICY: &str = r#"
 path "auth/token/lookup-self" { capabilities = ["read"] }
 path "auth/token/renew-self"  { capabilities = ["update"] }
 path "auth/token/revoke-self" { capabilities = ["update"] }
+path "auth/token/audit-login" { capabilities = ["update"] }
 path "sys/capabilities-self"  { capabilities = ["update"] }
 path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
 
@@ -601,6 +617,7 @@ static TRANSIT_USER_POLICY: &str = r#"
 path "auth/token/lookup-self" { capabilities = ["read"] }
 path "auth/token/renew-self"  { capabilities = ["update"] }
 path "auth/token/revoke-self" { capabilities = ["update"] }
+path "auth/token/audit-login" { capabilities = ["update"] }
 path "sys/capabilities-self"  { capabilities = ["update"] }
 path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
 
@@ -639,6 +656,7 @@ static TRANSIT_ADMIN_POLICY: &str = r#"
 path "auth/token/lookup-self" { capabilities = ["read"] }
 path "auth/token/renew-self"  { capabilities = ["update"] }
 path "auth/token/revoke-self" { capabilities = ["update"] }
+path "auth/token/audit-login" { capabilities = ["update"] }
 path "sys/capabilities-self"  { capabilities = ["update"] }
 path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
 
@@ -672,6 +690,7 @@ static LDAP_USER_POLICY: &str = r#"
 path "auth/token/lookup-self" { capabilities = ["read"] }
 path "auth/token/renew-self"  { capabilities = ["update"] }
 path "auth/token/revoke-self" { capabilities = ["update"] }
+path "auth/token/audit-login" { capabilities = ["update"] }
 path "sys/capabilities-self"  { capabilities = ["update"] }
 path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
 
@@ -701,6 +720,7 @@ static LDAP_ADMIN_POLICY: &str = r#"
 path "auth/token/lookup-self" { capabilities = ["read"] }
 path "auth/token/renew-self"  { capabilities = ["update"] }
 path "auth/token/revoke-self" { capabilities = ["update"] }
+path "auth/token/audit-login" { capabilities = ["update"] }
 path "sys/capabilities-self"  { capabilities = ["update"] }
 path "sys/internal/ui/resultant-acl" { capabilities = ["read"] }
 

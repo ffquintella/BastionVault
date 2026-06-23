@@ -3460,6 +3460,113 @@ mod mod_system_tests {
         assert!(ops.contains(&"logout".to_string()), "missing logout op in {ops:?}");
     }
 
+    /// A GUI token sign-in (presenting an existing token, validated via
+    /// `lookup-self`) records a `login` event under the `token/` mount
+    /// through the self-service `auth/token/audit-login` endpoint.
+    /// Regression for the gap where token logins — unlike password /
+    /// FIDO2 / approle — left no row on the Admin → Audit page because
+    /// presenting a token is not a credential-backend login event.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_audit_events_includes_token_login() {
+        let mut server =
+            TestHttpServer::new("test_audit_events_includes_token_login", true).await;
+        server.token = server.root_token.clone();
+
+        // The endpoint any authenticated token may call (granted by the
+        // `default` policy) — this is the exact call the GUI makes after
+        // a pasted token validates against `lookup-self`.
+        let tok = server.root_token.clone();
+        server
+            .write("auth/token/audit-login", None, Some(&tok))
+            .unwrap();
+
+        let ret = server.read("sys/audit/events", None).unwrap().1;
+        let rows: Vec<(String, String)> = ret
+            .get("events")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter(|e| e.get("category").and_then(|v| v.as_str()) == Some("login"))
+            .map(|e| {
+                (
+                    e.get("op").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    e.get("target").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+
+        assert!(
+            rows.iter()
+                .any(|(op, target)| op == "login" && target.starts_with("token/")),
+            "missing token login row in {rows:?}"
+        );
+    }
+
+    /// A rejected SSO callback records a `login-failed` event under the
+    /// backend's mount (`oidc/` here) so failed federated sign-ins are
+    /// auditable. Regression for the gap where the OIDC/SAML callback
+    /// handlers minted tokens (or rejected attempts) without ever
+    /// touching the login-audit trail. We exercise the failure path: a
+    /// callback with an unknown `state` is rejected before any token is
+    /// issued, which the wrapper still records.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_audit_events_includes_sso_callback_failure() {
+        let mut server =
+            TestHttpServer::new("test_audit_events_includes_sso_callback_failure", true).await;
+        server.token = server.root_token.clone();
+
+        // Mount OIDC + SAML; both `callback` endpoints are unauth paths.
+        server
+            .write("sys/auth/oidc", serde_json::json!({ "type": "oidc" }).as_object().cloned(), None)
+            .unwrap();
+        server
+            .write("sys/auth/saml", serde_json::json!({ "type": "saml" }).as_object().cloned(), None)
+            .unwrap();
+
+        // Unknown state (OIDC) / unconfigured mount (SAML) → both reject
+        // before minting a token, exercising the failure-recording path.
+        let _ = server.write(
+            "auth/oidc/callback",
+            serde_json::json!({ "state": "nope", "code": "nope" }).as_object().cloned(),
+            Some(""),
+        );
+        let _ = server.write(
+            "auth/saml/callback",
+            serde_json::json!({ "saml_response": "bm9wZQ==", "relay_state": "nope" })
+                .as_object()
+                .cloned(),
+            Some(""),
+        );
+
+        let ret = server.read("sys/audit/events", None).unwrap().1;
+        let rows: Vec<(String, String)> = ret
+            .get("events")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter(|e| e.get("category").and_then(|v| v.as_str()) == Some("login"))
+            .map(|e| {
+                (
+                    e.get("op").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    e.get("target").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                )
+            })
+            .collect();
+
+        assert!(
+            rows.iter()
+                .any(|(op, target)| op == "login-failed" && target.starts_with("oidc/")),
+            "missing oidc login-failed row in {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|(op, target)| op == "login-failed" && target.starts_with("saml/")),
+            "missing saml login-failed row in {rows:?}"
+        );
+    }
+
     /// Share grants and revocations show up in the audit trail under
     /// the `share` category. Regression for the original gap where
     /// the aggregator only pulled policy/group history and sharing
