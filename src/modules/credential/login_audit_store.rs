@@ -47,7 +47,15 @@ pub struct LoginAuditEntry {
     /// or `"fido2/"`.
     pub mount: String,
     /// `true` when a token was issued, `false` for any rejected attempt.
+    /// For a `logout` event this is always `true` (a recorded logout is
+    /// a completed session end).
     pub success: bool,
+    /// Event kind: `"login"` (default — also the value back-filled for
+    /// entries written before logout auditing existed) or `"logout"`.
+    /// Drives the op shown on the Audit page: a login maps to
+    /// `login` / `login-failed` by `success`; a logout maps to `logout`.
+    #[serde(default = "default_action")]
+    pub action: String,
     /// Peer address of the caller when available (best-effort; empty
     /// when the connection info is absent).
     #[serde(default)]
@@ -69,8 +77,15 @@ impl LoginAuditStore {
         let Some(system_view) = core.state.load().system_view.as_ref().cloned() else {
             return Err(RvError::ErrBarrierSealed);
         };
+        Ok(Self::from_system_view(&system_view))
+    }
+
+    /// Build the store from a system view directly, for callers that
+    /// hold a system view but not a `Core` (e.g. the token store's
+    /// `revoke-self` / logout path).
+    pub fn from_system_view(system_view: &Arc<BarrierView>) -> Arc<Self> {
         let view = Arc::new(system_view.new_sub_view(LOGIN_AUDIT_SUB_PATH));
-        Ok(Arc::new(Self { view }))
+        Arc::new(Self { view })
     }
 
     /// Append an entry. `ts` is stamped here if empty. Key is monotonic
@@ -125,11 +140,39 @@ pub async fn record_login(
         username: username.to_string(),
         mount: mount.to_string(),
         success,
+        action: "login".to_string(),
         remote_addr: remote_addr.to_string(),
         details: details.to_string(),
     };
     if let Err(e) = store.append(entry).await {
         log::warn!(target: "security", "login audit append failed: {e}");
+    }
+}
+
+/// Best-effort append of a logout (session-end) event. Mirrors
+/// [`record_login`] but is reachable from callers that hold a system
+/// view rather than a `Core` — namely the token store's `revoke-self`
+/// handler. Never fails the revocation: storage errors are logged at
+/// WARN and swallowed.
+#[maybe_async::maybe_async]
+pub async fn record_logout(
+    system_view: &Arc<BarrierView>,
+    mount: &str,
+    username: &str,
+    remote_addr: &str,
+) {
+    let store = LoginAuditStore::from_system_view(system_view);
+    let entry = LoginAuditEntry {
+        ts: String::new(),
+        username: username.to_string(),
+        mount: mount.to_string(),
+        success: true,
+        action: "logout".to_string(),
+        remote_addr: remote_addr.to_string(),
+        details: String::new(),
+    };
+    if let Err(e) = store.append(entry).await {
+        log::warn!(target: "security", "logout audit append failed: {e}");
     }
 }
 
@@ -158,6 +201,12 @@ pub fn login_outcome(result: &Result<Option<Response>, RvError>) -> (bool, Strin
         Ok(None) => (false, "no response".to_string()),
         Err(e) => (false, e.to_string()),
     }
+}
+
+/// Back-compat default for [`LoginAuditEntry::action`]: entries written
+/// before logout auditing existed have no `action` field and are logins.
+fn default_action() -> String {
+    "login".to_string()
 }
 
 /// 20-digit zero-padded nanoseconds since UNIX epoch. Matches

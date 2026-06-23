@@ -45,6 +45,16 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.18.4] - 2026-06-23
+
+### Fixed
+
+- **Security-key (FIDO2) logins now appear in the audit trail** (`src/modules/credential/userpass/path_fido2_login.rs`) -- v0.18.1 wired login auditing into the standalone `fido2/` backend, but the GUI's security-key login completes against the *userpass-integrated* path `auth/userpass/fido2/login/complete`, which was never instrumented, so tapping a key recorded nothing. That handler is now split into an audited `fido2_login_complete` wrapper + private `fido2_login_complete_inner`, recording success and failure under the `userpass/` mount with a `method=fido2` tag (distinguishing a key login from a password login). Covered by the new `test_audit_events_includes_login_and_logout` regression test.
+
+### Added
+
+- **Logout is now audited and revokes the session token server-side** -- a new Vault-compatible `auth/token/revoke-self` endpoint (`src/modules/auth/token_store.rs`, `handle_revoke_self`) revokes the calling token and its child tokens, then appends a `logout` event to the login-audit trail. The default policies already granted `update` on this path but nothing served it; the GUI `logout` command (`gui/src-tauri/src/commands/auth.rs`) previously just dropped the token locally, leaving it valid until TTL. Logout now calls `revoke-self` best-effort before clearing local state (works in both embedded and remote mode). A root-policy token is audited but **not** revoked, so a GUI logout cannot lock the operator out of break-glass access. `LoginAuditEntry` gains an `action` field (defaults to `login` for back-compat with existing rows; `logout` for the new event); the `sys/audit/events` aggregator (`src/modules/system/mod.rs`) maps it to a dedicated `logout` op, and the GUI Audit page (`gui/src/routes/AuditPage.tsx`) gains the **Logout** badge and operation filter.
+
 ## [0.18.3] - 2026-06-23
 
 ### Added

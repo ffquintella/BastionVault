@@ -109,7 +109,48 @@ impl UserPassBackendInner {
         Ok(Some(Response::data_response(challenge_json.as_object().cloned())))
     }
 
+    /// Public entry point for `auth/userpass/fido2/login/complete` — the
+    /// route the GUI's security-key login actually calls. Runs the
+    /// ceremony via `fido2_login_complete_inner` and records the outcome
+    /// to the login-audit trail under the `userpass/` mount (this is the
+    /// userpass-integrated FIDO2 path, distinct from the standalone
+    /// `fido2/` backend). The audit write is best-effort and never
+    /// blocks or alters the login result.
     pub async fn fido2_login_complete(
+        &self,
+        backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let username = req
+            .get_data("username")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_lowercase()))
+            .unwrap_or_else(|| "(unknown)".to_string());
+        let remote_addr = req.connection.as_ref().map(|c| c.peer_addr.clone()).unwrap_or_default();
+
+        let result = self.fido2_login_complete_inner(backend, req).await;
+        let (success, base) =
+            crate::modules::credential::login_audit_store::login_outcome(&result);
+        // Tag the method so a security-key login is distinguishable from
+        // a password login on the same `userpass/` mount.
+        let details = if base.is_empty() {
+            "method=fido2".to_string()
+        } else {
+            format!("method=fido2 {base}")
+        };
+        crate::modules::credential::login_audit_store::record_login(
+            &self.core,
+            "userpass/",
+            &username,
+            success,
+            &remote_addr,
+            &details,
+        )
+        .await;
+        result
+    }
+
+    async fn fido2_login_complete_inner(
         &self,
         _backend: &dyn Backend,
         req: &mut Request,

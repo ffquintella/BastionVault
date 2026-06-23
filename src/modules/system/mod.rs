@@ -1666,7 +1666,13 @@ impl SystemBackend {
                             // for a login row; it is not an entity id, so
                             // the GUI renders it verbatim.
                             user: e.username.clone(),
-                            op: if e.success { "login".into() } else { "login-failed".into() },
+                            // logout entries carry action="logout"; logins
+                            // map to login / login-failed by success.
+                            op: match e.action.as_str() {
+                                "logout" => "logout".into(),
+                                _ if e.success => "login".into(),
+                                _ => "login-failed".into(),
+                            },
                             category: "login".into(),
                             target: format!("{}{}", e.mount, e.username),
                             changed_fields: fields,
@@ -3389,6 +3395,69 @@ mod mod_system_tests {
             users.iter().all(|u| u == "root"),
             "root-token audit rows should surface as 'root', got {users:?}",
         );
+    }
+
+    /// A password login records a `login` op and a self-revoke records a
+    /// `logout` op, both under the `login` category. Regression for two
+    /// gaps: the GUI's security-key login hits the userpass-integrated
+    /// FIDO2 path (which v0.18.1 left un-instrumented while wiring the
+    /// unused standalone `fido2/` backend), and logout neither revoked
+    /// the token server-side nor produced an audit row.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_audit_events_includes_login_and_logout() {
+        let mut server =
+            TestHttpServer::new("test_audit_events_includes_login_and_logout", true).await;
+        server.token = server.root_token.clone();
+
+        server
+            .write("sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), None)
+            .unwrap();
+        server
+            .write(
+                "auth/pass/users/bob",
+                serde_json::json!({ "password": "hunter22XX!", "token_policies": "default" })
+                    .as_object()
+                    .cloned(),
+                None,
+            )
+            .unwrap();
+
+        // Password login -> records a `login` event and mints bob's token.
+        let login = server
+            .write(
+                "auth/pass/login/bob",
+                serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                None,
+            )
+            .unwrap()
+            .1;
+        let bob_token = login
+            .get("auth")
+            .and_then(|a| a.get("client_token"))
+            .and_then(|v| v.as_str())
+            .expect("login should mint a client_token")
+            .to_string();
+
+        // Self-revoke with bob's own token -> records a `logout` event.
+        // `default` policy is granted `update` on this path, so this also
+        // exercises the ACL grant that was previously unserved.
+        server
+            .write("auth/token/revoke-self", None, Some(&bob_token))
+            .unwrap();
+
+        let ret = server.read("sys/audit/events", None).unwrap().1;
+        let ops: Vec<String> = ret
+            .get("events")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter(|e| e.get("category").and_then(|v| v.as_str()) == Some("login"))
+            .map(|e| e.get("op").and_then(|v| v.as_str()).unwrap_or("").to_string())
+            .collect();
+
+        assert!(ops.contains(&"login".to_string()), "missing login op in {ops:?}");
+        assert!(ops.contains(&"logout".to_string()), "missing logout op in {ops:?}");
     }
 
     /// Share grants and revocations show up in the audit trail under

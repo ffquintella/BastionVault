@@ -43,7 +43,7 @@ use crate::{
     new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
     router::Router,
     bv_error_response, bv_error_string,
-    storage::{Storage, StorageEntry},
+    storage::{barrier_view::BarrierView, Storage, StorageEntry},
     utils::{
         default_system_time, deserialize_duration, deserialize_system_time, generate_uuid, is_str_subset,
         policy::sanitize_policies,
@@ -139,6 +139,10 @@ pub struct TokenStore {
     /// FerroGate machine-bound (or root). Cloned from `Core` at construction so
     /// the hot path reads an atomic, never storage.
     pub require_machine_identity: Arc<AtomicBool>,
+    /// Root system view, captured at construction. Used by `revoke-self`
+    /// to append a logout event to the login-audit trail (the token
+    /// store holds no `Core` reference). `None` only if built sealed.
+    pub system_view: Option<Arc<BarrierView>>,
 }
 
 #[maybe_async::maybe_async]
@@ -180,6 +184,7 @@ impl TokenStore {
             expiration,
             token_cache,
             require_machine_identity: core.require_machine_identity.clone(),
+            system_view: Some(system_view.clone()),
         };
 
         if salt.is_some() {
@@ -207,6 +212,7 @@ impl TokenStore {
         let ts_inner_arc5 = self.self_ptr.upgrade().unwrap().clone();
         let ts_inner_arc6 = self.self_ptr.upgrade().unwrap().clone();
         let ts_inner_arc7 = self.self_ptr.upgrade().unwrap().clone();
+        let ts_inner_arc8 = self.self_ptr.upgrade().unwrap().clone();
 
         let backend = new_logical_backend!({
             paths: [
@@ -265,6 +271,13 @@ impl TokenStore {
                         {op: Operation::Read, handler: ts_inner_arc3.handle_lookup_self}
                     ],
                     help: "This endpoint will lookup a token and its properties."
+                },
+                {
+                    pattern: "revoke-self$",
+                    operations: [
+                        {op: Operation::Write, handler: ts_inner_arc8.handle_revoke_self}
+                    ],
+                    help: "This endpoint revokes the calling token and its child tokens (logout)."
                 },
                 {
                     pattern: "revoke/(?P<token>.+)",
@@ -756,6 +769,69 @@ impl TokenStore {
         }
 
         self.revoke(&id).await?;
+
+        Ok(None)
+    }
+
+    /// `auth/token/revoke-self` — the Vault-compatible self-service
+    /// logout endpoint. Revokes the calling token and its child tokens,
+    /// then records a best-effort `logout` event to the login-audit
+    /// trail so the session end surfaces on the admin Audit page.
+    ///
+    /// A root-policy token is left valid: it is typically the operator's
+    /// only break-glass access, and self-revoking it on logout would
+    /// require an unseal-key ceremony to recover. The logout is still
+    /// recorded. Every other token is revoked along with its tree.
+    pub async fn handle_revoke_self(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let id = req.client_token.clone();
+        if id.is_empty() {
+            return Err(RvError::ErrRequestInvalid);
+        }
+
+        // Capture the principal for the audit row before the entry is
+        // gone. A missing entry (already-expired token) still produces a
+        // logout row, just with generic identity.
+        let (username, mount, is_root) = match self.lookup(&id).await {
+            Ok(Some(te)) => {
+                let username = te
+                    .meta
+                    .get("username")
+                    .cloned()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| {
+                        if te.display_name.is_empty() {
+                            "(token)".to_string()
+                        } else {
+                            te.display_name.clone()
+                        }
+                    });
+                let mount = te.meta.get("mount_path").cloned().unwrap_or_default();
+                let is_root = te.policies.iter().any(|p| p == "root");
+                (username, mount, is_root)
+            }
+            _ => ("(unknown)".to_string(), String::new(), false),
+        };
+        let remote_addr = req.connection.as_ref().map(|c| c.peer_addr.clone()).unwrap_or_default();
+
+        if is_root {
+            log::info!(target: "security", "revoke-self on a root-policy token: logout recorded, token left valid");
+        } else {
+            self.revoke_tree(&id).await?;
+        }
+
+        if let Some(system_view) = self.system_view.as_ref() {
+            crate::modules::credential::login_audit_store::record_logout(
+                system_view,
+                &mount,
+                &username,
+                &remote_addr,
+            )
+            .await;
+        }
 
         Ok(None)
     }

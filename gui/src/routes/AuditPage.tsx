@@ -53,6 +53,7 @@ const OP_VARIANTS: Record<string, "info" | "success" | "warning" | "error" | "ne
   restore: "warning",
   login: "success",
   "login-failed": "error",
+  logout: "neutral",
 };
 
 /**
@@ -262,6 +263,7 @@ export function AuditPage() {
                   { value: "password-change", label: "Password change" },
                   { value: "login", label: "Login" },
                   { value: "login-failed", label: "Login failed" },
+                  { value: "logout", label: "Logout" },
                 ]}
               />
             </div>

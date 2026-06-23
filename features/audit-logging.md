@@ -62,22 +62,34 @@ Pending / later phases:
   append-only log lives on disk via the file device; a browser
   view for it can be a later addition.
 
-**Login events (shipped)** — every authentication attempt, success
-and failure, is recorded to a flat system-view store
-(`src/modules/credential/login_audit_store.rs`,
+**Login & logout events (shipped)** — every authentication attempt,
+success and failure, plus every session-end, is recorded to a flat
+system-view store (`src/modules/credential/login_audit_store.rs`,
 `sys/login-audit/<nanos>`, mirroring `FileAuditStore`) and surfaces
 on the aggregated Audit page under the `login` category. The
-userpass, approle, and fido2 login handlers wrap their credential
-check (`login` → `login_inner`, `login_complete` →
-`login_complete_inner`) with a best-effort `record_login` call that
-never blocks or alters the login result. Each row carries the
-principal (`<mount>/<name>`), peer address (`from=…`), and granted
-policies (success) or rejection reason (failure); the aggregator
-maps them to op `login` / `login-failed`. AppRole failures record
-`(unknown)` because the `role_id` is an opaque secret that must not
-be logged. Note this is distinct from the tamper-evident HMAC
-broker chain (which logs every authenticated request); this store
-is the operator-facing login view.
+credential login handlers wrap their check with a best-effort
+`record_login` call that never blocks or alters the result:
+userpass password (`login` → `login_inner`), the standalone `fido2/`
+backend (`login_complete` → `login_complete_inner`), the
+userpass-integrated FIDO2 path the GUI actually uses
+(`auth/userpass/fido2/login/complete`, `fido2_login_complete` →
+`fido2_login_complete_inner`, tagged `method=fido2`), and approle.
+Each row carries the principal (`<mount>/<name>`), peer address
+(`from=…`), and granted policies (success) or rejection reason
+(failure); the aggregator maps them to op `login` / `login-failed`.
+AppRole failures record `(unknown)` because the `role_id` is an
+opaque secret that must not be logged.
+
+Logout is the Vault-compatible `auth/token/revoke-self` endpoint
+(`src/modules/auth/token_store.rs`, `handle_revoke_self`): it
+revokes the calling token (and its tree) and appends a `logout`
+event via `record_logout`. A root-policy token is audited but left
+valid so a GUI logout cannot revoke break-glass access. The
+`LoginAuditEntry.action` field (`login` default / `logout`)
+distinguishes the two; the aggregator maps `logout` to its own op.
+Note this is distinct from the tamper-evident HMAC broker chain
+(which logs every authenticated request); this store is the
+operator-facing login/logout view.
 
 ### Original design notes
 

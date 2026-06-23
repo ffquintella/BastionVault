@@ -228,6 +228,23 @@ pub async fn get_current_token(state: State<'_, AppState>) -> CmdResult<Option<S
 
 #[tauri::command]
 pub async fn logout(state: State<'_, AppState>) -> CmdResult<()> {
+    // Revoke the session token server-side so it can't be reused after
+    // logout, and so the revocation is recorded as a `logout` audit
+    // event. Best-effort: a failed revoke (token already expired,
+    // backend briefly unreachable) must not trap the user in a
+    // logged-in UI, so we clear local state regardless. Routes through
+    // the active backend, so it works in both embedded and remote mode.
+    let token = state.token.lock().await.clone();
+    if let Some(token) = token.filter(|t| !t.is_empty()) {
+        let _ = dispatch_with_token(
+            &state,
+            Operation::Write,
+            "auth/token/revoke-self".to_string(),
+            None,
+            &token,
+        )
+        .await;
+    }
     *state.token.lock().await = None;
     Ok(())
 }
