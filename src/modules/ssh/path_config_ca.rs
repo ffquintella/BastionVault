@@ -29,14 +29,43 @@ use std::{collections::HashMap, sync::Arc};
 use serde_json::{json, Map, Value};
 use ssh_key::{rand_core::OsRng, Algorithm, LineEnding, PrivateKey};
 
-use super::{policy::CaConfig, SshBackend, SshBackendInner};
+use super::{
+    policy::CaConfig,
+    ssh_ca_audit_store::{SshCaAuditEntry, SshCaAuditStore},
+    SshBackend, SshBackendInner,
+};
 use crate::{
     context::Context,
+    core::Core,
     errors::RvError,
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
+    modules::identity::caller_audit_actor,
     new_fields, new_fields_internal, new_path, new_path_internal,
     storage::StorageEntry,
 };
+
+/// Append an SSH CA lifecycle event to the system-view audit store.
+/// Fail-soft: a failure to record never blocks or fails the CA
+/// operation itself — matches the file / login audit pattern.
+async fn record_ssh_ca_audit(core: &Core, actor: &str, op: &str, algorithm: &str) {
+    let store = match SshCaAuditStore::from_core(core) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("ssh ca audit: could not open store: {e}");
+            return;
+        }
+    };
+    let entry = SshCaAuditEntry {
+        ts: String::new(),
+        actor_entity_id: actor.to_string(),
+        op: op.to_string(),
+        mount: String::new(),
+        algorithm: algorithm.to_string(),
+    };
+    if let Err(e) = store.append(entry).await {
+        log::warn!("ssh ca audit: append failed: {e}");
+    }
+}
 
 const CA_HELP: &str = r#"
 Manage the SSH CA keypair. POST without a body generates a fresh
@@ -234,6 +263,8 @@ impl SshBackendInner {
         })
         .await?;
 
+        record_ssh_ca_audit(&self.core, &caller_audit_actor(req), "create", &cfg.algorithm).await;
+
         let mut data = Map::new();
         data.insert("public_key".into(), Value::String(public_key_openssh));
         data.insert("algorithm".into(), Value::String(cfg.algorithm));
@@ -269,6 +300,8 @@ impl SshBackendInner {
         })
         .await?;
 
+        record_ssh_ca_audit(&self.core, &caller_audit_actor(req), "create", &cfg.algorithm).await;
+
         let mut data = Map::new();
         data.insert("public_key".into(), Value::String(public_key_openssh));
         data.insert("algorithm".into(), Value::String(cfg.algorithm));
@@ -281,6 +314,7 @@ impl SshBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         req.storage_delete(super::policy::CA_CONFIG_KEY).await?;
+        record_ssh_ca_audit(&self.core, &caller_audit_actor(req), "delete", "").await;
         Ok(None)
     }
 }

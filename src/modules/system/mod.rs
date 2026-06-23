@@ -1677,6 +1677,38 @@ impl SystemBackend {
             }
         }
 
+        // SSH CA lifecycle (create / delete of the signing CA) from the
+        // SSH engine's append store. Same lazy-from-core, skip-on-sealed
+        // pattern as the branches above.
+        {
+            if let Ok(store) =
+                crate::modules::ssh::ssh_ca_audit_store::SshCaAuditStore::from_core(&self.core)
+            {
+                if let Ok(entries) = store.list_all().await {
+                    for e in entries {
+                        let mut fields = Vec::new();
+                        if !e.algorithm.is_empty() {
+                            fields.push(format!("algorithm={}", e.algorithm));
+                        }
+                        let target = if e.mount.is_empty() {
+                            "config/ca".to_string()
+                        } else {
+                            format!("{}config/ca", e.mount)
+                        };
+                        events.push(AuditEventBuilder {
+                            ts: e.ts,
+                            user: e.actor_entity_id,
+                            op: e.op,
+                            category: "ssh-ca".into(),
+                            target,
+                            changed_fields: fields,
+                            summary: String::new(),
+                        });
+                    }
+                }
+            }
+        }
+
         events
     }
 

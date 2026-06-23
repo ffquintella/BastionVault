@@ -45,6 +45,17 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.18.3] - 2026-06-23
+
+### Added
+
+- **SSH CA create/delete now recorded in the audit trail** (`src/modules/ssh/ssh_ca_audit_store.rs`) -- configuring the SSH signing CA (classical Ed25519 or PQC ML-DSA-65) and deleting it now append to a system-view audit store and surface on the admin Audit page under a new **SSH CA** category. Follows the existing `FileAuditStore` / `LoginAuditStore` pattern: lazy `from_core`, 20-digit-nanos keys, newest-first listing, and fail-soft writes (a recording failure logs at WARN and never blocks the CA operation). The `sys/audit/events` aggregator (`src/modules/system/mod.rs`) maps these to `create` / `delete` ops with the CA algorithm in the fields column, and the GUI (`gui/src/routes/AuditPage.tsx`) gains the matching category label/badge.
+
+### Fixed
+
+- **SSH sign-cert now accepts ECDSA client public keys** (`Cargo.toml`, `src/modules/ssh/path_sign.rs`) -- submitting an `ecdsa-sha2-nistp256` (or P-384/P-521) client key to `ssh/sign/<role>` failed with `HTTP 500: public_key parse failed: unknown algorithm` because the `ssh-key` dependency was built without its `ecdsa` feature, so the ECDSA key-data decode arm was compiled out. The feature is now enabled, letting the Ed25519 CA sign ECDSA subject keys (the CA key itself stays Ed25519). The parse-failure path also now returns **HTTP 400** instead of 500 — a malformed client key is client input, not an internal fault — matching the 500→400 correction made for the same engine in 0.18.2.
+- **SSH role editor now persists unchecking "PQC-only"** (`gui/src-tauri/src/commands/ssh.rs`) -- the `ssh_write_role` Tauri command only added `pqc_only` to the engine request body when it was `true`, so clearing the checkbox omitted the field entirely. Because the engine's role-write handler does a partial merge (absent field = unchanged), a previously-stored `true` survived and the box re-checked itself on reload. The field is now sent unconditionally (`Value::Bool(config.pqc_only)`), so `false` reaches the engine and overwrites the stored value.
+
 ## [0.18.2] - 2026-06-22
 
 ### Fixed

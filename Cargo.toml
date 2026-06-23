@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.18.2"
+version = "0.18.3"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -287,9 +287,10 @@ pkcs8 = { version = "0.10", features = ["pem", "alloc"] }
 # SSH Secret Engine (Phase 1, CA mode): OpenSSH key + certificate
 # parsing / encoding / signing on a pure-Rust stack (RustCrypto
 # under the hood). `alloc` for heap, `ed25519` for the default CA
-# algorithm, `encryption` for armored OpenSSH private-key handling.
-# Phases 2 (OTP) and later may add `rsa` / `p256` / `p384` features.
-ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519", "encryption"] }
+# algorithm, `encryption` for armored OpenSSH private-key handling,
+# `ecdsa` so clients may submit NIST P-256/384/521 public keys to be
+# signed (the CA itself stays Ed25519). Later phases may add `rsa`.
+ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519", "ecdsa", "encryption"] }
 ssh-encoding = "0.2"
 # TOTP Secret Engine (RFC 6238). Pure-Rust stack:
 #   * `base32` — RFC 4648 base32 codec for the seed.

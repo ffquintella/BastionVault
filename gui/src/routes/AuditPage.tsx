@@ -24,6 +24,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   user: "User / Role",
   file: "File",
   login: "Login",
+  "ssh-ca": "SSH CA",
 };
 
 const CATEGORY_VARIANTS: Record<
@@ -38,6 +39,7 @@ const CATEGORY_VARIANTS: Record<
   user: "neutral",
   file: "info",
   login: "info",
+  "ssh-ca": "warning",
 };
 
 const OP_VARIANTS: Record<string, "info" | "success" | "warning" | "error" | "neutral"> = {

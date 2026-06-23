@@ -286,9 +286,9 @@ pub async fn ssh_write_role(
     if config.port != 0 {
         body.insert("port".into(), Value::Number(config.port.into()));
     }
-    if config.pqc_only {
-        body.insert("pqc_only".into(), Value::Bool(true));
-    }
+    // Always send pqc_only — the engine does a partial merge, so omitting it
+    // when false would leave a previously-stored `true` unchanged.
+    body.insert("pqc_only".into(), Value::Bool(config.pqc_only));
 
     // Maps round-trip as serde_json objects — the engine handler
     // matches on `Value::Object`.

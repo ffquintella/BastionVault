@@ -574,4 +574,7 @@ macro_rules! bv_error_response_status {
     ($status:expr, $message:expr) => {
         RvError::ErrResponseStatus($status, $message.to_string())
     };
+    ($status:expr, $fmt:expr, $($arg:tt)+) => {
+        RvError::ErrResponseStatus($status, format!($fmt, $($arg)+))
+    };
 }

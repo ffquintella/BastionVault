@@ -160,7 +160,7 @@ impl SshBackendInner {
 
         // ── Client public key ──────────────────────────────────────
         let client_pk = PublicKey::from_openssh(public_key_str.trim())
-            .map_err(|e| RvError::ErrString(format!("public_key parse failed: {e}")))?;
+            .map_err(|e| bv_error_response_status!(400, "public_key parse failed: {}", e))?;
 
         // ── cert_type (request override → role default) ────────────
         let req_cert_type = req
@@ -553,4 +553,19 @@ fn collect_string_map(req: &Request, key: &str) -> BTreeMap<String, String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use ssh_key::PublicKey;
+
+    /// Regression: a NIST P-256 client key must parse so the CA can
+    /// sign it. Before the `ecdsa` feature was enabled on `ssh-key`,
+    /// this failed with "unknown algorithm" → HTTP 500.
+    #[test]
+    fn ecdsa_nistp256_client_key_parses() {
+        let key = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBE+0GOS9xWpcSP5ErBg42XJZEsKzyKwA+kzcJgqcxxAiD6d+McGp2Tfen+Oh3H0EZBYKroF6SLNa6KWSdUbsIu4= felipe@ARJ2247.local";
+        let pk = PublicKey::from_openssh(key.trim()).expect("ecdsa-sha2-nistp256 should parse");
+        assert_eq!(pk.algorithm().as_str(), "ecdsa-sha2-nistp256");
+    }
 }
