@@ -41,6 +41,7 @@ export function SettingsPage() {
   const mode = useVaultStore((s) => s.mode);
   const remoteProfile = useVaultStore((s) => s.remoteProfile);
   const clearAuth = useAuthStore((s) => s.clearAuth);
+  const clearSessions = useAuthStore((s) => s.clearSessions);
   const reset = useVaultStore((s) => s.reset);
   const [sealing, setSealing] = useState(false);
   const [activeTab, setActiveTab] = useState<string>(() => {
@@ -372,15 +373,32 @@ export function SettingsPage() {
     }
   }
 
-  function handleDisconnect() {
+  async function handleDisconnect() {
+    // Revoke + clear the token while the connection is still up, then
+    // tear down the remote handle. Best-effort revoke.
+    try {
+      await api.logout();
+    } catch {
+      /* best-effort */
+    }
     api.disconnectRemote().catch(() => {});
     clearAuth();
+    clearSessions();
     reset();
     navigate("/connect");
   }
 
-  function handleSignOut() {
+  async function handleSignOut() {
+    // Revoke the token server-side and clear the Rust-side AppState
+    // before dropping local state; best-effort so a failed revoke can't
+    // trap the user logged in. See Layout.handleSignOut for the rationale.
+    try {
+      await api.logout();
+    } catch {
+      /* best-effort */
+    }
     clearAuth();
+    clearSessions();
     reset();
     navigate("/connect");
   }

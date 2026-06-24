@@ -1823,8 +1823,9 @@ function ConnectionProfileEditor({
             protocol={profile.protocol}
           />
         ) : (
-          <CredentialSourceStub
-            kind={profile.credential_source.kind}
+          <SshEngineCredentialEditor
+            cs={profile.credential_source}
+            onChange={updateCredentialSource}
           />
         )}
 
@@ -2120,19 +2121,167 @@ function PkiCredentialEditor({
   );
 }
 
-function CredentialSourceStub({ kind }: { kind: CredentialSource["kind"] }) {
-  const labels: Record<CredentialSource["kind"], string> = {
-    secret: "",
-    ldap: "",
-    "ssh-engine": "SSH secret engine — vault-issued cert/OTP/PQC, ships in a later phase",
-    pki: "",
+/**
+ * Editor for the SSH secret-engine credential source. Connect mints a
+ * fresh credential per session from the bound SSH engine mount:
+ *   - ca:  signs an ephemeral Ed25519 key into a short-lived OpenSSH
+ *          user cert via `<mount>/sign/<role>`.
+ *   - otp: issues a one-time password via `<mount>/creds/<role>` (the
+ *          host must run the Vault SSH OTP helper).
+ *   - pqc: signs an ML-DSA-65 cert (requires the server `ssh_pqc`
+ *          build). Not launchable from the in-app client yet — russh
+ *          can't present a PQC cert — so the profile can be pre-staged
+ *          but Connect rejects it with a clear message.
+ *
+ * Mount + role are populated from the live engine (`ssh_list_mounts` /
+ * `ssh_list_roles`); if either call fails (e.g. missing capability) the
+ * field falls back to free text so the operator is never blocked.
+ */
+function SshEngineCredentialEditor({
+  cs,
+  onChange,
+}: {
+  cs: Extract<CredentialSource, { kind: "ssh-engine" }>;
+  onChange: (s: CredentialSource) => void;
+}) {
+  // null = not yet loaded or load failed → render a free-text fallback.
+  const [mounts, setMounts] = useState<string[] | null>(null);
+  const [roles, setRoles] = useState<string[] | null>(null);
+  const [rolesLoading, setRolesLoading] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .sshListMounts()
+      .then((list) => {
+        if (!cancelled) setMounts(list.map((m) => m.path));
+      })
+      .catch(() => {
+        if (!cancelled) setMounts(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const mount = cs.ssh_mount.trim();
+    if (!mount) {
+      setRoles(null);
+      return;
+    }
+    let cancelled = false;
+    setRolesLoading(true);
+    api
+      .sshListRoles(mount)
+      .then((list) => {
+        if (!cancelled) setRoles(list);
+      })
+      .catch(() => {
+        if (!cancelled) setRoles(null);
+      })
+      .finally(() => {
+        if (!cancelled) setRolesLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cs.ssh_mount]);
+
+  // Build a Select option list from a loaded list, keeping the current
+  // value selectable even when it isn't in the list (stale role, or the
+  // operator typed it before the engine had it).
+  const optionsWith = (list: string[], current: string) => {
+    const values = current && !list.includes(current) ? [current, ...list] : list;
+    return values.map((v) => ({ value: v, label: v }));
   };
+
   return (
-    <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-xs text-[var(--color-text-muted)]">
-      {labels[kind]}. The profile editor remembers your selection so
-      you can pre-stage a profile, but Connect will refuse to
-      launch until the implementation lands. See{" "}
-      <code>features/resource-connect.md</code>.
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 gap-3">
+        {mounts === null ? (
+          <Input
+            label="SSH engine mount path"
+            value={cs.ssh_mount}
+            onChange={(e) => onChange({ ...cs, ssh_mount: e.target.value })}
+            placeholder="ssh/"
+            hint="Mount path of the SSH secret engine on this vault (e.g. `ssh/`). Connect mints a fresh credential per session."
+          />
+        ) : (
+          <Select
+            label="SSH engine mount path"
+            value={cs.ssh_mount}
+            onChange={(e) =>
+              onChange({ ...cs, ssh_mount: e.target.value, ssh_role: "" })
+            }
+            options={[
+              { value: "", label: "(pick a mount)" },
+              ...optionsWith(mounts, cs.ssh_mount),
+            ]}
+          />
+        )}
+        <Select
+          label="Credential mode"
+          value={cs.mode}
+          onChange={(e) =>
+            onChange({ ...cs, mode: e.target.value as "ca" | "otp" | "pqc" })
+          }
+          options={[
+            { value: "ca", label: "CA-signed cert (Ed25519)" },
+            { value: "otp", label: "One-time password (OTP)" },
+            { value: "pqc", label: "PQC cert (ML-DSA-65)" },
+          ]}
+        />
+      </div>
+      {roles === null ? (
+        <Input
+          label="SSH role"
+          value={cs.ssh_role}
+          onChange={(e) => onChange({ ...cs, ssh_role: e.target.value })}
+          placeholder="default"
+          hint={
+            cs.ssh_mount.trim()
+              ? "Role on the bound SSH mount. Couldn't list roles for this mount — type the role name. Connect uses `<mount>/sign/<role>` (cert) or `<mount>/creds/<role>` (OTP)."
+              : "Pick a mount first, then choose the role configured on it."
+          }
+        />
+      ) : (
+        <Select
+          label="SSH role"
+          value={cs.ssh_role}
+          onChange={(e) => onChange({ ...cs, ssh_role: e.target.value })}
+          options={[
+            {
+              value: "",
+              label: rolesLoading ? "Loading…" : "(pick a role)",
+            },
+            ...optionsWith(roles, cs.ssh_role),
+          ]}
+        />
+      )}
+      {cs.mode === "otp" && (
+        <p className="text-xs text-[var(--color-text-muted)]">
+          OTP mode issues a one-time password per session via{" "}
+          <code>&lt;mount&gt;/creds/&lt;role&gt;</code>. The target host must
+          run the Vault SSH OTP helper (PAM) for the password to be accepted.
+        </p>
+      )}
+      {cs.mode === "pqc" && (
+        <p className="text-xs text-[var(--color-danger)]">
+          PQC certs (ML-DSA-65) require the server <code>ssh_pqc</code> build
+          and can't be presented by the in-app client yet — Connect will
+          reject this mode. Use it only to pre-stage a profile.
+        </p>
+      )}
+      {cs.mode === "ca" && (
+        <p className="text-xs text-[var(--color-text-muted)]">
+          Connect generates an ephemeral Ed25519 key and signs it into a
+          short-lived OpenSSH user cert via{" "}
+          <code>&lt;mount&gt;/sign/&lt;role&gt;</code>. The role's{" "}
+          <code>ttl</code> caps the per-session cert lifetime; no static
+          credential is stored on this resource.
+        </p>
+      )}
     </div>
   );
 }

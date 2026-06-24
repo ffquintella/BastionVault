@@ -195,6 +195,56 @@ path "sys/tools/hash/*" {
 path "sys/control-group/request" {
     capabilities = ["update"]
 }
+
+# --- Shared-target access (share-scoped, no ownership) ---------------------
+#
+# A `default` user can already SEE what's shared with them via
+# `identity/sharing/for-me` above; these rules let them actually USE it.
+# Every rule is `scopes = ["shared"]` ONLY (deliberately no "owner"), so a
+# rule grants access *exclusively* when an active SecretShare exists for the
+# (target, caller) pair carrying the capability the operation maps to -- see
+# `scope_passes` / `operation_share_capability` in `policy/acl.rs`. With no
+# matching share the rule contributes nothing, so this adds no blanket
+# resource/secret access and no first-write ownership carve-out: it widens
+# the baseline by exactly "you may use what was explicitly shared with you".
+# Group-delivered shares still require the opt-in
+# `metadata { group_shared_resources = "true" }` tag, intentionally kept out
+# of `default` (see the note on `identity/sharing/for-me`).
+
+# KV secrets shared with the caller (read/list; update when the share grants it).
+path "secret/*" {
+    capabilities = ["read", "list", "update"]
+    scopes       = ["shared"]
+}
+path "secret/data/*" {
+    capabilities = ["read", "list", "update"]
+    scopes       = ["shared"]
+}
+path "secret/metadata/*" {
+    capabilities = ["read", "list"]
+    scopes       = ["shared"]
+}
+
+# Resources shared with the caller. `read` = open/connect (the GUI reads the
+# resource record to dial it); `update` = the connect path's recent-session
+# stamp. Delete is intentionally withheld -- destructive inventory ops need a
+# privileged operator policy, matching `standard-user`.
+path "resources/*" {
+    capabilities = ["read", "list", "update"]
+    scopes       = ["shared"]
+}
+
+# Asset groups shared with the caller. `groups` (list) is ungated like
+# `standard-user`; the handler narrows the response set to groups the caller
+# owns or has been shared on. `groups/+` (read a specific group) is
+# share-scoped.
+path "resource-group/groups" {
+    capabilities = ["list"]
+}
+path "resource-group/groups/+" {
+    capabilities = ["read"]
+    scopes       = ["shared"]
+}
 "#;
 
 // Administrator baseline. Full access to every path with every

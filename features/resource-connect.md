@@ -438,7 +438,7 @@ No backend changes — resource fields are already a flexible `Map<String, Value
 | Profile validation on save (mount + role reachable under operator's policies) | host + GUI |
 | Vitest coverage for the profile editor and the secret-shape detection | `gui/src/test/` |
 
-### Phase 3 — SSH session window + `secret` source — **Done** (`ssh-engine` source landed in 0.7.11)
+### Phase 3 — SSH session window + `secret` source — **Done** (`ssh-engine` resolver landed in 0.7.11; the `ssh-engine` profile-editor panel — live mount/role pickers + CA/OTP/PQC mode selector in `gui/src/routes/ResourcesPage.tsx` — landed Unreleased, replacing the prior stub)
 
 | Deliverable | Location |
 |---|---|

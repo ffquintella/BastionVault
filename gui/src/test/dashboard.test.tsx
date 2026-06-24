@@ -1,10 +1,18 @@
-import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { bucketByHour } from "../components/dashboard/SessionActivityChart";
 import { KpiTile } from "../components/dashboard/KpiTile";
 import { AttentionPanel } from "../components/dashboard/AttentionPanel";
+import { isAdminUser } from "../lib/access";
 import type { RustionTargetHealth } from "../lib/rustion";
+
+// Mock the Tauri invoke API at the module level (same pattern as
+// pages.test.tsx) so UserDashboard's `list_shares_for_me` call resolves.
+const mockInvoke = vi.fn();
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (...args: unknown[]) => mockInvoke(...args),
+}));
 
 const wrap = (ui: React.ReactNode) => render(<MemoryRouter>{ui}</MemoryRouter>);
 
@@ -106,5 +114,83 @@ describe("AttentionPanel", () => {
       <AttentionPanel sealed={false} health={[h("up")]} auditWriteFailures={0} failedLogins1h={0} />,
     );
     expect(screen.getByText(/All clear/i)).toBeTruthy();
+  });
+});
+
+describe("isAdminUser", () => {
+  it("treats a plain default user as non-admin", () => {
+    expect(isAdminUser(["default"])).toBe(false);
+    expect(isAdminUser([])).toBe(false);
+    expect(isAdminUser(["pki-user", "default"])).toBe(false);
+  });
+
+  it("recognizes super-admin keywords and delegated admin policies", () => {
+    for (const p of ["root", "admin", "administrator", "super-admin"]) {
+      expect(isAdminUser([p])).toBe(true);
+    }
+    expect(isAdminUser(["exchange-admin"])).toBe(true);
+    expect(isAdminUser(["plugin-admin"])).toBe(true);
+    expect(isAdminUser(["default", "admin"])).toBe(true);
+  });
+});
+
+describe("UserDashboard (cropped non-admin view)", () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+  });
+
+  it("renders the shares scoped to the user with working Open links", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_shares_for_me") {
+        return Promise.resolve({
+          entity_id: "entity-felipe2",
+          group_shared_resources: false,
+          entries: [
+            { target_kind: "resource", target_path: "apldc1vds0045.fgv.br", grantee_kind: "entity" },
+            { target_kind: "kv-secret", target_path: "team/db", grantee_kind: "entity" },
+          ],
+        });
+      }
+      return Promise.reject(new Error(`unmocked: ${cmd}`));
+    });
+
+    const { UserDashboard } = await import("../components/dashboard/UserDashboard");
+    wrap(<UserDashboard />);
+
+    await waitFor(() =>
+      expect(screen.getByText("apldc1vds0045.fgv.br")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("team/db")).toBeInTheDocument();
+
+    const hrefs = screen
+      .getAllByRole("link", { name: "Open" })
+      .map((a) => a.getAttribute("href"));
+    expect(hrefs).toContain("/resources/apldc1vds0045.fgv.br");
+    expect(hrefs).toContain("/secrets/team/db");
+
+    // Cropped view: none of the operator-only KPIs appear.
+    expect(screen.queryByText("Secret engines")).not.toBeInTheDocument();
+    expect(screen.queryByText("Identities")).not.toBeInTheDocument();
+    expect(screen.queryByText("Seal Vault")).not.toBeInTheDocument();
+    // "Shared with me" shows as both the KPI tile label and the card header.
+    expect(screen.getAllByText("Shared with me").length).toBeGreaterThan(0);
+  });
+
+  it("shows an empty state when nothing is shared", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_shares_for_me") {
+        return Promise.resolve({ entity_id: "x", group_shared_resources: false, entries: [] });
+      }
+      return Promise.reject(new Error(`unmocked: ${cmd}`));
+    });
+
+    const { UserDashboard } = await import("../components/dashboard/UserDashboard");
+    wrap(<UserDashboard />);
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("Nothing has been shared with you yet."),
+      ).toBeInTheDocument(),
+    );
   });
 });

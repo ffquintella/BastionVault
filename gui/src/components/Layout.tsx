@@ -11,6 +11,7 @@ import * as api from "../lib/api";
 import { PluginMenuSlot } from "./PluginMenuSlot";
 import { usePluginSurfacesStore } from "../stores/pluginSurfacesStore";
 import { useToast } from "./ui/Toast";
+import { SUPER_ADMIN, isAdminUser } from "../lib/access";
 
 // localStorage key for the persisted expanded/collapsed state of the
 // Admin section in the sidebar. Default (no key set) is expanded so
@@ -37,12 +38,8 @@ type NavItem = {
   requiresMountType?: string;
 };
 
-// Well-known full-admin policy names. Any of these grants the same
-// nav as `root` — both the workspace engine links and the Admin
-// section. Operators can assign one of these to delegate full GUI
-// access without issuing a root token. See also `adminPolicies` below,
-// which is kept in lockstep with this list.
-const SUPER_ADMIN = ["root", "super-admin", "administrator", "admin"] as const;
+// `SUPER_ADMIN` and the admin-policy set now live in `lib/access` so the
+// sidebar and the dashboard share one definition of "who is an admin".
 
 // Workspace items — visible to every authenticated user, subject to
 // `requires` and `requiresMountType` per item. PKI lives here (not
@@ -125,22 +122,6 @@ const adminNav: NavItem[] = [
   { path: "/settings", label: "Settings" },
 ];
 
-// Policies that grant access to the Admin section as a whole. `root`,
-// `super-admin`, `administrator`, and `admin` are well-known
-// super-administrator policy-name keywords — any user assigned one of
-// these sees every admin link. Operators who want to delegate just one
-// admin sub-feature can grant the corresponding *-admin policy below
-// without granting full admin. `pki-admin` does NOT belong here — PKI
-// is a workspace feature now, not an admin one.
-//
-// Note: GUI visibility only. Actual API authorization is still enforced
-// server-side by the policy's HCL path/capabilities rules.
-const adminPolicies = new Set<string>([
-  ...SUPER_ADMIN,
-  "exchange-admin",
-  "plugin-admin",
-]);
-
 // Match a NavItem's `requiresMountType` against the live mount table.
 // Treat the kv family as interchangeable (kv ↔ kv-v2) so an operator
 // running KV-v1 still sees the Secrets link.
@@ -165,8 +146,9 @@ export function Layout({ children }: LayoutProps) {
   const policies = useAuthStore((s) => s.policies);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const clearAuth = useAuthStore((s) => s.clearAuth);
+  const clearSessions = useAuthStore((s) => s.clearSessions);
   const reset = useVaultStore((s) => s.reset);
-  const isAdmin = policies.some((p) => adminPolicies.has(p));
+  const isAdmin = isAdminUser(policies);
   const policySet = new Set(policies);
 
   // Plugin Extensibility v1: pull the active-surface bundle once
@@ -292,8 +274,22 @@ export function Layout({ children }: LayoutProps) {
   );
   const effectiveAdminOpen = adminOpen || activeInAdmin;
 
-  function handleSignOut() {
+  async function handleSignOut() {
+    // Revoke the token server-side and clear it from the Rust AppState
+    // BEFORE dropping local state. Best-effort: a failed revoke (token
+    // already gone, backend briefly unreachable) must never trap the
+    // user in a logged-in UI. Without this the old token lingers in the
+    // backend and `restoreSession`/`SessionMonitor` resurrect or trip
+    // over the dead session on the next login.
+    try {
+      await api.logout();
+    } catch {
+      /* best-effort: clear local state regardless */
+    }
     clearAuth();
+    // Forget cached per-vault sessions so re-opening this vault can't
+    // silently log back in as the user who just signed out.
+    clearSessions();
     reset();
     navigate("/connect");
   }

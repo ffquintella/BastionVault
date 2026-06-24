@@ -3898,9 +3898,9 @@ mod mod_system_tests {
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
-    async fn test_system_internal_ui_mounts_default_policy_sees_nothing() {
+    async fn test_system_internal_ui_mounts_default_policy_shareable_mounts() {
         let mut test_http_server =
-            TestHttpServer::new("test_system_internal_ui_mounts_default_policy_sees_nothing", true)
+            TestHttpServer::new("test_system_internal_ui_mounts_default_policy_shareable_mounts", true)
                 .await;
 
         // Mount userpass and provision a user with only `default`.
@@ -3962,13 +3962,19 @@ mod mod_system_tests {
             .cloned()
             .unwrap_or_default();
 
-        // Mounts felipe MUST NOT see (no path in `default` grants
-        // anything under these mounts): secret/, resources/,
-        // resource-group/. If these appear, something leaked.
-        for hidden in ["secret/", "resources/", "resource-group/"] {
+        // Mounts felipe MAY now see: the `default` policy carries
+        // share-scoped grants (`scopes = ["shared"]`) on secret/,
+        // resources/, and resource-group/ so a share *recipient* can
+        // navigate to what was shared with them. Mount-level visibility
+        // follows from carrying any grant under the mount (see
+        // `ACL::has_mount_access`) and matches `standard-user`; it does
+        // NOT imply item access — reading a specific resource/secret
+        // still requires an active SecretShare resolved at authorize
+        // time (covered by the policy/acl share-scope tests).
+        for visible in ["secret/", "resources/", "resource-group/"] {
             assert!(
-                !secret.contains_key(hidden),
-                "felipe must not see {hidden} on dashboard, got {:?}",
+                secret.contains_key(visible),
+                "felipe should see the shareable mount {visible} on dashboard, got {:?}",
                 secret.keys().collect::<Vec<_>>(),
             );
         }

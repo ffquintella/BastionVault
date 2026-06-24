@@ -986,7 +986,7 @@ mod mod_policy_acl_tests {
     use serde_json::{json, Map, Value};
 
     use super::*;
-    use crate::logical::{Operation, Request};
+    use crate::logical::{Auth, Operation, Request};
 
     static TEST_ACL_POLICY: &str = r#"
 name = "DeV"
@@ -2225,6 +2225,70 @@ path "kv/deny" {
         let caps = acl.capabilities("resources/secrets/db-prod/");
         assert!(caps.contains(&Capability::Read.to_string()));
         assert!(caps.contains(&Capability::Connect.to_string()));
+    }
+
+    #[test]
+    fn test_default_policy_shared_resource_rule() {
+        // Locks in the share-recipient fix: the `default` policy's
+        // `path "resources/*" { capabilities=["read","list","update"];
+        // scopes=["shared"] }` rule must grant Read on a resource *only*
+        // when an active share for the caller exists (surfaced as
+        // `target_shared_caps`), and deny it otherwise.
+        let policy = create_test_policy(
+            "default-like",
+            r#"
+            path "resources/*" {
+                capabilities = ["read", "list", "update"]
+                scopes       = ["shared"]
+            }
+            "#,
+        );
+        let acl = ACL::new(&[Arc::new(policy)]).unwrap();
+
+        let mut auth = Auth::default();
+        auth.metadata
+            .insert("entity_id".to_string(), "entity-felipe2".to_string());
+
+        // No share → no access (scope_passes sees empty target_shared_caps).
+        let req_no_share = Request {
+            operation: Operation::Read,
+            path: "resources/resources/apldc1vds0045".to_string(),
+            auth: Some(auth.clone()),
+            ..Default::default()
+        };
+        let res = acl.allow_operation(&req_no_share, false).unwrap();
+        assert!(
+            !res.allowed && res.capabilities_bitmap & Capability::Read.to_bits() == 0,
+            "default user with no share must NOT read the resource",
+        );
+
+        // Active read-share → Read granted.
+        let req_shared = Request {
+            operation: Operation::Read,
+            path: "resources/resources/apldc1vds0045".to_string(),
+            auth: Some(auth.clone()),
+            target_shared_caps: vec!["read".to_string()],
+            ..Default::default()
+        };
+        let res = acl.allow_operation(&req_shared, false).unwrap();
+        assert!(
+            res.allowed && res.capabilities_bitmap & Capability::Read.to_bits() != 0,
+            "default user WITH a read-share must be able to read the resource",
+        );
+
+        // A share that only grants `list` must not unlock Read.
+        let req_list_only = Request {
+            operation: Operation::Read,
+            path: "resources/resources/apldc1vds0045".to_string(),
+            auth: Some(auth),
+            target_shared_caps: vec!["list".to_string()],
+            ..Default::default()
+        };
+        let res = acl.allow_operation(&req_list_only, false).unwrap();
+        assert!(
+            !res.allowed,
+            "a list-only share must not grant Read (level of the share is honored)",
+        );
     }
 
     #[test]

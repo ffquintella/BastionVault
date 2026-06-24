@@ -86,6 +86,10 @@ interface AuthState {
    *  returns true on success. Returns false silently (and drops the
    *  stale cache entry) if the token no longer authenticates. */
   restoreSession: (vaultId: string) => Promise<boolean>;
+  /** Drop every cached per-vault session. Called on a deliberate
+   *  sign-out so a subsequent re-open of the same vault can't silently
+   *  resurrect the just-ended session via `restoreSession`. */
+  clearSessions: () => void;
 }
 
 export const useAuthStore = create<AuthState>((set, get) => ({
@@ -221,4 +225,5 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       return false;
     }
   },
+  clearSessions: () => set({ sessions: {} }),
 }));

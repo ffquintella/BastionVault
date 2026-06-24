@@ -19,6 +19,8 @@ import { RecentAuditCard } from "../components/dashboard/RecentAuditCard";
 import { LiveSessionsCard } from "../components/dashboard/LiveSessionsCard";
 import { AttentionPanel } from "../components/dashboard/AttentionPanel";
 import { QuickActions } from "../components/dashboard/QuickActions";
+import { UserDashboard } from "../components/dashboard/UserDashboard";
+import { isAdminUser } from "../lib/access";
 
 const POLL_MS = 5000;
 
@@ -28,6 +30,12 @@ export function DashboardPage() {
   const principal = useAuthStore((s) => s.principal);
   const entityId = useAuthStore((s) => s.entityId);
   const loadEntity = useAuthStore((s) => s.loadEntity);
+  const policies = useAuthStore((s) => s.policies);
+  // Standard users get a cropped dashboard scoped to what's shared with
+  // them; the operator KPIs (engines, policies, identities, audit,
+  // bastion telemetry, seal) are all admin-only and would just render
+  // "unavailable" for them.
+  const isAdmin = isAdminUser(policies);
 
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [server, setServer] = useState<ServerInfo | null>(null);
@@ -40,12 +48,34 @@ export function DashboardPage() {
   const liveLoaded = useRef(false);
 
   useEffect(() => {
-    loadDashboard();
     if (!principal) loadEntity().catch(() => {});
+    if (!isAdmin) {
+      // Non-admin: only the header's status/version badges need data;
+      // everything else lives in <UserDashboard>, which fetches its own
+      // shares. Skip the operator endpoints entirely so we don't fire a
+      // burst of calls that resolve to "permission denied".
+      loadLite();
+      return;
+    }
+    loadDashboard();
     const id = setInterval(pollLive, POLL_MS);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Header-only fetch for the cropped (non-admin) dashboard: vault seal
+  // state + server info drive the <HealthStrip> badges; both are
+  // readable by any authenticated token.
+  async function loadLite() {
+    const [st, srv] = await Promise.allSettled([
+      api.getVaultStatus(),
+      api.getServerInfo(),
+    ]);
+    if (st.status === "fulfilled") setStatus(st.value);
+    if (srv.status === "fulfilled") setServer(srv.value);
+    setNowMs(Date.now());
+    setLoading(false);
+  }
 
   async function loadDashboard() {
     // Fetch the latest events with no time window — the "Recent activity"
@@ -144,6 +174,10 @@ export function DashboardPage() {
           </div>
         )}
 
+        {!isAdmin ? (
+          <UserDashboard />
+        ) : (
+        <>
         {/* KPI tiles */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
           <KpiTile
@@ -220,6 +254,8 @@ export function DashboardPage() {
         </div>
 
         <QuickActions sealed={sealed} onSeal={handleSeal} />
+        </>
+        )}
       </div>
     </Layout>
   );
