@@ -1715,6 +1715,48 @@ impl SystemBackend {
             }
         }
 
+        // SSH certificate issuance (sign/:role) from the SSH engine's
+        // append store. Same lazy-from-core, skip-on-sealed pattern as
+        // the branches above.
+        {
+            if let Ok(store) =
+                crate::modules::ssh::ssh_sign_audit_store::SshSignAuditStore::from_core(&self.core)
+            {
+                if let Ok(entries) = store.list_all().await {
+                    for e in entries {
+                        let mut fields = Vec::new();
+                        if !e.principals.is_empty() {
+                            fields.push(format!("principals={}", e.principals));
+                        }
+                        if !e.cert_type.is_empty() {
+                            fields.push(format!("cert_type={}", e.cert_type));
+                        }
+                        if !e.serial.is_empty() {
+                            fields.push(format!("serial={}", e.serial));
+                        }
+                        if !e.algorithm.is_empty() {
+                            fields.push(format!("algorithm={}", e.algorithm));
+                        }
+                        let role = if e.role.is_empty() { "?".to_string() } else { e.role.clone() };
+                        let target = if e.mount.is_empty() {
+                            format!("sign/{role}")
+                        } else {
+                            format!("{}sign/{role}", e.mount)
+                        };
+                        events.push(AuditEventBuilder {
+                            ts: e.ts,
+                            user: e.actor_entity_id,
+                            op: e.op,
+                            category: "ssh-sign".into(),
+                            target,
+                            changed_fields: fields,
+                            summary: String::new(),
+                        });
+                    }
+                }
+            }
+        }
+
         events
     }
 

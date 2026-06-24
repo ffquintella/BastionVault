@@ -42,12 +42,17 @@ use ssh_key::{
     Algorithm, PrivateKey, PublicKey,
 };
 
-use super::{SshBackend, SshBackendInner};
+use super::{
+    ssh_sign_audit_store::{SshSignAuditEntry, SshSignAuditStore},
+    SshBackend, SshBackendInner,
+};
 use crate::{
     bv_error_response_status,
     context::Context,
+    core::Core,
     errors::RvError,
     logical::{Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
+    modules::identity::caller_audit_actor,
     new_fields, new_fields_internal, new_path, new_path_internal,
 };
 
@@ -56,6 +61,42 @@ Sign a client public key into an OpenSSH certificate, constrained by
 the named role. Returns `signed_key` (single-line OpenSSH cert) and
 `serial_number`. The CA private key never leaves the barrier.
 "#;
+
+/// Append an SSH cert-issuance event to the system-view audit store.
+/// Fail-soft: a failure to record never blocks or fails the sign
+/// itself — matches the CA / file / login audit pattern.
+#[allow(clippy::too_many_arguments)]
+async fn record_ssh_sign_audit(
+    core: &Core,
+    actor: &str,
+    role: &str,
+    principals: &[String],
+    cert_type: &str,
+    serial: u64,
+    algorithm: &str,
+) {
+    let store = match SshSignAuditStore::from_core(core) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("ssh sign audit: could not open store: {e}");
+            return;
+        }
+    };
+    let entry = SshSignAuditEntry {
+        ts: String::new(),
+        actor_entity_id: actor.to_string(),
+        op: "sign".to_string(),
+        mount: String::new(),
+        role: role.to_string(),
+        principals: principals.join(","),
+        cert_type: cert_type.to_string(),
+        serial: format!("{serial:016x}"),
+        algorithm: algorithm.to_string(),
+    };
+    if let Err(e) = store.append(entry).await {
+        log::warn!("ssh sign audit: append failed: {e}");
+    }
+}
 
 impl SshBackend {
     pub fn sign_path(&self) -> Path {
@@ -340,6 +381,18 @@ impl SshBackendInner {
             .to_openssh()
             .map_err(|e| RvError::ErrString(format!("cert serialise failed: {e}")))?;
 
+        // ── Audit ──────────────────────────────────────────────────
+        record_ssh_sign_audit(
+            &self.core,
+            &caller_audit_actor(req),
+            &role_name,
+            &requested,
+            &cert_type_str,
+            serial,
+            "ssh-ed25519",
+        )
+        .await;
+
         // ── Response ───────────────────────────────────────────────
         let mut data = Map::new();
         data.insert("signed_key".into(), Value::String(signed_key));
@@ -523,6 +576,18 @@ impl SshBackendInner {
             nonce: &nonce,
         };
         let signed_key = pqc::sign_cert(&ca, &spec)?;
+
+        // ── Audit ──────────────────────────────────────────────────
+        record_ssh_sign_audit(
+            &self.core,
+            &caller_audit_actor(req),
+            &role_name_for_key_id,
+            &requested,
+            &cert_type_str,
+            serial,
+            super::pqc::MLDSA65_ALGO,
+        )
+        .await;
 
         let mut data = Map::new();
         data.insert("signed_key".into(), Value::String(signed_key));

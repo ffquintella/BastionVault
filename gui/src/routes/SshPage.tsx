@@ -582,6 +582,25 @@ function RoleForm({
               value={config.allowed_extensions}
               onChange={(e) => set("allowed_extensions", e.target.value)}
               placeholder="permit-pty,permit-port-forwarding"
+              hint="Whitelist of extensions a caller may request. Does not emit them — use Default extensions for always-on."
+            />
+            <Input
+              label="Default extensions"
+              value={Object.keys(config.default_extensions).join(",")}
+              onChange={(e) =>
+                set(
+                  "default_extensions",
+                  Object.fromEntries(
+                    e.target.value
+                      .split(",")
+                      .map((s) => s.trim())
+                      .filter(Boolean)
+                      .map((k) => [k, ""]),
+                  ),
+                )
+              }
+              placeholder="permit-pty,permit-port-forwarding"
+              hint="Always emitted on every cert this role signs. Comma-separated."
             />
             <Input
               label="Allowed critical options"

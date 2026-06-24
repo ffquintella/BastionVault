@@ -45,6 +45,16 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.18.6] - 2026-06-24
+
+### Added
+
+- **SSH certificate signing is now recorded in the audit trail** (`src/modules/ssh/ssh_sign_audit_store.rs`) -- every successful `ssh/sign/<role>` issuance (classical Ed25519 or PQC ML-DSA-65) now appends to a system-view audit store and surfaces on the admin Audit page under a new **SSH Sign** category, closing the gap where the CA lifecycle was audited (0.18.3) but the certs it issued were not. Follows the existing `SshCaAuditStore` pattern: lazy `from_core`, 20-digit-nanos keys, newest-first listing, and fail-soft writes (a recording failure logs at WARN and never blocks the signing). Each row records the actor, role, principals, cert type, the 16-hex-digit serial (matching the `serial_number` returned to the caller, for revocation/forensics), and the signing algorithm. The `sys/audit/events` aggregator (`src/modules/system/mod.rs`) maps these to a `sign` op, and the GUI (`gui/src/routes/AuditPage.tsx`) gains the matching category label/badge and operation filter.
+
+### Fixed
+
+- **SSH role editor now exposes "Default extensions", so `permit-pty` (and friends) actually land on signed certs** (`gui/src/routes/SshPage.tsx`) -- the role form only offered an **Allowed extensions** field, which is a request *whitelist* (`role.allowed_extensions`), not an always-on set. With no UI for `default_extensions` and no way for the Sign Cert form to request extensions, a role configured with `permit-pty` issued certs that carried no extensions at all — breaking PTY allocation on login. The form now has a **Default extensions** input (comma-separated → `{name: ""}` map) that populates `default_extensions`, which `ssh/sign` always emits, and the **Allowed extensions** hint now states it is a request whitelist that does not emit on its own. Backend semantics (whitelist vs. always-on, matching HashiCorp Vault) are unchanged.
+
 ## [0.18.5] - 2026-06-23
 
 ### Added

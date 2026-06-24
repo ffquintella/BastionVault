@@ -165,6 +165,39 @@ async fn test_ssh_phase1_end_to_end() {
         "validity window out of range: {validity}s"
     );
 
+    // ── Audit trail ─────────────────────────────────────────────────
+    // The successful sign must surface on sys/audit/events under the
+    // `ssh-sign` category, carrying the role, principal and the same
+    // serial the caller received.
+    let audit = read(&core, &token, "sys/audit/events")
+        .await
+        .expect("audit events read returned nothing");
+    let events = audit["events"].as_array().expect("events not an array");
+    let sign_event = events
+        .iter()
+        .find(|e| e["category"].as_str() == Some("ssh-sign"))
+        .expect("no ssh-sign audit event recorded");
+    assert_eq!(sign_event["op"].as_str(), Some("sign"));
+    assert_eq!(sign_event["target"].as_str(), Some("sign/devs"));
+    let fields: Vec<&str> = sign_event["changed_fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        fields.iter().any(|f| *f == "principals=bob"),
+        "principal not in audit fields: {fields:?}"
+    );
+    assert!(
+        fields.iter().any(|f| *f == format!("serial={serial_hex}")),
+        "serial not in audit fields: {fields:?}"
+    );
+    assert!(
+        fields.iter().any(|f| *f == "algorithm=ssh-ed25519"),
+        "algorithm not in audit fields: {fields:?}"
+    );
+
     // ── Negative cases ──────────────────────────────────────────────
     // Caller asks for a principal not in allowed_users.
     let bad_body = json!({

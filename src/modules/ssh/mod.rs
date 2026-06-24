@@ -34,6 +34,7 @@ pub mod path_roles;
 pub mod path_sign;
 pub mod policy;
 pub mod ssh_ca_audit_store;
+pub mod ssh_sign_audit_store;
 #[cfg(feature = "ssh_pqc")]
 pub mod pqc;
 
