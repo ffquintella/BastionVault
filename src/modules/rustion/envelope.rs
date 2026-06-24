@@ -61,6 +61,12 @@ pub struct CredentialMaterial {
     pub kind: String,
     pub username: String,
     pub material: Vec<u8>,
+    /// For `ssh-cert`: the signed OpenSSH certificate text. Sealed into
+    /// the envelope's `credential.extra["cert"]` map — the same shape
+    /// Rustion's control plane reads (`SessionCredential::openssh_cert`).
+    /// `material` carries the matching ephemeral private key. `None` for
+    /// every other kind.
+    pub cert: Option<String>,
 }
 
 /// Build an `open` envelope. Phase 3 calls this once the operator's
@@ -104,7 +110,17 @@ pub fn build_open(
             kind: credential.kind,
             username: credential.username,
             material: credential.material,
-            extra: None,
+            // For `ssh-cert`, seal the OpenSSH certificate text under
+            // `extra["cert"]` (a CBOR map). Rustion decrypts it inside its
+            // own process and presents the (key, cert) pair to the target
+            // `sshd`. Other kinds carry no `extra`.
+            extra: credential.cert.map(|cert| {
+                use ciborium::value::Value as CborValue;
+                CborValue::Map(vec![(
+                    CborValue::Text("cert".to_string()),
+                    CborValue::Text(cert),
+                )])
+            }),
         }),
         session: Some(BvrgSession {
             ttl_secs,
@@ -473,6 +489,7 @@ mod tests {
                 kind: "ssh-password".into(),
                 username: "deploy".into(),
                 material: b"hunter2".to_vec(),
+                cert: None,
             },
             3600,
             3,
@@ -487,6 +504,58 @@ mod tests {
         assert_eq!(verified.envelope_fingerprint, built.fingerprint);
         let cred = verified.payload.credential.unwrap();
         assert_eq!(cred.username, "deploy");
+    }
+
+    #[test]
+    fn build_open_ssh_cert_seals_cert_in_extra() {
+        // A brokered `ssh-cert` envelope carries the ephemeral private key
+        // in `material` and the signed OpenSSH certificate text under
+        // `extra["cert"]` — the shape Rustion's control plane consumes.
+        let master = BvrgMasterSigningKey::generate().unwrap();
+        let master_pub = master.public_key();
+        let kp = MlKem768Provider.generate_keypair().unwrap();
+        let target = synthetic_target_with_kem_pub(kp.public_key());
+
+        let built = build_open(
+            &master,
+            &target,
+            &op_ctx(),
+            "db01.internal",
+            22,
+            "ssh",
+            None,
+            CredentialMaterial {
+                kind: "ssh-cert".into(),
+                username: "alice".into(),
+                material: b"-----BEGIN OPENSSH PRIVATE KEY-----\nEPHEMERAL\n-----END OPENSSH PRIVATE KEY-----\n".to_vec(),
+                cert: Some("ssh-ed25519-cert-v01@openssh.com AAAA... alice".into()),
+            },
+            900,
+            0,
+            "always",
+        )
+        .expect("build_open ssh-cert");
+
+        let verified = bvrg::verify(&built.bytes, &master_pub, kp.secret_key()).expect("verify");
+        let cred = verified.payload.credential.expect("credential present");
+        assert_eq!(cred.kind, "ssh-cert");
+        assert_eq!(cred.username, "alice");
+        assert!(
+            !cred.material.is_empty(),
+            "ephemeral private key must be carried in material"
+        );
+        // The cert text round-trips under extra["cert"], matching
+        // Rustion's `SessionCredential::openssh_cert` extraction.
+        let extra = cred.extra.expect("extra map present");
+        let ciborium::value::Value::Map(pairs) = extra else {
+            panic!("extra must be a CBOR map");
+        };
+        let cert = pairs
+            .iter()
+            .find(|(k, _)| k.as_text() == Some("cert"))
+            .and_then(|(_, v)| v.as_text())
+            .expect("cert key in extra");
+        assert_eq!(cert, "ssh-ed25519-cert-v01@openssh.com AAAA... alice");
     }
 
     #[test]

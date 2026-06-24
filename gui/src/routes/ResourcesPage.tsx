@@ -48,13 +48,17 @@ import {
   defaultPort,
   detectSecretShape,
   isLaunchableProfile,
+  loginClassGate,
   needsOperatorPrompt,
   normalizeProfileDefaults,
   pickDefaultProfile,
   protocolForOsType,
   readProfiles,
   validateProfile,
+  validateProfileForLoginClass,
 } from "../lib/connectionProfiles";
+import { resourceLoginClass, loginClassChipLabel } from "../lib/sshBroker";
+import type { EffectiveLoginClass } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 import { useAuthStore } from "../stores/authStore";
@@ -1539,6 +1543,55 @@ function ConnectionProfileEditor({
     label: string;
   }>>([]);
   const [loadingSecrets, setLoadingSecrets] = useState(false);
+  // Resolved effective SSH login class for this resource. When
+  // `brokered`, the editor forces the SSH-engine source and disables the
+  // static/secret options (the host enforces the same on connect +
+  // attach). Defaults to `shared-credential` if the broker policy is
+  // unset or unavailable.
+  const [loginClass, setLoginClass] = useState<EffectiveLoginClass | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancel = false;
+    (async () => {
+      try {
+        const lc = await resourceLoginClass(String(resource.name));
+        if (cancel) return;
+        setLoginClass(lc);
+        // Pre-select the SSH-engine source for a brokered SSH profile that
+        // still carries a static-capable source (e.g. a freshly-blanked
+        // profile or one migrated from shared-credential).
+        if (lc.login_class === "brokered") {
+          setProfile((p) =>
+            p.protocol === "ssh" && p.credential_source.kind !== "ssh-engine"
+              ? {
+                  ...p,
+                  credential_source: {
+                    kind: "ssh-engine",
+                    ssh_mount: "",
+                    ssh_role: "",
+                    mode: "ca",
+                  },
+                }
+              : p,
+          );
+        }
+      } catch {
+        // Non-fatal: default to unrestricted. The host still enforces
+        // brokered rules on connect / attach.
+        if (!cancel) setLoginClass(null);
+      }
+    })();
+    return () => {
+      cancel = true;
+    };
+  }, [open, resource.name]);
+
+  const brokeredSsh =
+    loginClass?.login_class === "brokered" && profile.protocol === "ssh";
+  const credGate = loginClassGate(
+    profile.protocol === "ssh" ? loginClass?.login_class : undefined,
+  );
 
   // Reload the candidate list of credential-shaped resource secrets
   // every time the editor opens. We don't try to filter to "only
@@ -1605,7 +1658,12 @@ function ConnectionProfileEditor({
     }
   }
 
-  const validationError = validateProfile(profile);
+  const validationError =
+    validateProfile(profile) ??
+    validateProfileForLoginClass(
+      profile,
+      profile.protocol === "ssh" ? loginClass?.login_class : undefined,
+    );
   const canSave = validationError === null;
 
   return (
@@ -1698,18 +1756,30 @@ function ConnectionProfileEditor({
 
         <hr className="border-[var(--color-border)]" />
 
+        {brokeredSsh && (
+          <div className="rounded-md border border-[var(--color-warning-border,var(--color-border))] bg-[var(--color-warning-bg,transparent)] p-2 text-xs">
+            <strong>Brokered resource</strong> — {loginClass && loginClassChipLabel(loginClass)}.
+            Every SSH login is minted per-connect from the SSH engine; a static
+            credential cannot be attached. The credential source is locked to
+            the SSH secret engine.
+          </div>
+        )}
+
         <Select
           label="Credential source"
           value={profile.credential_source.kind}
+          disabled={brokeredSsh}
           onChange={(e) =>
             handleCredKindChange(e.target.value as CredentialSource["kind"])
           }
-          options={[
-            { value: "secret", label: "Resource secret" },
-            { value: "ldap", label: "LDAP / Active Directory" },
-            { value: "ssh-engine", label: "SSH secret engine (later phase)" },
-            { value: "pki", label: "PKI client cert (SSH publickey / RDP CredSSP smartcard)" },
-          ]}
+          options={(
+            [
+              { value: "secret", label: "Resource secret" },
+              { value: "ldap", label: "LDAP / Active Directory" },
+              { value: "ssh-engine", label: "SSH secret engine (CA-signed cert / OTP)" },
+              { value: "pki", label: "PKI client cert (SSH publickey / RDP CredSSP smartcard)" },
+            ] as { value: CredentialSource["kind"]; label: string }[]
+          ).filter((o) => credGate.allowedKinds.includes(o.value))}
         />
 
         {profile.credential_source.kind === "secret" ? (

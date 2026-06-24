@@ -3,13 +3,37 @@ import {
   blankProfile,
   defaultPort,
   detectSecretShape,
+  isLaunchableProfile,
+  loginClassGate,
   newProfileId,
   profilesForOsType,
   protocolForOsType,
   readProfiles,
   validateProfile,
+  validateProfileForLoginClass,
 } from "../lib/connectionProfiles";
 import type { ConnectionProfile } from "../lib/types";
+
+function sshEngineProfile(
+  mode: "ca" | "otp" | "pqc" = "ca",
+): ConnectionProfile {
+  return {
+    id: "p_test",
+    name: "brokered",
+    protocol: "ssh",
+    username: "deploy",
+    credential_source: { kind: "ssh-engine", ssh_mount: "ssh", ssh_role: "ops", mode },
+  };
+}
+
+function secretProfile(): ConnectionProfile {
+  return {
+    id: "p_secret",
+    name: "static",
+    protocol: "ssh",
+    credential_source: { kind: "secret", secret_id: "ssh" },
+  };
+}
 
 describe("protocolForOsType", () => {
   it("maps *nix os_type values to ssh", () => {
@@ -220,5 +244,48 @@ describe("profilesForOsType", () => {
   });
   it("returns [] when os_type doesn't have a Connect protocol", () => {
     expect(profilesForOsType([sshP, rdpP], "other")).toEqual([]);
+  });
+});
+
+describe("isLaunchableProfile (ssh-engine brokered)", () => {
+  it("launches ca and otp ssh-engine modes", () => {
+    expect(isLaunchableProfile(sshEngineProfile("ca"))).toBe(true);
+    expect(isLaunchableProfile(sshEngineProfile("otp"))).toBe(true);
+  });
+  it("does not launch pqc mode (no in-app ML-DSA cert auth)", () => {
+    expect(isLaunchableProfile(sshEngineProfile("pqc"))).toBe(false);
+  });
+});
+
+describe("loginClassGate", () => {
+  it("brokered forces the ssh-engine source and disables the rest", () => {
+    const g = loginClassGate("brokered");
+    expect(g.brokered).toBe(true);
+    expect(g.allowedKinds).toEqual(["ssh-engine"]);
+    expect(g.forcedKind).toBe("ssh-engine");
+  });
+  it("shared-credential (and unset) allows every source", () => {
+    for (const lc of ["shared-credential", undefined] as const) {
+      const g = loginClassGate(lc);
+      expect(g.brokered).toBe(false);
+      expect(g.allowedKinds).toContain("secret");
+      expect(g.allowedKinds).toContain("ssh-engine");
+      expect(g.forcedKind).toBeNull();
+    }
+  });
+});
+
+describe("validateProfileForLoginClass", () => {
+  it("rejects a static (secret) source on a brokered resource", () => {
+    expect(validateProfileForLoginClass(secretProfile(), "brokered")).toMatch(
+      /brokered/i,
+    );
+  });
+  it("accepts an ssh-engine source on a brokered resource", () => {
+    expect(validateProfileForLoginClass(sshEngineProfile("ca"), "brokered")).toBeNull();
+  });
+  it("is a no-op for shared-credential resources", () => {
+    expect(validateProfileForLoginClass(secretProfile(), "shared-credential")).toBeNull();
+    expect(validateProfileForLoginClass(secretProfile(), undefined)).toBeNull();
   });
 });

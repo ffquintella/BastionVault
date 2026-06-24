@@ -178,6 +178,18 @@ pub struct RustionBackendInner {
     pub core: Arc<Core>,
 }
 
+/// Output of [`RustionBackendInner::mint_brokered_ssh_cert`]: the
+/// base64 ephemeral private key (sealed into the envelope's
+/// `credential.material`), the signed OpenSSH certificate text (sealed
+/// into `credential.extra["cert"]`), and the cert serial (stamped on
+/// the `session.open` audit so the session joins the `ssh/sign`
+/// issuance row).
+struct MintedSshCert {
+    private_key_b64: String,
+    certificate: String,
+    serial: String,
+}
+
 #[derive(Deref)]
 pub struct RustionBackend {
     #[deref]
@@ -1627,6 +1639,14 @@ impl RustionBackendInner {
             credential_kind: pick("credential_kind"),
             credential_username: pick("credential_username"),
             credential_material,
+            credential_cert: {
+                let c = pick("credential_cert");
+                if c.is_empty() {
+                    None
+                } else {
+                    Some(c)
+                }
+            },
             ttl_secs: u32::try_from(pick_u("ttl_secs", 3600)).unwrap_or(3600),
             max_renewals: u8::try_from(pick_u("max_renewals", 3)).unwrap_or(3),
             recording: recording_choice,
@@ -1669,6 +1689,13 @@ impl RustionBackendInner {
                 .await
                 .unwrap_or_default(),
         };
+
+        // Brokered-session audit context. A minted `ssh-cert` / `ssh-otp`
+        // credential implies `login_class = brokered`; map the kind back
+        // to the SSH-engine mode and surface the cert serial so the
+        // session joins the `ssh/sign` issuance row on both witnesses.
+        let brokered_kind = request.credential_kind.clone();
+        let cert_serial = pick("credential_serial");
 
         match session::open_session_v2(&store, &master, &operator, &request).await {
             Ok(resp) => {
@@ -1736,6 +1763,23 @@ impl RustionBackendInner {
                             .collect(),
                     ),
                 );
+                // SSH login-brokering audit fields. A minted `ssh-cert` /
+                // `ssh-otp` credential is by construction `brokered`; stamp
+                // the login class, the SSH-engine mode, and the cert serial
+                // so the session and the `ssh/sign` issuance row are
+                // joinable on both BastionVault and Rustion witnesses.
+                let ssh_engine_mode = match brokered_kind.as_str() {
+                    "ssh-cert" => Some("ca"),
+                    "ssh-otp" => Some("otp"),
+                    _ => None,
+                };
+                if let Some(mode) = ssh_engine_mode {
+                    data.insert("login_class".into(), Value::String("brokered".into()));
+                    data.insert("ssh_engine_mode".into(), Value::String(mode.into()));
+                    if !cert_serial.is_empty() {
+                        data.insert("cert_serial".into(), Value::String(cert_serial.clone()));
+                    }
+                }
                 // Phase 6.4: track this session as a "pending recording"
                 // so the 24h poller pulls if the webhook never lands.
                 // Best-effort — failure here doesn't fail session-open.
@@ -1912,13 +1956,111 @@ impl RustionBackendInner {
                         }
                     }
                 }
+                "ssh-engine" => {
+                    // Brokered minting on the Rustion path. The ephemeral
+                    // keypair is minted + signed inside the vault process
+                    // (never reaching the GUI / JS), sealed into the
+                    // envelope, and zeroized here the instant the b64
+                    // material is in hand. Rustion decrypts the (key, cert)
+                    // pair inside its own process and authenticates to the
+                    // target with cert-based publickey auth.
+                    let ssh_mount = cs
+                        .get("ssh_mount")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim().trim_end_matches('/').to_string())
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| {
+                            bv_error_response_status!(400, "credential_source.ssh_mount is required")
+                        })?;
+                    let ssh_role = cs
+                        .get("ssh_role")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| {
+                            bv_error_response_status!(400, "credential_source.ssh_role is required")
+                        })?
+                        .to_string();
+                    let mode = cs
+                        .get("mode")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("ca");
+                    match mode {
+                        "ca" => {
+                            let principal = req
+                                .get_data("credential_username")
+                                .ok()
+                                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                                .filter(|s| !s.is_empty());
+                            let minted = self
+                                .mint_brokered_ssh_cert(&ssh_mount, &ssh_role, principal.as_deref())
+                                .await?;
+                            let data = req.data.get_or_insert_with(Map::new);
+                            data.insert(
+                                "credential_kind".into(),
+                                Value::String("ssh-cert".into()),
+                            );
+                            data.insert(
+                                "credential_material".into(),
+                                Value::String(minted.private_key_b64),
+                            );
+                            data.insert(
+                                "credential_cert".into(),
+                                Value::String(minted.certificate),
+                            );
+                            data.insert(
+                                "credential_serial".into(),
+                                Value::String(minted.serial.clone()),
+                            );
+                            if let Some(p) = principal {
+                                if data
+                                    .get("credential_username")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .is_empty()
+                                {
+                                    data.insert(
+                                        "credential_username".into(),
+                                        Value::String(p),
+                                    );
+                                }
+                            }
+                        }
+                        "otp" => {
+                            // The `ssh-otp` envelope kind is implemented +
+                            // unit-tested, but no enrolled Rustion can yet
+                            // consume it (the materialiser is tracked
+                            // cross-repo). Fail closed rather than forward an
+                            // artifact the bastion will reject — never a
+                            // silent fallthrough to direct or shared-cred.
+                            return Err(bv_error_response_status!(
+                                501,
+                                "ssh_otp_rustion_unsupported: brokered SSH OTP cannot be \
+                                 forwarded through a Rustion bastion yet (the bastion's \
+                                 ssh-otp materialiser is not deployed). Use the direct \
+                                 connect path for OTP brokering, or `ca` mode through Rustion."
+                            ));
+                        }
+                        other => {
+                            return Err(bv_error_response_status!(
+                                400,
+                                &format!(
+                                    "brokered ssh-engine mode `{other}` cannot be forwarded \
+                                     through Rustion; `ca` (Ed25519 cert) is supported, `pqc` \
+                                     is not (the bastion's russh client cannot present an \
+                                     ML-DSA-65 cert). Use `ca`."
+                                )
+                            ));
+                        }
+                    }
+                }
                 other => {
                     return Err(bv_error_response_status!(
                         400,
                         &format!(
                             "v2 session/open server-side resolution supports \
-                             credential_source.kind=\"secret\" only; got `{other}`. \
-                             Pass resolved `credential_material` for ldap/ssh-engine/pki."
+                             credential_source.kind in {{\"secret\", \"ssh-engine\"}}; got \
+                             `{other}`. Pass resolved `credential_material` for ldap/pki."
                         )
                     ));
                 }
@@ -1997,6 +2139,92 @@ impl RustionBackendInner {
         );
 
         Ok((STANDARD.encode(password.as_bytes()), username))
+    }
+
+    /// Mint a brokered SSH certificate for the Rustion path: generate an
+    /// ephemeral Ed25519 keypair in-process, sign it via the bound SSH
+    /// engine role (`<mount>/sign/<role>`), and return the base64 private
+    /// key (for the envelope's `credential.material`) plus the signed
+    /// OpenSSH certificate text (for `credential.extra["cert"]`) and its
+    /// serial. The ephemeral private key never leaves this process
+    /// un-sealed and its plaintext copy is zeroized before return.
+    ///
+    /// The sign call runs router-direct under the server's own authority
+    /// (the connect-capability gate in `handle_session_open_v2` is the
+    /// authorization), so a connect-only operator never needs `read` /
+    /// `update` on the SSH engine mount.
+    async fn mint_brokered_ssh_cert(
+        &self,
+        ssh_mount: &str,
+        ssh_role: &str,
+        principal: Option<&str>,
+    ) -> Result<MintedSshCert, RvError> {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use ssh_key::{rand_core::OsRng, Algorithm, LineEnding, PrivateKey};
+        use zeroize::Zeroizing;
+
+        // Ephemeral client keypair — in-memory only, never persisted.
+        let private_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519)
+            .map_err(|e| bv_error_string!(&format!("generate ephemeral ssh keypair: {e}")))?;
+        let public_openssh = private_key
+            .public_key()
+            .to_openssh()
+            .map_err(|e| bv_error_string!(&format!("serialize ephemeral pubkey: {e}")))?;
+        let private_openssh: Zeroizing<String> = Zeroizing::new(
+            private_key
+                .to_openssh(LineEnding::LF)
+                .map_err(|e| bv_error_string!(&format!("serialize ephemeral private key: {e}")))?
+                .to_string(),
+        );
+
+        // Sign the public half via the SSH engine, router-direct.
+        let mut body = Map::new();
+        body.insert("public_key".into(), Value::String(public_openssh));
+        if let Some(p) = principal.filter(|s| !s.is_empty()) {
+            body.insert("valid_principals".into(), Value::String(p.to_string()));
+        }
+        let path = format!("{ssh_mount}/sign/{ssh_role}");
+        let mut sub = Request::new_write_request(&path, Some(body));
+        sub.operation = Operation::Write;
+        let resp = self
+            .core
+            .router
+            .handle_request(&mut sub)
+            .await?
+            .ok_or_else(|| {
+                bv_error_response_status!(
+                    502,
+                    &format!("ssh engine `{path}` returned no response while minting brokered cert")
+                )
+            })?;
+        let data = resp.data.unwrap_or_default();
+        let certificate = data
+            .get("signed_key")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                bv_error_response_status!(
+                    502,
+                    &format!("ssh engine `{path}` sign response missing `signed_key`")
+                )
+            })?
+            .to_string();
+        let serial = data
+            .get("serial_number")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        // Base64 the private key, then drop the plaintext copy. From here
+        // the key lives only inside the sealed envelope ciphertext.
+        let private_key_b64 = STANDARD.encode(private_openssh.as_bytes());
+        drop(private_openssh);
+
+        Ok(MintedSshCert {
+            private_key_b64,
+            certificate,
+            serial,
+        })
     }
 
     // ─── Phase 5: renew + kill ──────────────────────────────────────

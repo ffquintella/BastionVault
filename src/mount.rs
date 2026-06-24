@@ -99,6 +99,15 @@ lazy_static! {
             logical_type: "rustion".to_string(),
             description: "Rustion PQC bastion fleet — targets, master cert, recordings, policy".to_string(),
             ..Default::default()
+        },
+        MountEntry {
+            table: MOUNT_TABLE_TYPE.to_string(),
+            tainted: false,
+            uuid: generate_uuid(),
+            path: "ssh-broker/".to_string(),
+            logical_type: "ssh-broker".to_string(),
+            description: "SSH login-class (broker) policy — shared-credential vs brokered, four-tier lockable".to_string(),
+            ..Default::default()
         }
     ];
 }

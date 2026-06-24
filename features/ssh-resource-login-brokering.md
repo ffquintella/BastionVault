@@ -72,6 +72,30 @@ path.
 
 ## Current State
 
+**Phases 1–4 implemented; Phase 5 partially implemented.** The four-tier
+`login_class` policy, attach-time `409` enforcement, direct-path
+`brokered_requires_ssh_engine` rejection, the `ssh-cert` / `ssh-otp`
+envelope kinds, server-side brokered minting on the Rustion path
+(ephemeral key minted + sealed + zeroized in-process), and the
+`session.open` audit fields (`login_class`, `ssh_engine_mode`,
+`cert_serial`, `login_class_chain`) are live. CLI `bvault ssh-broker
+policy {get,set}` and the connection-profile editor's brokered gate ship.
+Covered by unit tests (login-class resolver, envelope `ssh-cert`
+round-trip, GUI gating helpers) and a host integration test
+(`brokered_enforcement_tests`: `409` attach guard, effective resolution,
+`403` lock violation).
+
+**Not yet implemented:** the Rustion-side `ssh-otp` session materialiser
+(tracked cross-repo — `ssh-cert` already works against Rustion v0.11.0;
+brokered OTP over Rustion fails closed with `ssh_otp_rustion_unsupported`);
+the direct-path testcontainers `ca` round-trip + the
+`tests/e2e/rustion-ssh/` end-to-end forwarding test; the standalone
+resource-detail brokered badge and the full per-tier policy editor in the
+GUI (the four tiers are manageable via CLI + the `ssh-broker/policy/*`
+API today); the operator runbook in `docs/`.
+
+### Pre-existing building blocks
+
 - The [SSH secret engine](ssh-secret-engine.md) ships CA-signed certs
   (Ed25519), OTP (with the `bv-ssh-helper` target binary), and ML-DSA-65 PQC
   certs, plus per-issuance audit. `ssh/sign/<role>`, `ssh/creds/<role>`, and
@@ -328,7 +352,7 @@ integration is.)
 
 ## Phases
 
-### Phase 1 — `login_class` on profiles + per-resource enforcement
+### Phase 1 — `login_class` on profiles + per-resource enforcement — ✅ Done
 
 | Deliverable | Location |
 |---|---|
@@ -338,7 +362,7 @@ integration is.)
 | GUI: disable `Secret` SSH source + pre-select `SshEngine` when brokered; brokered badge | `ConnectionProfileEditor.tsx`, `ResourcesPage.tsx` |
 | Tests: brokered profile rejects static cred attach; ca/otp profile accepted | host + vitest |
 
-### Phase 2 — Four-tier `login_class` policy + lock
+### Phase 2 — Four-tier `login_class` policy + lock — ✅ Done
 
 | Deliverable | Location |
 |---|---|
@@ -349,7 +373,7 @@ integration is.)
 | `bvault ssh-broker policy {get,set}` CLI | CLI |
 | Policy-change audit events | host |
 
-### Phase 3 — Brokered minting on the direct connect path
+### Phase 3 — Brokered minting on the direct connect path — ✅ Done (testcontainers round-trip pending)
 
 | Deliverable | Location |
 |---|---|
@@ -359,7 +383,7 @@ integration is.)
 | `session.open` carries `login_class` / `ssh_engine_mode` / `cert_serial`; correlated to the existing `ssh/sign` audit row | `session/audit.rs` |
 | Integration test (testcontainers OpenSSH w/ `TrustedUserCAKeys`): brokered `ca` round-trip; ephemeral key never persisted; OTP single-use | `gui/src-tauri/tests/` |
 
-### Phase 4 — `ssh-cert` / `ssh-otp` envelope forwarding to Rustion
+### Phase 4 — `ssh-cert` / `ssh-otp` envelope forwarding to Rustion — ✅ Done (BastionVault side; Rustion `ssh-otp` materialiser + `tests/e2e/rustion-ssh/` pending cross-repo)
 
 | Deliverable | Location |
 |---|---|

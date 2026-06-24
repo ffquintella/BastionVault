@@ -119,29 +119,43 @@ pub async fn session_open_ssh(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let v2_route: Option<ConnectRoute> = if credential_source_kind == "secret" {
-        let r = open_rustion_session_v2_ssh(
-            &state,
-            &request.resource_name,
-            &meta,
-            &profile,
-            &primary_target_host,
-            port,
-            &username,
-            &credential_source,
-        )
-        .await?;
-        match r {
-            ConnectRoute::Rustion { .. } => Some(r),
-            ConnectRoute::Direct => None,
-        }
-    } else {
-        None
-    };
+    // `secret` and `ssh-engine` sources resolve server-side on the v2
+    // path: BastionVault either injects the stored secret (`secret`) or
+    // mints + signs an ephemeral cert (`ssh-engine`, brokered) and seals
+    // it into the envelope — the GUI never holds the credential. When the
+    // policy doesn't route through a bastion, `open_rustion_session_v2_ssh`
+    // returns `Direct` and we fall back to the client-side path below
+    // (which mints locally for a direct dial).
+    let v2_route: Option<ConnectRoute> =
+        if credential_source_kind == "secret" || credential_source_kind == "ssh-engine" {
+            let r = open_rustion_session_v2_ssh(
+                &state,
+                &request.resource_name,
+                &meta,
+                &profile,
+                &primary_target_host,
+                port,
+                &username,
+                &credential_source,
+            )
+            .await?;
+            match r {
+                ConnectRoute::Rustion { .. } => Some(r),
+                ConnectRoute::Direct => None,
+            }
+        } else {
+            None
+        };
 
     // `credential` is `Some` only on the client-side path (direct dials and
     // non-secret kinds). The v2 server-side path dials the bastion with the
     // ticket and never resolves a target credential locally.
+    // Carries the resolved login-class + minted-artifact details so the
+    // direct-path `session.open` audit line (below) can stamp
+    // `login_class` / `ssh_engine_mode` / `cert_serial` / the resolved
+    // tier chain. Left `None` on the v2 server-side path (the rustion
+    // module stamps those fields server-side).
+    let mut session_audit: Option<(EffectiveLoginClassView, Option<EngineMint>)> = None;
     let (route, credential, username, on_close): (
         ConnectRoute,
         Option<SshCredential>,
@@ -150,7 +164,7 @@ pub async fn session_open_ssh(
     ) = if let Some(r) = v2_route {
         (r, None, username, None)
     } else {
-        let resolved = resolve_ssh_credential(
+        let (resolved, lc) = resolve_ssh_credential(
             &state,
             &request.resource_name,
             &profile,
@@ -159,6 +173,7 @@ pub async fn session_open_ssh(
         )
         .await?;
         let cred = resolved.credential;
+        session_audit = Some((lc, resolved.engine_mint));
         // LDAP profiles can override the profile's username with the one the
         // cred resolver returned (static_role / library set returns the
         // canonical service-account username).
@@ -304,6 +319,31 @@ pub async fn session_open_ssh(
         ),
         None => format!("ssh {username}@{host}:{port}"),
     };
+
+    // Direct-path `session.open` audit line. Stamps the resolved login
+    // class, the SSH-engine mode, and the minted cert serial so a brokered
+    // session and the `ssh/sign` issuance row that authorized it are
+    // joinable (the Rustion path stamps the equivalent fields server-side).
+    if let Some((lc, mint)) = &session_audit {
+        let (mode, serial) = match mint {
+            Some(m) => (m.mode.as_str(), m.cert_serial.as_deref().unwrap_or("")),
+            None => ("", ""),
+        };
+        log::info!(
+            target: "audit",
+            "session.open: resource={} login_class={} login_class_source={} \
+             ssh_engine_mode={} cert_serial={} login_class_chain=[{}] token={} host={}:{}",
+            request.resource_name,
+            lc.login_class,
+            lc.login_class_source,
+            mode,
+            serial,
+            lc.login_class_chain.join(","),
+            outcome.token,
+            host,
+            port,
+        );
+    }
 
     // Phase 7.4: stash the Rustion lifecycle bundle keyed by the
     // local SSH token so the spawned window can drive renew + kill.
@@ -1098,6 +1138,38 @@ pub async fn session_rustion_info(
     }))
 }
 
+/// The resolved effective SSH login class for a resource — drives the
+/// Connection-tab brokered badge / resolution chip and gates the profile
+/// editor's credential-source choices.
+#[derive(serde::Serialize, Clone)]
+pub struct ResourceLoginClassInfo {
+    pub login_class: String,
+    pub login_class_source: String,
+    pub login_class_chain: Vec<String>,
+    pub locked_at_tier: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ResourceLoginClassRequest {
+    pub resource_name: String,
+}
+
+#[tauri::command]
+pub async fn resource_login_class(
+    state: State<'_, AppState>,
+    request: ResourceLoginClassRequest,
+) -> CmdResult<ResourceLoginClassInfo> {
+    let meta = read_resource_meta(&state, &request.resource_name).await?;
+    let (rid, rtype, ags) = collect_policy_hints(&state, &request.resource_name, &meta).await;
+    let lc = read_effective_login_class(&state, &rid, &rtype, &ags).await?;
+    Ok(ResourceLoginClassInfo {
+        login_class: lc.login_class,
+        login_class_source: lc.login_class_source,
+        login_class_chain: lc.login_class_chain,
+        locked_at_tier: lc.lock_violation,
+    })
+}
+
 #[tauri::command]
 pub async fn session_close(
     state: State<'_, AppState>,
@@ -1434,6 +1506,104 @@ async fn read_effective_policy(
         transport,
         bastions,
         recording,
+        lock_violation,
+    })
+}
+
+/// Resolved SSH login-class verdict for the connect path. Mirrors the
+/// `ssh-broker/policy/effective` response.
+struct EffectiveLoginClassView {
+    login_class: String,
+    login_class_source: String,
+    /// Per-tier class contributions, in resolution order (for the
+    /// `login_class_chain` audit field).
+    login_class_chain: Vec<String>,
+    lock_violation: Option<String>,
+}
+
+/// Resolve the effective SSH login class (`shared-credential` |
+/// `brokered`) for a resource by calling `ssh-broker/policy/effective`.
+/// Defaults to `shared-credential` when the broker policy is unset, so a
+/// deployment that never configures brokering is unaffected.
+async fn read_effective_login_class(
+    state: &State<'_, AppState>,
+    resource_id: &str,
+    resource_type: &str,
+    asset_group_ids: &[String],
+) -> Result<EffectiveLoginClassView, CommandError> {
+    let mut body = Map::new();
+    if !resource_id.is_empty() {
+        body.insert("resource_id".into(), Value::String(resource_id.to_string()));
+    }
+    if !resource_type.is_empty() {
+        body.insert(
+            "resource_type".into(),
+            Value::String(resource_type.to_string()),
+        );
+    }
+    if !asset_group_ids.is_empty() {
+        body.insert(
+            "asset_group_ids".into(),
+            Value::Array(asset_group_ids.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    // Tolerate a policy-service error (e.g. an upgraded vault that never
+    // mounted `ssh-broker/`): default to `shared-credential`. The
+    // authoritative brokered control is the server-side *attach-time*
+    // guard (resource module, PolicyStore-direct), which a missing mount
+    // does not affect — a brokered resource simply can't hold a static
+    // SSH credential in the first place, so the direct-path dial has
+    // nothing to fall back to.
+    let resp = match make_request(
+        state,
+        Operation::Write,
+        "ssh-broker/policy/effective".to_string(),
+        Some(body),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!(
+                "ssh-broker/policy/effective unavailable ({e:?}); defaulting login_class to shared-credential"
+            );
+            return Ok(EffectiveLoginClassView {
+                login_class: "shared-credential".to_string(),
+                login_class_source: "default".to_string(),
+                login_class_chain: Vec::new(),
+                lock_violation: None,
+            });
+        }
+    };
+    let data = resp.and_then(|r| r.data).unwrap_or_default();
+    let login_class = data
+        .get("login_class")
+        .and_then(|v| v.as_str())
+        .unwrap_or("shared-credential")
+        .to_string();
+    let login_class_source = data
+        .get("login_class_source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default")
+        .to_string();
+    let login_class_chain = data
+        .get("login_class_chain")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let lock_violation = data.get("lock_violation").and_then(|v| match v {
+        Value::Object(m) => Some(
+            m.get("detail")
+                .and_then(|d| d.as_str())
+                .unwrap_or("ssh login_class lock violation")
+                .to_string(),
+        ),
+        _ => None,
+    });
+    Ok(EffectiveLoginClassView {
+        login_class,
+        login_class_source,
+        login_class_chain,
         lock_violation,
     })
 }
@@ -1982,6 +2152,19 @@ fn profile_username(profile: &Value) -> String {
         .to_string()
 }
 
+/// What the SSH engine minted for a brokered session. Populated only by
+/// the `ssh-engine` resolvers; used to stamp `ssh_engine_mode` +
+/// `cert_serial` on the direct-path `session.open` audit line so a
+/// session and the `ssh/sign` issuance row that authorized it are
+/// joinable.
+#[derive(Default, Clone)]
+struct EngineMint {
+    /// `ca` | `otp` (the brokered mode used).
+    mode: String,
+    /// Hex serial of the minted cert (`ca` mode only).
+    cert_serial: Option<String>,
+}
+
 struct ResolvedSshCredential {
     credential: SshCredential,
     /// When the resolver knows the canonical username (e.g.
@@ -1991,6 +2174,9 @@ struct ResolvedSshCredential {
     /// LDAP library check-out registers a cleanup hook here so
     /// `session_close` can return the account to the pool.
     on_close: Option<crate::session::SessionCleanup>,
+    /// Set by the `ssh-engine` resolvers (brokered minting); `None` for
+    /// static / ldap / pki sources.
+    engine_mint: Option<EngineMint>,
 }
 
 async fn resolve_ssh_credential(
@@ -1999,12 +2185,35 @@ async fn resolve_ssh_credential(
     profile: &Value,
     meta: &Map<String, Value>,
     operator_credential: Option<&OperatorCredential>,
-) -> Result<ResolvedSshCredential, CommandError> {
+) -> Result<(ResolvedSshCredential, EffectiveLoginClassView), CommandError> {
     let cs = profile.get("credential_source").ok_or_else(|| {
         CommandError::from("profile is missing credential_source".to_string())
     })?;
     let kind = cs.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-    match kind {
+
+    // Brokered login-class enforcement (direct path). If the resource
+    // resolves to `brokered`, every SSH login must be minted per-connect
+    // from the SSH engine; a `secret` (or any non-ssh-engine) source is
+    // rejected fail-closed — never silently downgraded.
+    let (rid, rtype, ags) = collect_policy_hints(state, resource_name, meta).await;
+    let lc = read_effective_login_class(state, &rid, &rtype, &ags).await?;
+    if lc.login_class == "brokered" {
+        if let Some(detail) = lc.lock_violation.as_ref() {
+            return Err(CommandError::from(format!("login_class_locked: {detail}")));
+        }
+        if kind != "ssh-engine" {
+            return Err(CommandError::from(format!(
+                "brokered_requires_ssh_engine: resource `{resource_name}` is brokered \
+                 (login_class via tier `{}`); its connection profile must use an \
+                 `ssh-engine` credential source, not `{}`. Every SSH login to a brokered \
+                 resource is minted per-connect from the SSH engine.",
+                lc.login_class_source,
+                if kind.is_empty() { "(unset)" } else { kind }
+            )));
+        }
+    }
+
+    let resolved = match kind {
         "secret" => resolve_secret_ssh(state, resource_name, cs).await,
         "ldap" => resolve_ldap_ssh(state, cs, operator_credential).await,
         "pki" => resolve_pki_ssh(state, resource_name, cs).await,
@@ -2012,7 +2221,8 @@ async fn resolve_ssh_credential(
         other => Err(CommandError::from(format!(
             "unknown credential source `{other}`"
         ))),
-    }
+    }?;
+    Ok((resolved, lc))
 }
 
 /// Resolve an `ssh-engine` source. Two working modes today:
@@ -2133,6 +2343,13 @@ async fn sign_ssh_engine_ca(
             ))
         })?
         .to_string();
+    // Capture the cert serial so the session can be joined to the
+    // `ssh/sign` issuance audit row.
+    let cert_serial = data
+        .get("serial_number")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
 
     Ok(ResolvedSshCredential {
         credential: SshCredential::Cert {
@@ -2143,6 +2360,10 @@ async fn sign_ssh_engine_ca(
         // second-guess the profile's username here.
         effective_username: None,
         on_close: None,
+        engine_mint: Some(EngineMint {
+            mode: "ca".into(),
+            cert_serial,
+        }),
     })
 }
 
@@ -2221,6 +2442,10 @@ async fn mint_ssh_engine_otp(
         credential: SshCredential::Password(Zeroizing::new(otp)),
         effective_username,
         on_close: None,
+        engine_mint: Some(EngineMint {
+            mode: "otp".into(),
+            cert_serial: None,
+        }),
     })
 }
 
@@ -2252,6 +2477,7 @@ async fn resolve_pki_ssh(
         // log in as. Profile.username stays authoritative.
         effective_username: None,
         on_close: None,
+        engine_mint: None,
     })
 }
 
@@ -2441,6 +2667,7 @@ async fn resolve_secret_ssh(
             .map(String::from)
             .filter(|s| !s.is_empty()),
         on_close: None,
+        engine_mint: None,
     })
 }
 
@@ -2494,6 +2721,7 @@ async fn resolve_ldap_ssh(
                 credential: SshCredential::Password(Zeroizing::new(oc.password.clone())),
                 effective_username: Some(oc.username.clone()),
                 on_close: None,
+                engine_mint: None,
             })
         }
         "static_role" => {
@@ -2534,6 +2762,7 @@ async fn resolve_ldap_ssh(
                 credential: SshCredential::Password(Zeroizing::new(password)),
                 effective_username: Some(username),
                 on_close: None,
+                engine_mint: None,
             })
         }
         "library_set" => {
@@ -2589,6 +2818,7 @@ async fn resolve_ldap_ssh(
                         lease_id,
                     },
                 }),
+                engine_mint: None,
             })
         }
         other => Err(CommandError::from(format!(

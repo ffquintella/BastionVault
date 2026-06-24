@@ -451,6 +451,34 @@ PUT    /v1/resource-group/reindex
 `PUT /v1/resource-group/reindex` rebuilds both reverse indexes
 from primary records — recovery path for torn writes.
 
+### SSH Login Brokering Policy
+
+Four-tier `login_class` policy (`shared-credential` | `brokered`) on the
+`ssh-broker/` logical mount. Pinning a resource / type / asset-group to
+`brokered` forbids storing a static SSH credential on it and forces every
+SSH login through the SSH engine. Resolution is most-restrictive-wins; a
+locked upstream tier returns `403 login_class_locked`. See
+[`docs/ssh-login-brokering.md`](ssh-login-brokering.md).
+
+~~~
+GET    /v2/ssh-broker/policy/global                 # login_class_default + login_class_lock (root-gated)
+PUT    /v2/ssh-broker/policy/global
+GET    /v2/ssh-broker/policy/type/{type}            # login_class + lock
+PUT    /v2/ssh-broker/policy/type/{type}
+DELETE /v2/ssh-broker/policy/type/{type}
+GET    /v2/ssh-broker/policy/asset-group/{id}       # login_class + priority + lock
+PUT    /v2/ssh-broker/policy/asset-group/{id}
+DELETE /v2/ssh-broker/policy/asset-group/{id}
+GET    /v2/ssh-broker/policy/resource/{id}          # login_class (writable when no upstream tier is locked)
+PUT    /v2/ssh-broker/policy/resource/{id}
+DELETE /v2/ssh-broker/policy/resource/{id}
+POST   /v2/ssh-broker/policy/effective              # resolve effective class for {resource_id, resource_type, asset_group_ids}
+~~~
+
+Attaching a static SSH credential (`private_key` / `password`) to a
+brokered resource returns `409 brokered_resource_no_static_credential`.
+CLI: `bvault ssh-broker policy {get,set}`.
+
 ## Secret Operations
 
 All secret operations go through logical paths mounted by secrets engines.

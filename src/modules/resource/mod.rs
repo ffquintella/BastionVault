@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::{
+    bv_error_response_status,
     context::Context,
     core::Core,
     errors::RvError,
@@ -44,6 +45,22 @@ Each resource metadata write is recorded in an append-only history log
 the previous value into a versioned entry so the full change history is
 available for audit.
 "#;
+
+/// True when a resource-secret body looks like a *static SSH login
+/// credential* — i.e. it carries a non-empty `private_key` or `password`
+/// field, exactly the shape the SSH `secret` credential source feeds to
+/// the dialler (`resolve_secret_ssh`). Brokered resources reject these at
+/// attach time. A bare `passphrase` (a modifier, not a credential) does
+/// not count on its own.
+fn static_ssh_credential_shape(body: &Map<String, Value>) -> bool {
+    let nonempty = |k: &str| {
+        body.get(k)
+            .and_then(|v| v.as_str())
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    };
+    nonempty("private_key") || nonempty("password")
+}
 
 // Storage key prefixes within this mount's barrier view
 const META_PREFIX: &str = "meta/";
@@ -890,6 +907,63 @@ impl ResourceBackendInner {
         }
     }
 
+    /// Resolve the effective SSH login class for a resource, walking the
+    /// four-tier `ssh-broker` policy. Returns `SharedCredential` (the
+    /// default) when the ssh-broker module isn't registered or no tier is
+    /// set — so a deployment that never configures brokering is
+    /// unaffected. The resource's classification hints (type + asset-group
+    /// memberships) come from the resource record and the resource-group
+    /// reverse index.
+    async fn resolve_login_class(
+        &self,
+        req: &Request,
+        resource: &str,
+    ) -> Result<crate::modules::ssh_broker::policy::EffectiveLoginClass, RvError> {
+        use crate::modules::ssh_broker::policy::{EffectiveLoginClass, LoginClass};
+
+        let default = || EffectiveLoginClass {
+            login_class: LoginClass::SharedCredential,
+            login_class_source: "default",
+            locked_by: Vec::new(),
+            locked_at_tier: None,
+            chain: Vec::new(),
+            lock_violation: None,
+        };
+
+        let Some(sb) = self
+            .core
+            .module_manager
+            .get_module::<crate::modules::ssh_broker::SshBrokerModule>("ssh-broker")
+        else {
+            return Ok(default());
+        };
+        let Some(pol) = sb.policy_store() else {
+            return Ok(default());
+        };
+
+        // Resource type from the metadata record.
+        let resource_type = match req.storage_get(&format!("{META_PREFIX}{resource}")).await? {
+            Some(e) => serde_json::from_slice::<Map<String, Value>>(&e.value)
+                .ok()
+                .and_then(|m| m.get("type").and_then(|v| v.as_str().map(String::from)))
+                .unwrap_or_default(),
+            None => String::new(),
+        };
+
+        // Asset-group memberships from the resource-group reverse index.
+        let asset_groups = match self
+            .core
+            .module_manager
+            .get_module::<crate::modules::resource_group::ResourceGroupModule>("resource-group")
+            .and_then(|m| m.store())
+        {
+            Some(store) => store.groups_for_resource(resource).await.unwrap_or_default(),
+            None => Vec::new(),
+        };
+
+        pol.resolve_for(&resource_type, &asset_groups, resource).await
+    }
+
     pub async fn handle_secret_write(
         &self,
         _backend: &dyn Backend,
@@ -899,6 +973,29 @@ impl ResourceBackendInner {
         let resource = resolve_resource_name(req, &raw).await?;
         let key_name = req.get_data("key")?.as_str().unwrap().to_string();
         let body = req.body.as_ref().ok_or(RvError::ErrRequestNoDataField)?.clone();
+
+        // Brokered-resource enforcement: a resource pinned to `brokered`
+        // (at any tier) may not carry a *static SSH credential*. Reject at
+        // attach time — not merely hidden in the GUI — so the control is
+        // enforceable, not advisory. A static secret carrying a
+        // `private_key` or `password` is exactly what the SSH `secret`
+        // credential source would hand the dialler; on a brokered resource
+        // every login must be minted per-connect from the SSH engine.
+        if static_ssh_credential_shape(&body) {
+            let eff = self.resolve_login_class(req, &resource).await?;
+            if eff.login_class == crate::modules::ssh_broker::policy::LoginClass::Brokered {
+                return Err(bv_error_response_status!(
+                    409,
+                    &format!(
+                        "brokered_resource_no_static_credential: resource `{resource}` is \
+                         brokered (login_class via tier `{}`); a static SSH credential may \
+                         not be attached — every SSH login is minted per-connect from the \
+                         SSH engine. Bind an `ssh-engine` credential source instead.",
+                        eff.login_class_source
+                    )
+                ));
+            }
+        }
 
         let curr_key = format!("{SECRET_PREFIX}{resource}/{key_name}");
         let smeta_key = format!("{SMETA_PREFIX}{resource}/{key_name}");
@@ -1177,5 +1274,117 @@ mod tests {
         assert_eq!(a.len(), 20);
         assert_eq!(b.len(), 20);
         assert!(a < b, "expected {a} < {b}");
+    }
+
+    #[test]
+    fn static_ssh_credential_shape_detects_key_and_password() {
+        assert!(static_ssh_credential_shape(&obj(json!({ "private_key": "x" }))));
+        assert!(static_ssh_credential_shape(&obj(json!({ "password": "p" }))));
+        // Empty values don't count as a credential.
+        assert!(!static_ssh_credential_shape(&obj(json!({ "password": "" }))));
+        // A bare passphrase or a generic KV blob is not a static credential.
+        assert!(!static_ssh_credential_shape(&obj(json!({ "passphrase": "p" }))));
+        assert!(!static_ssh_credential_shape(&obj(json!({ "token": "t" }))));
+    }
+}
+
+#[cfg(test)]
+mod brokered_enforcement_tests {
+    use crate::test_utils::TestHttpServer;
+    use serde_json::json;
+
+    /// End-to-end proof of the brokered attach guard + the four-tier
+    /// login-class lock:
+    ///   - A resource whose type is pinned `brokered` rejects a static SSH
+    ///     credential (private_key / password) with 409.
+    ///   - A resource on the default (`shared-credential`) tier still
+    ///     accepts a static credential.
+    ///   - A per-resource attempt to weaken a locked global `brokered`
+    ///     floor is refused with 403 `login_class_locked`.
+    #[maybe_async::test(
+        feature = "sync_handler",
+        async(all(not(feature = "sync_handler")), tokio::test)
+    )]
+    async fn test_brokered_attach_guard_and_lock() {
+        let mut server = TestHttpServer::new("test_brokered_attach_guard", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+
+        // Pin the `database` resource type to brokered.
+        let (st, _) = server
+            .write(
+                "ssh-broker/policy/type/database",
+                json!({ "login_class": "brokered", "lock": true }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert!(st == 200 || st == 204, "type policy write status: {st}");
+
+        // Create a database-typed resource and a web-typed one.
+        for (name, ty) in [("db01", "database"), ("web01", "web")] {
+            let (st, _) = server
+                .write(
+                    &format!("resources/resources/{name}"),
+                    json!({ "name": name, "type": ty }).as_object().cloned(),
+                    Some(&root),
+                )
+                .unwrap();
+            assert!(st == 200 || st == 204, "resource {name} write status: {st}");
+        }
+
+        // The effective class for db01 resolves to brokered via the type tier.
+        let (st, resp) = server
+            .write(
+                "ssh-broker/policy/effective",
+                json!({ "resource_id": "db01", "resource_type": "database" })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert_eq!(st, 200, "effective resolve status: {st} {resp:?}");
+        assert_eq!(resp["data"]["login_class"], json!("brokered"), "{resp:?}");
+
+        // Attaching a static SSH credential to the brokered resource → 409.
+        let (st, resp) = server
+            .write(
+                "resources/secrets/db01/sshkey",
+                json!({ "private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nx\n" })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert_eq!(st, 409, "brokered attach must be refused: {resp:?}");
+
+        // The same secret on a shared-credential resource succeeds.
+        let (st, _) = server
+            .write(
+                "resources/secrets/web01/sshkey",
+                json!({ "password": "hunter2" }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert!(st == 200 || st == 204, "shared-credential attach status: {st}");
+
+        // Lock the global tier at brokered, then try to relax it per-resource.
+        let (st, _) = server
+            .write(
+                "ssh-broker/policy/global",
+                json!({ "login_class_default": "brokered", "login_class_lock": true })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert!(st == 200 || st == 204, "global lock write status: {st}");
+        let (st, resp) = server
+            .write(
+                "ssh-broker/policy/resource/db01",
+                json!({ "login_class": "shared-credential" }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert_eq!(st, 403, "relaxing a locked tier must be refused: {resp:?}");
     }
 }

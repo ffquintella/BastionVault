@@ -376,6 +376,25 @@ export type ResourceTypeConfig = Record<string, ResourceTypeDef>;
 
 export type SessionProtocol = "ssh" | "rdp";
 
+/**
+ * SSH login class (see features/ssh-resource-login-brokering.md):
+ *   - `shared-credential` — a static key/password lives on the resource
+ *     (the `secret` source); the historical default.
+ *   - `brokered` — every login is minted per-connect from the SSH engine
+ *     (`ssh-engine` source). A brokered resource may not hold a static
+ *     SSH credential; the editor disables the `secret` source for it.
+ */
+export type SshLoginClass = "shared-credential" | "brokered";
+
+/** Resolved effective login class for a resource, from
+ *  `ssh-broker/policy/effective`. */
+export interface EffectiveLoginClass {
+  login_class: SshLoginClass;
+  login_class_source: string;
+  login_class_chain: string[];
+  locked_at_tier?: string | null;
+}
+
 export type CredentialSource =
   | { kind: "secret"; secret_id: string }
   | {
@@ -457,6 +476,14 @@ export interface ConnectionProfile {
    * a per-profile `off` upward.
    */
   recording?: "always" | "off" | "input-redacted";
+  /**
+   * SSH only — the login class this profile is built for. When the
+   * resource resolves to `brokered`, the editor forces `ssh-engine` and
+   * disables the `secret` source. Optional; the effective class is
+   * resolved server-side from the four-tier policy at connect time and
+   * this field is only an editor hint. Ignored for RDP profiles.
+   */
+  login_class?: SshLoginClass;
 }
 
 /**

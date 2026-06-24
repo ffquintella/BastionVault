@@ -38,6 +38,7 @@ pub enum Commands {
     Secrets(command::secrets::Secrets),
     Exchange(command::exchange::Exchange),
     Rustion(command::rustion::Rustion),
+    SshBroker(command::ssh_broker::SshBroker),
     #[cfg(unix)]
     Ferrogate(command::ferrogate::Ferrogate),
 }
@@ -59,6 +60,7 @@ impl Commands {
             Commands::Secrets(secrets) => secrets.execute(),
             Commands::Exchange(exchange) => exchange.execute(),
             Commands::Rustion(rustion) => rustion.execute(),
+            Commands::SshBroker(ssh_broker) => ssh_broker.execute(),
             #[cfg(unix)]
             Commands::Ferrogate(ferrogate) => ferrogate.execute(),
         }

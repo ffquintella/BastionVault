@@ -56,6 +56,11 @@ pub struct SessionOpenRequest {
     pub credential_username: String,
     #[serde(with = "serde_bytes_compat")]
     pub credential_material: Vec<u8>,
+    /// For `ssh-cert`: the signed OpenSSH certificate text, sealed into
+    /// the envelope's `credential.extra["cert"]`. `material` carries the
+    /// ephemeral private key. Empty for every other kind.
+    #[serde(default)]
+    pub credential_cert: Option<String>,
 
     /// Session policy from the profile. Rustion clamps `ttl_secs` to
     /// the authority record's `max_session_secs` regardless.
@@ -421,6 +426,7 @@ fn build_open_envelope(
             kind: request.credential_kind.clone(),
             username: request.credential_username.clone(),
             material: request.credential_material.clone(),
+            cert: request.credential_cert.clone(),
         },
         request.ttl_secs,
         request.max_renewals,

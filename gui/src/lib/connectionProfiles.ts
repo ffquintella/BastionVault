@@ -11,6 +11,7 @@ import type {
   CredentialSource,
   ResourceSecretShape,
   SessionProtocol,
+  SshLoginClass,
 } from "./types";
 
 /** Default port per (protocol). Per-OS-type defaults that override
@@ -192,8 +193,62 @@ export function isLaunchableProfile(p: ConnectionProfile): boolean {
     case "pki":
       return true;
     case "ssh-engine":
-      return false;
+      // Brokered minting ships (CA-signed cert + OTP). PQC cert auth is
+      // still not launchable from the in-app client (russh can't present
+      // an ML-DSA-65 cert); the connect path rejects it with a clear
+      // message, but the other modes launch.
+      return p.credential_source.mode !== "pqc";
   }
+}
+
+/**
+ * Brokered login-class gate for the profile editor. Given the resolved
+ * effective login class for the resource, returns whether the `secret`
+ * SSH source must be disabled (brokered forbids a static credential) and
+ * which credential-source kind the editor should force/pre-select.
+ *
+ * Pure + synchronous so the editor and unit tests share one source of
+ * truth; the authoritative enforcement is server-side
+ * (`brokered_requires_ssh_engine` on connect, `409` on credential attach).
+ */
+export function loginClassGate(loginClass: SshLoginClass | undefined): {
+  brokered: boolean;
+  /** Credential-source kinds the editor should offer. */
+  allowedKinds: CredentialSource["kind"][];
+  /** Kind to pre-select when the current one is disallowed. */
+  forcedKind: CredentialSource["kind"] | null;
+} {
+  if (loginClass === "brokered") {
+    return {
+      brokered: true,
+      allowedKinds: ["ssh-engine"],
+      forcedKind: "ssh-engine",
+    };
+  }
+  return {
+    brokered: false,
+    allowedKinds: ["secret", "ldap", "ssh-engine", "pki"],
+    forcedKind: null,
+  };
+}
+
+/**
+ * Validate a profile against a resolved effective login class. Returns
+ * null when the profile is allowed, or a human-readable error when a
+ * brokered resource is paired with a non-`ssh-engine` (static-capable)
+ * source. Mirrors the host's `brokered_requires_ssh_engine` rejection so
+ * the editor blocks the save before the connect attempt does.
+ */
+export function validateProfileForLoginClass(
+  p: ConnectionProfile,
+  loginClass: SshLoginClass | undefined,
+): string | null {
+  if (p.protocol !== "ssh") return null;
+  if (loginClass !== "brokered") return null;
+  if (p.credential_source.kind !== "ssh-engine") {
+    return "This resource is brokered: SSH logins must use the SSH-engine credential source (no static credential).";
+  }
+  return null;
 }
 
 /**

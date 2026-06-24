@@ -486,6 +486,7 @@ pub fn run() {
             commands::connect::session_resize,
             commands::connect::session_close,
             commands::connect::session_rustion_info,
+            commands::connect::resource_login_class,
             commands::ldap::ldap_list_static_roles,
             commands::ldap::ldap_read_static_role,
             commands::ldap::ldap_write_static_role,

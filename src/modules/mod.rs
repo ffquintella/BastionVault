@@ -25,6 +25,7 @@ pub mod resource;
 pub mod resource_group;
 pub mod rustion;
 pub mod ssh;
+pub mod ssh_broker;
 pub mod system;
 pub mod totp;
 pub mod transit;
