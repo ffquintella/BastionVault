@@ -10,9 +10,9 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 |---|---|
 | Done | 49 |
 | Partial | 1 |
-| Todo | 8 |
+| Todo | 9 |
 | Removed | 1 |
-| **Total tracked features** | **59** |
+| **Total tracked features** | **60** |
 
 Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-and-distribution.md)) — sequenced into four release waves; Waves 1 + 2 shipped (with Linux GUI bundler caveat), Wave 3 next.
 
@@ -78,6 +78,7 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | `[x]` Done | File Resources (binary blobs + sync targets) | [spec](features/file-resources.md) — local-FS + SMB + SFTP + SCP + periodic re-sync + sync-on-write. |
 | `[x]` Done | First-class `firewall` / `switch` types + refined `database` | [spec](features/resource-types-firewall-switch-db.md) — three phases shipped; closed-enum DB engines, vendor / HA-role / layer / firmware fields. |
 | `[x]` Done | Resource Connect — in-app SSH / RDP for server resources | [spec](features/resource-connect.md) — Phases 1–7 incl. ⌘K palette, recently-connected list, Connect-policy on `ResourceTypeDef`. SSH × {Secret, LDAP, PKI, **SSH engine (CA + OTP)**}, RDP × {Secret, LDAP, PKI}. |
+| `[ ]` Todo | SSH Login Brokering for Resources (cert-signing / OTP, no shared credential) | [spec](features/ssh-resource-login-brokering.md) — adds a per-resource `login_class` (`shared-credential` \| `brokered`) with a four-tier lockable policy, so a resource / type / asset group can be **pinned to brokered**: every SSH login is a per-connect minted artifact (CA / PQC signed cert or OTP) from the SSH engine, never a stored credential. Forwards the minted cert (ephemeral key + signed cert) to **Rustion** via new BVRG-v1 `ssh-cert` / `ssh-otp` envelope kinds so the bastion authenticates to the target on the operator's behalf — retiring the "non-password SSH fails closed under `rustion-required`" gap. 5 phases, all Todo. Cross-repo Rustion materialiser tracked in lockstep. |
 
 ### Networking & TLS
 

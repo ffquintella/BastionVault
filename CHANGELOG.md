@@ -45,6 +45,10 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+- **Spec: SSH Login Brokering for Resources** (`features/ssh-resource-login-brokering.md`) -- design for a per-resource `login_class` (`shared-credential` | `brokered`) with a four-tier lockable policy (global / resource-type / asset-group / resource), letting an admin **mandate** that every SSH login to a resource is a per-connect minted artifact (CA / PQC signed certificate or OTP) from the SSH secret engine instead of a stored, shareable credential. Brokered resources refuse to store a static SSH credential (`409 brokered_resource_no_static_credential`), and the ephemeral private key is minted in-process, never persisted, and never reaches the operator's workstation. The spec also adds new BVRG-v1 envelope credential kinds `ssh-cert` (ephemeral key + signed cert) and `ssh-otp` so the minted artifact is **forwarded to Rustion** and the bastion authenticates to the target on the operator's behalf — retiring the documented "non-password SSH fails closed under `rustion-required`" gap. 5 phases, all Todo; the matching Rustion control-plane session materialiser is tracked cross-repo. Roadmap row added under Resources (`roadmap.md`).
+
 ## [0.18.6] - 2026-06-24
 
 ### Added
