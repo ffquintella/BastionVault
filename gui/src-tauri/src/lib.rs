@@ -257,6 +257,8 @@ pub fn run() {
             commands::scheduled_exports::scheduled_exports_delete,
             commands::scheduled_exports::scheduled_exports_runs,
             commands::scheduled_exports::scheduled_exports_run_now,
+            commands::scheduled_exports::scheduled_exports_backups_list,
+            commands::scheduled_exports::scheduled_exports_backup_read,
             // Plugins
             commands::plugins::plugins_list,
             commands::plugins::plugins_get,

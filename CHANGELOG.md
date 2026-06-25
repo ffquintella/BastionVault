@@ -45,6 +45,16 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.19.2] - 2026-06-25
+
+### Added
+
+- **GUI: list and restore scheduled-backup files** (`gui/src-tauri/src/commands/scheduled_exports.rs`, `gui/src/lib/api.ts`, `gui/src/routes/ExchangePage.tsx`) -- the Import/Export → Scheduled backups tab previously showed only a schedule's destination path; the operator had to leave the app to find the `.bvx`/`.json` files the cron runner had written and re-upload one through the Import tab to restore it. Each schedule card now has a **Backups** button that opens a modal listing the backup files present in that schedule's local destination directory (name, format, size, modified time, newest first), each with a **Restore** button. Restore reuses the existing import pipeline: the chosen file is read off disk and run through `exchange_preview` (classified new/identical/conflict summary) then `exchange_apply` under a selectable conflict policy (skip/overwrite/rename), prompting for the `.bvx` password when needed. Backed by two new embedded-only Tauri commands — `scheduled_exports_backups_list` (scans the destination dir, ignoring temp/non-backup files) and `scheduled_exports_backup_read` (reads a single file as base64, with file-name traversal guards); both fail fast with a clear message in remote mode since the files live on the host's filesystem.
+
+### Fixed
+
+- **GUI: gate resource Files and Connection controls on permission instead of clicking through to a 403** (`gui/src/routes/ResourcesPage.tsx`) -- on a resource a user could only read (e.g. via a share), the **Files** tab still tried to list files and surfaced a raw `HTTP 403: Permission denied` toast, and the **Connection** tab rendered the *Add profile* / *Edit* / *Delete* / *Set default* buttons fully enabled even though saving would be denied. The Files panel now treats a blanket 403 on the listing as "no file access" and renders a quiet *No access to files* notice rather than an error toast (other errors still surface). The Connection panel resolves the caller's write capability via a new `useCanWriteResource` hook and disables the mutation controls (with an explanatory tooltip and a *Read-only access* banner) when the caller can't modify the resource; **Connect** stays available since launching a session is a separate capability. The **Info** tab's *Edit* / *Delete* buttons are gated by the same hook. Because `sys/capabilities-self` is evaluated without identity context and so can't see ownership- or admin-granted access, the hook mirrors the Sharing card's model and also treats an admin or the resource owner as allowed, avoiding a false-disable for the people who legitimately own the resource.
+
 ## [0.19.1] - 2026-06-24
 
 ### Added

@@ -10,8 +10,9 @@
 //! failed with "Vault not open" whenever the GUI was connected to a
 //! remote server (where `AppState::vault` is always `None`).
 
+use base64::Engine;
 use bastion_vault::scheduled_exports::{
-    runner, RunRecord, RunStatus, Schedule, ScheduleInput, ScheduleStore,
+    runner, DestinationKind, RunRecord, RunStatus, Schedule, ScheduleInput, ScheduleStore,
 };
 use bv_client::Operation;
 use serde::Serialize;
@@ -268,4 +269,174 @@ pub async fn scheduled_exports_run_now(
         .append_run(core.barrier.as_storage(), &record)
         .await;
     Ok(record)
+}
+
+// ── Backup file discovery + restore ──────────────────────────────────────
+//
+// The cron runner writes `{schedule_id}-{timestamp}.{bvx|json}` files to the
+// schedule's local destination directory (see
+// `bastion_vault::scheduled_exports::runner::write_local`). These commands
+// let the GUI enumerate those produced files and read one back as bytes so it
+// can be fed through the existing `exchange_preview` / `exchange_apply` import
+// flow — i.e. a restore.
+//
+// Both are embedded-only: they touch the local filesystem of the BastionVault
+// host. In remote mode the backups live on the server's disk, unreachable from
+// the GUI process, so the commands fail fast with a clear message rather than
+// the misleading "Vault not open".
+
+#[derive(Debug, Serialize)]
+pub struct BackupFile {
+    pub name: String,
+    pub size_bytes: u64,
+    /// RFC3339 last-modified timestamp, when the platform reports one.
+    pub modified: Option<String>,
+    /// "bvx" | "json", derived from the file extension.
+    pub format: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BackupListResult {
+    /// The resolved local destination directory that was scanned.
+    pub dir: String,
+    pub files: Vec<BackupFile>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BackupReadResult {
+    /// Base64-encoded raw file bytes (`.bvx` envelope or plaintext JSON).
+    pub file_b64: String,
+    /// "bvx" | "json", derived from the file extension.
+    pub format: String,
+}
+
+/// Resolve a schedule's `local_path` destination, erroring if the schedule
+/// uses a non-local destination kind.
+fn local_dir(dest: &DestinationKind) -> CmdResult<&str> {
+    match dest {
+        DestinationKind::LocalPath { path } => Ok(path.as_str()),
+    }
+}
+
+/// Map a file name's extension to a known export format, or `None` for files
+/// that are not backups we recognise.
+fn format_of(name: &str) -> Option<&'static str> {
+    if name.ends_with(".bvx") {
+        Some("bvx")
+    } else if name.ends_with(".json") {
+        Some("json")
+    } else {
+        None
+    }
+}
+
+/// Load a schedule by id from the open embedded vault.
+async fn get_schedule(state: &State<'_, AppState>, id: &str) -> CmdResult<Schedule> {
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let store = ScheduleStore::new();
+    store
+        .get(core.barrier.as_storage(), id)
+        .await
+        .map_err(CommandError::from)?
+        .ok_or_else(|| "schedule not found".into())
+}
+
+/// List the backup files present in a schedule's local destination directory,
+/// newest first. Files that are not `.bvx`/`.json` are ignored.
+#[tauri::command]
+pub async fn scheduled_exports_backups_list(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<BackupListResult> {
+    if is_remote(&state).await {
+        return Err(
+            "Listing backup files is only available when running an embedded vault.".into(),
+        );
+    }
+    let sched = get_schedule(&state, &id).await?;
+    let dir = local_dir(&sched.destination)?.to_string();
+
+    let mut files: Vec<BackupFile> = Vec::new();
+    let read_dir = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        // A directory that does not exist yet (no run has fired) is not an
+        // error — it just means there are no backups to list.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(BackupListResult { dir, files })
+        }
+        Err(e) => return Err(format!("cannot read {dir}: {e}").into()),
+    };
+
+    for entry in read_dir.flatten() {
+        let meta = match entry.metadata() {
+            Ok(m) if m.is_file() => m,
+            _ => continue,
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // Skip in-flight temp files written by the atomic-rename path.
+        if name.starts_with('.') {
+            continue;
+        }
+        let Some(format) = format_of(&name) else { continue };
+        let modified = meta
+            .modified()
+            .ok()
+            .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+        files.push(BackupFile {
+            name,
+            size_bytes: meta.len(),
+            modified,
+            format: format.to_string(),
+        });
+    }
+
+    // Newest first: by modified time when known, then file name descending so
+    // the timestamp-suffixed runner names fall in chronological order.
+    files.sort_by(|a, b| {
+        b.modified
+            .cmp(&a.modified)
+            .then_with(|| b.name.cmp(&a.name))
+    });
+
+    Ok(BackupListResult { dir, files })
+}
+
+/// Read a single backup file from a schedule's local destination directory
+/// and return its bytes base64-encoded, ready for `exchange_preview`.
+///
+/// `filename` must be a bare file name within the destination directory;
+/// any path separators or `..` components are rejected to prevent traversal
+/// outside the configured backup directory.
+#[tauri::command]
+pub async fn scheduled_exports_backup_read(
+    state: State<'_, AppState>,
+    id: String,
+    filename: String,
+) -> CmdResult<BackupReadResult> {
+    if is_remote(&state).await {
+        return Err(
+            "Restoring backup files is only available when running an embedded vault.".into(),
+        );
+    }
+    if filename.is_empty()
+        || filename.contains('/')
+        || filename.contains('\\')
+        || filename.contains("..")
+    {
+        return Err("invalid backup file name".into());
+    }
+    let format = format_of(&filename)
+        .ok_or("backup file must be a .bvx or .json file")?
+        .to_string();
+
+    let sched = get_schedule(&state, &id).await?;
+    let dir = local_dir(&sched.destination)?;
+    let path = std::path::Path::new(dir).join(&filename);
+
+    let bytes = std::fs::read(&path)
+        .map_err(|e| CommandError::from(format!("cannot read backup file: {e}")))?;
+    let file_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(BackupReadResult { file_b64, format })
 }

@@ -1312,6 +1312,34 @@ export const scheduledExportsRuns = (id: string) =>
 export const scheduledExportsRunNow = (id: string) =>
   invoke<RunRecord>("scheduled_exports_run_now", { id });
 
+// Backup files produced by a schedule's runs, discovered on disk in its
+// local destination directory. Embedded-mode only.
+export interface BackupFile {
+  name: string;
+  size_bytes: number;
+  /** RFC3339 last-modified timestamp, when the platform reports one. */
+  modified: string | null;
+  format: ScheduleFormat;
+}
+
+export interface BackupListResult {
+  /** The resolved local destination directory that was scanned. */
+  dir: string;
+  files: BackupFile[];
+}
+
+export interface BackupReadResult {
+  /** Base64-encoded raw file bytes, ready for `exchangePreview`. */
+  file_b64: string;
+  format: ScheduleFormat;
+}
+
+export const scheduledExportsBackupsList = (id: string) =>
+  invoke<BackupListResult>("scheduled_exports_backups_list", { id });
+
+export const scheduledExportsBackupRead = (id: string, filename: string) =>
+  invoke<BackupReadResult>("scheduled_exports_backup_read", { id, filename });
+
 // ── Plugins (admin) ───────────────────────────────────────────────────────
 //
 // WASM plugin catalog management. See `features/plugin-system.md`.

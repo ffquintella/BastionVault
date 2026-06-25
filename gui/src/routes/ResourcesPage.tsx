@@ -790,6 +790,12 @@ function ResourceInfoCard({ resource, typeDef, onUpdate, onDelete, toast }: {
 }) {
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<Record<string, unknown>>({ ...resource });
+  // Gate Edit/Delete on the caller's write access so a read-only viewer
+  // (e.g. shared read) sees them disabled rather than clicking through
+  // to a 403. `null` (loading) leaves them enabled to avoid a flicker.
+  const canWrite = useCanWriteResource(String(resource.name ?? ""));
+  const readOnly = canWrite === false;
+  const readOnlyTitle = "You don't have permission to modify this resource.";
 
   function updateField(key: string, value: unknown) {
     setForm((prev) => {
@@ -826,8 +832,8 @@ function ResourceInfoCard({ resource, typeDef, onUpdate, onDelete, toast }: {
     return (
       <Card actions={
         <div className="flex gap-2">
-          <Button size="sm" variant="ghost" onClick={() => { setForm({ ...resource }); setEditing(true); }}>Edit</Button>
-          <Button size="sm" variant="danger" onClick={onDelete}>Delete</Button>
+          <Button size="sm" variant="ghost" disabled={readOnly} title={readOnly ? readOnlyTitle : undefined} onClick={() => { setForm({ ...resource }); setEditing(true); }}>Edit</Button>
+          <Button size="sm" variant="danger" disabled={readOnly} title={readOnly ? readOnlyTitle : undefined} onClick={onDelete}>Delete</Button>
         </div>
       }>
         <div className="grid grid-cols-2 gap-4 text-sm">
@@ -1087,6 +1093,61 @@ function useCanReadSecrets(resourceName: string): boolean | null {
   return canRead;
 }
 
+/**
+ * Resolve whether the caller may modify a resource's metadata (e.g. its
+ * connection profiles). Returns `null` while loading, `true`/`false`
+ * once known.
+ *
+ * `capabilities-self` only reports policy-based capabilities — it is
+ * evaluated against a synthetic request with no identity, so it can NOT
+ * see access granted by resource ownership or an `owner`-scoped rule.
+ * We therefore mirror the Sharing card's authorization model and treat
+ * an admin or the resource owner as allowed even when the bare policy
+ * check comes back empty. The server still enforces the real boundary;
+ * this only governs whether the GUI offers the edit controls.
+ *
+ * Fails toward `false` on a denied policy check so read-only callers
+ * (the common case: a share grants them read but not write) see the
+ * mutation controls disabled rather than enabled-then-403.
+ */
+function useCanWriteResource(resourceName: string): boolean | null {
+  const policies = useAuthStore((s) => s.policies);
+  const entityId = useAuthStore((s) => s.entityId);
+  const isAdmin = policies.some((p) => p === "root" || p === "admin");
+  const [allowed, setAllowed] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (isAdmin) {
+      setAllowed(true);
+      return;
+    }
+    let cancelled = false;
+    setAllowed(null);
+    const path = `resources/resources/${resourceName}`;
+    Promise.all([
+      api
+        .capabilitiesSelf([path])
+        .then((r) => r.paths[path] ?? [])
+        .catch(() => [] as string[]),
+      api.getResourceOwner(resourceName).catch(() => null),
+    ]).then(([caps, owner]) => {
+      if (cancelled) return;
+      const byPolicy =
+        caps.includes("update") ||
+        caps.includes("create") ||
+        caps.includes("root");
+      const byOwner =
+        owner?.owned === true &&
+        owner.entity_id === entityId &&
+        entityId !== "";
+      setAllowed(byPolicy || byOwner);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [resourceName, isAdmin, entityId]);
+  return allowed;
+}
+
 function ConnectionProfilesPanel({
   resource,
   onUpdated,
@@ -1119,6 +1180,14 @@ function ConnectionProfilesPanel({
   // server resolves the credential for `rustion` opens, so those are safe.
   const canReadSecrets = useCanReadSecrets(String(resource.name ?? ""));
   const connectOnly = canReadSecrets === false;
+
+  // Whether the caller may add/edit/delete profiles. While the check is
+  // in flight (`null`) we leave controls enabled to avoid a flicker; the
+  // server enforces the boundary regardless. Read-only callers see the
+  // mutation controls disabled instead of clicking through to a 403.
+  const canWrite = useCanWriteResource(String(resource.name ?? ""));
+  const readOnly = canWrite === false;
+  const readOnlyTitle = "You don't have permission to modify this resource.";
   const launchableProfiles = profiles
     .filter(isLaunchableProfile)
     .filter((p) => !connectOnly || p.kind === "rustion");
@@ -1218,8 +1287,22 @@ function ConnectionProfilesPanel({
               Connect button can launch a session in one click.
             </p>
           </div>
-          <Button onClick={() => setCreating(true)}>+ Add profile</Button>
+          <Button
+            onClick={() => setCreating(true)}
+            disabled={readOnly}
+            title={readOnly ? readOnlyTitle : undefined}
+          >
+            + Add profile
+          </Button>
         </div>
+
+        {readOnly && (
+          <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] px-3 py-2 text-sm">
+            <strong className="text-[var(--color-text)]">Read-only access.</strong>{" "}
+            You can connect using existing profiles, but you don't have
+            permission to add, edit, or delete them.
+          </div>
+        )}
 
         {!osType && (
           <div className="rounded border border-yellow-700 bg-yellow-950/40 text-yellow-200 px-3 py-2 text-sm">
@@ -1308,15 +1391,32 @@ function ConnectionProfilesPanel({
                     size="sm"
                     variant="ghost"
                     onClick={() => handleSetDefault(p)}
-                    title="Make this the profile the one-click Connect launches"
+                    disabled={readOnly}
+                    title={
+                      readOnly
+                        ? readOnlyTitle
+                        : "Make this the profile the one-click Connect launches"
+                    }
                   >
                     Set default
                   </Button>
                 )}
-                <Button size="sm" variant="ghost" onClick={() => setEditTarget(p)}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setEditTarget(p)}
+                  disabled={readOnly}
+                  title={readOnly ? readOnlyTitle : undefined}
+                >
                   Edit
                 </Button>
-                <Button size="sm" variant="danger" onClick={() => setConfirmDelete(p)}>
+                <Button
+                  size="sm"
+                  variant="danger"
+                  onClick={() => setConfirmDelete(p)}
+                  disabled={readOnly}
+                  title={readOnly ? readOnlyTitle : undefined}
+                >
                   Delete
                 </Button>
               </div>
@@ -2694,6 +2794,10 @@ function ResourceFilesPanel({
 }) {
   const [files, setFiles] = useState<FileMeta[]>([]);
   const [loading, setLoading] = useState(true);
+  // Listing files needs the `list` capability on `files/files`. A
+  // read-only caller (no file access) would otherwise get a raw
+  // "HTTP 403" toast; instead we render a quiet permission notice.
+  const [denied, setDenied] = useState(false);
 
   function fmtBytes(n: number): string {
     if (n < 1024) return `${n} B`;
@@ -2705,6 +2809,7 @@ function ResourceFilesPanel({
     let cancelled = false;
     async function load() {
       setLoading(true);
+      setDenied(false);
       try {
         const list = await api.listFiles();
         const matched: FileMeta[] = [];
@@ -2719,7 +2824,15 @@ function ResourceFilesPanel({
         matched.sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
         if (!cancelled) setFiles(matched);
       } catch (e) {
-        if (!cancelled) toast("error", extractError(e));
+        if (cancelled) return;
+        // A blanket 403 on the listing means the caller has no file
+        // access at all — show a quiet notice rather than an error
+        // toast. Anything else is a real failure worth surfacing.
+        if (extractError(e).includes("403")) {
+          setDenied(true);
+        } else {
+          toast("error", extractError(e));
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -2761,6 +2874,11 @@ function ResourceFilesPanel({
       </div>
       {loading ? (
         <div className="text-sm text-[var(--color-text-muted)]">Loading…</div>
+      ) : denied ? (
+        <EmptyState
+          title="No access to files"
+          description="You don't have permission to view files. Ask an administrator if you need access."
+        />
       ) : files.length === 0 ? (
         <EmptyState
           title="No files"

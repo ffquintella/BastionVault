@@ -9,6 +9,7 @@ import type {
   Schedule,
   ScheduleInput,
   RunRecord,
+  BackupFile,
 } from "../lib/api";
 import { extractError } from "../lib/error";
 
@@ -558,6 +559,7 @@ function SchedulesTab({ toast }: { toast: ToastFn }) {
   const [editing, setEditing] = useState<Schedule | "new" | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [runHistory, setRunHistory] = useState<{ id: string; runs: RunRecord[] } | null>(null);
+  const [backupsFor, setBackupsFor] = useState<Schedule | null>(null);
 
   async function refresh() {
     setLoading(true);
@@ -635,6 +637,7 @@ function SchedulesTab({ toast }: { toast: ToastFn }) {
               <div className="flex flex-col gap-1 shrink-0">
                 <Button size="sm" variant="ghost" onClick={() => handleViewRuns(s.id)}>Runs</Button>
                 <Button size="sm" variant="ghost" onClick={() => handleRunNow(s.id)}>Run now</Button>
+                <Button size="sm" variant="ghost" onClick={() => setBackupsFor(s)}>Backups</Button>
                 <Button size="sm" variant="secondary" onClick={() => setEditing(s)}>Edit</Button>
                 <Button size="sm" variant="danger" onClick={() => setDeletingId(s.id)}>Delete</Button>
               </div>
@@ -666,6 +669,14 @@ function SchedulesTab({ toast }: { toast: ToastFn }) {
           scheduleId={runHistory.id}
           runs={runHistory.runs}
           onClose={() => setRunHistory(null)}
+        />
+      )}
+
+      {backupsFor && (
+        <BackupsModal
+          schedule={backupsFor}
+          onClose={() => setBackupsFor(null)}
+          toast={toast}
         />
       )}
     </Card>
@@ -974,6 +985,236 @@ function RunHistoryModal({
                   <td className="px-2 py-1">{r.bytes_written}</td>
                   <td className="px-2 py-1 text-[var(--color-text-muted)] truncate max-w-md">
                     {r.error ?? (r.destination.kind === "local_path" ? r.destination.path : "")}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = n / 1024;
+  let i = 0;
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024;
+    i++;
+  }
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[i]}`;
+}
+
+/**
+ * Lists the backup files a schedule's runs have written to its local
+ * destination directory, and lets the operator restore any one of them.
+ *
+ * Restore reuses the Import flow: the selected file is read off disk (base64),
+ * fed through `exchangePreview` for a classified summary, then `exchangeApply`
+ * writes it back into the vault under the chosen conflict policy. Embedded-mode
+ * only — the files live on the BastionVault host's filesystem.
+ */
+function BackupsModal({
+  schedule,
+  onClose,
+  toast,
+}: {
+  schedule: Schedule;
+  onClose: () => void;
+  toast: ToastFn;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [dir, setDir] = useState("");
+  const [files, setFiles] = useState<BackupFile[]>([]);
+  const [restoring, setRestoring] = useState<BackupFile | null>(null);
+
+  // Restore-step state.
+  const [password, setPassword] = useState("");
+  const [allowPlaintext, setAllowPlaintext] = useState(false);
+  const [conflictPolicy, setConflictPolicy] = useState<"skip" | "overwrite" | "rename">("skip");
+  const [preview, setPreview] = useState<ExchangePreviewResult | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function refresh() {
+    setLoading(true);
+    try {
+      const result = await api.scheduledExportsBackupsList(schedule.id);
+      setDir(result.dir);
+      setFiles(result.files);
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { refresh(); }, [schedule.id]);
+
+  function startRestore(f: BackupFile) {
+    setRestoring(f);
+    setPassword("");
+    setAllowPlaintext(false);
+    setConflictPolicy("skip");
+    setPreview(null);
+  }
+
+  function cancelRestore() {
+    setRestoring(null);
+    setPreview(null);
+  }
+
+  async function loadPreview(f: BackupFile): Promise<ExchangePreviewResult> {
+    const { file_b64 } = await api.scheduledExportsBackupRead(schedule.id, f.name);
+    return api.exchangePreview(
+      file_b64,
+      f.format,
+      f.format === "bvx" ? password : undefined,
+      f.format === "json" ? allowPlaintext : false,
+    );
+  }
+
+  async function handlePreview() {
+    if (!restoring) return;
+    setBusy(true);
+    try {
+      setPreview(await loadPreview(restoring));
+    } catch (e) {
+      toast("error", extractError(e));
+      setPreview(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRestore() {
+    if (!restoring) return;
+    setBusy(true);
+    try {
+      // Reuse an existing preview token if one is showing, else mint one.
+      const token = preview ? preview.token : (await loadPreview(restoring)).token;
+      const result = await api.exchangeApply(token, conflictPolicy);
+      toast(
+        "success",
+        `Restored: ${result.written} written, ${result.unchanged} unchanged, ${result.skipped} skipped, ${result.renamed} renamed.`,
+      );
+      cancelRestore();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg w-full max-w-3xl max-h-[80vh] overflow-auto p-6 space-y-3">
+        <div className="flex justify-between items-start">
+          <div className="min-w-0">
+            <h2 className="text-lg font-bold">Backups — {schedule.name}</h2>
+            <p className="text-xs text-[var(--color-text-muted)] font-mono truncate">{dir || (schedule.destination.kind === "local_path" ? schedule.destination.path : "")}</p>
+          </div>
+          <button className="text-[var(--color-text-muted)] hover:text-[var(--color-text)]" onClick={onClose}>x</button>
+        </div>
+
+        {restoring ? (
+          <div className="space-y-3">
+            <button
+              className="text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+              onClick={cancelRestore}
+            >
+              ← Back to files
+            </button>
+            <div className="rounded-md border border-[var(--color-border)] p-3 text-sm">
+              <p className="font-mono truncate">{restoring.name}</p>
+              <p className="text-xs text-[var(--color-text-muted)] mt-0.5">
+                {restoring.format.toUpperCase()} · {formatBytes(restoring.size_bytes)}
+              </p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              {restoring.format === "bvx" ? (
+                <Input
+                  label="Password"
+                  type="password"
+                  value={password}
+                  onChange={(e) => { setPassword(e.target.value); setPreview(null); }}
+                />
+              ) : (
+                <label className="flex items-center gap-2 text-sm pt-7">
+                  <input
+                    type="checkbox"
+                    checked={allowPlaintext}
+                    onChange={(e) => { setAllowPlaintext(e.target.checked); setPreview(null); }}
+                  />
+                  Allow plaintext restore
+                </label>
+              )}
+              <Select
+                label="Conflict policy"
+                value={conflictPolicy}
+                onChange={(e) => setConflictPolicy(e.target.value as "skip" | "overwrite" | "rename")}
+                options={[
+                  { value: "skip", label: "Skip (keep existing)" },
+                  { value: "overwrite", label: "Overwrite" },
+                  { value: "rename", label: "Rename (write to <path>.imported.<timestamp>)" },
+                ]}
+              />
+            </div>
+
+            {preview && (
+              <div className="space-y-3">
+                <div className="rounded-md border border-[var(--color-border)] p-3 text-sm">
+                  <p>
+                    <strong>{preview.total}</strong> items —{" "}
+                    <span className="text-emerald-500">{preview.new} new</span> /{" "}
+                    <span className="text-[var(--color-text-muted)]">{preview.identical} identical</span> /{" "}
+                    <span className="text-amber-500">{preview.conflict} conflict</span>
+                  </p>
+                </div>
+                <PreviewTable items={preview.items} />
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2">
+              <Button onClick={handlePreview} loading={busy && !preview} variant="secondary">
+                Preview
+              </Button>
+              <Button onClick={handleRestore} loading={busy}>
+                Restore
+              </Button>
+            </div>
+          </div>
+        ) : loading ? (
+          <p className="text-sm text-[var(--color-text-muted)]">Loading...</p>
+        ) : files.length === 0 ? (
+          <p className="text-sm text-[var(--color-text-muted)]">
+            No backup files found in this directory yet.
+          </p>
+        ) : (
+          <table className="w-full text-xs">
+            <thead className="bg-[var(--color-bg)] text-[var(--color-text-muted)]">
+              <tr>
+                <th className="text-left px-2 py-1">File</th>
+                <th className="text-left px-2 py-1">Format</th>
+                <th className="text-left px-2 py-1">Size</th>
+                <th className="text-left px-2 py-1">Modified</th>
+                <th className="px-2 py-1"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {files.map((f) => (
+                <tr key={f.name} className="odd:bg-[var(--color-bg)]/40">
+                  <td className="px-2 py-1 font-mono truncate max-w-xs">{f.name}</td>
+                  <td className="px-2 py-1 uppercase">{f.format}</td>
+                  <td className="px-2 py-1">{formatBytes(f.size_bytes)}</td>
+                  <td className="px-2 py-1 font-mono text-[var(--color-text-muted)]">
+                    {f.modified ? f.modified.replace("T", " ").replace(/\.\d+/, "").replace("+00:00", "Z") : "—"}
+                  </td>
+                  <td className="px-2 py-1 text-right">
+                    <Button size="sm" onClick={() => startRestore(f)}>Restore</Button>
                   </td>
                 </tr>
               ))}
