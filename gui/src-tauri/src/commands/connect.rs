@@ -1430,12 +1430,24 @@ async fn collect_policy_hints(
 }
 
 /// Resolved policy verdict for the connect path. Mirrors the relevant
-/// subset of the server's `EffectivePolicy`.
+/// subset of the server's `EffectivePolicy`. The `Default` (empty
+/// transport, no bastions) reads as "no Rustion policy applies" — every
+/// route resolver treats that as a plain direct dial.
+#[derive(Default)]
 struct EffectivePolicyView {
     transport: String,
     bastions: Vec<String>,
     recording: String,
     lock_violation: Option<String>,
+}
+
+/// True when a backend error is an HTTP 403 / permission-denied. The
+/// remote backend surfaces `"HTTP 403: Permission denied"`; the embedded
+/// backend surfaces `RvError::ErrPermissionDenied`'s display. Matches the
+/// frontend `isPermissionDenied` classifier so both layers agree.
+fn is_permission_denied(e: &CommandError) -> bool {
+    let msg = e.message.to_ascii_lowercase();
+    msg.contains("403") || msg.contains("permission denied")
 }
 
 async fn read_effective_policy(
@@ -1466,13 +1478,28 @@ async fn read_effective_policy(
             ),
         );
     }
-    let resp = make_request(
+    let resp = match make_request(
         state,
         Operation::Write,
         format!("{RUSTION_MOUNT}policy/effective"),
         Some(body),
     )
-    .await?;
+    .await
+    {
+        Ok(resp) => resp,
+        // A caller who can reach the resource and read its secret but
+        // lacks read on the global `rustion/` policy surface — the common
+        // read-only share-grantee case — gets a 403 here. The effective
+        // policy is only a routing hint: the real boundaries are still
+        // enforced server-side (brokering on `rustion/v2/session/open`,
+        // the credential read on `resources/secrets/...`). So treat
+        // permission-denied as "no Rustion policy is visible to me" and
+        // fall through to a direct dial instead of aborting Connect.
+        // Other errors (network, 500, lock-violation payloads) still
+        // propagate.
+        Err(e) if is_permission_denied(&e) => return Ok(EffectivePolicyView::default()),
+        Err(e) => return Err(e),
+    };
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     let transport = data
         .get("transport")
@@ -2992,5 +3019,46 @@ async fn caller_display(state: &State<'_, AppState>) -> String {
                 .to_string()
         }
         _ => "unknown".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn permission_denied_matches_remote_and_embedded_shapes() {
+        // Remote backend (RemoteBackend → HTTP).
+        assert!(is_permission_denied(&CommandError::from(
+            "HTTP 403: Permission denied"
+        )));
+        // Embedded backend (RvError::ErrPermissionDenied display).
+        assert!(is_permission_denied(&CommandError::from("permission denied")));
+        // Case-insensitive.
+        assert!(is_permission_denied(&CommandError::from("Permission Denied")));
+    }
+
+    #[test]
+    fn permission_denied_ignores_unrelated_errors() {
+        assert!(!is_permission_denied(&CommandError::from(
+            "HTTP 500: internal error"
+        )));
+        assert!(!is_permission_denied(&CommandError::from(
+            "node `h` is unavailable: reset"
+        )));
+        assert!(!is_permission_denied(&CommandError::from("404 not found")));
+    }
+
+    #[test]
+    fn effective_policy_default_reads_as_direct() {
+        // The fall-through value returned when the caller can't read the
+        // rustion policy surface must route as a plain direct dial: empty
+        // transport (→ `prefer_rustion` is false at every resolver), no
+        // bastions, and no spurious lock violation.
+        let v = EffectivePolicyView::default();
+        assert!(v.transport.is_empty());
+        assert!(v.bastions.is_empty());
+        assert!(v.recording.is_empty());
+        assert!(v.lock_violation.is_none());
     }
 }

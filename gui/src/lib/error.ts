@@ -35,3 +35,15 @@ export function isMountNotFound(e: unknown): boolean {
   return msg.includes("404") && /mount not found|no handler for route/i.test(msg);
 }
 
+/**
+ * True when the backend denied the request for lack of capability —
+ * HTTP 403. Read-only share-grantees and non-admin users hit this on
+ * routes they can't read (e.g. the Rustion dispatcher preview). Lets a
+ * purely informational panel stay out of the way instead of rendering
+ * a red "unavailable" error for an expected permission boundary.
+ */
+export function isPermissionDenied(e: unknown): boolean {
+  const msg = extractError(e);
+  return msg.includes("403") || /permission denied/i.test(msg);
+}
+

@@ -10,7 +10,7 @@
 import { useEffect, useState } from "react";
 
 import { Card } from "./ui";
-import { extractError } from "../lib/error";
+import { extractError, isPermissionDenied } from "../lib/error";
 import {
   rustionDispatcherPreview,
   type RustionDispatcherPreview as Preview,
@@ -63,7 +63,14 @@ export function RustionDispatcherPreview({
         if (!cancelled) setPreview(p);
       })
       .catch((e: unknown) => {
-        if (!cancelled) setError(extractError(e));
+        if (cancelled) return;
+        // A 403 here is an expected permission boundary, not a fault:
+        // read-only share-grantees and non-admins can't read the
+        // dispatcher preview. This panel is purely informational, so
+        // stay out of the way rather than render a red error — same as
+        // it does when no bastion is involved.
+        if (isPermissionDenied(e)) setPreview(null);
+        else setError(extractError(e));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);

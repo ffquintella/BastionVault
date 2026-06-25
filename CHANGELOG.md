@@ -45,6 +45,13 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.19.5] - 2026-06-25
+
+### Fixed
+
+- **Connect failed with `HTTP 403` for users who could read the secret but not the Rustion policy** (`gui/src-tauri/src/commands/connect.rs`) -- clicking **Connect** on an SSH/RDP profile with a `secret` (or `ssh-engine`) credential source aborted with `403 Permission denied` for a read-only share-grantee, even on a resource with no bastion configured. The connect path unconditionally calls `rustion/policy/effective` (via `read_effective_policy`) to decide whether to broker, and that read -- on the global `rustion/` mount, which such a caller can't reach -- propagated its 403 through `?` and killed the whole Connect before the credential was ever resolved. The effective policy is only a *routing hint* (the real boundaries stay server-side: brokering on `rustion/v2/session/open`, the credential read on `resources/secrets/...`), so a permission-denied is now treated as "no Rustion policy is visible to me" and falls through to a direct dial -- the same way `read_effective_login_class` already tolerates a missing `ssh-broker/` mount. Other errors (network, 500, lock-violation payloads) still propagate, so a transient fault can't silently downgrade routing. Covers the SSH and RDP route resolvers (both funnel through `read_effective_policy`). Unit tests `commands::connect::tests`.
+- **Bastion routing preview showed a red error for read-only users** (`gui/src/components/RustionDispatcherPreview.tsx`, `gui/src/lib/error.ts`) -- the Connection tab's dispatcher preview ("Will try: A → B") rendered a red `Bastion preview unavailable: HTTP 403: Permission denied` card whenever the caller lacked `read` on `rustion/dispatcher/preview` (the common case for read-only share-grantees and non-admins). Every other section on that tab degrades gracefully under the same boundary (Connection profiles → "Read-only access" banner; Rustion policy → "not configured"), so the loud error was inconsistent and alarming. A new `isPermissionDenied` classifier (alongside `isMountNotFound`/`isNodeUnavailable`) lets the panel treat a 403 as the expected permission boundary it is and render nothing -- same as it already does when no bastion is involved -- while genuine faults (500/network) still surface. Unit tests in `gui/src/test/error.test.ts`.
+
 ## [0.19.4] - 2026-06-25
 
 ### Fixed
