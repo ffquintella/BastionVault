@@ -57,7 +57,7 @@ RUSTUP_CARGO_BIN ?= $(HOME)/.cargo/bin
 endif
 export PATH := $(RUSTUP_CARGO_BIN):$(PATH)
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugin-bump container-image container-image-run container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -336,6 +336,16 @@ container-image: ## Build the server OCI image (auto-detects podman/docker, over
 	@echo "==> Built $(IMAGE_NAME):$(IMAGE_TAG) and $(IMAGE_NAME):latest"
 	@echo "    Inspect: $(CONTAINER_TOOL) images $(IMAGE_NAME)"
 	@echo "    Run:     make container-image-run"
+
+container-image-test: ## Test the Wolfi runtime images (static checks; set SMOKE=1 to also build + run-smoke the image)
+	@if [ "$(SMOKE)" = "1" ]; then \
+		echo "==> Wolfi runtime tests (static + smoke build with $(CONTAINER_TOOL))"; \
+		BV_CONTAINER_SMOKE=1 CONTAINER_TOOL=$(CONTAINER_TOOL) \
+			bash deploy/container/test/wolfi-runtime.test.sh; \
+	else \
+		echo "==> Wolfi runtime tests (static only; pass SMOKE=1 to build + smoke-test)"; \
+		bash deploy/container/test/wolfi-runtime.test.sh; \
+	fi
 
 container-image-run: ## Build (linux/arm64) and run the server image locally (config from deploy/container/config/)
 	@$(MAKE) container-image PLATFORM=linux/arm64

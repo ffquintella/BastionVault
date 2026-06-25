@@ -66,7 +66,7 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | `[x]` Done | Cloud targets for Encrypted File (S3 / OneDrive / Google Drive / Dropbox) | [spec](features/cloud-storage-backend.md) — 8 phases incl. cache decorator + key obfuscation. |
 | `[x]` Done | Operator Backup / Restore (BVBK) | [spec](features/import-export-backup-restore.md) — full-vault binary archive, HMAC-SHA256, for disaster recovery. |
 | `[x]` Done | User-facing Exchange Module (`.bvx`) | [spec](features/import-export-module.md) — password-encrypted JSON for "Alice shares N secrets with Bob"; built on top of BVBK but a different threat model. Argon2id + XChaCha20-Poly1305, two-step preview-then-apply import with `skip` / `overwrite` / `rename` conflict policies, full GUI with scope picker + entropy meter. |
-| `[x]` Done | Scheduled Exports | [spec](features/scheduled-exports.md) — `src/scheduled_exports/` (runner + schedule + store), `POST/GET/PUT/DELETE /v1/sys/scheduled-exports/*`, Tauri commands + GUI tab under `/exchange` (Scheduled backups). Built on top of the `.bvx` Exchange machinery. |
+| `[x]` Done | Scheduled Exports | [spec](features/scheduled-exports.md) — `src/scheduled_exports/` (runner + schedule + store), `POST/GET/PUT/DELETE /v1/sys/scheduled-exports/*`, Tauri commands + GUI tab under `/exchange` (Scheduled backups). Built on top of the `.bvx` Exchange machinery. A `kind: "full"` backup now captures **every** secret engine (KV + PKI/SSH/Transit/TOTP/OpenLDAP/Rustion/… via opaque `raw` items) and restores resources/files/groups too, instead of only the `secret/` KV mount. |
 | `[x]` Done | Caching | [spec](features/caching.md) — token cache + ciphertext-only secret cache + memory hardening. |
 | `[x]` Done | Batch Operations | [spec](features/batch-operations.md) — Phase 1 HTTP shipped; CLI + SDK [deferred](#deferred-sub-initiatives). |
 
@@ -142,7 +142,7 @@ Sequenced together under [`roadmaps/packaging-and-distribution.md`](roadmaps/pac
 
 | Status | Feature | Notes |
 |---|---|---|
-| `[/]` Partial | Server Container Image (Podman / OCI, standalone + cluster) | [spec](features/packaging-podman-server.md) — **Phase 1 shipped**: standalone, `linux/amd64`, distroless `cc-debian12:nonroot`, GHCR push on `v*.*.*` tags, unsigned. Phases 1.5 (client-IP propagation), 2 (cluster), 3 (multi-arch + Cosign + SBOM + `:debug`), 4 (Helm chart) pending. |
+| `[/]` Partial | Server Container Image (Podman / OCI, standalone + cluster) | [spec](features/packaging-podman-server.md) — **Phase 1 shipped**: standalone, `linux/amd64`, Wolfi `cgr.dev/chainguard/wolfi-base` runtime (migrated from distroless `cc-debian12:nonroot`), GHCR push on `v*.*.*` tags, unsigned. Phases 1.5 (client-IP propagation), 2 (cluster), 3 (multi-arch + Cosign + SBOM + `:debug`), 4 (Helm chart) pending. |
 | `[ ]` Todo | Native Client Installers (deb / rpm / pkg / msi for GUI + CLI) | [spec](features/packaging-client-binaries.md) — Tauri bundler for GUI, parallel CLI track via `cargo-deb` / `cargo-generate-rpm` / `pkgbuild` / WiX 3.x. Double-signed (platform-native + Cosign). Phase 5 publishes apt + dnf repos. |
 | `[ ]` Todo | Client Distribution Website (OCI image) | [spec](features/packaging-distribution-website.md) — small `axum` + `askama` static-site server, signed `manifest.json` consumed by both the landing page and the GUI's "update available" banner (link-out only, no auto-update). |
 

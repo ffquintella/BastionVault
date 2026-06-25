@@ -20,6 +20,8 @@ import { LiveSessionsCard } from "../components/dashboard/LiveSessionsCard";
 import { AttentionPanel } from "../components/dashboard/AttentionPanel";
 import { QuickActions } from "../components/dashboard/QuickActions";
 import { UserDashboard } from "../components/dashboard/UserDashboard";
+import { UnsealModal } from "../components/UnsealModal";
+import { ConfirmModal } from "../components/ui";
 import { isAdminUser } from "../lib/access";
 
 const POLL_MS = 5000;
@@ -45,6 +47,10 @@ export function DashboardPage() {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [sealConfirm, setSealConfirm] = useState(false);
+  const [sealing, setSealing] = useState(false);
+  const [unsealOpen, setUnsealOpen] = useState(false);
+  const mode = useVaultStore((s) => s.mode);
   const liveLoaded = useRef(false);
 
   useEffect(() => {
@@ -117,12 +123,26 @@ export function DashboardPage() {
   }
 
   async function handleSeal() {
+    setSealing(true);
     try {
-      await api.sealVault();
-      const st = await api.getVaultStatus();
-      setStatus(st);
+      const outcome = await api.sealVault();
+      setStatus(outcome.status);
+      setSealConfirm(false);
+      // Cluster fan-out: surface any node that refused to seal.
+      const failed = outcome.nodes.filter((n) => n.error);
+      if (failed.length > 0) {
+        setError(
+          `Sealed ${outcome.nodes.length - failed.length}/${outcome.nodes.length} nodes. Failed: ${failed
+            .map((n) => `${n.address} (${n.error})`)
+            .join(", ")}`,
+        );
+      } else {
+        setError(null);
+      }
     } catch (e: unknown) {
       setError(extractError(e));
+    } finally {
+      setSealing(false);
     }
   }
 
@@ -253,10 +273,35 @@ export function DashboardPage() {
           <RecentAuditCard events={audit} nowMs={nowMs} loading={loading} />
         </div>
 
-        <QuickActions sealed={sealed} onSeal={handleSeal} />
+        <QuickActions
+          sealed={sealed}
+          onSeal={() => setSealConfirm(true)}
+          onUnseal={() => setUnsealOpen(true)}
+        />
         </>
         )}
       </div>
+
+      <ConfirmModal
+        open={sealConfirm}
+        onClose={() => setSealConfirm(false)}
+        onConfirm={handleSeal}
+        title="Seal the vault?"
+        message="Sealing locks the barrier and drops every active session. Secrets stay encrypted at rest and become unreadable until the vault is unsealed again."
+        confirmLabel="Seal vault"
+        variant="danger"
+        loading={sealing}
+      />
+
+      <UnsealModal
+        open={unsealOpen}
+        onClose={() => setUnsealOpen(false)}
+        mode={mode}
+        onUnsealed={(st) => {
+          setStatus(st);
+          if (!st.sealed) setUnsealOpen(false);
+        }}
+      />
     </Layout>
   );
 }

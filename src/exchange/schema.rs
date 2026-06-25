@@ -106,6 +106,13 @@ pub struct ExchangeItems {
     pub asset_groups: Vec<AssetGroupItem>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resource_groups: Vec<ResourceGroupItem>,
+    /// Opaque barrier-subtree entries for secret engines that have no
+    /// structured exporter (pki, ssh, ssh-broker, transit, totp, openldap,
+    /// rustion, …). Captured verbatim under the mount's barrier prefix so a
+    /// full-vault backup round-trips every engine, not just KV. See
+    /// `scope::read_raw_mount`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raw: Vec<RawEntry>,
 }
 
 /// A single KV entry. `value` is the parsed JSON body if the storage entry
@@ -136,6 +143,19 @@ pub struct FileItem {
     pub id: String,
     pub metadata: Value,
     pub content_b64: String,
+}
+
+/// A single opaque barrier-storage entry for a non-KV secret engine. `mount`
+/// is the engine's mount path (e.g. `pki/`); `path` is the key **relative to
+/// the mount's barrier prefix**; `value` is the parsed JSON body, or a
+/// `{"_base64": "..."}` wrapper when the stored bytes are not JSON — exactly
+/// like [`KvItem`]. The importer writes it straight back under the destination
+/// mount's barrier prefix via `MountIndex::resolve_raw_key`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RawEntry {
+    pub mount: String,
+    pub path: String,
+    pub value: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

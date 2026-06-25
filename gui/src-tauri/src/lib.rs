@@ -209,6 +209,7 @@ pub fn run() {
             commands::system::init_vault,
             commands::system::open_vault,
             commands::system::seal_vault,
+            commands::system::unseal_vault,
             commands::system::reset_vault,
             commands::system::reset_local_keystore,
             commands::system::recover_unseal_key,

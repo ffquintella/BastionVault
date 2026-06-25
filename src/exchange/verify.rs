@@ -33,11 +33,14 @@ pub struct ItemCounts {
     pub files: u64,
     pub asset_groups: u64,
     pub resource_groups: u64,
+    /// Opaque non-KV engine entries (pki, ssh, transit, …).
+    #[serde(default)]
+    pub raw: u64,
 }
 
 impl ItemCounts {
     pub fn total(&self) -> u64 {
-        self.kv + self.resources + self.files + self.asset_groups + self.resource_groups
+        self.kv + self.resources + self.files + self.asset_groups + self.resource_groups + self.raw
     }
 }
 
@@ -126,6 +129,7 @@ pub fn verify_backup_bytes(bytes: &[u8], password: Option<&str>) -> Result<Verif
         files: document.items.files.len() as u64,
         asset_groups: document.items.asset_groups.len() as u64,
         resource_groups: document.items.resource_groups.len() as u64,
+        raw: document.items.raw.len() as u64,
     };
     let total_items = counts.total();
 

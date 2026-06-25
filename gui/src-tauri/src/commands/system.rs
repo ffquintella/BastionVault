@@ -95,6 +95,15 @@ pub async fn open_vault(state: State<'_, AppState>) -> CmdResult<()> {
     Ok(())
 }
 
+/// Outcome of a seal attempt: aggregate status + per-node breakdown.
+/// `nodes` has one entry for embedded / single-node remote, and one per
+/// member for a discovered cluster (seal is fanned out cluster-wide).
+#[derive(Serialize)]
+pub struct SealOutcome {
+    pub status: VaultStatus,
+    pub nodes: Vec<crate::commands::connection::NodeSealResult>,
+}
+
 /// Seal the vault. Backend-gated: the caller must hold a policy
 /// granting `update` on `sys/seal`, which in the shipped policy set
 /// is only the `root` token. Before this gate was added, any
@@ -104,8 +113,16 @@ pub async fn open_vault(state: State<'_, AppState>) -> CmdResult<()> {
 /// which replays the same per-target resolution the request pipeline
 /// uses in `post_auth`. It is not a UI-only hide: even a hand-crafted
 /// Tauri call with a low-privilege token is rejected here.
+///
+/// In remote mode seal state is per-node, so the command is fanned out
+/// to *every* node of the connected cluster (mirroring
+/// `bvault operator seal`) — the server applies the same `sys/seal`
+/// Write policy check per node. A literal-URL profile targets just the
+/// one node.
 #[tauri::command]
-pub async fn seal_vault(state: State<'_, AppState>) -> CmdResult<()> {
+pub async fn seal_vault(state: State<'_, AppState>) -> CmdResult<SealOutcome> {
+    use crate::commands::connection::NodeSealResult;
+
     #[cfg(feature = "embedded_vault")]
     {
         use bastion_vault::logical::Operation as ServerOp;
@@ -155,23 +172,186 @@ pub async fn seal_vault(state: State<'_, AppState>) -> CmdResult<()> {
 
             embedded::seal_vault(vault).await?;
             *state.backend.lock().await = None;
-            return Ok(());
+            return Ok(SealOutcome {
+                status: VaultStatus { initialized: true, sealed: true, has_vault: true },
+                nodes: vec![NodeSealResult {
+                    address: "embedded".to_string(),
+                    sealed: Some(true),
+                    progress: None,
+                    threshold: None,
+                    error: None,
+                }],
+            });
         }
     }
 
-    // Remote mode (or embedded with no open vault): route through the
-    // trait. The server applies the same `sys/seal` Write policy
-    // check; failure surfaces as a Permission Denied error from the
-    // backend.
-    crate::commands::make_request(
-        &state,
-        Operation::Write,
-        "sys/seal".to_string(),
-        None,
-    )
-    .await?;
-    *state.backend.lock().await = None;
-    Ok(())
+    // Remote mode: fan the seal out across the whole cluster.
+    {
+        let token = state.token.lock().await.clone().unwrap_or_default();
+        if token.is_empty() {
+            return Err("Authentication required to seal the vault".into());
+        }
+        let profile = state.remote_profile.lock().await.clone();
+        if let Some(profile) = profile {
+            let nodes =
+                crate::commands::connection::remote_seal_fanout(&profile, &token).await?;
+            // If no node could be sealed, surface the first failure as a
+            // hard error so the caller sees why (e.g. permission denied).
+            let sealed_count = nodes.iter().filter(|n| n.sealed == Some(true)).count();
+            if sealed_count == 0 {
+                let msg = nodes
+                    .iter()
+                    .find_map(|n| n.error.clone())
+                    .unwrap_or_else(|| "Seal failed on all nodes".to_string());
+                return Err(CommandError::from(msg));
+            }
+            // At least one node sealed → drop the cached backend handle so
+            // the next request re-establishes rather than reusing a handle
+            // pointed at a now-sealed node.
+            *state.backend.lock().await = None;
+            return Ok(SealOutcome {
+                status: VaultStatus { initialized: true, sealed: true, has_vault: true },
+                nodes,
+            });
+        }
+    }
+
+    Err(CommandError::from("No vault available to seal".to_string()))
+}
+
+/// Resolve the unseal key for an embedded vault. The operator-supplied
+/// `provided` hex string wins when present; otherwise we fall back to
+/// the key the init/recovery flow cached in the local keystore for the
+/// currently-active profile. Validates hex shape before decoding so a
+/// typo surfaces here rather than as an opaque barrier error.
+#[cfg(feature = "embedded_vault")]
+fn resolve_embedded_unseal_key(provided: Option<&str>) -> CmdResult<Vec<u8>> {
+    let hex_key = match provided.map(str::trim).filter(|k| !k.is_empty()) {
+        Some(k) => k.to_string(),
+        None => {
+            let vault_id = crate::embedded::current_vault_id();
+            crate::local_keystore::get_unseal_key(&vault_id)?.ok_or_else(|| {
+                CommandError::from(
+                    "No unseal key supplied and none cached on this device for the active vault"
+                        .to_string(),
+                )
+            })?
+        }
+    };
+    let trimmed = hex_key.trim();
+    if !trimmed.len().is_multiple_of(2) || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("unseal key is not valid hex".into());
+    }
+    hex::decode(trimmed).map_err(|_| CommandError::from("unseal key is not valid hex".to_string()))
+}
+
+/// Outcome of an unseal attempt: the aggregate `status` the UI keys off
+/// plus a per-node breakdown. `status.sealed` stays true while *any*
+/// targeted node is still sealed, so the operator keeps feeding shares
+/// until the whole cluster crosses the threshold. `nodes` has a single
+/// entry for embedded / single-node remote, and one entry per member
+/// for a discovered cluster.
+#[derive(Serialize)]
+pub struct UnsealOutcome {
+    pub status: VaultStatus,
+    pub nodes: Vec<crate::commands::connection::NodeSealResult>,
+}
+
+/// Unseal the vault and return the resulting status + per-node breakdown.
+///
+/// Embedded mode: `seal_vault` leaves the in-process `BastionVault`
+/// handle parked in `AppState` (only the `Backend` handle is torn
+/// down), so we re-apply the unseal key to the same barrier and
+/// rebuild the `EmbeddedBackend` the dispatcher reads through. The key
+/// comes from `unseal_key_hex` when the operator pastes one, otherwise
+/// from the local-keystore cache that init seeded — so the common case
+/// (operator who set up this machine) is a one-click unseal.
+///
+/// Remote mode: seal state is per-node, so the share is fanned out to
+/// *every* node of the connected cluster — mirroring
+/// `bvault operator unseal` — discovering the roster via SRV for a
+/// cluster-name profile, or hitting just the one node for a literal URL.
+/// The key is required here. Multi-share (t-of-n) setups need each share
+/// submitted in turn; the aggregate `sealed` stays true until every node
+/// is open, so the dialog keeps prompting for the next share.
+#[tauri::command]
+pub async fn unseal_vault(
+    state: State<'_, AppState>,
+    unseal_key_hex: Option<String>,
+) -> CmdResult<UnsealOutcome> {
+    use crate::commands::connection::NodeSealResult;
+
+    #[cfg(feature = "embedded_vault")]
+    {
+        let vault_guard = state.vault.lock().await;
+        if let Some(vault) = vault_guard.as_ref() {
+            if vault.core.load().sealed() {
+                let key = resolve_embedded_unseal_key(unseal_key_hex.as_deref())?;
+                let opened = vault
+                    .unseal(&[key.as_slice()])
+                    .await
+                    .map_err(CommandError::from)?;
+                if !opened {
+                    return Err(
+                        "Unseal failed: the key did not match this vault".into(),
+                    );
+                }
+            }
+            let core = vault.core.load();
+            let initialized = core.inited().await.unwrap_or(false);
+            let sealed = core.sealed();
+            // Rebuild the backend handle `seal_vault` cleared so the
+            // dispatcher can serve requests again.
+            if !sealed {
+                let vault_arc = vault.clone();
+                drop(vault_guard);
+                *state.backend.lock().await = Some(std::sync::Arc::new(
+                    crate::backend::EmbeddedBackend::new(vault_arc),
+                ));
+            }
+            return Ok(UnsealOutcome {
+                status: VaultStatus { initialized, sealed, has_vault: true },
+                nodes: vec![NodeSealResult {
+                    address: "embedded".to_string(),
+                    sealed: Some(sealed),
+                    progress: None,
+                    threshold: None,
+                    error: None,
+                }],
+            });
+        }
+    }
+
+    // Remote mode: fan the share out across the whole cluster.
+    {
+        let key = unseal_key_hex
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .ok_or("An unseal key is required to unseal a remote vault")?
+            .to_string();
+        let profile = state.remote_profile.lock().await.clone();
+        if let Some(profile) = profile {
+            let nodes =
+                crate::commands::connection::remote_unseal_fanout(&profile, &key).await?;
+            // The cluster counts as sealed while any node we could reach
+            // still reports sealed, or any node errored (we can't confirm
+            // it crossed the threshold). A node that answered with a seal
+            // state is, by definition, initialized.
+            let sealed = nodes
+                .iter()
+                .any(|n| n.sealed.unwrap_or(true) || n.error.is_some());
+            let initialized = nodes.iter().any(|n| n.sealed.is_some());
+            return Ok(UnsealOutcome {
+                status: VaultStatus { initialized, sealed, has_vault: true },
+                nodes,
+            });
+        }
+    }
+
+    Err(CommandError::from(
+        "No vault available to unseal".to_string(),
+    ))
 }
 
 #[tauri::command]

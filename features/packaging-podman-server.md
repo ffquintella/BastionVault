@@ -53,7 +53,8 @@ client-side counterpart (GUI + CLI binaries served from a static site) is
 ## Current State
 
 - **Phase 1 shipped.** Two-stage [`deploy/container/Containerfile`](../deploy/container/Containerfile)
-  (rust:slim builder → `gcr.io/distroless/cc-debian12:nonroot` runtime),
+  (rust:slim builder → `cgr.dev/chainguard/wolfi-base` runtime; **migrated
+  from `gcr.io/distroless/cc-debian12:nonroot`** — see "Why Wolfi" below),
   [inert sample config](../deploy/container/config/config.hcl.sample),
   [operator README](../deploy/container/README.md), [`podman compose` reference](../deploy/compose/standalone.yml),
   and a [`linux/amd64` GHCR push workflow](../.github/workflows/container-image.yml)
@@ -90,11 +91,12 @@ A two-stage build:
                   │ COPY --from=builder
                   ▼
 ┌──────────── Stage 2: runtime ────────────┐
-│ FROM gcr.io/distroless/cc-debian12:nonroot│
+│ FROM cgr.dev/chainguard/wolfi-base:latest │
+│  - apk add ca-certificates-bundle         │
 │  - /usr/local/bin/bvault                  │
 │  - /usr/local/bin/bv-ssh-helper           │
 │  - /etc/bvault/config.hcl (sample)  │
-│  - USER 65532:65532 (nonroot, baked in)   │
+│  - USER 65532:65532 (nonroot, from base)  │
 │  - EXPOSE 8200 8201 (api, cluster)        │
 │  - ENTRYPOINT ["/usr/local/bin/bvault"]   │
 │  - CMD ["server", "-config",              │
@@ -102,23 +104,27 @@ A two-stage build:
 └──────────────────────────────────────────┘
 ```
 
-Why distroless: the runtime contains glibc + ca-certificates and
-nothing else. No shell (by default), no package manager, no userspace
-network tools, no compiler. The CVE surface is the absolute minimum
-compatible with a dynamically-linked Rust binary.
+Why Wolfi: the runtime base is `cgr.dev/chainguard/wolfi-base` —
+Chainguard's free, open-source, glibc-based "undistro" built for
+containers. Like the distroless base it superseded, it contains glibc +
+a CA bundle and a minimal userspace, so the CVE surface stays minimal
+and the dynamically-linked Rust binary runs unchanged (Wolfi's glibc is
+forward-compatible with the older glibc the Debian builder links
+against). Unlike distroless it ships `apk` and a busybox shell in the
+base, which simplifies the build: the production image installs the CA
+bundle inline (`apk add ca-certificates-bundle`) and reuses the base's
+pre-existing `nonroot` UID/GID 65532 (created by apko), retiring the
+separate Debian busybox-staging stage the distroless build needed.
 
 The production image ships with a POSIX shell by default — `kubectl
 exec` / `podman exec`, init / readiness scripts, and the bundled
-`rustion-master-bootstrap.sh` all work out of the box. The shell is
-`busybox-static` staged from a `debian:bookworm-slim` builder layer
-and copied into the runtime as `/bin/busybox` with `/bin/sh` symlinked
-to it. Single static binary, no library deps, ~1 MB. apt only runs in
-the staging container — the final image still carries no package
-manager.
+`rustion-master-bootstrap.sh` all work out of the box, because Wolfi's
+base already carries `/bin/sh` (busybox).
 
-Operators who explicitly want the classic shell-less distroless
-property (smallest attack surface, no `/bin/sh` available inside the
-container at all) can opt out at build time:
+Operators who explicitly want the classic shell-less property (smallest
+attack surface, no `/bin/sh` or package manager available inside the
+container at all) can opt out at build time — `INCLUDE_SHELL=0` strips
+busybox + apk from the final image:
 
 ```
 make container-image INCLUDE_SHELL=0
@@ -145,9 +151,9 @@ the kernel via its listening socket. Putting userspace network tools in
 the production image would expand the post-exploit toolbox without
 adding any visibility the application doesn't already have.
 
-A second variant, `:debug`, uses `gcr.io/distroless/cc-debian12:debug-nonroot`
-which adds a busybox shell **plus a small, fixed set of network
-inspection tools — `ss`, `ip`, `tcpdump`, `curl` — for operator-side
+A second variant, `:debug`, uses the same `cgr.dev/chainguard/wolfi-base`
+runtime and `apk add`s a small, fixed set of network inspection tools on
+top — `ss`/`ip` (iproute2), `tcpdump`, `curl` — for operator-side
 incident response** (e.g. "is my reverse proxy actually forwarding the
 client IP?", "what does the kernel see on this socket?"). Operators are
 expected to run `:latest` in production and only pull `:debug`
@@ -423,7 +429,8 @@ first signed-image tag.
 | File | Purpose |
 |---|---|
 | [`.github/workflows/container-image.yml`](../.github/workflows/container-image.yml) | `buildx` for `linux/amd64` + `linux/arm64` under one manifest list; `cosign sign --yes <image>@<digest>` keyless via GitHub OIDC; `syft` CycloneDX SBOM + `cosign attest --type cyclonedx`; matrix builds production + `:debug` variants in parallel. **Done.** |
-| [`deploy/container/Containerfile.debug`](../deploy/container/Containerfile.debug) | `:debug` variant. `debug-nonroot` distroless base + `ss`/`ip`/`tcpdump`/`curl` copied in from a Debian builder layer. No package manager carried into the final image. **Done.** |
+| [`deploy/container/Containerfile.debug`](../deploy/container/Containerfile.debug) | `:debug` variant. `cgr.dev/chainguard/wolfi-base` runtime with `ss`/`ip` (iproute2), `tcpdump`, `curl` `apk add`ed from the Wolfi repos (no Debian staging layer, no hand-copied `.so` deps). **Done.** |
+| [`deploy/container/test/wolfi-runtime.test.sh`](../deploy/container/test/wolfi-runtime.test.sh) | Test harness for the Wolfi runtime: always-on static assertions on both Containerfiles + an opt-in (`BV_CONTAINER_SMOKE=1`) build-and-run smoke test. Wired to `make container-image-test [SMOKE=1]`. **Done.** |
 | `docs/docs/operations/container-image.md` | Operator-facing docs: pulling, verifying, mounting volumes, env-var matrix, cluster cookbook, "Client IP propagation" cookbook. **Deferred** — split off as a separate writing task; verification + SBOM-download one-liners are surfaced in the workflow's job summary in the meantime. |
 
 Acceptance: `cosign verify --certificate-identity-regexp 'https://github.com/ffquintella/BastionVault/' --certificate-oidc-issuer https://token.actions.githubusercontent.com <image>@<digest>` succeeds; `cosign verify-attestation --type cyclonedx <image>@<digest>` returns the SBOM; the manifest list resolves to two arch-specific manifests for `linux/amd64` + `linux/arm64`. Verifiable on the first tag pushed under this workflow.

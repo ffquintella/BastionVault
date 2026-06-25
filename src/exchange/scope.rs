@@ -18,7 +18,7 @@ use crate::{
     core::Core,
     errors::RvError,
     exchange::schema::{
-        AssetGroupItem, ExchangeDocument, ExchangeItems, ExporterInfo, FileItem, KvItem,
+        AssetGroupItem, ExchangeDocument, ExchangeItems, ExporterInfo, FileItem, KvItem, RawEntry,
         ResourceGroupItem, ResourceItem, ScopeKind, ScopeSelector, ScopeSpec,
     },
     mount::{LOGICAL_BARRIER_PREFIX, SYSTEM_BARRIER_PREFIX},
@@ -90,6 +90,13 @@ impl MountIndex {
             .unwrap_or(&[])
     }
 
+    /// Iterate every `(logical_type, mounts)` pair in the index. Used by the
+    /// full-export raw sweep to reach mount types it has no structured
+    /// exporter for.
+    fn iter_by_type(&self) -> impl Iterator<Item = (&String, &Vec<(String, String)>)> {
+        self.by_type.iter()
+    }
+
     /// Barrier-storage prefix for a logical mount's data, e.g.
     /// `namespaces/<root_uuid>/logical/<uuid>/`.
     fn barrier_prefix(&self, uuid: &str) -> String {
@@ -113,6 +120,37 @@ impl MountIndex {
             }
         }
         None
+    }
+
+    /// Find the uuid of a mount of **any** logical type by its mount path
+    /// (trailing-slash form, e.g. `pki/`). Used by the raw exporter/importer
+    /// to address non-KV secret engines, which `kv_uuid_for_mount` ignores.
+    fn uuid_for_mount_any(&self, mount_path: &str) -> Option<&str> {
+        for mounts in self.by_type.values() {
+            for (path, uuid) in mounts {
+                if path == mount_path {
+                    return Some(uuid);
+                }
+            }
+        }
+        None
+    }
+
+    /// Resolve a raw barrier entry's `(mount, path)` to the barrier-storage key
+    /// where the live engine reads/writes it. Mirrors [`resolve_kv_key`] but
+    /// resolves the mount uuid across **all** logical types (pki, ssh, transit,
+    /// …), so non-KV engines round-trip under the re-rooted layout. Falls back
+    /// to the bare mount path when the mount is unknown (hand-built documents /
+    /// cross-vault imports onto a missing mount).
+    ///
+    /// [`resolve_kv_key`]: Self::resolve_kv_key
+    pub fn resolve_raw_key(&self, mount: &str, path: &str) -> String {
+        let mount = ensure_trailing_slash(mount);
+        let rel = strip_leading_slash(path);
+        match self.uuid_for_mount_any(&mount) {
+            Some(uuid) => format!("{}{rel}", self.barrier_prefix(uuid)),
+            None => format!("{mount}{rel}"),
+        }
     }
 
     /// Resolve a KV item's `(mount, path)` to the barrier-storage key where
@@ -209,6 +247,25 @@ pub struct ImportResult {
     pub unchanged: u64,
     pub skipped: u64,
     pub renamed: u64,
+}
+
+impl ImportResult {
+    /// `(new, identical, conflict)` counts derived from per-item
+    /// classification — what a restore "Preview" (dry run) reports. Independent
+    /// of `written`/`skipped`/… which describe the action taken.
+    pub fn classification_counts(&self) -> (u64, u64, u64) {
+        let mut new = 0;
+        let mut identical = 0;
+        let mut conflict = 0;
+        for item in &self.items {
+            match item.classification {
+                ImportClassification::New => new += 1,
+                ImportClassification::Identical => identical += 1,
+                ImportClassification::Conflict => conflict += 1,
+            }
+        }
+        (new, identical, conflict)
+    }
 }
 
 /// Resolve a `ScopeSpec` into an `ExchangeDocument` by reading the
@@ -342,8 +399,44 @@ async fn resolve_full(
         resolve_group(storage, mounts, &name, GroupKind::Resource, items, warnings).await?;
     }
 
+    // Every remaining secret engine (pki, ssh, ssh-broker, transit, totp,
+    // openldap, rustion, and any future type) has no structured exporter, so a
+    // KV-only full export silently dropped it. Capture each such mount's entire
+    // barrier subtree verbatim as `RawEntry`s — opaque key→bytes that restore
+    // byte-for-byte under the same (or a re-routed) mount. Types handled above,
+    // plus the global `system` / `identity` views, are skipped so we neither
+    // double-capture nor back up the live mount table / seal config.
+    for (logical_type, mount_entries) in mounts.iter_by_type() {
+        if RAW_SKIP_TYPES.contains(&logical_type.as_str()) {
+            continue;
+        }
+        for (mount_path, _uuid) in mount_entries {
+            let mount_norm = ensure_trailing_slash(mount_path);
+            if let Err(e) = read_raw_mount(storage, mounts, &mount_norm, items).await {
+                warnings.push(format!(
+                    "raw capture of mount {mount_norm} (type {logical_type}) failed: {e:?}"
+                ));
+            }
+        }
+    }
+
     Ok(())
 }
+
+/// Logical mount types that `resolve_full` must NOT raw-capture: KV / resource
+/// / files have structured exporters above; `resource-group` lives in the
+/// `sys/` store (captured via the groups loop); `system` and `identity` are
+/// control-plane views (mount table, seal config, entities) that an exchange
+/// document must never round-trip.
+const RAW_SKIP_TYPES: &[&str] = &[
+    "kv",
+    "kv-v2",
+    "resource",
+    "files",
+    "resource-group",
+    "system",
+    "identity",
+];
 
 /// Read a single resource (and its embedded secrets / metadata / version
 /// history) from the first `resource`-typed mount in the index. Records
@@ -644,6 +737,41 @@ async fn read_kv_mount(
     Ok(())
 }
 
+/// Capture a non-KV mount's entire barrier subtree (`<root>logical/<uuid>/…`)
+/// as opaque [`RawEntry`]s, one per leaf key. The stored `path` is relative to
+/// the mount's barrier prefix so `import_from_document` can write it straight
+/// back under the destination mount via `MountIndex::resolve_raw_key`. Values
+/// are JSON when the bytes parse, else a self-describing `{"_base64": …}`
+/// wrapper — identical to the KV encoding, so any engine round-trips.
+async fn read_raw_mount(
+    storage: &dyn Storage,
+    mounts: &MountIndex,
+    mount_norm: &str,
+    items: &mut ExchangeItems,
+) -> Result<(), RvError> {
+    let scan_prefix = match mounts.uuid_for_mount_any(mount_norm) {
+        Some(uuid) => mounts.barrier_prefix(uuid),
+        // No index entry (hand-built index / legacy layout): scan the bare
+        // mount path so older flows keep working.
+        None => mount_norm.to_string(),
+    };
+    let keys = list_recursive(storage, &scan_prefix).await?;
+    for full_key in keys {
+        let relative = full_key
+            .strip_prefix(&scan_prefix)
+            .unwrap_or(&full_key)
+            .to_string();
+        if let Some(entry) = storage.get(&full_key).await? {
+            items.raw.push(RawEntry {
+                mount: mount_norm.to_string(),
+                path: relative,
+                value: entry_value_to_json(&entry),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Does a kv-v2 / kv-v1 barrier-relative key fall under the logical secret
 /// path `lp`? Strips the kv-v2 `data/` or `metadata/` tree prefix before
 /// comparing; kv-v1 keys are compared directly.
@@ -671,65 +799,221 @@ fn parse_json_or_b64(bytes: &[u8]) -> Value {
 
 /// Apply a parsed `ExchangeDocument` to the vault according to the conflict
 /// policy. Returns a per-item result so the caller can audit each write.
+///
+/// With `dry_run = true` every entry is classified (new / identical /
+/// conflict) but nothing is written — this backs the restore "Preview" so the
+/// preview and the real write agree on *every* item type, not just KV. This is
+/// the single classify+write engine: KV items, opaque `raw` engine entries
+/// (pki / ssh / transit / …), and structured resource / file / group items all
+/// funnel through the same per-entry path.
 pub async fn import_from_document(
     storage: &dyn Storage,
     mounts: &MountIndex,
     document: &ExchangeDocument,
     policy: ConflictPolicy,
+    dry_run: bool,
 ) -> Result<ImportResult, RvError> {
     document.validate_schema_tag().map_err(|_| RvError::ErrRequestInvalid)?;
 
     let mut result = ImportResult::default();
 
+    // KV items — resolved to the live kv backend's barrier key.
     for kv in &document.items.kv {
-        // Resolve to where the live kv backend reads/writes the item (under
-        // the re-rooted barrier prefix), so the preview and the write agree.
         let full_path = mounts.resolve_kv_key(&kv.mount, &kv.path);
         let new_bytes = json_value_to_storage_bytes(&kv.value)?;
+        apply_entry(
+            storage, &full_path, new_bytes, policy, dry_run, &kv.mount, &kv.path, &mut result,
+        )
+        .await?;
+    }
 
-        let existing = storage.get(&full_path).await?;
-        let classification = match &existing {
-            None => ImportClassification::New,
-            Some(e) if e.value == new_bytes => ImportClassification::Identical,
-            Some(_) => ImportClassification::Conflict,
-        };
+    // Raw items — opaque barrier entries for non-KV engines.
+    for raw in &document.items.raw {
+        let full_path = mounts.resolve_raw_key(&raw.mount, &raw.path);
+        let new_bytes = json_value_to_storage_bytes(&raw.value)?;
+        apply_entry(
+            storage, &full_path, new_bytes, policy, dry_run, &raw.mount, &raw.path, &mut result,
+        )
+        .await?;
+    }
 
-        let (action, renamed_to) = match (&classification, policy) {
-            (ImportClassification::New, _) => {
-                storage.put(&StorageEntry { key: full_path.clone(), value: new_bytes }).await?;
-                (ImportAction::Written, None)
-            }
-            (ImportClassification::Identical, _) => (ImportAction::Unchanged, None),
-            (ImportClassification::Conflict, ConflictPolicy::Overwrite) => {
-                storage.put(&StorageEntry { key: full_path.clone(), value: new_bytes }).await?;
-                (ImportAction::Written, None)
-            }
-            (ImportClassification::Conflict, ConflictPolicy::Skip) => (ImportAction::Skipped, None),
-            (ImportClassification::Conflict, ConflictPolicy::Rename) => {
-                let suffix = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
-                let renamed = format!("{full_path}.imported.{suffix}");
-                storage.put(&StorageEntry { key: renamed.clone(), value: new_bytes }).await?;
-                (ImportAction::Renamed, Some(renamed))
-            }
-        };
-
-        match action {
-            ImportAction::Written => result.written += 1,
-            ImportAction::Unchanged => result.unchanged += 1,
-            ImportAction::Skipped => result.skipped += 1,
-            ImportAction::Renamed => result.renamed += 1,
+    // Resources — reconstitute meta / history / per-secret bundles back under
+    // the resource mount's barrier prefix.
+    let default_resource_mount = mounts
+        .mounts_of_type("resource")
+        .first()
+        .map(|(p, _)| p.clone());
+    for res in &document.items.resources {
+        let mount_path = res
+            .data
+            .get("mount_path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| default_resource_mount.clone())
+            .unwrap_or_else(|| "resources/".to_string());
+        for (rel, bytes) in flatten_resource_bundle(&res.id, &res.data)? {
+            let full_path = mounts.resolve_raw_key(&mount_path, &rel);
+            apply_entry(
+                storage, &full_path, bytes, policy, dry_run, &mount_path, &rel, &mut result,
+            )
+            .await?;
         }
+    }
 
-        result.items.push(ImportedItem {
-            mount: kv.mount.clone(),
-            path: kv.path.clone(),
-            classification,
-            action,
-            renamed_to,
-        });
+    // File blobs — metadata + raw blob bytes under the files mount.
+    let files_mount = mounts
+        .mounts_of_type("files")
+        .first()
+        .map(|(p, _)| p.clone())
+        .unwrap_or_else(|| "files/".to_string());
+    for file in &document.items.files {
+        let meta_rel = format!("meta/{}", file.id);
+        let meta_bytes = json_value_to_storage_bytes(&file.metadata)?;
+        let full_path = mounts.resolve_raw_key(&files_mount, &meta_rel);
+        apply_entry(
+            storage, &full_path, meta_bytes, policy, dry_run, &files_mount, &meta_rel, &mut result,
+        )
+        .await?;
+        if !file.content_b64.is_empty() {
+            use base64::Engine;
+            let blob = base64::engine::general_purpose::STANDARD
+                .decode(file.content_b64.as_bytes())
+                .map_err(|_| RvError::ErrRequestInvalid)?;
+            let blob_rel = format!("blob/{}", file.id);
+            let full_path = mounts.resolve_raw_key(&files_mount, &blob_rel);
+            apply_entry(
+                storage, &full_path, blob, policy, dry_run, &files_mount, &blob_rel, &mut result,
+            )
+            .await?;
+        }
+    }
+
+    // Resource / asset groups — both kinds are `{id, data}` records that share
+    // the one `sys/` group store, mirroring how `resolve_group` reads them.
+    let groups = document
+        .items
+        .resource_groups
+        .iter()
+        .map(|g| (&g.id, &g.data))
+        .chain(document.items.asset_groups.iter().map(|g| (&g.id, &g.data)));
+    for (id, data) in groups {
+        let canonical = id.trim().to_lowercase();
+        let full_path = format!("{}resource-group/group/{canonical}", mounts.system_prefix());
+        let bytes = json_value_to_storage_bytes(data)?;
+        let display_path = format!("group/{canonical}");
+        apply_entry(
+            storage, &full_path, bytes, policy, dry_run, "resource-group/", &display_path,
+            &mut result,
+        )
+        .await?;
     }
 
     Ok(result)
+}
+
+/// Classify a single destination key against the incoming bytes and, unless
+/// `dry_run`, apply the write under the conflict `policy`. Records one
+/// `ImportedItem` (tagged with the human-readable `display_mount` /
+/// `display_path`) and bumps the matching counter. Shared by every item type.
+#[allow(clippy::too_many_arguments)]
+async fn apply_entry(
+    storage: &dyn Storage,
+    full_path: &str,
+    new_bytes: Vec<u8>,
+    policy: ConflictPolicy,
+    dry_run: bool,
+    display_mount: &str,
+    display_path: &str,
+    result: &mut ImportResult,
+) -> Result<(), RvError> {
+    let existing = storage.get(full_path).await?;
+    let classification = match &existing {
+        None => ImportClassification::New,
+        Some(e) if e.value == new_bytes => ImportClassification::Identical,
+        Some(_) => ImportClassification::Conflict,
+    };
+
+    let (action, renamed_to) = match (&classification, policy) {
+        (ImportClassification::New, _) => {
+            if !dry_run {
+                storage
+                    .put(&StorageEntry { key: full_path.to_string(), value: new_bytes })
+                    .await?;
+            }
+            (ImportAction::Written, None)
+        }
+        (ImportClassification::Identical, _) => (ImportAction::Unchanged, None),
+        (ImportClassification::Conflict, ConflictPolicy::Overwrite) => {
+            if !dry_run {
+                storage
+                    .put(&StorageEntry { key: full_path.to_string(), value: new_bytes })
+                    .await?;
+            }
+            (ImportAction::Written, None)
+        }
+        (ImportClassification::Conflict, ConflictPolicy::Skip) => (ImportAction::Skipped, None),
+        (ImportClassification::Conflict, ConflictPolicy::Rename) => {
+            let suffix = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
+            let renamed = format!("{full_path}.imported.{suffix}");
+            if !dry_run {
+                storage
+                    .put(&StorageEntry { key: renamed.clone(), value: new_bytes })
+                    .await?;
+            }
+            (ImportAction::Renamed, Some(renamed))
+        }
+    };
+
+    // Counters describe what was (or, on a dry run, would be) done.
+    match action {
+        ImportAction::Written => result.written += 1,
+        ImportAction::Unchanged => result.unchanged += 1,
+        ImportAction::Skipped => result.skipped += 1,
+        ImportAction::Renamed => result.renamed += 1,
+    }
+
+    result.items.push(ImportedItem {
+        mount: display_mount.to_string(),
+        path: display_path.to_string(),
+        classification,
+        action,
+        renamed_to,
+    });
+    Ok(())
+}
+
+/// Flatten an exported resource bundle (`{mount_path, meta, history?,
+/// secrets{name:{value, meta?, versions{ver:val}}}}`, produced by
+/// `resolve_resource`) into the `(barrier-relative-key, bytes)` pairs the
+/// resource engine stores. The inverse of the export walk in
+/// `collect_resource_secrets`.
+fn flatten_resource_bundle(id: &str, data: &Value) -> Result<Vec<(String, Vec<u8>)>, RvError> {
+    let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+    if let Some(meta) = data.get("meta") {
+        out.push((format!("meta/{id}"), json_value_to_storage_bytes(meta)?));
+    }
+    if let Some(history) = data.get("history") {
+        out.push((format!("hist/{id}"), json_value_to_storage_bytes(history)?));
+    }
+    if let Some(Value::Object(secrets)) = data.get("secrets") {
+        for (name, sb) in secrets {
+            if let Some(value) = sb.get("value") {
+                out.push((format!("secret/{id}/{name}"), json_value_to_storage_bytes(value)?));
+            }
+            if let Some(meta) = sb.get("meta") {
+                out.push((format!("smeta/{id}/{name}"), json_value_to_storage_bytes(meta)?));
+            }
+            if let Some(Value::Object(versions)) = sb.get("versions") {
+                for (ver, vv) in versions {
+                    out.push((
+                        format!("sver/{id}/{name}/{ver}"),
+                        json_value_to_storage_bytes(vv)?,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn ensure_trailing_slash(s: &str) -> String {
@@ -932,7 +1216,7 @@ mod tests {
 
         // Import into a fresh vault — must land back under the barrier prefix.
         let dst = MemStorage::default();
-        let result = import_from_document(&dst, &mounts, &doc, ConflictPolicy::Skip).await.unwrap();
+        let result = import_from_document(&dst, &mounts, &doc, ConflictPolicy::Skip, false).await.unwrap();
         assert_eq!(result.written, 2);
         assert_eq!(result.unchanged, 0);
         assert_eq!(result.skipped, 0);
@@ -1053,7 +1337,7 @@ mod tests {
             },
         );
 
-        let result = import_from_document(&store, &MountIndex::empty(), &doc, ConflictPolicy::Skip).await.unwrap();
+        let result = import_from_document(&store, &MountIndex::empty(), &doc, ConflictPolicy::Skip, false).await.unwrap();
         assert_eq!(result.skipped, 1);
         assert_eq!(result.written, 0);
         let after = store.get("secret/x/y").await.unwrap().unwrap();
@@ -1079,7 +1363,7 @@ mod tests {
             },
         );
 
-        let result = import_from_document(&store, &MountIndex::empty(), &doc, ConflictPolicy::Rename).await.unwrap();
+        let result = import_from_document(&store, &MountIndex::empty(), &doc, ConflictPolicy::Rename, false).await.unwrap();
         assert_eq!(result.renamed, 1);
         let after = store.get("secret/x/y").await.unwrap().unwrap();
         assert_eq!(after.value, serde_json::to_vec(&original).unwrap());
@@ -1108,8 +1392,185 @@ mod tests {
             },
         );
 
-        let result = import_from_document(&store, &MountIndex::empty(), &doc, ConflictPolicy::Skip).await.unwrap();
+        let result = import_from_document(&store, &MountIndex::empty(), &doc, ConflictPolicy::Skip, false).await.unwrap();
         assert_eq!(result.unchanged, 1);
         assert_eq!(result.written, 0);
+    }
+
+    /// Defect A: a full export must capture non-KV secret engines (pki, ssh,
+    /// transit, …) as opaque `raw` entries, and the import must write them
+    /// back byte-for-byte under the destination mount's barrier prefix —
+    /// including non-JSON blobs via the `{"_base64": …}` wrapper.
+    #[tokio::test]
+    async fn raw_engine_full_capture_and_restore() {
+        let src = MemStorage::default();
+        let key_meta = serde_json::json!({"type": "chacha20-poly1305", "version": 3});
+        populate(
+            &src,
+            &[("namespaces/root-uuid/logical/u-transit/keys/app", &key_meta)],
+        )
+        .await;
+        // A raw (non-JSON) key-material blob addressed under the same mount.
+        src.put(&StorageEntry {
+            key: "namespaces/root-uuid/logical/u-transit/material/app/1".to_string(),
+            value: vec![0xDE, 0xAD, 0xBE, 0xEF],
+        })
+        .await
+        .unwrap();
+
+        let mounts = reroot_index(&[("transit", "transit/", "u-transit")]);
+        let scope = ScopeSpec { kind: ScopeKind::Full, include: vec![] };
+        let doc = export_to_document(&src, &mounts, ExporterInfo::default(), scope)
+            .await
+            .unwrap();
+
+        assert_eq!(doc.items.kv.len(), 0, "transit is not a KV mount");
+        assert_eq!(doc.items.raw.len(), 2, "both transit keys captured as raw");
+        assert!(doc.items.raw.iter().all(|r| r.mount == "transit/"));
+        let paths: Vec<&str> = doc.items.raw.iter().map(|r| r.path.as_str()).collect();
+        assert!(paths.contains(&"keys/app"));
+        assert!(paths.contains(&"material/app/1"));
+
+        // Restore into a fresh vault — bytes must land back under the barrier
+        // prefix, blob included.
+        let dst = MemStorage::default();
+        let result = import_from_document(&dst, &mounts, &doc, ConflictPolicy::Skip, false)
+            .await
+            .unwrap();
+        assert_eq!(result.written, 2);
+        assert_eq!(
+            dst.get("namespaces/root-uuid/logical/u-transit/keys/app")
+                .await
+                .unwrap()
+                .unwrap()
+                .value,
+            serde_json::to_vec(&key_meta).unwrap()
+        );
+        assert_eq!(
+            dst.get("namespaces/root-uuid/logical/u-transit/material/app/1")
+                .await
+                .unwrap()
+                .unwrap()
+                .value,
+            vec![0xDE, 0xAD, 0xBE, 0xEF],
+        );
+    }
+
+    /// Defect A: `RAW_SKIP_TYPES` must keep the control-plane `system` /
+    /// `identity` views out of a full export — backing them up would round-trip
+    /// the live mount table / seal config.
+    #[tokio::test]
+    async fn raw_capture_skips_system_and_identity() {
+        let src = MemStorage::default();
+        populate(
+            &src,
+            &[
+                ("namespaces/root-uuid/logical/u-sys/mounts/table", &serde_json::json!({"x":1})),
+                ("namespaces/root-uuid/logical/u-id/entity/e1", &serde_json::json!({"y":2})),
+            ],
+        )
+        .await;
+        let mounts = reroot_index(&[
+            ("system", "sys/", "u-sys"),
+            ("identity", "identity/", "u-id"),
+        ]);
+        let scope = ScopeSpec { kind: ScopeKind::Full, include: vec![] };
+        let doc = export_to_document(&src, &mounts, ExporterInfo::default(), scope)
+            .await
+            .unwrap();
+        assert_eq!(doc.items.raw.len(), 0, "system/identity must not be captured");
+    }
+
+    /// Defect B: a structured resource (meta + per-secret bundle), as produced
+    /// by a full export, must be restorable — the old importer dropped every
+    /// non-KV item on the floor, so backups were unrestorable.
+    #[tokio::test]
+    async fn structured_resource_round_trips_through_import() {
+        let src = MemStorage::default();
+        let meta = serde_json::json!({"id": "t1", "kind": "host"});
+        let secret_val = serde_json::json!({"password": "p@ss"});
+        let secret_meta = serde_json::json!({"created": "2026-06-25"});
+        populate(
+            &src,
+            &[
+                ("namespaces/root-uuid/logical/u-res/meta/t1", &meta),
+                ("namespaces/root-uuid/logical/u-res/secret/t1/db", &secret_val),
+                ("namespaces/root-uuid/logical/u-res/smeta/t1/db", &secret_meta),
+            ],
+        )
+        .await;
+        let mounts = reroot_index(&[("resource", "resources/", "u-res")]);
+
+        let doc = export_to_document(
+            &src,
+            &mounts,
+            ExporterInfo::default(),
+            ScopeSpec { kind: ScopeKind::Full, include: vec![] },
+        )
+        .await
+        .unwrap();
+        assert_eq!(doc.items.resources.len(), 1, "resource captured");
+
+        // Restore into a fresh vault and confirm every barrier key reappears.
+        let dst = MemStorage::default();
+        let result = import_from_document(&dst, &mounts, &doc, ConflictPolicy::Skip, false)
+            .await
+            .unwrap();
+        assert!(result.written >= 3, "meta + secret value + secret meta written");
+        assert_eq!(
+            dst.get("namespaces/root-uuid/logical/u-res/meta/t1")
+                .await
+                .unwrap()
+                .unwrap()
+                .value,
+            serde_json::to_vec(&meta).unwrap()
+        );
+        assert_eq!(
+            dst.get("namespaces/root-uuid/logical/u-res/secret/t1/db")
+                .await
+                .unwrap()
+                .unwrap()
+                .value,
+            serde_json::to_vec(&secret_val).unwrap()
+        );
+        assert!(
+            dst.get("namespaces/root-uuid/logical/u-res/smeta/t1/db")
+                .await
+                .unwrap()
+                .is_some(),
+            "per-secret metadata restored"
+        );
+    }
+
+    /// A dry-run import classifies every item but writes nothing — the
+    /// invariant the restore "Preview" relies on.
+    #[tokio::test]
+    async fn dry_run_classifies_without_writing() {
+        let dst = MemStorage::default();
+        let mounts = reroot_index(&[("transit", "transit/", "u-transit")]);
+        let doc = ExchangeDocument::new(
+            ExporterInfo::default(),
+            ScopeSpec { kind: ScopeKind::Full, include: vec![] },
+            ExchangeItems {
+                raw: vec![RawEntry {
+                    mount: "transit/".to_string(),
+                    path: "keys/app".to_string(),
+                    value: serde_json::json!({"v": 1}),
+                }],
+                ..Default::default()
+            },
+        );
+        let result = import_from_document(&dst, &mounts, &doc, ConflictPolicy::Skip, true)
+            .await
+            .unwrap();
+        let (new, identical, conflict) = result.classification_counts();
+        assert_eq!((new, identical, conflict), (1, 0, 0));
+        assert!(
+            dst.get("namespaces/root-uuid/logical/u-transit/keys/app")
+                .await
+                .unwrap()
+                .is_none(),
+            "dry run must not write"
+        );
     }
 }

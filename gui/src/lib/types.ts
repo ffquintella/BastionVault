@@ -6,6 +6,35 @@ export interface VaultStatus {
   has_vault: boolean;
 }
 
+/** Per-node result of a cluster seal/unseal fan-out. */
+export interface NodeSealResult {
+  address: string;
+  /** Post-submit seal state for this node; null when the call errored. */
+  sealed: boolean | null;
+  /** Shamir shares entered so far on this node (t-of-n setups). */
+  progress: number | null;
+  /** Shares required to cross the threshold, as the node reported it. */
+  threshold: number | null;
+  /** Error string when the call to this node failed. */
+  error: string | null;
+}
+
+/** Outcome of an unseal attempt: aggregate status + per-node breakdown.
+ *  In a cluster, the share is fanned out to every node, so `nodes` lists
+ *  each member; `status.sealed` stays true until they are all open. */
+export interface UnsealOutcome {
+  status: VaultStatus;
+  nodes: NodeSealResult[];
+}
+
+/** Outcome of a seal attempt: aggregate status + per-node breakdown.
+ *  Seal is fanned out to every cluster node, so `nodes` lists each
+ *  member (including any that failed to seal). */
+export interface SealOutcome {
+  status: VaultStatus;
+  nodes: NodeSealResult[];
+}
+
 export interface RemoteProfile {
   name: string;
   address: string;

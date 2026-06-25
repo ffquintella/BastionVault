@@ -29,11 +29,14 @@ architecture line up with the project's secure-by-default posture.
 | `/var/lib/bvault/data` | Storage volume mount-point (Hiqlite SQLite + Raft logs by default). |
 | `/etc/bvault/tls/` | TLS material mount-point (`server.crt`, `server.key`). |
 
-The runtime is `gcr.io/distroless/cc-debian12:nonroot` — glibc and
-ca-certificates and nothing else. There is no shell, no package
-manager, no userspace network tools (`ss`, `ip`, `tcpdump`, `curl`).
-Phase 3 will publish a `:debug` variant with those tools for incident
-response. Until then, debug from outside the container.
+The runtime is `cgr.dev/chainguard/wolfi-base` — Chainguard's free,
+open-source, glibc-based "undistro" for containers: glibc, a CA bundle,
+and a minimal userspace. By default it carries the bundled busybox shell
+so `podman exec` works out of the box; build with `INCLUDE_SHELL=0` to
+strip the shell and `apk` for the classic shell-less posture. There are
+no userspace network tools (`ss`, `ip`, `tcpdump`, `curl`) in the
+production image — the `:debug` variant adds those for incident
+response. Until you pull `:debug`, debug from outside the container.
 
 The container runs as UID `65532:65532` (the distroless `nonroot` user).
 Mounted volumes must be writable by that UID for `data/`; config and

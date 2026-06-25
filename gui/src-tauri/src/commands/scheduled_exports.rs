@@ -10,7 +10,6 @@
 //! failed with "Vault not open" whenever the GUI was connected to a
 //! remote server (where `AppState::vault` is always `None`).
 
-use base64::Engine;
 use bastion_vault::scheduled_exports::{
     runner, DestinationKind, RunRecord, RunStatus, Schedule, ScheduleInput, ScheduleStore,
 };
@@ -511,53 +510,37 @@ pub async fn scheduled_exports_restore(
     let core = vault.core.load();
 
     if dry_run {
-        let storage = core.barrier.as_storage();
-        // Resolve KV keys through the same mount-prefix logic as the write
-        // path (`import_from_document`); otherwise the re-rooted layout
-        // (`namespaces/<root_uuid>/logical/<uuid>/…`) is missed and every
-        // item is misclassified as `new`.
+        // Classify via the one engine in dry-run mode so the preview agrees
+        // with the real restore on every item type (KV, raw non-KV engines,
+        // structured resources / files / groups) and resolves keys under the
+        // re-rooted layout the write path uses.
         let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
         let mounts = bastion_vault::exchange::scope::MountIndex::from_core(&core_arc)
             .map_err(CommandError::from)?;
-        let mut new = 0u64;
-        let mut identical = 0u64;
-        let mut conflict = 0u64;
-        let mut items: Vec<RestoreItem> = Vec::with_capacity(document.items.kv.len());
-        for kv in &document.items.kv {
-            let full_path = mounts.resolve_kv_key(&kv.mount, &kv.path);
-            let new_bytes = match &kv.value {
-                Value::Object(map) if map.len() == 1 && map.contains_key("_base64") => {
-                    if let Some(Value::String(b64)) = map.get("_base64") {
-                        base64::engine::general_purpose::STANDARD
-                            .decode(b64.as_bytes())
-                            .map_err(|_| "_base64 not valid")?
-                    } else {
-                        serde_json::to_vec(&kv.value).map_err(|_| "json serialize failed")?
-                    }
+        let classify = bastion_vault::exchange::scope::import_from_document(
+            core.barrier.as_storage(),
+            &mounts,
+            &document,
+            bastion_vault::exchange::ConflictPolicy::Skip,
+            true, // dry_run
+        )
+        .await
+        .map_err(CommandError::from)?;
+        let (new, identical, conflict) = classify.classification_counts();
+        let items: Vec<RestoreItem> = classify
+            .items
+            .iter()
+            .map(|i| RestoreItem {
+                mount: i.mount.clone(),
+                path: i.path.clone(),
+                classification: match i.classification {
+                    bastion_vault::exchange::ImportClassification::New => "new",
+                    bastion_vault::exchange::ImportClassification::Identical => "identical",
+                    bastion_vault::exchange::ImportClassification::Conflict => "conflict",
                 }
-                _ => serde_json::to_vec(&kv.value).map_err(|_| "json serialize failed")?,
-            };
-            let existing = storage.get(&full_path).await.map_err(CommandError::from)?;
-            let classification = match &existing {
-                None => {
-                    new += 1;
-                    "new"
-                }
-                Some(e) if e.value == new_bytes => {
-                    identical += 1;
-                    "identical"
-                }
-                Some(_) => {
-                    conflict += 1;
-                    "conflict"
-                }
-            };
-            items.push(RestoreItem {
-                mount: kv.mount.clone(),
-                path: kv.path.clone(),
-                classification: classification.to_string(),
-            });
-        }
+                .to_string(),
+            })
+            .collect();
         return Ok(RestoreResult {
             dry_run: true,
             total: items.len() as u64,
@@ -584,6 +567,7 @@ pub async fn scheduled_exports_restore(
         &mounts,
         &document,
         policy,
+        false,
     )
     .await
     .map_err(CommandError::from)?;

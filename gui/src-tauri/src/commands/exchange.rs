@@ -317,49 +317,38 @@ pub async fn exchange_preview(
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
     let core = vault.core.load();
-    let storage = core.barrier.as_storage();
 
-    let mut new = 0u64;
-    let mut identical = 0u64;
-    let mut conflict = 0u64;
-    let mut items: Vec<PreviewItem> = Vec::with_capacity(document.items.kv.len());
-    for kv in &document.items.kv {
-        let mount = if kv.mount.ends_with('/') { kv.mount.clone() } else { format!("{}/", kv.mount) };
-        let path = kv.path.strip_prefix('/').unwrap_or(&kv.path);
-        let full_path = format!("{mount}{path}");
-        let new_bytes = match &kv.value {
-            Value::Object(map) if map.len() == 1 && map.contains_key("_base64") => {
-                if let Some(Value::String(b64)) = map.get("_base64") {
-                    base64::engine::general_purpose::STANDARD
-                        .decode(b64.as_bytes())
-                        .map_err(|_| "_base64 not valid")?
-                } else {
-                    serde_json::to_vec(&kv.value).map_err(|_| "json serialize failed")?
-                }
+    // Classify via the one engine in dry-run mode so the preview agrees with
+    // the apply on every item type (KV, raw non-KV engines, structured
+    // resources / files / groups) and resolves keys under the re-rooted
+    // barrier layout — the old bare-`{mount}{path}` lookup missed re-rooted
+    // mounts and mislabelled everything `new`, and never saw non-KV items.
+    let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
+    let mounts = exchange::scope::MountIndex::from_core(&core_arc).map_err(CommandError::from)?;
+    let classify = exchange::scope::import_from_document(
+        core.barrier.as_storage(),
+        &mounts,
+        &document,
+        exchange::ConflictPolicy::Skip,
+        true, // dry_run
+    )
+    .await
+    .map_err(CommandError::from)?;
+    let (new, identical, conflict) = classify.classification_counts();
+    let items: Vec<PreviewItem> = classify
+        .items
+        .iter()
+        .map(|i| PreviewItem {
+            mount: i.mount.clone(),
+            path: i.path.clone(),
+            classification: match i.classification {
+                exchange::ImportClassification::New => "new",
+                exchange::ImportClassification::Identical => "identical",
+                exchange::ImportClassification::Conflict => "conflict",
             }
-            _ => serde_json::to_vec(&kv.value).map_err(|_| "json serialize failed")?,
-        };
-        let existing = storage.get(&full_path).await.map_err(CommandError::from)?;
-        let classification = match &existing {
-            None => {
-                new += 1;
-                "new"
-            }
-            Some(e) if e.value == new_bytes => {
-                identical += 1;
-                "identical"
-            }
-            Some(_) => {
-                conflict += 1;
-                "conflict"
-            }
-        };
-        items.push(PreviewItem {
-            mount: kv.mount.clone(),
-            path: kv.path.clone(),
-            classification: classification.to_string(),
-        });
-    }
+            .to_string(),
+        })
+        .collect();
 
     let owner = state.token.lock().await.clone().unwrap_or_default();
     let preview_token = core.exchange_preview_store.insert(document, owner.clone());
@@ -450,10 +439,15 @@ pub async fn exchange_apply(
 
     let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
     let mounts = exchange::scope::MountIndex::from_core(&core_arc).map_err(CommandError::from)?;
-    let result =
-        exchange::scope::import_from_document(core.barrier.as_storage(), &mounts, &document, policy)
-            .await
-            .map_err(CommandError::from)?;
+    let result = exchange::scope::import_from_document(
+        core.barrier.as_storage(),
+        &mounts,
+        &document,
+        policy,
+        false,
+    )
+    .await
+    .map_err(CommandError::from)?;
 
     drop(vault_guard);
     let mut audit_body = serde_json::Map::new();

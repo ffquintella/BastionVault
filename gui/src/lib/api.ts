@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   VaultMode,
   VaultStatus,
+  UnsealOutcome,
+  SealOutcome,
   Preferences,
   InitResponse,
   LoginResponse,
@@ -166,7 +168,19 @@ export const remoteLoginUserpass = (username: string, password: string) =>
 // System
 export const initVault = () => invoke<InitResponse>("init_vault");
 export const openVault = () => invoke<void>("open_vault");
-export const sealVault = () => invoke<void>("seal_vault");
+/** Seal the vault and return the aggregate status + per-node results.
+ *  In remote mode the seal is fanned out to every node of the connected
+ *  cluster (mirroring `bvault operator seal`); `nodes` reports each
+ *  member, including any that failed to seal. */
+export const sealVault = () => invoke<SealOutcome>("seal_vault");
+/** Unseal the vault and return the aggregate status + per-node results.
+ *  In embedded mode the key is optional — leaving it undefined falls back
+ *  to the unseal key cached on this device. In remote mode a hex key is
+ *  required and is fanned out to every node of the connected cluster
+ *  (multi-share setups need each share submitted in turn; `status.sealed`
+ *  stays true until all nodes are open). */
+export const unsealVault = (unsealKeyHex?: string) =>
+  invoke<UnsealOutcome>("unseal_vault", { unsealKeyHex: unsealKeyHex ?? null });
 export const resetVault = () => invoke<void>("reset_vault");
 /** Recovery escape hatch — wipes the local keystore (the encrypted
  *  file + the OS-keychain entry that seals it) while leaving every

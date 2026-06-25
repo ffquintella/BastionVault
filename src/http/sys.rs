@@ -1395,53 +1395,30 @@ async fn classify_exchange_items(
     core: &Arc<Core>,
     document: &crate::exchange::ExchangeDocument,
 ) -> Result<(u64, u64, u64, Vec<crate::exchange::PreviewClassificationItem>), RvError> {
-    let storage = core.barrier.as_storage();
-    // Resolve KV keys through the same mount-prefix logic as the write path
-    // (`import_from_document`); otherwise the re-rooted layout
-    // (`namespaces/<root_uuid>/logical/<uuid>/…`) is missed and every item is
-    // misclassified as `new`.
+    // Classify through the one engine (`import_from_document` in dry-run mode)
+    // so the preview agrees with the real write on *every* item type — KV, raw
+    // non-KV engines (pki / ssh / transit / …), and structured resources /
+    // files / groups — and resolves keys under the re-rooted layout the same
+    // way the write path does.
     let mounts = crate::exchange::scope::MountIndex::from_core(core)?;
-    let mut new = 0u64;
-    let mut identical = 0u64;
-    let mut conflict = 0u64;
-    let mut items: Vec<crate::exchange::PreviewClassificationItem> =
-        Vec::with_capacity(document.items.kv.len());
-    for kv in &document.items.kv {
-        let full_path = mounts.resolve_kv_key(&kv.mount, &kv.path);
-        let new_bytes = match &kv.value {
-            serde_json::Value::Object(map) if map.len() == 1 && map.contains_key("_base64") => {
-                if let Some(serde_json::Value::String(b64)) = map.get("_base64") {
-                    use base64::Engine;
-                    base64::engine::general_purpose::STANDARD
-                        .decode(b64.as_bytes())
-                        .map_err(|_| RvError::ErrRequestInvalid)?
-                } else {
-                    serde_json::to_vec(&kv.value)?
-                }
-            }
-            _ => serde_json::to_vec(&kv.value)?,
-        };
-        let existing = storage.get(&full_path).await?;
-        let classification = match &existing {
-            None => {
-                new += 1;
-                crate::exchange::ImportClassification::New
-            }
-            Some(e) if e.value == new_bytes => {
-                identical += 1;
-                crate::exchange::ImportClassification::Identical
-            }
-            Some(_) => {
-                conflict += 1;
-                crate::exchange::ImportClassification::Conflict
-            }
-        };
-        items.push(crate::exchange::PreviewClassificationItem {
-            mount: kv.mount.clone(),
-            path: kv.path.clone(),
-            classification,
-        });
-    }
+    let result = crate::exchange::scope::import_from_document(
+        core.barrier.as_storage(),
+        &mounts,
+        document,
+        crate::exchange::ConflictPolicy::Skip,
+        true, // dry_run
+    )
+    .await?;
+    let (new, identical, conflict) = result.classification_counts();
+    let items = result
+        .items
+        .into_iter()
+        .map(|i| crate::exchange::PreviewClassificationItem {
+            mount: i.mount,
+            path: i.path,
+            classification: i.classification,
+        })
+        .collect();
     Ok((new, identical, conflict, items))
 }
 
@@ -1559,6 +1536,7 @@ async fn sys_exchange_import_apply_handler(
             &mounts,
             &document,
             payload.conflict_policy,
+            false,
         )
         .await?;
 
@@ -2724,6 +2702,7 @@ async fn sys_scheduled_exports_restore_handler(
             &mounts,
             &document,
             payload.conflict_policy,
+            false,
         )
         .await?;
 
@@ -2793,6 +2772,7 @@ async fn sys_exchange_import_request_handler(
             &mounts,
             &document,
             payload.conflict_policy,
+            false,
         )
         .await?;
 

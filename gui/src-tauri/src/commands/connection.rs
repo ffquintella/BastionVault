@@ -169,6 +169,189 @@ fn looks_like_url(s: &str) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
 }
 
+/// Per-node result of a cluster seal/unseal fan-out.
+#[derive(Serialize, Clone)]
+pub struct NodeSealResult {
+    /// Concrete node URL the share was sent to.
+    pub address: String,
+    /// Post-submit seal state for this node, when the call succeeded.
+    /// `None` means the call to this node errored.
+    pub sealed: Option<bool>,
+    /// Shamir share progress the node reported (shares entered so far).
+    pub progress: Option<u64>,
+    /// Threshold the node reported (shares required to cross).
+    pub threshold: Option<u64>,
+    /// Error string when the call to this node failed.
+    pub error: Option<String>,
+}
+
+/// Enumerate the node URLs of the connected cluster. Mirrors the
+/// operator CLI's `cluster_clients`: a literal-URL profile (or one with
+/// discovery disabled) resolves to just the connected node; a bare
+/// cluster name resolves via SRV to *every* node — including sealed /
+/// unreachable ones, since those are exactly the nodes a seal/unseal
+/// must reach.
+async fn cluster_target_urls(profile: &RemoteProfile) -> CmdResult<Vec<String>> {
+    use bv_client::discovery::{self, SystemResolver};
+
+    if !profile.cluster_discovery || looks_like_url(&profile.address) {
+        return Ok(vec![profile.address.clone()]);
+    }
+
+    let mut discovery_cfg = DiscoveryConfig::default();
+    if let Some(svc) = profile
+        .discovery_srv_service
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        discovery_cfg.srv_service = svc.to_string();
+    }
+
+    let resolver = SystemResolver::new();
+    let resolved = discovery::resolve(&profile.address, &discovery_cfg, &resolver)
+        .await
+        .map_err(|e| CommandError::from(format!("Cluster discovery failed: {e}")))?;
+    let urls: Vec<String> = resolved
+        .into_candidates()
+        .iter()
+        .map(|c| c.url())
+        .collect();
+    if urls.is_empty() {
+        return Err(CommandError::from(format!(
+            "No nodes found for `{}`",
+            profile.address
+        )));
+    }
+    Ok(urls)
+}
+
+/// Build a fresh legacy `Client` aimed at a single node URL, attaching
+/// TLS when the scheme calls for it. One client per node is how the
+/// CLI fans seal/unseal out — `Client` is immutable once built, so a
+/// per-node target means a per-node client.
+fn client_for_node(profile: &RemoteProfile, url: &str) -> CmdResult<Client> {
+    let mut builder = Client::new().with_addr(url);
+    if url.starts_with("https://") {
+        builder = builder.with_tls_config(build_legacy_tls(profile)?);
+    }
+    Ok(builder.build())
+}
+
+/// Send an unseal share to every node of the connected cluster.
+///
+/// Seal state is per-node (each node holds its own barrier), so the
+/// same share must reach every node to bring them across the Shamir
+/// threshold in lockstep — this is the GUI analogue of
+/// `bvault operator unseal`'s cluster fan-out. `sys/unseal` is an
+/// unauthenticated endpoint (a sealed vault can't authenticate anyone),
+/// so the per-node clients carry no token. Per-node failures are
+/// captured rather than aborting the sweep, so one unreachable node
+/// doesn't strand the others mid-threshold.
+pub(crate) async fn remote_unseal_fanout(
+    profile: &RemoteProfile,
+    key: &str,
+) -> CmdResult<Vec<NodeSealResult>> {
+    let urls = cluster_target_urls(profile).await?;
+    let mut results = Vec::with_capacity(urls.len());
+    for url in urls {
+        let client = match client_for_node(profile, &url) {
+            Ok(c) => c,
+            Err(e) => {
+                results.push(NodeSealResult {
+                    address: url,
+                    sealed: None,
+                    progress: None,
+                    threshold: None,
+                    error: Some(e.to_string()),
+                });
+                continue;
+            }
+        };
+        match client.sys().unseal(key) {
+            Ok(resp) => {
+                let body = resp.response_data.as_ref().and_then(|v| v.as_object());
+                results.push(NodeSealResult {
+                    address: url,
+                    sealed: body
+                        .and_then(|b| b.get("sealed"))
+                        .and_then(|v| v.as_bool()),
+                    progress: body
+                        .and_then(|b| b.get("progress"))
+                        .and_then(|v| v.as_u64()),
+                    threshold: body.and_then(|b| b.get("t")).and_then(|v| v.as_u64()),
+                    error: None,
+                });
+            }
+            Err(e) => results.push(NodeSealResult {
+                address: url,
+                sealed: None,
+                progress: None,
+                threshold: None,
+                error: Some(format!("sys/unseal failed: {e}")),
+            }),
+        }
+    }
+    Ok(results)
+}
+
+/// Send a seal command to every node of the connected cluster.
+///
+/// Seal state is per-node, so `bvault operator seal` fans the command
+/// across the whole cluster — this is the GUI analogue. Unlike unseal,
+/// `sys/seal` requires authorization (`update` on `sys/seal`), so each
+/// per-node client carries the session token. Per-node failures are
+/// captured rather than aborting the sweep, so one node that refuses
+/// (e.g. a transient 403 or an unreachable peer) doesn't leave the
+/// remaining nodes un-sealed.
+pub(crate) async fn remote_seal_fanout(
+    profile: &RemoteProfile,
+    token: &str,
+) -> CmdResult<Vec<NodeSealResult>> {
+    let urls = cluster_target_urls(profile).await?;
+    let mut results = Vec::with_capacity(urls.len());
+    for url in urls {
+        let client = match client_for_node(profile, &url) {
+            Ok(c) => c.with_token(token),
+            Err(e) => {
+                results.push(NodeSealResult {
+                    address: url,
+                    sealed: None,
+                    progress: None,
+                    threshold: None,
+                    error: Some(e.to_string()),
+                });
+                continue;
+            }
+        };
+        match client.sys().seal() {
+            // `sys/seal` answers 204 (or 200) on success; a 0 status is
+            // the client's "no response from node" sentinel.
+            Ok(resp) if resp.response_status == 0 => results.push(NodeSealResult {
+                address: url,
+                sealed: None,
+                progress: None,
+                threshold: None,
+                error: Some("sys/seal failed: no response from node".to_string()),
+            }),
+            Ok(_) => results.push(NodeSealResult {
+                address: url,
+                sealed: Some(true),
+                progress: None,
+                threshold: None,
+                error: None,
+            }),
+            Err(e) => results.push(NodeSealResult {
+                address: url,
+                sealed: None,
+                progress: None,
+                threshold: None,
+                error: Some(format!("sys/seal failed: {e}")),
+            }),
+        }
+    }
+    Ok(results)
+}
+
 /// Build the bv-client TLS config matching the profile. Returns
 /// `None` when the address scheme is plain HTTP (no TLS needed).
 fn build_bv_tls(profile: &RemoteProfile) -> CmdResult<Option<ClientTlsConfig>> {

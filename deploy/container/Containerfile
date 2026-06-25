@@ -94,72 +94,59 @@ RUN if readelf -d /out/bvault | grep -E 'NEEDED.*(libssl|libcrypto)'; then \
         exit 1; \
     fi
 
-# ---------- Stage 2: tools (pulled for TARGETPLATFORM) ----------
-# Shell staging. Gated by the `INCLUDE_SHELL` build ARG:
+# ---------- Stage 2: runtime (pulled for TARGETPLATFORM) ----------
+# Wolfi — Chainguard's free, open-source, glibc-based "undistro" built
+# for containers (cgr.dev/chainguard/wolfi-base). Like distroless it
+# carries glibc + a CA bundle and nothing application-specific, so the
+# CVE surface stays minimal; unlike distroless it ships `apk` and a
+# POSIX shell (busybox) in the base, so we install the CA bundle inline
+# (and reuse the base's pre-existing nonroot user) instead of staging
+# them from a separate Debian layer. The bvault binary is dynamically
+# linked against glibc and
+# Wolfi's glibc is forward-compatible with the older glibc the Debian
+# builder stage links against, so the cross-built binary runs as-is.
 #
-#   INCLUDE_SHELL=1  (default) — stage busybox-static and copy it in
-#                    as /bin/busybox with /bin/sh -> busybox. Static
-#                    binary, no library deps, ~1 MB. Operators get a
-#                    POSIX shell for diagnostics + the in-container
-#                    `rustion-master-bootstrap.sh` runs out of the box
-#                    on `podman exec` without needing the :debug
-#                    variant or a host-side `podman cp`.
-#   INCLUDE_SHELL=0  — final image is shell-less, matching classic
-#                    distroless. `kubectl exec` / `podman exec` won't
-#                    have a shell to run. Opt-in for hardening
-#                    scenarios where the attack surface trade-off
-#                    matters more than operator ergonomics.
-#
-# Either way we land in a `tools` stage so the runtime can do an
-# unconditional `COPY --from=tools` — when the shell is disabled the
-# staged directory is just empty.
-#
-# We stage via a separate Debian builder layer rather than `apt-get
-# install` in the runtime because distroless has no package manager
-# (and we want to keep it that way).
-FROM --platform=$TARGETPLATFORM docker.io/library/debian:bookworm-slim AS tools
+# `INCLUDE_SHELL` (default 1) keeps Wolfi's bundled busybox shell so
+# `podman exec` / `kubectl exec` and the in-container
+# `rustion-master-bootstrap.sh` work out of the box. INCLUDE_SHELL=0
+# strips busybox + apk, restoring the classic shell-less,
+# package-manager-less hardened posture (smallest attack surface,
+# nothing to drop into on `exec`). The :debug variant layers on
+# ss / ip / tcpdump / curl for incident response.
+FROM --platform=$TARGETPLATFORM cgr.dev/chainguard/wolfi-base:latest AS runtime
 
 ARG INCLUDE_SHELL=1
-
-RUN set -eux; \
-    mkdir -p /staged/bin; \
-    if [ "$INCLUDE_SHELL" = "1" ]; then \
-        apt-get update; \
-        apt-get install -y --no-install-recommends busybox-static; \
-        rm -rf /var/lib/apt/lists/*; \
-        cp /bin/busybox /staged/bin/busybox; \
-        ln -s busybox /staged/bin/sh; \
-    fi
-
-# ---------- Stage 3: runtime (pulled for TARGETPLATFORM) ----------
-# Distroless: glibc + ca-certificates + /bin/busybox (the latter from
-# the `tools` stage, opt-out via --build-arg INCLUDE_SHELL=0). No
-# package manager, no userspace network tools. The :debug variant layers on ss / ip /
-# tcpdump / curl for incident response.
-FROM --platform=$TARGETPLATFORM gcr.io/distroless/cc-debian12:nonroot
 
 LABEL org.opencontainers.image.title="BastionVault" \
       org.opencontainers.image.description="Identity-based secrets management server (Vault-API compatible)" \
       org.opencontainers.image.source="https://github.com/ffquintella/BastionVault" \
       org.opencontainers.image.licenses="Apache-2.0" \
-      org.opencontainers.image.vendor="BastionVault"
+      org.opencontainers.image.vendor="BastionVault" \
+      org.opencontainers.image.base.name="cgr.dev/chainguard/wolfi-base:latest"
+
+# CA bundle for outbound TLS. Wolfi-base already ships the `nonroot`
+# user/group at UID/GID 65532 (created by apko) — the same UID this
+# image has always run as and the distroless `nonroot` convention — so
+# we reuse it rather than re-create a duplicate /etc/passwd entry. When
+# INCLUDE_SHELL=0 we drop busybox + apk so nothing remains to `exec`
+# into.
+RUN set -eux; \
+    apk add --no-cache ca-certificates-bundle; \
+    if [ "${INCLUDE_SHELL}" = "0" ]; then \
+        rm -rf /bin/busybox /bin/sh /usr/bin/busybox \
+               /sbin/apk /usr/bin/apk /lib/apk /etc/apk /var/cache/apk; \
+    fi
 
 # Binaries.
 COPY --from=builder /out/bvault         /usr/local/bin/bvault
 COPY --from=builder /out/bv-ssh-helper  /usr/local/bin/bv-ssh-helper
 
-# Operator bootstrap script for the Rustion master keypair. POSIX sh
-# so it runs under busybox ash, which is bundled by default via the
-# `tools` stage (INCLUDE_SHELL=1). Operators who explicitly opt out of
-# the shell with `--build-arg INCLUDE_SHELL=0` should `podman cp` this
-# file out and run it from the host instead.
+# Operator bootstrap script for the Rustion master keypair. POSIX sh so
+# it runs under Wolfi's bundled busybox shell (INCLUDE_SHELL=1, the
+# default). Operators who opt out of the shell with
+# `--build-arg INCLUDE_SHELL=0` should `podman cp` this file out and run
+# it from the host instead.
 COPY --chmod=0755 scripts/rustion-master-bootstrap.sh /usr/local/bin/rustion-master-bootstrap.sh
-
-# Shell. Carries /bin/busybox + a /bin/sh symlink by default
-# (INCLUDE_SHELL=1, set in the `tools` stage above). When built with
-# --build-arg INCLUDE_SHELL=0 the staged directory is empty and this
-# COPY is a no-op. See the `tools` stage above for the rationale.
-COPY --from=tools /staged/bin/  /bin/
 
 # Inert sample config (file storage at /var/lib/bvault/data, TLS expected
 # at /etc/bvault/tls/). The operator MUST mount their own config and
@@ -167,7 +154,7 @@ COPY --from=tools /staged/bin/  /bin/
 # unmodified because the storage backend secrets are placeholder values.
 COPY deploy/container/config/config.hcl.sample /etc/bvault/config.hcl
 
-# nonroot UID baked into the distroless base.
+# nonroot UID shipped by the Wolfi base.
 USER 65532:65532
 
 # Storage volume. The image expects the operator to mount real

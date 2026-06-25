@@ -27,8 +27,8 @@ pub mod verify;
 pub use envelope::{decrypt_bvx, encrypt_bvx, Envelope, EnvelopeError, MIN_PASSWORD_LEN};
 pub use preview::{PreviewClassificationItem, PreviewStore, PreviewSummary};
 pub use schema::{
-    AssetGroupItem, ExchangeDocument, ExchangeItems, ExporterInfo, FileItem, KvItem, ResourceGroupItem,
-    ResourceItem, ScopeKind, ScopeSelector, ScopeSpec,
+    AssetGroupItem, ExchangeDocument, ExchangeItems, ExporterInfo, FileItem, KvItem, RawEntry,
+    ResourceGroupItem, ResourceItem, ScopeKind, ScopeSelector, ScopeSpec,
 };
 pub use scope::{
     export_to_document, import_from_document, ConflictPolicy, ImportAction, ImportClassification,

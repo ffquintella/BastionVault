@@ -20,6 +20,7 @@ import type {
 } from "../lib/api";
 import { DEFAULT_RESOURCE_TYPES, mergeTypeConfig } from "../lib/resourceTypes";
 import { CloudStorageCard } from "../components/CloudStorageCard";
+import { UnsealModal } from "../components/UnsealModal";
 import { RustionBastionsTab } from "../components/RustionBastionsTab";
 import { RustionPolicyPanel } from "../components/RustionPolicyPanel";
 import * as api from "../lib/api";
@@ -43,7 +44,11 @@ export function SettingsPage() {
   const clearAuth = useAuthStore((s) => s.clearAuth);
   const clearSessions = useAuthStore((s) => s.clearSessions);
   const reset = useVaultStore((s) => s.reset);
+  const status = useVaultStore((s) => s.status);
+  const setStatus = useVaultStore((s) => s.setStatus);
   const [sealing, setSealing] = useState(false);
+  const [sealConfirm, setSealConfirm] = useState(false);
+  const [unsealOpen, setUnsealOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<string>(() => {
     try { return localStorage.getItem("settings.activeTab") || "general"; } catch { return "general"; }
   });
@@ -119,7 +124,11 @@ export function SettingsPage() {
     loadSsoState();
     loadYubiKeyState();
     void loadDataLocation();
-  }, [loadPasswordPolicy]);
+    // Refresh the seal status so the Actions card shows Seal vs Unseal
+    // correctly even when the operator lands here without visiting the
+    // dashboard first (which is what normally populates the store).
+    api.getVaultStatus().then(setStatus).catch(() => {});
+  }, [loadPasswordPolicy, setStatus]);
 
   // Resolve the active Local profile's effective data dir for the
   // Connection card. Honours per-profile `data_dir` override and
@@ -364,8 +373,23 @@ export function SettingsPage() {
   async function handleSeal() {
     setSealing(true);
     try {
-      await api.sealVault();
-      toast("info", "Vault sealed");
+      const outcome = await api.sealVault();
+      setStatus(outcome.status);
+      setSealConfirm(false);
+      // Cluster fan-out: report the node tally and any node that refused.
+      const failed = outcome.nodes.filter((n) => n.error);
+      if (failed.length > 0) {
+        toast(
+          "error",
+          `Sealed ${outcome.nodes.length - failed.length}/${outcome.nodes.length} nodes; ${failed
+            .map((n) => `${n.address} (${n.error})`)
+            .join(", ")}`,
+        );
+      } else if (outcome.nodes.length > 1) {
+        toast("info", `Vault sealed on all ${outcome.nodes.length} nodes`);
+      } else {
+        toast("info", "Vault sealed");
+      }
     } catch (e: unknown) {
       toast("error", extractError(e));
     } finally {
@@ -979,6 +1003,30 @@ export function SettingsPage() {
           message={`Delete the "${deleteTypeId}" resource type? Existing resources of this type will keep their data but won't have field definitions.`}
           confirmLabel="Delete" />
 
+        <ConfirmModal
+          open={sealConfirm}
+          onClose={() => setSealConfirm(false)}
+          onConfirm={handleSeal}
+          title="Seal the vault?"
+          message="Sealing locks the barrier and drops every active session. Secrets stay encrypted at rest and become unreadable until the vault is unsealed again."
+          confirmLabel="Seal vault"
+          variant="danger"
+          loading={sealing}
+        />
+
+        <UnsealModal
+          open={unsealOpen}
+          onClose={() => setUnsealOpen(false)}
+          mode={mode}
+          onUnsealed={(st) => {
+            setStatus(st);
+            if (!st.sealed) {
+              toast("success", "Vault unsealed");
+              setUnsealOpen(false);
+            }
+          }}
+        />
+
         {activeTab === "storage" && (<>
         {/* Cloud Storage Targets — OAuth connect flow. Phase 7 of
             features/cloud-storage-backend.md. */}
@@ -998,18 +1046,37 @@ export function SettingsPage() {
         {/* Actions */}
         <Card title="Actions">
           <div className="space-y-3">
-            {mode === "Embedded" && (
+            {status?.sealed ? (
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-sm font-medium">Seal Vault</p>
+                  <p className="text-sm font-medium">Unseal Vault</p>
                   <p className="text-xs text-[var(--color-text-muted)]">
-                    Lock the vault. Requires unseal to access again.
+                    The vault is sealed. Unseal it to access secrets again.
                   </p>
                 </div>
-                <Button variant="danger" size="sm" onClick={handleSeal} loading={sealing}>
-                  Seal
+                <Button variant="primary" size="sm" onClick={() => setUnsealOpen(true)}>
+                  Unseal
                 </Button>
               </div>
+            ) : (
+              mode === "Embedded" && (
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium">Seal Vault</p>
+                    <p className="text-xs text-[var(--color-text-muted)]">
+                      Lock the vault. Requires unseal to access again.
+                    </p>
+                  </div>
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    onClick={() => setSealConfirm(true)}
+                    loading={sealing}
+                  >
+                    Seal
+                  </Button>
+                </div>
+              )
             )}
             {mode === "Remote" && (
               <div className="flex items-center justify-between">
