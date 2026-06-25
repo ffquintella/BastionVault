@@ -15,7 +15,8 @@ import { useMiaEnvStore } from "../stores/miaEnvStore";
 import type { RemoteProfile, FerroGateEnrolment } from "../lib/types";
 import type { VaultProfile, VaultSpec } from "../lib/api";
 import * as api from "../lib/api";
-import { extractError } from "../lib/error";
+import { extractError, isVaultSealed } from "../lib/error";
+import { UnsealModal } from "../components/UnsealModal";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 
 type CloudProvider = "s3" | "onedrive" | "gdrive" | "dropbox";
@@ -111,6 +112,14 @@ export function ConnectPage() {
   const [profiles, setProfiles] = useState<VaultProfile[]>([]);
   const [lastUsedId, setLastUsedId] = useState<string | null>(null);
   const [opening, setOpening] = useState<string | null>(null);
+
+  // Sealed-cluster unseal. A remote connect fails outright when every
+  // node is sealed (cluster discovery finds no healthy node), so no
+  // profile is ever stored in AppState — `unsealTarget` holds the saved
+  // profile whose connect tripped the sealed error so the operator can
+  // unseal it in place and retry, without leaving the chooser.
+  const [unsealTarget, setUnsealTarget] = useState<VaultProfile | null>(null);
+  const [unsealOpen, setUnsealOpen] = useState(false);
 
   // Reset-vault panel state (unseal-key mismatch recovery).
   const [showReset, setShowReset] = useState(false);
@@ -461,6 +470,7 @@ export function ConnectPage() {
   async function openProfile(profile: VaultProfile, recordDefault = true) {
     setOpening(profile.id);
     setError(null);
+    setUnsealTarget(null);
     try {
       const targetId = profile.id;
       const currentId = lastUsedId;
@@ -643,6 +653,11 @@ export function ConnectPage() {
       // remediation (vault data stays untouched).
       if (lower.includes("local keystore") || lower.includes("unwrap")) {
         setShowLocalKeystoreReset(true);
+      } else if (profile.spec.kind === "remote" && isVaultSealed(msg)) {
+        // A remote cluster that's entirely sealed fails connect before
+        // any node is reachable. Offer an in-place unseal against this
+        // profile rather than the (destructive) data-wipe reset.
+        setUnsealTarget(profile);
       } else if (
         profile.spec.kind !== "remote" &&
         (lower.includes("unseal") ||
@@ -1088,7 +1103,16 @@ export function ConnectPage() {
     >
       {error && (
         <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
-          {error}
+          <p>{error}</p>
+          {unsealTarget && (
+            <button
+              type="button"
+              onClick={() => setUnsealOpen(true)}
+              className="mt-2 w-full py-2 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 rounded-lg text-sm font-medium transition-colors"
+            >
+              Unseal vault
+            </button>
+          )}
         </div>
       )}
 
@@ -1919,6 +1943,32 @@ export function ConnectPage() {
           </div>
         )}
       </Modal>
+
+      {/* Unseal a sealed remote cluster in place. The connect attempt
+          failed before any node was reachable, so we target the saved
+          profile directly via `remote_unseal_profile`. On a full unseal
+          we close the dialog, clear the error, and retry the connect so
+          the operator lands in the normal login flow. Multi-share
+          clusters keep the dialog open until every share is in. */}
+      {unsealTarget && unsealTarget.spec.kind === "remote" && (
+        <UnsealModal
+          open={unsealOpen}
+          onClose={() => setUnsealOpen(false)}
+          mode="Remote"
+          profile={unsealTarget.spec.profile}
+          onUnsealed={(st) => {
+            if (!st.sealed) {
+              const target = unsealTarget;
+              setUnsealOpen(false);
+              setUnsealTarget(null);
+              setError(null);
+              void openProfile(target).catch(() => {
+                /* openProfile surfaces its own error / unseal CTA */
+              });
+            }
+          }}
+        />
+      )}
     </AuthLayout>
   );
 }

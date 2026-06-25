@@ -181,6 +181,14 @@ export const sealVault = () => invoke<SealOutcome>("seal_vault");
  *  stays true until all nodes are open). */
 export const unsealVault = (unsealKeyHex?: string) =>
   invoke<UnsealOutcome>("unseal_vault", { unsealKeyHex: unsealKeyHex ?? null });
+/** Unseal a remote cluster identified by an explicit profile, without a
+ *  prior `connectRemote`. Used by the Connect screen when a connect
+ *  attempt fails because every node is sealed (cluster discovery finds
+ *  no healthy node, so no profile is stored in AppState to target). The
+ *  share is fanned out across the cluster's roster (SRV-discovered)
+ *  exactly like the connected unseal path. */
+export const remoteUnsealProfile = (profile: RemoteProfile, unsealKeyHex: string) =>
+  invoke<UnsealOutcome>("remote_unseal_profile", { profile, unsealKeyHex });
 export const resetVault = () => invoke<void>("reset_vault");
 /** Recovery escape hatch — wipes the local keystore (the encrypted
  *  file + the OS-keychain entry that seals it) while leaving every

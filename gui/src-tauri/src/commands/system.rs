@@ -5,7 +5,7 @@ use tauri::State;
 
 use crate::embedded;
 use crate::error::{CmdResult, CommandError};
-use crate::state::AppState;
+use crate::state::{AppState, RemoteProfile};
 
 #[derive(Serialize)]
 pub struct InitResponse {
@@ -334,24 +334,55 @@ pub async fn unseal_vault(
         if let Some(profile) = profile {
             let nodes =
                 crate::commands::connection::remote_unseal_fanout(&profile, &key).await?;
-            // The cluster counts as sealed while any node we could reach
-            // still reports sealed, or any node errored (we can't confirm
-            // it crossed the threshold). A node that answered with a seal
-            // state is, by definition, initialized.
-            let sealed = nodes
-                .iter()
-                .any(|n| n.sealed.unwrap_or(true) || n.error.is_some());
-            let initialized = nodes.iter().any(|n| n.sealed.is_some());
-            return Ok(UnsealOutcome {
-                status: VaultStatus { initialized, sealed, has_vault: true },
-                nodes,
-            });
+            return Ok(remote_fanout_outcome(nodes));
         }
     }
 
     Err(CommandError::from(
         "No vault available to unseal".to_string(),
     ))
+}
+
+/// Fold a per-node unseal fan-out result into the aggregate
+/// [`UnsealOutcome`]. The cluster counts as sealed while any node we
+/// reached still reports sealed, OR any node errored (we can't confirm
+/// it crossed the threshold). A node that answered with a seal state is,
+/// by definition, initialized.
+fn remote_fanout_outcome(
+    nodes: Vec<crate::commands::connection::NodeSealResult>,
+) -> UnsealOutcome {
+    let sealed = nodes
+        .iter()
+        .any(|n| n.sealed.unwrap_or(true) || n.error.is_some());
+    let initialized = nodes.iter().any(|n| n.sealed.is_some());
+    UnsealOutcome {
+        status: VaultStatus { initialized, sealed, has_vault: true },
+        nodes,
+    }
+}
+
+/// Unseal a remote cluster identified by an explicit profile, WITHOUT a
+/// prior `connect_remote`.
+///
+/// When every node of a cluster is sealed, the connect flow fails at
+/// cluster discovery ("no healthy node found") *before*
+/// `state.remote_profile` is ever populated — so the regular
+/// [`unseal_vault`] path has no target. The Get-Started / Connect screen
+/// calls this with the profile straight from the saved list, letting the
+/// operator unseal the cluster and then retry the connection. The fan-out
+/// runs its own SRV discovery and reaches sealed/unreachable nodes,
+/// identical to the connected path; the key is required.
+#[tauri::command]
+pub async fn remote_unseal_profile(
+    profile: RemoteProfile,
+    unseal_key_hex: String,
+) -> CmdResult<UnsealOutcome> {
+    let key = unseal_key_hex.trim();
+    if key.is_empty() {
+        return Err("An unseal key is required to unseal a remote vault".into());
+    }
+    let nodes = crate::commands::connection::remote_unseal_fanout(&profile, key).await?;
+    Ok(remote_fanout_outcome(nodes))
 }
 
 #[tauri::command]

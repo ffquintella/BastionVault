@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-06-25
+
+### Added
+
+- **Unseal a sealed cluster from the Connect / Get-Started screen** (`gui/src-tauri/src/commands/system.rs`, `gui/src-tauri/src/lib.rs`, `gui/src/components/UnsealModal.tsx`, `gui/src/routes/ConnectPage.tsx`, `gui/src/lib/api.ts`) -- when a remote connection fails because *every* node is sealed, cluster discovery reports "no healthy node found" and the connect aborts *before* any profile is stored in `AppState`, so the connected `unseal_vault` path had nothing to target and the operator was stuck at the vault chooser. A new `remote_unseal_profile` Tauri command fans an unseal share out across a cluster identified by an **explicit profile** (reusing the same SRV discovery + per-node `sys/unseal` fan-out as the connected path, reaching sealed/unreachable nodes), so no prior connect is needed. The Connect screen now recognises the sealed connect error (via the `isVaultSealed` classifier), surfaces an inline **Unseal vault** action on the saved profile that failed, and — on a full unseal — clears the error and automatically retries the connection so the operator lands in the normal login flow. `UnsealModal` gained an optional `profile` prop that routes through the new command; the per-node breakdown and multi-share (t-of-n) prompting behave identically to the connected path. The seal-state aggregation shared by both paths is factored into one `remote_fanout_outcome` helper. Tests in `gui/src/test/seal-unseal.test.tsx` and `gui/src/test/pages.test.tsx`.
+
 ## [0.20.1] - 2026-06-25
 
 ### Added

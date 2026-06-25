@@ -9,7 +9,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { UnsealModal } from "../components/UnsealModal";
-import type { VaultStatus, UnsealOutcome } from "../lib/types";
+import type { VaultStatus, UnsealOutcome, RemoteProfile } from "../lib/types";
 
 const UNSEALED: VaultStatus = { initialized: true, sealed: false, has_vault: true };
 const STILL_SEALED: VaultStatus = { initialized: true, sealed: true, has_vault: true };
@@ -80,5 +80,44 @@ describe("UnsealModal", () => {
     expect(screen.getByText("https://n1:8200")).toBeInTheDocument();
     expect(screen.getAllByText(/sealed \(1\/3\)/)).toHaveLength(2);
     expect(screen.getByText("error")).toBeInTheDocument();
+  });
+
+  it("explicit profile: unseals against the given profile (not the connected vault)", async () => {
+    // The Connect screen passes a `profile` when the cluster connect
+    // itself failed sealed — there is no live connection, so the modal
+    // must target `remote_unseal_profile` with that profile + key
+    // rather than the connected `unseal_vault` path.
+    const profile: RemoteProfile = {
+      name: "HML - Cluster",
+      address: "esi.fgv.br",
+      tls_skip_verify: false,
+    };
+    mockInvoke.mockResolvedValue(
+      outcome(UNSEALED, [
+        { address: "https://n1:5200", sealed: false, progress: null, threshold: null, error: null },
+      ]),
+    );
+    const onUnsealed = vi.fn();
+    render(
+      <UnsealModal
+        open
+        onClose={() => {}}
+        onUnsealed={onUnsealed}
+        mode="Remote"
+        profile={profile}
+      />,
+    );
+
+    await userEvent.type(screen.getByLabelText(/unseal key/i), "deadbeef");
+    await userEvent.click(screen.getByRole("button", { name: "Unseal" }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("remote_unseal_profile", {
+        profile,
+        unsealKeyHex: "deadbeef",
+      }),
+    );
+    expect(mockInvoke).not.toHaveBeenCalledWith("unseal_vault", expect.anything());
+    expect(onUnsealed).toHaveBeenCalledWith(UNSEALED);
   });
 });

@@ -253,6 +253,54 @@ describe("ConnectPage", () => {
     expect(screen.getByText("Prod")).toBeInTheDocument();
   });
 
+  it("offers an unseal action when a remote connect fails because the cluster is sealed", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_vault_profiles")
+        return Promise.resolve({
+          vaults: [
+            {
+              id: "v1",
+              name: "HML - Cluster",
+              spec: {
+                kind: "remote",
+                profile: {
+                  name: "HML - Cluster",
+                  address: "esi.fgv.br",
+                  tls_skip_verify: false,
+                },
+              },
+            },
+          ],
+          lastUsedId: null,
+        });
+      // Every node sealed → discovery finds no healthy node and connect
+      // fails outright, before any profile is stored in AppState.
+      if (cmd === "connect_remote")
+        return Promise.reject({
+          message:
+            "Cluster discovery failed: no healthy node found for `esi.fgv.br`: n4=Sealed, n3=Sealed",
+        });
+      return Promise.reject(new Error(`unmocked: ${cmd}`));
+    });
+    const user = userEvent.setup();
+    const { ConnectPage } = await import("../routes/ConnectPage");
+    renderWithProviders(<ConnectPage />);
+
+    await waitFor(() =>
+      expect(screen.getByText("HML - Cluster")).toBeInTheDocument(),
+    );
+    await user.click(screen.getByText("HML - Cluster"));
+
+    // The sealed connect error surfaces an inline "Unseal vault" button.
+    const unsealBtn = await screen.findByRole("button", {
+      name: /unseal vault/i,
+    });
+    await user.click(unsealBtn);
+    expect(
+      screen.getByRole("heading", { name: /unseal vault/i }),
+    ).toBeInTheDocument();
+  });
+
   it("asks the server whether machine identity is required and runs the gate when it is", async () => {
     const calls: string[] = [];
     mockInvoke.mockImplementation((cmd: string) => {

@@ -1,7 +1,12 @@
 import { useState } from "react";
 import { Button, Input, Modal } from "./ui";
 import * as api from "../lib/api";
-import type { VaultMode, VaultStatus, NodeSealResult } from "../lib/types";
+import type {
+  VaultMode,
+  VaultStatus,
+  NodeSealResult,
+  RemoteProfile,
+} from "../lib/types";
 import { extractError } from "../lib/error";
 
 interface UnsealModalProps {
@@ -12,6 +17,13 @@ interface UnsealModalProps {
    *  whether to keep the dialog open. */
   onUnsealed: (status: VaultStatus) => void;
   mode: VaultMode;
+  /** Explicit remote profile to unseal against, used by the Connect
+   *  screen when the connection itself failed because every node is
+   *  sealed (so no profile is stored in AppState). When set, the share
+   *  is fanned out against this profile directly via
+   *  `remote_unseal_profile` instead of the connected `unseal_vault`
+   *  path. Implies remote mode. */
+  profile?: RemoteProfile;
 }
 
 /**
@@ -22,12 +34,13 @@ interface UnsealModalProps {
  * the share is fanned out to every node of the connected cluster (seal
  * state is per-node), and the per-node outcome is shown below the field.
  */
-export function UnsealModal({ open, onClose, onUnsealed, mode }: UnsealModalProps) {
+export function UnsealModal({ open, onClose, onUnsealed, mode, profile }: UnsealModalProps) {
   const [key, setKey] = useState("");
   const [unsealing, setUnsealing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nodes, setNodes] = useState<NodeSealResult[]>([]);
-  const remote = mode === "Remote";
+  // An explicit profile always means a remote, not-yet-connected cluster.
+  const remote = mode === "Remote" || profile !== undefined;
 
   function reset() {
     setKey("");
@@ -51,7 +64,9 @@ export function UnsealModal({ open, onClose, onUnsealed, mode }: UnsealModalProp
     setUnsealing(true);
     setError(null);
     try {
-      const outcome = await api.unsealVault(trimmed || undefined);
+      const outcome = profile
+        ? await api.remoteUnsealProfile(profile, trimmed)
+        : await api.unsealVault(trimmed || undefined);
       setNodes(outcome.nodes);
       onUnsealed(outcome.status);
       if (!outcome.status.sealed) {
