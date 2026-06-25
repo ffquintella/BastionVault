@@ -15,6 +15,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { Badge, Button, Card, Input, Select, useToast } from "./ui";
+import { useCanWriteResource } from "../hooks/useCanWriteResource";
 import { extractError } from "../lib/error";
 import {
   rustionPolicyAssetGroupRead,
@@ -51,6 +52,16 @@ export function RustionPolicyTierEditor({ tier, id, onSaved }: Props) {
   const [lock, setLock] = useState(false);
   const [priority, setPriority] = useState(0);
   const [saving, setSaving] = useState(false);
+
+  // Per-resource policy is gated to the resource owner server-side (Save
+  // returns 403 for read-only share-grantees). Mirror that in the UI so
+  // those callers see the controls disabled instead of clicking through
+  // to a 403. The higher tiers (type / asset-group) carry their own
+  // admin / group-owner gating, so we skip the owner check there
+  // (`enabled = false` → the hook returns `true`).
+  const canWrite = useCanWriteResource(id, tier === "resource");
+  const readOnly = tier === "resource" && canWrite === false;
+  const readOnlyTitle = "You don't have permission to modify this resource.";
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -199,11 +210,19 @@ export function RustionPolicyTierEditor({ tier, id, onSaved }: Props) {
           <p className="text-xs text-[var(--color-text-muted)]">
             {tierDescription(tier)}
           </p>
+          {readOnly && (
+            <div className="rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] px-3 py-2 text-sm">
+              <strong className="text-[var(--color-text)]">Read-only access.</strong>{" "}
+              You don't have permission to modify this resource's policy.
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-3">
             <Select
               label="Transport"
               value={transport}
               onChange={(e) => setTransport(e.target.value as Transport)}
+              disabled={readOnly}
+              title={readOnly ? readOnlyTitle : undefined}
               options={[
                 { value: "", label: "(unset — fall through)" },
                 { value: "direct", label: "direct" },
@@ -215,6 +234,8 @@ export function RustionPolicyTierEditor({ tier, id, onSaved }: Props) {
               label="Recording"
               value={recording}
               onChange={(e) => setRecording(e.target.value as Recording)}
+              disabled={readOnly}
+              title={readOnly ? readOnlyTitle : undefined}
               options={[
                 { value: "", label: "(unset — fall through)" },
                 { value: "always", label: "always" },
@@ -227,12 +248,16 @@ export function RustionPolicyTierEditor({ tier, id, onSaved }: Props) {
               value={bastionGroup}
               onChange={(e) => setBastionGroup(e.target.value)}
               placeholder="(unset)"
+              disabled={readOnly}
+              title={readOnly ? readOnlyTitle : undefined}
             />
             <Input
               label="Pinned bastions"
               value={bastionsList}
               onChange={(e) => setBastionsList(e.target.value)}
               placeholder="rt_…, rt_…"
+              disabled={readOnly}
+              title={readOnly ? readOnlyTitle : undefined}
             />
             {tier === "asset-group" && (
               <div className="col-span-2">
@@ -271,11 +296,23 @@ export function RustionPolicyTierEditor({ tier, id, onSaved }: Props) {
           </div>
           <div className="flex justify-end gap-2">
             {exists && (
-              <Button onClick={handleClear} variant="secondary" loading={saving}>
+              <Button
+                onClick={handleClear}
+                variant="secondary"
+                loading={saving}
+                disabled={readOnly}
+                title={readOnly ? readOnlyTitle : undefined}
+              >
                 {tier === "type" ? "Delete tier" : "Clear fields"}
               </Button>
             )}
-            <Button onClick={handleSave} loading={saving} variant="primary">
+            <Button
+              onClick={handleSave}
+              loading={saving}
+              variant="primary"
+              disabled={readOnly}
+              title={readOnly ? readOnlyTitle : undefined}
+            >
               Save
             </Button>
           </div>

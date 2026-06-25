@@ -285,7 +285,7 @@ pub async fn scheduled_exports_run_now(
 // the GUI process, so the commands fail fast with a clear message rather than
 // the misleading "Vault not open".
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct BackupFile {
     pub name: String,
     pub size_bytes: u64,
@@ -300,14 +300,6 @@ pub struct BackupListResult {
     /// The resolved local destination directory that was scanned.
     pub dir: String,
     pub files: Vec<BackupFile>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct BackupReadResult {
-    /// Base64-encoded raw file bytes (`.bvx` envelope or plaintext JSON).
-    pub file_b64: String,
-    /// "bvx" | "json", derived from the file extension.
-    pub format: String,
 }
 
 /// Resolve a schedule's `local_path` destination, erroring if the schedule
@@ -351,9 +343,13 @@ pub async fn scheduled_exports_backups_list(
     id: String,
 ) -> CmdResult<BackupListResult> {
     if is_remote(&state).await {
-        return Err(
-            "Listing backup files is only available when running an embedded vault.".into(),
-        );
+        // The backup files live on the server's filesystem; ask the server to
+        // enumerate them rather than touching the (non-existent) local disk.
+        let path = format!("sys/scheduled-exports/{id}/backups");
+        let data = remote_data(&state, Operation::Read, path, None).await?;
+        let dir = parse_field(&data, "dir")?;
+        let files = parse_field(&data, "files")?;
+        return Ok(BackupListResult { dir, files });
     }
     let sched = get_schedule(&state, &id).await?;
     let dir = local_dir(&sched.destination)?.to_string();
@@ -403,23 +399,78 @@ pub async fn scheduled_exports_backups_list(
     Ok(BackupListResult { dir, files })
 }
 
-/// Read a single backup file from a schedule's local destination directory
-/// and return its bytes base64-encoded, ready for `exchange_preview`.
+#[derive(Debug, Serialize, serde::Deserialize, Default)]
+pub struct RestoreItem {
+    pub mount: String,
+    pub path: String,
+    /// "new" | "identical" | "conflict"
+    pub classification: String,
+}
+
+/// Outcome of a restore. On `dry_run` the `new`/`identical`/`conflict` counts
+/// and `items` describe the classification; on a real apply the
+/// `written`/`unchanged`/`skipped`/`renamed` counts describe what was written.
+#[derive(Debug, Serialize, serde::Deserialize, Default)]
+pub struct RestoreResult {
+    pub dry_run: bool,
+    #[serde(default)]
+    pub total: u64,
+    #[serde(default)]
+    pub new: u64,
+    #[serde(default)]
+    pub identical: u64,
+    #[serde(default)]
+    pub conflict: u64,
+    #[serde(default)]
+    pub written: u64,
+    #[serde(default)]
+    pub unchanged: u64,
+    #[serde(default)]
+    pub skipped: u64,
+    #[serde(default)]
+    pub renamed: u64,
+    #[serde(default)]
+    pub items: Vec<RestoreItem>,
+}
+
+/// Restore one of a schedule's backup files into the vault.
 ///
-/// `filename` must be a bare file name within the destination directory;
-/// any path separators or `..` components are rejected to prevent traversal
-/// outside the configured backup directory.
+/// The whole operation — reading the file off disk and writing the imported
+/// items — runs against the vault host: embedded mode does it in-process,
+/// remote mode delegates to `POST /v{1,2}/sys/scheduled-exports/{id}/restore`
+/// so the (possibly full-vault) backup never round-trips through the GUI.
+///
+/// `dry_run` classifies without writing, backing the modal's "Preview" button;
+/// a real apply uses `conflict_policy` (`skip` | `overwrite` | `rename`).
 #[tauri::command]
-pub async fn scheduled_exports_backup_read(
+pub async fn scheduled_exports_restore(
     state: State<'_, AppState>,
     id: String,
     filename: String,
-) -> CmdResult<BackupReadResult> {
+    password: Option<String>,
+    allow_plaintext: Option<bool>,
+    conflict_policy: Option<String>,
+    dry_run: bool,
+) -> CmdResult<RestoreResult> {
+    let allow_plaintext = allow_plaintext.unwrap_or(false);
+    let conflict_policy = conflict_policy.unwrap_or_else(|| "skip".to_string());
+
     if is_remote(&state).await {
-        return Err(
-            "Restoring backup files is only available when running an embedded vault.".into(),
-        );
+        let mut body = Map::new();
+        body.insert("filename".into(), Value::String(filename));
+        if let Some(p) = password {
+            body.insert("password".into(), Value::String(p));
+        }
+        body.insert("allow_plaintext".into(), Value::Bool(allow_plaintext));
+        body.insert("conflict_policy".into(), Value::String(conflict_policy));
+        body.insert("dry_run".into(), Value::Bool(dry_run));
+        let path = format!("sys/scheduled-exports/{id}/restore");
+        let data = remote_data(&state, Operation::Write, path, Some(body)).await?;
+        return serde_json::from_value(Value::Object(data))
+            .map_err(|e| CommandError::from(format!("unexpected server response: {e}")));
     }
+
+    // ── Embedded: read + classify/import in-process. ──────────────────────
     if filename.is_empty()
         || filename.contains('/')
         || filename.contains('\\')
@@ -427,16 +478,137 @@ pub async fn scheduled_exports_backup_read(
     {
         return Err("invalid backup file name".into());
     }
-    let format = format_of(&filename)
-        .ok_or("backup file must be a .bvx or .json file")?
-        .to_string();
+    let format = format_of(&filename).ok_or("backup file must be a .bvx or .json file")?;
 
     let sched = get_schedule(&state, &id).await?;
     let dir = local_dir(&sched.destination)?;
     let path = std::path::Path::new(dir).join(&filename);
-
-    let bytes = std::fs::read(&path)
+    let file_bytes = std::fs::read(&path)
         .map_err(|e| CommandError::from(format!("cannot read backup file: {e}")))?;
-    let file_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(BackupReadResult { file_b64, format })
+
+    let document_bytes = match format {
+        "bvx" => {
+            let pw = password.as_deref().ok_or("password required for bvx format")?;
+            bastion_vault::exchange::decrypt_bvx(&file_bytes, pw).map_err(CommandError::from)?
+        }
+        // "json"
+        _ => {
+            if !allow_plaintext {
+                return Err("plaintext restore refused (set allowPlaintext: true)".into());
+            }
+            file_bytes
+        }
+    };
+
+    let document: bastion_vault::exchange::ExchangeDocument =
+        serde_json::from_slice(&document_bytes).map_err(|_| "document is not valid bvx.v1 JSON")?;
+    document
+        .validate_schema_tag()
+        .map_err(|_| "unsupported bvx schema tag")?;
+
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+
+    if dry_run {
+        let storage = core.barrier.as_storage();
+        let mut new = 0u64;
+        let mut identical = 0u64;
+        let mut conflict = 0u64;
+        let mut items: Vec<RestoreItem> = Vec::with_capacity(document.items.kv.len());
+        for kv in &document.items.kv {
+            let mount = if kv.mount.ends_with('/') { kv.mount.clone() } else { format!("{}/", kv.mount) };
+            let path = kv.path.strip_prefix('/').unwrap_or(&kv.path);
+            let full_path = format!("{mount}{path}");
+            let new_bytes = match &kv.value {
+                Value::Object(map) if map.len() == 1 && map.contains_key("_base64") => {
+                    if let Some(Value::String(b64)) = map.get("_base64") {
+                        base64::engine::general_purpose::STANDARD
+                            .decode(b64.as_bytes())
+                            .map_err(|_| "_base64 not valid")?
+                    } else {
+                        serde_json::to_vec(&kv.value).map_err(|_| "json serialize failed")?
+                    }
+                }
+                _ => serde_json::to_vec(&kv.value).map_err(|_| "json serialize failed")?,
+            };
+            let existing = storage.get(&full_path).await.map_err(CommandError::from)?;
+            let classification = match &existing {
+                None => {
+                    new += 1;
+                    "new"
+                }
+                Some(e) if e.value == new_bytes => {
+                    identical += 1;
+                    "identical"
+                }
+                Some(_) => {
+                    conflict += 1;
+                    "conflict"
+                }
+            };
+            items.push(RestoreItem {
+                mount: kv.mount.clone(),
+                path: kv.path.clone(),
+                classification: classification.to_string(),
+            });
+        }
+        return Ok(RestoreResult {
+            dry_run: true,
+            total: items.len() as u64,
+            new,
+            identical,
+            conflict,
+            items,
+            ..Default::default()
+        });
+    }
+
+    let policy = match conflict_policy.as_str() {
+        "skip" => bastion_vault::exchange::ConflictPolicy::Skip,
+        "overwrite" => bastion_vault::exchange::ConflictPolicy::Overwrite,
+        "rename" => bastion_vault::exchange::ConflictPolicy::Rename,
+        _ => return Err("conflict_policy must be skip|overwrite|rename".into()),
+    };
+
+    let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
+    let mounts =
+        bastion_vault::exchange::scope::MountIndex::from_core(&core_arc).map_err(CommandError::from)?;
+    let result = bastion_vault::exchange::scope::import_from_document(
+        core.barrier.as_storage(),
+        &mounts,
+        &document,
+        policy,
+    )
+    .await
+    .map_err(CommandError::from)?;
+
+    drop(vault_guard);
+    let owner = state.token.lock().await.clone().unwrap_or_default();
+    let mut audit_body = Map::new();
+    audit_body.insert("schedule_id".into(), Value::String(id));
+    audit_body.insert("filename".into(), Value::String(filename));
+    audit_body.insert("conflict_policy".into(), Value::String(conflict_policy));
+    audit_body.insert("written".into(), Value::Number(result.written.into()));
+    audit_body.insert("unchanged".into(), Value::Number(result.unchanged.into()));
+    audit_body.insert("skipped".into(), Value::Number(result.skipped.into()));
+    audit_body.insert("renamed".into(), Value::Number(result.renamed.into()));
+    bastion_vault::audit::emit_sys_audit(
+        &core_arc,
+        &owner,
+        "sys/scheduled-exports/restore",
+        bastion_vault::logical::Operation::Write,
+        Some(audit_body),
+        None,
+    )
+    .await;
+
+    Ok(RestoreResult {
+        dry_run: false,
+        written: result.written,
+        unchanged: result.unchanged,
+        skipped: result.skipped,
+        renamed: result.renamed,
+        ..Default::default()
+    })
 }

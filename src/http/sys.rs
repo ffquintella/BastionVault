@@ -1387,6 +1387,61 @@ struct ExchangeImportRequest {
     allow_plaintext: bool,
 }
 
+/// Classify every KV item in an exchange document against the destination
+/// vault *without* writing anything. Returns `(new, identical, conflict,
+/// items)`. Shared by the import-preview handler and the scheduled-export
+/// restore dry-run path.
+async fn classify_exchange_items(
+    core: &Arc<Core>,
+    document: &crate::exchange::ExchangeDocument,
+) -> Result<(u64, u64, u64, Vec<crate::exchange::PreviewClassificationItem>), RvError> {
+    let storage = core.barrier.as_storage();
+    let mut new = 0u64;
+    let mut identical = 0u64;
+    let mut conflict = 0u64;
+    let mut items: Vec<crate::exchange::PreviewClassificationItem> =
+        Vec::with_capacity(document.items.kv.len());
+    for kv in &document.items.kv {
+        let mount = if kv.mount.ends_with('/') { kv.mount.clone() } else { format!("{}/", kv.mount) };
+        let path = kv.path.strip_prefix('/').unwrap_or(&kv.path);
+        let full_path = format!("{mount}{path}");
+        let new_bytes = match &kv.value {
+            serde_json::Value::Object(map) if map.len() == 1 && map.contains_key("_base64") => {
+                if let Some(serde_json::Value::String(b64)) = map.get("_base64") {
+                    use base64::Engine;
+                    base64::engine::general_purpose::STANDARD
+                        .decode(b64.as_bytes())
+                        .map_err(|_| RvError::ErrRequestInvalid)?
+                } else {
+                    serde_json::to_vec(&kv.value)?
+                }
+            }
+            _ => serde_json::to_vec(&kv.value)?,
+        };
+        let existing = storage.get(&full_path).await?;
+        let classification = match &existing {
+            None => {
+                new += 1;
+                crate::exchange::ImportClassification::New
+            }
+            Some(e) if e.value == new_bytes => {
+                identical += 1;
+                crate::exchange::ImportClassification::Identical
+            }
+            Some(_) => {
+                conflict += 1;
+                crate::exchange::ImportClassification::Conflict
+            }
+        };
+        items.push(crate::exchange::PreviewClassificationItem {
+            mount: kv.mount.clone(),
+            path: kv.path.clone(),
+            classification,
+        });
+    }
+    Ok((new, identical, conflict, items))
+}
+
 /// `POST /v1/sys/exchange/import/preview` — decrypt + parse + classify.
 /// Stores the parsed document keyed by an opaque token; the apply call
 /// must present the same token within the configured TTL.
@@ -1440,49 +1495,8 @@ async fn sys_exchange_import_preview_handler(
     document.validate_schema_tag().map_err(|_| RvError::ErrRequestInvalid)?;
 
     // Classify each item against the destination *without* writing.
-    let storage = core.barrier.as_storage();
-    let mut new = 0u64;
-    let mut identical = 0u64;
-    let mut conflict = 0u64;
-    let mut items: Vec<crate::exchange::PreviewClassificationItem> = Vec::with_capacity(document.items.kv.len());
-    for kv in &document.items.kv {
-        let mount = if kv.mount.ends_with('/') { kv.mount.clone() } else { format!("{}/", kv.mount) };
-        let path = kv.path.strip_prefix('/').unwrap_or(&kv.path);
-        let full_path = format!("{mount}{path}");
-        let new_bytes = match &kv.value {
-            serde_json::Value::Object(map) if map.len() == 1 && map.contains_key("_base64") => {
-                if let Some(serde_json::Value::String(b64)) = map.get("_base64") {
-                    use base64::Engine;
-                    base64::engine::general_purpose::STANDARD
-                        .decode(b64.as_bytes())
-                        .map_err(|_| RvError::ErrRequestInvalid)?
-                } else {
-                    serde_json::to_vec(&kv.value)?
-                }
-            }
-            _ => serde_json::to_vec(&kv.value)?,
-        };
-        let existing = storage.get(&full_path).await?;
-        let classification = match &existing {
-            None => {
-                new += 1;
-                crate::exchange::ImportClassification::New
-            }
-            Some(e) if e.value == new_bytes => {
-                identical += 1;
-                crate::exchange::ImportClassification::Identical
-            }
-            Some(_) => {
-                conflict += 1;
-                crate::exchange::ImportClassification::Conflict
-            }
-        };
-        items.push(crate::exchange::PreviewClassificationItem {
-            mount: kv.mount.clone(),
-            path: kv.path.clone(),
-            classification,
-        });
-    }
+    let (new, identical, conflict, items) =
+        classify_exchange_items(core.get_ref(), &document).await?;
 
     // Owner binding: tokens are bound to the actor's display name; the
     // header was resolved before we moved into the async block.
@@ -2506,6 +2520,227 @@ async fn sys_scheduled_exports_run_now_handler(
     result
 }
 
+// ── Scheduled export backups: discovery + restore ─────────────────────────
+//
+// The cron runner writes `{schedule_id}-{timestamp}.{bvx|json}` files into the
+// schedule's local destination directory on the *server* host. These endpoints
+// let a remote GUI enumerate those files and restore one of them — both the
+// filesystem read and the import write happen entirely on the server, so a
+// remote operator never has to pull the (potentially full-vault) backup down
+// to the client and post it back. The GUI's embedded mode does the same work
+// in-process; this is the HTTP surface for the remote path.
+
+/// Map a backup file name's extension to a known export format, or `None` for
+/// files that are not backups we recognise.
+fn backup_format_of(name: &str) -> Option<&'static str> {
+    if name.ends_with(".bvx") {
+        Some("bvx")
+    } else if name.ends_with(".json") {
+        Some("json")
+    } else {
+        None
+    }
+}
+
+/// Reject anything that is not a bare file name within the destination
+/// directory — path separators or `..` components would escape the configured
+/// backup directory.
+fn valid_backup_filename(name: &str) -> bool {
+    !name.is_empty() && !name.contains('/') && !name.contains('\\') && !name.contains("..")
+}
+
+/// `GET /v1/sys/scheduled-exports/{id}/backups` — list the backup files a
+/// schedule's runs have written to its local destination directory, newest
+/// first. Files that are not `.bvx`/`.json` are ignored.
+async fn sys_scheduled_exports_backups_list_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let id = req.match_info().get("id").unwrap_or("").to_string();
+    let audit_path = format!("sys/scheduled-exports/{id}/backups");
+    let result: Result<HttpResponse, RvError> = (async move {
+        let store = crate::scheduled_exports::ScheduleStore::new();
+        let sched = match store.get(core.barrier.as_storage(), &id).await? {
+            Some(s) => s,
+            None => return Ok(response_error(StatusCode::NOT_FOUND, "schedule not found")),
+        };
+        let crate::scheduled_exports::DestinationKind::LocalPath { path: dir } = &sched.destination;
+        let dir = dir.clone();
+
+        let mut files: Vec<serde_json::Value> = Vec::new();
+        let read_dir = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            // A directory that does not exist yet (no run has fired) is not an
+            // error — it just means there are no backups to list.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(response_json_ok(None, json!({ "dir": dir, "files": files })));
+            }
+            Err(e) => return Ok(response_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("cannot read {dir}: {e}"))),
+        };
+
+        for entry in read_dir.flatten() {
+            let meta = match entry.metadata() {
+                Ok(m) if m.is_file() => m,
+                _ => continue,
+            };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // Skip in-flight temp files written by the atomic-rename path.
+            if name.starts_with('.') {
+                continue;
+            }
+            let Some(format) = backup_format_of(&name) else { continue };
+            let modified = meta
+                .modified()
+                .ok()
+                .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+            files.push(json!({
+                "name": name,
+                "size_bytes": meta.len(),
+                "modified": modified,
+                "format": format,
+            }));
+        }
+
+        // Newest first: by modified time when known, then file name descending
+        // so the timestamp-suffixed runner names fall in chronological order.
+        files.sort_by(|a, b| {
+            let am = a.get("modified").and_then(|v| v.as_str());
+            let bm = b.get("modified").and_then(|v| v.as_str());
+            let an = a.get("name").and_then(|v| v.as_str());
+            let bn = b.get("name").and_then(|v| v.as_str());
+            bm.cmp(&am).then_with(|| bn.cmp(&an))
+        });
+
+        Ok(response_json_ok(None, json!({ "dir": dir, "files": files })))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::List).await;
+    result
+}
+
+#[derive(Debug, Deserialize)]
+struct ScheduledExportRestoreRequest {
+    filename: String,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    allow_plaintext: bool,
+    #[serde(default)]
+    conflict_policy: crate::exchange::ConflictPolicy,
+    /// When true, classify the document against the vault but write nothing —
+    /// powers the GUI's "Preview" button.
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// `POST /v1/sys/scheduled-exports/{id}/restore` — read one backup file off
+/// the server's disk and import it back into the vault. With `dry_run: true`
+/// it classifies without writing (preview); otherwise it applies under the
+/// supplied conflict policy.
+async fn sys_scheduled_exports_restore_handler(
+    req: HttpRequest,
+    body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new(&req, &body, &core);
+    let id = req.match_info().get("id").unwrap_or("").to_string();
+    let audit_path = format!("sys/scheduled-exports/{id}/restore");
+    let result: Result<HttpResponse, RvError> = (async move {
+        let mut payload: ScheduledExportRestoreRequest =
+            serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+
+        if !valid_backup_filename(&payload.filename) {
+            return Ok(response_error(StatusCode::BAD_REQUEST, "invalid backup file name"));
+        }
+        let format = match backup_format_of(&payload.filename) {
+            Some(f) => f,
+            None => return Ok(response_error(StatusCode::BAD_REQUEST, "backup file must be a .bvx or .json file")),
+        };
+
+        let store = crate::scheduled_exports::ScheduleStore::new();
+        let sched = match store.get(core.barrier.as_storage(), &id).await? {
+            Some(s) => s,
+            None => return Ok(response_error(StatusCode::NOT_FOUND, "schedule not found")),
+        };
+        let crate::scheduled_exports::DestinationKind::LocalPath { path: dir } = &sched.destination;
+        let path = std::path::Path::new(dir).join(&payload.filename);
+
+        let file_bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(response_error(StatusCode::NOT_FOUND, "backup file not found"));
+            }
+            Err(e) => return Ok(response_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("cannot read backup file: {e}"))),
+        };
+
+        let document_bytes = match format {
+            "bvx" => {
+                let password = payload.password.as_deref().ok_or(RvError::ErrRequestInvalid)?;
+                let bytes = crate::exchange::decrypt_bvx(&file_bytes, password)?;
+                if let Some(ref mut p) = payload.password {
+                    p.zeroize();
+                }
+                bytes
+            }
+            // "json"
+            _ => {
+                if !payload.allow_plaintext {
+                    return Ok(response_error(
+                        StatusCode::BAD_REQUEST,
+                        "plaintext restore refused (set allow_plaintext: true to override)",
+                    ));
+                }
+                file_bytes
+            }
+        };
+
+        let document: crate::exchange::ExchangeDocument =
+            serde_json::from_slice(&document_bytes).map_err(|_| RvError::ErrRequestInvalid)?;
+        document.validate_schema_tag().map_err(|_| RvError::ErrRequestInvalid)?;
+
+        if payload.dry_run {
+            let (new, identical, conflict, items) =
+                classify_exchange_items(core.get_ref(), &document).await?;
+            return Ok(response_json_ok(
+                None,
+                json!({
+                    "dry_run": true,
+                    "total": items.len() as u64,
+                    "new": new,
+                    "identical": identical,
+                    "conflict": conflict,
+                    "items": items,
+                }),
+            ));
+        }
+
+        let mounts = crate::exchange::scope::MountIndex::from_core(&core.get_ref().clone())?;
+        let import = crate::exchange::scope::import_from_document(
+            core.barrier.as_storage(),
+            &mounts,
+            &document,
+            payload.conflict_policy,
+        )
+        .await?;
+
+        Ok(response_json_ok(
+            None,
+            json!({
+                "dry_run": false,
+                "written": import.written,
+                "unchanged": import.unchanged,
+                "skipped": import.skipped,
+                "renamed": import.renamed,
+                "items": import.items,
+            }),
+        ))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Write).await;
+    result
+}
+
 /// `POST /v1/sys/exchange/import` — single-shot import, kept for callers
 /// (CLI scripts, automation pipelines) that don't want to round-trip a
 /// preview token. The two-step flow above is the GUI default.
@@ -2666,6 +2901,14 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
         .service(
             web::resource("/scheduled-exports/{id}/run-now")
                 .route(web::post().to(sys_scheduled_exports_run_now_handler)),
+        )
+        .service(
+            web::resource("/scheduled-exports/{id}/backups")
+                .route(web::get().to(sys_scheduled_exports_backups_list_handler)),
+        )
+        .service(
+            web::resource("/scheduled-exports/{id}/restore")
+                .route(web::post().to(sys_scheduled_exports_restore_handler)),
         )
         .service(
             // Plugin registration uploads the manifest + binary (and
@@ -3012,5 +3255,118 @@ mod namespace_route_tests {
             err.contains("no such namespace"),
             "404 must come from the logical handler, not the actix scope: {resp:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod scheduled_export_backup_tests {
+    //! End-to-end coverage for the scheduled-export backup-listing and restore
+    //! HTTP endpoints, which let a *remote* GUI manage backup files that live
+    //! on the server's filesystem. Drives the real actix pipeline so the new
+    //! `/sys/scheduled-exports/{id}/backups` + `/restore` routes can't silently
+    //! regress (404 at the actix scope, traversal guard, dry-run vs apply).
+
+    use serde_json::json;
+
+    use crate::test_utils::TestHttpServer;
+
+    /// Create a JSON full-vault schedule writing to `dir`, returning its id.
+    fn create_schedule(server: &TestHttpServer, token: &str, name: &str, dir: &str) -> String {
+        let body = json!({
+            "name": name,
+            "cron": "0 0 3 * * *",
+            "format": "json",
+            "scope": { "kind": "full", "include": [] },
+            "destination": { "kind": "local_path", "path": dir },
+            "password_ref": null,
+            "allow_plaintext": true,
+            "enabled": true,
+        });
+        let (status, resp) = server
+            .request("POST", "sys/scheduled-exports", body.as_object().cloned(), Some(token), None)
+            .unwrap();
+        assert_eq!(status, 200, "create schedule failed: {resp:?}");
+        resp["schedule"]["id"].as_str().unwrap().to_string()
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_backups_list_and_restore_over_http() {
+        let mut server = TestHttpServer::new("test_sched_backup_restore_http", true).await;
+        server.token = server.root_token.clone();
+        let token = server.root_token.clone();
+
+        let dir = std::env::temp_dir()
+            .join(format!("bv-sched-backup-test-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let id = create_schedule(&server, &token, "restore-test", &dir);
+
+        // No run has fired yet: the destination dir does not exist. Listing must
+        // succeed with an empty file set rather than erroring.
+        let (status, resp) = server
+            .request("GET", &format!("sys/scheduled-exports/{id}/backups"), None, Some(&token), None)
+            .unwrap();
+        assert_eq!(status, 200, "backups list (empty dir) must reach handler: {resp:?}");
+        assert_eq!(resp["files"].as_array().map(|a| a.len()), Some(0));
+
+        // Fire an immediate run to produce a backup file on disk.
+        let (status, resp) = server
+            .request("POST", &format!("sys/scheduled-exports/{id}/run-now"), None, Some(&token), None)
+            .unwrap();
+        assert_eq!(status, 200, "run-now failed: {resp:?}");
+        assert_eq!(resp["run"]["status"].as_str(), Some("success"), "run must succeed: {resp:?}");
+
+        // The run's file is now listable.
+        let (status, resp) = server
+            .request("GET", &format!("sys/scheduled-exports/{id}/backups"), None, Some(&token), None)
+            .unwrap();
+        assert_eq!(status, 200, "backups list failed: {resp:?}");
+        let files = resp["files"].as_array().cloned().unwrap_or_default();
+        assert!(!files.is_empty(), "expected at least one backup file: {resp:?}");
+        let filename = files[0]["name"].as_str().unwrap().to_string();
+        assert_eq!(files[0]["format"].as_str(), Some("json"));
+
+        // Dry-run restore: classify without writing.
+        let body = json!({ "filename": filename, "allow_plaintext": true, "dry_run": true });
+        let (status, resp) = server
+            .request("POST", &format!("sys/scheduled-exports/{id}/restore"), body.as_object().cloned(), Some(&token), None)
+            .unwrap();
+        assert_eq!(status, 200, "dry-run restore failed: {resp:?}");
+        assert_eq!(resp["dry_run"].as_bool(), Some(true));
+        assert!(resp.get("items").is_some(), "dry-run must return classified items: {resp:?}");
+
+        // Real apply.
+        let body = json!({ "filename": filename, "allow_plaintext": true, "dry_run": false, "conflict_policy": "overwrite" });
+        let (status, resp) = server
+            .request("POST", &format!("sys/scheduled-exports/{id}/restore"), body.as_object().cloned(), Some(&token), None)
+            .unwrap();
+        assert_eq!(status, 200, "apply restore failed: {resp:?}");
+        assert_eq!(resp["dry_run"].as_bool(), Some(false));
+        assert!(resp.get("written").is_some(), "apply must report a written count: {resp:?}");
+
+        // Path-traversal guard: a name with `..` is rejected before any read.
+        let body = json!({ "filename": "../escape.json", "allow_plaintext": true, "dry_run": true });
+        let (status, _resp) = server
+            .request("POST", &format!("sys/scheduled-exports/{id}/restore"), body.as_object().cloned(), Some(&token), None)
+            .unwrap();
+        assert_eq!(status, 400, "traversal filename must be rejected with 400");
+
+        // Unknown file → 404, not a 500.
+        let body = json!({ "filename": "does-not-exist.json", "allow_plaintext": true, "dry_run": true });
+        let (status, _resp) = server
+            .request("POST", &format!("sys/scheduled-exports/{id}/restore"), body.as_object().cloned(), Some(&token), None)
+            .unwrap();
+        assert_eq!(status, 404, "missing backup file must be 404");
+
+        // Restore against an unknown schedule id → 404.
+        let body = json!({ "filename": filename, "allow_plaintext": true, "dry_run": true });
+        let (status, _resp) = server
+            .request("POST", "sys/scheduled-exports/no-such-id/restore", body.as_object().cloned(), Some(&token), None)
+            .unwrap();
+        assert_eq!(status, 404, "restore on unknown schedule must be 404");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

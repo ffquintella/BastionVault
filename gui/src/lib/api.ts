@@ -1312,8 +1312,9 @@ export const scheduledExportsRuns = (id: string) =>
 export const scheduledExportsRunNow = (id: string) =>
   invoke<RunRecord>("scheduled_exports_run_now", { id });
 
-// Backup files produced by a schedule's runs, discovered on disk in its
-// local destination directory. Embedded-mode only.
+// Backup files produced by a schedule's runs, discovered on disk in the
+// schedule's local destination directory. In embedded mode this is the GUI
+// host's disk; in remote mode the server enumerates its own filesystem.
 export interface BackupFile {
   name: string;
   size_bytes: number;
@@ -1328,17 +1329,53 @@ export interface BackupListResult {
   files: BackupFile[];
 }
 
-export interface BackupReadResult {
-  /** Base64-encoded raw file bytes, ready for `exchangePreview`. */
-  file_b64: string;
-  format: ScheduleFormat;
-}
-
 export const scheduledExportsBackupsList = (id: string) =>
   invoke<BackupListResult>("scheduled_exports_backups_list", { id });
 
-export const scheduledExportsBackupRead = (id: string, filename: string) =>
-  invoke<BackupReadResult>("scheduled_exports_backup_read", { id, filename });
+export interface RestoreItem {
+  mount: string;
+  path: string;
+  classification: "new" | "identical" | "conflict";
+}
+
+// Outcome of a restore. On a dry-run the new/identical/conflict counts and
+// items describe the classification; on a real apply the
+// written/unchanged/skipped/renamed counts describe what was written.
+export interface RestoreResult {
+  dry_run: boolean;
+  total: number;
+  new: number;
+  identical: number;
+  conflict: number;
+  written: number;
+  unchanged: number;
+  skipped: number;
+  renamed: number;
+  items: RestoreItem[];
+}
+
+/**
+ * Restore one of a schedule's backup files into the vault. Reading the file
+ * and writing the items both happen on the vault host (in-process when
+ * embedded, server-side when remote), so a remote restore never round-trips
+ * the backup through the GUI. `dryRun` classifies without writing.
+ */
+export const scheduledExportsRestore = (args: {
+  id: string;
+  filename: string;
+  password?: string;
+  allowPlaintext?: boolean;
+  conflictPolicy?: "skip" | "overwrite" | "rename";
+  dryRun: boolean;
+}) =>
+  invoke<RestoreResult>("scheduled_exports_restore", {
+    id: args.id,
+    filename: args.filename,
+    password: args.password,
+    allowPlaintext: args.allowPlaintext,
+    conflictPolicy: args.conflictPolicy,
+    dryRun: args.dryRun,
+  });
 
 // ── Plugins (admin) ───────────────────────────────────────────────────────
 //

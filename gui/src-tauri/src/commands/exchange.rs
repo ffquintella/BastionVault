@@ -5,18 +5,57 @@
 //! layer because there isn't one in embedded mode — the GUI runs in
 //! the same process as the vault.
 //!
-//! Remote mode: routes through the existing `Client::sys()` HTTP API
+//! Remote mode: routes through the `bv_client::Backend` trait
+//! (`crate::commands::make_request`) to the server's HTTP API
 //! (`/v1/sys/exchange/export`, `/v1/sys/exchange/import/preview`,
-//! `/v1/sys/exchange/import/apply`).
+//! `/v1/sys/exchange/import/apply`). Each command starts with an
+//! `is_remote(&state)` guard; without it every command failed with
+//! "Vault not open" whenever the GUI was connected to a remote server
+//! (where `AppState::vault` is always `None`). The preview token is
+//! minted in the server's `core.exchange_preview_store`, so in remote
+//! mode preview *and* apply must both hit the server — a token minted
+//! there can only be consumed there.
 
 use base64::Engine;
 use bastion_vault::exchange;
+use bv_client::Operation;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use tauri::State;
 
+use crate::commands::make_request;
 use crate::error::{CmdResult, CommandError};
-use crate::state::AppState;
+use crate::state::{AppState, VaultMode};
+
+/// True when the GUI is connected to a remote server rather than an
+/// in-process embedded vault. In remote mode `AppState::vault` is always
+/// `None`, so every command must route through the HTTP API instead of
+/// locking the (absent) embedded vault.
+async fn is_remote(state: &State<'_, AppState>) -> bool {
+    matches!(*state.mode.lock().await, VaultMode::Remote)
+}
+
+/// Issue a logical request through the active backend and return its `data`
+/// map. The sys/exchange HTTP handlers reply with a bare JSON object, which
+/// the client surfaces whole as `data`.
+async fn remote_data(
+    state: &State<'_, AppState>,
+    operation: Operation,
+    path: String,
+    body: Option<Map<String, Value>>,
+) -> CmdResult<Map<String, Value>> {
+    let resp = make_request(state, operation, path, body).await?;
+    Ok(resp.and_then(|r| r.data).unwrap_or_default())
+}
+
+fn parse_field<T: serde::de::DeserializeOwned>(
+    data: &Map<String, Value>,
+    key: &str,
+) -> CmdResult<T> {
+    let value = data.get(key).cloned().unwrap_or(Value::Null);
+    serde_json::from_value(value)
+        .map_err(|e| CommandError::from(format!("unexpected server response: {e}")))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ScopeSelectorInput {
@@ -80,6 +119,31 @@ pub async fn exchange_export(
 ) -> CmdResult<ExchangeExportResult> {
     let scope = parse_scope(&include)?;
     let allow_plaintext_b = allow_plaintext.unwrap_or(false);
+
+    // Remote mode: the embedded `Core` is `None`, so build the same request
+    // body the HTTP handler expects and let the server walk its own storage.
+    // The server emits its own audit entry, so we skip the local emit below.
+    if is_remote(&state).await {
+        let mut body = Map::new();
+        body.insert("format".into(), Value::String(format.clone()));
+        body.insert(
+            "scope".into(),
+            serde_json::to_value(&scope).map_err(|e| CommandError::from(e.to_string()))?,
+        );
+        if let Some(p) = password {
+            body.insert("password".into(), Value::String(p));
+        }
+        body.insert("allow_plaintext".into(), Value::Bool(allow_plaintext_b));
+        if let Some(c) = comment {
+            body.insert("comment".into(), Value::String(c));
+        }
+        let data = remote_data(&state, Operation::Write, "sys/exchange/export".into(), Some(body)).await?;
+        return Ok(ExchangeExportResult {
+            file_b64: parse_field(&data, "file_b64")?,
+            size_bytes: parse_field(&data, "size_bytes")?,
+            format: parse_field(&data, "format")?,
+        });
+    }
 
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;
@@ -177,7 +241,7 @@ pub struct ExchangePreviewResult {
     pub items: Vec<PreviewItem>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PreviewItem {
     pub mount: String,
     pub path: String,
@@ -200,6 +264,35 @@ pub async fn exchange_preview(
     let file_bytes = base64::engine::general_purpose::STANDARD
         .decode(file_b64.as_bytes())
         .map_err(|_| "input not valid base64")?;
+
+    // Remote mode: the preview token lives in the server's
+    // `core.exchange_preview_store`, so the classify-and-stash work must run
+    // server-side — a token minted there can only be consumed there (apply
+    // also routes remote). The HTTP handler takes the file as a UTF-8 string
+    // (both the `.bvx` envelope and plaintext JSON are text).
+    if is_remote(&state).await {
+        let file = String::from_utf8(file_bytes)
+            .map_err(|_| "import file is not valid UTF-8")?;
+        let mut body = Map::new();
+        body.insert("file".into(), Value::String(file));
+        body.insert("format".into(), Value::String(format.clone()));
+        if let Some(p) = password {
+            body.insert("password".into(), Value::String(p));
+        }
+        body.insert("allow_plaintext".into(), Value::Bool(allow_plaintext));
+        let data =
+            remote_data(&state, Operation::Write, "sys/exchange/import/preview".into(), Some(body))
+                .await?;
+        return Ok(ExchangePreviewResult {
+            token: parse_field(&data, "token")?,
+            expires_in_secs: parse_field(&data, "expires_in_secs")?,
+            total: parse_field(&data, "total")?,
+            new: parse_field(&data, "new")?,
+            identical: parse_field(&data, "identical")?,
+            conflict: parse_field(&data, "conflict")?,
+            items: parse_field(&data, "items")?,
+        });
+    }
 
     let document_bytes = match format.as_str() {
         "bvx" => {
@@ -322,6 +415,28 @@ pub async fn exchange_apply(
         "rename" => exchange::ConflictPolicy::Rename,
         _ => return Err("conflict_policy must be skip|overwrite|rename".into()),
     };
+
+    // Remote mode: the preview token was minted by the server (see
+    // `exchange_preview`), so the apply that consumes it must hit the server
+    // too. Same actor token is carried by the backend dispatch, so the
+    // owner-binding check on the token passes.
+    if is_remote(&state).await {
+        let mut body = Map::new();
+        body.insert("token".into(), Value::String(token.clone()));
+        body.insert(
+            "conflict_policy".into(),
+            Value::String(conflict_policy.clone().unwrap_or_else(|| "skip".to_string())),
+        );
+        let data =
+            remote_data(&state, Operation::Write, "sys/exchange/import/apply".into(), Some(body))
+                .await?;
+        return Ok(ExchangeApplyResult {
+            written: parse_field(&data, "written")?,
+            unchanged: parse_field(&data, "unchanged")?,
+            skipped: parse_field(&data, "skipped")?,
+            renamed: parse_field(&data, "renamed")?,
+        });
+    }
 
     let vault_guard = state.vault.lock().await;
     let vault = vault_guard.as_ref().ok_or("Vault not open")?;

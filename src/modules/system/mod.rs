@@ -2259,15 +2259,43 @@ impl SystemBackend {
             .auth
             .clone()
             .ok_or(RvError::ErrPermissionDenied)?;
-        let acl: ACL = policy_module
-            .policy_store
-            .load()
+        let policy_store = policy_module.policy_store.load();
+        let acl: ACL = policy_store
             .new_acl_for_request(&auth.policies, None, &auth)
             .await?;
 
         let mut capabilities = Map::new();
         for path in &paths {
-            let caps = acl.capabilities(path.clone());
+            let mut caps = acl.capabilities(path.clone());
+
+            // `acl.capabilities` runs an `Operation::List` dry-run, and the
+            // `is_list` short-circuit in `allow_operation` defers scope
+            // filtering for genuine LISTs to post-route. That makes
+            // scope-gated (`scopes = ["owner"|"shared"]`) rules advertise
+            // their FULL capability set here without verifying the scope.
+            // For capabilities-self that over-reports: a read-only
+            // share-grantee would see `update`/`delete` they cannot exercise,
+            // and the GUI would then enable Edit/Delete controls the server
+            // rejects with 403. Re-verify each scope-sensitive capability
+            // against the real gate (`can_operate` resolves ownership and
+            // active shares) and drop any the caller cannot truly perform.
+            // `root`/`deny` are absolute (never scope-gated) so leave them.
+            if !caps.iter().any(|c| c == "root" || c == "deny") {
+                for (cap_name, op) in [
+                    ("read", Operation::Read),
+                    ("list", Operation::List),
+                    ("update", Operation::Write),
+                    ("create", Operation::Write),
+                    ("delete", Operation::Delete),
+                ] {
+                    if caps.iter().any(|c| c == cap_name)
+                        && !policy_store.can_operate(&auth, path, op).await
+                    {
+                        caps.retain(|c| c != cap_name);
+                    }
+                }
+            }
+
             capabilities.insert(
                 path.clone(),
                 Value::Array(caps.into_iter().map(Value::String).collect()),
@@ -3138,6 +3166,116 @@ mod mod_system_tests {
         let both_caps = caps_for(&login("both"));
         assert!(both_caps.contains(&"connect".to_string()), "got {both_caps:?}");
         assert!(both_caps.contains(&"read".to_string()), "got {both_caps:?}");
+    }
+
+    /// Regression: `capabilities-self` must not advertise scope-gated
+    /// (`scopes = ["shared"|"owner"]`) capabilities the caller has not
+    /// actually been granted via ownership or an active share. The
+    /// `acl.capabilities` dry-run runs as `Operation::List`, whose
+    /// `is_list` short-circuit defers scope filtering and would otherwise
+    /// leak the rule's full capability set (e.g. `update`) — making the GUI
+    /// enable Edit/Delete for a read-only share-grantee that the server
+    /// then rejects with 403. Ungated rules must still report fully.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_capabilities_self_scope_gated_not_leaked() {
+        let mut server = TestHttpServer::new("test_capabilities_self_scope_gated", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+        server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
+
+        // One policy with a scope-gated rule (no share/owner exists for the
+        // caller, so its caps must NOT surface) and an ungated rule (must
+        // surface fully — guards against over-pruning).
+        let policy_hcl = r#"
+            path "resources/resources/shared-thing" {
+                capabilities = ["read", "list", "update"]
+                scopes       = ["shared"]
+            }
+            path "resources/resources/plain-thing" {
+                capabilities = ["read", "update"]
+            }
+        "#;
+        let (pol_status, pol_resp) = server
+            .write(
+                "v1/sys/policies/acl/scoped-res",
+                serde_json::json!({ "policy": policy_hcl }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert!(
+            (200..300).contains(&pol_status),
+            "policy write must succeed: {pol_status} {pol_resp:?}"
+        );
+
+        server
+            .write(
+                "v1/sys/auth/pass",
+                serde_json::json!({ "type": "userpass" }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        server
+            .write(
+                "v1/auth/pass/users/grantee",
+                serde_json::json!({
+                    "password": "hunter22XX!",
+                    "token_policies": "scoped-res",
+                    "ttl": 0,
+                })
+                .as_object()
+                .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+
+        let token = server
+            .write(
+                "v1/auth/pass/login/grantee",
+                serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                None,
+            )
+            .unwrap()
+            .1
+            .get("auth")
+            .and_then(|a| a.get("client_token"))
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+
+        let caps_for = |path: &str| -> Vec<String> {
+            let (status, resp) = server
+                .request(
+                    "POST",
+                    "v2/sys/capabilities-self",
+                    serde_json::json!({ "paths": [path] }).as_object().cloned(),
+                    Some(&token),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(status, 200, "capabilities-self must succeed: {resp:?}");
+            resp.get("capabilities")
+                .and_then(|c| c.get(path))
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default()
+        };
+
+        // Scope-gated rule, caller has no share/ownership: the rule's
+        // capabilities (incl. `update`) must NOT leak.
+        let shared = caps_for("resources/resources/shared-thing");
+        assert!(
+            !shared.contains(&"update".to_string()),
+            "scope-gated `update` must not leak to a non-grantee: {shared:?}"
+        );
+        assert!(
+            !shared.contains(&"read".to_string()),
+            "scope-gated `read` must not leak to a non-grantee: {shared:?}"
+        );
+
+        // Ungated rule: full capabilities still reported (no over-pruning).
+        let plain = caps_for("resources/resources/plain-thing");
+        assert!(plain.contains(&"read".to_string()), "got {plain:?}");
+        assert!(plain.contains(&"update".to_string()), "got {plain:?}");
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

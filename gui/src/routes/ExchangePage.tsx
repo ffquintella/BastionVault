@@ -10,6 +10,7 @@ import type {
   ScheduleInput,
   RunRecord,
   BackupFile,
+  RestoreResult,
 } from "../lib/api";
 import { extractError } from "../lib/error";
 
@@ -1012,10 +1013,10 @@ function formatBytes(n: number): string {
  * Lists the backup files a schedule's runs have written to its local
  * destination directory, and lets the operator restore any one of them.
  *
- * Restore reuses the Import flow: the selected file is read off disk (base64),
- * fed through `exchangePreview` for a classified summary, then `exchangeApply`
- * writes it back into the vault under the chosen conflict policy. Embedded-mode
- * only — the files live on the BastionVault host's filesystem.
+ * Restore runs entirely on the vault host: `scheduledExportsRestore` reads the
+ * selected file and writes the items in-process (embedded) or on the server
+ * (remote). A dry-run produces the classified summary for the preview step;
+ * the real apply writes under the chosen conflict policy.
  */
 function BackupsModal({
   schedule,
@@ -1035,7 +1036,7 @@ function BackupsModal({
   const [password, setPassword] = useState("");
   const [allowPlaintext, setAllowPlaintext] = useState(false);
   const [conflictPolicy, setConflictPolicy] = useState<"skip" | "overwrite" | "rename">("skip");
-  const [preview, setPreview] = useState<ExchangePreviewResult | null>(null);
+  const [preview, setPreview] = useState<RestoreResult | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function refresh() {
@@ -1066,21 +1067,18 @@ function BackupsModal({
     setPreview(null);
   }
 
-  async function loadPreview(f: BackupFile): Promise<ExchangePreviewResult> {
-    const { file_b64 } = await api.scheduledExportsBackupRead(schedule.id, f.name);
-    return api.exchangePreview(
-      file_b64,
-      f.format,
-      f.format === "bvx" ? password : undefined,
-      f.format === "json" ? allowPlaintext : false,
-    );
-  }
-
   async function handlePreview() {
     if (!restoring) return;
     setBusy(true);
     try {
-      setPreview(await loadPreview(restoring));
+      const result = await api.scheduledExportsRestore({
+        id: schedule.id,
+        filename: restoring.name,
+        password: restoring.format === "bvx" ? password : undefined,
+        allowPlaintext: restoring.format === "json" ? allowPlaintext : false,
+        dryRun: true,
+      });
+      setPreview(result);
     } catch (e) {
       toast("error", extractError(e));
       setPreview(null);
@@ -1093,9 +1091,14 @@ function BackupsModal({
     if (!restoring) return;
     setBusy(true);
     try {
-      // Reuse an existing preview token if one is showing, else mint one.
-      const token = preview ? preview.token : (await loadPreview(restoring)).token;
-      const result = await api.exchangeApply(token, conflictPolicy);
+      const result = await api.scheduledExportsRestore({
+        id: schedule.id,
+        filename: restoring.name,
+        password: restoring.format === "bvx" ? password : undefined,
+        allowPlaintext: restoring.format === "json" ? allowPlaintext : false,
+        conflictPolicy,
+        dryRun: false,
+      });
       toast(
         "success",
         `Restored: ${result.written} written, ${result.unchanged} unchanged, ${result.skipped} skipped, ${result.renamed} renamed.`,
