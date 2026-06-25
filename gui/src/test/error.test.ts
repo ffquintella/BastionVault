@@ -4,6 +4,7 @@ import {
   isMountNotFound,
   isNodeUnavailable,
   isPermissionDenied,
+  isVaultSealed,
 } from "../lib/error";
 
 describe("extractError", () => {
@@ -38,6 +39,29 @@ describe("isPermissionDenied", () => {
       false,
     );
     expect(isPermissionDenied({ message: "404 mount not found" })).toBe(false);
+  });
+});
+
+describe("isVaultSealed", () => {
+  it("matches a remote sealed-node error", () => {
+    expect(
+      isVaultSealed({
+        message:
+          "node `https://vault.example.com:4200` is unavailable: BastionVault is sealed.",
+      }),
+    ).toBe(true);
+  });
+
+  it("matches a plain sealed message", () => {
+    expect(isVaultSealed(new Error("vault is sealed"))).toBe(true);
+  });
+
+  it("does not match the opposite 'unsealed' wording", () => {
+    expect(isVaultSealed(new Error("vault is already unsealed"))).toBe(false);
+  });
+
+  it("does not match unrelated errors", () => {
+    expect(isVaultSealed(new Error("HTTP 403: Permission denied"))).toBe(false);
   });
 });
 

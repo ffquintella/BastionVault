@@ -4,10 +4,11 @@ import { listen } from "@tauri-apps/api/event";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { AuthLayout } from "../components/AuthLayout";
 import { Modal } from "../components/ui";
+import { UnsealModal } from "../components/UnsealModal";
 import { useAuthStore } from "../stores/authStore";
 import { useVaultStore } from "../stores/vaultStore";
 import * as api from "../lib/api";
-import { extractError } from "../lib/error";
+import { extractError, isVaultSealed } from "../lib/error";
 
 type Tab = "token" | "login" | "oidc";
 type LoginStep = "username" | "password";
@@ -87,9 +88,18 @@ export function LoginPage() {
   }
   const mode = useVaultStore((s) => s.mode);
   const remoteProfile = useVaultStore((s) => s.remoteProfile);
+  const setStatus = useVaultStore((s) => s.setStatus);
   const [tab, setTab] = useState<Tab>("login");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  // Unseal entry point. A sealed barrier blocks every auth backend, so
+  // a login attempt against a sealed vault dead-ends with a "sealed"
+  // error. When we recognise that error we surface an Unseal action so
+  // the operator can unlock the barrier and retry sign-in without
+  // leaving the login page.
+  const [unsealOpen, setUnsealOpen] = useState(false);
+  const sealed = error !== null && isVaultSealed(error);
 
   // Token form
   const [token, setToken] = useState("");
@@ -393,7 +403,16 @@ export function LoginPage() {
 
       {error && (
         <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
-          {error}
+          <p>{error}</p>
+          {sealed && (
+            <button
+              type="button"
+              onClick={() => setUnsealOpen(true)}
+              className="mt-2 w-full py-2 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 rounded-lg text-sm font-medium transition-colors"
+            >
+              Unseal vault
+            </button>
+          )}
         </div>
       )}
 
@@ -599,6 +618,24 @@ export function LoginPage() {
           </div>
         </div>
       )}
+
+      {/* Unseal dialog — reached from the sealed-error CTA. On a
+          successful unseal the barrier is open, so we clear the error
+          and close the dialog; the operator can then sign in. Remote
+          multi-share setups keep the dialog open until every share is
+          submitted (status stays sealed). */}
+      <UnsealModal
+        open={unsealOpen}
+        onClose={() => setUnsealOpen(false)}
+        mode={mode}
+        onUnsealed={(st) => {
+          setStatus(st);
+          if (!st.sealed) {
+            setUnsealOpen(false);
+            setError(null);
+          }
+        }}
+      />
 
       {/* PIN Entry Modal */}
       <Modal

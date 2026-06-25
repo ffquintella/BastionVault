@@ -36,6 +36,18 @@ export function isMountNotFound(e: unknown): boolean {
 }
 
 /**
+ * True when the failure was caused by the vault being sealed — the
+ * barrier is locked so no auth backend can mint a token. Surfaced on
+ * the login page (e.g. `node \`<host>\` is unavailable: BastionVault is
+ * sealed.`) so the operator can be offered an unseal action instead of
+ * a dead-end error. The `\b` anchors keep this from matching the
+ * opposite "unsealed" wording.
+ */
+export function isVaultSealed(e: unknown): boolean {
+  return /\bsealed\b/i.test(extractError(e));
+}
+
+/**
  * True when the backend denied the request for lack of capability —
  * HTTP 403. Read-only share-grantees and non-admin users hit this on
  * routes they can't read (e.g. the Rustion dispatcher preview). Lets a

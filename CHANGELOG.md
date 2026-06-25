@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-06-25
+
+### Added
+
+- **Unseal from the login screen** (`gui/src/routes/LoginPage.tsx`, `gui/src/lib/error.ts`) -- when a sign-in attempt dead-ends because the vault is sealed (e.g. `node \`<host>\` is unavailable: BastionVault is sealed.`), the login page now recognises the sealed error and offers an **Unseal vault** action inline with the error, opening the existing `UnsealModal`. Previously the only sealed-vault entry points were the Dashboard and Settings, both of which sit behind a login the operator could not complete while sealed — so a sealed remote vault left the operator stuck at the sign-in form. A new `isVaultSealed` error classifier drives the detection (anchored so it never matches the opposite "unsealed" wording); on a successful unseal the dialog closes, the error clears, and the operator can sign in. Remote multi-share clusters keep prompting for the next share as before. Tests in `gui/src/test/error.test.ts` and `gui/src/test/pages.test.tsx`.
+
 ## [0.20.0] - 2026-06-25
 
 ### Added

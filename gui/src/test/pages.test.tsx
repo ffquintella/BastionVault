@@ -112,6 +112,39 @@ describe("LoginPage", () => {
     const btn = screen.getByText("Continue").closest("button");
     expect(btn).toBeDisabled();
   });
+
+  it("offers an unseal action when login fails because the vault is sealed", async () => {
+    // A sealed barrier blocks token auth; the backend reports it as a
+    // "sealed" error. The login page must turn that dead-end into an
+    // unseal entry point rather than just a red message.
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_sso_providers")
+        return Promise.resolve({ enabled: false, providers: [] });
+      if (cmd === "login_token")
+        return Promise.reject({
+          message:
+            "node `https://vault.example.com:4200` is unavailable: BastionVault is sealed.",
+        });
+      return Promise.reject(new Error(`unmocked: ${cmd}`));
+    });
+    const user = userEvent.setup();
+    const { LoginPage } = await import("../routes/LoginPage");
+    renderWithProviders(<LoginPage />);
+
+    await user.click(screen.getAllByText("Token")[0]);
+    await user.type(screen.getByPlaceholderText("hvs.xxxxx..."), "hvs.test");
+    await user.click(screen.getAllByRole("button", { name: /sign in/i })[0]);
+
+    // The sealed error surfaces an "Unseal vault" button that opens the
+    // unseal dialog without leaving the login page.
+    const unsealBtn = await screen.findByRole("button", {
+      name: /unseal vault/i,
+    });
+    await user.click(unsealBtn);
+    expect(
+      screen.getByRole("heading", { name: /unseal vault/i }),
+    ).toBeInTheDocument();
+  });
 });
 
 describe("InitPage", () => {
