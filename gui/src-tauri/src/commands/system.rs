@@ -121,8 +121,6 @@ pub struct SealOutcome {
 /// one node.
 #[tauri::command]
 pub async fn seal_vault(state: State<'_, AppState>) -> CmdResult<SealOutcome> {
-    use crate::commands::connection::NodeSealResult;
-
     #[cfg(feature = "embedded_vault")]
     {
         use bastion_vault::logical::Operation as ServerOp;
@@ -174,7 +172,7 @@ pub async fn seal_vault(state: State<'_, AppState>) -> CmdResult<SealOutcome> {
             *state.backend.lock().await = None;
             return Ok(SealOutcome {
                 status: VaultStatus { initialized: true, sealed: true, has_vault: true },
-                nodes: vec![NodeSealResult {
+                nodes: vec![crate::commands::connection::NodeSealResult {
                     address: "embedded".to_string(),
                     sealed: Some(true),
                     progress: None,
@@ -279,8 +277,6 @@ pub async fn unseal_vault(
     state: State<'_, AppState>,
     unseal_key_hex: Option<String>,
 ) -> CmdResult<UnsealOutcome> {
-    use crate::commands::connection::NodeSealResult;
-
     #[cfg(feature = "embedded_vault")]
     {
         let vault_guard = state.vault.lock().await;
@@ -311,7 +307,7 @@ pub async fn unseal_vault(
             }
             return Ok(UnsealOutcome {
                 status: VaultStatus { initialized, sealed, has_vault: true },
-                nodes: vec![NodeSealResult {
+                nodes: vec![crate::commands::connection::NodeSealResult {
                     address: "embedded".to_string(),
                     sealed: Some(sealed),
                     progress: None,
