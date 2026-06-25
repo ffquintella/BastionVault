@@ -115,6 +115,25 @@ impl MountIndex {
         None
     }
 
+    /// Resolve a KV item's `(mount, path)` to the barrier-storage key where
+    /// the live kv backend actually reads/writes it. `kv.path` is
+    /// barrier-relative (e.g. `data/myapp/db`); under the default re-rooted
+    /// layout the data lives at `namespaces/<root_uuid>/logical/<uuid>/…`, so
+    /// callers must resolve through the mount prefix rather than using the
+    /// bare `mount + path`. Falls back to the bare mount path when the mount
+    /// is unknown (hand-built documents / legacy layouts).
+    ///
+    /// This is the single source of truth shared by the import write path and
+    /// the dry-run preview classification so they agree on where to look.
+    pub fn resolve_kv_key(&self, mount: &str, path: &str) -> String {
+        let mount = ensure_trailing_slash(mount);
+        let rel = strip_leading_slash(path);
+        match self.kv_uuid_for_mount(&mount) {
+            Some(uuid) => format!("{}{rel}", self.barrier_prefix(uuid)),
+            None => format!("{mount}{rel}"),
+        }
+    }
+
     /// Test-only constructor that fixes the mount table and storage prefixes
     /// explicitly so a re-rooted (`namespaces/<uuid>/…`) layout can be
     /// exercised without a live `Core`.
@@ -663,16 +682,9 @@ pub async fn import_from_document(
     let mut result = ImportResult::default();
 
     for kv in &document.items.kv {
-        let mount = ensure_trailing_slash(&kv.mount);
-        let rel = strip_leading_slash(&kv.path);
-        // `kv.path` is barrier-relative (e.g. `data/myapp/db`); write it back
-        // under the destination mount's barrier prefix so it lands where the
-        // live kv backend reads. Fall back to the bare mount path when the
-        // mount is unknown (hand-built documents / legacy layouts).
-        let full_path = match mounts.kv_uuid_for_mount(&mount) {
-            Some(uuid) => format!("{}{rel}", mounts.barrier_prefix(uuid)),
-            None => format!("{mount}{rel}"),
-        };
+        // Resolve to where the live kv backend reads/writes the item (under
+        // the re-rooted barrier prefix), so the preview and the write agree.
+        let full_path = mounts.resolve_kv_key(&kv.mount, &kv.path);
         let new_bytes = json_value_to_storage_bytes(&kv.value)?;
 
         let existing = storage.get(&full_path).await?;
@@ -855,6 +867,29 @@ mod tests {
                 .push(((*path).to_string(), (*uuid).to_string()));
         }
         MountIndex::for_test(by_type, ROOT_LOGICAL, ROOT_SYSTEM)
+    }
+
+    #[test]
+    fn resolve_kv_key_uses_reroot_prefix() {
+        let mounts = reroot_index(&[("kv-v2", "secret/", "u-secret")]);
+        // A known mount must resolve to the live re-rooted barrier key, not the
+        // bare `secret/…` path. This is what the restore dry-run looks up; the
+        // old bare-path lookup found nothing and reported everything as `new`.
+        assert_eq!(
+            mounts.resolve_kv_key("secret/", "data/myapp/db"),
+            "namespaces/root-uuid/logical/u-secret/data/myapp/db",
+        );
+        // Mount without a trailing slash and path with a leading slash are
+        // normalized the same way the write path normalizes them.
+        assert_eq!(
+            mounts.resolve_kv_key("secret", "/data/myapp/db"),
+            "namespaces/root-uuid/logical/u-secret/data/myapp/db",
+        );
+        // Unknown mount falls back to the bare mount path (legacy / hand-built).
+        assert_eq!(
+            mounts.resolve_kv_key("nope/", "data/x"),
+            "nope/data/x",
+        );
     }
 
     #[tokio::test]

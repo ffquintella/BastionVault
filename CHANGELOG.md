@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.19.4] - 2026-06-25
+
+### Fixed
+
+- **Scheduled-backup/exchange restore preview misclassified every item as `new`** (`src/exchange/scope.rs`, `src/http/sys.rs`, `gui/src-tauri/src/commands/scheduled_exports.rs`) -- the restore dry-run (the GUI *Preview* step) and the `/sys/exchange/import/preview` classifier built the lookup key as the bare `mount + path` (e.g. `secret/versions/…`), but under the default re-rooted layout the live KV data lives at `namespaces/<root_uuid>/logical/<mount_uuid>/…`. The probe therefore found nothing and reported `25 new / 0 identical / 0 conflict` even when restoring a backup of data already present, hiding all conflicts before an Overwrite. The actual write path (`import_from_document`) already resolved the prefix correctly via `MountIndex`, so the two disagreed. The prefix resolution is now a single shared `MountIndex::resolve_kv_key` used by the write path *and* both dry-run classifiers, so the preview looks where the data actually lives. Regression test `resolve_kv_key_uses_reroot_prefix`.
+
 ## [0.19.3] - 2026-06-25
 
 ### Added

@@ -1396,15 +1396,18 @@ async fn classify_exchange_items(
     document: &crate::exchange::ExchangeDocument,
 ) -> Result<(u64, u64, u64, Vec<crate::exchange::PreviewClassificationItem>), RvError> {
     let storage = core.barrier.as_storage();
+    // Resolve KV keys through the same mount-prefix logic as the write path
+    // (`import_from_document`); otherwise the re-rooted layout
+    // (`namespaces/<root_uuid>/logical/<uuid>/…`) is missed and every item is
+    // misclassified as `new`.
+    let mounts = crate::exchange::scope::MountIndex::from_core(core)?;
     let mut new = 0u64;
     let mut identical = 0u64;
     let mut conflict = 0u64;
     let mut items: Vec<crate::exchange::PreviewClassificationItem> =
         Vec::with_capacity(document.items.kv.len());
     for kv in &document.items.kv {
-        let mount = if kv.mount.ends_with('/') { kv.mount.clone() } else { format!("{}/", kv.mount) };
-        let path = kv.path.strip_prefix('/').unwrap_or(&kv.path);
-        let full_path = format!("{mount}{path}");
+        let full_path = mounts.resolve_kv_key(&kv.mount, &kv.path);
         let new_bytes = match &kv.value {
             serde_json::Value::Object(map) if map.len() == 1 && map.contains_key("_base64") => {
                 if let Some(serde_json::Value::String(b64)) = map.get("_base64") {

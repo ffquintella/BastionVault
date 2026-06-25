@@ -512,14 +512,19 @@ pub async fn scheduled_exports_restore(
 
     if dry_run {
         let storage = core.barrier.as_storage();
+        // Resolve KV keys through the same mount-prefix logic as the write
+        // path (`import_from_document`); otherwise the re-rooted layout
+        // (`namespaces/<root_uuid>/logical/<uuid>/…`) is missed and every
+        // item is misclassified as `new`.
+        let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
+        let mounts = bastion_vault::exchange::scope::MountIndex::from_core(&core_arc)
+            .map_err(CommandError::from)?;
         let mut new = 0u64;
         let mut identical = 0u64;
         let mut conflict = 0u64;
         let mut items: Vec<RestoreItem> = Vec::with_capacity(document.items.kv.len());
         for kv in &document.items.kv {
-            let mount = if kv.mount.ends_with('/') { kv.mount.clone() } else { format!("{}/", kv.mount) };
-            let path = kv.path.strip_prefix('/').unwrap_or(&kv.path);
-            let full_path = format!("{mount}{path}");
+            let full_path = mounts.resolve_kv_key(&kv.mount, &kv.path);
             let new_bytes = match &kv.value {
                 Value::Object(map) if map.len() == 1 && map.contains_key("_base64") => {
                     if let Some(Value::String(b64)) = map.get("_base64") {
