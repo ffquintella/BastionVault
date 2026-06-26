@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.21.2"
+version = "0.21.3"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -36,7 +36,7 @@ members = [
 # separately — its build artefacts shouldn't pollute the host's
 # `target/`, and its release-profile (panic=abort, opt=s) shouldn't
 # leak into our normal builds.
-exclude = ["plugins-ext", "IronRDP", "third_party/ferrogate-sdk-rust"]
+exclude = ["plugins-ext", "IronRDP", "third_party/ferrogate-sdk-rust", "third_party/hiqlite"]
 resolver = "2"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -88,7 +88,10 @@ chrono = "0.4"
 zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
 diesel = { version = "2.3.8", features = ["mysql", "r2d2"], optional = true }
 r2d2 = { version = "0.8.10", optional = true }
-hiqlite = { version = "0.13", optional = true, features = ["sqlite", "dlock"] }
+# Pinned to the 0.14 pre-release carried by our fork submodule
+# (`third_party/hiqlite`, branch `main-local`) which adds the raft-client
+# socket-leak fix. See the `[patch.crates-io]` entry below.
+hiqlite = { version = "=0.14.0-202606024", optional = true, features = ["sqlite", "dlock"] }
 cryptr = { version = "0.10", optional = true, default-features = false }
 # Cloud Storage Targets — Phase 2b: S3 via rusty-s3 (URL signing +
 # XML parsing only, ~15 transitive deps). HTTP is handled by the
@@ -561,3 +564,21 @@ picky-asn1 = { git = "https://github.com/ffquintella/picky-rs", branch = "fix-de
 picky-asn1-der = { git = "https://github.com/ffquintella/picky-rs", branch = "fix-deps" }
 picky-asn1-x509 = { git = "https://github.com/ffquintella/picky-rs", branch = "fix-deps" }
 picky-krb = { git = "https://github.com/ffquintella/picky-rs", branch = "fix-deps" }
+
+# hiqlite raft-client socket-leak fix. Stock hiqlite leaks one ESTABLISHED
+# TCP socket per openraft client rebuild: aborting the parent `ws_handler`
+# task only *detaches* (does not abort) its spawned reader/writer tasks,
+# which keep the upgraded WebSocket's socket halves alive. On the HML cluster
+# the follower accumulated ~28k leaked sockets to the leader's raft port
+# (8210), exhausted the ephemeral range, and Raft lost quorum ("Cannot assign
+# requested address (os error 99)"). Our fork carries a one-struct
+# `AbortOnDrop` guard so the child tasks are torn down on every drop path.
+#
+# Consumed as a git patch (same pattern as the sspi/picky forks above) rather
+# than a path patch: hiqlite's repo is itself a Cargo workspace and the crate
+# uses `workspace = true` inheritance, which cargo cannot resolve when a path
+# patch points inside a nested/excluded workspace. The fork is ALSO checked
+# out as a git submodule at `third_party/hiqlite` for local editing — edit
+# there on `main-local`, push, then `cargo update -p hiqlite`. Drop this patch
+# once the fix is upstreamed (github.com/sebadob/hiqlite).
+hiqlite = { git = "https://github.com/ffquintella/hiqlite", branch = "main-local" }

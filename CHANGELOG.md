@@ -45,6 +45,33 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.21.3] - 2026-06-26
+
+### Fixed
+
+- **Hiqlite Raft client no longer leaks a TCP socket per client rebuild
+  (cluster quorum loss).** Bumped `hiqlite` to `0.14.0-202606024` and pointed
+  it at our fork (`github.com/ffquintella/hiqlite`, branch `main-local`, also a
+  git submodule at `third_party/hiqlite`) via `[patch.crates-io]`, matching the
+  sspi/picky fork pattern. Stock hiqlite's `ws_handler`
+  (`hiqlite/src/network/raft_client.rs`) spawns its `stream_reader` /
+  `stream_writer` tasks as bare `tokio::JoinHandle`s; when openraft rebuilds the
+  client for a target, `NetworkConnectionStreaming::drop` aborts the parent
+  task, which only *detaches* (does not abort) the children, so they keep the
+  upgraded WebSocket's socket halves alive and the TCP connection lingers
+  `ESTABLISHED` on both peers. On the HML cluster the follower accumulated ~28k
+  leaked sockets to the leader's Raft port (`:8210`), exhausted the ephemeral
+  port range, and every consistent read failed with `Cluster lost quorum`
+  (`Cannot assign requested address (os error 99)`). The fork binds the child
+  tasks to an `AbortOnDrop` guard so they are torn down on every drop path.
+- **PKI Certificates tab no longer wastes a third of the width when no cert is
+  selected** (`gui/src/routes/PkiPage.tsx`) -- the issued-certificates list was
+  always laid out in a `grid-cols-3` split with the table pinned to
+  `col-span-2`, but the detail column only renders after a row is clicked. With
+  no selection the table was squeezed into two-thirds width, leaving a large
+  empty gap on the right. The split grid is now applied only when a certificate
+  detail pane is actually showing; otherwise the list fills the full card width.
+
 ## [0.21.2] - 2026-06-26
 
 ### Changed

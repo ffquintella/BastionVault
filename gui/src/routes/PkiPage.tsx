@@ -2466,6 +2466,12 @@ function CertsTab({ mount }: { mount: string }) {
   const pageStart = (currentPage - 1) * CERTS_PAGE_SIZE;
   const pageRows = filtered.slice(pageStart, pageStart + CERTS_PAGE_SIZE);
 
+  // Only split into a list + detail grid once a cert is actually
+  // selected. Otherwise the detail column renders nothing and the
+  // list is needlessly squeezed into 2/3 width, leaving a large empty
+  // gap on the right. With no selection, the list fills the full width.
+  const showDetail = !!(cert && selected);
+
   useEffect(() => {
     setPage(1);
   }, [filter, mount]);
@@ -2497,14 +2503,16 @@ function CertsTab({ mount }: { mount: string }) {
           description="Issued certificates appear here. Roles with `no_store = true` skip persistence."
         />
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className={showDetail ? "grid grid-cols-1 lg:grid-cols-3 gap-4" : ""}>
           {/* `min-h-[20rem]` keeps the list usable in a small window;
               `max-h-[calc(100vh-22rem)]` lets it expand to fill the
               available vertical space when the window is tall. The
               ~22rem reservation accounts for the layout sidebar
               padding, page header, Mount card, Tabs card, and this
               Card's own title row + paddings. */}
-          <div className="lg:col-span-2 min-h-[20rem] max-h-[calc(100vh-22rem)] overflow-auto min-w-0">
+          <div
+            className={`${showDetail ? "lg:col-span-2" : ""} min-h-[20rem] max-h-[calc(100vh-22rem)] overflow-auto min-w-0`}
+          >
             <Table<CertSummary>
               tableClassName="table-fixed"
               columns={[
