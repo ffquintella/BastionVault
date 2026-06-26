@@ -93,6 +93,21 @@ impl Server {
             return Err(RvError::ErrConfigListenerNotFound);
         }
 
+        // Stage process-plugin executables in the operator-configured
+        // directory (if any). The default OS temp dir is often `noexec`
+        // in hardened containers, which breaks process-runtime plugins.
+        // The `BV_PLUGIN_RUNTIME_DIR` env var still overrides this at
+        // runtime; here we honour the config-file value.
+        if !config.plugin_runtime_dir.is_empty() {
+            crate::plugins::set_plugin_runtime_dir(config.plugin_runtime_dir.as_str());
+            if let Err(e) = fs::create_dir_all(config.plugin_runtime_dir.as_str()) {
+                log::warn!(
+                    "could not create plugin_runtime_dir {}: {e}",
+                    config.plugin_runtime_dir
+                );
+            }
+        }
+
         env::set_var("RUST_LOG", config.log_level.as_str());
         // Custom file-fanout logger: `operations.log` gets every
         // record at or above `log_level`; `security.log` gets the

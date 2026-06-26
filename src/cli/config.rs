@@ -96,6 +96,17 @@ pub struct Config {
     /// built-in default of 32 MiB.
     #[serde(default)]
     pub batch_max_body_size: usize,
+    /// Directory the process-plugin runtime stages plugin executables in
+    /// before spawning them. The OS temp dir (`/tmp`) is frequently
+    /// mounted `noexec` in hardened containers, which makes `execve` of a
+    /// process-runtime plugin (e.g. `xca-import`) fail with `EACCES` —
+    /// surfacing to the GUI as a generic invoke error. Point this at a
+    /// writable, exec-allowed directory (e.g. `/var/lib/bvault/plugin-run`);
+    /// the server creates it on first use. Empty uses the OS temp dir.
+    /// Overridable at runtime via the `BV_PLUGIN_RUNTIME_DIR` environment
+    /// variable, which takes precedence over this value.
+    #[serde(default)]
+    pub plugin_runtime_dir: String,
 }
 
 #[derive(Debug, Copy, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -315,6 +326,10 @@ impl Config {
 
         if other.barrier_type != BarrierType::Chacha20Poly1305 {
             self.barrier_type = other.barrier_type;
+        }
+
+        if !other.plugin_runtime_dir.is_empty() {
+            self.plugin_runtime_dir = other.plugin_runtime_dir;
         }
 
         self.cache.merge(other.cache);

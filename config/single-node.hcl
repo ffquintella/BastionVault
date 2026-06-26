@@ -26,3 +26,10 @@ listener "tcp" {
 api_addr   = "https://127.0.0.1:8200"
 log_level  = "info"
 pid_file   = "/var/run/bvault.pid"
+
+# Directory the process-plugin runtime stages plugin executables in before
+# spawning them. The OS temp dir (/tmp) is often mounted `noexec` in hardened
+# containers, which makes execve of a process-runtime plugin (e.g. xca-import)
+# fail with EACCES. Point this at a writable, exec-allowed path; the server
+# creates it on first use. Overridable at runtime via BV_PLUGIN_RUNTIME_DIR.
+# plugin_runtime_dir = "/var/lib/bvault/plugin-run"

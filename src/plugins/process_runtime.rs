@@ -59,7 +59,9 @@
 //! Plugin → host (stderr): forwarded to host log with `[plugin=<name>]`
 //! prefix; not parsed.
 
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use base64::Engine;
@@ -532,9 +534,58 @@ fn rebase_key(manifest: &PluginManifest, requested: &str) -> Option<String> {
     ))
 }
 
+/// Operator-configured directory the process runtime stages plugin
+/// executables in before spawning them. Set once at server startup
+/// from `Config::plugin_runtime_dir`; the `BV_PLUGIN_RUNTIME_DIR`
+/// environment variable overrides it at runtime so deployments
+/// (e.g. the Puppet module) can point it at a writable, exec-allowed
+/// path without editing the config file.
+static PLUGIN_RUNTIME_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Record the configured plugin runtime directory. Idempotent — the
+/// first non-empty value wins; later calls are ignored. A no-op when
+/// `dir` is empty so an unset config key falls through to the default.
+pub fn set_plugin_runtime_dir(dir: impl Into<PathBuf>) {
+    let dir = dir.into();
+    if dir.as_os_str().is_empty() {
+        return;
+    }
+    let _ = PLUGIN_RUNTIME_DIR.set(dir);
+}
+
+/// Resolve the directory plugin executables are staged in, in
+/// precedence order:
+///   1. `BV_PLUGIN_RUNTIME_DIR` env var (non-empty)
+///   2. the value set from config at startup
+///   3. the OS temp dir (`std::env::temp_dir()`)
+///
+/// The OS temp dir is frequently mounted `noexec` in hardened
+/// containers, which makes `execve` of a process-runtime plugin fail
+/// with `EACCES`. Operators point this at an exec-allowed path to fix
+/// that.
+pub fn plugin_runtime_dir() -> PathBuf {
+    if let Ok(v) = std::env::var("BV_PLUGIN_RUNTIME_DIR") {
+        if !v.trim().is_empty() {
+            return PathBuf::from(v);
+        }
+    }
+    if let Some(dir) = PLUGIN_RUNTIME_DIR.get() {
+        return dir.clone();
+    }
+    std::env::temp_dir()
+}
+
 pub(super) fn write_temp_executable(name: &str, binary: &[u8]) -> Result<std::path::PathBuf, ProcessRuntimeError> {
     use std::io::Write;
-    let mut path = std::env::temp_dir();
+    let mut path = plugin_runtime_dir();
+    // Ensure the directory exists. Cheap when it already does; lets
+    // operators name a path and have the server create it on first use.
+    if let Err(e) = std::fs::create_dir_all(&path) {
+        return Err(ProcessRuntimeError::TempFile(format!(
+            "create plugin runtime dir {}: {e}",
+            path.display()
+        )));
+    }
     let stem = name
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
@@ -721,6 +772,22 @@ pub fn run_test_subprocess_plugin() -> ! {
 mod tests {
     use super::*;
     use crate::plugins::manifest::{Capabilities, RuntimeKind};
+
+    #[test]
+    fn plugin_runtime_dir_env_var_overrides() {
+        // The `BV_PLUGIN_RUNTIME_DIR` env var is the Puppet-facing knob;
+        // it must win over both the OS temp-dir default and any value
+        // baked in from config. The OnceLock global can't be reset
+        // between tests, so we only assert the env-var precedence here.
+        let want = std::env::temp_dir().join("bv-plugin-run-test-override");
+        std::env::set_var("BV_PLUGIN_RUNTIME_DIR", &want);
+        assert_eq!(plugin_runtime_dir(), want);
+        // An empty value falls through to the default rather than
+        // resolving to an empty path.
+        std::env::set_var("BV_PLUGIN_RUNTIME_DIR", "");
+        assert_ne!(plugin_runtime_dir(), PathBuf::new());
+        std::env::remove_var("BV_PLUGIN_RUNTIME_DIR");
+    }
 
     fn manifest_for(behaviour: &str, name: &str) -> PluginManifest {
         // The "binary" is a copy of the current test exe — see

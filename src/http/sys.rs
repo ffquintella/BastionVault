@@ -2306,6 +2306,14 @@ async fn sys_plugins_invoke_handler(
     // Dispatch by manifest.runtime: WASM stays in the wasmtime sandbox,
     // Process spawns a subprocess and mediates host calls over JSON-RPC
     // on stdio. The output shape is identical regardless of runtime.
+    // Runtime-level failures (subprocess spawn/exec, temp-file write,
+    // timeouts, WASM traps) are distinct from the plugin reporting a
+    // structured error via its response envelope. Surface the real
+    // message to the caller instead of collapsing it to a generic
+    // "Request is invalid." — the embedded GUI path already returns the
+    // underlying string, and operators need it to diagnose e.g. a
+    // `noexec` temp dir blocking a process-runtime plugin. Still logged
+    // server-side at warn for the audit/ops trail.
     let output = match record.manifest.runtime {
         crate::plugins::RuntimeKind::Wasm => {
             let fuel = payload
@@ -2317,23 +2325,35 @@ async fn sys_plugins_invoke_handler(
                 crate::plugins::DEFAULT_MEMORY_BYTES,
             )
             .map_err(|_| RvError::ErrUnknown)?;
-            runtime
+            match runtime
                 .invoke_with_config(&record.manifest, &record.binary, &input, Some(core_arc), config)
                 .await
-                .map_err(|e| {
+            {
+                Ok(o) => o,
+                Err(e) => {
                     log::warn!("plugin {} wasm invoke failed: {e}", record.manifest.name);
-                    RvError::ErrRequestInvalid
-                })?
+                    return Ok(response_error(
+                        StatusCode::BAD_GATEWAY,
+                        &format!("plugin invoke failed: {e}"),
+                    ));
+                }
+            }
         }
         crate::plugins::RuntimeKind::Process => {
             let runtime = crate::plugins::ProcessRuntime::new();
-            runtime
+            match runtime
                 .invoke_with_config(&record.manifest, &record.binary, &input, Some(core_arc), config)
                 .await
-                .map_err(|e| {
+            {
+                Ok(o) => o,
+                Err(e) => {
                     log::warn!("plugin {} process invoke failed: {e}", record.manifest.name);
-                    RvError::ErrRequestInvalid
-                })?
+                    return Ok(response_error(
+                        StatusCode::BAD_GATEWAY,
+                        &format!("plugin invoke failed: {e}"),
+                    ));
+                }
+            }
         }
     };
 

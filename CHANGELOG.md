@@ -45,6 +45,33 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-06-26
+
+### Added
+
+- **Configurable plugin runtime directory** (`plugin_runtime_dir` config key /
+  `BV_PLUGIN_RUNTIME_DIR` env var) -- the process-plugin runtime stages plugin
+  executables here before spawning them (`src/plugins/process_runtime.rs`,
+  `src/cli/config.rs`, applied in `src/cli/command/server.rs`). The OS temp dir
+  (`/tmp`) is frequently mounted `noexec` in hardened containers, which made
+  `execve` of a process-runtime plugin (e.g. `xca-import`) fail with `EACCES`.
+  Operators -- and the Puppet module -- can now point this at a writable,
+  exec-allowed path (e.g. `/var/lib/bvault/plugin-run`); the server creates it
+  on first use. The env var takes precedence over the config value, then the OS
+  temp dir is the fallback. Documented in `config/ha-cluster.hcl` and
+  `config/single-node.hcl`.
+
+### Fixed
+
+- **Plugin invoke errors no longer masked as "Request is invalid."**
+  (`src/http/sys.rs`) -- the remote `sys/plugins/{name}/invoke` handler
+  collapsed every runtime-level failure (subprocess spawn/exec, temp-file
+  write, timeout, WASM trap) into a generic `ErrRequestInvalid`, hiding the real
+  cause from the GUI (e.g. a `noexec` temp dir blocking a process-runtime
+  plugin). It now surfaces the underlying error message as HTTP 502, matching
+  the embedded-mode path which already returned the real string. The failure is
+  still logged server-side at `warn`.
+
 ## [0.21.0] - 2026-06-26
 
 ### Fixed
