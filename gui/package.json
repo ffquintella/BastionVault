@@ -1,7 +1,7 @@
 {
   "name": "bastion-vault-gui",
   "private": true,
-  "version": "0.21.3",
+  "version": "0.21.4",
   "type": "module",
   "scripts": {
     "dev": "node node_modules/vite/bin/vite.js",
@@ -15,9 +15,9 @@
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2",
     "@tauri-apps/plugin-shell": "^2",
-    "@xterm/addon-fit": "^0.10.0",
-    "@xterm/xterm": "^5.5.0",
-    "lucide-react": "^0.468",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "lucide-react": "^1.21.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.1.0",
@@ -31,11 +31,11 @@
     "@testing-library/user-event": "^14.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^4.3.0",
-    "jsdom": "^26.0.0",
+    "@vitejs/plugin-react": "^6.0.0",
+    "jsdom": "^29.0.0",
     "tailwindcss": "^4.0.0",
-    "typescript": "^5.6.0",
-    "vite": "^6.0.0",
-    "vitest": "^3.0.0"
+    "typescript": "^6.0.0",
+    "vite": "^8.0.0",
+    "vitest": "^4.0.0"
   }
 }

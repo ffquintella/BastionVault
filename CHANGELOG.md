@@ -45,6 +45,33 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.21.4] - 2026-06-26
+
+### Security
+
+- **Fix `quinn-proto` remote memory-exhaustion advisory (RUSTSEC-2026-0185,
+  CVSS 7.5).** Bumped the transitive `quinn-proto` dependency `0.11.14 ->
+  0.11.15` via `cargo update` (in-range, no manifest change). The flaw allowed
+  unbounded out-of-order QUIC stream reassembly; it reached the tree through the
+  cloud-S3 / `hiqlite` / Tauri HTTP stacks (`cryptr` -> `s3-simple` -> `quinn`,
+  `reqwest` -> `quinn`). `cargo audit` now reports 2 vulnerabilities, both the
+  `rsa` Marvin-attack advisory (RUSTSEC-2023-0071) for which no upstream fix
+  exists.
+
+### Changed
+
+- **Refresh in-range Rust dependencies.** `cargo update` bumped `aes`
+  `0.9.0 -> 0.9.1` and `crypto-bigint` `0.7.3 -> 0.7.5` (both clear yanked-crate
+  advisory warnings), plus `rustls 0.23.40 -> 0.23.41`, `tokio 1.52.1 -> 1.52.3`,
+  `reqwest 0.13.3 -> 0.13.4`, `h2 0.4.13 -> 0.4.15`, and `hyper 1.9.0 -> 1.10.1`.
+  Lockfile-only; `cargo check --lib` clean.
+- **Upgrade the GUI toolchain to current majors** (`gui/package.json`):
+  Vite `6 -> 8`, Vitest `3 -> 4`, `@vitejs/plugin-react` `4 -> 6`, TypeScript
+  `5 -> 6`, `jsdom` `26 -> 29`, `lucide-react` `0.468 -> 1.21`, `@xterm/xterm`
+  `5 -> 6`, and `@xterm/addon-fit` `0.10 -> 0.11` (matched to xterm 6). All gates
+  green: `tsc --noEmit`, `vite build`, and `vitest run` (187 tests). `npm audit`
+  reports 0 vulnerabilities.
+
 ## [0.21.3] - 2026-06-26
 
 ### Fixed
