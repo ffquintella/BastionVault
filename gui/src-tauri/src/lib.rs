@@ -308,6 +308,9 @@ pub fn run() {
             commands::users::create_user,
             commands::users::update_user,
             commands::users::delete_user,
+            commands::users::get_default_account,
+            commands::users::get_default_account_self,
+            commands::users::set_default_account,
             // Policies
             commands::policies::list_policies,
             commands::policies::read_policy,

@@ -436,6 +436,60 @@ async fn sys_ns_assignment_path_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// LIST `/v2/sys/identity/default-account` — list principals that have default
+/// resource accounts. HTTP shim over the sys-backend logical route
+/// `identity/default-account`. v2-only (new forward-going route).
+async fn sys_default_account_list_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/identity/default-account".to_string();
+    r.operation = Operation::List;
+    copy_namespace_header(&req, &mut r);
+    handle_request(core, &mut r).await
+}
+
+/// GET `/v2/sys/identity/default-account/self` — read the calling principal's
+/// own default resource accounts. HTTP shim over the sys-backend logical route
+/// `identity/default-account/self`. Readable by any authenticated caller.
+async fn sys_default_account_self_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/identity/default-account/self".to_string();
+    r.operation = Operation::Read;
+    copy_namespace_header(&req, &mut r);
+    handle_request(core, &mut r).await
+}
+
+/// GET / POST|PUT / DELETE `/v2/sys/identity/default-account/{mount}/{name}` —
+/// read, set, or clear a principal's default resource accounts. HTTP shim over
+/// the sys-backend logical route `identity/default-account/{mount}/{name}`.
+async fn sys_default_account_path_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    path: web::Path<String>,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = format!("sys/identity/default-account/{}", path.into_inner());
+    copy_namespace_header(&req, &mut r);
+    match *req.method() {
+        actix_web::http::Method::POST | actix_web::http::Method::PUT => {
+            r.operation = Operation::Write;
+            if !body.is_empty() {
+                r.body = Some(serde_json::from_slice(&body)?);
+                body.clear();
+            }
+        }
+        actix_web::http::Method::DELETE => r.operation = Operation::Delete,
+        _ => r.operation = Operation::Read,
+    }
+    handle_request(core, &mut r).await
+}
+
 /// POST `/sys/kv-owner/transfer` — admin-only ownership reassignment
 /// of a KV path. Thin HTTP shim over the sys-backend logical route
 /// `kv-owner/transfer`; the same body shape applies
@@ -3145,6 +3199,25 @@ pub fn init_sys_service(cfg: &mut web::ServiceConfig) {
                 web::resource("/policy-tests/{name:.*}")
                     .route(web::get().to(sys_policy_tests_read_request_handler))
                     .route(web::post().to(sys_policy_tests_write_request_handler)),
+            )
+            // Per-principal default resource accounts (Resource Connect).
+            // v2-only. Register the `self` and bare-list resources *before* the
+            // `{path:.*}` wildcard so they win the match.
+            .service(
+                web::resource("/identity/default-account")
+                    .route(web::method(list_method()).to(sys_default_account_list_request_handler))
+                    .route(web::get().to(sys_default_account_list_request_handler)),
+            )
+            .service(
+                web::resource("/identity/default-account/self")
+                    .route(web::get().to(sys_default_account_self_request_handler)),
+            )
+            .service(
+                web::resource("/identity/default-account/{path:.*}")
+                    .route(web::get().to(sys_default_account_path_request_handler))
+                    .route(web::post().to(sys_default_account_path_request_handler))
+                    .route(web::put().to(sys_default_account_path_request_handler))
+                    .route(web::delete().to(sys_default_account_path_request_handler)),
             ),
     );
 }
@@ -3238,6 +3311,159 @@ mod namespace_route_tests {
             err.contains("no such namespace"),
             "404 must come from the logical handler, not the actix scope: {resp:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod default_account_route_tests {
+    //! HTTP coverage for the per-principal default-resource-account routes.
+    //! These are v2-only sys shims; without them the `/v2/sys` scope would 404
+    //! the request before the logical catch-all sees it. Drives the real HTTP
+    //! pipeline so the admin CRUD path and the caller-resolved `self` read can't
+    //! silently regress.
+
+    use serde_json::json;
+
+    use crate::test_utils::TestHttpServer;
+
+    /// Point the test client at the `/v2` scope — these routes are v2-only.
+    fn v2(server: &mut TestHttpServer) {
+        server.url_prefix = server.url_prefix.replace("/v1", "/v2");
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_default_account_crud_roundtrip_over_http() {
+        let mut server = TestHttpServer::new("test_default_account_crud_http", true).await;
+        v2(&mut server);
+        server.token = server.root_token.clone();
+        let token = server.root_token.clone();
+
+        // Write linux + windows (+ a Windows RDP password) for userpass/alice.
+        let (status, resp) = server
+            .request(
+                "POST",
+                "sys/identity/default-account/userpass/alice",
+                json!({ "linux": "alice-svc", "windows": "CORP\\alice", "windows_password": "rdp-pw" })
+                    .as_object()
+                    .cloned(),
+                Some(&token),
+                None,
+            )
+            .unwrap();
+        assert!(status == 200 || status == 204, "write failed: {status} {resp:?}");
+
+        // Read it back — proves the v2 shim reaches the logical read handler.
+        let (status, resp) = server
+            .request(
+                "GET",
+                "sys/identity/default-account/userpass/alice",
+                None,
+                Some(&token),
+                None,
+            )
+            .unwrap();
+        assert_eq!(status, 200, "read must reach the logical handler: {resp:?}");
+        let data = resp.get("data").unwrap_or(&resp);
+        assert_eq!(data.get("linux").and_then(|v| v.as_str()), Some("alice-svc"));
+        assert_eq!(data.get("macos").and_then(|v| v.as_str()), Some(""));
+        // The admin read must mask the password: presence flag yes, plaintext no.
+        assert_eq!(
+            data.get("has_windows_password").and_then(|v| v.as_bool()),
+            Some(true),
+            "admin read must report the password is set: {resp:?}"
+        );
+        assert!(
+            data.get("windows_password").is_none(),
+            "admin read must NOT echo the plaintext password: {resp:?}"
+        );
+
+        // Re-save with only the login names (no windows_password key) — the
+        // stored password must be preserved (write-preserve semantics).
+        let (status, _resp) = server
+            .request(
+                "POST",
+                "sys/identity/default-account/userpass/alice",
+                json!({ "linux": "alice-svc", "windows": "CORP\\alice" })
+                    .as_object()
+                    .cloned(),
+                Some(&token),
+                None,
+            )
+            .unwrap();
+        assert!(status == 200 || status == 204, "re-write failed: {status}");
+        let (_status, resp) = server
+            .request("GET", "sys/identity/default-account/userpass/alice", None, Some(&token), None)
+            .unwrap();
+        let data = resp.get("data").unwrap_or(&resp);
+        assert_eq!(
+            data.get("has_windows_password").and_then(|v| v.as_bool()),
+            Some(true),
+            "omitting windows_password on re-save must preserve it: {resp:?}"
+        );
+
+        // Explicitly clear the password (empty string) — names stay.
+        let (status, _resp) = server
+            .request(
+                "POST",
+                "sys/identity/default-account/userpass/alice",
+                json!({ "linux": "alice-svc", "windows": "CORP\\alice", "windows_password": "" })
+                    .as_object()
+                    .cloned(),
+                Some(&token),
+                None,
+            )
+            .unwrap();
+        assert!(status == 200 || status == 204, "clear-password write failed: {status}");
+        let (_status, resp) = server
+            .request("GET", "sys/identity/default-account/userpass/alice", None, Some(&token), None)
+            .unwrap();
+        let data = resp.get("data").unwrap_or(&resp);
+        assert_eq!(
+            data.get("has_windows_password").and_then(|v| v.as_bool()),
+            Some(false),
+            "empty windows_password must clear it: {resp:?}"
+        );
+
+        // The `self` read is reachable for any authenticated caller. The root
+        // token has no userpass alias, so it resolves to empty fields — but it
+        // must reach the handler (200), not 404 at the scope.
+        let (status, resp) = server
+            .request(
+                "GET",
+                "sys/identity/default-account/self",
+                None,
+                Some(&token),
+                None,
+            )
+            .unwrap();
+        assert_eq!(status, 200, "self read must reach the handler: {resp:?}");
+
+        // Delete clears the record.
+        let (status, _resp) = server
+            .request(
+                "DELETE",
+                "sys/identity/default-account/userpass/alice",
+                None,
+                Some(&token),
+                None,
+            )
+            .unwrap();
+        assert!(status == 200 || status == 204, "delete failed: {status}");
+
+        // After delete the read returns the explicit empty (unconfigured) state,
+        // not a 404 — the GUI renders an editable blank form.
+        let (status, resp) = server
+            .request(
+                "GET",
+                "sys/identity/default-account/userpass/alice",
+                None,
+                Some(&token),
+                None,
+            )
+            .unwrap();
+        assert_eq!(status, 200, "read-after-delete should be empty, not 404: {resp:?}");
+        let data = resp.get("data").unwrap_or(&resp);
+        assert_eq!(data.get("linux").and_then(|v| v.as_str()), Some(""));
     }
 }
 

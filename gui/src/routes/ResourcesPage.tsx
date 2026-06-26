@@ -1145,10 +1145,22 @@ function ConnectionProfilesPanel({
   const [operatorPrompt, setOperatorPrompt] = useState<ConnectionProfile | null>(null);
 
   async function handleConnect(profile: ConnectionProfile) {
+    // RDP default-account: the host uses the operator's *stored* Windows
+    // password when one is set, so only prompt when there isn't one.
     if (
-      profile.credential_source.kind === "ldap" &&
-      profile.credential_source.bind_mode === "operator"
+      profile.credential_source.kind === "default-account" &&
+      profile.protocol === "rdp"
     ) {
+      const self = await api.getDefaultAccountSelf().catch(() => null);
+      if (self?.has_windows_password) {
+        await runConnect(profile, undefined);
+      } else {
+        setOperatorPrompt(profile);
+      }
+      return;
+    }
+    // LDAP operator-bind needs an interactive credential before opening.
+    if (needsOperatorPrompt(profile)) {
       setOperatorPrompt(profile);
       return;
     }
@@ -1444,12 +1456,19 @@ function OperatorBindPrompt({
   onCancel: () => void;
   onSubmit: (oc: { username: string; password: string }) => Promise<void>;
 }) {
+  // For the RDP default-account source the login user is the connecting
+  // operator's Windows default account, resolved server-side; only the
+  // password is collected here (a username field would be ignored).
+  const isDefaultAccount = profile.credential_source.kind === "default-account";
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
+  const canSubmit =
+    !submitting && password.length > 0 && (isDefaultAccount || username.length > 0);
+
   async function handleSubmit() {
-    if (!username || !password || submitting) return;
+    if (!canSubmit) return;
     setSubmitting(true);
     try {
       await onSubmit({ username, password });
@@ -1462,39 +1481,54 @@ function OperatorBindPrompt({
     <Modal
       open
       onClose={onCancel}
-      title={`LDAP credentials · ${profile.name}`}
+      title={
+        isDefaultAccount
+          ? `Account password · ${profile.name}`
+          : `LDAP credentials · ${profile.name}`
+      }
       size="sm"
       actions={
         <>
           <Button variant="ghost" onClick={onCancel} disabled={submitting}>
             Cancel
           </Button>
-          <Button onClick={handleSubmit} disabled={!username || !password || submitting}>
+          <Button onClick={handleSubmit} disabled={!canSubmit}>
             {submitting ? "Connecting…" : "Connect"}
           </Button>
         </>
       }
     >
       <div className="space-y-3">
-        <p className="text-xs text-[var(--color-text-muted)]">
-          Enter the LDAP / Active Directory credentials to bind with
-          for this session. Accepts plain <code>user</code>,{" "}
-          <code>DOMAIN\\user</code>, or <code>user@realm</code> — the
-          host parses the domain part for the RDP CredSSP slot.
-          Credentials are not persisted on this profile.
-        </p>
-        <Input
-          label="Username"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          placeholder="DOMAIN\\alice"
-          autoFocus
-        />
+        {isDefaultAccount ? (
+          <p className="text-xs text-[var(--color-text-muted)]">
+            This session logs in as your <strong>Windows default account</strong>{" "}
+            (set under Users → Edit User → Default Resource Account). Enter its
+            password — it is not persisted on this profile.
+          </p>
+        ) : (
+          <p className="text-xs text-[var(--color-text-muted)]">
+            Enter the LDAP / Active Directory credentials to bind with
+            for this session. Accepts plain <code>user</code>,{" "}
+            <code>DOMAIN\\user</code>, or <code>user@realm</code> — the
+            host parses the domain part for the RDP CredSSP slot.
+            Credentials are not persisted on this profile.
+          </p>
+        )}
+        {!isDefaultAccount && (
+          <Input
+            label="Username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            placeholder="DOMAIN\\alice"
+            autoFocus
+          />
+        )}
         <Input
           label="Password"
           type="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
+          autoFocus={isDefaultAccount}
         />
       </div>
     </Modal>
@@ -1556,6 +1590,10 @@ function describeCredentialSource(c: CredentialSource): string {
       return `ssh-engine • ${c.ssh_mount}role=${c.ssh_role} (${c.mode})`;
     case "pki":
       return `pki • ${c.pki_mount} role=${c.pki_role}`;
+    case "default-account":
+      return c.ssh_mount
+        ? `default-account • ${c.ssh_mount}role=${c.ssh_role ?? ""} (${c.mode ?? "ca"})`
+        : "default-account • connecting user";
   }
 }
 
@@ -1701,6 +1739,16 @@ function ConnectionProfileEditor({
           pki_role: "",
         });
         break;
+      case "default-account":
+        // SSH brokers via the engine (mount/role/mode); RDP ignores the
+        // ssh_* fields (password is prompted at connect).
+        updateCredentialSource({
+          kind: "default-account",
+          ssh_mount: "",
+          ssh_role: "",
+          mode: "ca",
+        });
+        break;
     }
   }
 
@@ -1824,6 +1872,7 @@ function ConnectionProfileEditor({
               { value: "ldap", label: "LDAP / Active Directory" },
               { value: "ssh-engine", label: "SSH secret engine (CA-signed cert / OTP)" },
               { value: "pki", label: "PKI client cert (SSH publickey / RDP CredSSP smartcard)" },
+              { value: "default-account", label: "Connecting user's default account" },
             ] as { value: CredentialSource["kind"]; label: string }[]
           ).filter((o) => credGate.allowedKinds.includes(o.value))}
         />
@@ -1864,6 +1913,12 @@ function ConnectionProfileEditor({
           />
         ) : profile.credential_source.kind === "pki" ? (
           <PkiCredentialEditor
+            cs={profile.credential_source}
+            onChange={updateCredentialSource}
+            protocol={profile.protocol}
+          />
+        ) : profile.credential_source.kind === "default-account" ? (
+          <DefaultAccountCredentialEditor
             cs={profile.credential_source}
             onChange={updateCredentialSource}
             protocol={profile.protocol}
@@ -2328,6 +2383,68 @@ function SshEngineCredentialEditor({
           credential is stored on this resource.
         </p>
       )}
+    </div>
+  );
+}
+
+/**
+ * Editor for the `default-account` credential source. The login name is the
+ * *connecting operator's* per-OS default account (set under Users → Edit User
+ * → Default Resource Account), so there is no profile username field.
+ *
+ * SSH reuses the SSH-engine editor (mount/role/mode): the credential is
+ * brokered per-connect, only the cert principal differs. RDP shows an
+ * explanatory note — the account supplies the Windows login user and the
+ * password is prompted at connect (a username-only account can't carry one).
+ */
+function DefaultAccountCredentialEditor({
+  cs,
+  onChange,
+  protocol,
+}: {
+  cs: Extract<CredentialSource, { kind: "default-account" }>;
+  onChange: (s: CredentialSource) => void;
+  protocol: SessionProtocol;
+}) {
+  if (protocol === "rdp") {
+    return (
+      <p className="text-xs text-[var(--color-text-muted)]">
+        The login user is the connecting operator's <strong>Windows</strong>{" "}
+        default account (set per user under <em>Users → Edit User → Default
+        Resource Account</em>). The session window prompts for the password
+        before opening — a username-only account can't carry one. Connect fails
+        with a clear error if the connecting user has no Windows default account
+        configured.
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      <p className="text-xs text-[var(--color-text-muted)]">
+        Brokers a per-connect credential from the SSH engine, exactly like the
+        SSH secret engine source — but the certificate principal is the{" "}
+        <strong>connecting operator's default account</strong> for the target's
+        OS (Linux/macOS), set per user under <em>Users → Edit User → Default
+        Resource Account</em>. No profile username is used; Connect fails closed
+        if the connecting user has no default account for the resource's OS.
+      </p>
+      <SshEngineCredentialEditor
+        cs={{
+          kind: "ssh-engine",
+          ssh_mount: cs.ssh_mount ?? "",
+          ssh_role: cs.ssh_role ?? "",
+          mode: cs.mode ?? "ca",
+        }}
+        onChange={(s) => {
+          if (s.kind !== "ssh-engine") return;
+          onChange({
+            kind: "default-account",
+            ssh_mount: s.ssh_mount,
+            ssh_role: s.ssh_role,
+            mode: s.mode,
+          });
+        }}
+      />
     </div>
   );
 }

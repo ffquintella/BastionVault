@@ -8,7 +8,7 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 
 | State | Count |
 |---|---|
-| Done | 49 |
+| Done | 50 |
 | Partial | 1 |
 | Todo | 9 |
 | Removed | 1 |
@@ -78,6 +78,7 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | `[x]` Done | File Resources (binary blobs + sync targets) | [spec](features/file-resources.md) — local-FS + SMB + SFTP + SCP + periodic re-sync + sync-on-write. |
 | `[x]` Done | First-class `firewall` / `switch` types + refined `database` | [spec](features/resource-types-firewall-switch-db.md) — three phases shipped; closed-enum DB engines, vendor / HA-role / layer / firmware fields. |
 | `[x]` Done | Resource Connect — in-app SSH / RDP for server resources | [spec](features/resource-connect.md) — Phases 1–7 incl. ⌘K palette, recently-connected list, Connect-policy on `ResourceTypeDef`. SSH × {Secret, LDAP, PKI, **SSH engine (CA + OTP)**}, RDP × {Secret, LDAP, PKI}. |
+| `[x]` Done | Default Resource Account — per-user, per-OS login name as a credential source | [spec](features/default-resource-account.md) — operators store a per-OS login name (Linux/macOS/Windows) under Users → Edit User; a connection profile's new **`default-account`** credential source resolves the *connecting* operator's account server-side (`v2/sys/identity/default-account/self`). SSH brokers a cert for that principal; RDP supplies the login user + prompts for the password. Fails closed when unconfigured; opt-in per profile. |
 | `[~]` In Progress | SSH Login Brokering for Resources (cert-signing / OTP, no shared credential) | [spec](features/ssh-resource-login-brokering.md) — adds a per-resource `login_class` (`shared-credential` \| `brokered`) with a four-tier lockable policy, so a resource / type / asset group can be **pinned to brokered**: every SSH login is a per-connect minted artifact (CA / PQC signed cert or OTP) from the SSH engine, never a stored credential. Forwards the minted cert (ephemeral key + signed cert) to **Rustion** via new BVRG-v1 `ssh-cert` / `ssh-otp` envelope kinds so the bastion authenticates to the target on the operator's behalf — retiring the "non-password SSH fails closed under `rustion-required`" gap. **Phases 1–4 done** (four-tier policy + `ssh-broker/` mount + CLI, `409` attach guard, direct + Rustion-path brokered minting with in-process key zeroize, `ssh-cert`/`ssh-otp` envelope kinds, `session.open` audit fields, GUI brokered gate). Remaining: testcontainers/`tests/e2e/rustion-ssh/` round-trips, GUI policy editor + detail badge, operator runbook. Cross-repo: Rustion `ssh-cert` already lands (v0.11.0); `ssh-otp` materialiser tracked in lockstep (BastionVault fails closed until then). |
 
 ### Networking & TLS

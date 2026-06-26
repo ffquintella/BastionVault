@@ -30,11 +30,13 @@ use crate::{
     bv_error_response_status, bv_error_string,
 };
 
+pub mod default_account;
 pub mod entity_store;
 pub mod group_store;
 pub mod owner_store;
 pub mod share_store;
 pub mod user_audit_store;
+pub use default_account::{DefaultResourceAccount, DefaultResourceAccountStore};
 pub use entity_store::{Entity, EntityStore};
 pub use group_store::{GroupEntry, GroupHistoryEntry, GroupKind, GroupStore};
 pub use owner_store::{OwnerRecord, OwnerStore};

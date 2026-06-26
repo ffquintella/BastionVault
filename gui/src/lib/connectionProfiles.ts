@@ -175,6 +175,19 @@ export function validateProfile(p: ConnectionProfile): string | null {
         return "PKI role is required";
       }
       return null;
+    case "default-account":
+      // SSH brokers a cert/OTP from the engine, so it needs the same
+      // mount/role as `ssh-engine`. RDP carries no extra fields (the
+      // password is prompted at connect).
+      if (p.protocol === "ssh") {
+        if (!p.credential_source.ssh_mount?.trim()) {
+          return "SSH-engine mount is required for the default-account source";
+        }
+        if (!p.credential_source.ssh_role?.trim()) {
+          return "SSH role is required for the default-account source";
+        }
+      }
+      return null;
   }
 }
 
@@ -198,6 +211,11 @@ export function isLaunchableProfile(p: ConnectionProfile): boolean {
       // an ML-DSA-65 cert); the connect path rejects it with a clear
       // message, but the other modes launch.
       return p.credential_source.mode !== "pqc";
+    case "default-account":
+      // SSH brokers via the engine (same pqc caveat as `ssh-engine`); RDP
+      // prompts for the password at connect and launches.
+      if (p.protocol === "ssh") return p.credential_source.mode !== "pqc";
+      return true;
   }
 }
 
@@ -219,15 +237,18 @@ export function loginClassGate(loginClass: SshLoginClass | undefined): {
   forcedKind: CredentialSource["kind"] | null;
 } {
   if (loginClass === "brokered") {
+    // `default-account` is a brokered SSH-engine mint (it only swaps the
+    // principal for the connecting operator's account), so it is allowed
+    // alongside `ssh-engine` for brokered resources.
     return {
       brokered: true,
-      allowedKinds: ["ssh-engine"],
+      allowedKinds: ["ssh-engine", "default-account"],
       forcedKind: "ssh-engine",
     };
   }
   return {
     brokered: false,
-    allowedKinds: ["secret", "ldap", "ssh-engine", "pki"],
+    allowedKinds: ["secret", "ldap", "ssh-engine", "pki", "default-account"],
     forcedKind: null,
   };
 }
@@ -245,8 +266,11 @@ export function validateProfileForLoginClass(
 ): string | null {
   if (p.protocol !== "ssh") return null;
   if (loginClass !== "brokered") return null;
-  if (p.credential_source.kind !== "ssh-engine") {
-    return "This resource is brokered: SSH logins must use the SSH-engine credential source (no static credential).";
+  if (
+    p.credential_source.kind !== "ssh-engine" &&
+    p.credential_source.kind !== "default-account"
+  ) {
+    return "This resource is brokered: SSH logins must use the SSH-engine (or default-account) credential source (no static credential).";
   }
   return null;
 }
@@ -259,10 +283,18 @@ export function validateProfileForLoginClass(
  * blindly.
  */
 export function needsOperatorPrompt(p: ConnectionProfile): boolean {
-  return (
+  if (
     p.credential_source.kind === "ldap" &&
     p.credential_source.bind_mode === "operator"
-  );
+  ) {
+    return true;
+  }
+  // RDP default-account resolves the login name server-side but still needs a
+  // password, which a username-only account can't carry — prompt for it.
+  if (p.credential_source.kind === "default-account" && p.protocol === "rdp") {
+    return true;
+  }
+  return false;
 }
 
 /**

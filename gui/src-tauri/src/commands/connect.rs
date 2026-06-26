@@ -1072,6 +1072,44 @@ async fn resolve_rdp_credential(
                 on_close: None,
             })
         }
+        "default-account" => {
+            // The login user is the connecting operator's default Windows
+            // account, resolved server-side (the typed username, if any, is
+            // ignored — the account is authoritative). The password comes from
+            // the operator's stored Windows password when set; otherwise it is
+            // prompted at connect (same operator-credential channel LDAP
+            // operator-bind uses).
+            let accounts = fetch_self_default_accounts(state).await?;
+            let username = accounts.windows.trim().to_string();
+            if username.is_empty() {
+                return Err(CommandError::from(
+                    "default-account credential source: the connecting user has no default \
+                     Windows account configured. Set it under Users → Edit User → Default \
+                     Resource Account."
+                        .to_string(),
+                ));
+            }
+            let password = if !accounts.windows_password.is_empty() {
+                accounts.windows_password.clone()
+            } else if let Some(oc) =
+                operator_credential.filter(|o| !o.password.is_empty())
+            {
+                oc.password.clone()
+            } else {
+                return Err(CommandError::from(
+                    "default-account RDP needs a password: set a stored Windows password under \
+                     Users → Edit User → Default Resource Account, or supply one at connect."
+                        .to_string(),
+                ));
+            };
+            let (effective_user, domain) = split_domain_user(&username);
+            Ok(ResolvedRdpCredential {
+                credential: session::rdp::RdpCredential::Password(Zeroizing::new(password)),
+                effective_username: Some(effective_user),
+                domain,
+                on_close: None,
+            })
+        }
         other => Err(CommandError::from(format!(
             "credential source `{other}` lands in a later phase"
         ))),
@@ -2228,12 +2266,15 @@ async fn resolve_ssh_credential(
         if let Some(detail) = lc.lock_violation.as_ref() {
             return Err(CommandError::from(format!("login_class_locked: {detail}")));
         }
-        if kind != "ssh-engine" {
+        // `default-account` is itself a brokered SSH-engine mint (it only swaps
+        // the role's principal for the connecting operator's default account),
+        // so it satisfies the brokered requirement alongside `ssh-engine`.
+        if kind != "ssh-engine" && kind != "default-account" {
             return Err(CommandError::from(format!(
                 "brokered_requires_ssh_engine: resource `{resource_name}` is brokered \
                  (login_class via tier `{}`); its connection profile must use an \
-                 `ssh-engine` credential source, not `{}`. Every SSH login to a brokered \
-                 resource is minted per-connect from the SSH engine.",
+                 `ssh-engine` (or `default-account`) credential source, not `{}`. Every \
+                 SSH login to a brokered resource is minted per-connect from the SSH engine.",
                 lc.login_class_source,
                 if kind.is_empty() { "(unset)" } else { kind }
             )));
@@ -2245,11 +2286,124 @@ async fn resolve_ssh_credential(
         "ldap" => resolve_ldap_ssh(state, cs, operator_credential).await,
         "pki" => resolve_pki_ssh(state, resource_name, cs).await,
         "ssh-engine" => resolve_ssh_engine_ssh(state, profile, meta, cs).await,
+        "default-account" => resolve_default_account_ssh(state, profile, meta, cs).await,
         other => Err(CommandError::from(format!(
             "unknown credential source `{other}`"
         ))),
     }?;
     Ok((resolved, lc))
+}
+
+/// The connecting operator's default resource accounts, fetched from
+/// `sys/identity/default-account/self`. The endpoint resolves the principal
+/// from the request token server-side, so the GUI can never claim another
+/// operator's account. Empty fields mean "unconfigured".
+struct SelfDefaultAccounts {
+    linux: String,
+    macos: String,
+    windows: String,
+    /// Optional stored Windows RDP password (the caller's own — revealed only on
+    /// the caller-scoped `self` path). Empty ⇒ prompt for it at connect.
+    windows_password: String,
+}
+
+async fn fetch_self_default_accounts(
+    state: &State<'_, AppState>,
+) -> Result<SelfDefaultAccounts, CommandError> {
+    let resp = make_request(
+        state,
+        Operation::Read,
+        "sys/identity/default-account/self".to_string(),
+        None,
+    )
+    .await?;
+    let data: HashMap<String, Value> = resp
+        .and_then(|r| r.data)
+        .map(|m| m.into_iter().collect())
+        .unwrap_or_default();
+    let field = |k: &str| {
+        data.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    Ok(SelfDefaultAccounts {
+        linux: field("linux"),
+        macos: field("macos"),
+        windows: field("windows"),
+        // Passwords are not trimmed — they may legitimately contain whitespace.
+        windows_password: data
+            .get("windows_password")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
+/// Resolve the connecting operator's default login name for a target OS family.
+/// `os_type` is the resource's structured OS (`linux` / `macos` / `windows` /
+/// `bsd` / `unix` / unset); BSD/Unix/unknown fall back to the Linux account.
+/// Fails closed with an operator-facing message when no account is set for that
+/// family — never silently substitutes a profile username.
+async fn resolve_default_account(
+    state: &State<'_, AppState>,
+    os_type: &str,
+) -> Result<String, CommandError> {
+    let accounts = fetch_self_default_accounts(state).await?;
+    let account = match os_type {
+        "windows" => accounts.windows,
+        "macos" => accounts.macos,
+        _ => accounts.linux,
+    };
+    if account.is_empty() {
+        let family = match os_type {
+            "windows" => "Windows",
+            "macos" => "macOS",
+            _ => "Linux",
+        };
+        return Err(CommandError::from(format!(
+            "default-account credential source: the connecting user has no default {family} \
+             account configured. Set it under Users → Edit User → Default Resource Account."
+        )));
+    }
+    Ok(account)
+}
+
+/// Read the resource's structured OS family for default-account resolution.
+fn resource_os_type(meta: &Map<String, Value>) -> String {
+    meta.get("os_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+/// Resolve a `default-account` SSH source: brokers a credential from the SSH
+/// engine exactly like `ssh-engine`, but the login principal is the connecting
+/// operator's default account for the resource's OS rather than a profile
+/// username. The `credential_source` carries the same `ssh_mount` / `ssh_role`
+/// / `mode` fields as `ssh-engine`.
+async fn resolve_default_account_ssh(
+    state: &State<'_, AppState>,
+    profile: &Value,
+    meta: &Map<String, Value>,
+    cs: &Value,
+) -> Result<ResolvedSshCredential, CommandError> {
+    let account = resolve_default_account(state, &resource_os_type(meta)).await?;
+
+    // Inject the resolved account as the profile username so the ssh-engine
+    // resolver mints the cert (`valid_principals`) / OTP for the right login.
+    let mut patched = profile.clone();
+    if let Some(obj) = patched.as_object_mut() {
+        obj.insert("username".to_string(), Value::String(account.clone()));
+    }
+    let mut resolved = resolve_ssh_engine_ssh(state, &patched, meta, cs).await?;
+    // Force the dial username to the resolved account: CA mode returns
+    // `effective_username = None` (the role enforces principals), but for the
+    // default-account source the operator's account *is* the login user.
+    resolved.effective_username = Some(account);
+    Ok(resolved)
 }
 
 /// Resolve an `ssh-engine` source. Two working modes today:

@@ -5,6 +5,7 @@ import {
   protocolForOsType,
   readProfiles,
   defaultPort,
+  needsOperatorPrompt as profileNeedsOperatorPrompt,
 } from "../lib/connectionProfiles";
 import {
   DEFAULT_RESOURCE_TYPES,
@@ -121,10 +122,11 @@ export function ConnectPalette() {
             // Only the kinds the host actually launches today.
             const kind = p.credential_source.kind;
             if (kind === "ssh-engine") continue;
-            const needsOperatorPrompt =
-              kind === "ldap" &&
-              "bind_mode" in p.credential_source &&
-              p.credential_source.bind_mode === "operator";
+            // default-account SSH is a brokered engine mint like ssh-engine —
+            // not a one-click palette launch. Its RDP form is fine (it just
+            // prompts for the password, like LDAP operator-bind).
+            if (kind === "default-account" && p.protocol === "ssh") continue;
+            const needsOperatorPrompt = profileNeedsOperatorPrompt(p);
             const host =
               p.target_host ||
               String(meta.hostname || "") ||
@@ -202,13 +204,15 @@ export function ConnectPalette() {
 
   async function launch(entry: PaletteEntry) {
     if (entry.needsOperatorPrompt) {
-      // Operator-bind LDAP needs a typed credential — palette
-      // closes and the operator finishes from the Resources page,
-      // where the inline prompt already lives.
-      toast(
-        "info",
-        `Open ${entry.resourceLabel} in Resources to enter LDAP credentials.`,
-      );
+      // These profiles may need a typed credential before opening (LDAP
+      // operator-bind, or an RDP default-account with no stored password).
+      // The palette can't prompt inline, so it hands off to the Resources
+      // page, where the inline prompt + stored-password check already live.
+      const detail =
+        entry.profile.credential_source.kind === "default-account"
+          ? "to complete the connection"
+          : "to enter LDAP credentials";
+      toast("info", `Open ${entry.resourceLabel} in Resources ${detail}.`);
       setOpen(false);
       return;
     }
@@ -320,7 +324,11 @@ export function ConnectPalette() {
                         <div className="text-xs text-[var(--color-text-muted)] font-mono truncate">
                           {e.profile.username ? `${e.profile.username}@` : ""}
                           {e.targetLabel}
-                          {e.needsOperatorPrompt ? " · LDAP operator bind" : ""}
+                          {e.needsOperatorPrompt
+                            ? e.profile.credential_source.kind === "default-account"
+                              ? " · prompts for password"
+                              : " · LDAP operator bind"
+                            : ""}
                         </div>
                       </div>
                       {isConnecting && (

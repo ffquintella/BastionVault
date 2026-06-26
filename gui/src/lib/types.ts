@@ -444,6 +444,26 @@ export type CredentialSource =
       pki_mount: string;
       pki_role: string;
       cert_ttl_secs?: number;
+    }
+  | {
+      /**
+       * Use the *connecting operator's* default resource account (set per
+       * user under Users → Edit User → Default Resource Account) as the login
+       * name, rather than pinning a username on the profile. The login name is
+       * resolved per the target's OS family at connect time.
+       *
+       * SSH: brokers a credential from the SSH engine exactly like
+       * `ssh-engine` (carries the same `ssh_mount` / `ssh_role` / `mode`),
+       * but `valid_principals` is the connecting operator's account.
+       *
+       * RDP: the account supplies the login user; the password is prompted at
+       * connect time (a username-only account can't carry one). The
+       * `ssh_*` fields are unused for RDP profiles.
+       */
+      kind: "default-account";
+      ssh_mount?: string;
+      ssh_role?: string;
+      mode?: "ca" | "otp" | "pqc";
     };
 
 export interface ConnectionProfile {

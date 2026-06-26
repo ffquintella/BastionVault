@@ -41,6 +41,17 @@ export function UsersPage() {
   const [formSelectedPolicies, setFormSelectedPolicies] = useState<string[]>([]);
   // Allowed namespaces (login-restriction). Empty ⇒ unrestricted (any namespace).
   const [formSelectedNamespaces, setFormSelectedNamespaces] = useState<string[]>([]);
+  // Per-OS default resource accounts (Resource Connect). Empty ⇒ unconfigured
+  // for that OS family. Only consumed by `default-account` connection profiles.
+  const [formDefaultAccountLinux, setFormDefaultAccountLinux] = useState("");
+  const [formDefaultAccountMacos, setFormDefaultAccountMacos] = useState("");
+  const [formDefaultAccountWindows, setFormDefaultAccountWindows] = useState("");
+  // Windows RDP password for the default account. The stored value is never
+  // read back (write-only from the admin's view); `…HasWinPw` reflects whether
+  // one is on file, `…WinPw` is a new value to set, `…ClearWinPw` clears it.
+  const [formDefaultAccountWinPw, setFormDefaultAccountWinPw] = useState("");
+  const [formDefaultAccountHasWinPw, setFormDefaultAccountHasWinPw] = useState(false);
+  const [formDefaultAccountClearWinPw, setFormDefaultAccountClearWinPw] = useState(false);
 
   // FIDO2 state for the edit modal
   const [editFido2Keys, setEditFido2Keys] = useState(0);
@@ -248,6 +259,23 @@ export function UsersPage() {
       await api.updateUser(mountPath, editUser, formPassword, policies);
       // Persist the namespace login-restriction (empty ⇒ clears it).
       await api.setNsAssignment(mountPath, editUser, formSelectedNamespaces);
+      // Persist the per-OS default resource accounts (all-empty ⇒ clears them).
+      // Password: a typed value sets it, the clear checkbox wipes it, otherwise
+      // it is left untouched (undefined ⇒ the command omits the field).
+      const windowsPassword =
+        formDefaultAccountWinPw.length > 0
+          ? formDefaultAccountWinPw
+          : formDefaultAccountClearWinPw
+            ? ""
+            : undefined;
+      await api.setDefaultAccount(
+        mountPath,
+        editUser,
+        formDefaultAccountLinux,
+        formDefaultAccountMacos,
+        formDefaultAccountWindows,
+        windowsPassword,
+      );
       toast("success", `User ${editUser} updated`);
       setEditUser(null);
       resetForm();
@@ -273,15 +301,29 @@ export function UsersPage() {
 
   async function openEdit(username: string) {
     try {
-      const [info, fido2Info, assignment] = await Promise.all([
+      const [info, fido2Info, assignment, defaultAccount] = await Promise.all([
         api.getUser(mountPath, username),
         api.fido2ListCredentials(username).catch(() => null),
         api.getNsAssignment(mountPath, username).catch(() => ({ namespaces: [] })),
+        api
+          .getDefaultAccount(mountPath, username)
+          .catch(() => ({
+            linux: "",
+            macos: "",
+            windows: "",
+            has_windows_password: false,
+          })),
       ]);
       setEditUser(username);
       setFormPassword("");
       setFormSelectedPolicies(info.policies);
       setFormSelectedNamespaces(assignment.namespaces);
+      setFormDefaultAccountLinux(defaultAccount.linux);
+      setFormDefaultAccountMacos(defaultAccount.macos);
+      setFormDefaultAccountWindows(defaultAccount.windows);
+      setFormDefaultAccountWinPw("");
+      setFormDefaultAccountHasWinPw(defaultAccount.has_windows_password);
+      setFormDefaultAccountClearWinPw(false);
       setEditFido2Keys(fido2Info?.registered_keys ?? 0);
       setEditFido2Enabled(fido2Info?.fido2_enabled ?? false);
       await Promise.all([loadPolicies(), loadNamespaces()]);
@@ -301,6 +343,12 @@ export function UsersPage() {
     setFormPassword("");
     setFormSelectedPolicies([]);
     setFormSelectedNamespaces([]);
+    setFormDefaultAccountLinux("");
+    setFormDefaultAccountMacos("");
+    setFormDefaultAccountWindows("");
+    setFormDefaultAccountWinPw("");
+    setFormDefaultAccountHasWinPw(false);
+    setFormDefaultAccountClearWinPw(false);
     setEditFido2Keys(0);
     setEditFido2Enabled(false);
   }
@@ -558,6 +606,71 @@ export function UsersPage() {
             )}
             <PolicySelector />
             <NamespaceSelector />
+
+            {/* Default Resource Account section (Resource Connect). */}
+            <div className="pt-3 border-t border-[var(--color-border)]">
+              <label className="text-sm font-medium text-[var(--color-text)]">
+                Default Resource Account
+              </label>
+              <p className="text-xs text-[var(--color-text-muted)] mt-1 mb-2">
+                Optional. The login name this user connects with on resources
+                whose connection profile uses the{" "}
+                <em>connecting user's default account</em> credential source.
+                One per OS family; leave blank to leave an OS unconfigured.
+                Resources not using that source are unaffected.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <Input
+                  label="Linux / Unix"
+                  value={formDefaultAccountLinux}
+                  onChange={(e) => setFormDefaultAccountLinux(e.target.value)}
+                  placeholder="e.g. felipe-admin"
+                />
+                <Input
+                  label="macOS"
+                  value={formDefaultAccountMacos}
+                  onChange={(e) => setFormDefaultAccountMacos(e.target.value)}
+                  placeholder="e.g. felipe"
+                />
+                <Input
+                  label="Windows"
+                  value={formDefaultAccountWindows}
+                  onChange={(e) => setFormDefaultAccountWindows(e.target.value)}
+                  placeholder="e.g. CORP\\felipe"
+                />
+              </div>
+              <div className="mt-3">
+                <SecretInput
+                  label="Windows account password (optional)"
+                  value={formDefaultAccountWinPw}
+                  onChange={(e) => {
+                    setFormDefaultAccountWinPw(e.target.value);
+                    if (e.target.value) setFormDefaultAccountClearWinPw(false);
+                  }}
+                  showGenerator
+                  onGenerate={(v) => setFormDefaultAccountWinPw(v)}
+                  disabled={formDefaultAccountClearWinPw}
+                  hint={
+                    formDefaultAccountHasWinPw
+                      ? "A password is stored. Leave blank to keep it; type a new one to replace it. Used only for RDP default-account connections (SSH is always brokered)."
+                      : "Optional. If set, RDP default-account connections use it instead of prompting at connect. Leave blank to prompt each time."
+                  }
+                />
+                {formDefaultAccountHasWinPw && (
+                  <label className="mt-1 flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
+                    <input
+                      type="checkbox"
+                      checked={formDefaultAccountClearWinPw}
+                      onChange={(e) => {
+                        setFormDefaultAccountClearWinPw(e.target.checked);
+                        if (e.target.checked) setFormDefaultAccountWinPw("");
+                      }}
+                    />
+                    Clear the stored Windows password (revert to prompting at connect)
+                  </label>
+                )}
+              </div>
+            </div>
 
             {/* FIDO2 Security Keys section */}
             <div className="pt-3 border-t border-[var(--color-border)]">

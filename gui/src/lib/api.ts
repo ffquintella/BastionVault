@@ -475,6 +475,44 @@ export const setNsAssignment = (mount: string, name: string, namespaces: string[
 export const deleteNsAssignment = (mount: string, name: string) =>
   invoke<void>("delete_ns_assignment", { mount, name });
 
+/** Per-principal default resource accounts (Resource Connect). Each field is
+ *  the OS login name the operator uses on that OS family's targets; an empty
+ *  string means "unconfigured" for that family. Consumed only by connection
+ *  profiles whose credential source is `default-account`. `mount` is the auth
+ *  mount (e.g. "userpass/"). */
+export interface DefaultAccountResult {
+  linux: string;
+  macos: string;
+  windows: string;
+  /** Whether a Windows RDP password is stored (the plaintext is never
+   *  returned to the frontend — only this flag). */
+  has_windows_password: boolean;
+}
+export const getDefaultAccount = (mountPath: string, username: string) =>
+  invoke<DefaultAccountResult>("get_default_account", { mountPath, username });
+/** The logged-in operator's own default accounts (resolved server-side from the
+ *  token). Used to decide whether an RDP default-account connect needs a
+ *  password prompt. */
+export const getDefaultAccountSelf = () =>
+  invoke<DefaultAccountResult>("get_default_account_self");
+export const setDefaultAccount = (
+  mountPath: string,
+  username: string,
+  linux: string,
+  macos: string,
+  windows: string,
+  // undefined keeps the stored password; "" clears it; a value sets a new one.
+  windowsPassword?: string,
+) =>
+  invoke<void>("set_default_account", {
+    mountPath,
+    username,
+    linux,
+    macos,
+    windows,
+    windowsPassword,
+  });
+
 // Resource type configuration
 export const resourceTypesRead = () =>
   invoke<Record<string, unknown> | null>("resource_types_read");

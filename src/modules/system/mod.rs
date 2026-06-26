@@ -163,6 +163,11 @@ impl SystemBackend {
         let sys_backend_nsassign_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_nsassign_write = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_nsassign_delete = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_defacct_list = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_defacct_self = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_defacct_read = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_defacct_write = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_defacct_delete = self.self_ptr.upgrade().unwrap().clone();
 
         let backend = new_logical_backend!({
             paths: [
@@ -841,8 +846,80 @@ impl SystemBackend {
                         {op: Operation::Delete, handler: sys_backend_nsassign_delete.handle_ns_assignment_delete}
                     ],
                     help: "Read, set, or clear a principal's allowed namespaces."
+                },
+                {
+                    // Per-principal default resource accounts (Resource Connect).
+                    // List every principal that has default accounts on record.
+                    // Root-scoped: operator-authored, independent of the
+                    // request's active namespace.
+                    pattern: "identity/default-account/?$",
+                    operations: [
+                        {op: Operation::List, handler: sys_backend_defacct_list.handle_default_account_list}
+                    ],
+                    help: "List principals that have default resource accounts."
+                },
+                {
+                    // The *calling* principal's own default accounts, resolved
+                    // from the request token. Readable by any authenticated
+                    // caller (NOT root-scoped) so the Connect path can fetch the
+                    // connecting operator's accounts with its own token.
+                    pattern: "identity/default-account/self$",
+                    operations: [
+                        {op: Operation::Read, handler: sys_backend_defacct_self.handle_default_account_self}
+                    ],
+                    help: "Read the calling principal's default resource accounts."
+                },
+                {
+                    // Address one principal by mount + name. `mount` is a single
+                    // path segment (e.g. `userpass`); `name` is the remainder.
+                    pattern: r"identity/default-account/(?P<mount>[^/]+)/(?P<name>.+)$",
+                    fields: {
+                        "mount": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Auth mount the principal belongs to (e.g. userpass, approle)."
+                        },
+                        "name": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Principal name (username or role name)."
+                        },
+                        "linux": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Default login name on Linux/Unix/BSD SSH targets."
+                        },
+                        "macos": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Default login name on macOS SSH targets."
+                        },
+                        "windows": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Default login name on Windows RDP targets."
+                        },
+                        "windows_password": {
+                            field_type: FieldType::SecretStr,
+                            required: false,
+                            description: "Optional password for the Windows RDP account. Omit to keep the stored value; empty string clears it. Never returned on read (only `has_windows_password`)."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read,   handler: sys_backend_defacct_read.handle_default_account_read},
+                        {op: Operation::Write,  handler: sys_backend_defacct_write.handle_default_account_write},
+                        {op: Operation::Delete, handler: sys_backend_defacct_delete.handle_default_account_delete}
+                    ],
+                    help: "Read, set, or clear a principal's default resource accounts."
                 }
             ],
+            // NB: `identity/default-account/*` is intentionally NOT root-scoped.
+            // The `self` sub-path must stay readable by any authenticated caller
+            // (the Connect path resolves the connecting operator's accounts with
+            // its own token), and `root_paths` glob matching is longest-prefix —
+            // a `default-account/*` entry would swallow `default-account/self`.
+            // Admin reads/writes are gated by policy on the explicit
+            // mount/name paths instead.
             root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "seal", "raw/*", "revoke-prefix/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*", "namespace-links", "namespace-links/*", "identity/ns-assignment", "identity/ns-assignment/*"],
             unauth_paths: ["internal/ui/mounts", "internal/ui/mounts/*", "init", "seal-status", "unseal", "sso/providers"],
             help: SYSTEM_BACKEND_HELP,
@@ -2989,6 +3066,234 @@ impl SystemBackend {
         let name = req.get_data_as_str("name")?;
         store.delete(&mount, &name).await?;
         Ok(None)
+    }
+
+    fn resolve_default_account_store(
+        &self,
+    ) -> Result<crate::modules::identity::DefaultResourceAccountStore, RvError> {
+        crate::modules::identity::DefaultResourceAccountStore::new(&self.core)
+    }
+
+    /// Build a default-account response. The Windows password is **never**
+    /// echoed as plaintext on admin/list reads — only `has_windows_password` is
+    /// surfaced. `reveal_password` is `Some` exactly on the caller-scoped `self`
+    /// path, where the connect host needs the value to inject it.
+    fn default_account_to_response(
+        rec: Option<&crate::modules::identity::DefaultResourceAccount>,
+        echo_mount: &str,
+        echo_name: &str,
+        reveal_password: bool,
+    ) -> Response {
+        let mut data = serde_json::Map::new();
+        match rec {
+            Some(a) => {
+                data.insert("mount".into(), Value::String(a.mount.clone()));
+                data.insert("name".into(), Value::String(a.name.clone()));
+                data.insert("linux".into(), Value::String(a.linux.clone()));
+                data.insert("macos".into(), Value::String(a.macos.clone()));
+                data.insert("windows".into(), Value::String(a.windows.clone()));
+                data.insert(
+                    "has_windows_password".into(),
+                    Value::Bool(a.has_windows_password()),
+                );
+                data.insert("updated_at".into(), Value::String(a.updated_at.clone()));
+                if reveal_password {
+                    data.insert(
+                        "windows_password".into(),
+                        Value::String(a.windows_password.clone()),
+                    );
+                }
+            }
+            None => {
+                // No record ⇒ unconfigured; report explicitly (empty fields)
+                // rather than 404 so the GUI renders an editable empty form.
+                data.insert("mount".into(), Value::String(echo_mount.to_string()));
+                data.insert("name".into(), Value::String(echo_name.to_string()));
+                data.insert("linux".into(), Value::String(String::new()));
+                data.insert("macos".into(), Value::String(String::new()));
+                data.insert("windows".into(), Value::String(String::new()));
+                data.insert("has_windows_password".into(), Value::Bool(false));
+                data.insert("updated_at".into(), Value::String(String::new()));
+                if reveal_password {
+                    data.insert("windows_password".into(), Value::String(String::new()));
+                }
+            }
+        }
+        Response::data_response(Some(data))
+    }
+
+    pub async fn handle_default_account_list(
+        &self,
+        _backend: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_default_account_store()?;
+        let mut records = store.list().await?;
+        records.sort_by(|a, b| {
+            (a.mount.as_str(), a.name.as_str()).cmp(&(b.mount.as_str(), b.name.as_str()))
+        });
+        let accounts: Vec<Value> = records
+            .iter()
+            .map(|a| {
+                // List never reveals stored passwords — only their presence.
+                json!({
+                    "mount": a.mount,
+                    "name": a.name,
+                    "linux": a.linux,
+                    "macos": a.macos,
+                    "windows": a.windows,
+                    "has_windows_password": a.has_windows_password(),
+                    "updated_at": a.updated_at,
+                })
+            })
+            .collect();
+        Ok(Some(Response::data_response(
+            json!({ "accounts": accounts }).as_object().cloned(),
+        )))
+    }
+
+    pub async fn handle_default_account_read(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_default_account_store()?;
+        let mount = Self::normalize_assignment_mount(&req.get_data_as_str("mount")?);
+        let name = req.get_data_as_str("name")?;
+        let rec = store.get(&mount, &name).await?;
+        // Admin read: password masked (has_windows_password only).
+        Ok(Some(Self::default_account_to_response(
+            rec.as_ref(),
+            &mount,
+            &name,
+            false,
+        )))
+    }
+
+    pub async fn handle_default_account_write(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_default_account_store()?;
+        let mount = Self::normalize_assignment_mount(&req.get_data_as_str("mount")?);
+        let name = req.get_data_as_str("name")?;
+        let linux = req.get_data_as_str("linux").unwrap_or_default();
+        let macos = req.get_data_as_str("macos").unwrap_or_default();
+        let windows = req.get_data_as_str("windows").unwrap_or_default();
+        // Password write-preserve semantics: the field is only changed when the
+        // request explicitly carries `windows_password` (empty string clears
+        // it). Omitting the key keeps whatever is stored, so re-saving the
+        // record without re-typing the password does not wipe it.
+        let windows_password = match req.get_data("windows_password") {
+            Ok(v) => v.as_str().unwrap_or("").to_string(),
+            Err(_) => store
+                .get(&mount, &name)
+                .await?
+                .map(|a| a.windows_password)
+                .unwrap_or_default(),
+        };
+        let rec = store
+            .set(&mount, &name, &linux, &macos, &windows, &windows_password)
+            .await?;
+        match rec {
+            // Echo back masked (never the plaintext that was just written).
+            Some(a) => Ok(Some(Self::default_account_to_response(
+                Some(&a),
+                &mount,
+                &name,
+                false,
+            ))),
+            None => Ok(None), // all-empty cleared the record
+        }
+    }
+
+    pub async fn handle_default_account_delete(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_default_account_store()?;
+        let mount = Self::normalize_assignment_mount(&req.get_data_as_str("mount")?);
+        let name = req.get_data_as_str("name")?;
+        store.delete(&mount, &name).await?;
+        Ok(None)
+    }
+
+    /// Resolve the *calling* principal's own default accounts from the request
+    /// token. Tries, in order: the `(mount_path, username)` stamped at login
+    /// (userpass / ferrogate fast path), then every alias on the caller's
+    /// identity entity (covers approle / OIDC / SAML / cert — any entity-backed
+    /// login). The first principal with a record wins. When nothing is on file
+    /// the response carries empty fields and the Connect path fails closed.
+    ///
+    /// This is the only path that reveals the stored Windows password, and only
+    /// ever the caller's *own* — the connect host injects it into the RDP
+    /// session. The endpoint is caller-scoped (not root), so a token can read
+    /// only its own record.
+    pub async fn handle_default_account_self(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let auth_module = self.get_module::<AuthModule>("auth")?;
+        let Some(token_store) = auth_module.token_store.load_full() else {
+            return Err(RvError::ErrPermissionDenied);
+        };
+        let auth = token_store
+            .check_token(&req.path, &req.client_token)
+            .await?
+            .ok_or(RvError::ErrPermissionDenied)?;
+
+        // Candidate principals to try, in priority order. Mounts are normalized
+        // to the trailing-slash form the admin writes key on.
+        let mut candidates: Vec<(String, String)> = Vec::new();
+        let push = |c: &mut Vec<(String, String)>, mount: &str, name: &str| {
+            if !mount.trim().is_empty() && !name.trim().is_empty() {
+                let m = Self::normalize_assignment_mount(mount);
+                if !c.iter().any(|(em, en)| em == &m && en == name) {
+                    c.push((m, name.to_string()));
+                }
+            }
+        };
+
+        // 1) Fast path: backends that stamp mount_path + username.
+        if let (Some(mp), Some(un)) = (
+            auth.metadata.get("mount_path"),
+            auth.metadata.get("username"),
+        ) {
+            push(&mut candidates, mp, un);
+        }
+
+        // 2) General path: every alias on the caller's identity entity.
+        if let Some(eid) = auth.metadata.get("entity_id").filter(|s| !s.is_empty()) {
+            if let Ok(identity) = self.get_module::<IdentityModule>("identity") {
+                if let Some(entity_store) = identity.entity_store() {
+                    if let Some(entity) = entity_store.get_entity(eid).await? {
+                        push(&mut candidates, &entity.primary_mount, &entity.primary_name);
+                        for alias in &entity.aliases {
+                            push(&mut candidates, &alias.mount, &alias.name);
+                        }
+                    }
+                }
+            }
+        }
+
+        let store = self.resolve_default_account_store()?;
+        for (mount, name) in &candidates {
+            if let Some(a) = store.get(mount, name).await? {
+                return Ok(Some(Self::default_account_to_response(
+                    Some(&a),
+                    mount,
+                    name,
+                    true,
+                )));
+            }
+        }
+
+        // Nothing on file — echo the best-known principal for context.
+        let (em, en) = candidates.first().cloned().unwrap_or_default();
+        Ok(Some(Self::default_account_to_response(None, &em, &en, true)))
     }
 }
 

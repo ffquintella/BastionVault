@@ -5,6 +5,7 @@ import {
   detectSecretShape,
   isLaunchableProfile,
   loginClassGate,
+  needsOperatorPrompt,
   newProfileId,
   profilesForOsType,
   protocolForOsType,
@@ -258,10 +259,10 @@ describe("isLaunchableProfile (ssh-engine brokered)", () => {
 });
 
 describe("loginClassGate", () => {
-  it("brokered forces the ssh-engine source and disables the rest", () => {
+  it("brokered allows only the brokered mints (ssh-engine + default-account)", () => {
     const g = loginClassGate("brokered");
     expect(g.brokered).toBe(true);
-    expect(g.allowedKinds).toEqual(["ssh-engine"]);
+    expect(g.allowedKinds).toEqual(["ssh-engine", "default-account"]);
     expect(g.forcedKind).toBe("ssh-engine");
   });
   it("shared-credential (and unset) allows every source", () => {
@@ -270,6 +271,7 @@ describe("loginClassGate", () => {
       expect(g.brokered).toBe(false);
       expect(g.allowedKinds).toContain("secret");
       expect(g.allowedKinds).toContain("ssh-engine");
+      expect(g.allowedKinds).toContain("default-account");
       expect(g.forcedKind).toBeNull();
     }
   });
@@ -287,5 +289,77 @@ describe("validateProfileForLoginClass", () => {
   it("is a no-op for shared-credential resources", () => {
     expect(validateProfileForLoginClass(secretProfile(), "shared-credential")).toBeNull();
     expect(validateProfileForLoginClass(secretProfile(), undefined)).toBeNull();
+  });
+  it("accepts a default-account source on a brokered resource", () => {
+    expect(
+      validateProfileForLoginClass(defaultAccountSshProfile(), "brokered"),
+    ).toBeNull();
+  });
+});
+
+function defaultAccountSshProfile(): ConnectionProfile {
+  return {
+    id: "p_da_ssh",
+    name: "my account",
+    protocol: "ssh",
+    credential_source: {
+      kind: "default-account",
+      ssh_mount: "ssh",
+      ssh_role: "ops",
+      mode: "ca",
+    },
+  };
+}
+
+function defaultAccountRdpProfile(): ConnectionProfile {
+  return {
+    id: "p_da_rdp",
+    name: "my account",
+    protocol: "rdp",
+    credential_source: { kind: "default-account" },
+  };
+}
+
+describe("default-account credential source", () => {
+  it("validates: SSH needs an engine mount + role", () => {
+    expect(validateProfile(defaultAccountSshProfile())).toBeNull();
+    expect(
+      validateProfile({
+        ...defaultAccountSshProfile(),
+        credential_source: { kind: "default-account", ssh_mount: "", ssh_role: "ops", mode: "ca" },
+      }),
+    ).toMatch(/mount is required/);
+    expect(
+      validateProfile({
+        ...defaultAccountSshProfile(),
+        credential_source: { kind: "default-account", ssh_mount: "ssh", ssh_role: "", mode: "ca" },
+      }),
+    ).toMatch(/role is required/);
+  });
+
+  it("validates: RDP needs no extra fields (password prompted at connect)", () => {
+    expect(validateProfile(defaultAccountRdpProfile())).toBeNull();
+  });
+
+  it("is launchable for SSH (ca/otp) and RDP, but not SSH pqc", () => {
+    expect(isLaunchableProfile(defaultAccountSshProfile())).toBe(true);
+    expect(
+      isLaunchableProfile({
+        ...defaultAccountSshProfile(),
+        credential_source: { kind: "default-account", ssh_mount: "ssh", ssh_role: "ops", mode: "otp" },
+      }),
+    ).toBe(true);
+    expect(
+      isLaunchableProfile({
+        ...defaultAccountSshProfile(),
+        credential_source: { kind: "default-account", ssh_mount: "ssh", ssh_role: "ops", mode: "pqc" },
+      }),
+    ).toBe(false);
+    expect(isLaunchableProfile(defaultAccountRdpProfile())).toBe(true);
+  });
+
+  it("prompts for an operator credential only for RDP (password)", () => {
+    expect(needsOperatorPrompt(defaultAccountRdpProfile())).toBe(true);
+    expect(needsOperatorPrompt(defaultAccountSshProfile())).toBe(false);
   });
 });

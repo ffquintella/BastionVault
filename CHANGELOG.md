@@ -45,6 +45,16 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-06-26
+
+### Fixed
+
+- **Isolated Hiqlite leader no longer masquerades as healthy / mislabels the failure** (`src/storage/hiqlite/mod.rs`) -- when a clustered leader can no longer reach a quorum of its peers (e.g. the Raft channel keeps failing to connect), every consistent read fails openraft's read-index leadership confirmation. Two defects made this miserable to diagnose: (1) `cluster-status` reported `cluster_healthy = true` because `is_healthy()` only consulted this node's *locally cached* Raft metrics (`is_healthy_db`), which still show a leader; and (2) the resulting `CheckIsLeaderError` was unconditionally mapped to `ErrClusterNoLeader` ("Cluster has no leader."), sending operators chasing a phantom election while the real fault was peer connectivity. `is_healthy()` now additionally requires a leader to have confirmed quorum within `QUORUM_ACK_STALE_MS` (3s, via openraft's `millis_since_quorum_ack`), so "healthy" means "can actually serve reads"; single-node leaders self-ack and stay healthy. The error mapping now distinguishes openraft's `QuorumNotEnough` (leader present but quorum unconfirmed → `ErrClusterQuorumLost`, "Cluster lost quorum.") from a genuine `ForwardToLeader`/no-leader condition (→ `ErrClusterNoLeader`), using hiqlite's public `is_forward_to_leader()` discriminator. Both still map to HTTP 503.
+
+### Added
+
+- **Per-user default resource account** (`src/modules/identity/default_account.rs`, `src/modules/system/mod.rs`, `src/http/sys.rs`, `gui/src-tauri/src/commands/users.rs`, `gui/src-tauri/src/commands/connect.rs`, `gui/src/routes/UsersPage.tsx`, `gui/src/routes/ResourcesPage.tsx`, `gui/src/lib/connectionProfiles.ts`, `gui/src/lib/types.ts`, `gui/src/lib/api.ts`) -- each vault user can now record an optional per-OS login name (Linux / macOS / Windows) under **Users → Edit User → Default Resource Account**. A connection profile opts in via the new **"Connecting user's default account"** credential source: at connect time the login name is the *connecting operator's* account for the target's OS, resolved server-side from the request token (`v2/sys/identity/default-account/self`) so a client can never claim another operator's account. For SSH it brokers a per-connect credential from the SSH engine (same `ssh_mount`/`ssh_role`/`mode` as the SSH-engine source) with the operator's account as the cert principal; for RDP the account supplies the login user and the password is prompted at connect. Fails closed with a clear message when the connecting user has no account for that OS — resources using any other credential source are unaffected. Admin reads/writes go through `v2/sys/identity/default-account/{mount}/{name}`. The `self` resolver works for any entity-backed login (userpass, AppRole, OIDC, SAML, cert) — not just userpass — by walking the caller's identity-entity aliases. RDP can also use an **optional stored Windows password** (set per user, encrypted at rest behind the barrier, masked on admin reads as `has_windows_password`, revealed only on the caller's own `self` read for the connect host); when set, RDP connects without prompting, otherwise it prompts as before. (`features/default-resource-account.md`)
+
 ## [0.20.2] - 2026-06-25
 
 ### Added

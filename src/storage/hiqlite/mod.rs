@@ -20,9 +20,45 @@ const HIQLITE_WAL_SIZE: u32 = 64 * 1024 * 1024;
 /// overhead that wraps the raw value before it hits the WAL writer.
 const MAX_PUT_VALUE_BYTES: usize = (HIQLITE_WAL_SIZE as usize) - 1024 * 1024;
 
+/// Maximum age (ms) of a leader's last quorum acknowledgement before we treat
+/// it as unhealthy.
+///
+/// openraft's `millis_since_quorum_ack` reports how long ago the leader last
+/// heard back from a quorum. A leader that can no longer reach a quorum keeps
+/// reporting itself as leader in its *local* cached metrics — so hiqlite's
+/// `is_leader_db()` / `is_healthy_db()` (which only read that local state) stay
+/// green — while every linearizable read fails the read-index confirmation with
+/// a quorum-not-enough timeout. Treating such an isolated leader as unhealthy
+/// makes `cluster-status` mean "can actually serve reads", not just "thinks it
+/// is leader". The read path uses a 500ms read-index timeout, so 3s is several
+/// heartbeat intervals of slack: wide enough to avoid false positives on a
+/// healthy cluster, tight enough to flag a partitioned leader quickly.
+const QUORUM_ACK_STALE_MS: u64 = 3_000;
+
 fn map_hiqlite_error(e: hiqlite::Error) -> RvError {
     match &e {
-        hiqlite::Error::CheckIsLeaderError(_) => RvError::ErrClusterNoLeader,
+        hiqlite::Error::CheckIsLeaderError(_) => {
+            // A `CheckIsLeaderError` carries two distinct meanings that we must
+            // not conflate:
+            //   - `ForwardToLeader`: this node is not the leader (election in
+            //     progress, or leadership lives elsewhere). hiqlite's
+            //     `is_forward_to_leader()` returns `Some(..)` for this shape.
+            //   - `QuorumNotEnough`: this node *is* the leader but could not
+            //     confirm leadership with a quorum within the read-index
+            //     timeout — e.g. its heartbeat `AppendEntries` to a peer keeps
+            //     failing. `is_forward_to_leader()` returns `None` here.
+            //
+            // The quorum case is what an isolated leader hits on every
+            // consistent read: the cluster still has a leader (this node), so
+            // reporting "Cluster has no leader" sends operators chasing a
+            // phantom election while the real fault is peer connectivity.
+            // Surface it as the distinct `ErrClusterQuorumLost` instead.
+            if e.is_forward_to_leader().is_some() {
+                RvError::ErrClusterNoLeader
+            } else {
+                RvError::ErrClusterQuorumLost
+            }
+        }
         hiqlite::Error::LeaderChange(_) => RvError::ErrClusterNoLeader,
         hiqlite::Error::ClientWriteError(_) => {
             if e.is_forward_to_leader().is_some() {
@@ -511,9 +547,36 @@ impl HiqliteBackend {
         self.client.is_leader_db().await
     }
 
-    /// Returns true if the Raft database cluster is healthy.
+    /// Returns true if the Raft database cluster is healthy *and this node can
+    /// actually serve consistent reads*.
+    ///
+    /// hiqlite's `is_healthy_db()` only inspects this node's locally cached Raft
+    /// metrics (running state + a known leader). That is necessary but not
+    /// sufficient: an isolated leader whose heartbeat `AppendEntries` to its
+    /// peers keep failing still shows a healthy local state while every
+    /// linearizable read fails the read-index quorum confirmation. We layer a
+    /// quorum-freshness check on top so "healthy" reflects read-serving
+    /// capability — see [`QUORUM_ACK_STALE_MS`].
     pub async fn is_healthy(&self) -> bool {
-        self.client.is_healthy_db().await.is_ok()
+        if self.client.is_healthy_db().await.is_err() {
+            return false;
+        }
+
+        match self.client.metrics_db().await {
+            Ok(metrics) => {
+                // Only the leader maintains `millis_since_quorum_ack`; for a
+                // follower the base check above is sufficient.
+                if metrics.current_leader == Some(metrics.id) {
+                    matches!(
+                        metrics.millis_since_quorum_ack,
+                        Some(ms) if ms <= QUORUM_ACK_STALE_MS
+                    )
+                } else {
+                    true
+                }
+            }
+            Err(_) => false,
+        }
     }
 
     /// Returns Raft cluster metrics as a JSON value.
