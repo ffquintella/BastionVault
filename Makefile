@@ -615,13 +615,19 @@ PLUGINS_OUT := $(PLUGINS_DIR)/dist
 PLUGINS_SIGNING_KEY ?= $(PLUGINS_OUT)/dev-signing-key
 PLUGINS_SIGNING_KEY_NAME ?= bastionvault-dev
 
-# Target triple for the process-runtime plugins. Empty (the default)
-# means "build for the current host" — cargo's native target. Set
-# this to cross-compile for a different OS/arch, e.g. when packaging
-# Linux binaries from a macOS workstation for a Linux container:
+# Target triple for the process-runtime plugins. Defaults to
+# x86_64-unknown-linux-gnu (amd64 Linux) because that is what the
+# BastionVault servers run — a .bvplugin packed with a host-native
+# macOS/arm64 binary is rejected at invoke time with `Exec format
+# error (os error 8)` (ENOEXEC: the Linux kernel can't execve a
+# Mach-O). Defaulting to amd64 means `make plugins-pack` /
+# `make plugins-sign` produce deployable bundles out of the box.
 #
-#   make plugins PLUGINS_PROCESS_TARGET=x86_64-unknown-linux-gnu
-#   make plugins PLUGINS_PROCESS_TARGET=aarch64-unknown-linux-gnu
+# Override for other deploy targets, or to build a host-native binary
+# for local testing (empty = cargo's native target):
+#
+#   make plugins PLUGINS_PROCESS_TARGET=aarch64-unknown-linux-gnu  # arm64 Linux
+#   make plugins PLUGINS_PROCESS_TARGET=                           # host native
 #
 # The rustup target is auto-installed via `plugins-process-target`.
 # Cross-linkers / sysroots are NOT installed by this Makefile.
@@ -639,7 +645,7 @@ PLUGINS_SIGNING_KEY_NAME ?= bastionvault-dev
 # Force a specific runner with `PLUGINS_CARGO=cargo` (bare) or
 # `PLUGINS_CARGO=cross` (always container). Install cross with
 # `cargo install cross --git https://github.com/cross-rs/cross`.
-PLUGINS_PROCESS_TARGET ?=
+PLUGINS_PROCESS_TARGET ?= x86_64-unknown-linux-gnu
 
 # Host triple is detected once via rustc so we can compare against
 # PLUGINS_PROCESS_TARGET. Older make doesn't shell well; fall back
@@ -831,7 +837,10 @@ plugins: plugins-pack plugins-process ## Build every reference plugin (WASM + .b
 	@echo "   alongside the matching plugin.toml from $(PLUGINS_DIR)/<plugin>/."
 	@if [ -z "$(PLUGINS_PROCESS_TARGET)" ]; then \
 		echo ""; \
-		echo "   Built for the host. To target a Linux server from this workstation:"; \
+		echo "   WARNING: built host-native (PLUGINS_PROCESS_TARGET= override)."; \
+		echo "   Process plugins will NOT run on an amd64 Linux server — the"; \
+		echo "   invoke fails with 'Exec format error (os error 8)'. For a"; \
+		echo "   deployable bundle, drop the override (defaults to amd64) or set:"; \
 		echo "     make plugins PLUGINS_PROCESS_TARGET=x86_64-unknown-linux-gnu"; \
 		echo "     make plugins PLUGINS_PROCESS_TARGET=aarch64-unknown-linux-gnu"; \
 	fi

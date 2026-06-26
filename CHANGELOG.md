@@ -45,6 +45,21 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.21.2] - 2026-06-26
+
+### Changed
+
+- **Reference plugins now cross-compile to amd64 Linux by default** (`Makefile`)
+  -- `PLUGINS_PROCESS_TARGET` now defaults to `x86_64-unknown-linux-gnu` instead
+  of the build host, so `make plugins`, `make plugins-pack`, and
+  `make plugins-sign` produce `.bvplugin` bundles whose process binaries run on
+  the BastionVault servers out of the box. Packing a host-native macOS/arm64
+  binary previously yielded a Mach-O that the Linux server rejected at invoke
+  time with `Exec format error (os error 8)` (ENOEXEC). Cross-builds are still
+  auto-routed through `cross`; override with
+  `PLUGINS_PROCESS_TARGET=aarch64-unknown-linux-gnu` (arm64 server) or
+  `PLUGINS_PROCESS_TARGET=` (host-native, local testing only).
+
 ## [0.21.1] - 2026-06-26
 
 ### Added
