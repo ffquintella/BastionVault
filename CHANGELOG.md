@@ -45,6 +45,30 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.21.5] - 2026-06-26
+
+### Added
+
+#### Cluster client performance & resilience (features/vault-cluster-client-discovery.md)
+
+- Cache the discovered cluster topology on the connected `RemoteBackend` so a
+  remote session can recover from a node loss without a manual reconnect.
+- Add single-shot in-session read failover: when the pinned cluster node
+  becomes unavailable mid-session, idempotent requests (Read/List) re-probe the
+  cached candidates, re-pick a healthy node, and retry once. Writes and deletes
+  are never auto-retried (a dropped connection leaves the commit ambiguous) and
+  keep the explicit-reconnect contract. Single-node / literal-URL profiles are
+  unaffected. The failover is logged for operator visibility.
+
+### Changed
+
+- Load several GUI pages' independent data with concurrent requests instead of
+  serial round-trips, which noticeably cuts page-load time against a remote
+  cluster where each request is a full network round-trip: FerroGate
+  (config/policies/environments), Groups (policies + members), the Password
+  Manager Pro importer (plugin/mounts/types), and the Certificate Lifecycle list
+  (which previously read every target's config and state one after another).
+
 ## [0.21.4] - 2026-06-26
 
 ### Security

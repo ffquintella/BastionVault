@@ -85,16 +85,39 @@ Scoring (lower is better):
 
 The cluster_id field is also captured and used as a sanity check: every node in a single SRV answer is expected to advertise the same cluster_id; mismatches are logged and the minority cluster_id is rejected so a stale DNS entry pointing at a decomissioned node can't poison the selection.
 
-### Sticky session with failover-on-next-open
+### Sticky session with single-shot read failover
 
-Once a node is chosen, the client pins it for the entire session:
+Once a node is chosen, the client pins it for the session. It does NOT re-probe
+in the background, does NOT re-resolve SRV per request, and does NOT silently
+move *stateful* traffic to another node. There is one bounded exception, added
+for cluster latency/resilience:
 
-- All subsequent HTTP requests go to the same target host:port.
-- We do NOT re-probe in the background, do NOT re-resolve SRV per request, do NOT silently move requests to another node.
-- If the pinned node fails (connection refused, TLS handshake fails, 5xx with `sealed` body, or a configurable number of consecutive request errors), the current request returns an error and the session ends. The GUI surfaces "the BastionVault node you were connected to became unavailable — reconnect to retry on another node."
-- The next `connect_remote` call (a fresh user action, app restart, new CLI invocation) re-runs discovery + health screen from scratch and picks again, naturally skipping the dead node.
+- **Idempotent requests (Read/List)** that fail with `NodeUnavailable`
+  (connection refused, TLS handshake failure, 5xx with a `sealed`/`standby`
+  body) trigger one re-probe of the cached candidate set, a re-pick of the best
+  healthy node *other than* the failed one, and exactly one retry on the new
+  node. The backend then stays pinned to that node. A burst of concurrent
+  failures re-picks once (serialized behind a mutex). The failover is logged.
+- **Writes and deletes are never auto-retried.** A dropped connection leaves the
+  commit state ambiguous, so a silent retry could double-apply. They return
+  `NodeUnavailable` and the GUI surfaces "the BastionVault node you were
+  connected to became unavailable — reconnect to retry on another node."
+- **Node-local streaming surfaces** (Resource Connect SSH/RDP transports,
+  active-surface long-poll watchers, FIDO2 ceremonies, plugin asset/surface
+  fetches) are dispatched on their own paths and are intentionally NOT covered —
+  re-pointing them mid-stream interacts badly with their per-node state.
+- Single-node / literal-URL profiles (fewer than two candidates) have nowhere to
+  fail over to and behave exactly as before.
+- The next `connect_remote` call (a fresh user action, app restart, new CLI
+  invocation) still re-runs discovery + health screen from scratch and picks
+  again.
 
-Rationale: re-pointing an in-flight session at a new node mid-stream interacts badly with anything that has node-local state (Resource Connect SSH/RDP transports, long-poll watchers, ongoing FIDO2 ceremonies, plugin surface caches). Sticky-with-explicit-reconnect makes that boundary unambiguous and gives the operator a clean retry without surprise behaviour.
+Rationale: leader-coordinated linearizable reads on the server mean read latency
+is dominated by the round-trip to the cluster, and a transient node loss should
+not force the operator to manually reconnect just to re-read data. Restricting
+transparent failover to side-effect-free requests keeps the write-commit and
+node-local-state boundaries unambiguous while removing the most common source of
+"had to reconnect" friction.
 
 ### Caching
 
@@ -126,7 +149,15 @@ Existing `address` field is reinterpreted as the cluster name when `cluster_disc
 ### Out of scope
 
 - Per-request load balancing across nodes (deliberate — see sticky session above).
-- Mid-session transparent failover (deliberate — see sticky session above).
+- Mid-session transparent failover for **writes/deletes** and for node-local
+  streaming surfaces (deliberate — see sticky session above). Idempotent
+  Read/List failover *is* now supported.
+- Routing reads to the lowest-RTT follower to reduce latency: the server serves
+  all storage reads as hiqlite linearizable (read-index) reads, which coordinate
+  with the leader regardless of which node receives the HTTP request, so a
+  follower read adds a hop rather than saving one. Faster follower reads would
+  require an explicit server-side bounded-staleness local-read path — out of
+  scope here.
 - Active-active multi-datacenter routing / geo-based selection.
 - Latency-aware re-pinning after the initial choice.
 - Discovery via mechanisms other than SRV (mDNS, Consul, k8s headless services).

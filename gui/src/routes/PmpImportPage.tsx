@@ -185,39 +185,49 @@ export function PmpImportPage() {
 
   // ── Plugin presence + KV mount probe ───────────────────────────
   useEffect(() => {
-    (async () => {
-      try {
-        const list = await api.pluginsList();
-        setPluginPresent(list.some((p) => p.name === PLUGIN_NAME));
-      } catch {
-        setPluginPresent(false);
-      }
-      try {
-        const mounts = await api.listMounts();
-        const kvs = mounts
-          .filter((m) => m.mount_type === "kv" || m.mount_type === "kv-v2")
-          .map((m) => ({
-            path: m.path.endsWith("/") ? m.path : `${m.path}/`,
-            type: m.mount_type as "kv" | "kv-v2",
-          }));
-        if (kvs.length > 0) {
-          setKvMountChoices(kvs);
-          // Prefer a mount literally called `secret/`; otherwise
-          // pick the first one.
-          const preferred = kvs.find((k) => k.path === "secret/") ?? kvs[0];
-          setKvMount(preferred.path);
-          setKvMountType(preferred.type);
+    // Plugin presence, KV mount list, and saved resource-type config are
+    // independent reads, each with its own fallback — fetch them
+    // concurrently so a remote cluster pays one round-trip instead of
+    // three in series.
+    void Promise.all([
+      (async () => {
+        try {
+          const list = await api.pluginsList();
+          setPluginPresent(list.some((p) => p.name === PLUGIN_NAME));
+        } catch {
+          setPluginPresent(false);
         }
-      } catch {
-        // keep the default `secret/` + kv-v2
-      }
-      try {
-        const saved = await api.resourceTypesRead();
-        setTypeConfig(mergeTypeConfig(saved as ResourceTypeConfig | null));
-      } catch {
-        setTypeConfig(DEFAULT_RESOURCE_TYPES);
-      }
-    })();
+      })(),
+      (async () => {
+        try {
+          const mounts = await api.listMounts();
+          const kvs = mounts
+            .filter((m) => m.mount_type === "kv" || m.mount_type === "kv-v2")
+            .map((m) => ({
+              path: m.path.endsWith("/") ? m.path : `${m.path}/`,
+              type: m.mount_type as "kv" | "kv-v2",
+            }));
+          if (kvs.length > 0) {
+            setKvMountChoices(kvs);
+            // Prefer a mount literally called `secret/`; otherwise
+            // pick the first one.
+            const preferred = kvs.find((k) => k.path === "secret/") ?? kvs[0];
+            setKvMount(preferred.path);
+            setKvMountType(preferred.type);
+          }
+        } catch {
+          // keep the default `secret/` + kv-v2
+        }
+      })(),
+      (async () => {
+        try {
+          const saved = await api.resourceTypesRead();
+          setTypeConfig(mergeTypeConfig(saved as ResourceTypeConfig | null));
+        } catch {
+          setTypeConfig(DEFAULT_RESOURCE_TYPES);
+        }
+      })(),
+    ]);
   }, []);
 
   // ── Step 1: pick file + validate ───────────────────────────────

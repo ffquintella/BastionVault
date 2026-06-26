@@ -6,7 +6,11 @@
 //! [`Operation`] to a HTTP method and parses the response body into
 //! a [`JsonResponse`] for the GUI's command layer.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use http::Request;
@@ -15,7 +19,7 @@ use ureq::Agent;
 
 use crate::{
     backend::Backend,
-    discovery::{self, DiscoveryConfig, SrvLookup, SystemResolver},
+    discovery::{self, DiscoveryConfig, SrvCandidate, SrvLookup, SystemResolver},
     error::{classify_node_failure, ClientError},
     health::{self, HealthConfig, Selected},
     tls::ClientTlsConfig,
@@ -85,7 +89,7 @@ mod builder_tests {
             .build_with_discovery_using(&PanicResolver)
             .await
             .expect("opt-out path should succeed without probing");
-        assert_eq!(be.address(), "https://vault.example:9999");
+        assert_eq!(be.address().as_str(), "https://vault.example:9999");
         assert!(be.selected().is_none());
     }
 }
@@ -102,19 +106,55 @@ pub struct RemoteBackend {
     inner: Arc<RemoteInner>,
 }
 
-struct RemoteInner {
+/// The node the backend is *currently* dialing. Swappable at runtime
+/// so the read-failover path (see [`RemoteInner::failover`]) can move a
+/// session off a node that just went unavailable without forcing the
+/// operator to reconnect. Guarded by an [`RwLock`]: request dispatch
+/// takes a read lock to snapshot the address; failover takes a write
+/// lock to swap it.
+#[derive(Clone)]
+struct ActiveNode {
     address: String,
+    /// Discovery/selection metadata for the active node, if known.
+    /// Carries enough info for log/UI surfacing of "Connected to
+    /// <cluster> via <node>, leader, 12 ms". `None` for literal-URL
+    /// constructions.
+    selected: Option<Selected>,
+}
+
+/// Cached cluster topology that powers in-session read failover. Only
+/// present when the backend was built with a multi-node candidate set
+/// (`>= 2` candidates). Carries everything needed to re-probe and
+/// re-pick a node *without* re-resolving SRV — the candidate list is
+/// the part that is stable across a leader election; node health and
+/// leadership are what we re-measure on failure.
+struct Failover {
+    /// Every node the cluster resolved to at connect time.
+    candidates: Vec<SrvCandidate>,
+    /// TLS material reused for the re-probe (same as the request path).
+    tls: Option<ClientTlsConfig>,
+    /// Probe timeouts/parallelism reused for the re-probe.
+    health_cfg: HealthConfig,
+    /// Serializes concurrent re-probes so a burst of failing requests
+    /// triggers a single re-pick rather than a thundering herd. After
+    /// acquiring it a caller re-checks the active address: if another
+    /// task already moved us off the dead node, it reuses that pick.
+    in_progress: tokio::sync::Mutex<()>,
+}
+
+struct RemoteInner {
+    /// The node currently being dialed. See [`ActiveNode`].
+    active: RwLock<ActiveNode>,
     headers: HashMap<String, String>,
     api_version: u8,
     agent: Agent,
-    /// Populated when the backend was constructed via discovery
-    /// (cluster name → SRV → health probes → pick). Carries enough
-    /// info for log/UI surfacing of "Connected to <cluster> via
-    /// <node>, leader, 12 ms". `None` for literal-URL constructions.
-    selected: Option<Selected>,
     /// The original input the operator typed (cluster name or
     /// literal URL). Surfaced as `host` in `ClientError::NodeUnavailable`.
     input_label: String,
+    /// Cached topology for in-session read failover. `None` disables
+    /// failover (single-node / literal-URL backends — nothing to fail
+    /// over to).
+    failover: Option<Failover>,
 }
 
 #[derive(Clone, Default)]
@@ -132,6 +172,11 @@ pub struct RemoteBackendBuilder {
     cluster_discovery: Option<bool>,
     discovery_config: Option<DiscoveryConfig>,
     health_config: Option<HealthConfig>,
+    /// Cluster topology to enable in-session read failover. Set
+    /// explicitly via [`Self::with_failover_candidates`] (the connect
+    /// path, which discovers once and pins the node) or populated
+    /// automatically by [`Self::build_with_discovery_using`].
+    failover_candidates: Option<Vec<SrvCandidate>>,
 }
 
 impl RemoteBackendBuilder {
@@ -181,6 +226,19 @@ impl RemoteBackendBuilder {
 
     pub fn with_health_config(mut self, cfg: HealthConfig) -> Self {
         self.health_config = Some(cfg);
+        self
+    }
+
+    /// Supply the full cluster candidate set so the built backend can
+    /// fail read-only requests over to another node in-session (see
+    /// [`RemoteBackend`] docs). Used by the connect path, which runs
+    /// discovery once to pick the node and then builds the production
+    /// backend with discovery disabled (pinned URL) — passing the
+    /// candidates here is what lets that pinned backend still recover
+    /// from a node loss without a manual reconnect. Failover only
+    /// engages when two or more candidates are supplied.
+    pub fn with_failover_candidates(mut self, candidates: Vec<SrvCandidate>) -> Self {
+        self.failover_candidates = Some(candidates);
         self
     }
 
@@ -246,12 +304,21 @@ impl RemoteBackendBuilder {
         })?;
 
         let address = selected.candidate.url();
-        let mut be = self.with_address(address).build();
+        // Hand the full candidate set to the backend so it can fail
+        // read-only requests over to another node in-session.
+        let mut be = self
+            .with_failover_candidates(candidates)
+            .with_address(address)
+            .build();
         // Stash the discovery/selection metadata after the fact
         // (the synchronous build path doesn't know about it).
         let inner = Arc::get_mut(&mut be.inner)
             .expect("freshly built RemoteBackend has unique Arc");
-        inner.selected = Some(selected);
+        inner
+            .active
+            .get_mut()
+            .expect("freshly built RemoteBackend has un-poisoned lock")
+            .selected = Some(selected);
         inner.input_label = input;
         Ok(be)
     }
@@ -278,14 +345,32 @@ impl RemoteBackendBuilder {
             .map(|a| a.trim_end_matches('/').to_string())
             .unwrap_or_else(|| "https://127.0.0.1:8200".to_string());
         let input_label = address.clone();
+        // Enable in-session read failover only when there is somewhere
+        // to fail over to (>= 2 candidates). Single-node / literal-URL
+        // backends leave this `None`.
+        let failover = self.failover_candidates.and_then(|candidates| {
+            if candidates.len() >= 2 {
+                Some(Failover {
+                    candidates,
+                    tls: self.tls.clone(),
+                    health_cfg: self.health_config.clone().unwrap_or_default(),
+                    in_progress: tokio::sync::Mutex::new(()),
+                })
+            } else {
+                None
+            }
+        });
         RemoteBackend {
             inner: Arc::new(RemoteInner {
-                address,
+                active: RwLock::new(ActiveNode {
+                    address,
+                    selected: None,
+                }),
                 headers: self.headers,
                 api_version: self.api_version.unwrap_or(1),
                 agent,
-                selected: None,
                 input_label,
+                failover,
             }),
         }
     }
@@ -296,17 +381,32 @@ impl RemoteBackend {
         RemoteBackendBuilder::new()
     }
 
-    pub fn address(&self) -> &str {
-        &self.inner.address
+    /// The URL of the node currently being dialed. Returns an owned
+    /// `String` (rather than a borrow) because the active node can be
+    /// swapped at runtime by the read-failover path.
+    pub fn address(&self) -> String {
+        self.inner
+            .active
+            .read()
+            .expect("active-node lock poisoned")
+            .address
+            .clone()
     }
 
-    /// The discovery result this backend was constructed from, if
-    /// any. `None` for backends built via [`RemoteBackendBuilder::build`]
-    /// (the legacy literal-URL path); `Some` for backends built via
+    /// The discovery result the *currently active* node was selected
+    /// from, if any. `None` for backends built via
+    /// [`RemoteBackendBuilder::build`] (the legacy literal-URL path);
+    /// `Some` for backends built via
     /// [`RemoteBackendBuilder::build_with_discovery`]. Carries the
-    /// chosen node + state + RTT for log/UI surfacing.
-    pub fn selected(&self) -> Option<&Selected> {
-        self.inner.selected.as_ref()
+    /// chosen node + state + RTT for log/UI surfacing. Tracks failover:
+    /// after a re-pick it reflects the node now in use.
+    pub fn selected(&self) -> Option<Selected> {
+        self.inner
+            .active
+            .read()
+            .expect("active-node lock poisoned")
+            .selected
+            .clone()
     }
 
     /// Original input the operator typed (cluster name or literal
@@ -324,18 +424,38 @@ impl RemoteBackend {
         }
     }
 
+    /// Build a request URL against the node currently being dialed.
     fn build_url(&self, path: &str) -> String {
+        self.build_url_with(&self.address(), path)
+    }
+
+    /// Build a request URL against an explicit node address. Used by
+    /// the failover retry so it dials the freshly-picked node rather
+    /// than re-reading the active address (which a racing request may
+    /// already be swapping).
+    fn build_url_with(&self, address: &str, path: &str) -> String {
         if path.starts_with('/') {
-            format!("{}{}", self.inner.address, path)
+            format!("{}{}", address, path)
         } else {
-            format!("{}/{}/{}", self.inner.address, self.api_prefix().trim_start_matches('/'), path)
+            format!(
+                "{}/{}/{}",
+                address,
+                self.api_prefix().trim_start_matches('/'),
+                path
+            )
         }
     }
 }
 
 impl RemoteBackend {
-    async fn dispatch(
+    /// Issue one request attempt against `address`. Transport-level
+    /// failures and sealed-5xx responses are classified into
+    /// [`ClientError::NodeUnavailable`] (see
+    /// [`crate::error::classify_node_failure`]); everything else passes
+    /// through. No retry / failover lives here — see [`Self::dispatch`].
+    async fn attempt(
         &self,
+        address: &str,
         operation: Operation,
         path: &str,
         body: Option<Map<String, Value>>,
@@ -352,7 +472,7 @@ impl RemoteBackend {
             Operation::List => "LIST",
         };
 
-        let url = self.build_url(path);
+        let url = self.build_url_with(address, path);
         let inner = Arc::clone(&self.inner);
         let token = token.to_string();
         let path_owned = path.to_string();
@@ -461,6 +581,107 @@ impl RemoteBackend {
                 ClientError::server(status, message),
             ))
         }
+    }
+
+    /// Dispatch a request with single-shot read failover.
+    ///
+    /// For idempotent operations ([`Operation::Read`] /
+    /// [`Operation::List`]) on a cluster-aware backend, a
+    /// [`ClientError::NodeUnavailable`] outcome triggers one re-probe +
+    /// re-pick of a different healthy node followed by exactly one
+    /// retry. This narrows the deliberate "sticky session" contract:
+    ///
+    /// * Writes / deletes are **never** auto-retried — a dropped
+    ///   connection leaves the commit state ambiguous, so a silent
+    ///   retry could double-apply. They keep the explicit-reconnect
+    ///   contract and surface `NodeUnavailable` to the caller.
+    /// * Single-node / literal-URL backends (`failover.is_none()`) have
+    ///   nowhere to move, so they behave exactly as before.
+    /// * Node-local streaming surfaces (active-surface watch, asset
+    ///   fetch) are dispatched on their own paths and are intentionally
+    ///   not covered here.
+    async fn dispatch(
+        &self,
+        operation: Operation,
+        path: &str,
+        body: Option<Map<String, Value>>,
+        token: &str,
+        namespace: Option<&str>,
+    ) -> Result<Option<JsonResponse>, ClientError> {
+        let address = self.address();
+
+        // `body` is consumed by `attempt`; clone for the first try so
+        // the original survives for a potential retry. The clone is a
+        // small JSON map — negligible next to a network round-trip.
+        let first = self
+            .attempt(&address, operation, path, body.clone(), token, namespace)
+            .await;
+
+        let node_failed = matches!(&first, Err(e) if e.is_node_unavailable());
+        if !node_failed || !Self::is_idempotent(operation) || self.inner.failover.is_none() {
+            return first;
+        }
+
+        match self.try_failover(&address).await {
+            Some(new_address) => {
+                log::warn!(
+                    "bv-client: node `{address}` unavailable on {operation:?} `{path}`; \
+                     failing over to `{new_address}` and retrying once"
+                );
+                self.attempt(&new_address, operation, path, body, token, namespace)
+                    .await
+            }
+            // No distinct healthy node — surface the original failure
+            // so the caller's reconnect UX still lights up.
+            None => first,
+        }
+    }
+
+    /// Only side-effect-free operations are safe to transparently
+    /// retry on another node.
+    fn is_idempotent(op: Operation) -> bool {
+        matches!(op, Operation::Read | Operation::List)
+    }
+
+    /// Re-probe the cached candidate set and swap the active node to
+    /// the best healthy one that is *not* `failed_address`. Returns the
+    /// new node URL, or `None` when no distinct healthy node exists (the
+    /// caller then surfaces the original error).
+    ///
+    /// Serialized via the failover mutex so a burst of failing requests
+    /// re-picks once; a caller that finds the active node already moved
+    /// off `failed_address` reuses that pick without re-probing.
+    async fn try_failover(&self, failed_address: &str) -> Option<String> {
+        let fo = self.inner.failover.as_ref()?;
+        let _guard = fo.in_progress.lock().await;
+
+        // A concurrent failover may have already moved us off the dead
+        // node while we waited for the lock — reuse its pick.
+        let current = self.address();
+        if current != failed_address {
+            return Some(current);
+        }
+
+        let probes = health::probe_all(&fo.candidates, &fo.health_cfg, fo.tls.as_ref()).await;
+        let alternates: Vec<_> = probes
+            .into_iter()
+            .filter(|p| p.candidate.url() != failed_address)
+            .collect();
+        let selected = health::pick(&alternates)?;
+        let new_address = selected.candidate.url();
+        if new_address == failed_address {
+            return None;
+        }
+
+        *self
+            .inner
+            .active
+            .write()
+            .expect("active-node lock poisoned") = ActiveNode {
+            address: new_address.clone(),
+            selected: Some(selected),
+        };
+        Some(new_address)
     }
 }
 
@@ -650,5 +871,110 @@ impl RemoteBackend {
             )));
         }
         Ok(Some(body))
+    }
+}
+
+#[cfg(test)]
+mod failover_tests {
+    use super::*;
+    use crate::health::NodeState;
+
+    fn cand(target: &str) -> SrvCandidate {
+        SrvCandidate {
+            target: target.to_string(),
+            port: 5200,
+            scheme: "https".to_string(),
+            priority: 10,
+            weight: 50,
+        }
+    }
+
+    #[test]
+    fn only_reads_and_lists_are_idempotent() {
+        assert!(RemoteBackend::is_idempotent(Operation::Read));
+        assert!(RemoteBackend::is_idempotent(Operation::List));
+        assert!(!RemoteBackend::is_idempotent(Operation::Write));
+        assert!(!RemoteBackend::is_idempotent(Operation::Delete));
+    }
+
+    #[test]
+    fn failover_enabled_only_with_two_or_more_candidates() {
+        // Two candidates → failover armed.
+        let be = RemoteBackend::builder()
+            .with_address("https://a.example:5200")
+            .with_failover_candidates(vec![cand("a.example"), cand("b.example")])
+            .build();
+        assert!(
+            be.inner.failover.is_some(),
+            "two candidates should arm failover"
+        );
+
+        // One candidate → nothing to fail over to.
+        let be = RemoteBackend::builder()
+            .with_address("https://a.example:5200")
+            .with_failover_candidates(vec![cand("a.example")])
+            .build();
+        assert!(
+            be.inner.failover.is_none(),
+            "single candidate must not arm failover"
+        );
+
+        // No candidates supplied (literal-URL / discovery-off path).
+        let be = RemoteBackend::builder()
+            .with_address("https://a.example:5200")
+            .build();
+        assert!(be.inner.failover.is_none());
+    }
+
+    #[test]
+    fn active_node_swap_is_observable() {
+        // Simulate the swap a successful `try_failover` performs and
+        // confirm the public accessors track the new node.
+        let be = RemoteBackend::builder()
+            .with_address("https://a.example:5200")
+            .with_failover_candidates(vec![cand("a.example"), cand("b.example")])
+            .build();
+        assert_eq!(be.address().as_str(), "https://a.example:5200");
+        assert!(be.selected().is_none());
+
+        let new = Selected {
+            candidate: cand("b.example"),
+            state: NodeState::ActiveLeader,
+            rtt_ms: 12,
+            cluster_id: Some("cid".into()),
+            version: None,
+        };
+        *be.inner.active.write().unwrap() = ActiveNode {
+            address: "https://b.example:5200".to_string(),
+            selected: Some(new),
+        };
+
+        assert_eq!(be.address().as_str(), "https://b.example:5200");
+        let sel = be.selected().expect("selected should follow the swap");
+        assert_eq!(sel.candidate.target, "b.example");
+        assert_eq!(sel.state, NodeState::ActiveLeader);
+        // Request URLs now target the failed-over node.
+        assert_eq!(
+            be.build_url("sys/internal/ui/mounts"),
+            "https://b.example:5200/v1/sys/internal/ui/mounts"
+        );
+    }
+
+    #[test]
+    fn build_url_with_honors_leading_slash_and_api_prefix() {
+        let be = RemoteBackend::builder()
+            .with_address("https://a.example:5200")
+            .with_api_version(2)
+            .build();
+        // Relative path picks up the versioned prefix.
+        assert_eq!(
+            be.build_url_with("https://node:5200", "sys/health"),
+            "https://node:5200/v2/sys/health"
+        );
+        // Absolute (leading-slash) path is used verbatim.
+        assert_eq!(
+            be.build_url_with("https://node:5200", "/v1/sys/health"),
+            "https://node:5200/v1/sys/health"
+        );
     }
 }

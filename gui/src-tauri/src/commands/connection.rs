@@ -2,7 +2,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use bastion_vault::api::{client::TLSConfigBuilder, Client};
 use bv_client::{
-    discovery::DiscoveryConfig,
+    discovery::{DiscoveryConfig, SrvCandidate},
     health::HealthConfig,
     tls::{ClientTlsConfig, TLSConfigBuilder as BvTLSConfigBuilder},
     RemoteBackend,
@@ -59,7 +59,7 @@ pub async fn connect_remote(
     // runs — once we've picked a node, every legacy / bv-client
     // request goes through the same target.
     let tls_for_bv = build_bv_tls(&profile)?;
-    let (effective_address, selected) =
+    let (effective_address, selected, failover_candidates, health_cfg) =
         resolve_remote_address(&profile, tls_for_bv.as_ref()).await?;
 
     // Legacy `Client`: point it at the chosen URL.
@@ -86,7 +86,18 @@ pub async fn connect_remote(
     let mut bv_builder = RemoteBackend::builder()
         .with_address(&effective_address)
         .with_api_version(2)
-        .with_cluster_discovery(false);
+        .with_cluster_discovery(false)
+        .with_health_config(health_cfg);
+    // Hand the discovered cluster topology to the pinned backend so it
+    // can fail read-only requests over to another healthy node mid-
+    // session (no-op for single-node / literal-URL profiles, where the
+    // candidate set has fewer than two entries). The legacy `Client`
+    // above stays pinned to the originally chosen node — only the
+    // bv-client read path participates in failover, which keeps any
+    // node-local state on the legacy client unambiguous.
+    if !failover_candidates.is_empty() {
+        bv_builder = bv_builder.with_failover_candidates(failover_candidates);
+    }
     if let Some(tls) = tls_for_bv {
         bv_builder = bv_builder.with_tls_config(tls);
     }
@@ -103,20 +114,41 @@ pub async fn connect_remote(
     Ok(())
 }
 
-/// Run cluster discovery for `profile` and return the URL that both
-/// the legacy `Client` and the bv-client `RemoteBackend` should use,
-/// plus a serialisable [`SelectedNode`] describing the pick (or
-/// `None` when discovery short-circuited).
+/// Run cluster discovery for `profile` and return everything the
+/// connect path needs:
+///
+/// * the URL both the legacy `Client` and the bv-client
+///   `RemoteBackend` should dial,
+/// * a serialisable [`SelectedNode`] describing the pick (or `None`
+///   when discovery short-circuited),
+/// * the full candidate set, so the pinned production backend can fail
+///   read-only requests over to another node without re-resolving SRV
+///   (empty for the discovery-disabled / literal-URL paths), and
+/// * the [`HealthConfig`] used for probing, reused for those failover
+///   re-probes.
 async fn resolve_remote_address(
     profile: &RemoteProfile,
     tls: Option<&ClientTlsConfig>,
-) -> CmdResult<(String, Option<SelectedNode>)> {
+) -> CmdResult<(String, Option<SelectedNode>, Vec<SrvCandidate>, HealthConfig)> {
+    use bv_client::{
+        discovery::{self, SystemResolver},
+        health,
+    };
+
+    let mut health_cfg = HealthConfig::default();
+    if let Some(ms) = profile.health_probe_timeout_ms {
+        if ms > 0 {
+            health_cfg.probe_timeout = Duration::from_millis(ms.into());
+        }
+    }
+
     // Two short-circuits: discovery disabled, or URL-shaped input.
     // The bv-client discovery layer already does the URL detection
     // for us — keep the check here at the connect command boundary
     // so the legacy `Client` skips its TLS branching predictably.
+    // Neither path yields a candidate set, so failover stays off.
     if !profile.cluster_discovery || looks_like_url(&profile.address) {
-        return Ok((profile.address.clone(), None));
+        return Ok((profile.address.clone(), None, Vec::new(), health_cfg));
     }
 
     let mut discovery_cfg = DiscoveryConfig::default();
@@ -125,44 +157,49 @@ async fn resolve_remote_address(
             discovery_cfg.srv_service = svc.to_string();
         }
     }
-    let mut health_cfg = HealthConfig::default();
-    if let Some(ms) = profile.health_probe_timeout_ms {
-        if ms > 0 {
-            health_cfg.probe_timeout = Duration::from_millis(ms.into());
-        }
+
+    // Drive bv-client's discovery → probe → pick pipeline directly so
+    // we keep the resolved candidate list (a throwaway `RemoteBackend`
+    // would discard it). The production backend is built later in
+    // `connect_remote` with this address baked in and these candidates
+    // wired in for failover.
+    let resolver = SystemResolver::new();
+    let resolved = discovery::resolve(&profile.address, &discovery_cfg, &resolver)
+        .await
+        .map_err(|e| CommandError::from(format!("Cluster discovery failed: {e}")))?;
+    let candidates = resolved.into_candidates();
+    if candidates.is_empty() {
+        return Err(CommandError::from(format!(
+            "Cluster discovery failed: no nodes resolved for `{}`",
+            profile.address
+        )));
     }
 
-    // Use bv-client's pipeline directly. We build a throwaway
-    // `RemoteBackend` only to harvest its `selected()` — the actual
-    // RemoteBackend the rest of the app uses is built later with the
-    // discovered address baked in (see `connect_remote`).
-    let probe_backend = {
-        let mut b = RemoteBackend::builder()
-            .with_address(&profile.address)
-            .with_api_version(2)
-            .with_cluster_discovery(true)
-            .with_discovery_config(discovery_cfg)
-            .with_health_config(health_cfg);
-        if let Some(t) = tls {
-            b = b.with_tls_config(t.clone());
-        }
-        b.build_with_discovery()
-            .await
-            .map_err(|e| CommandError::from(format!("Cluster discovery failed: {e}")))?
-    };
+    let probes = health::probe_all(&candidates, &health_cfg, tls).await;
+    let selected = health::pick(&probes).ok_or_else(|| {
+        let reasons: Vec<String> = probes
+            .iter()
+            .map(|p| format!("{}={:?}", p.candidate.target, p.state))
+            .collect();
+        CommandError::from(format!(
+            "Cluster discovery failed: no healthy node for `{}`: {}",
+            profile.address,
+            reasons.join(", ")
+        ))
+    })?;
 
-    let address = probe_backend.address().to_string();
-    let selected = probe_backend.selected().map(|s| SelectedNode {
+    let address = selected.candidate.url();
+    let selected_node = SelectedNode {
         cluster_label: profile.address.clone(),
-        address: s.candidate.url(),
-        target: s.candidate.target.clone(),
-        port: s.candidate.port,
-        state: format!("{:?}", s.state),
-        rtt_ms: s.rtt_ms,
-        cluster_id: s.cluster_id.clone(),
-        version: s.version.clone(),
-    });
-    Ok((address, selected))
+        address: selected.candidate.url(),
+        target: selected.candidate.target.clone(),
+        port: selected.candidate.port,
+        state: format!("{:?}", selected.state),
+        rtt_ms: selected.rtt_ms,
+        cluster_id: selected.cluster_id.clone(),
+        version: selected.version.clone(),
+    };
+    Ok((address, Some(selected_node), candidates, health_cfg))
 }
 
 fn looks_like_url(s: &str) -> bool {

@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use bv_client::discovery::{self, DiscoveryConfig, SrvCandidate, SrvLookup, SrvRecord};
 use bv_client::error::ClientError;
 use bv_client::health::{self, HealthConfig, NodeState};
+use bv_client::{Backend, Operation, RemoteBackend};
 
 /// Behaviour of one fake node. Encoded as JSON the server writes
 /// back on every `/v1/sys/health` request — the surrounding harness
@@ -322,4 +323,75 @@ async fn discovery_recovers_after_leader_dies() {
     let probes2 = health::probe_all(&candidates, &health_cfg(), None).await;
     let picked2 = health::pick(&probes2).unwrap();
     assert_eq!(picked2.candidate.port, follower.port);
+}
+
+#[tokio::test]
+async fn read_fails_over_in_session_when_pinned_node_dies() {
+    // A `RemoteBackend` pinned to the leader, but armed with the full
+    // candidate set, must transparently re-pick a healthy node and
+    // retry an idempotent request when the pinned node drops — no
+    // operator reconnect required.
+    let leader = FakeNode::spawn(NodeBehavior::leader("cid"));
+    let follower = FakeNode::spawn(NodeBehavior::follower("cid"));
+    let leader_url = cand_for(&leader, 10, 50).url();
+    let follower_url = cand_for(&follower, 10, 50).url();
+
+    let be = RemoteBackend::builder()
+        .with_address(&leader_url)
+        .with_health_config(health_cfg())
+        .with_failover_candidates(vec![
+            cand_for(&leader, 10, 50),
+            cand_for(&follower, 10, 50),
+        ])
+        .build();
+    assert_eq!(be.address(), leader_url);
+
+    // Healthy: the read lands on the pinned leader.
+    be.handle(Operation::Read, "sys/internal/ui/mounts", None, "tok")
+        .await
+        .expect("read against healthy leader");
+    assert_eq!(be.address(), leader_url, "no failover while leader is up");
+
+    // The leader drops. The next read must fail over to the follower
+    // and succeed, leaving the backend pinned to the follower.
+    leader.set(NodeBehavior::dead());
+    be.handle(Operation::Read, "sys/internal/ui/mounts", None, "tok")
+        .await
+        .expect("read should succeed after failing over to follower");
+    assert_eq!(
+        be.address(),
+        follower_url,
+        "backend should now be pinned to the surviving follower"
+    );
+}
+
+#[tokio::test]
+async fn write_does_not_fail_over() {
+    // Writes are never auto-retried (a dropped connection leaves the
+    // commit ambiguous). A write to a dead pinned node surfaces
+    // `NodeUnavailable` and leaves the active node unchanged, even
+    // though a healthy follower exists.
+    let leader = FakeNode::spawn(NodeBehavior::dead());
+    let follower = FakeNode::spawn(NodeBehavior::follower("cid"));
+    let leader_url = cand_for(&leader, 10, 50).url();
+
+    let be = RemoteBackend::builder()
+        .with_address(&leader_url)
+        .with_health_config(health_cfg())
+        .with_failover_candidates(vec![
+            cand_for(&leader, 10, 50),
+            cand_for(&follower, 10, 50),
+        ])
+        .build();
+
+    let err = be
+        .handle(Operation::Write, "sys/policies/acl/x", None, "tok")
+        .await
+        .expect_err("write to a dead node must error");
+    assert!(err.is_node_unavailable(), "expected NodeUnavailable, got {err}");
+    assert_eq!(
+        be.address(),
+        leader_url,
+        "a write must not silently move the session to another node"
+    );
 }

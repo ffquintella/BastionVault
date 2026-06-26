@@ -70,28 +70,37 @@ export function GroupsPage() {
   }
 
   async function loadAuxLists() {
-    try {
-      const p = await api.listPolicies();
-      setAvailablePolicies(p.policies.filter((x) => x !== "root"));
-    } catch {
-      setAvailablePolicies([]);
-    }
-
-    if (kind === "user") {
-      try {
-        const u = await api.listUsers("userpass/");
-        setAvailableMembers(u.users);
-      } catch {
-        setAvailableMembers([]);
-      }
-    } else {
-      try {
-        const r = await api.listAppRoles();
-        setAvailableMembers(r.roles);
-      } catch {
-        setAvailableMembers([]);
-      }
-    }
+    // The policy list and the member list (users or approles) are
+    // independent reads, each with its own fallback — fetch them
+    // concurrently so a remote cluster pays one round-trip instead of
+    // two in series.
+    await Promise.all([
+      (async () => {
+        try {
+          const p = await api.listPolicies();
+          setAvailablePolicies(p.policies.filter((x) => x !== "root"));
+        } catch {
+          setAvailablePolicies([]);
+        }
+      })(),
+      (async () => {
+        if (kind === "user") {
+          try {
+            const u = await api.listUsers("userpass/");
+            setAvailableMembers(u.users);
+          } catch {
+            setAvailableMembers([]);
+          }
+        } else {
+          try {
+            const r = await api.listAppRoles();
+            setAvailableMembers(r.roles);
+          } catch {
+            setAvailableMembers([]);
+          }
+        }
+      })(),
+    ]);
   }
 
   async function selectGroup(name: string) {

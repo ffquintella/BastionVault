@@ -183,18 +183,21 @@ function TargetsTab({ mount }: { mount: string }) {
       setNames(list);
       const tmap: Record<string, CertLifecycleTarget> = {};
       const smap: Record<string, CertLifecycleState> = {};
-      for (const n of list) {
-        try {
-          tmap[n] = await api.certLifecycleReadTarget(mount, n);
-        } catch {
-          /* skip rows that fail to read */
-        }
-        try {
-          smap[n] = await api.certLifecycleReadState(mount, n);
-        } catch {
-          /* state can be missing on never-renewed targets */
-        }
-      }
+      // Each target needs a target-read and a state-read, all mutually
+      // independent. Reading them serially is 2×N round-trips, which on
+      // a remote cluster (≈50 ms each) is painfully slow for a list of
+      // any size. Fan every read out concurrently and collect what
+      // succeeds — failures still skip their row exactly as before.
+      await Promise.all(
+        list.map(async (n) => {
+          const [t, s] = await Promise.all([
+            api.certLifecycleReadTarget(mount, n).catch(() => undefined),
+            api.certLifecycleReadState(mount, n).catch(() => undefined),
+          ]);
+          if (t !== undefined) tmap[n] = t; // skip rows that fail to read
+          if (s !== undefined) smap[n] = s; // state missing on never-renewed targets
+        }),
+      );
       setTargets(tmap);
       setStates(smap);
     } catch (e) {

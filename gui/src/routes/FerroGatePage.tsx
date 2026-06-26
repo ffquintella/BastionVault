@@ -129,29 +129,42 @@ export function FerroGatePage() {
       const list = await api.ferrogateListMachines();
       setMachines(list);
       setMountEnabled(true);
-      try {
-        const cfg = await api.ferrogateReadConfig();
-        setConfig(cfg);
-        seedSelectedEnv(cfg.mia_environment || "");
-      } catch {
-        /* config read may fail independently; leave as-is */
-      }
-      try {
-        const pol = await api.listPolicies();
-        setAvailablePolicies(pol.policies.filter((p) => p !== "root" && p !== "default"));
-        setPoliciesListable(true);
-      } catch {
-        // Listing policies needs admin; if it fails the selectors fall back to a
-        // free-text field so the editor still works.
-        setAvailablePolicies([]);
-        setPoliciesListable(false);
-      }
-      try {
-        const envs = await api.ferrogateListEnvironments();
-        setEnvironments(Array.isArray(envs) ? envs : []);
-      } catch {
-        setEnvironments([]);
-      }
+      // The config, policy, and environment reads are independent of one
+      // another and each handles its own failure, so fetch them
+      // concurrently. On a remote cluster every request is a full
+      // round-trip; running them in parallel pays that latency once
+      // instead of three times in series.
+      await Promise.all([
+        (async () => {
+          try {
+            const cfg = await api.ferrogateReadConfig();
+            setConfig(cfg);
+            seedSelectedEnv(cfg.mia_environment || "");
+          } catch {
+            /* config read may fail independently; leave as-is */
+          }
+        })(),
+        (async () => {
+          try {
+            const pol = await api.listPolicies();
+            setAvailablePolicies(pol.policies.filter((p) => p !== "root" && p !== "default"));
+            setPoliciesListable(true);
+          } catch {
+            // Listing policies needs admin; if it fails the selectors fall back to a
+            // free-text field so the editor still works.
+            setAvailablePolicies([]);
+            setPoliciesListable(false);
+          }
+        })(),
+        (async () => {
+          try {
+            const envs = await api.ferrogateListEnvironments();
+            setEnvironments(Array.isArray(envs) ? envs : []);
+          } catch {
+            setEnvironments([]);
+          }
+        })(),
+      ]);
     } catch (e) {
       // A missing mount surfaces as an error here.
       setMountEnabled(false);
