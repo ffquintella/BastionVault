@@ -36,6 +36,26 @@ impl Storage for BarrierView {
         self.barrier.delete(self.expand_key(key).as_str()).await
     }
 
+    async fn scan(&self, prefix: &str, start_key: Option<&str>) -> Result<Vec<StorageEntry>, RvError> {
+        self.sanity_check(prefix)?;
+        let full_prefix = self.expand_key(prefix);
+        // `start_key` is relative to this view, same as `prefix`; expand
+        // it to a full key so the lower bound compares against the
+        // backend's prefixed keys.
+        let full_start = match start_key {
+            Some(s) => {
+                self.sanity_check(s)?;
+                Some(self.expand_key(s))
+            }
+            None => None,
+        };
+        let entries = self.barrier.scan(full_prefix.as_str(), full_start.as_deref()).await?;
+        Ok(entries
+            .into_iter()
+            .map(|e| StorageEntry { key: self.truncate_key(e.key.as_str()), value: e.value })
+            .collect())
+    }
+
     async fn lock(&self, lock_name: &str) -> Result<Box<dyn Any>, RvError> {
         self.barrier.lock(lock_name).await
     }
@@ -79,6 +99,29 @@ impl BarrierView {
             self.delete(key.as_str()).await?
         }
         Ok(())
+    }
+
+    /// Bulk-read every entry under `prefix` (relative to this view) in a
+    /// single backend round-trip where supported, with keys returned
+    /// relative to the view. Equivalent to `get_keys()` + a `get()` per
+    /// key, but without the per-entry storage round-trip — on the
+    /// hiqlite backend the whole subtree comes back in one consistent
+    /// query instead of 1+N reads, which is what made audit/history
+    /// aggregation slow.
+    pub async fn get_entries(&self, prefix: &str) -> Result<Vec<StorageEntry>, RvError> {
+        self.scan(prefix, None).await
+    }
+
+    /// Like [`get_entries`](Self::get_entries) but only returns entries
+    /// whose key is `>= since_key` (relative to this view). For an
+    /// append log keyed by zero-padded nanosecond timestamps, pass the
+    /// padded nanos of the window start to scan only the recent tail.
+    pub async fn get_entries_since(
+        &self,
+        prefix: &str,
+        since_key: &str,
+    ) -> Result<Vec<StorageEntry>, RvError> {
+        self.scan(prefix, Some(since_key)).await
     }
 
     pub fn as_storage(&self) -> &dyn Storage {

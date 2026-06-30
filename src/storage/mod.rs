@@ -54,6 +54,34 @@ pub trait Storage: Send + Sync {
     async fn lock(&self, _lock_name: &str) -> Result<Box<dyn Any>, RvError> {
         Ok(Box::new(true))
     }
+
+    /// Bulk-read every entry under `prefix` (recursively), optionally
+    /// restricted to keys `>= start_key`. Semantically equivalent to a
+    /// `list` walk plus a `get` per key, but implementors backed by a
+    /// queryable store override this to fetch the whole subtree in a
+    /// single round-trip — avoiding the 1+N reads that dominate large
+    /// audit/history scans (the prefix walk plus one read per entry).
+    ///
+    /// `start_key` is an inclusive lower bound on the *full* key, used
+    /// for time-windowed scans over chronologically-keyed append logs
+    /// whose keys sort in timestamp order.
+    async fn scan(&self, prefix: &str, start_key: Option<&str>) -> Result<Vec<StorageEntry>, RvError> {
+        let mut stack = vec![prefix.to_string()];
+        let mut out = Vec::new();
+        while let Some(curr) = stack.pop() {
+            for child in self.list(&curr).await? {
+                let full = format!("{curr}{child}");
+                if child.ends_with('/') {
+                    stack.push(full);
+                } else if start_key.map(|s| full.as_str() >= s).unwrap_or(true) {
+                    if let Some(e) = self.get(&full).await? {
+                        out.push(e);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// This struct is used to describe a specific storage entry
@@ -81,6 +109,30 @@ pub trait Backend: Send + Sync + std::any::Any {
     async fn delete(&self, key: &str) -> Result<(), RvError>;
     async fn lock(&self, _lock_name: &str) -> Result<Box<dyn Any>, RvError> {
         Ok(Box::new(true))
+    }
+
+    /// Physical-layer counterpart of [`Storage::scan`]: bulk-read every
+    /// entry under `prefix` (recursively), optionally restricted to keys
+    /// `>= start_key`. The default walks `list` + `get`; backends that
+    /// can return a whole subtree in one query (e.g. hiqlite) override
+    /// this so the barrier's `scan` is a single round-trip instead of
+    /// 1+N consistent reads.
+    async fn scan(&self, prefix: &str, start_key: Option<&str>) -> Result<Vec<BackendEntry>, RvError> {
+        let mut stack = vec![prefix.to_string()];
+        let mut out = Vec::new();
+        while let Some(curr) = stack.pop() {
+            for child in self.list(&curr).await? {
+                let full = format!("{curr}{child}");
+                if child.ends_with('/') {
+                    stack.push(full);
+                } else if start_key.map(|s| full.as_str() >= s).unwrap_or(true) {
+                    if let Some(e) = self.get(&full).await? {
+                        out.push(e);
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 }
 

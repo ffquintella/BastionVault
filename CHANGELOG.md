@@ -45,6 +45,30 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.21.6] - 2026-06-30
+
+### Changed
+
+#### Audit/dashboard read performance
+
+- Add a bulk `scan(prefix, start_key)` to the storage `Storage`/`Backend`
+  traits. The hiqlite backend implements it as a single consistent
+  `SELECT … WHERE vault_key LIKE ? [AND vault_key >= ?]` query, replacing the
+  recursive `list` + per-key `get` walk (1+N linearizable Raft reads) that
+  dominated audit/history aggregation. Other backends inherit a `list`+`get`
+  fallback, and the ciphertext cache delegates straight to the inner backend.
+  (`src/storage/`, `src/cache/secret_cache.rs`)
+- Rewrite the five append-only audit stores (user, login, file, SSH CA, SSH
+  sign) to read via the new bulk path, and add a `list_since(key)` variant that
+  range-scans only the recent tail of their timestamp-ordered keys.
+- Refactor `collect_audit_events` (`src/modules/system/mod.rs`): the
+  independent per-subsystem reads now run concurrently (`tokio::join!`) instead
+  of sequentially, and accept an optional recency bound that is pushed into the
+  range scan. `GET /v2/sys/dashboard/summary` now counts only the last 24h
+  instead of decrypting all history for a 235-byte response, and
+  `GET /v2/sys/audit/events` bounds its scan by the caller's `from` filter.
+  Together these take both endpoints from ~5.5s to sub-second on the cluster.
+
 ## [0.21.5] - 2026-06-26
 
 ### Added

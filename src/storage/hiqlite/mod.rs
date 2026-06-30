@@ -154,6 +154,51 @@ impl Backend for HiqliteBackend {
         Ok(keys)
     }
 
+    /// Single-query subtree read. Returns every row whose `vault_key`
+    /// starts with `prefix` (optionally bounded below by `start_key`) in
+    /// one consistent query, replacing the recursive `list` + per-key
+    /// `get` walk — the 1+N linearizable reads that made audit/history
+    /// aggregation take seconds. `start_key` pushes the time-window lower
+    /// bound into SQL so chronologically-keyed logs scan only the recent
+    /// tail rather than all history.
+    async fn scan(&self, prefix: &str, start_key: Option<&str>) -> Result<Vec<BackendEntry>, RvError> {
+        if prefix.starts_with('/') {
+            return Err(RvError::ErrPhysicalBackendPrefixInvalid);
+        }
+
+        let rows: Vec<VaultRow> = match start_key {
+            Some(start) => {
+                self.client
+                    .query_consistent_map(
+                        Cow::Owned(format!(
+                            "SELECT vault_key, vault_value FROM {} WHERE vault_key LIKE ? AND vault_key >= ?",
+                            self.table
+                        )),
+                        vec![Param::from(format!("{prefix}%")), Param::from(start.to_string())],
+                    )
+                    .await
+                    .map_err(map_hiqlite_error)?
+            }
+            None => {
+                self.client
+                    .query_consistent_map(
+                        Cow::Owned(format!(
+                            "SELECT vault_key, vault_value FROM {} WHERE vault_key LIKE ?",
+                            self.table
+                        )),
+                        vec![Param::from(format!("{prefix}%"))],
+                    )
+                    .await
+                    .map_err(map_hiqlite_error)?
+            }
+        };
+
+        Ok(rows
+            .into_iter()
+            .map(|row| BackendEntry { key: row.vault_key, value: row.vault_value })
+            .collect())
+    }
+
     async fn get(&self, key: &str) -> Result<Option<BackendEntry>, RvError> {
         if key.starts_with('/') {
             return Err(RvError::ErrPhysicalBackendKeyInvalid);

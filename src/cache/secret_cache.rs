@@ -130,6 +130,16 @@ impl Backend for CachingBackend {
         self.inner.list(prefix).await
     }
 
+    async fn scan(&self, prefix: &str, start_key: Option<&str>) -> Result<Vec<BackendEntry>, RvError> {
+        // Delegate the bulk subtree read straight to the inner backend so
+        // a queryable backend (e.g. hiqlite) keeps its single-round-trip
+        // fast path. Scans are not memoized: like `list`, the result set
+        // shifts on every adjacent write and there is no cheap per-prefix
+        // invalidation. Per-key `get` caching still applies on the hot
+        // read path.
+        self.inner.scan(prefix, start_key).await
+    }
+
     async fn get(&self, key: &str) -> Result<Option<BackendEntry>, RvError> {
         if let Some(hit) = self.hit(key) {
             return Ok(Some(hit));

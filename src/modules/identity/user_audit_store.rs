@@ -71,20 +71,26 @@ impl UserAuditStore {
         self.view.put(&StorageEntry { key, value }).await
     }
 
-    /// Full log, newest first.
+    /// Full log, newest first. One bulk read instead of a prefix walk
+    /// plus a `get` per entry.
     pub async fn list_all(&self) -> Result<Vec<UserAuditEntry>, RvError> {
-        let mut keys = self.view.get_keys().await?;
-        keys.sort();
-        keys.reverse();
-        let mut out = Vec::with_capacity(keys.len());
-        for k in keys {
-            if let Some(raw) = self.view.get(&k).await? {
-                if let Ok(e) = serde_json::from_slice::<UserAuditEntry>(&raw.value) {
-                    out.push(e);
-                }
-            }
-        }
-        Ok(out)
+        Ok(Self::decode(self.view.get_entries("").await?))
+    }
+
+    /// Entries from `since_key` onward (inclusive), newest first.
+    /// `since_key` is a zero-padded nanosecond key (see [`hist_seq`]),
+    /// so the aggregator can bound a time-window scan to the recent tail
+    /// instead of reading all history.
+    pub async fn list_since(&self, since_key: &str) -> Result<Vec<UserAuditEntry>, RvError> {
+        Ok(Self::decode(self.view.get_entries_since("", since_key).await?))
+    }
+
+    /// Sort newest-first (keys are monotonic nanoseconds, so descending
+    /// key order is reverse-chronological) and decode each value,
+    /// skipping any that fail to parse.
+    fn decode(mut entries: Vec<StorageEntry>) -> Vec<UserAuditEntry> {
+        entries.sort_by(|a, b| b.key.cmp(&a.key));
+        entries.into_iter().filter_map(|e| serde_json::from_slice::<UserAuditEntry>(&e.value).ok()).collect()
     }
 }
 

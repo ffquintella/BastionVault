@@ -109,6 +109,23 @@ impl Storage for AESGCMBarrier {
         self.backend.delete(key).await
     }
 
+    async fn scan(&self, prefix: &str, start_key: Option<&str>) -> Result<Vec<StorageEntry>, RvError> {
+        if self.barrier_info.load().sealed {
+            return Err(RvError::ErrBarrierSealed);
+        }
+
+        // One bulk read from the backend, then decrypt each entry in
+        // memory. The full backend key is the AEAD AAD (matching how
+        // `put` encrypted it), so decryption uses `be.key` verbatim.
+        let raw = self.backend.scan(prefix, start_key).await?;
+        let mut out = Vec::with_capacity(raw.len());
+        for be in raw {
+            let plain = self.decrypt(&be.key, be.value.as_slice())?;
+            out.push(StorageEntry { key: be.key, value: plain });
+        }
+        Ok(out)
+    }
+
     async fn lock(&self, lock_name: &str) -> Result<Box<dyn Any>, RvError> {
         self.backend.lock(lock_name).await
     }
@@ -557,5 +574,55 @@ mod test {
         assert!(get.is_err());
         let delete = barrier.delete("bar/foo").await;
         assert!(delete.is_err());
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_barrier_scan() {
+        let backend = new_test_backend("test_barrier_scan");
+
+        let barrier = AESGCMBarrier::new(backend.clone());
+        let mut key = vec![0u8; 32];
+        rand::rng().fill_bytes(key.as_mut_slice());
+        barrier.init(key.as_slice()).await.unwrap();
+        barrier.unseal(key.as_slice()).await.unwrap();
+
+        // A flat, timestamp-style keyed log (like the audit stores) plus
+        // a nested key to exercise the recursive walk in the default
+        // backend `scan`.
+        for (k, v) in [
+            ("log/00000000000000000001", "one"),
+            ("log/00000000000000000002", "two"),
+            ("log/00000000000000000003", "three"),
+            ("log/sub/00000000000000000004", "four"),
+        ] {
+            barrier.put(&StorageEntry { key: k.to_string(), value: v.as_bytes().to_vec() }).await.unwrap();
+        }
+
+        // Full scan returns every entry under the prefix, recursively,
+        // with values decrypted.
+        let mut all = barrier.scan("log/", None).await.unwrap();
+        assert_eq!(all.len(), 4);
+        all.sort_by(|a, b| a.key.cmp(&b.key));
+        assert_eq!(all[0].value, b"one");
+        assert_eq!(all[3].value, b"four");
+        assert_eq!(all[3].key, "log/sub/00000000000000000004");
+
+        // start_key is an inclusive lower bound on the full key: only the
+        // tail at or after it comes back. The nested key sorts after the
+        // flat ones, so a bound of `...0003` keeps `0003` and the nested
+        // `sub/...0004` (lexicographically `log/sub/` > `log/0`).
+        let bounded = barrier.scan("log/", Some("log/00000000000000000003")).await.unwrap();
+        assert_eq!(bounded.len(), 2);
+        assert!(bounded.iter().all(|e| e.key.as_str() >= "log/00000000000000000003"));
+
+        // The bound is purely lexicographic on the full key, so a
+        // sentinel that sorts above every key (including the nested
+        // `log/sub/...`) returns nothing.
+        let empty = barrier.scan("log/", Some("log/z")).await.unwrap();
+        assert!(empty.is_empty());
+
+        // Sealing makes scan fail closed, like the other storage ops.
+        barrier.seal().unwrap();
+        assert!(barrier.scan("log/", None).await.is_err());
     }
 }

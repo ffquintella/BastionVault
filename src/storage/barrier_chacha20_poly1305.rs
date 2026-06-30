@@ -150,6 +150,23 @@ impl Storage for ChaCha20Poly1305Barrier {
         self.backend.delete(key).await
     }
 
+    async fn scan(&self, prefix: &str, start_key: Option<&str>) -> Result<Vec<StorageEntry>, RvError> {
+        if self.barrier_info.load().sealed {
+            return Err(RvError::ErrBarrierSealed);
+        }
+
+        // One bulk read from the backend, then decrypt each entry in
+        // memory. The full backend key is the AEAD AAD (matching how
+        // `put` encrypted it), so decryption uses `be.key` verbatim.
+        let raw = self.backend.scan(prefix, start_key).await?;
+        let mut out = Vec::with_capacity(raw.len());
+        for be in raw {
+            let plain = self.decrypt(&be.key, be.value.as_slice())?;
+            out.push(StorageEntry { key: be.key, value: plain });
+        }
+        Ok(out)
+    }
+
     async fn lock(&self, lock_name: &str) -> Result<Box<dyn Any>, RvError> {
         self.backend.lock(lock_name).await
     }
