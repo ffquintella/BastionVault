@@ -322,10 +322,19 @@ export const logout = () => invoke<void>("logout");
 // Secrets (mount/mountType passed for kv-v2 path handling)
 export const listSecrets = (path: string, mount?: string, mountType?: string) =>
   invoke<SecretListResult>("list_secrets", { path, mount, mountType });
-export const readSecret = (path: string, mount?: string, mountType?: string) =>
-  invoke<SecretData>("read_secret", { path, mount, mountType });
+export const readSecret = (path: string, mount?: string, mountType?: string, env?: string) =>
+  invoke<SecretData>("read_secret", { path, mount, mountType, env });
 export const writeSecret = (path: string, data: Record<string, string>, mount?: string, mountType?: string) =>
   invoke<void>("write_secret", { path, data, mount, mountType });
+/** KV v2: write key/value pairs as overrides for a single environment. Base
+ *  values and other environments are preserved server-side. */
+export const writeSecretEnv = (
+  path: string,
+  env: string,
+  data: Record<string, string>,
+  mount?: string,
+  mountType?: string,
+) => invoke<void>("write_secret_env", { path, env, data, mount, mountType });
 export const deleteSecret = (path: string, mount?: string, mountType?: string) =>
   invoke<void>("delete_secret", { path, mount, mountType });
 
@@ -379,6 +388,8 @@ export interface KvV2EngineConfig {
   max_versions: number;
   cas_required: boolean;
   delete_version_after: string;
+  /** Advisory environment names offered in the env selector. */
+  environments?: string[];
 }
 export const readKvV2EngineConfig = (mount: string) =>
   invoke<KvV2EngineConfig>("read_kv_v2_engine_config", { mount });

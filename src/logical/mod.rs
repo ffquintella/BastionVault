@@ -28,6 +28,7 @@ pub mod path;
 pub mod request;
 pub mod response;
 pub mod secret;
+pub mod util;
 
 pub use auth::Auth;
 pub use backend::{LogicalBackend, CTX_KEY_BACKEND_PATH};
@@ -38,6 +39,7 @@ pub use path::{Path, PathOperation};
 pub use request::Request;
 pub use response::Response;
 pub use secret::{Secret, SecretData};
+pub use util::{parse_query_allowlist, split_path_query};
 
 #[derive(Eq, PartialEq, Copy, Clone, Debug, EnumString, Display, Enum, Serialize, Deserialize)]
 pub enum Operation {

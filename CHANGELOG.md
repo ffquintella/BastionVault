@@ -43,7 +43,42 @@ EXAMPLE ENTRY:
 =============================================================================
 -->
 
-## [Unreleased]
+## [0.22.0] - 2026-06-30
+
+### Added
+
+#### Per-environment KV v2 secret values (`features/kv-environments.md`)
+
+- **`env` request parameter wired end-to-end.** GET query strings (`?env=prod`)
+  and the embedded-backend path are now parsed into `req.data` *before* the ACL
+  check (new `src/logical/util.rs::split_path_query` / `parse_query_allowlist`,
+  consumed by both `src/http/logical.rs` and `gui/src-tauri/src/backend.rs`).
+  This makes a policy's `required_parameters = ["env"]` and
+  `allowed_parameters = { env = [...] }` actually enforceable on KV reads --
+  previously a plain GET carried no `env`, so such a policy silently locked
+  reads. The router now merges path captures into seeded `req.data` instead of
+  replacing it (`src/logical/backend.rs`).
+- **A single KV v2 secret can hold per-environment values.** `VersionData` gains
+  an `envs` map of per-environment override sets (`src/modules/kv_v2/version.rs`).
+  A read with `?env=<name>` returns the shared base merged with that
+  environment's overrides (`merge_env`); the response carries `resolved_env` and
+  `available_envs`. Writes support a full multi-env body (`envs`), a targeted
+  single-environment patch (`env` + `data`, carrying base and other envs
+  forward), and legacy base-only writes (which preserve existing envs). Reads
+  are strict: an env declared-but-absent on a secret returns 404; legacy secrets
+  with no envs ignore `env`. Backward-compatible on disk via serde defaults.
+- **Engine-level environment registry.** `kv-v2` `config` accepts an
+  `environments` list (`src/modules/kv_v2/metadata.rs`) the GUI offers as a
+  dropdown; free-form env names are still accepted.
+- **CLI `--env`** on `bvault read` (sends `?env=`) and `bvault write` (targeted
+  per-environment patch) -- `src/cli/command/{read,write}.rs`.
+- **GUI env support** (`gui/src/routes/SecretsPage.tsx`): an environment selector
+  on the secret detail view, per-key inherited/override badges, env-scoped
+  editing, an optional environment on the create modal, and the env registry on
+  the engine config. New `write_secret_env` Tauri command; `read_secret` returns
+  env metadata.
+- **Audit** now records the `env` selector from `req.data` on reads
+  (`src/audit/entry.rs`, verbatim -- `env` is non-secret).
 
 ### Fixed
 

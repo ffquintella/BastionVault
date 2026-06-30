@@ -791,6 +791,41 @@ mod mod_policy_tests {
     }
 
     #[test]
+    fn test_env_required_and_allowed_parameter() {
+        // Mirrors the field policy on `secret/data/apps/netrisk/*`: `env` is
+        // required and constrained to a value set. The ACL check runs in the
+        // pre-route phase, so at check time `req.data` holds only the seeded
+        // query params (`env`) — path captures like `name` aren't there yet.
+        let hcl = r#"
+        path "secret/data/apps/netrisk/*" {
+            capabilities = ["read", "list"]
+            required_parameters = ["env"]
+            allowed_parameters = {"env" = ["prod", "staging"]}
+        }"#;
+        let policy = Policy::from_str(hcl).unwrap();
+        let perms = &policy.paths[0].permissions;
+
+        let make = |env: Option<&str>| {
+            let mut req = Request::new("secret/data/apps/netrisk/db");
+            req.operation = Operation::Read;
+            if let Some(e) = env {
+                let mut d = serde_json::Map::new();
+                d.insert("env".to_string(), Value::String(e.to_string()));
+                req.data = Some(d);
+            }
+            req
+        };
+
+        // Missing env -> required_parameters denies (this is the 403 a plain
+        // GET without `?env=` currently hits).
+        assert!(!perms.check(&make(None), false).unwrap().allowed);
+        // env=prod -> required satisfied and value allowed.
+        assert!(perms.check(&make(Some("prod")), false).unwrap().allowed);
+        // env=dev -> required satisfied but value not in the allowed set.
+        assert!(!perms.check(&make(Some("dev")), false).unwrap().allowed);
+    }
+
+    #[test]
     fn test_connect_capability_round_trip() {
         // String <-> enum round-trip and bit value for the connect capability.
         assert_eq!(Capability::from_str("connect").unwrap(), Capability::Connect);

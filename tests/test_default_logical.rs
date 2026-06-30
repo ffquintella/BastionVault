@@ -690,6 +690,132 @@ async fn test_sys_logical_backend(core: &Core, token: &str) {
     test_sys_raw_api_feature(core, token).await;
 }
 
+/// Per-environment KV-v2 values: a single secret carries a shared base plus
+/// per-environment override sets; reads select an environment and receive the
+/// merged result. Covers full multi-env writes, targeted single-env patches,
+/// legacy base-only writes (which must carry envs forward), strict misses, and
+/// the engine-level environment registry.
+#[maybe_async::maybe_async]
+async fn test_kv_v2_environments(core: &Core, token: &str) {
+    let mount_data = json!({ "type": "kv-v2" }).as_object().unwrap().clone();
+    test_write_api(core, token, "sys/mounts/kvenv/", true, Some(mount_data)).await;
+
+    // Helper: read with an optional env selector seeded into req.data, exactly
+    // as the HTTP/embedded boundary does before routing.
+    async fn read_env(
+        core: &Core,
+        token: &str,
+        path: &str,
+        env: Option<&str>,
+    ) -> Option<Map<String, Value>> {
+        let mut req = Request::new(path);
+        req.operation = Operation::Read;
+        req.client_token = token.to_string();
+        if let Some(e) = env {
+            req.data = Some(json!({ "env": e }).as_object().unwrap().clone());
+        }
+        let resp = core.handle_request(&mut req).await.unwrap();
+        resp.and_then(|r| r.data)
+    }
+
+    // --- Full multi-env write: base + prod/staging overrides ---
+    let body = json!({
+        "data": { "host": "db.internal", "port": 5432 },
+        "envs": {
+            "prod":    { "host": "db.prod",    "tls": true },
+            "staging": { "host": "db.staging" }
+        }
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let mut req = Request::new("kvenv/data/svc");
+    req.operation = Operation::Write;
+    req.client_token = token.to_string();
+    req.body = Some(body);
+    assert!(core.handle_request(&mut req).await.is_ok());
+
+    // --- Read base (no env) -> base only, resolved_env null ---
+    let d = read_env(core, token, "kvenv/data/svc", None).await.unwrap();
+    assert_eq!(d["data"]["host"].as_str().unwrap(), "db.internal");
+    assert!(d["data"].get("tls").is_none());
+    assert!(d["metadata"]["resolved_env"].is_null());
+    let avail = d["metadata"]["available_envs"].as_array().unwrap();
+    assert_eq!(avail.len(), 2);
+
+    // --- Read env=prod -> base merged with prod overrides ---
+    let d = read_env(core, token, "kvenv/data/svc", Some("prod")).await.unwrap();
+    assert_eq!(d["data"]["host"].as_str().unwrap(), "db.prod");
+    assert_eq!(d["data"]["port"].as_u64().unwrap(), 5432); // inherited from base
+    assert_eq!(d["data"]["tls"].as_bool().unwrap(), true);
+    assert_eq!(d["metadata"]["resolved_env"].as_str().unwrap(), "prod");
+
+    // --- Read env=staging -> staging override over base ---
+    let d = read_env(core, token, "kvenv/data/svc", Some("staging")).await.unwrap();
+    assert_eq!(d["data"]["host"].as_str().unwrap(), "db.staging");
+    assert_eq!(d["data"]["port"].as_u64().unwrap(), 5432);
+
+    // --- Strict miss: env declared-but-absent -> None (404 over HTTP) ---
+    assert!(read_env(core, token, "kvenv/data/svc", Some("dev")).await.is_none());
+
+    // --- Targeted patch: update only prod, carry base + staging forward ---
+    let body = json!({ "env": "prod", "data": { "host": "db.prod2" } })
+        .as_object()
+        .unwrap()
+        .clone();
+    let mut req = Request::new("kvenv/data/svc");
+    req.operation = Operation::Write;
+    req.client_token = token.to_string();
+    req.body = Some(body);
+    assert!(core.handle_request(&mut req).await.is_ok());
+
+    let d = read_env(core, token, "kvenv/data/svc", Some("prod")).await.unwrap();
+    assert_eq!(d["data"]["host"].as_str().unwrap(), "db.prod2");
+    // staging + base untouched by the prod patch.
+    let d = read_env(core, token, "kvenv/data/svc", Some("staging")).await.unwrap();
+    assert_eq!(d["data"]["host"].as_str().unwrap(), "db.staging");
+    let d = read_env(core, token, "kvenv/data/svc", None).await.unwrap();
+    assert_eq!(d["data"]["host"].as_str().unwrap(), "db.internal");
+
+    // --- Legacy base-only write must carry envs forward, not wipe them ---
+    let body = json!({ "data": { "host": "db.internal2" } }).as_object().unwrap().clone();
+    let mut req = Request::new("kvenv/data/svc");
+    req.operation = Operation::Write;
+    req.client_token = token.to_string();
+    req.body = Some(body);
+    assert!(core.handle_request(&mut req).await.is_ok());
+    let d = read_env(core, token, "kvenv/data/svc", Some("prod")).await.unwrap();
+    assert_eq!(d["data"]["host"].as_str().unwrap(), "db.prod2"); // env survived
+
+    // --- Ambiguous write (env + envs) is rejected ---
+    let body = json!({ "env": "prod", "data": { "x": 1 }, "envs": { "prod": {} } })
+        .as_object()
+        .unwrap()
+        .clone();
+    let mut req = Request::new("kvenv/data/svc");
+    req.operation = Operation::Write;
+    req.client_token = token.to_string();
+    req.body = Some(body);
+    assert!(core.handle_request(&mut req).await.is_err());
+
+    // --- Engine env registry round-trips through config ---
+    let cfg = json!({ "environments": ["prod", "staging", "dev"] }).as_object().unwrap().clone();
+    let mut req = Request::new("kvenv/config");
+    req.operation = Operation::Write;
+    req.client_token = token.to_string();
+    req.body = Some(cfg);
+    assert!(core.handle_request(&mut req).await.is_ok());
+
+    let mut req = Request::new("kvenv/config");
+    req.operation = Operation::Read;
+    req.client_token = token.to_string();
+    let resp = core.handle_request(&mut req).await.unwrap().unwrap();
+    let envs = resp.data.unwrap()["environments"].as_array().unwrap().clone();
+    assert_eq!(envs.len(), 3);
+
+    test_delete_api(core, token, "sys/mounts/kvenv/", true).await;
+}
+
 #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
 async fn test_default_logical() {
     use bastion_vault::BastionVault;
@@ -736,6 +862,7 @@ async fn test_default_logical() {
         test_default_secret(&core, &root_token).await;
         test_kv_logical_backend(&core, &root_token).await;
         test_kv_v2_logical_backend(&core, &root_token).await;
+        test_kv_v2_environments(&core, &root_token).await;
         test_kv_v2_version_history_tracking(&core, &root_token).await;
         test_resource_metadata_history(&core, &root_token).await;
         test_resource_secret_versioning(&core, &root_token).await;

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { Layout } from "../components/Layout";
 import {
   Badge,
@@ -12,6 +12,7 @@ import {
   EntityPicker,
   GroupsSection,
   Modal,
+  Select,
   SecretPairsEditor,
   SecretHistoryPanel,
   Table,
@@ -48,6 +49,17 @@ export function SecretsPage() {
   const [editingSecret, setEditingSecret] = useState(false);
   const [editPairs, setEditPairs] = useState<SecretPair[]>([]);
   const [savingEdit, setSavingEdit] = useState(false);
+
+  // Per-environment view (KV v2). `selectedEnv === null` means the base
+  // (shared) set; otherwise the merged base+overrides for that environment.
+  // `availableEnvs` comes from the read response, `engineEnvs` from the mount's
+  // config registry, and `baseData` lets us flag inherited vs overridden keys.
+  const [selectedEnv, setSelectedEnv] = useState<string | null>(null);
+  const [availableEnvs, setAvailableEnvs] = useState<string[]>([]);
+  const [engineEnvs, setEngineEnvs] = useState<string[]>([]);
+  const [baseData, setBaseData] = useState<Record<string, unknown>>({});
+  // Optional environment for a brand-new secret (blank = base/shared).
+  const [newEnv, setNewEnv] = useState("");
 
   // Sharing: modal and target key for the currently-selected secret.
   // `shareTarget` is the leaf key name (same as `selectedKey`) — we
@@ -221,6 +233,29 @@ export function SecretsPage() {
     }
   }, [currentPath, loadKeys]);
 
+  // Load the mount's advisory environment list (KV v2 only) so the env
+  // selector can offer it as a dropdown. Failures are non-fatal — the
+  // selector still surfaces any envs a secret already declares.
+  useEffect(() => {
+    if (mountType !== "kv-v2" || !mountBase) {
+      setEngineEnvs([]);
+      return;
+    }
+    api
+      .readKvV2EngineConfig(mountBase)
+      .then((cfg) => setEngineEnvs(cfg.environments ?? []))
+      .catch(() => setEngineEnvs([]));
+  }, [mountBase, mountType]);
+
+  // Base (shared) + the union of registry and secret-declared environments.
+  const envOptions = useMemo(() => {
+    const set = new Set<string>([...engineEnvs, ...availableEnvs]);
+    return [
+      { value: "__base__", label: "Base (shared)" },
+      ...Array.from(set).sort().map((e) => ({ value: e, label: e })),
+    ];
+  }, [engineEnvs, availableEnvs]);
+
   async function handleSelectKey(key: string) {
     if (key.endsWith("/")) {
       setCurrentPath(currentPath + key);
@@ -230,8 +265,32 @@ export function SecretsPage() {
       const result = await api.readSecret(currentPath + key, mountBase, mountType);
       setSelectedKey(key);
       setSecretData(result.data);
+      setBaseData(result.data);
+      setAvailableEnvs(result.available_envs ?? []);
+      setSelectedEnv(null);
       setEditingSecret(false);
       setShowHistory(false);
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
+  }
+
+  /** Switch the detail view to a different environment (or `null` for the
+   *  shared base) by re-reading the secret with the env selector. */
+  async function selectEnv(env: string | null) {
+    if (!selectedKey) return;
+    try {
+      const result = await api.readSecret(
+        currentPath + selectedKey,
+        mountBase,
+        mountType,
+        env ?? undefined,
+      );
+      setSelectedEnv(env);
+      setSecretData(result.data);
+      if (env === null) setBaseData(result.data);
+      if (result.available_envs) setAvailableEnvs(result.available_envs);
+      setEditingSecret(false);
     } catch (e: unknown) {
       toast("error", extractError(e));
     }
@@ -348,15 +407,27 @@ export function SecretsPage() {
   async function handleCreate() {
     if (!newKey) return;
     try {
-      await api.writeSecret(
-        currentPath + newKey,
-        dataFromPairs(createPairs),
-        mountBase,
-        mountType,
-      );
-      toast("success", `Created ${newKey}`);
+      const env = newEnv.trim();
+      if (env && mountType === "kv-v2") {
+        await api.writeSecretEnv(
+          currentPath + newKey,
+          env,
+          dataFromPairs(createPairs),
+          mountBase,
+          mountType,
+        );
+      } else {
+        await api.writeSecret(
+          currentPath + newKey,
+          dataFromPairs(createPairs),
+          mountBase,
+          mountType,
+        );
+      }
+      toast("success", `Created ${newKey}${env ? ` (${env})` : ""}`);
       setShowCreate(false);
       setNewKey("");
+      setNewEnv("");
       setCreatePairs([{ key: "", value: "" }]);
       loadKeys();
     } catch (e: unknown) {
@@ -378,14 +449,22 @@ export function SecretsPage() {
     }
     setSavingEdit(true);
     try {
-      await api.writeSecret(currentPath + selectedKey, data, mountBase, mountType);
-      toast("success", `Updated ${selectedKey}`);
+      if (selectedEnv) {
+        // Env view: persist the edited pairs as this environment's overrides.
+        await api.writeSecretEnv(currentPath + selectedKey, selectedEnv, data, mountBase, mountType);
+      } else {
+        await api.writeSecret(currentPath + selectedKey, data, mountBase, mountType);
+      }
+      toast("success", `Updated ${selectedKey}${selectedEnv ? ` (${selectedEnv})` : ""}`);
       const refreshed = await api.readSecret(
         currentPath + selectedKey,
         mountBase,
         mountType,
+        selectedEnv ?? undefined,
       );
       setSecretData(refreshed.data);
+      if (!selectedEnv) setBaseData(refreshed.data);
+      if (refreshed.available_envs) setAvailableEnvs(refreshed.available_envs);
       setEditingSecret(false);
     } catch (e: unknown) {
       toast("error", extractError(e));
@@ -598,6 +677,16 @@ export function SecretsPage() {
                   />
                 ) : editingSecret ? (
                   <div className="space-y-3">
+                    {mountType === "kv-v2" && (
+                      <p className="text-sm text-[var(--color-text-muted)]">
+                        Editing{" "}
+                        <span className="font-medium text-[var(--color-text)]">
+                          {selectedEnv ? `environment "${selectedEnv}"` : "base (shared)"}
+                        </span>
+                        {selectedEnv &&
+                          " — saved keys become overrides for this environment."}
+                      </p>
+                    )}
                     <SecretPairsEditor pairs={editPairs} onChange={setEditPairs} />
                     <div className="flex gap-2 pt-2">
                       <Button
@@ -620,6 +709,24 @@ export function SecretsPage() {
                   </div>
                 ) : (
                   <div className="space-y-3">
+                    {mountType === "kv-v2" && envOptions.length > 1 && (
+                      <div className="flex items-end gap-2">
+                        <Select
+                          label="Environment"
+                          className="max-w-[14rem]"
+                          options={envOptions}
+                          value={selectedEnv ?? "__base__"}
+                          onChange={(e) =>
+                            selectEnv(e.target.value === "__base__" ? null : e.target.value)
+                          }
+                        />
+                        {selectedEnv && (
+                          <span className="pb-2">
+                            <Badge variant="info" label={`base + ${selectedEnv} overrides`} />
+                          </span>
+                        )}
+                      </div>
+                    )}
                     <table className="w-full text-sm">
                       <thead>
                         <tr className="text-[var(--color-text-muted)] text-left">
@@ -628,14 +735,32 @@ export function SecretsPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {Object.entries(secretData).map(([k, v]) => (
-                          <tr key={k} className="border-t border-[var(--color-border)]">
-                            <td className="py-2 font-mono text-[var(--color-primary)]">{k}</td>
-                            <td className="py-2 font-mono">
-                              <MaskedValue value={String(v)} />
-                            </td>
-                          </tr>
-                        ))}
+                        {Object.entries(secretData).map(([k, v]) => {
+                          const overridden =
+                            selectedEnv != null &&
+                            (!(k in baseData) || String(baseData[k]) !== String(v));
+                          return (
+                            <tr key={k} className="border-t border-[var(--color-border)]">
+                              <td className="py-2 font-mono text-[var(--color-primary)]">
+                                <span className="min-w-0 truncate">{k}</span>
+                                {selectedEnv && (
+                                  <span
+                                    className={`ml-2 text-[10px] uppercase tracking-wide ${
+                                      overridden
+                                        ? "text-[var(--color-primary)]"
+                                        : "text-[var(--color-text-muted)]"
+                                    }`}
+                                  >
+                                    {overridden ? "override" : "inherited"}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2 font-mono">
+                                <MaskedValue value={String(v)} />
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                     <div className="flex gap-2 pt-2">
@@ -698,6 +823,14 @@ export function SecretsPage() {
               onChange={(e) => setNewKey(e.target.value)}
               placeholder="my-secret"
             />
+            {mountType === "kv-v2" && (
+              <Input
+                label="Environment (optional)"
+                value={newEnv}
+                onChange={(e) => setNewEnv(e.target.value)}
+                placeholder="leave blank for base / shared"
+              />
+            )}
             <SecretPairsEditor pairs={createPairs} onChange={setCreatePairs} />
           </div>
         </Modal>

@@ -43,6 +43,14 @@ stdin."#
     )]
     data: Vec<String>,
 
+    #[arg(
+        long = "env",
+        value_name = "ENV",
+        help = "Write these key=value pairs as overrides for this environment only (KV v2). \
+                The secret's base values and other environments are preserved."
+    )]
+    env: Option<String>,
+
     #[deref]
     #[command(flatten, next_help_heading = "HTTP Options")]
     http_options: command::HttpOptions,
@@ -66,6 +74,12 @@ impl CommandExecutor for Write {
                 // Wrap data under "data" key for v2
                 let mut wrapped: Map<String, Value> = Map::new();
                 wrapped.insert("data".to_string(), json!(kv_data));
+                // With --env, the server treats this as a targeted patch of
+                // that environment's overrides, carrying base + other envs
+                // forward into the new version.
+                if let Some(env) = self.env.as_deref().filter(|s| !s.is_empty()) {
+                    wrapped.insert("env".to_string(), Value::String(env.to_string()));
+                }
                 (v2_path, wrapped)
             }
             _ => (self.path.clone(), kv_data),

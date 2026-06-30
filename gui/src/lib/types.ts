@@ -194,6 +194,11 @@ export interface MountInfo {
 // Secrets
 export interface SecretData {
   data: Record<string, unknown>;
+  /** KV v2: the environment whose overrides were merged into `data`, or null
+   *  when the base (shared) set was returned. */
+  resolved_env?: string | null;
+  /** KV v2: environments declared on this secret (empty for plain secrets). */
+  available_envs?: string[];
 }
 
 export interface SecretListResult {

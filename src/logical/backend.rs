@@ -94,11 +94,14 @@ impl Backend for LogicalBackend {
 
         if let Some((path, captures)) = self.match_path(&req.path) {
             if !captures.is_empty() {
-                let mut data = Map::new();
+                // Merge path captures *into* any pre-seeded `req.data` rather
+                // than replacing it — the entry boundaries seed query params
+                // (e.g. `env`, `version`) here before the router runs, and the
+                // KV handler still needs them after routing.
+                let data = req.data.get_or_insert_with(Map::new);
                 captures.iter().for_each(|(key, value)| {
                     data.insert(key.to_string(), Value::String(value.to_string()));
                 });
-                req.data = Some(data);
             }
 
             req.match_path = Some(path.clone());

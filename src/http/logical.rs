@@ -133,6 +133,18 @@ async fn logical_request_handler_inner(
             r.operation = Operation::List;
         }
     }
+
+    // Lift allowlisted query parameters (`env`, `version`) into `r.data` so
+    // they are visible to the ACL check (which runs before path captures are
+    // populated) and to KV handlers. Writes carry these in the JSON body
+    // instead; parsing the query here is harmless when empty.
+    if let Some(params) = crate::logical::parse_query_allowlist(req.query_string()) {
+        let data = r.data.get_or_insert_with(Default::default);
+        for (k, v) in params {
+            data.entry(k).or_insert(v);
+        }
+    }
+
     #[cfg(feature = "sync_handler")]
     let ret = core.handle_request(&mut r)?;
     #[cfg(not(feature = "sync_handler"))]

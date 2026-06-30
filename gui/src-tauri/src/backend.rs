@@ -43,9 +43,15 @@ mod embedded {
             token: &str,
             namespace: Option<&str>,
         ) -> Result<Option<JsonResponse>, ClientError> {
-            use bastion_vault::logical::{Operation as ServerOp, Request};
+            use bastion_vault::logical::{split_path_query, Operation as ServerOp, Request};
 
             let core = self.vault.core.load();
+
+            // The GUI glues an `?env=<name>` selector onto the path; the router
+            // would otherwise absorb it into the secret name. Split it off and
+            // seed `req.data` exactly like the HTTP entry boundary does, so the
+            // ACL check and KV handler see `env` identically in both modes.
+            let (clean_path, query_data) = split_path_query(path);
 
             let mut req = Request {
                 operation: match operation {
@@ -54,9 +60,10 @@ mod embedded {
                     Operation::Delete => ServerOp::Delete,
                     Operation::List => ServerOp::List,
                 },
-                path: path.to_string(),
+                path: clean_path,
                 client_token: token.to_string(),
                 body,
+                data: query_data,
                 ..Default::default()
             };
             // Multi-tenancy: carry the active namespace as the request header

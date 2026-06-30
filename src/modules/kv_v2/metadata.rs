@@ -40,6 +40,12 @@ pub struct EngineConfig {
     pub max_versions: u64,
     pub cas_required: bool,
     pub delete_version_after: String,
+    /// Advisory list of environment names the GUI offers as a dropdown when
+    /// editing per-environment secret values. Free-form env names are still
+    /// accepted on writes — this list is a convenience, not a constraint.
+    /// `#[serde(default)]` keeps older on-disk config deserializable.
+    #[serde(default)]
+    pub environments: Vec<String>,
 }
 
 impl Default for EngineConfig {
@@ -48,6 +54,7 @@ impl Default for EngineConfig {
             max_versions: 0,
             cas_required: false,
             delete_version_after: "0s".to_string(),
+            environments: Vec::new(),
         }
     }
 }

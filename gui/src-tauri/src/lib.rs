@@ -289,6 +289,7 @@ pub fn run() {
             commands::secrets::list_secrets,
             commands::secrets::read_secret,
             commands::secrets::write_secret,
+            commands::secrets::write_secret_env,
             commands::secrets::delete_secret,
             commands::secrets::list_secret_versions,
             commands::secrets::read_secret_version,

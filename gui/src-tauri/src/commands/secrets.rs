@@ -10,9 +10,15 @@ use crate::state::AppState;
 
 use super::make_request;
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 pub struct SecretData {
     pub data: HashMap<String, Value>,
+    /// For KV v2 env-scoped reads: the environment whose overrides were
+    /// merged into `data`, or `None` when the base (shared) set was returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_env: Option<String>,
+    /// Environments declared on this secret (empty for plain/legacy secrets).
+    pub available_envs: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -65,27 +71,50 @@ pub async fn read_secret(
     path: String,
     mount: Option<String>,
     mount_type: Option<String>,
+    env: Option<String>,
 ) -> CmdResult<SecretData> {
     let m = mount.as_deref().unwrap_or("");
     let mt = mount_type.as_deref().unwrap_or("kv");
-    let actual_path = adjust_kv_path(&path, m, mt, "data");
+    let mut actual_path = adjust_kv_path(&path, m, mt, "data");
+    // Carry the env selector as a query param; the server lifts it into the
+    // request data so the ACL check and KV engine both see it. Works for both
+    // the embedded and remote backends.
+    if let Some(e) = env.as_deref().filter(|s| !s.is_empty()) {
+        actual_path = format!("{actual_path}?env={e}");
+    }
     let resp = make_request(&state, Operation::Read, actual_path, None).await?;
 
     match resp {
         Some(r) => {
             let raw = r.data.unwrap_or_default();
-            // v2 nests the actual secret under a "data" key
-            let data = if mt == "kv-v2" {
-                raw.get("data")
+            // v2 nests the actual secret under a "data" key and exposes env
+            // info under "metadata".
+            if mt == "kv-v2" {
+                let data = raw
+                    .get("data")
                     .and_then(|v| v.as_object())
                     .cloned()
-                    .unwrap_or(raw)
+                    .unwrap_or_default()
                     .into_iter()
-                    .collect()
+                    .collect();
+                let meta = raw.get("metadata");
+                let resolved_env = meta
+                    .and_then(|m| m.get("resolved_env"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let available_envs = meta
+                    .and_then(|m| m.get("available_envs"))
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                Ok(SecretData { data, resolved_env, available_envs })
             } else {
-                raw.into_iter().collect()
-            };
-            Ok(SecretData { data })
+                Ok(SecretData {
+                    data: raw.into_iter().collect(),
+                    resolved_env: None,
+                    available_envs: Vec::new(),
+                })
+            }
         }
         None => Err("Secret not found".into()),
     }
@@ -116,6 +145,40 @@ pub async fn write_secret(
     } else {
         kv_body
     };
+
+    make_request(&state, Operation::Write, actual_path, Some(body)).await?;
+    Ok(())
+}
+
+/// Write key/value pairs as overrides for a single environment (KV v2 only).
+/// The server carries the secret's base values and other environments forward
+/// into the new version, replacing only this environment's overrides.
+#[tauri::command]
+pub async fn write_secret_env(
+    state: State<'_, AppState>,
+    path: String,
+    env: String,
+    data: HashMap<String, String>,
+    mount: Option<String>,
+    mount_type: Option<String>,
+) -> CmdResult<()> {
+    let m = mount.as_deref().unwrap_or("");
+    let mt = mount_type.as_deref().unwrap_or("kv");
+    if mt != "kv-v2" {
+        return Err("environment-scoped writes require a kv-v2 mount".into());
+    }
+    if env.trim().is_empty() {
+        return Err("env is required".into());
+    }
+    let actual_path = adjust_kv_path(&path, m, mt, "data");
+
+    let mut kv_body = Map::new();
+    for (k, v) in data {
+        kv_body.insert(k, Value::String(v));
+    }
+    let mut body = Map::new();
+    body.insert("data".to_string(), Value::Object(kv_body));
+    body.insert("env".to_string(), Value::String(env));
 
     make_request(&state, Operation::Write, actual_path, Some(body)).await?;
     Ok(())
@@ -455,6 +518,10 @@ pub struct KvV2EngineConfig {
     pub cas_required: bool,
     /// Duration after which versions are auto-soft-deleted. `"0s"` disables.
     pub delete_version_after: String,
+    /// Advisory environment names offered in the GUI's env selector. Free-form
+    /// env names are still accepted on writes — this is a convenience list.
+    #[serde(default)]
+    pub environments: Vec<String>,
 }
 
 #[tauri::command]
@@ -479,6 +546,11 @@ pub async fn read_kv_v2_engine_config(
             .and_then(|v| v.as_str())
             .unwrap_or("0s")
             .to_string(),
+        environments: data
+            .get("environments")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
     })
 }
 
@@ -498,6 +570,10 @@ pub async fn write_kv_v2_engine_config(
     body.insert(
         "delete_version_after".to_string(),
         Value::String(config.delete_version_after),
+    );
+    body.insert(
+        "environments".to_string(),
+        Value::Array(config.environments.into_iter().map(Value::String).collect()),
     );
     make_request(&state, Operation::Write, path, Some(body)).await?;
     Ok(())

@@ -12,7 +12,7 @@ use std::{any::Any, collections::HashMap, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use derive_more::Deref;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::{
     context::Context,
@@ -28,7 +28,7 @@ use crate::{
 };
 
 use self::metadata::{EngineConfig, SecretMetadata, VersionMetadata};
-use self::version::VersionData;
+use self::version::{merge_env, VersionData};
 
 static KV_V2_BACKEND_HELP: &str = r#"
 The KV v2 backend stores versioned key-value secrets. Each write creates
@@ -108,6 +108,11 @@ impl KvV2Backend {
                             field_type: FieldType::Int,
                             default: "0",
                             description: "Version number to read (0 = latest)"
+                        },
+                        "env": {
+                            field_type: FieldType::Str,
+                            default: "",
+                            description: "Environment selector; read returns the base secret merged with this environment's overrides"
                         }
                     },
                     operations: [
@@ -238,6 +243,39 @@ fn get_name_from_request(req: &Request) -> Result<String, RvError> {
     Err(RvError::ErrRequestFieldNotFound)
 }
 
+/// Read the optional `env` selector — query (`req.data`) first, then the JSON
+/// body. Empty or absent yields `None`.
+fn get_env_from_request(req: &Request) -> Option<String> {
+    for map in [req.data.as_ref(), req.body.as_ref()].into_iter().flatten() {
+        if let Some(v) = map.get("env").and_then(|v| v.as_str()) {
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Read the requested version (0 = latest) — query (`req.data`) first, then
+/// the JSON body.
+fn get_version_from_request(req: &Request) -> u64 {
+    for map in [req.data.as_ref(), req.body.as_ref()].into_iter().flatten() {
+        if let Some(v) = map.get("version").and_then(|v| v.as_u64()) {
+            return v;
+        }
+    }
+    0
+}
+
+/// Env names are advisory (free-form is allowed) but must not break the stored
+/// JSON or be meaningless: non-empty, no `/`, no control characters.
+fn sanitize_env_name(name: &str) -> Result<(), RvError> {
+    if name.is_empty() || name.contains('/') || name.chars().any(|c| c.is_control()) {
+        return Err(RvError::ErrRequestInvalid);
+    }
+    Ok(())
+}
+
 fn get_versions_from_body(req: &Request) -> Vec<u64> {
     if let Some(body) = req.body.as_ref() {
         if let Some(versions) = body.get("versions") {
@@ -356,6 +394,18 @@ impl KvV2BackendInner {
             if let Some(v) = body.get("delete_version_after").and_then(|v| v.as_str()) {
                 config.delete_version_after = v.to_string();
             }
+            if let Some(arr) = body.get("environments").and_then(|v| v.as_array()) {
+                let mut envs: Vec<String> = Vec::new();
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        sanitize_env_name(s)?;
+                        if !envs.iter().any(|e| e == s) {
+                            envs.push(s.to_string());
+                        }
+                    }
+                }
+                config.environments = envs;
+            }
         }
 
         self.write_config(req, &config).await?;
@@ -368,19 +418,15 @@ impl KvV2BackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let name = get_name_from_request(req)?;
+        let env = get_env_from_request(req);
 
         let meta = match self.read_metadata(req, &name).await? {
             Some(m) => m,
             None => return Ok(None),
         };
 
-        // Determine which version to read
-        let requested_version = req
-            .body
-            .as_ref()
-            .and_then(|b| b.get("version"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        // Determine which version to read (query string or body; 0 = latest).
+        let requested_version = get_version_from_request(req);
 
         let version = if requested_version == 0 { meta.current_version } else { requested_version };
 
@@ -416,8 +462,23 @@ impl KvV2BackendInner {
             None => return Err(RvError::ErrModuleKvV2VersionNotFound),
         };
 
+        // Resolve the effective data for the requested environment:
+        //   - no env, or secret has no envs at all -> base data (legacy/plain).
+        //   - env present and declared -> base merged with that env's overrides.
+        //   - env present but the secret declares envs and not this one ->
+        //     strict miss: return None (HTTP maps a None read to 404).
+        let (resolved_data, resolved_env) = match &env {
+            Some(e) if !vd.envs.is_empty() => match vd.envs.get(e) {
+                Some(overrides) => (merge_env(&vd.data, overrides), Some(e.clone())),
+                None => return Ok(None),
+            },
+            _ => (vd.data.clone(), None),
+        };
+
+        let available_envs: Vec<String> = vd.envs.keys().cloned().collect();
+
         let resp_data = json!({
-            "data": vd.data,
+            "data": resolved_data,
             "metadata": {
                 "version": vd.version,
                 "created_time": vd.created_time,
@@ -425,6 +486,8 @@ impl KvV2BackendInner {
                 "destroyed": vd.destroyed,
                 "username": vd.username,
                 "operation": vd.operation,
+                "resolved_env": resolved_env,
+                "available_envs": available_envs,
             }
         });
 
@@ -438,18 +501,32 @@ impl KvV2BackendInner {
     ) -> Result<Option<Response>, RvError> {
         let name = get_name_from_request(req)?;
 
-        let body = req.body.as_ref().ok_or(RvError::ErrModuleKvV2DataFieldMissing)?;
-
-        // Extract data and options from body
-        let secret_data = match body.get("data") {
-            Some(Value::Object(d)) => d.clone(),
-            _ => return Err(RvError::ErrModuleKvV2DataFieldMissing),
+        // Extract everything from the body as owned values up front so the
+        // immutable borrow ends before we touch storage below.
+        let (secret_data, env_target, envs_payload, cas_value) = {
+            let body = req.body.as_ref().ok_or(RvError::ErrModuleKvV2DataFieldMissing)?;
+            let secret_data = match body.get("data") {
+                Some(Value::Object(d)) => d.clone(),
+                _ => return Err(RvError::ErrModuleKvV2DataFieldMissing),
+            };
+            let env_target = body
+                .get("env")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            let envs_payload = body.get("envs").and_then(|v| v.as_object()).cloned();
+            let cas_value = body
+                .get("options")
+                .and_then(|o| o.get("cas"))
+                .and_then(|c| c.as_u64());
+            (secret_data, env_target, envs_payload, cas_value)
         };
 
-        let cas_value = body
-            .get("options")
-            .and_then(|o| o.get("cas"))
-            .and_then(|c| c.as_u64());
+        // `env` (targeted single-environment patch) and `envs` (full multi-env
+        // write) are mutually exclusive ways to express the env map.
+        if env_target.is_some() && envs_payload.is_some() {
+            return Err(RvError::ErrRequestInvalid);
+        }
 
         let config = self.read_config(req).await?;
         let mut meta = self.read_metadata(req, &name).await?.unwrap_or_else(|| {
@@ -483,8 +560,45 @@ impl KvV2BackendInner {
         let user = caller_username(req);
         let op = if new_version == 1 { "create" } else { "update" };
 
+        // Assemble base + envs for the new version per the write mode. One
+        // version per write always captures the whole object (base + all envs).
+        let (base_data, envs_map) = if let Some(env_name) = env_target.as_deref() {
+            sanitize_env_name(env_name)?;
+            // Targeted patch: carry the current version's base + other envs
+            // forward, then set just this environment's overrides from `data`.
+            let (base, mut envs) = if meta.current_version > 0 {
+                match self.read_version(req, &name, meta.current_version).await? {
+                    Some(prev) => (prev.data, prev.envs),
+                    None => (Map::new(), Map::new()),
+                }
+            } else {
+                (Map::new(), Map::new())
+            };
+            envs.insert(env_name.to_string(), Value::Object(secret_data));
+            (base, envs)
+        } else if let Some(envs_obj) = envs_payload {
+            // Full multi-env write: `data` is the base, `envs` replaces the map.
+            for k in envs_obj.keys() {
+                sanitize_env_name(k)?;
+            }
+            (secret_data, envs_obj)
+        } else {
+            // Legacy base-only write: replace base, but carry existing envs
+            // forward so a plain write doesn't silently wipe per-env values.
+            let envs = if meta.current_version > 0 {
+                self.read_version(req, &name, meta.current_version)
+                    .await?
+                    .map(|p| p.envs)
+                    .unwrap_or_default()
+            } else {
+                Map::new()
+            };
+            (secret_data, envs)
+        };
+
         let vd = VersionData {
-            data: secret_data,
+            data: base_data,
+            envs: envs_map,
             version: new_version,
             created_time: now.clone(),
             deletion_time: String::new(),

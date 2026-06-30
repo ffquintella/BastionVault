@@ -177,7 +177,7 @@ impl AuditEntry {
                 id: req.id.clone(),
                 operation: operation_str(req.operation).to_string(),
                 path: req.path.clone(),
-                data: redact_body(req.body.as_ref(), hmac_key, log_raw),
+                data: audit_request_data(req, hmac_key, log_raw),
                 remote_address: derived_addr.clone(),
                 remote_address_socket: socket_addr,
                 remote_address_derived: derived_addr,
@@ -246,6 +246,33 @@ fn operation_str(op: Operation) -> &'static str {
 /// don't carry secrets directly and keeping them preserves the
 /// shape of the entry for operators reading the log. When `log_raw`
 /// is true the body is returned verbatim.
+/// Build the audited request `data`: the redacted body, with the non-secret
+/// `env` selector (which arrives on reads via the query string, i.e. in
+/// `req.data` not `req.body`) folded in verbatim so env-scoped reads are
+/// auditable. `env` is not secret-bearing, so it is never HMAC-redacted. Other
+/// `req.data` entries (path captures, `version`) are intentionally left out.
+fn audit_request_data(req: &Request, hmac_key: &[u8], log_raw: bool) -> Option<Value> {
+    let redacted = redact_body(req.body.as_ref(), hmac_key, log_raw);
+
+    let env = req
+        .data
+        .as_ref()
+        .and_then(|d| d.get("env"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+
+    let Some(env) = env else {
+        return redacted;
+    };
+
+    let mut obj = match redacted {
+        Some(Value::Object(m)) => m,
+        _ => Map::new(),
+    };
+    obj.insert("env".to_string(), Value::String(env.to_string()));
+    Some(Value::Object(obj))
+}
+
 fn redact_body(
     body: Option<&Map<String, Value>>,
     hmac_key: &[u8],
