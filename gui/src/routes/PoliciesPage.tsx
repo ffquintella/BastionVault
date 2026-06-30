@@ -35,6 +35,9 @@ export function PoliciesPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newContent, setNewContent] = useState(DEFAULT_POLICY);
+  // The Create modal mirrors the edit view: the operator can author the new
+  // policy with the visual block builder or by editing raw HCL.
+  const [createTab, setCreateTab] = useState<"builder" | "editor">("editor");
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [tab, setTab] = useState<PolicyTab>("editor");
@@ -167,6 +170,7 @@ export function PoliciesPage() {
       setShowCreate(false);
       setNewName("");
       setNewContent(DEFAULT_POLICY);
+      setCreateTab("editor");
       loadPolicies();
       selectPolicy(newName);
     } catch (e: unknown) {
@@ -339,12 +343,27 @@ export function PoliciesPage() {
               onChange={(e) => setNewName(e.target.value)}
               placeholder="my-policy"
             />
-            <Textarea
-              label="Policy (HCL)"
-              value={newContent}
-              onChange={(e) => setNewContent(e.target.value)}
-              className="min-h-[200px]"
+            <Tabs
+              tabs={[
+                { id: "builder", label: "Visual builder" },
+                { id: "editor", label: "HCL source" },
+              ]}
+              active={createTab}
+              onChange={(t) => setCreateTab(t as "builder" | "editor")}
             />
+            {createTab === "builder" ? (
+              <PolicyBlockEditor
+                value={newContent}
+                onChange={(hcl) => setNewContent(hcl)}
+              />
+            ) : (
+              <Textarea
+                label="Policy (HCL)"
+                value={newContent}
+                onChange={(e) => setNewContent(e.target.value)}
+                className="min-h-[200px]"
+              />
+            )}
           </div>
         </Modal>
 

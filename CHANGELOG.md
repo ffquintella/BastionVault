@@ -45,6 +45,14 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+
+- **Visual builder missing from Create Policy modal** (`gui/src/routes/PoliciesPage.tsx`)
+  -- the Create Policy modal only offered a raw HCL textarea, while the edit
+  view exposed both a "Visual builder" and "HCL source" tab. Added the same
+  tab toggle to the Create modal so new policies can be authored with the
+  `PolicyBlockEditor` block UI, matching the edit experience.
+
 ## [0.21.7] - 2026-06-30
 
 ### Fixed
