@@ -45,6 +45,18 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.22.3] - 2026-06-30
+
+### Fixed
+- GUI: Secrets owner lookups built a doubled path. Both the listing owner badge
+  and the Share window prepended `mountBase` to `currentPath`, but `currentPath`
+  already carries the mount prefix, producing paths like
+  `secret/secret/tests/foo` that never matched an owner record. Effects: every
+  owned secret was mislabelled "unowned" in the listing, and the Share window
+  showed the owner as unowned (hiding grant/transfer controls) while its
+  grant/revoke/list calls targeted the wrong canonical path. Both now use
+  `currentPath + key`, consistent with the asset-group and detail-panel paths.
+
 ## [0.22.2] - 2026-06-30
 
 ### Added

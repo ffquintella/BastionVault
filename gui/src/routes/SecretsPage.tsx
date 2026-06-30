@@ -205,7 +205,13 @@ export function SecretsPage() {
     const leaves = keys.filter((k) => !k.endsWith("/"));
     Promise.all(
       leaves.map(async (k) => {
-        const full = canonicalizeSecretPath(mountBase + currentPath + k);
+        // `currentPath` already carries the mount prefix (it is seeded
+        // from the mount path and folder clicks append to it), so do NOT
+        // prepend `mountBase` again — that would double it
+        // (e.g. "secret/secret/tests/...") and the owner lookup would
+        // miss, mislabelling every owned secret as "unowned". Mirrors the
+        // path built for the owner/share detail panel.
+        const full = canonicalizeSecretPath(currentPath + k);
         try {
           const o = await api.getKvOwner(full);
           return [k, o?.owned ? o.entity_id : ""] as const;
@@ -844,8 +850,8 @@ export function SecretsPage() {
         >
           {shareTarget && (
             <SecretSharingPanel
-              fullPath={canonicalizeSecretPath(mountBase + currentPath + shareTarget)}
-              displayPath={mountBase + currentPath + shareTarget}
+              fullPath={canonicalizeSecretPath(currentPath + shareTarget)}
+              displayPath={currentPath + shareTarget}
               onClose={() => setShareTarget(null)}
             />
           )}
