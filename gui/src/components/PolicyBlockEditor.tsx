@@ -3,6 +3,8 @@ import { Button, Card, Input, Badge, CollapsibleSection } from "./ui";
 import {
   parsePolicyHcl,
   serializePolicyModel,
+  envRestrictionOf,
+  withEnvRestriction,
   CAPABILITIES,
   type PolicyModel,
   type PolicyBlock,
@@ -224,6 +226,28 @@ export function PolicyBlockEditor({ value, onChange, onParseError }: Props) {
                 </p>
               )}
 
+              {/* Environment restriction (KV v2 per-env values) */}
+              {!denied && (
+                <div>
+                  <Input
+                    label="Restrict to environments (comma-separated)"
+                    value={envRestrictionOf(b).join(", ")}
+                    onChange={(e) => updateBlock(i, withEnvRestriction(b, csvToArray(e.target.value)))}
+                    placeholder="e.g. prod, staging — blank for no restriction"
+                  />
+                  {envRestrictionOf(b).length > 0 && (
+                    <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+                      Requires <code>env</code> on every request and limits it to{" "}
+                      {envRestrictionOf(b)
+                        .map((e) => `"${e}"`)
+                        .join(", ")}
+                      . Callers must pass <code>?env=</code> (or an <code>env</code> body field); other
+                      parameters are unaffected.
+                    </p>
+                  )}
+                </div>
+              )}
+
               {/* Advanced / dynamic blocks */}
               <CollapsibleSection title="Advanced">
                 <div className="grid grid-cols-2 gap-3">
@@ -267,7 +291,9 @@ export function PolicyBlockEditor({ value, onChange, onParseError }: Props) {
                   </div>
                 </div>
                 <p className="mt-2 text-xs text-[var(--color-text-muted)]">
-                  Allowed/denied parameter maps are preserved on round-trip but edited from the HCL source tab.
+                  The environment restriction above edits <code>allowed_parameters.env</code> and{" "}
+                  <code>required_parameters</code>. Other allowed/denied parameter maps are preserved on
+                  round-trip but edited from the HCL source tab.
                 </p>
               </CollapsibleSection>
             </div>

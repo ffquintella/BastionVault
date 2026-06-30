@@ -42,11 +42,18 @@ What landed:
   registry on the engine-config editor. `read_secret` returns env metadata.
 - **Audit** — `src/audit/entry.rs` folds the non-secret `env` selector from
   `req.data` into the audited request `data` (verbatim, not HMAC'd).
+- **Policy builder** — `gui/src/components/PolicyBlockEditor.tsx` has a "Restrict
+  to environments" field per rule. It emits `required_parameters = ["env"]` +
+  `allowed_parameters = { env = [...], "*" = [] }` via the pure
+  `withEnvRestriction` / `envRestrictionOf` helpers in `gui/src/lib/policyHcl.ts`
+  (the `"*" = []` sentinel keeps non-`env` parameters working so the restriction
+  gates only `env`). Round-trips through the HCL source tab.
 - **Tests** — `tests/test_default_logical.rs::test_kv_v2_environments` (full
   multi-env / targeted patch / legacy carry-forward / strict miss / registry),
   `merge_env` + serde backward-compat units in `version.rs`, the env ACL unit in
   `policy.rs` (`test_env_required_and_allowed_parameter`), `split_path_query`
-  units in `util.rs`, and `gui/src/test/secretsEnv.test.ts` for the API wiring.
+  units in `util.rs`, `gui/src/test/secretsEnv.test.ts` for the API wiring, and
+  the `withEnvRestriction` round-trip units in `gui/src/test/policyHcl.test.ts`.
 
 ## Summary
 

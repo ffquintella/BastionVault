@@ -52,6 +52,40 @@ export interface PolicyBlock {
   scopes?: string[];
 }
 
+/** The environments a rule restricts access to (from `allowed_parameters.env`). */
+export function envRestrictionOf(b: PolicyBlock): string[] {
+  return b.allowedParameters?.env ?? [];
+}
+
+/**
+ * Build the `allowed_parameters` / `required_parameters` patch that restricts a
+ * rule to a set of environments. A non-empty list means: `env` is **required**
+ * on every request and must be one of the listed values. The `"*" = []`
+ * allow-all sentinel is added so every *other* parameter (write-body fields,
+ * `version`, …) still passes — otherwise `allowed_parameters` would whitelist
+ * `env` alone and reject normal reads/writes. Clearing the list removes the env
+ * constraint (and the sentinel, when it was the only entry left).
+ */
+export function withEnvRestriction(b: PolicyBlock, envs: string[]): Partial<PolicyBlock> {
+  const allowed: Record<string, string[]> = { ...(b.allowedParameters ?? {}) };
+  const required = new Set(b.requiredParameters ?? []);
+  if (envs.length) {
+    allowed.env = envs;
+    if (!("*" in allowed)) allowed["*"] = [];
+    required.add("env");
+  } else {
+    delete allowed.env;
+    required.delete("env");
+    if (Object.keys(allowed).length === 1 && allowed["*"]?.length === 0) {
+      delete allowed["*"];
+    }
+  }
+  return {
+    allowedParameters: Object.keys(allowed).length ? allowed : undefined,
+    requiredParameters: required.size ? Array.from(required) : undefined,
+  };
+}
+
 /** Parsed representation of a whole policy document. */
 export interface PolicyModel {
   name?: string;

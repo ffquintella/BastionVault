@@ -43,6 +43,21 @@ EXAMPLE ENTRY:
 =============================================================================
 -->
 
+## [0.22.1] - 2026-06-30
+
+### Added
+
+- **Policy builder: restrict a rule to specific environment(s)**
+  (`gui/src/components/PolicyBlockEditor.tsx`, `gui/src/lib/policyHcl.ts`). Each
+  policy rule in the Visual builder gains a "Restrict to environments" field.
+  Entering env names emits `required_parameters = ["env"]` and
+  `allowed_parameters = { "env" = [...], "*" = [] }` — `env` becomes required and
+  value-constrained, while the `"*"` allow-all sentinel keeps every other
+  parameter (write-body fields, `version`) working so the restriction only gates
+  `env`. New pure helpers `envRestrictionOf` / `withEnvRestriction` (unit-tested
+  in `gui/src/test/policyHcl.test.ts`). Surfaces the per-environment ACL that the
+  engine already enforced (`features/kv-environments.md`).
+
 ## [0.22.0] - 2026-06-30
 
 ### Added

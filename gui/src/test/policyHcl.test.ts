@@ -4,7 +4,10 @@ import {
   serializePolicyModel,
   lintPolicyModel,
   previewCapability,
+  envRestrictionOf,
+  withEnvRestriction,
   CAPABILITIES,
+  type PolicyBlock,
   type PolicyModel,
 } from "../lib/policyHcl";
 
@@ -205,5 +208,43 @@ describe("policyHcl — capability set", () => {
     expect([...CAPABILITIES].sort()).toEqual(
       ["connect", "create", "delete", "deny", "list", "patch", "read", "root", "sudo", "update"].sort(),
     );
+  });
+});
+
+describe("policyHcl — environment restriction", () => {
+  const base: PolicyBlock = { path: "secret/data/apps/netrisk/*", capabilities: ["read", "list"] };
+
+  it("requires env and constrains its values, leaving other params open", () => {
+    const patch = withEnvRestriction(base, ["prod", "staging"]);
+    expect(patch.requiredParameters).toEqual(["env"]);
+    expect(patch.allowedParameters).toEqual({ env: ["prod", "staging"], "*": [] });
+  });
+
+  it("round-trips through HCL", () => {
+    const block = { ...base, ...withEnvRestriction(base, ["prod"]) };
+    const hcl = serializePolicyModel({ blocks: [block] });
+    expect(hcl).toContain('required_parameters = ["env"]');
+    expect(hcl).toContain('"env" = ["prod"]');
+    const { model } = parsePolicyHcl(hcl);
+    const rt = model.blocks[0];
+    expect(envRestrictionOf(rt)).toEqual(["prod"]);
+    expect(rt.requiredParameters).toContain("env");
+    expect(rt.allowedParameters?.["*"]).toEqual([]);
+  });
+
+  it("clearing removes the env constraint and the allow-all sentinel", () => {
+    const restricted = { ...base, ...withEnvRestriction(base, ["prod"]) };
+    const cleared = { ...restricted, ...withEnvRestriction(restricted, []) };
+    expect(cleared.allowedParameters).toBeUndefined();
+    expect(cleared.requiredParameters).toBeUndefined();
+    expect(envRestrictionOf(cleared)).toEqual([]);
+  });
+
+  it("preserves a pre-existing required parameter when clearing env", () => {
+    const seeded: PolicyBlock = { ...base, requiredParameters: ["region"] };
+    const restricted = { ...seeded, ...withEnvRestriction(seeded, ["prod"]) };
+    expect(restricted.requiredParameters?.sort()).toEqual(["env", "region"]);
+    const cleared = { ...restricted, ...withEnvRestriction(restricted, []) };
+    expect(cleared.requiredParameters).toEqual(["region"]);
   });
 });
