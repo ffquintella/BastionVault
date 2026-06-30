@@ -87,11 +87,13 @@ Read data from a path.
 bvault read secret/my-secret
 bvault read --field=password secret/my-secret
 bvault read --format=json secret/my-secret
+bvault read --env prod secret/apps/netrisk/db
 ~~~
 
 | Option | Description |
 |--------|-------------|
 | `--field` | Print only the specified field value |
+| `--env` | KV v2 environment selector — returns the base values merged with this environment's overrides. Required when the secret's policy lists `env` under `required_parameters`. See [Per-environment KV v2](kv-environments.md). |
 
 ## write
 
@@ -101,12 +103,17 @@ Write data to a path.
 bvault write secret/my-secret foo=bar
 bvault write secret/my-secret password=@/path/to/file
 bvault write secret/my-secret data=-
+bvault write --env prod secret/apps/netrisk/db host=db.prod.internal
 ~~~
 
 Values can be specified as:
 - `key=value` — literal value
 - `key=@/path/to/file` — read value from a file
 - `key=-` — read value from stdin
+
+| Option | Description |
+|--------|-------------|
+| `--env` | KV v2 — write these `key=value` pairs as overrides for this environment only; the base values and other environments are preserved. See [Per-environment KV v2](kv-environments.md). |
 
 ## delete
 

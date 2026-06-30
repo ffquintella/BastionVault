@@ -28,6 +28,7 @@
 
 - Secret engines
   - [Overview](secret-engines.md)
+  - [Per-environment KV v2](kv-environments.md)
   - [SSH](ssh-secret-engine.md)
 
 - Resource Connect

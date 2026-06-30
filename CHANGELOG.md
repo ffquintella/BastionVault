@@ -43,6 +43,20 @@ EXAMPLE ENTRY:
 =============================================================================
 -->
 
+## [Unreleased]
+
+## [0.22.2] - 2026-06-30
+
+### Added
+
+- **Docs: Per-environment KV v2 secrets** (`docs/kv-environments.md`). Operator
+  guide covering the base+overrides model, merge/resolution rules, the HTTP API
+  (read `?env=`, targeted/full/legacy write modes, the advisory `environments`
+  registry), CLI (`bvault read/write --env`), the GUI environment selector and
+  inherited/override workflow, and the `required_parameters`/`allowed_parameters`
+  policy interplay. Linked from the sidebar, CLI reference (`read`/`write`), and
+  secret-engines overview.
+
 ## [0.22.1] - 2026-06-30
 
 ### Added

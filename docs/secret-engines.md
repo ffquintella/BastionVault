@@ -101,7 +101,7 @@ This is why you can mount `kv` twice (`secret/` and `team-a/`) without collision
 | Module | Type name | What it does |
 |---|---|---|
 | `kv` | `kv` | v1 generic K/V — pass-through to barrier-encrypted storage with optional lease TTL. |
-| `kv_v2` | `kv-v2` | Versioned K/V with soft-delete metadata; adds `metadata.rs` and `version.rs` alongside `mod.rs`. |
+| `kv_v2` | `kv-v2` | Versioned K/V with soft-delete metadata; adds `metadata.rs` and `version.rs` alongside `mod.rs`. Supports [per-environment values](kv-environments.md) (shared base + `?env=` overrides). |
 | `crypto` | encryption-as-a-service | Wraps `bv_crypto` (ML-KEM, ML-DSA, AEAD) for callers that don't want to manage keys. |
 | `files` | file resources | Binary blob storage with metadata, used by the GUI's file manager. |
 | `resource` / `resource_group` | typed records | Structured "resource" records (think SSH targets, DB creds metadata) and groups thereof. |
