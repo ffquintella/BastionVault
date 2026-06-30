@@ -45,6 +45,25 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.21.7] - 2026-06-30
+
+### Fixed
+
+#### Brokered SSH cert dropped from Rustion envelope
+
+- Declare `credential_cert` and `credential_serial` as fields on the
+  `rustion/session/open` and `rustion/v2/session/open` routes
+  (`src/modules/rustion/mod.rs`). The server-side SSH-engine `ca` mint in
+  `handle_session_open_v2` writes the signed OpenSSH certificate into
+  `req.data["credential_cert"]`, but `Request::get_data` only returns keys
+  that are declared route fields — so `pick("credential_cert")` read back
+  empty, the BVRG envelope shipped `credential.kind = ssh-cert` with no
+  `extra["cert"]`, and Rustion fell back to plain publickey auth
+  ("no certificate in envelope" → target authentication rejected). The
+  ephemeral key (`credential_material`) and `credential_kind` came through
+  because those *were* declared, which masked the gap. Added a regression
+  test asserting both routes declare the fields.
+
 ## [0.21.6] - 2026-06-30
 
 ### Changed

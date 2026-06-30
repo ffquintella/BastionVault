@@ -586,6 +586,8 @@ impl RustionBackend {
                         "credential_kind": { field_type: FieldType::Str, default: "", description: "ssh-key | ssh-password | rdp-password | rdp-cert | ..." },
                         "credential_username": { field_type: FieldType::Str, default: "", description: "Username on the target host." },
                         "credential_material": { field_type: FieldType::Str, default: "", description: "Base64-encoded credential bytes." },
+                        "credential_cert": { field_type: FieldType::Str, default: "", description: "For `ssh-cert`: signed OpenSSH certificate text, sealed into the envelope's `credential.extra[\"cert\"]`. Must be a declared field or `get_data` cannot read it back after server-side minting." },
+                        "credential_serial": { field_type: FieldType::Str, default: "", description: "Minted cert serial, surfaced on the brokered-session audit row." },
                         "ttl_secs": { field_type: FieldType::Int, default: 3600, description: "Requested session TTL." },
                         "max_renewals": { field_type: FieldType::Int, default: 3, description: "Max renewal count." },
                         "recording": { field_type: FieldType::Str, default: "always", description: "always | off | input-redacted" },
@@ -616,6 +618,8 @@ impl RustionBackend {
                         "credential_kind": { field_type: FieldType::Str, default: "", description: "ssh-key | ssh-password | rdp-password | rdp-cert | ..." },
                         "credential_username": { field_type: FieldType::Str, default: "", description: "Username on the target host." },
                         "credential_material": { field_type: FieldType::Str, default: "", description: "Base64-encoded credential bytes (deferred ldap/ssh-engine/pki kinds still pass this through)." },
+                        "credential_cert": { field_type: FieldType::Str, default: "", description: "For `ssh-cert`: signed OpenSSH certificate text the server-side mint seals into the envelope's `credential.extra[\"cert\"]`. Must be a declared field or `get_data` cannot read it back after minting." },
+                        "credential_serial": { field_type: FieldType::Str, default: "", description: "Minted cert serial, surfaced on the brokered-session audit row." },
                         "ttl_secs": { field_type: FieldType::Int, default: 3600, description: "Requested session TTL." },
                         "max_renewals": { field_type: FieldType::Int, default: 3, description: "Max renewal count." },
                         "recording": { field_type: FieldType::Str, default: "always", description: "always | off | input-redacted" },
@@ -3784,7 +3788,37 @@ impl Module for RustionModule {
 
 #[cfg(test)]
 mod connect_only_tests {
+    use crate::logical::Backend;
     use crate::test_utils::TestHttpServer;
+
+    /// Regression guard for the brokered ssh-cert drop: the server-side
+    /// mint in `handle_session_open_v2` inserts `credential_cert` (the
+    /// signed OpenSSH cert) and `credential_serial` into the request
+    /// data, but `Request::get_data` only returns keys that are
+    /// **declared fields** on the matched route — an undeclared key
+    /// reads back empty. If these aren't declared on the session/open
+    /// routes, `pick("credential_cert")` returns "", the envelope ships
+    /// `kind=ssh-cert` with no `extra["cert"]`, and Rustion silently
+    /// falls back to plain publickey ("no certificate in envelope").
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_session_open_routes_declare_credential_cert_field() {
+        let server = TestHttpServer::new("test_session_open_cert_field", true).await;
+        let mut backend = super::RustionBackend::new(server.core.clone()).new_backend();
+        backend.init().expect("backend init compiles route regexes");
+        for pat in ["session/open", "v2/session/open"] {
+            let (path, _) = backend
+                .match_path(pat)
+                .unwrap_or_else(|| panic!("route `{pat}` should match"));
+            for field in ["credential_cert", "credential_serial"] {
+                assert!(
+                    path.get_field(field).is_some(),
+                    "route `{pat}` must declare `{field}` as a field, \
+                     or get_data/pick cannot read the server-side-minted value \
+                     back into the BVRG envelope"
+                );
+            }
+        }
+    }
 
     /// End-to-end authorization proof for connect-only access through
     /// `rustion/v2/session/open`:
