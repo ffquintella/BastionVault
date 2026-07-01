@@ -132,7 +132,7 @@ impl PkiBackendInner {
         // Phase L3: snapshot the chain for this issuer so the response
         // carries `ca_chain` consistently across `issue/sign/ACME`.
         let ca_chain = super::issuers::build_issuer_chain(req, &issuer).await?;
-        let ca_signer = issuer.signer;
+        let ca_signer = super::issuers::take_signer(issuer.signer, &issuer.name)?;
         let issuer_id = issuer.id.clone();
 
         let role_alg = role.algorithm()?;
@@ -336,7 +336,7 @@ impl PkiBackendInner {
         ttl = clamped_ttl;
         let ca_cert_pem = issuer.cert_pem.clone();
         let ca_chain = super::issuers::build_issuer_chain(req, &issuer).await?;
-        let ca_signer = issuer.signer;
+        let ca_signer = super::issuers::take_signer(issuer.signer, &issuer.name)?;
         let issuer_id = issuer.id.clone();
 
         let subject =
@@ -443,7 +443,7 @@ impl PkiBackendInner {
         ttl = clamped_ttl;
         let ca_cert_pem = issuer.cert_pem.clone();
         let ca_chain = super::issuers::build_issuer_chain(req, &issuer).await?;
-        let ca_signer = issuer.signer;
+        let ca_signer = super::issuers::take_signer(issuer.signer, &issuer.name)?;
         let issuer_id = issuer.id.clone();
 
         // Synthesize a permissive role: server+client EKUs, no CN

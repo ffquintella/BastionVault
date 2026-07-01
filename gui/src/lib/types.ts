@@ -1137,6 +1137,48 @@ export interface PkiImportCaBundleRequest {
   issuer_name?: string;
 }
 
+/** One certificate node in a parsed CA chain — shared by the pre-import
+ *  preview and the post-import result. The tree is built by linking a
+ *  node's `issuer` DN to another node's `subject` DN. */
+export interface PkiChainNode {
+  subject: string;
+  issuer: string;
+  common_name: string;
+  issuer_common_name: string;
+  serial: string;
+  not_after: number;
+  is_ca: boolean;
+  self_signed: boolean;
+}
+
+export interface PkiChainPreview {
+  nodes: PkiChainNode[];
+  key_present: boolean;
+  warnings: string[];
+}
+
+/** One imported (or skipped) cert from a `pki/config/ca` call. */
+export interface PkiImportedCert {
+  issuer_id: string;
+  issuer_name: string;
+  common_name: string;
+  subject: string;
+  issuer: string;
+  serial: string;
+  self_signed: boolean;
+  has_key: boolean;
+  keyless: boolean;
+  skipped: boolean;
+}
+
+export interface PkiCaImportResult {
+  issuer_id: string;
+  issuer_name: string;
+  imported_issuers: string[];
+  imported_keys: string[];
+  chain: PkiImportedCert[];
+}
+
 export interface PkiRoleConfig {
   ttl: string;
   max_ttl: string;

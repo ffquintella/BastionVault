@@ -341,10 +341,10 @@ async fn test_pki_phase5_config_ca_import() {
     )
     .await;
 
-    // Phase 5.2: re-importing the same bundle under the *same name* is
-    // now a duplicate-name conflict (rather than a singleton conflict). A
-    // re-import under a different name would succeed and create a second
-    // imported issuer.
+    // Chain-import era: re-importing the same certificate (matched by
+    // serial) is now an idempotent no-op — the cert is already present at
+    // the mount, so it is skipped rather than rejected as a duplicate
+    // name. The request succeeds and imports nothing new.
     let mut req = Request::new("pki/config/ca");
     req.operation = Operation::Write;
     req.client_token = token.clone();
@@ -354,9 +354,20 @@ async fn test_pki_phase5_config_ca_import() {
             .unwrap()
             .clone(),
     );
+    let reimport = core
+        .handle_request(&mut req)
+        .await
+        .expect("re-importing an already-present cert is an idempotent no-op")
+        .and_then(|r| r.data)
+        .expect("response data");
     assert!(
-        core.handle_request(&mut req).await.is_err(),
-        "re-importing under an already-taken issuer name must be rejected"
+        reimport["imported_issuers"].as_array().unwrap().is_empty(),
+        "no new issuer created on re-import"
+    );
+    let chain = reimport["chain"].as_array().unwrap();
+    assert!(
+        chain.iter().all(|e| e["skipped"].as_bool().unwrap_or(false)),
+        "every cert in a same-bundle re-import is skipped"
     );
 
     // Issue a cert under the imported CA.

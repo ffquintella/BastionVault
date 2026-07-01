@@ -171,6 +171,15 @@ pub struct CaMetadata {
     /// pre-existing records deserialisable.
     #[serde(default)]
     pub key_id: String,
+    /// Key-less issuer marker. `true` for CA certificates imported
+    /// without a private key (a trust/chain anchor) via
+    /// `pki/config/ca` — they participate in chain resolution and are
+    /// listed as issuers, but cannot sign anything. `key_id` is empty
+    /// and no managed-key entry backs them. `#[serde(default)]` keeps
+    /// every pre-existing record readable (all deserialize to `false`,
+    /// i.e. key-holding, which is the historical invariant).
+    #[serde(default)]
+    pub keyless: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

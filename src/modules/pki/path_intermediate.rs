@@ -370,7 +370,7 @@ impl PkiBackendInner {
             });
         }
         let ca_cert_pem = issuer.cert_pem.clone();
-        let ca_signer = issuer.signer;
+        let ca_signer = super::issuers::take_signer(issuer.signer, &issuer.name)?;
         let Signer::Classical(ca_classical) = &ca_signer else {
             return Err(RvError::ErrPkiKeyTypeInvalid);
         };

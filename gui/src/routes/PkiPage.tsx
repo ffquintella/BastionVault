@@ -24,6 +24,10 @@ import type {
   PkiAutoTidyConfig,
   PkiManagedKey,
   PkiCertRecord,
+  PkiChainNode,
+  PkiChainPreview,
+  PkiCaImportResult,
+  PkiImportedCert,
 } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
@@ -857,18 +861,129 @@ function GenerateRootModal({
   );
 }
 
+// ── CA chain tree ─────────────────────────────────────────────────
+
+/** Normalised node the {@link ChainTree} renders. Both the pre-import
+ *  preview ({@link PkiChainNode}) and the post-import result
+ *  ({@link PkiImportedCert}) adapt into this shape. */
+type ChainTreeNode = {
+  key: string;
+  subject: string;
+  issuer: string;
+  label: string;
+  serial: string;
+  selfSigned: boolean;
+  isCa?: boolean;
+  hasKey?: boolean;
+  keyless?: boolean;
+  skipped?: boolean;
+  issuerName?: string;
+};
+
+function previewToTree(nodes: PkiChainNode[]): ChainTreeNode[] {
+  return nodes.map((n, i) => ({
+    key: `${n.serial}-${i}`,
+    subject: n.subject,
+    issuer: n.issuer,
+    label: n.common_name || n.subject || `serial ${n.serial}`,
+    serial: n.serial,
+    selfSigned: n.self_signed,
+    isCa: n.is_ca,
+  }));
+}
+
+function importedToTree(certs: PkiImportedCert[]): ChainTreeNode[] {
+  return certs.map((c, i) => ({
+    key: `${c.serial}-${i}`,
+    subject: c.subject,
+    issuer: c.issuer,
+    label: c.common_name || c.subject || `serial ${c.serial}`,
+    serial: c.serial,
+    selfSigned: c.self_signed,
+    hasKey: c.has_key,
+    keyless: c.keyless,
+    skipped: c.skipped,
+    issuerName: c.issuer_name,
+  }));
+}
+
+/** Render a set of CA certs as a hierarchy: each node is placed under
+ *  the node whose Subject DN equals its Issuer DN. Self-signed certs (or
+ *  certs whose issuer isn't in the set) are roots. Cycle- and
+ *  duplicate-subject-safe. */
+function ChainTree({ nodes }: { nodes: ChainTreeNode[] }) {
+  const { roots, childrenOf } = useMemo(() => {
+    const bySubject = new Map<string, ChainTreeNode>();
+    for (const n of nodes) if (!bySubject.has(n.subject)) bySubject.set(n.subject, n);
+    const childrenOf = new Map<string, ChainTreeNode[]>();
+    const roots: ChainTreeNode[] = [];
+    for (const n of nodes) {
+      const parent =
+        !n.selfSigned && n.issuer !== n.subject ? bySubject.get(n.issuer) : undefined;
+      if (parent && parent.subject !== n.subject) {
+        const arr = childrenOf.get(parent.subject) ?? [];
+        arr.push(n);
+        childrenOf.set(parent.subject, arr);
+      } else {
+        roots.push(n);
+      }
+    }
+    return { roots, childrenOf };
+  }, [nodes]);
+
+  if (nodes.length === 0) return null;
+
+  const renderNode = (node: ChainTreeNode, depth: number, visited: Set<string>) => {
+    if (visited.has(node.subject)) return null;
+    visited.add(node.subject);
+    const kids = childrenOf.get(node.subject) ?? [];
+    return (
+      <div
+        key={node.key}
+        className={
+          depth > 0 ? "ml-3 border-l border-[var(--color-border)] pl-3" : ""
+        }
+      >
+        <div className="flex flex-wrap items-center gap-2 py-1">
+          <span className="text-sm font-medium truncate min-w-0">{node.label}</span>
+          <Badge label={node.selfSigned ? "root" : "intermediate"} variant={node.selfSigned ? "info" : "neutral"} />
+          {node.isCa === false && <Badge label="not a CA" variant="error" />}
+          {node.hasKey && <Badge label="signing (has key)" variant="success" />}
+          {node.keyless && <Badge label="trust-only" variant="warning" />}
+          {node.skipped && <Badge label="already present" variant="neutral" />}
+          {node.issuerName ? (
+            <code className="text-xs text-[var(--color-text-muted)] truncate min-w-0">
+              {node.issuerName}
+            </code>
+          ) : null}
+        </div>
+        {kids.map((k) => renderNode(k, depth + 1, visited))}
+      </div>
+    );
+  };
+
+  const visited = new Set<string>();
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 overflow-x-auto">
+      {roots.map((r) => renderNode(r, 0, visited))}
+    </div>
+  );
+}
+
 // ── Import root CA Modal ──────────────────────────────────────────
 
 /** Two-mode root CA importer:
- *  - **PEM bundle**: textarea, accepts a single string with the cert
- *    PEM block(s) and the unencrypted private-key PEM concatenated.
+ *  - **PEM bundle**: textarea, accepts one or more CA cert PEM blocks
+ *    and (optionally) an unencrypted private key concatenated. As the
+ *    operator types, the paste is parsed locally into a live chain tree.
  *  - **PKCS#12**: file picker (`.p12` / `.pfx`) + passphrase. The
  *    file is read in the renderer, base64-encoded, and unwrapped on
  *    the Tauri side; the passphrase never leaves the local process.
  *
- *  Both modes go through `pki/config/ca`, so the freshly imported
- *  cert + key land as a normal issuer (with a shadow managed-key
- *  entry so the Keys tab can manage it like any other key). */
+ *  Both modes go through `pki/config/ca`. The cert matching the private
+ *  key (if any) becomes a signing issuer; every other CA cert imports as
+ *  a key-less trust/chain anchor. The imported hierarchy is shown as a
+ *  tree on success. */
 function ImportRootCaModal({
   open,
   onClose,
@@ -888,7 +1003,33 @@ function ImportRootCaModal({
   const [pkcs12B64, setPkcs12B64] = useState("");
   const [passphrase, setPassphrase] = useState("");
   const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState<PkiChainPreview | null>(null);
+  const [imported, setImported] = useState<PkiCaImportResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Live preview: parse the pasted PEM locally (no vault call) on a
+  // short debounce so the tree tracks typing without a parse per keystroke.
+  useEffect(() => {
+    if (mode !== "pem" || !pemBundle.trim()) {
+      setPreview(null);
+      return;
+    }
+    let cancelled = false;
+    const handle = setTimeout(() => {
+      api
+        .pkiParseChain(pemBundle)
+        .then((p) => {
+          if (!cancelled) setPreview(p);
+        })
+        .catch(() => {
+          if (!cancelled) setPreview(null);
+        });
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [pemBundle, mode]);
 
   function reset() {
     setMode("pem");
@@ -897,6 +1038,8 @@ function ImportRootCaModal({
     setPkcs12Name("");
     setPkcs12B64("");
     setPassphrase("");
+    setPreview(null);
+    setImported(null);
   }
 
   function handleClose() {
@@ -924,32 +1067,40 @@ function ImportRootCaModal({
   async function submit() {
     setBusy(true);
     try {
+      let r: PkiCaImportResult;
       if (mode === "pem") {
         if (!pemBundle.trim()) {
-          toast("error", "Paste a PEM bundle (cert + private key).");
+          toast("error", "Paste a PEM bundle (one or more CA certs, optionally a key).");
           return;
         }
-        const r = await api.pkiImportCaBundle({
+        r = await api.pkiImportCaBundle({
           mount,
           pem_bundle: pemBundle.trim(),
           issuer_name: issuerName.trim() || undefined,
         });
-        toast("success", `Imported as issuer "${r.issuer_name}"`);
       } else {
         if (!pkcs12B64) {
           toast("error", "Select a .p12 / .pfx file first.");
           return;
         }
-        const r = await api.pkiImportCaPkcs12({
+        r = await api.pkiImportCaPkcs12({
           mount,
           pkcs12_b64: pkcs12B64,
           passphrase,
           issuer_name: issuerName.trim() || undefined,
         });
-        toast("success", `Imported as issuer "${r.issuer_name}"`);
       }
+      const newCount = r.imported_issuers.length;
+      const keyCount = r.imported_keys.length;
+      toast(
+        "success",
+        newCount === 0
+          ? "Nothing new — every cert was already present."
+          : `Imported ${newCount} issuer${newCount === 1 ? "" : "s"}` +
+              (keyCount ? ` (${keyCount} signing)` : " (trust-only)"),
+      );
+      setImported(r);
       onSuccess();
-      handleClose();
     } catch (e) {
       toast("error", extractError(e));
     } finally {
@@ -960,6 +1111,35 @@ function ImportRootCaModal({
   const canSubmit =
     !busy &&
     (mode === "pem" ? pemBundle.trim().length > 0 : pkcs12B64.length > 0);
+
+  // ── Result view: shown after a successful import ──────────────────
+  if (imported) {
+    const treeNodes = importedToTree(imported.chain);
+    const newCount = imported.imported_issuers.length;
+    return (
+      <Modal
+        open={open}
+        onClose={handleClose}
+        title="Import complete"
+        size="lg"
+        actions={
+          <Button onClick={handleClose}>Done</Button>
+        }
+      >
+        <div className="space-y-3">
+          <p className="text-sm text-[var(--color-text-muted)]">
+            {newCount === 0
+              ? "Every certificate was already present at this mount — nothing changed."
+              : `Imported ${newCount} issuer${newCount === 1 ? "" : "s"}. ` +
+                (imported.imported_keys.length
+                  ? "The cert matching the private key is a signing issuer; the rest are trust/chain anchors."
+                  : "All certs were imported as trust/chain anchors (no signing key).")}
+          </p>
+          {treeNodes.length > 0 ? <ChainTree nodes={treeNodes} /> : null}
+        </div>
+      </Modal>
+    );
+  }
 
   return (
     <Modal
@@ -1008,7 +1188,7 @@ function ImportRootCaModal({
           label="Issuer name (optional)"
           value={issuerName}
           onChange={(e) => setIssuerName(e.target.value)}
-          placeholder="Defaults to the cert's CN"
+          placeholder="Names the signing issuer; chain certs use their CN"
         />
 
         {mode === "pem" ? (
@@ -1024,10 +1204,33 @@ function ImportRootCaModal({
               }
             />
             <p className="text-xs text-[var(--color-text-muted)]">
-              Paste the CA certificate and its unencrypted private key
-              (PKCS#8 / RSA / EC) concatenated. Optional intermediate certs
-              may be appended; they go through the same import path.
+              Paste one or more CA certificates. Include the unencrypted
+              private key (PKCS#8 / RSA / EC) to import a signing issuer; the
+              cert it matches becomes the signer and any other CA certs
+              (root, intermediates) import as trust/chain anchors. With no
+              key, every CA imports as trust-only.
             </p>
+            {preview ? (
+              <div className="space-y-2">
+                {preview.nodes.length > 0 ? (
+                  <>
+                    <div className="text-xs font-medium text-[var(--color-text-muted)]">
+                      Chain preview
+                    </div>
+                    <ChainTree nodes={previewToTree(preview.nodes)} />
+                  </>
+                ) : null}
+                {preview.warnings.map((w, i) => (
+                  <p
+                    key={i}
+                    className="text-xs text-yellow-400 flex items-start gap-1.5"
+                  >
+                    <span aria-hidden>⚠</span>
+                    <span className="min-w-0">{w}</span>
+                  </p>
+                ))}
+              </div>
+            ) : null}
           </>
         ) : (
           <>

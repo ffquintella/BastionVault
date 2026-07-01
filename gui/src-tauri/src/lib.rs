@@ -411,6 +411,7 @@ pub fn run() {
             commands::pki::pki_export_issuer,
             commands::pki::pki_import_ca_bundle,
             commands::pki::pki_import_ca_pkcs12,
+            commands::pki::pki_parse_chain,
             commands::pki::pki_list_roles,
             commands::pki::pki_read_role,
             commands::pki::pki_write_role,

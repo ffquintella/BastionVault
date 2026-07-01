@@ -45,6 +45,44 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+- **PKI root-chain import + key-less issuers** (`src/modules/pki/`) --
+  `pki/config/ca` now accepts a full CA chain in one paste: one or more CA
+  CERTIFICATE blocks with an optional single private key. The cert matching
+  the key becomes a signing issuer; every other CA cert imports as a
+  **key-less** (trust/chain-only) issuer. With no key, all CAs import as
+  trust anchors. Certificate order is irrelevant (the key match, not
+  position, picks the signer) and re-importing an already-present cert (by
+  serial) is an idempotent skip.
+  - New `CaMetadata.keyless` flag and `IssuerHandle.signer: Option<Signer>`;
+    key-less issuers load with no signer and are rejected at signing time via
+    `issuers::require_key` / `take_signer` with a clear 400.
+  - New `issuers::add_issuer_keyless` and `issuers::find_issuer_by_serial`.
+- **GUI: Import root CA chain tree** (`gui/`) -- the Import root CA modal now
+  renders a live chain tree as you paste (root -> intermediate -> CA), flags
+  non-CA certs and missing keys, and shows the imported hierarchy on success
+  (signing vs trust-only vs already-present). Backed by a new local-only
+  `pki_parse_chain` Tauri command (parses in-process, works in remote mode).
+
+### Changed
+- `pki/config/ca` responses now include a per-cert `chain` array (issuer id,
+  name, CN, serial, self-signed, has-key, key-less, skipped) so tooling can
+  render the imported hierarchy. Re-importing the same bundle is now a no-op
+  skip rather than a duplicate-name error.
+
+### Fixed
+- **PKI CA import returned a bewildering HTTP 500** -- pasting a CA
+  certificate (or a chain) with no private key hit `ErrPkiPemBundleInvalid`
+  and surfaced as `HTTP 500: PKI pem bundle is invalid`. Import-validation
+  failures (`ErrPkiPemBundleInvalid`, `ErrPkiCertKeyMismatch`,
+  `ErrPkiKeyTypeInvalid`, `ErrPkiCertIsNotCA`, `ErrPkiCertChainIncorrect`)
+  are now client errors (HTTP 400) with actionable messages ("no CERTIFICATE
+  block", "the private key does not match any certificate in it",
+  "certificate #N is not a CA", ...).
+- **PKI CA import silently dropped every cert after the first** -- a pasted
+  chain only ever imported its first certificate. All CA certs in the bundle
+  are now imported so `ca_chain` resolves end to end.
+
 ## [0.22.3] - 2026-06-30
 
 ### Fixed

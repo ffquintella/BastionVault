@@ -401,7 +401,18 @@ impl RvError {
             | RvError::ErrRequestFieldInvalid
             | RvError::ErrModuleKvV2CasMismatch
             | RvError::ErrModuleKvV2CasRequired
-            | RvError::ErrModuleKvV2DataFieldMissing => StatusCode::BAD_REQUEST,
+            | RvError::ErrModuleKvV2DataFieldMissing
+            // PKI bundle/import validation failures are caused by bad
+            // operator-supplied input (a malformed paste, a cert/key
+            // mismatch, an unsupported key type, or a non-CA cert), so
+            // they are client errors, not server faults. Previously these
+            // fell through to 500, which made a mistyped paste look like
+            // an engine crash in the GUI.
+            | RvError::ErrPkiPemBundleInvalid
+            | RvError::ErrPkiCertKeyMismatch
+            | RvError::ErrPkiKeyTypeInvalid
+            | RvError::ErrPkiCertIsNotCA
+            | RvError::ErrPkiCertChainIncorrect => StatusCode::BAD_REQUEST,
             RvError::ErrModuleKvV2VersionDestroyed
             | RvError::ErrModuleKvV2VersionNotFound => StatusCode::NOT_FOUND,
             RvError::ErrBarrierSealed

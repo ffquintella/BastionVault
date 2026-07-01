@@ -659,7 +659,7 @@ pub struct PkiImportCaBundleRequest {
 pub async fn pki_import_ca_bundle(
     state: State<'_, AppState>,
     request: PkiImportCaBundleRequest,
-) -> CmdResult<PkiSetSignedResult> {
+) -> CmdResult<PkiCaImportResult> {
     let mount = mount_prefix(&request.mount);
     let mut body = Map::new();
     body.insert("pem_bundle".into(), json!(request.pem_bundle));
@@ -668,7 +668,7 @@ pub async fn pki_import_ca_bundle(
     }
     let resp = make_request(&state, Operation::Write, format!("{mount}/config/ca"), Some(body)).await?;
     let map = data_to_map(resp);
-    Ok(PkiSetSignedResult { issuer_id: val_str(&map, "issuer_id"), issuer_name: val_str(&map, "issuer_name") })
+    Ok(ca_import_result(&map))
 }
 
 /// Import a CA from a PKCS#12 (`.p12` / `.pfx`) container. The
@@ -694,7 +694,7 @@ pub struct PkiImportCaPkcs12Request {
 pub async fn pki_import_ca_pkcs12(
     state: State<'_, AppState>,
     request: PkiImportCaPkcs12Request,
-) -> CmdResult<PkiSetSignedResult> {
+) -> CmdResult<PkiCaImportResult> {
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine;
     use p12_keystore::KeyStore;
@@ -748,10 +748,192 @@ pub async fn pki_import_ca_pkcs12(
     let resp =
         make_request(&state, Operation::Write, format!("{mount}/config/ca"), Some(body)).await?;
     let map = data_to_map(resp);
-    Ok(PkiSetSignedResult {
-        issuer_id: val_str(&map, "issuer_id"),
-        issuer_name: val_str(&map, "issuer_name"),
+    Ok(ca_import_result(&map))
+}
+
+// ── CA chain parsing / preview ─────────────────────────────────────
+
+/// One certificate node in a parsed CA chain, shared by the pre-import
+/// preview (`pki_parse_chain`) and the post-import result
+/// (`PkiCaImportResult`). The front-end links nodes into a tree by
+/// matching each node's `issuer` DN against another node's `subject` DN.
+#[derive(Serialize)]
+pub struct PkiChainNode {
+    pub subject: String,
+    pub issuer: String,
+    pub common_name: String,
+    pub issuer_common_name: String,
+    pub serial: String,
+    pub not_after: i64,
+    pub is_ca: bool,
+    pub self_signed: bool,
+}
+
+#[derive(Serialize)]
+pub struct PkiChainPreview {
+    pub nodes: Vec<PkiChainNode>,
+    /// Whether the bundle carries a private key at all. If false, the
+    /// import will register every CA as a trust/chain-only issuer.
+    pub key_present: bool,
+    /// Human-readable notes the modal shows before import — e.g. a
+    /// non-CA cert in the paste, or "no key → trust-only import".
+    pub warnings: Vec<String>,
+}
+
+/// Pull the CN out of an RFC-2253/4514 DN string (`CN=foo,O=bar`).
+/// Handles the CN appearing anywhere in the DN; returns "" if absent.
+fn cn_from_dn(dn: &str) -> String {
+    for part in dn.split(',') {
+        let p = part.trim();
+        if let Some(rest) = p.strip_prefix("CN=") {
+            return rest.to_string();
+        }
+    }
+    String::new()
+}
+
+/// Parse a certificate DER into a chain node (display-only facts).
+fn chain_node_from_der(der: &[u8]) -> Option<PkiChainNode> {
+    use x509_parser::prelude::FromDer;
+    let (_, cert) = x509_parser::certificate::X509Certificate::from_der(der).ok()?;
+    let subject = cert.tbs_certificate.subject.to_string();
+    let issuer = cert.tbs_certificate.issuer.to_string();
+    let is_ca = cert
+        .tbs_certificate
+        .basic_constraints()
+        .ok()
+        .flatten()
+        .map(|bc| bc.value.ca)
+        .unwrap_or(false);
+    Some(PkiChainNode {
+        common_name: cn_from_dn(&subject),
+        issuer_common_name: cn_from_dn(&issuer),
+        self_signed: subject == issuer,
+        subject,
+        issuer,
+        serial: format!("{:x}", cert.tbs_certificate.serial),
+        not_after: cert.tbs_certificate.validity.not_after.timestamp(),
+        is_ca,
     })
+}
+
+/// Parse a pasted PEM bundle **locally** (no vault access, so it works
+/// in embedded and remote modes alike) into a chain preview: one node
+/// per CERTIFICATE block plus whether a private key is present. Powers
+/// the "tree preview" in the Import root CA modal before the operator
+/// commits the import.
+#[tauri::command]
+pub fn pki_parse_chain(pem_bundle: String) -> CmdResult<PkiChainPreview> {
+    let mut nodes = Vec::new();
+    let mut key_present = false;
+    let mut warnings = Vec::new();
+
+    // `parse_many` tolerates surrounding whitespace/comments between
+    // blocks; unknown/garbage blocks are skipped rather than fatal.
+    let blocks = pem::parse_many(pem_bundle.as_bytes()).unwrap_or_default();
+    for block in &blocks {
+        let tag = block.tag();
+        if tag == "CERTIFICATE" {
+            match chain_node_from_der(block.contents()) {
+                Some(node) => {
+                    if !node.is_ca {
+                        let who = if node.common_name.is_empty() {
+                            format!("serial {}", node.serial)
+                        } else {
+                            node.common_name.clone()
+                        };
+                        warnings.push(format!(
+                            "“{who}” is not a CA certificate — it will be rejected. Remove leaf certs; import them via the Certificates tab."
+                        ));
+                    }
+                    nodes.push(node);
+                }
+                None => warnings.push("A CERTIFICATE block could not be parsed and will be rejected.".into()),
+            }
+        } else if tag.contains("PRIVATE KEY") || tag == "BV PQC SIGNER" {
+            key_present = true;
+        }
+    }
+
+    if nodes.is_empty() {
+        warnings.push("No certificate found yet — paste at least one CA certificate.".into());
+    } else if !key_present {
+        warnings.push(
+            "No private key in the paste — every CA will be imported as trust/chain-only (cannot sign).".into(),
+        );
+    }
+
+    Ok(PkiChainPreview { nodes, key_present, warnings })
+}
+
+// ── CA import result ────────────────────────────────────────────────
+
+/// One imported (or skipped) certificate from a `pki/config/ca` call.
+#[derive(Serialize, Default)]
+pub struct PkiImportedCert {
+    pub issuer_id: String,
+    pub issuer_name: String,
+    pub common_name: String,
+    pub subject: String,
+    pub issuer: String,
+    pub serial: String,
+    pub self_signed: bool,
+    pub has_key: bool,
+    pub keyless: bool,
+    pub skipped: bool,
+}
+
+/// Result of a CA bundle / PKCS#12 import: the primary (signing or root)
+/// issuer plus the full per-cert breakdown the modal renders as a tree.
+#[derive(Serialize, Default)]
+pub struct PkiCaImportResult {
+    pub issuer_id: String,
+    pub issuer_name: String,
+    pub imported_issuers: Vec<String>,
+    pub imported_keys: Vec<String>,
+    pub chain: Vec<PkiImportedCert>,
+}
+
+/// Project a `pki/config/ca` response map into [`PkiCaImportResult`].
+fn ca_import_result(map: &Map<String, Value>) -> PkiCaImportResult {
+    let str_list = |k: &str| -> Vec<String> {
+        map.get(k)
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+    let chain = map
+        .get("chain")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .map(|e| PkiImportedCert {
+                    issuer_id: val_str_v(e, "issuer_id"),
+                    issuer_name: val_str_v(e, "issuer_name"),
+                    common_name: val_str_v(e, "common_name"),
+                    subject: val_str_v(e, "subject"),
+                    issuer: val_str_v(e, "issuer"),
+                    serial: val_str_v(e, "serial"),
+                    self_signed: e.get("self_signed").and_then(Value::as_bool).unwrap_or(false),
+                    has_key: e.get("has_key").and_then(Value::as_bool).unwrap_or(false),
+                    keyless: e.get("keyless").and_then(Value::as_bool).unwrap_or(false),
+                    skipped: e.get("skipped").and_then(Value::as_bool).unwrap_or(false),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    PkiCaImportResult {
+        issuer_id: val_str(map, "issuer_id"),
+        issuer_name: val_str(map, "issuer_name"),
+        imported_issuers: str_list("imported_issuers"),
+        imported_keys: str_list("imported_keys"),
+        chain,
+    }
+}
+
+/// Read a string field from an arbitrary JSON value's object body.
+fn val_str_v(v: &Value, key: &str) -> String {
+    v.get(key).and_then(Value::as_str).unwrap_or_default().to_string()
 }
 
 // ── Roles ─────────────────────────────────────────────────────────

@@ -85,6 +85,8 @@ import type {
   PkiSignIntermediateResult,
   PkiImportCaBundleRequest,
   PkiImportCaPkcs12Request,
+  PkiCaImportResult,
+  PkiChainPreview,
   PkiImportCertRequest,
   PkiImportCertResult,
   PkiRoleConfig,
@@ -1897,9 +1899,13 @@ export const pkiExportCert = (request: PkiExportCertRequest) =>
 export const pkiExportIssuer = (request: PkiExportIssuerRequest) =>
   invoke<PkiExportResult>("pki_export_issuer", { request });
 export const pkiImportCaBundle = (request: PkiImportCaBundleRequest) =>
-  invoke<PkiSetSignedResult>("pki_import_ca_bundle", { request });
+  invoke<PkiCaImportResult>("pki_import_ca_bundle", { request });
 export const pkiImportCaPkcs12 = (request: PkiImportCaPkcs12Request) =>
-  invoke<PkiSetSignedResult>("pki_import_ca_pkcs12", { request });
+  invoke<PkiCaImportResult>("pki_import_ca_pkcs12", { request });
+/** Parse a pasted PEM bundle locally (no vault call) into a chain
+ *  preview: one node per cert + whether a private key is present. */
+export const pkiParseChain = (pemBundle: string) =>
+  invoke<PkiChainPreview>("pki_parse_chain", { pemBundle });
 
 export const pkiListRoles = (mount: string) => invoke<string[]>("pki_list_roles", { mount });
 export const pkiReadRole = (mount: string, name: string) =>

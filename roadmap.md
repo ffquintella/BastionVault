@@ -111,7 +111,7 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 
 | Status | Feature | Notes |
 |---|---|---|
-| `[x]` Done | PKI | [spec](features/pki-secret-engine.md) — Phases 1–5.2; classical + ML-DSA + composite, multi-issuer, on-demand + auto tidy. |
+| `[x]` Done | PKI | [spec](features/pki-secret-engine.md) — Phases 1–5.6; classical + ML-DSA + composite, multi-issuer, on-demand + auto tidy. **5.6**: `pki/config/ca` chain import — a bundle of one or more CA certs + optional key imports the key-matching cert as a signing issuer and the rest as key-less trust/chain issuers (certs-only bundles import as pure trust anchors); idempotent re-import, 400 (not 500) on bad input, GUI live chain-tree preview + post-import tree. |
 | `[x]` Done | PKI: ACME server endpoints | [spec](features/pki-acme.md) — RFC-8555 feature-complete, HTTP-01 + DNS-01 + EAB. |
 | `[x]` Done | PKI: Key Management + Cert Lifecycle | [spec](features/pki-key-management-and-lifecycle.md) — 7 phases incl. `CertDeliveryPlugin` trait. |
 | `[x]` Done | Transit | [spec](features/transit-secret-engine.md) — Phases 1–4: AEAD + HMAC + sign/verify + ML-KEM + ML-DSA + BYOK + hybrid. |
@@ -181,7 +181,7 @@ Each entry below has a dedicated spec / roadmap document with full phase notes.
 - [File Resources](features/file-resources.md) — `files/` mount, 32 MiB cap + SHA-256 integrity, ownership / sharing / asset-group membership, local-FS / SMB / SFTP / SCP sync, content versioning, GUI.
 - [Cloud Storage Targets for Encrypted File](features/cloud-storage-backend.md) — 8 phases; pluggable `FileTarget` trait + S3 / OneDrive / Google Drive / Dropbox providers, OAuth/PKCE infra, OS keychain, key-obfuscation decorator, multi-vault saved profiles.
 - [Cloud FileTarget Memory Cache](features/cloud-storage-backend.md) — bounded TTL cache (30 s read / 10 s list / 65k entries / 500 MiB), singleflight coalescing, stale-while-revalidate, opt-in prefetch, Prometheus metrics. Default-on for cloud providers.
-- [PKI Secret Engine](features/pki-secret-engine.md) — Phases 1–5.2; classical + PQC + composite, multi-issuer with per-usage gates, full Vault-shape route surface, on-demand + auto tidy.
+- [PKI Secret Engine](features/pki-secret-engine.md) — Phases 1–5.6; classical + PQC + composite, multi-issuer with per-usage gates, full Vault-shape route surface, on-demand + auto tidy, and CA chain import (key-matching signing issuer + key-less trust/chain issuers).
 - [PKI Key Management + Cert Lifecycle](features/pki-key-management-and-lifecycle.md) — all seven phases (L1–L7): managed key store, key reuse on issue/sign, issuer-bound keys, chain endpoint + `ca_chain` on responses, emission controls (domain matrix + ACME kill-switch + TTL/pathLen clamps), cert-lifecycle module with manual renew, periodic scheduler with backoff, and `CertDeliveryPlugin` trait with built-in `file` + `http-push` deliverers. The `plugin-ext` bridge for third-party deliverers is a deferred follow-up.
 - [PKI ACME Server](features/pki-acme.md) — Phases 6.1 + 6.1.5 + 6.2 + 6.3, feature-complete on RFC 8555 (HTTP-01 + DNS-01, EAB, key-change, revoke, rate limit, expiry sweep).
 - [Transit Secret Engine](features/transit-secret-engine.md) — Phases 1–4: AEAD + HMAC + sign/verify + ML-KEM datakey + ML-DSA + derived/convergent + BYOK + hybrid composite.

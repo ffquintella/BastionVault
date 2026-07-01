@@ -370,7 +370,7 @@ impl PkiBackendInner {
         let (ttl, _was_clamped) =
             super::super::issuers::clamp_ttl_to_issuer(&issuer, role.effective_ttl(None))?;
         let ca_cert_pem = issuer.cert_pem.clone();
-        let ca_signer = issuer.signer;
+        let ca_signer = super::super::issuers::take_signer(issuer.signer, &issuer.name)?;
         let issuer_id = issuer.id.clone();
 
         // Phase L4: per-role ACME kill-switch. Even with `acme/config`

@@ -134,7 +134,7 @@ pub async fn rebuild_crl_for_issuer(req: &Request, issuer: &IssuerHandle) -> Res
     // Phase 5.4: every CRL builder now returns a PEM `String` directly —
     // classical, PQC, and composite all share `x509_pqc::build_crl_with_alg`
     // under the hood. No more rcgen-vs-x509-cert split.
-    let pem = match &issuer.signer {
+    let pem = match super::issuers::require_key(issuer)? {
         Signer::Classical(cs) => {
             x509::build_crl(crl_number, cfg.expiry_seconds.max(60), &revoked, cs, &issuer.cert_pem)?
         }
