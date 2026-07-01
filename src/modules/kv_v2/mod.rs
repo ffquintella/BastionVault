@@ -276,6 +276,60 @@ fn sanitize_env_name(name: &str) -> Result<(), RvError> {
     Ok(())
 }
 
+/// Enforce AppRole environment scoping stamped on the caller's token.
+///
+/// When the token is env-scoped (`approle_env_scoped == "true"`, set at
+/// AppRole login from the secret_id and machine-binding scopes), a KV data
+/// operation must carry an `env` parameter that glob-matches BOTH the secret_id
+/// scope (`approle_env_secret`) and the machine scope (`approle_env_machine`).
+/// An empty list for a dimension means "no restriction" for that dimension.
+/// This is the force-env-and-restrict rule: a scoped token may only touch
+/// environment-scoped secrets, and only the environments it is allowed.
+///
+/// Non-scoped tokens (the common case, incl. all non-AppRole tokens) pass
+/// through unchanged.
+fn enforce_env_scope(req: &Request, env: Option<&str>) -> Result<(), RvError> {
+    let Some(auth) = req.auth.as_ref() else {
+        return Ok(());
+    };
+    if auth.metadata.get("approle_env_scoped").map(String::as_str) != Some("true") {
+        return Ok(());
+    }
+
+    // Force env: a scoped token may not read/write base (non-env) secrets.
+    let Some(env) = env.filter(|e| !e.is_empty()) else {
+        return Err(RvError::ErrPermissionDenied);
+    };
+
+    if env_scope_allows(
+        auth.metadata.get("approle_env_secret").map(String::as_str),
+        auth.metadata.get("approle_env_machine").map(String::as_str),
+        env,
+    ) {
+        Ok(())
+    } else {
+        Err(RvError::ErrPermissionDenied)
+    }
+}
+
+/// Pure core of [`enforce_env_scope`]: does `env` satisfy both the secret_id
+/// scope and the machine scope? Each scope is a comma-separated glob list; an
+/// empty/absent list is "no restriction" for that dimension. `*` matches any
+/// environment. Both dimensions must allow `env`.
+fn env_scope_allows(secret_csv: Option<&str>, machine_csv: Option<&str>, env: &str) -> bool {
+    let dimension_ok = |csv: Option<&str>| -> bool {
+        match csv {
+            None | Some("") => true,
+            Some(list) => list
+                .split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .any(|p| p == "*" || crate::utils::string::globbed_strings_match(p, env)),
+        }
+    };
+    dimension_ok(secret_csv) && dimension_ok(machine_csv)
+}
+
 fn get_versions_from_body(req: &Request) -> Vec<u64> {
     if let Some(body) = req.body.as_ref() {
         if let Some(versions) = body.get("versions") {
@@ -420,6 +474,8 @@ impl KvV2BackendInner {
         let name = get_name_from_request(req)?;
         let env = get_env_from_request(req);
 
+        enforce_env_scope(req, env.as_deref())?;
+
         let meta = match self.read_metadata(req, &name).await? {
             Some(m) => m,
             None => return Ok(None),
@@ -527,6 +583,11 @@ impl KvV2BackendInner {
         if env_target.is_some() && envs_payload.is_some() {
             return Err(RvError::ErrRequestInvalid);
         }
+
+        // Enforce AppRole environment scoping: a scoped token may only write a
+        // single targeted environment it is allowed to (base/full-envs writes
+        // carry no `env` and are denied by the force-env rule).
+        enforce_env_scope(req, env_target.as_deref())?;
 
         let config = self.read_config(req).await?;
         let mut meta = self.read_metadata(req, &name).await?.unwrap_or_else(|| {
@@ -881,5 +942,46 @@ impl Module for KvV2Module {
 
     fn cleanup(&self, core: &Core) -> Result<(), RvError> {
         core.delete_logical_backend("kv-v2")
+    }
+}
+
+#[cfg(test)]
+mod env_scope_tests {
+    use super::env_scope_allows;
+
+    #[test]
+    fn unrestricted_dimensions_allow_any_env() {
+        // Both empty/absent => no restriction on either dimension.
+        assert!(env_scope_allows(None, None, "prod"));
+        assert!(env_scope_allows(Some(""), Some(""), "anything"));
+    }
+
+    #[test]
+    fn secret_scope_restricts() {
+        assert!(env_scope_allows(Some("prod,staging"), None, "prod"));
+        assert!(env_scope_allows(Some("prod,staging"), None, "staging"));
+        assert!(!env_scope_allows(Some("prod,staging"), None, "dev"));
+    }
+
+    #[test]
+    fn machine_scope_restricts() {
+        assert!(env_scope_allows(None, Some("staging"), "staging"));
+        assert!(!env_scope_allows(None, Some("staging"), "prod"));
+    }
+
+    #[test]
+    fn both_dimensions_must_allow() {
+        // secret allows prod+staging, machine allows only staging => intersection.
+        assert!(env_scope_allows(Some("prod,staging"), Some("staging"), "staging"));
+        assert!(!env_scope_allows(Some("prod,staging"), Some("staging"), "prod"));
+    }
+
+    #[test]
+    fn wildcards_match() {
+        assert!(env_scope_allows(Some("prod-*"), None, "prod-eu"));
+        assert!(env_scope_allows(Some("prod-*"), None, "prod-us"));
+        assert!(!env_scope_allows(Some("prod-*"), None, "staging"));
+        // A bare "*" matches everything.
+        assert!(env_scope_allows(Some("*"), Some("*"), "whatever"));
     }
 }

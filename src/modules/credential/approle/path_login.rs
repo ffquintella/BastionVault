@@ -10,6 +10,7 @@ use crate::{
     core::Core,
     errors::RvError,
     logical::{Auth, Backend, Field, FieldType, Operation, Path, PathOperation, Request, Response},
+    modules::credential::ferrogate::{machine_id as ferrogate_machine_id, status as ferrogate_status},
     modules::identity::{GroupKind, IdentityModule},
     new_fields, new_fields_internal, new_path, new_path_internal, bv_error_response, bv_error_string,
     storage::StorageEntry,
@@ -58,6 +59,10 @@ impl AppRoleBackend {
                     field_type: FieldType::Str,
                     required: true,
                     description: "SecretID belong to the App role"
+                },
+                "machine_token": {
+                    field_type: FieldType::Str,
+                    description: "A live FerroGate machine token bound to the role. Required when the server's approle_require_machine gate is enabled (the default)."
                 }
             },
             operations: [
@@ -164,6 +169,9 @@ impl AppRoleBackendInner {
         }
 
         let mut metadata: HashMap<String, String> = HashMap::new();
+
+        // Environment scope carried by the secret_id used at login (empty = all).
+        let mut secret_envs: Vec<String> = Vec::new();
 
         let storage = Arc::as_ref(req.storage.as_ref().unwrap());
 
@@ -285,6 +293,7 @@ impl AppRoleBackendInner {
                 }
             }
 
+            secret_envs = secret_id_entry.environments.clone();
             metadata = secret_id_entry.metadata;
         }
 
@@ -304,6 +313,92 @@ impl AppRoleBackendInner {
                     conn.peer_addr
                 )));
             }
+        }
+
+        // --- Mandatory machine binding ---
+        // When the server gate `approle_require_machine` is on (the default),
+        // every AppRole login must present a live FerroGate machine token whose
+        // machine is bound to this role. The token is proof of an approved
+        // machine; we re-check approval (defense in depth) and intersect the
+        // machine binding's environment scope with the secret_id's scope.
+        // Operators can disable the gate to stage rollout (e.g. before binding
+        // machines to existing roles).
+        let mut machine_envs: Vec<String> = Vec::new();
+        if self.core.approle_require_machine.load(std::sync::atomic::Ordering::Relaxed) {
+            let machine_token = req
+                .get_data("machine_token")
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .filter(|t| !t.trim().is_empty())
+                .ok_or_else(|| {
+                    RvError::ErrResponse(
+                        "machine_token is required: AppRole logins must present a FerroGate machine token".to_string(),
+                    )
+                })?;
+
+            let auth_module = self
+                .core
+                .module_manager
+                .get_module::<crate::modules::auth::AuthModule>("auth")
+                .ok_or_else(|| RvError::ErrResponse("auth module not loaded".to_string()))?;
+            let guard = auth_module.token_store.load();
+            let token_store =
+                guard.as_ref().ok_or_else(|| RvError::ErrResponse("token store not initialised".to_string()))?;
+
+            let te = match token_store.lookup(&machine_token).await {
+                Ok(Some(te)) => te,
+                _ => return Err(RvError::ErrResponse("invalid machine_token".to_string())),
+            };
+            if te.policies.iter().any(|p| p == "root") {
+                return Err(RvError::ErrResponse("machine_token cannot be a root token".to_string()));
+            }
+            if te.meta.get("mount_path").map(String::as_str) != Some("ferrogate/") {
+                return Err(RvError::ErrResponse("machine_token is not a FerroGate machine token".to_string()));
+            }
+            let spiffe_id = te
+                .meta
+                .get("spiffe_id")
+                .cloned()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| RvError::ErrResponse("machine_token lacks a machine identity".to_string()))?;
+            let mid = ferrogate_machine_id(&spiffe_id);
+
+            let binding = role_entry
+                .bound_machines
+                .iter()
+                .find(|m| m.machine_id == mid)
+                .cloned()
+                .ok_or_else(|| {
+                    RvError::ErrResponse(format!("machine {spiffe_id} is not bound to role {}", role_entry.name))
+                })?;
+
+            // Reject a machine that has since been revoked/rejected. Best-effort:
+            // when the FerroGate mount is not readable at the expected path we fall
+            // back to trusting the (still-valid) machine token.
+            if let Some(m) = self.lookup_ferrogate_machine(&mid).await? {
+                if m.status != ferrogate_status::APPROVED {
+                    return Err(RvError::ErrResponse(format!(
+                        "machine {spiffe_id} is not approved (status={})",
+                        m.status
+                    )));
+                }
+            }
+
+            machine_envs = binding.environments.clone();
+
+            // Stamp the machine identity so the issued token is itself machine-bound
+            // (satisfies the server `require_machine_identity` gate) and auditable.
+            metadata.insert("spiffe_id".to_string(), spiffe_id);
+            metadata.insert("machine_id".to_string(), mid);
+        }
+
+        // Environment scope on the issued token: enforced by the KV v2 engine.
+        // Both the secret_id scope and the machine scope must be satisfied by
+        // any `env` request parameter (each empty list = no restriction).
+        if !secret_envs.is_empty() || !machine_envs.is_empty() {
+            metadata.insert("approle_env_scoped".to_string(), "true".to_string());
+            metadata.insert("approle_env_secret".to_string(), secret_envs.join(","));
+            metadata.insert("approle_env_machine".to_string(), machine_envs.join(","));
         }
 
         metadata.insert("role_name".to_string(), role_entry.name.clone());

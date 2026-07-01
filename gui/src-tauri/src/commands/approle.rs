@@ -17,6 +17,15 @@ pub struct AppRoleListResult {
     pub roles: Vec<String>,
 }
 
+#[derive(Serialize, serde::Deserialize, Default, Clone)]
+pub struct MachineBinding {
+    pub machine_id: String,
+    #[serde(default)]
+    pub spiffe_id: String,
+    #[serde(default)]
+    pub environments: Vec<String>,
+}
+
 #[derive(Serialize)]
 pub struct AppRoleInfo {
     pub name: String,
@@ -29,6 +38,12 @@ pub struct AppRoleInfo {
     pub token_num_uses: i64,
     pub secret_id_bound_cidrs: Vec<String>,
     pub token_bound_cidrs: Vec<String>,
+    pub bound_machines: Vec<MachineBinding>,
+}
+
+#[derive(Serialize)]
+pub struct MachineBindingList {
+    pub machines: Vec<MachineBinding>,
 }
 
 #[tauri::command]
@@ -77,6 +92,10 @@ pub async fn read_approle(state: State<'_, AppState>, name: String) -> CmdResult
                 token_num_uses: data.and_then(|d| d.get("token_num_uses")).and_then(|v| v.as_i64()).unwrap_or(0),
                 secret_id_bound_cidrs: get_str_vec("secret_id_bound_cidrs"),
                 token_bound_cidrs: get_str_vec("token_bound_cidrs"),
+                bound_machines: data
+                    .and_then(|d| d.get("bound_machines"))
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_default(),
             })
         }
         None => Err("Role not found".into()),
@@ -168,6 +187,7 @@ pub struct SecretIdAccessorInfo {
     pub expiration_time: String,
     pub metadata: HashMap<String, String>,
     pub cidr_list: Vec<String>,
+    pub environments: Vec<String>,
 }
 
 #[tauri::command]
@@ -175,10 +195,14 @@ pub async fn generate_secret_id(
     state: State<'_, AppState>,
     name: String,
     metadata: String,
+    environments: Vec<String>,
 ) -> CmdResult<SecretIdResponse> {
     let mut body = Map::new();
     if !metadata.is_empty() {
         body.insert("metadata".into(), Value::String(metadata));
+    }
+    if !environments.is_empty() {
+        body.insert("environments".into(), Value::Array(environments.into_iter().map(Value::String).collect()));
     }
 
     let resp = make_request(
@@ -258,6 +282,12 @@ pub async fn lookup_secret_id_accessor(
                 .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
                 .unwrap_or_default();
 
+            let environments: Vec<String> = data
+                .and_then(|d| d.get("environments"))
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+
             Ok(SecretIdAccessorInfo {
                 secret_id_accessor: accessor,
                 secret_id_num_uses: data.and_then(|d| d.get("secret_id_num_uses")).and_then(|v| v.as_i64()).unwrap_or(0),
@@ -266,6 +296,7 @@ pub async fn lookup_secret_id_accessor(
                 expiration_time: data.and_then(|d| d.get("expiration_time")).and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 metadata,
                 cidr_list,
+                environments,
             })
         }
         None => Err("Accessor not found".into()),
@@ -286,6 +317,70 @@ pub async fn destroy_secret_id_accessor(
         Operation::Write,
         format!("auth/approle/role/{name}/secret-id-accessor/destroy/"),
         Some(body),
+    ).await?;
+    Ok(())
+}
+
+// ── Machine Bindings ───────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn list_role_machines(
+    state: State<'_, AppState>,
+    name: String,
+) -> CmdResult<MachineBindingList> {
+    let resp = make_request(
+        &state,
+        Operation::List,
+        format!("auth/approle/role/{name}/machine/"),
+        None,
+    ).await?;
+
+    match resp {
+        Some(r) => {
+            let machines = r
+                .data
+                .as_ref()
+                .and_then(|d| d.get("machines"))
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            Ok(MachineBindingList { machines })
+        }
+        None => Ok(MachineBindingList { machines: vec![] }),
+    }
+}
+
+#[tauri::command]
+pub async fn add_role_machine(
+    state: State<'_, AppState>,
+    name: String,
+    machine_id: String,
+    spiffe_id: String,
+    environments: Vec<String>,
+) -> CmdResult<()> {
+    let mut body = Map::new();
+    if !machine_id.is_empty() {
+        body.insert("machine_id".into(), Value::String(machine_id));
+    }
+    if !spiffe_id.is_empty() {
+        body.insert("spiffe_id".into(), Value::String(spiffe_id));
+    }
+    body.insert("environments".into(), Value::Array(environments.into_iter().map(Value::String).collect()));
+
+    make_request(&state, Operation::Write, format!("auth/approle/role/{name}/machine/"), Some(body)).await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn delete_role_machine(
+    state: State<'_, AppState>,
+    name: String,
+    machine_id: String,
+) -> CmdResult<()> {
+    make_request(
+        &state,
+        Operation::Delete,
+        format!("auth/approle/role/{name}/machine/{machine_id}"),
+        None,
     ).await?;
     Ok(())
 }

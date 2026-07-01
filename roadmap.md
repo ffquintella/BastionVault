@@ -93,7 +93,7 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | Status | Feature | Notes |
 |---|---|---|
 | `[x]` Done | Auth: Token | Vault-shape token store. |
-| `[x]` Done | Auth: AppRole | RoleID + SecretID. |
+| `[x]` Done | Auth: AppRole | RoleID + SecretID. **Unreleased** adds mandatory FerroGate machine binding (per-role machine allowlist, server gate `auth/approle/config { require_machine }` default-on) + per-environment scoping of secret IDs and machine bindings (glob/wildcard), enforced force-env-and-restrict by the KV v2 engine. [spec](features/approle-machine-env.md). |
 | `[x]` Done | Auth: Userpass | Argon2 password hashing. |
 | `[x]` Done | Auth: Certificate | mTLS client-cert auth. |
 | `[x]` Done | Auth: OIDC | [spec](features/oidc-auth.md) — server module + GUI lifecycle, PKCE / nonce / JWKS. |

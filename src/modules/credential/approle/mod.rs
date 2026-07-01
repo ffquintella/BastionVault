@@ -43,6 +43,7 @@
 
 use std::{
     any::Any,
+    collections::HashMap,
     sync::{atomic::AtomicU32, Arc},
 };
 
@@ -50,11 +51,12 @@ use arc_swap::ArcSwapOption;
 use derive_more::Deref;
 
 use crate::{
+    context::Context,
     core::Core,
     errors::RvError,
-    logical::{Backend, LogicalBackend},
+    logical::{Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation},
     modules::{auth::AuthModule, Module},
-    new_logical_backend, new_logical_backend_internal,
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
     utils::{locks::Locks, salt::Salt},
 };
 
@@ -121,11 +123,33 @@ impl AppRoleBackend {
         let role_paths = self.role_paths();
         backend.paths.extend(role_paths.into_iter().map(Arc::new));
         backend.paths.push(Arc::new(self.login_path()));
+        backend.paths.push(Arc::new(self.config_path()));
 
         backend.paths.push(Arc::new(self.role_path()));
         backend.paths.push(Arc::new(self.tidy_secret_id_path()));
 
         backend
+    }
+
+    // config - Read/set the server-wide mandatory-machine gate.
+    pub fn config_path(&self) -> Path {
+        let approle_backend_ref1 = self.inner.clone();
+        let approle_backend_ref2 = self.inner.clone();
+
+        new_path!({
+            pattern: r"config$",
+            fields: {
+                "require_machine": {
+                    field_type: FieldType::Bool,
+                    description: "When true (default), every AppRole login must present a FerroGate machine token bound to the role."
+                }
+            },
+            operations: [
+                {op: Operation::Read, handler: approle_backend_ref1.read_config},
+                {op: Operation::Write, handler: approle_backend_ref2.write_config}
+            ],
+            help: "AppRole backend configuration: mandatory machine-binding gate."
+        })
     }
 }
 
@@ -282,6 +306,11 @@ mod test {
         secret_id: &str,
         is_ok: bool,
     ) -> Result<Option<Response>, RvError> {
+        // These legacy login tests predate mandatory machine binding. Disable
+        // the server gate so they exercise the role_id + secret_id flow;
+        // dedicated tests cover the machine-mandatory path.
+        core.approle_require_machine.store(false, std::sync::atomic::Ordering::Relaxed);
+
         let data = json!({
             "role_id": role_id,
             "secret_id": secret_id,

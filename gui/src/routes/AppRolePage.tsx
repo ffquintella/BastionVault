@@ -13,7 +13,7 @@ import {
   PolicySelect,
   useToast,
 } from "../components/ui";
-import type { AppRoleInfo, SecretIdAccessorInfo } from "../lib/types";
+import type { AppRoleInfo, SecretIdAccessorInfo, FerroGateMachine, MachineBinding } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 import { useEntityDirectoryStore } from "../stores/entityDirectoryStore";
@@ -228,6 +228,7 @@ export function AppRolePage() {
                 roleInfo={roleInfo}
                 roleId={roleId}
                 onCopy={copyToClipboard}
+                onRefresh={() => selectRole(roleInfo.name)}
                 toast={toast}
               />
             ) : (
@@ -342,18 +343,28 @@ interface RoleDetailProps {
   roleInfo: AppRoleInfo;
   roleId: string;
   onCopy: (text: string, label: string) => void;
+  onRefresh: () => void;
   toast: (type: "success" | "error" | "info", message: string) => void;
 }
 
-function RoleDetail({ roleInfo, roleId, onCopy, toast }: RoleDetailProps) {
+function RoleDetail({ roleInfo, roleId, onCopy, onRefresh, toast }: RoleDetailProps) {
   const [tab, setTab] = useState("overview");
+  const noMachines = roleInfo.bound_machines.length === 0;
 
   return (
     <>
+      {noMachines && (
+        <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-yellow-400 text-sm">
+          This role has no bound machines. AppRole logins require a FerroGate machine token bound to
+          the role — until a machine is bound under the <strong>Machines</strong> tab, no client can
+          authenticate with this role.
+        </div>
+      )}
       <Card title={`Role: ${roleInfo.name}`}>
         <Tabs
           tabs={[
             { id: "overview", label: "Overview" },
+            { id: "machines", label: `Machines (${roleInfo.bound_machines.length})` },
             { id: "secret-ids", label: "Secret IDs" },
           ]}
           active={tab}
@@ -426,9 +437,193 @@ function RoleDetail({ roleInfo, roleId, onCopy, toast }: RoleDetailProps) {
         </Card>
       )}
 
+      {tab === "machines" && (
+        <MachinesPanel roleInfo={roleInfo} onRefresh={onRefresh} toast={toast} />
+      )}
+
       {tab === "secret-ids" && (
         <SecretIdPanel roleName={roleInfo.name} onCopy={onCopy} toast={toast} />
       )}
+    </>
+  );
+}
+
+// ── Machines Panel ─────────────────────────────────────────────────
+
+interface MachinesPanelProps {
+  roleInfo: AppRoleInfo;
+  onRefresh: () => void;
+  toast: (type: "success" | "error" | "info", message: string) => void;
+}
+
+function MachinesPanel({ roleInfo, onRefresh, toast }: MachinesPanelProps) {
+  const [showAdd, setShowAdd] = useState(false);
+  const [available, setAvailable] = useState<FerroGateMachine[]>([]);
+  const [pickMachineId, setPickMachineId] = useState("");
+  const [envInput, setEnvInput] = useState("");
+  const [removeTarget, setRemoveTarget] = useState<string | null>(null);
+
+  async function openAdd() {
+    setPickMachineId("");
+    setEnvInput("");
+    try {
+      const machines = await api.ferrogateListMachines();
+      // Only approved machines are usable, and hide those already bound.
+      const bound = new Set(roleInfo.bound_machines.map((m) => m.machine_id));
+      setAvailable(machines.filter((m) => m.status === "approved" && !bound.has(m.id)));
+    } catch {
+      setAvailable([]);
+    }
+    setShowAdd(true);
+  }
+
+  async function handleAdd() {
+    if (!pickMachineId) return;
+    const environments = envInput
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    try {
+      await api.addRoleMachine(roleInfo.name, pickMachineId, "", environments);
+      toast("success", "Machine bound to role");
+      setShowAdd(false);
+      onRefresh();
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
+  }
+
+  async function handleRemove() {
+    if (!removeTarget) return;
+    try {
+      await api.deleteRoleMachine(roleInfo.name, removeTarget);
+      toast("success", "Machine binding removed");
+      setRemoveTarget(null);
+      onRefresh();
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    }
+  }
+
+  const columns = [
+    {
+      key: "machine",
+      header: "Machine",
+      className: "min-w-0",
+      render: (m: MachineBinding) => (
+        <div className="min-w-0">
+          <div className="font-mono text-xs truncate">{m.spiffe_id || m.machine_id}</div>
+          {m.spiffe_id && (
+            <div className="font-mono text-[10px] text-[var(--color-text-muted)] truncate">
+              {m.machine_id}
+            </div>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: "environments",
+      header: "Environments",
+      render: (m: MachineBinding) =>
+        m.environments.length > 0 ? (
+          <div className="flex flex-wrap gap-1">
+            {m.environments.map((e) => (
+              <Badge key={e} label={e} variant="info" />
+            ))}
+          </div>
+        ) : (
+          <span className="text-xs text-[var(--color-text-muted)]">All environments</span>
+        ),
+    },
+    {
+      key: "actions",
+      header: "",
+      className: "text-right w-24",
+      render: (m: MachineBinding) => (
+        <Button variant="danger" size="sm" onClick={() => setRemoveTarget(m.machine_id)}>
+          Remove
+        </Button>
+      ),
+    },
+  ];
+
+  return (
+    <>
+      <Card
+        title="Bound Machines"
+        actions={
+          <Button size="sm" onClick={openAdd}>
+            Bind Machine
+          </Button>
+        }
+      >
+        <Table
+          columns={columns}
+          data={roleInfo.bound_machines}
+          rowKey={(m) => m.machine_id}
+          emptyMessage="No machines bound. This role cannot authenticate until a machine is bound."
+        />
+      </Card>
+
+      <Modal
+        open={showAdd}
+        onClose={() => setShowAdd(false)}
+        title="Bind Machine to Role"
+        actions={
+          <>
+            <Button variant="ghost" onClick={() => setShowAdd(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleAdd} disabled={!pickMachineId}>
+              Bind
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          {available.length === 0 ? (
+            <p className="text-sm text-[var(--color-text-muted)]">
+              No approved FerroGate machines available to bind. Approve machines under Admin →
+              Machines (FerroGate) first.
+            </p>
+          ) : (
+            <div>
+              <label className="block text-sm text-[var(--color-text-muted)] mb-1">Machine</label>
+              <select
+                value={pickMachineId}
+                onChange={(e) => setPickMachineId(e.target.value)}
+                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm"
+              >
+                <option value="">Select a machine…</option>
+                {available.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.spiffe_id}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          <Input
+            label="Environments (comma separated, wildcards allowed)"
+            value={envInput}
+            onChange={(e) => setEnvInput(e.target.value)}
+            placeholder="prod, staging, prod-*  (empty = all environments)"
+          />
+          <p className="text-xs text-[var(--color-text-muted)]">
+            Leave empty to let this machine access all environments for this role. Wildcards like{" "}
+            <code>prod-*</code> are supported.
+          </p>
+        </div>
+      </Modal>
+
+      <ConfirmModal
+        open={removeTarget !== null}
+        onClose={() => setRemoveTarget(null)}
+        onConfirm={handleRemove}
+        title="Remove Machine Binding"
+        message="Remove this machine from the role? Clients using it will no longer be able to authenticate with this role."
+        confirmLabel="Remove"
+      />
     </>
   );
 }
@@ -456,6 +651,8 @@ function SecretIdPanel({ roleName, onCopy, toast }: SecretIdPanelProps) {
   const [generatedSecret, setGeneratedSecret] = useState<string | null>(null);
   const [destroyTarget, setDestroyTarget] = useState<string | null>(null);
   const [detailTarget, setDetailTarget] = useState<SecretIdAccessorInfo | null>(null);
+  const [showGenerate, setShowGenerate] = useState(false);
+  const [genEnvInput, setGenEnvInput] = useState("");
 
   useEffect(() => {
     loadAccessors();
@@ -474,8 +671,14 @@ function SecretIdPanel({ roleName, onCopy, toast }: SecretIdPanelProps) {
   }
 
   async function handleGenerate() {
+    const environments = genEnvInput
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
     try {
-      const result = await api.generateSecretId(roleName, "");
+      const result = await api.generateSecretId(roleName, "", environments);
+      setShowGenerate(false);
+      setGenEnvInput("");
       setGeneratedSecret(result.secret_id);
       toast("success", "Secret ID generated");
       loadAccessors();
@@ -534,7 +737,7 @@ function SecretIdPanel({ roleName, onCopy, toast }: SecretIdPanelProps) {
       <Card
         title="Secret IDs"
         actions={
-          <Button size="sm" onClick={handleGenerate}>
+          <Button size="sm" onClick={() => { setGenEnvInput(""); setShowGenerate(true); }}>
             Generate
           </Button>
         }
@@ -550,6 +753,35 @@ function SecretIdPanel({ roleName, onCopy, toast }: SecretIdPanelProps) {
           />
         )}
       </Card>
+
+      {/* Generate secret ID (choose environment scope) */}
+      <Modal
+        open={showGenerate}
+        onClose={() => setShowGenerate(false)}
+        title="Generate Secret ID"
+        actions={
+          <>
+            <Button variant="ghost" onClick={() => setShowGenerate(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleGenerate}>Generate</Button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          <Input
+            label="Environments (comma separated, wildcards allowed)"
+            value={genEnvInput}
+            onChange={(e) => setGenEnvInput(e.target.value)}
+            placeholder="prod, staging, prod-*  (empty = all environments)"
+          />
+          <p className="text-xs text-[var(--color-text-muted)]">
+            Scope this secret ID to specific environments. Leave empty to allow all environments.
+            The issued token's effective scope is the intersection of this and the bound machine's
+            environment scope.
+          </p>
+        </div>
+      </Modal>
 
       {/* Generated secret display */}
       <Modal
@@ -600,6 +832,10 @@ function SecretIdPanel({ roleName, onCopy, toast }: SecretIdPanelProps) {
             {detailTarget.cidr_list.length > 0 && (
               <DetailRow label="CIDR List" value={detailTarget.cidr_list.join(", ")} />
             )}
+            <DetailRow
+              label="Environments"
+              value={detailTarget.environments.length > 0 ? detailTarget.environments.join(", ") : "All"}
+            />
             {Object.keys(detailTarget.metadata).length > 0 && (
               <div>
                 <span className="text-[var(--color-text-muted)]">Metadata:</span>

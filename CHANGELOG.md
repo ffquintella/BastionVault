@@ -43,9 +43,29 @@ EXAMPLE ENTRY:
 =============================================================================
 -->
 
-## [Unreleased]
+## [0.23.0] - 2026-07-01
 
 ### Added
+- **AppRole machine binding + per-environment secret IDs** (`src/modules/credential/approle/`,
+  `src/modules/kv_v2/`) -- AppRole is now a two-factor, environment-aware machine credential:
+  - **Mandatory machine binding.** A role carries a list of bound FerroGate machines
+    (`role/<role>/machine` LIST/WRITE, `role/<role>/machine/<id>` READ/DELETE). When the new
+    server gate `auth/approle/config { require_machine }` is on (the default), every AppRole
+    login must present a live FerroGate `machine_token` whose SPIFFE ID resolves to one of the
+    role's bound machines (verified against the token store, re-checked for approval). The issued
+    token is stamped with the machine identity, so it also satisfies the server
+    `require_machine_identity` gate. Operators can set `require_machine=false` to stage rollout.
+  - **Environment-scoped secret IDs.** `role/<role>/secret-id` (and `custom-secret-id`) accept an
+    `environments` glob list (empty = all; wildcards like `prod-*` allowed). Each machine binding
+    also carries its own `environments` list.
+  - **Enforcement.** The issued token carries the intersection of the secret-ID scope and the
+    machine-binding scope; the KV v2 engine enforces force-env-and-restrict on reads/writes (a
+    scoped token must supply an `env` that glob-matches both scopes), reusing the policy layer's
+    glob matcher.
+- **GUI: AppRole Machines tab + secret-ID environment scope** (`gui/`) -- the AppRole page gains a
+  Machines tab (bind/unbind approved FerroGate machines with per-binding environment chips, plus a
+  banner when a role has no bound machines), an environment selector on secret-ID generation, and
+  environment display in the accessor detail.
 - **PKI root-chain import + key-less issuers** (`src/modules/pki/`) --
   `pki/config/ca` now accepts a full CA chain in one paste: one or more CA
   CERTIFICATE blocks with an optional single private key. The cert matching

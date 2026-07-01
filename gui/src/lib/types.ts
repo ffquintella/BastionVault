@@ -632,6 +632,16 @@ export interface AppRoleListResult {
   roles: string[];
 }
 
+export interface MachineBinding {
+  machine_id: string;
+  spiffe_id: string;
+  environments: string[];
+}
+
+export interface MachineBindingList {
+  machines: MachineBinding[];
+}
+
 export interface AppRoleInfo {
   name: string;
   bind_secret_id: boolean;
@@ -643,6 +653,7 @@ export interface AppRoleInfo {
   token_num_uses: number;
   secret_id_bound_cidrs: string[];
   token_bound_cidrs: string[];
+  bound_machines: MachineBinding[];
 }
 
 export interface RoleIdInfo {
@@ -667,6 +678,7 @@ export interface SecretIdAccessorInfo {
   expiration_time: string;
   metadata: Record<string, string>;
   cidr_list: string[];
+  environments: string[];
 }
 
 // FerroGate machine auth

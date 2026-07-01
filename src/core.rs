@@ -49,6 +49,10 @@ const DEPRECATED_UNSEAL_KEY_SET_PATH: &str = "core/used-unseal-keys-set";
 /// mirror is the restart-durable enforcement cache the token layer reads
 /// (loaded into [`Core::require_machine_identity`] at unseal).
 const FERROGATE_REQUIRE_MI_PATH: &str = "core/ferrogate-require-machine-identity";
+/// System-view key for the AppRole mandatory-machine-binding gate. Absent ⇒
+/// mandatory (the default); mirrored into [`Core::approle_require_machine`] at
+/// unseal.
+const APPROLE_REQUIRE_MACHINE_PATH: &str = "core/approle-require-machine";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SealConfig {
@@ -126,6 +130,13 @@ pub struct Core {
     /// `auth/ferrogate/config` write handler runs, so the token layer never
     /// touches storage to read it.
     pub require_machine_identity: Arc<AtomicBool>,
+    /// Server-wide gate for mandatory AppRole machine binding. When `true`
+    /// (the default), every AppRole login must present a valid FerroGate
+    /// machine token bound to the role — enforced in the AppRole login
+    /// handler. Operators can set it `false` to stage rollout (e.g. before
+    /// binding machines to existing roles). Loaded from the system view at
+    /// `post_unseal` and updated via the `auth/approle/config` write handler.
+    pub approle_require_machine: Arc<AtomicBool>,
     /// Process-wide request-outcome counters (denied requests, failed
     /// logins, audit-write failures) surfaced on the GUI Dashboard via
     /// `sys/dashboard/summary`. Always present; incremented from the
@@ -169,6 +180,7 @@ impl Default for Core {
             audit_broker: ArcSwapOption::empty(),
             exchange_preview_store: crate::exchange::PreviewStore::default(),
             require_machine_identity: Arc::new(AtomicBool::new(false)),
+            approle_require_machine: Arc::new(AtomicBool::new(true)),
             stats: Arc::new(crate::stats::DashboardStats::default()),
         }
     }
@@ -372,6 +384,36 @@ impl Core {
             None => false,
         };
         self.require_machine_identity.store(required, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Persist the AppRole mandatory-machine gate to the system view and update
+    /// the in-memory mirror. Called by the `auth/approle/config` write handler.
+    pub async fn set_approle_require_machine(&self, required: bool) -> Result<(), RvError> {
+        if let Some(view) = self.get_system_view() {
+            let entry = StorageEntry {
+                key: APPROLE_REQUIRE_MACHINE_PATH.to_string(),
+                value: if required { b"true".to_vec() } else { b"false".to_vec() },
+            };
+            view.put(&entry).await?;
+        }
+        self.approle_require_machine.store(required, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Load the AppRole mandatory-machine gate from the system view into the
+    /// in-memory mirror. Absent key (never configured) ⇒ `true` (mandatory by
+    /// default). Called once at `post_unseal`.
+    pub async fn load_approle_require_machine(&self) -> Result<(), RvError> {
+        let required = match self.get_system_view() {
+            Some(view) => view
+                .get(APPROLE_REQUIRE_MACHINE_PATH)
+                .await?
+                .map(|e| e.value != b"false")
+                .unwrap_or(true),
+            None => true,
+        };
+        self.approle_require_machine.store(required, Ordering::Relaxed);
         Ok(())
     }
 
@@ -710,6 +752,11 @@ impl Core {
         // unseal — operators can re-assert it via the config endpoint.
         if let Err(e) = self.load_require_machine_identity().await {
             log::warn!("failed to load ferrogate require_machine_identity flag: {e}");
+        }
+
+        // Load the AppRole mandatory-machine gate (defaults to true/mandatory).
+        if let Err(e) = self.load_approle_require_machine().await {
+            log::warn!("failed to load approle require_machine flag: {e}");
         }
 
         if let Some(mounts_monitor) = self.mounts_monitor.load().as_ref() {

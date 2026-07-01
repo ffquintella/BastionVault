@@ -372,6 +372,9 @@ pub fn run() {
             commands::approle::list_secret_id_accessors,
             commands::approle::lookup_secret_id_accessor,
             commands::approle::destroy_secret_id_accessor,
+            commands::approle::list_role_machines,
+            commands::approle::add_role_machine,
+            commands::approle::delete_role_machine,
             // FerroGate machine auth
             commands::ferrogate::ferrogate_requirement,
             commands::ferrogate::ferrogate_read_config,

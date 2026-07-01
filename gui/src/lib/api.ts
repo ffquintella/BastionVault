@@ -43,6 +43,7 @@ import type {
   SecretIdResponse,
   SecretIdAccessorList,
   SecretIdAccessorInfo,
+  MachineBindingList,
   FerroGateConfig,
   FerroGateRequirement,
   FerroGateMachine,
@@ -615,14 +616,24 @@ export const writeAppRole = (
   });
 export const deleteAppRole = (name: string) => invoke<void>("delete_approle", { name });
 export const readRoleId = (name: string) => invoke<RoleIdInfo>("read_role_id", { name });
-export const generateSecretId = (name: string, metadata: string) =>
-  invoke<SecretIdResponse>("generate_secret_id", { name, metadata });
+export const generateSecretId = (name: string, metadata: string, environments: string[] = []) =>
+  invoke<SecretIdResponse>("generate_secret_id", { name, metadata, environments });
 export const listSecretIdAccessors = (name: string) =>
   invoke<SecretIdAccessorList>("list_secret_id_accessors", { name });
 export const lookupSecretIdAccessor = (name: string, accessor: string) =>
   invoke<SecretIdAccessorInfo>("lookup_secret_id_accessor", { name, accessor });
 export const destroySecretIdAccessor = (name: string, accessor: string) =>
   invoke<void>("destroy_secret_id_accessor", { name, accessor });
+export const listRoleMachines = (name: string) =>
+  invoke<MachineBindingList>("list_role_machines", { name });
+export const addRoleMachine = (
+  name: string,
+  machineId: string,
+  spiffeId: string,
+  environments: string[],
+) => invoke<void>("add_role_machine", { name, machineId, spiffeId, environments });
+export const deleteRoleMachine = (name: string, machineId: string) =>
+  invoke<void>("delete_role_machine", { name, machineId });
 
 // FerroGate machine auth
 export const ferrogateRequirement = () => invoke<FerroGateRequirement>("ferrogate_requirement");
