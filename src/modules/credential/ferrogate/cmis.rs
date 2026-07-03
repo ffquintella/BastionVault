@@ -55,6 +55,12 @@ fn explain<E: std::error::Error>(err: &E) -> String {
 /// Fetch the raw `jwks_json` string from CMIS. Returns a human-readable error
 /// (safe to surface) on any transport/RPC failure.
 ///
+/// `kid_hint` names the key id the caller is about to verify against (empty =
+/// no hint). A CMIS node whose published set misses the hinted kid re-reads
+/// its replicated issued-SVID store before answering, closing the cross-node
+/// gap where only the replica that witnessed a host's attestation serves that
+/// host's child-token key. Older CMIS versions ignore the field.
+///
 /// The set of nodes to try, in order, comes from [`candidate_endpoints`]:
 /// - With [`FerroGateConfig::cmis_srv`] set, the SRV record is resolved into
 ///   every advertised CMIS node (RFC 2782 order) — HA failover.
@@ -65,7 +71,7 @@ fn explain<E: std::error::Error>(err: &E) -> String {
 /// first node that connects *and* verifies serves the RPC. A node whose cert
 /// has diverged from the pin fails verification and the next candidate is
 /// tried, exactly as the MIA fails over.
-pub async fn fetch_jwks_json(config: &FerroGateConfig) -> Result<String, String> {
+pub async fn fetch_jwks_json(config: &FerroGateConfig, kid_hint: &str) -> Result<String, String> {
     if config.cmis_endpoint.trim().is_empty() && config.cmis_srv.trim().is_empty() {
         return Err(
             "cmis_grpc source selected but neither cmis_endpoint nor cmis_srv is set".to_string(),
@@ -83,7 +89,7 @@ pub async fn fetch_jwks_json(config: &FerroGateConfig) -> Result<String, String>
             Ok(channel) => {
                 let mut client = MachineIdentityClient::new(channel);
                 let resp = client
-                    .jwks(JwksRequest {})
+                    .jwks(JwksRequest { kid_hint: kid_hint.to_string() })
                     .await
                     .map_err(|e| format!("CMIS JWKS RPC failed: {}", e.message()))?;
                 return Ok(resp.into_inner().jwks_json);
@@ -327,6 +333,6 @@ mod tests {
     async fn srv_takes_precedence_and_an_empty_config_is_rejected() {
         // Neither endpoint nor SRV set → explicit error, no silent dial.
         let empty = FerroGateConfig { jwks_source: "cmis_grpc".to_string(), ..FerroGateConfig::default() };
-        assert!(fetch_jwks_json(&empty).await.is_err());
+        assert!(fetch_jwks_json(&empty, "").await.is_err());
     }
 }

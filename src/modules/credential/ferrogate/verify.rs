@@ -33,6 +33,25 @@ pub fn token_typ(jws: &str) -> Option<String> {
     v.get("typ")?.as_str().map(str::to_string)
 }
 
+/// Peek the JOSE `kid` of a compact JWS without verifying it. Feeds the CMIS
+/// JWKS fetch's `kid_hint` and the miss check that busts the JWKS cache when
+/// a token names a key the cached set does not carry.
+#[must_use]
+pub fn token_kid(jws: &str) -> Option<String> {
+    let seg = jws.split('.').next()?;
+    let bytes = URL_SAFE_NO_PAD.decode(seg).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    v.get("kid")?.as_str().map(str::to_string)
+}
+
+/// Whether a JWKS JSON document carries a key with the given `kid`. A
+/// malformed document reports `false` — the caller's subsequent parse/verify
+/// surfaces the real error.
+#[must_use]
+pub fn jwks_has_kid(jwks_json: &str, kid: &str) -> bool {
+    JwkSet::from_json(jwks_json).is_ok_and(|s| s.keys.iter().any(|k| k.kid == kid))
+}
+
 /// Verify a host SVID presented directly (the opt-in `accept_svid` mode). This
 /// enforces the FerroGate CRL via `verify_unrevoked` (a revoked or stale-CRL
 /// SVID is rejected) but provides **no** per-request DPoP sender-constraint —
@@ -217,6 +236,25 @@ mod tests {
     fn default_port_difference_is_accepted() {
         verify_with("https://vault.example.com:443", "https://vault.example.com")
             .expect("explicit default https port must verify");
+    }
+
+    #[test]
+    fn token_kid_peeks_the_header_without_verifying() {
+        let (sk, _pk) = CompositeSecretKey::generate().unwrap();
+        let ed_sk = SigningKey::from_bytes(&[7u8; 32]);
+        let (_proof, jkt) = mint_dpop(&ed_sk, "https://a", 1000);
+        let jws = mint_child(&sk, "https://a", &jkt, 1000, 2000);
+        assert_eq!(super::token_kid(&jws).as_deref(), Some(KID));
+        assert_eq!(super::token_kid("not-a-jws"), None);
+    }
+
+    #[test]
+    fn jwks_has_kid_reports_presence_and_tolerates_garbage() {
+        let (_sk, pk) = CompositeSecretKey::generate().unwrap();
+        let json = jwks_json(&pk);
+        assert!(super::jwks_has_kid(&json, KID));
+        assert!(!super::jwks_has_kid(&json, "host-absent"));
+        assert!(!super::jwks_has_kid("{ not json", KID));
     }
 
     #[test]

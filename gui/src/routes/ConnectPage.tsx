@@ -121,6 +121,14 @@ export function ConnectPage() {
   const [unsealTarget, setUnsealTarget] = useState<VaultProfile | null>(null);
   const [unsealOpen, setUnsealOpen] = useState(false);
 
+  // Machine-gate hard failure (transport / token-verification error, e.g.
+  // "no key for kid host-…" after a MIA or CMIS restart). The server exempts
+  // root tokens from the machine requirement (break-glass admin), so instead
+  // of leaving the operator stuck on this screen we offer a "Sign in with
+  // root token" action that jumps to the login page's token tab. Set only
+  // after `connectRemote` succeeded, so the login page has a live connection.
+  const [gateBreakGlass, setGateBreakGlass] = useState(false);
+
   // Reset-vault panel state (unseal-key mismatch recovery).
   const [showReset, setShowReset] = useState(false);
   const [resetText, setResetText] = useState("");
@@ -411,8 +419,11 @@ export function ConnectPage() {
       r = await api.ferrogateMachineLogin(audience, "", "ferrogate", 300, undefined, environment);
     } catch (e) {
       // Transport / token-verification / config failure — a hard error, not an
-      // enrolment decision. Surface it and stop.
+      // enrolment decision. Surface it and stop, but expose the root-token
+      // break-glass path: the server exempts root tokens from the machine
+      // requirement precisely so recovery is possible when attestation breaks.
       setError(`Machine identity check failed: ${extractError(e)}`);
+      setGateBreakGlass(true);
       return true;
     }
     if (r.authenticated) return false; // machine approved → proceed
@@ -471,6 +482,7 @@ export function ConnectPage() {
     setOpening(profile.id);
     setError(null);
     setUnsealTarget(null);
+    setGateBreakGlass(false);
     try {
       const targetId = profile.id;
       const currentId = lastUsedId;
@@ -1104,6 +1116,21 @@ export function ConnectPage() {
       {error && (
         <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
           <p>{error}</p>
+          {gateBreakGlass && (
+            <>
+              <button
+                type="button"
+                onClick={() => navigate("/login?breakglass=1")}
+                className="mt-2 w-full py-2 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 rounded-lg text-sm font-medium transition-colors"
+              >
+                Sign in with root token instead
+              </button>
+              <p className="mt-1.5 text-xs text-red-400/70">
+                Root tokens are exempt from the machine-identity requirement,
+                so you can still sign in to diagnose or re-approve this host.
+              </p>
+            </>
+          )}
           {unsealTarget && (
             <button
               type="button"

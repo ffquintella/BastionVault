@@ -421,7 +421,7 @@ pub async fn build_autoconfig(
         cmis_tls_enable: disc.tls_enable,
         ..FerroGateConfig::default()
     };
-    let fetched_jwks = cmis::fetch_jwks_json(&probe).await?;
+    let fetched_jwks = cmis::fetch_jwks_json(&probe, "").await?;
 
     let jwks_kids = match ferro_child_verify::JwkSet::from_json(&fetched_jwks) {
         Ok(set) => set.keys.into_iter().map(|k| k.kid).collect::<Vec<_>>(),

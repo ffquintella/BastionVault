@@ -540,7 +540,14 @@ impl FerroGateBackendInner {
     /// Resolve the JWKS (trust anchor) to verify tokens against, per the
     /// configured source: `static_jwks` returns the pasted set; `cmis_grpc`
     /// fetches it from CMIS (cached for `jwks_refresh_secs`).
-    pub async fn resolve_jwks(&self, config: &FerroGateConfig) -> Result<String, String> {
+    ///
+    /// `token_kid` is the JOSE `kid` of the token about to be verified (empty
+    /// = unknown). On the `cmis_grpc` source it does double duty: a fresh
+    /// cached set that *misses* the kid is treated as stale (a host whose MIA
+    /// restarted signs with a brand-new key the cache predates), and the kid
+    /// rides the fetch as a hint so a CMIS replica that never witnessed the
+    /// host's attestation rehydrates it from the replicated store on miss.
+    pub async fn resolve_jwks(&self, config: &FerroGateConfig, token_kid: &str) -> Result<String, String> {
         match config.jwks_source.as_str() {
             jwks_source::STATIC => {
                 if config.static_jwks.trim().is_empty() {
@@ -551,12 +558,12 @@ impl FerroGateBackendInner {
             jwks_source::CMIS_GRPC => {
                 #[cfg(feature = "sync_handler")]
                 {
-                    let _ = config;
+                    let _ = (config, token_kid);
                     Err("cmis_grpc JWKS source requires the async (default) build".to_string())
                 }
                 #[cfg(not(feature = "sync_handler"))]
                 {
-                    self.resolve_cmis_jwks(config).await
+                    self.resolve_cmis_jwks(config, token_kid).await
                 }
             }
             other => Err(format!("unknown jwks_source '{other}'")),
@@ -564,16 +571,23 @@ impl FerroGateBackendInner {
     }
 
     /// Fetch the CMIS JWKS, honouring the in-memory cache and falling back to a
-    /// stale cached copy if a refresh fails (stale-while-revalidate).
+    /// stale cached copy if a refresh fails (stale-while-revalidate). A cached
+    /// set missing `token_kid` bypasses the cache: the set is refetched with
+    /// the kid as an on-miss rehydrate hint. Refetch frequency for tokens
+    /// naming unknown kids is bounded by the per-IP login rate limit, and a
+    /// kid genuinely absent from CMIS still fails verification exactly as
+    /// before — the bypass can only turn spurious misses into successes.
     #[cfg(not(feature = "sync_handler"))]
-    async fn resolve_cmis_jwks(&self, config: &FerroGateConfig) -> Result<String, String> {
+    async fn resolve_cmis_jwks(&self, config: &FerroGateConfig, token_kid: &str) -> Result<String, String> {
         let now = now_unix();
         if let Some(c) = self.jwks_cache.load_full() {
-            if now - c.fetched_at < config.jwks_refresh_secs.max(1) {
+            if now - c.fetched_at < config.jwks_refresh_secs.max(1)
+                && (token_kid.is_empty() || verify::jwks_has_kid(&c.json, token_kid))
+            {
                 return Ok(c.json.clone());
             }
         }
-        match super::cmis::fetch_jwks_json(config).await {
+        match super::cmis::fetch_jwks_json(config, token_kid).await {
             Ok(json) => {
                 self.jwks_cache.store(Some(Arc::new(CachedJwks { json: json.clone(), fetched_at: now })));
                 Ok(json)
@@ -611,7 +625,7 @@ impl FerroGateBackendInner {
             return Ok(Some(Response::error_response("rate_limited: too many login attempts, retry shortly")));
         }
 
-        let jwks_json = match self.resolve_jwks(&config).await {
+        let jwks_json = match self.resolve_jwks(&config, &verify::token_kid(&token).unwrap_or_default()).await {
             Ok(j) => j,
             Err(reason) => {
                 log::warn!(target: "security", "ferrogate login rejected: {reason}");
@@ -812,7 +826,7 @@ impl FerroGateBackendInner {
         let config = self.get_config(req).await?;
         let (token, dpop) = Self::extract_token_dpop(req)?;
 
-        let jwks_json = match self.resolve_jwks(&config).await {
+        let jwks_json = match self.resolve_jwks(&config, &verify::token_kid(&token).unwrap_or_default()).await {
             Ok(j) => j,
             Err(reason) => return Ok(Some(Response::error_response(&reason))),
         };

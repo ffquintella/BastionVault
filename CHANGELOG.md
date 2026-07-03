@@ -45,7 +45,18 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.23.2] - 2026-07-03
+
 ### Added
+- **Root-token break-glass for a failed machine-identity gate** (`gui/src/routes/ConnectPage.tsx`,
+  `gui/src/routes/LoginPage.tsx`) -- when the connect-time FerroGate machine gate fails with a
+  hard error (MIA down, stale `no key for kid host-...`), the Get Started error banner now offers
+  "Sign in with root token instead", which opens the login page's Token tab with an explanatory
+  notice (`/login?breakglass=1`). `finalizeLogin` skips the machine-binding step for sessions whose
+  policies include `root`, mirroring the server-side exemption in the token store's `pre_route`
+  (root is break-glass by design) -- previously a root login re-ran the broken MIA attestation and
+  dead-ended the recovery.
+
 - **Windows CLI packages** (`installers/cli/{msi,nupkg}/`, `Makefile`) -- `make windows-cli-msi`
   builds a CLI-only .msi from a WiX 3.x project (installs `bvault.exe` to
   `C:\Program Files\BastionVault CLI\`, appends the directory to the system PATH, removed on
@@ -53,6 +64,17 @@ EXAMPLE ENTRY:
   `make windows-cli-packages` builds both; `make cli-packages` dispatches per host OS
   (Linux: deb+rpm, Windows: msi+nupkg). Unsigned, x64 only -- CI matrix and Authenticode
   are later phases of the client-installers spec (packaging Phase 3, CLI side).
+
+### Fixed
+- **Spurious `no key for kid host-...` against HA CMIS clusters -- JWKS kid-aware refresh**
+  (`src/modules/credential/ferrogate/{cmis.rs,cmis_proto.rs,verify.rs,path_machines.rs}`) --
+  the ferrogate mount's JWKS fetch now passes the presented token's JOSE `kid` as the new
+  `kid_hint` on the CMIS `JWKS` RPC, letting a CMIS replica that never witnessed the host's
+  attestation rehydrate the key from its replicated store on miss (FerroGate-side change,
+  wire-compatible with older CMIS). The mount-side JWKS cache is also busted when a fresh
+  cached set lacks the token's kid (a host whose MIA re-attested signs under a key the cache
+  predates); refetch frequency is bounded by the per-IP login rate limit, and a kid genuinely
+  unknown to CMIS still fails verification exactly as before.
 
 ## [0.23.1] - 2026-07-03
 

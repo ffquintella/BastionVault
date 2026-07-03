@@ -95,7 +95,6 @@ fn build_chain() -> (String, String, String, String, Issuer<'static, KeyPair>) {
 #[maybe_async::maybe_async]
 async fn setup() -> (BastionVault, std::path::PathBuf, String) {
     let (bvault, dir, _) = boot();
-    let core = bvault.core.load();
     let seal = SealConfig { secret_shares: 5, secret_threshold: 3 };
     let init = bvault.init(&seal).await.unwrap();
     for i in 0..seal.secret_threshold {

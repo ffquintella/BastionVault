@@ -127,8 +127,16 @@ pub struct RotateRequest {
     #[prost(uint64, tag = "3")]
     pub known_epoch: u64,
 }
-#[derive(Clone, Copy, PartialEq, ::prost::Message)]
-pub struct JwksRequest {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct JwksRequest {
+    /// Optional `kid` the caller is about to verify against (e.g.
+    /// `host-<hex>` from a child token's JOSE header). A CMIS replica that
+    /// does not have it in its published set re-reads the replicated
+    /// issued-SVID store before answering (on-miss rehydrate). Empty = no
+    /// hint; older CMIS versions ignore the field entirely.
+    #[prost(string, tag = "1")]
+    pub kid_hint: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct JwksResponse {
     #[prost(string, tag = "1")]

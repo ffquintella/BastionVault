@@ -489,8 +489,8 @@ async fn test_sys_mount_feature(core: &Core, token: &str) {
     let data = resp.unwrap().data;
     assert!(data.is_some());
     // Default core mounts: secret/, resources/, files/, identity/,
-    // resource-group/, sys/, rustion/.
-    assert_eq!(data.as_ref().unwrap().len(), 7);
+    // resource-group/, sys/, rustion/, ssh-broker/.
+    assert_eq!(data.as_ref().unwrap().len(), 8);
 
     // test api: "mounts/kv" with valid type
     let mount_data = json!({

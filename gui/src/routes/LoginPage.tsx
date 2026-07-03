@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { AuthLayout } from "../components/AuthLayout";
@@ -21,6 +21,13 @@ interface SsoProviderOption {
 
 export function LoginPage() {
   const navigate = useNavigate();
+  // Break-glass entry from the ConnectPage: the machine-identity gate hit a
+  // hard error (MIA down, stale signing key, …) and the operator chose the
+  // root-token recovery path. Root tokens are server-exempt from the machine
+  // requirement, so the token tab is preselected and `finalizeLogin` skips
+  // the machine-binding step for root sessions.
+  const [searchParams] = useSearchParams();
+  const breakGlass = searchParams.get("breakglass") === "1";
   const setAuth = useAuthStore((s) => s.setAuth);
   const sessionExpired = useAuthStore((s) => s.sessionExpired);
   const loadEntity = useAuthStore((s) => s.loadEntity);
@@ -45,7 +52,16 @@ export function LoginPage() {
     // was already proven approved by the connect-time gate, so a non-approved
     // result here is exceptional — surface it and abort (throwing skips the
     // caller's navigate).
-    if (mode === "Remote" && remoteProfile?.require_machine_identity) {
+    //
+    // Root tokens skip the binding: the server's token-store chokepoint
+    // exempts them from the machine requirement (break-glass admin), so the
+    // binding adds nothing — and attempting it would dead-end the recovery
+    // login when the local MIA is exactly what's broken.
+    if (
+      mode === "Remote" &&
+      remoteProfile?.require_machine_identity &&
+      !policies.includes("root")
+    ) {
       // Sign the DPoP proof with the server's advertised `expected_audience`
       // (captured on the profile at connect time), matching the connect-time
       // machine gate. Using `address` here would re-introduce the htu mismatch
@@ -89,7 +105,7 @@ export function LoginPage() {
   const mode = useVaultStore((s) => s.mode);
   const remoteProfile = useVaultStore((s) => s.remoteProfile);
   const setStatus = useVaultStore((s) => s.setStatus);
-  const [tab, setTab] = useState<Tab>("login");
+  const [tab, setTab] = useState<Tab>(breakGlass ? "token" : "login");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -398,6 +414,18 @@ export function LoginPage() {
       {sessionExpired && !error && (
         <div className="mb-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-400 text-sm">
           Your session expired. Please sign in again.
+        </div>
+      )}
+
+      {/* Break-glass hint: reached from the ConnectPage after the machine
+          gate failed hard. Only the root token can get past the server's
+          machine requirement, so steer the operator there explicitly. */}
+      {breakGlass && !error && (
+        <div className="mb-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-400 text-sm">
+          The machine identity check failed on this host, but root tokens are
+          exempt from it. Sign in with the root token to recover — other
+          logins will be rejected by the server until the machine gate works
+          again.
         </div>
       )}
 

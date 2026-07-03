@@ -914,7 +914,7 @@ mod test {
             ..Default::default()
         };
 
-        let json = super::cmis::fetch_jwks_json(&cfg).await.expect("fetch JWKS from live CMIS");
+        let json = super::cmis::fetch_jwks_json(&cfg, "").await.expect("fetch JWKS from live CMIS");
         let jwks = JwkSet::from_json(&json).expect("live JWKS parses");
         assert!(jwks.keys.iter().any(|k| k.kty == "FERROGATE-COMPOSITE"), "expected a composite key");
         eprintln!(
