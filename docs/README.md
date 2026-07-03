@@ -9,7 +9,7 @@ A Rust-based secrets management server compatible with HashiCorp Vault's API, wi
 - [Quick start](quick-start.md) — boot a vault, init, unseal, write your first secret.
 - [Install](install.md) — build from source, package, or Podman.
 - [Configuration](configuration.md) — storage + listener + cluster config in HCL.
-- [Authentication](authentication.md) — Token, UserPass, AppRole, Certificate, FIDO2, OIDC.
+- [Authentication](authentication.md) — Token, UserPass, AppID, Certificate, FIDO2, OIDC.
 
 ## Operate
 

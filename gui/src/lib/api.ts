@@ -593,7 +593,7 @@ export const listResourceSecretVersions = (name: string, key: string) =>
 export const readResourceSecretVersion = (name: string, key: string, version: number) =>
   invoke<ResourceSecretVersionData>("read_resource_secret_version", { name, key, version });
 
-// AppRole
+// AppID (API type "approle")
 export const listAppRoles = () => invoke<AppRoleListResult>("list_approles");
 export const readAppRole = (name: string) => invoke<AppRoleInfo>("read_approle", { name });
 export const writeAppRole = (

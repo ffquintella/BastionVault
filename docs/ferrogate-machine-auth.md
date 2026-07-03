@@ -74,6 +74,13 @@ bvault ferrogate login --audience https://vault.example.com
 bvault ferrogate status --audience https://vault.example.com
 bvault ferrogate whoami
 
+# For applications (headless): mint a machine token and print it as JSON,
+# WITHOUT persisting it to the host's token helper. Exec this at app startup
+# and parse the output — the token works as X-Vault-Token on direct API
+# calls, or as the `machine_token` of an AppID (approle) login.
+bvault ferrogate token --format json --audience https://vault.example.com
+bvault ferrogate token --field client_token     # bare token, pipe-friendly
+
 # Admin (GUI: Machines (FerroGate); or CLI — run against the server with a root token):
 bvault operator ferrogate list --status pending
 bvault operator ferrogate approve <handle|spiffe-id> --policies default,reader

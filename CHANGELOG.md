@@ -43,6 +43,24 @@ EXAMPLE ENTRY:
 =============================================================================
 -->
 
+## [0.23.1] - 2026-07-03
+
+### Added
+- **`bvault ferrogate token`** (`src/cli/command/ferrogate.rs`) -- headless machine-token
+  minting for applications: performs the MIA + DPoP login exchange like `ferrogate login`,
+  but prints the minted token and its attributes (policies, TTL, SPIFFE id, ...) as
+  structured output (`--format json`, `--field client_token`) and never persists it to the
+  on-disk token helper. Apps exec it at startup and use the token as `X-Vault-Token` or as
+  the `machine_token` of an AppID login — no GUI client required on the machine.
+
+### Changed
+- **Rename the AppRole designation to AppID** -- the auth method is now presented as
+  **AppID** everywhere users see it (GUI navigation, AppID page, mount-type label,
+  identity-group labels, backend `help`/`description` strings, login error message, docs),
+  since it identifies an application/machine rather than a role. The wire protocol is
+  untouched for Vault compatibility: the mount type stays `approle` and all
+  `auth/approle/*` API paths, CLI commands, and field names are unchanged.
+
 ## [0.23.0] - 2026-07-01
 
 ### Added

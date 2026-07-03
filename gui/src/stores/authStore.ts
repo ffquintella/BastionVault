@@ -48,7 +48,7 @@ interface AuthState {
   sessionExpired: boolean;
   /** Stable entity_id for the logged-in user, used by ownership and sharing features. */
   entityId: string;
-  /** Principal username (UserPass) or role name (AppRole); for display only. */
+  /** Principal username (UserPass) or role name (AppID); for display only. */
   principal: string;
   /**
    * Per-vault-id session cache. When the operator flips between

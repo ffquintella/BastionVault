@@ -332,7 +332,7 @@ impl AppRoleBackendInner {
                 .filter(|t| !t.trim().is_empty())
                 .ok_or_else(|| {
                     RvError::ErrResponse(
-                        "machine_token is required: AppRole logins must present a FerroGate machine token".to_string(),
+                        "machine_token is required: AppID logins must present a FerroGate machine token".to_string(),
                     )
                 })?;
 

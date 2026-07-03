@@ -107,7 +107,7 @@ const userNav: NavItem[] = [
 // admin policy at all.
 const adminNav: NavItem[] = [
   { path: "/users", label: "Users" },
-  { path: "/approle", label: "AppRole" },
+  { path: "/approle", label: "AppID" },
   { path: "/ferrogate", label: "Machines (FerroGate)" },
   { path: "/groups", label: "Identity Groups" },
   { path: "/asset-groups", label: "Asset Groups" },

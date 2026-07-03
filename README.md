@@ -32,7 +32,7 @@ Part of the features provided by BastionVault are as follows:
   * RESTful API, compatible with Hashicorp Vault
 * Authentication & Authorization
   * token-based authentication
-  * AppRole authentication
+  * AppID authentication (Vault AppRole-compatible)
   * username/password authentication
   * certificate authentication
   * path-based ACL policies

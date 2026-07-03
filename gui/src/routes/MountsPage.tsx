@@ -141,7 +141,7 @@ const MOUNTABLE_PLUGIN_TYPES = new Set<string>([
 
 const AUTH_TYPES = [
   { value: "userpass", label: "Username & Password" },
-  { value: "approle", label: "AppRole" },
+  { value: "approle", label: "AppID" },
   { value: "cert", label: "TLS Certificate" },
   { value: "ferrogate", label: "FerroGate Machine Identity" },
 ];

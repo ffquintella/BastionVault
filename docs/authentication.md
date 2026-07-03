@@ -8,7 +8,7 @@ BastionVault supports multiple authentication methods. Each method is mounted at
 |--------|----------|-------------|
 | **Token** | Direct token usage | Pass a known token directly |
 | **Userpass** | Human operators | Username and password login |
-| **AppRole** | Applications and services | Role ID + Secret ID exchange |
+| **AppID** | Applications and services | Role ID + Secret ID exchange |
 | **Certificate** | mTLS environments | TLS client certificate verification |
 
 All methods produce a **token** on successful authentication. This token is then used for all subsequent API requests via the `X-Vault-Token` header or `token` cookie.
@@ -85,9 +85,9 @@ bvault list auth/userpass/users
 bvault delete auth/userpass/users/alice
 ~~~
 
-## AppRole Authentication
+## AppID Authentication
 
-AppRole is designed for machine-to-machine authentication. It uses a two-part credential: a **Role ID** (like a username) and a **Secret ID** (like a password).
+AppID (mounted as the Vault-compatible `approle` auth type) is designed for machine-to-machine authentication. It uses a two-part credential: a **Role ID** (like a username) and a **Secret ID** (like a password).
 
 ### Setup
 
@@ -129,7 +129,7 @@ curl --request POST \
   https://127.0.0.1:8200/v1/auth/approle/login
 ~~~
 
-### AppRole Options
+### AppID Options
 
 | Option | Description |
 |--------|-------------|
@@ -142,7 +142,7 @@ curl --request POST \
 | `token_bound_cidrs` | CIDR blocks that tokens can be used from |
 | `secret_id_bound_cidrs` | CIDR blocks that secret IDs can be generated from |
 
-### Recommended AppRole Workflow
+### Recommended AppID Workflow
 
 1. An admin creates the role and retrieves the Role ID
 2. The Role ID is embedded in the application configuration
@@ -188,7 +188,7 @@ bvault login --method=cert \
 |----------|-------------------|
 | Quick testing, development | Token (root token or static) |
 | Human operators | Userpass |
-| Applications, CI/CD pipelines | AppRole |
+| Applications, CI/CD pipelines | AppID |
 | Service mesh, mutual TLS environments | Certificate |
 | Multiple methods needed | Enable several; assign different policies to each |
 
@@ -207,7 +207,7 @@ Every token has a list of attached policies. When authenticating:
 
 1. The auth method determines which policies to attach (based on role, user, or certificate configuration)
 2. The `default` policy is always included
-3. **Identity-group policies are unioned in**: every user group containing the caller's username (UserPass / FIDO2) and every app group containing the caller's role name (AppRole) contributes its `policies` list. Group membership changes take effect on the *next* login.
+3. **Identity-group policies are unioned in**: every user group containing the caller's username (UserPass / FIDO2) and every app group containing the caller's role name (AppID) contributes its `policies` list. Group membership changes take effect on the *next* login.
 4. The token inherits the combined capabilities of all its policies
 5. The `root` policy grants unrestricted access
 

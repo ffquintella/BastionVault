@@ -627,7 +627,7 @@ export interface ResourceSecretVersionData {
   operation: string;
 }
 
-// AppRole
+// AppID (API type "approle")
 export interface AppRoleListResult {
   roles: string[];
 }

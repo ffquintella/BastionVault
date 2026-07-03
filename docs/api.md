@@ -297,7 +297,7 @@ Response:
 
 ### Identity Groups
 
-User-group and AppRole-group records that fan policies out to every
+User-group and AppID-group records that fan policies out to every
 member at login time.
 
 ~~~
@@ -609,7 +609,7 @@ DELETE /v1/auth/{mount}/users/{username}
 LIST /v1/auth/{mount}/users
 ~~~
 
-### AppRole Login
+### AppID Login
 
 ~~~
 POST /v1/auth/{mount}/login
@@ -622,7 +622,7 @@ POST /v1/auth/{mount}/login
 }
 ~~~
 
-### AppRole Management
+### AppID Management
 
 **Create/update a role**
 

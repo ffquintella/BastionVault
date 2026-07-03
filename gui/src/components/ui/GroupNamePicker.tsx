@@ -4,7 +4,7 @@ import * as api from "../../lib/api";
 
 interface GroupNamePickerProps {
   /** "user" → identity groups bundling UserPass principals,
-   *  "app" → groups bundling AppRole principals. */
+   *  "app" → groups bundling AppID principals. */
   kind: GroupKind;
   /** Currently selected group name (empty when nothing chosen). */
   value: string;

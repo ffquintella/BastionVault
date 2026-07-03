@@ -143,6 +143,13 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   in a unit test; the wire framing has a CBOR round-trip test. Unix-only for now (Windows named-pipe is a
   follow-up). Full live login isn't exercised in the current dev env (the dev CMIS has no RIM bundle, so its MIA
   can't attest/mint), but every layer the CLI owns is unit-validated.
+- **Phase 5.1 — app-facing token minting.** `bvault ferrogate token` (2026-07-03) is the headless companion to
+  `login` for applications: the same MIA + DPoP exchange at `auth/<mount>/login`, but the minted machine token
+  and its attributes (policies, TTL, hoisted `metadata` such as `spiffe_id`) are printed as structured output
+  (`--format json`, `--field client_token` for bare-token piping) and **never persisted** to the on-disk token
+  helper, so an app can exec it at startup without disturbing the host's stored CLI session. The token serves
+  as `X-Vault-Token` for direct API calls or as the `machine_token` of an AppID login. The MIA
+  mint/DPoP/body construction is shared with `login`/`status` via a common helper.
 - **Phase 6 shipped.** Admin GUI page `Machines (FerroGate)` (route `/ferrogate`, sidebar entry) with Pending /
   Approved / History / Config tabs: approve (policies + TTL + comment), reject (reason), revoke, and a
   trust-anchor config form (trust domain, audience, JWKS source, CMIS endpoint + SPKI pins, static JWKS,

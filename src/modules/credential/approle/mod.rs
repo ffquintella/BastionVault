@@ -141,14 +141,14 @@ impl AppRoleBackend {
             fields: {
                 "require_machine": {
                     field_type: FieldType::Bool,
-                    description: "When true (default), every AppRole login must present a FerroGate machine token bound to the role."
+                    description: "When true (default), every AppID login must present a FerroGate machine token bound to the role."
                 }
             },
             operations: [
                 {op: Operation::Read, handler: approle_backend_ref1.read_config},
                 {op: Operation::Write, handler: approle_backend_ref2.write_config}
             ],
-            help: "AppRole backend configuration: mandatory machine-binding gate."
+            help: "AppID backend configuration: mandatory machine-binding gate."
         })
     }
 }

@@ -4,6 +4,9 @@
 //! Subcommands:
 //! - `login`  — mint a child token from the MIA, prove possession via DPoP, and
 //!   exchange it at `auth/<mount>/login` for a BastionVault token.
+//! - `token`  — same exchange as `login`, but print the minted token and its
+//!   attributes as structured output (`--format json`) and never persist it —
+//!   for applications that exec this at startup.
 //! - `status` — report this machine's enrolment status without minting a vault
 //!   token (verifies the FerroGate token server-side).
 //! - `whoami` — print this host's SPIFFE id (read locally from a freshly minted
@@ -54,6 +57,8 @@ pub struct Ferrogate {
 pub enum Commands {
     /// Authenticate and obtain a BastionVault token.
     Login(Login),
+    /// Mint a machine token and print it as structured output (for apps; never persisted).
+    Token(Token),
     /// Report this machine's enrolment status.
     Status(Status),
     /// Print this host's SPIFFE id (local; no server call).
@@ -75,6 +80,31 @@ fn resolve_socket(socket: Option<&str>, environment: Option<&str>) -> Result<Str
     Ok(ferrogate_mia::resolve_mia_socket_for(environment))
 }
 
+/// Mint a DPoP-bound child token from the local MIA and build the request body
+/// (`token` + `dpop` proof) for the mount's `login` / `status` endpoints.
+fn mia_login_body(socket: &str, audience: &str, ttl: u32) -> Result<Map<String, Value>, RvError> {
+    let dpop = DpopKey::generate();
+    let child = ferrogate_mia::request_child_token(socket, audience, &dpop.jkt(), ttl)
+        .map_err(|e| bv_error_string!(e))?;
+    let proof = dpop.proof("POST", audience);
+
+    let mut body = Map::new();
+    body.insert("token".into(), Value::String(child.jws));
+    body.insert("dpop".into(), Value::String(proof));
+    Ok(body)
+}
+
+/// Pull a human-readable error out of a login response that minted no token.
+fn login_error(resp: &crate::api::HttpResponse) -> String {
+    resp.response_data
+        .as_ref()
+        .and_then(|d| d.get("data").or(Some(d)))
+        .and_then(|d| d.get("error"))
+        .and_then(|e| e.as_str())
+        .unwrap_or("login failed (no token issued)")
+        .to_string()
+}
+
 impl Ferrogate {
     #[inline]
     pub fn execute(&mut self) -> ExitCode {
@@ -83,6 +113,7 @@ impl Ferrogate {
         };
         match cmd {
             Commands::Login(c) => c.execute(),
+            Commands::Token(c) => c.execute(),
             Commands::Status(c) => c.execute(),
             Commands::Whoami(c) => c.execute(),
             Commands::Autoconfig(c) => c.execute(),
@@ -143,16 +174,9 @@ impl CommandExecutor for Login {
         };
 
         let socket = resolve_socket(self.socket.as_deref(), self.environment.as_deref())?;
-        let dpop = DpopKey::generate();
-        let child = ferrogate_mia::request_child_token(&socket, &audience, &dpop.jkt(), self.ttl)
-            .map_err(|e| bv_error_string!(e))?;
-        let proof = dpop.proof("POST", &audience);
+        let body = mia_login_body(&socket, &audience, self.ttl)?;
 
         let client = self.client()?;
-        let mut body = Map::new();
-        body.insert("token".into(), Value::String(child.jws));
-        body.insert("dpop".into(), Value::String(proof));
-
         let path = format!("auth/{}/login", self.mount.trim_matches('/'));
         let resp = client.logical().write(&path, Some(body))?;
 
@@ -175,17 +199,103 @@ impl CommandExecutor for Login {
                 }
                 Ok(())
             }
-            None => {
-                let msg = resp
-                    .response_data
-                    .as_ref()
-                    .and_then(|d| d.get("data").or(Some(d)))
-                    .and_then(|d| d.get("error"))
-                    .and_then(|e| e.as_str())
-                    .unwrap_or("login failed (no token issued)");
-                Err(bv_error_string!(msg.to_string()))
+            None => Err(bv_error_string!(login_error(&resp))),
+        }
+    }
+}
+
+// ── token ────────────────────────────────────────────────────────────────
+
+#[derive(Parser, Deref)]
+#[command(
+    about = "Mint a machine token and print it as structured output (for apps)",
+    long_about = r#"Authenticate this machine via the local FerroGate MIA and print the minted
+BastionVault machine token together with its attributes (policies, TTL,
+SPIFFE id, ...). The token is NEVER persisted to the on-disk token helper,
+so this is safe to run from applications without disturbing the host's
+stored CLI session.
+
+Intended for applications that exec this command at startup:
+
+    $ bvault ferrogate token --format json
+    $ bvault ferrogate token --field client_token
+
+The minted token can be sent as `X-Vault-Token` on direct API calls, or
+presented as the `machine_token` of an AppID (approle) login."#
+)]
+pub struct Token {
+    /// Audience the token is minted for; MUST match the mount's
+    /// `expected_audience`. Defaults to the resolved server address.
+    #[arg(long)]
+    audience: Option<String>,
+
+    /// MIA helper socket path. Defaults to the socket the installed MIA is
+    /// configured with (`FERROGATE_HELPER_SOCKET`, then `mia.toml`).
+    #[arg(long)]
+    socket: Option<String>,
+
+    /// MIA environment selector: resolve the socket from `mia-<env>.toml`
+    /// instead of `mia.toml`. Mirrors `mia --environment <env>`. Ignored when
+    /// `--socket` is given.
+    #[arg(long)]
+    environment: Option<String>,
+
+    /// Mount path of the ferrogate auth method.
+    #[arg(long, default_value = "ferrogate")]
+    mount: String,
+
+    /// Requested child-token lifetime, seconds (MIA clamps to its max).
+    #[arg(long, default_value_t = 300)]
+    ttl: u32,
+
+    #[deref]
+    #[command(flatten, next_help_heading = "HTTP Options")]
+    http_options: command::HttpOptions,
+
+    #[command(flatten, next_help_heading = "Output Options")]
+    output: command::LogicalOutputOptions,
+}
+
+impl CommandExecutor for Token {
+    fn main(&self) -> Result<(), RvError> {
+        let audience = match &self.audience {
+            Some(a) => a.clone(),
+            None => self.resolved_address()?,
+        };
+        let socket = resolve_socket(self.socket.as_deref(), self.environment.as_deref())?;
+        let body = mia_login_body(&socket, &audience, self.ttl)?;
+
+        let client = self.client()?;
+        let path = format!("auth/{}/login", self.mount.trim_matches('/'));
+        let resp = client.logical().write(&path, Some(body))?;
+
+        let auth = resp
+            .response_data
+            .as_ref()
+            .and_then(|d| d.get("auth"))
+            .and_then(|a| a.as_object())
+            .filter(|a| a.get("client_token").and_then(Value::as_str).is_some_and(|t| !t.is_empty()));
+
+        let Some(auth) = auth else {
+            return Err(bv_error_string!(login_error(&resp)));
+        };
+
+        // Flatten to a single level so both `--field <name>` and the table
+        // formatter work: metadata entries (spiffe_id, machine_id, ...) are
+        // hoisted to top-level keys; auth keys win on collision.
+        let mut out = Map::new();
+        if let Some(meta) = auth.get("metadata").and_then(Value::as_object) {
+            for (k, v) in meta {
+                out.insert(k.clone(), v.clone());
             }
         }
+        for (k, v) in auth {
+            if k != "metadata" && !v.is_null() {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+
+        self.output.print_data(&Value::Object(Map::from_iter([("data".to_string(), Value::Object(out))])), self.output.field.as_deref())
     }
 }
 
@@ -228,16 +338,9 @@ impl CommandExecutor for Status {
             None => self.resolved_address()?,
         };
         let socket = resolve_socket(self.socket.as_deref(), self.environment.as_deref())?;
-        let dpop = DpopKey::generate();
-        let child = ferrogate_mia::request_child_token(&socket, &audience, &dpop.jkt(), self.ttl)
-            .map_err(|e| bv_error_string!(e))?;
-        let proof = dpop.proof("POST", &audience);
+        let body = mia_login_body(&socket, &audience, self.ttl)?;
 
         let client = self.client()?;
-        let mut body = Map::new();
-        body.insert("token".into(), Value::String(child.jws));
-        body.insert("dpop".into(), Value::String(proof));
-
         let path = format!("auth/{}/status", self.mount.trim_matches('/'));
         let resp = client.logical().write(&path, Some(body))?;
         if let Some(data) = resp.response_data.as_ref().and_then(|d| d.get("data")) {

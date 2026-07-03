@@ -1,5 +1,9 @@
 # AppRole machine binding + per-environment secret IDs
 
+> **Naming note:** the auth method's user-facing designation is now **AppID** (GUI, docs,
+> help strings) since it identifies an application/machine rather than a role. The API type
+> and all `auth/approle/*` paths in this spec are unchanged for Vault compatibility.
+
 ## Summary
 
 Makes AppRole a two-factor, environment-aware machine credential:

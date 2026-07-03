@@ -221,7 +221,7 @@ The `default` and `root` policies are built-in and cannot be deleted.
 ## Identity Groups
 
 Identity groups attach a set of policies to a *named collection of
-principals* — UserPass usernames (`user` groups) or AppRole role names
+principals* — UserPass usernames (`user` groups) or AppID role names
 (`app` groups). At login time, the policies attached to every group
 the caller is a member of are unioned with their direct policies.
 
@@ -238,7 +238,7 @@ bvault read identity/group/user/engineering
 # List all user groups.
 bvault list identity/group/user
 
-# AppRole groups live under group/app.
+# AppID groups live under group/app.
 bvault write identity/group/app/ci-bots \
   members="github-runner,builder" \
   policies="ci-readonly"
@@ -348,7 +348,7 @@ Delete a user:
 bvault delete auth/userpass/users/admin
 ~~~
 
-### Configure AppRole
+### Configure AppID
 
 Create a role:
 
@@ -372,7 +372,7 @@ Generate a secret ID:
 bvault write -f auth/approle/role/my-app/secret-id
 ~~~
 
-Login with AppRole:
+Login with AppID:
 
 ~~~bash
 bvault write auth/approle/login role_id=<role-id> secret_id=<secret-id>
@@ -411,6 +411,6 @@ The encryption key is derived from the unseal keys during the unseal process. Wh
 - [ ] Configure appropriate log level (`info` or `warn` for production)
 - [ ] Set up monitoring for the metrics endpoint
 - [ ] Create scoped policies; avoid using the root token for regular operations
-- [ ] Use AppRole or userpass for application authentication instead of static tokens
+- [ ] Use AppID or userpass for application authentication instead of static tokens
 - [ ] Back up the storage directory regularly
 - [ ] Test unseal procedures before they are needed in an emergency

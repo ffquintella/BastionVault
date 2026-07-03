@@ -202,11 +202,11 @@ export function GroupsPage() {
     }
   }
 
-  const memberLabel = kind === "user" ? "Users" : "App Roles";
+  const memberLabel = kind === "user" ? "Users" : "AppID Roles";
   const memberHint =
     kind === "user"
       ? "UserPass usernames in this group"
-      : "AppRole role names in this group";
+      : "AppID role names in this group";
 
   return (
     <Layout>

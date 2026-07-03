@@ -31,7 +31,7 @@ Features:
      * Compatible with HashiCorp Vault
 * Authentication
   * Token-based authentication
-  * AppRole authentication
+  * AppID authentication (Vault AppRole-compatible)
   * Username/password authentication
   * Certificate authentication
   * Path-based ACL policies

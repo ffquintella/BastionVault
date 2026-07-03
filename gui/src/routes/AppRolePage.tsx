@@ -92,8 +92,8 @@ export function AppRolePage() {
   async function handleEnableMount() {
     setEnabling(true);
     try {
-      await api.enableAuthMethod("approle/", "approle", "AppRole auth method");
-      toast("success", "AppRole auth method enabled");
+      await api.enableAuthMethod("approle/", "approle", "AppID auth method");
+      toast("success", "AppID auth method enabled");
       await loadRoles();
     } catch (e: unknown) {
       toast("error", extractError(e));
@@ -165,7 +165,7 @@ export function AppRolePage() {
     <Layout>
       <div className="space-y-4">
         <div className="flex items-center justify-between">
-          <h1 className="text-2xl font-bold">AppRole</h1>
+          <h1 className="text-2xl font-bold">AppID</h1>
           {mountEnabled && (
             <Button size="sm" onClick={() => setShowCreate(true)}>
               Create Role
@@ -176,11 +176,11 @@ export function AppRolePage() {
         {mountEnabled === false && !loading && (
           <Card>
             <EmptyState
-              title="AppRole auth method not enabled"
-              description="The AppRole auth backend must be mounted before you can create roles."
+              title="AppID auth method not enabled"
+              description="The AppID auth backend must be mounted before you can create roles."
               action={
                 <Button onClick={handleEnableMount} disabled={enabling}>
-                  {enabling ? "Enabling..." : "Enable AppRole"}
+                  {enabling ? "Enabling..." : "Enable AppID"}
                 </Button>
               }
             />
@@ -247,7 +247,7 @@ export function AppRolePage() {
         <Modal
           open={showCreate}
           onClose={() => setShowCreate(false)}
-          title="Create AppRole"
+          title="Create AppID Role"
           actions={
             <>
               <Button variant="ghost" onClick={() => setShowCreate(false)}>
@@ -355,7 +355,7 @@ function RoleDetail({ roleInfo, roleId, onCopy, onRefresh, toast }: RoleDetailPr
     <>
       {noMachines && (
         <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-yellow-400 text-sm">
-          This role has no bound machines. AppRole logins require a FerroGate machine token bound to
+          This role has no bound machines. AppID logins require a FerroGate machine token bound to
           the role — until a machine is bound under the <strong>Machines</strong> tab, no client can
           authenticate with this role.
         </div>

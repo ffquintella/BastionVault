@@ -15,7 +15,7 @@ The Connect screen is the first surface after launch. It owns:
 
 - A profile chooser for previously-used remote vaults (address, name, last-seen node).
 - A toggle to start (or resume) the **embedded** local vault — file storage for quick scratch use, Hiqlite when started via `make run-dev-gui-hiqlite`.
-- The sign-in form, which adapts to the auth backends advertised by the target vault: userpass, AppRole, client certificate, and FIDO2/WebAuthn.
+- The sign-in form, which adapts to the auth backends advertised by the target vault: userpass, AppID, client certificate, and FIDO2/WebAuthn.
 
 When a remote target is part of an HA cluster, the GUI runs the same client-side node discovery the CLI uses and pins the lowest-RTT healthy node — the dot in the bottom-left of the sidebar (LOCAL/REMOTE) shows the discovered target on hover.
 
@@ -104,7 +104,7 @@ Visible to tokens with `root`, `super-admin`, `administrator`, `admin`, or a del
 | Entry | Purpose |
 |-------|---------|
 | Users | Userpass user lifecycle: create / update password / set policies / register FIDO2 keys |
-| AppRole | AppRole role lifecycle and secret-id generation |
+| AppID | AppID role lifecycle and secret-id generation |
 | Identity Groups | User / app groups, with the policies that group members inherit |
 | Asset Groups | Named bundles of resources and KV paths that can be shared as a unit |
 | Policies | View, edit, and create HCL policies; surfaces seeded baselines (default, standard-user, secret-author, pki-user, …) |

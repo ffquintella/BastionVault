@@ -76,7 +76,7 @@ pub fn caller_audit_actor(req: &Request) -> String {
 
 static IDENTITY_BACKEND_HELP: &str = r#"
 The identity backend manages user groups and application groups. Each group
-holds a list of members (usernames for user groups, AppRole role names for
+holds a list of members (usernames for user groups, AppID role names for
 application groups) and a list of policies. At login time, policies attached
 to a caller's groups are unioned with their directly-attached policies.
 "#;
@@ -221,7 +221,7 @@ impl IdentityBackend {
                         "members": {
                             field_type: FieldType::CommaStringSlice,
                             required: false,
-                            description: "AppRole role names that belong to this group."
+                            description: "AppID role names that belong to this group."
                         },
                         "policies": {
                             field_type: FieldType::CommaStringSlice,

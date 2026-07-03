@@ -849,7 +849,7 @@ function AssetGroupSharingCard({
               options={[
                 { value: "entity", label: "User (entity)" },
                 { value: "group_user", label: "User identity group" },
-                { value: "group_app", label: "Application group (AppRole)" },
+                { value: "group_app", label: "Application group (AppID)" },
               ]}
             />
             {granteeKind !== "entity" && (
