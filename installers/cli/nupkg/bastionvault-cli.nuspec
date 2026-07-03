@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Chocolatey package for the bvault CLI. Built by `make windows-cli-nupkg`,
+  which stages this nuspec + tools/ + the release bvault.exe into
+  target/nupkg/staging/ and runs `choco pack ... -\-version <x.y.z>` there
+  (the <version> below is a placeholder the Makefile overrides).
+
+  Chocolatey auto-shims every .exe under tools/, so installing the package
+  puts `bvault` on PATH with no install script.
+-->
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>bastionvault-cli</id>
+    <version>0.0.0</version>
+    <title>BastionVault CLI</title>
+    <authors>BastionVault Contributors</authors>
+    <projectUrl>https://github.com/ffquintella/BastionVault</projectUrl>
+    <licenseUrl>https://github.com/ffquintella/BastionVault/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <tags>bastionvault vault secrets cli security admin</tags>
+    <summary>BastionVault command-line client</summary>
+    <description>
+BastionVault is an identity-based secrets management server with a
+Vault-compatible API. This package installs the bvault command-line
+client used to interact with a BastionVault server.
+    </description>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

@@ -57,7 +57,7 @@ RUSTUP_CARGO_BIN ?= $(HOME)/.cargo/bin
 endif
 export PATH := $(RUSTUP_CARGO_BIN):$(PATH)
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages cli-packages
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -389,6 +389,82 @@ linux-cli-rpm: ## Build the bvault CLI .rpm (cargo-generate-rpm; output under ta
 	@ls -lh target/generate-rpm/*.rpm 2>/dev/null || true
 
 linux-cli-packages: linux-cli-deb linux-cli-rpm ## Build both .deb and .rpm for the bvault CLI
+
+# ── Windows CLI packages (packaging Phase 3, CLI side) ─────────────────
+#
+# Builds the bvault CLI .msi (WiX 3.x project at installers/cli/msi/
+# bvault.wxs — Program Files install + system PATH entry) and a
+# Chocolatey .nupkg (installers/cli/nupkg/ — choco auto-shims the exe).
+# Both must run ON Windows: candle/light and choco are Windows tools.
+#
+# Pre-reqs (one-time):
+#   .msi   — WiX Toolset 3.x with its bin/ on PATH (or pass
+#            CANDLE=/LIGHT= with full paths).
+#   .nupkg — Chocolatey (https://chocolatey.org/install).
+
+CANDLE ?= candle
+LIGHT  ?= light
+CHOCO  ?= choco
+
+windows-cli-msi: ## Build the bvault CLI .msi (WiX 3.x; output under target/msi/)
+ifneq ($(OS),Windows_NT)
+	@echo "ERROR: windows-cli-msi must run on Windows (WiX candle/light are Windows tools)."; exit 1
+else
+	@command -v $(CANDLE) >/dev/null 2>&1 || { \
+		echo "ERROR: WiX 'candle' not found. Install the WiX 3.x toolset and put its bin/ on PATH,"; \
+		echo "       or pass CANDLE=/LIGHT= with full paths."; \
+		exit 1; \
+	}
+	cargo build --release --bin bvault
+	@mkdir -p target/msi
+	$(CANDLE) -nologo -arch x64 \
+		-dVersion=$(VERSION) \
+		-dBvaultExe=target/release/bvault.exe \
+		-dLicenseRtf=installers/cli/msi/License.rtf \
+		-out target/msi/bvault.wixobj \
+		installers/cli/msi/bvault.wxs
+	$(LIGHT) -nologo -ext WixUIExtension \
+		-out target/msi/bvault-$(VERSION)-windows-x64.msi \
+		target/msi/bvault.wixobj
+	@echo ""
+	@echo "==> .msi under target/msi/:"
+	@ls -lh target/msi/*.msi 2>/dev/null || true
+endif
+
+windows-cli-nupkg: ## Build the bvault CLI Chocolatey .nupkg (output under target/nupkg/)
+ifneq ($(OS),Windows_NT)
+	@echo "ERROR: windows-cli-nupkg must run on Windows (choco is a Windows tool)."; exit 1
+else
+	@command -v $(CHOCO) >/dev/null 2>&1 || { \
+		echo "ERROR: choco not found. Install Chocolatey: https://chocolatey.org/install"; \
+		exit 1; \
+	}
+	cargo build --release --bin bvault
+	@rm -rf target/nupkg/staging
+	@mkdir -p target/nupkg/staging/tools
+	cp installers/cli/nupkg/bastionvault-cli.nuspec target/nupkg/staging/
+	cp installers/cli/nupkg/tools/LICENSE.txt \
+	   installers/cli/nupkg/tools/VERIFICATION.txt \
+	   target/nupkg/staging/tools/
+	cp target/release/bvault.exe target/nupkg/staging/tools/
+	cd target/nupkg/staging && $(CHOCO) pack bastionvault-cli.nuspec \
+		--version $(VERSION) --outputdirectory ..
+	@echo ""
+	@echo "==> .nupkg under target/nupkg/:"
+	@ls -lh target/nupkg/*.nupkg 2>/dev/null || true
+endif
+
+windows-cli-packages: windows-cli-msi windows-cli-nupkg ## Build both .msi and .nupkg for the bvault CLI
+
+cli-packages: ## Build the bvault CLI packages for this host (Linux: deb+rpm, Windows: msi+nupkg)
+ifeq ($(OS),Windows_NT)
+	@$(MAKE) windows-cli-packages
+else ifeq ($(shell uname -s),Linux)
+	@$(MAKE) linux-cli-packages
+else
+	@echo "ERROR: no CLI package format for this host: .deb/.rpm build on Linux, .msi/.nupkg on Windows"; \
+	echo "       (macOS .pkg is packaging Phase 2 — not wired yet)"; exit 1
+endif
 
 # ── Container image push (Sonatype Nexus, Docker Hub, GHCR, …) ─────────
 #

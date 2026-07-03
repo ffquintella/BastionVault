@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  BastionVault CLI - Windows .msi (WiX 3.x, CLI-only; the GUI has its own
+  Tauri/WiX project under gui/src-tauri/installers/windows/).
+
+  Installs bvault.exe to "C:\Program Files\BastionVault CLI\" (per-machine)
+  and appends that directory to the system PATH. No service, no shortcuts.
+
+  Build via `make windows-cli-msi`, which passes:
+    -dVersion=<x.y.z>        product version (from the root Cargo.toml)
+    -dBvaultExe=<path>       the release bvault.exe to package
+    -dLicenseRtf=<path>      the RTF shown by the WixUI_Minimal license dialog
+
+  The UpgradeCode is the package's permanent identity - never change it,
+  or upgrades will install side-by-side instead of replacing.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="BastionVault CLI"
+           Language="1033"
+           Version="$(var.Version)"
+           Manufacturer="BastionVault Contributors"
+           UpgradeCode="129C70A1-A75A-4F5A-99BF-7DE6E65D39D6">
+
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Description="BastionVault command-line client"
+             Comments="https://github.com/ffquintella/BastionVault" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of BastionVault CLI is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
+    <UIRef Id="WixUI_Minimal" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLDIR" Name="BastionVault CLI">
+
+          <Component Id="BvaultExe" Guid="*" Win64="yes">
+            <File Id="BvaultExeFile"
+                  Source="$(var.BvaultExe)"
+                  Name="bvault.exe"
+                  KeyPath="yes" />
+          </Component>
+
+          <!-- PATH is machine-wide and non-permanent: the entry is removed
+               on uninstall. The registry value exists only to give the
+               component a stable KeyPath (Environment can't be one). -->
+          <Component Id="PathEntry" Guid="BE61D53B-37F3-4BD4-8DA2-99C666F47861" Win64="yes">
+            <Environment Id="BvaultPath"
+                         Name="PATH"
+                         Value="[INSTALLDIR]"
+                         Part="last"
+                         Action="set"
+                         System="yes"
+                         Permanent="no" />
+            <RegistryValue Root="HKLM"
+                           Key="Software\BastionVault\CLI"
+                           Name="installed"
+                           Type="integer"
+                           Value="1"
+                           KeyPath="yes" />
+          </Component>
+
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id="Main" Title="BastionVault CLI" Level="1">
+      <ComponentRef Id="BvaultExe" />
+      <ComponentRef Id="PathEntry" />
+    </Feature>
+  </Product>
+</Wix>

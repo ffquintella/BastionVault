@@ -1,0 +1,14 @@
+VERIFICATION
+
+The bvault.exe in this package is built from the BastionVault sources at
+https://github.com/ffquintella/BastionVault (tag v<version>) via
+`cargo build --release --bin bvault` and packed by `make windows-cli-nupkg`.
+
+To verify, build the same tag from source and compare checksums:
+
+    git checkout v<version>
+    cargo build --release --bin bvault
+    Get-FileHash target\release\bvault.exe -Algorithm SHA256
+
+Release artefacts and their checksums are published on the GitHub
+Releases page of the repository.

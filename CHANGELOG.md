@@ -43,6 +43,17 @@ EXAMPLE ENTRY:
 =============================================================================
 -->
 
+## [Unreleased]
+
+### Added
+- **Windows CLI packages** (`installers/cli/{msi,nupkg}/`, `Makefile`) -- `make windows-cli-msi`
+  builds a CLI-only .msi from a WiX 3.x project (installs `bvault.exe` to
+  `C:\Program Files\BastionVault CLI\`, appends the directory to the system PATH, removed on
+  uninstall); `make windows-cli-nupkg` packs a Chocolatey package (choco auto-shims the exe).
+  `make windows-cli-packages` builds both; `make cli-packages` dispatches per host OS
+  (Linux: deb+rpm, Windows: msi+nupkg). Unsigned, x64 only -- CI matrix and Authenticode
+  are later phases of the client-installers spec (packaging Phase 3, CLI side).
+
 ## [0.23.1] - 2026-07-03
 
 ### Added

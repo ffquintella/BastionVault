@@ -53,17 +53,27 @@ deliberately separate.
 
 ## Current State
 
-- **No native installers exist.** No `cargo deb`, no `cargo
-  generate-rpm`, no productbuild script, no WiX project, no GitHub
-  Actions matrix that produces these on tag.
+- **Linux CLI packages ship locally (Phase 1, CLI side done).**
+  `make linux-cli-packages` builds the `bastionvault` .deb (`cargo-deb`)
+  and .rpm (`cargo-generate-rpm`) with the binary, manpage, and
+  bash/zsh/fish completions from [installers/cli/](../installers/cli/).
+  No CI matrix and no GPG signing yet.
+- **Windows CLI packages ship locally (Phase 3, CLI side wired
+  2026-07-03).** `make windows-cli-msi` builds the .msi from the CLI-only
+  WiX 3.x project at [installers/cli/msi/bvault.wxs](../installers/cli/msi/bvault.wxs)
+  (Program Files install + system PATH entry, `WixUI_Minimal` license
+  dialog); `make windows-cli-nupkg` packs a Chocolatey package from
+  [installers/cli/nupkg/](../installers/cli/nupkg/) (choco auto-shims the
+  exe). `make windows-cli-packages` builds both; `make cli-packages`
+  dispatches per host OS. Must run on a Windows host (candle/light/choco);
+  x64 only; no Authenticode signing yet. The .nupkg is an addition to the
+  original plan (which listed only the .msi for Windows).
 - The Tauri GUI crate's `bundle.targets` is `"all"` in
   [gui/src-tauri/tauri.conf.json](../gui/src-tauri/tauri.conf.json), but
   no CI runs `tauri build` against the cross-platform matrix and no
   signing identity is configured.
-- The `bvault` binary builds cleanly on all four platforms, but is not
-  packaged anywhere — operators copy it out of `target/release/`.
-- The Packaging & Distribution row in [roadmap.md](../roadmap.md) currently
-  reads `Todo`.
+- macOS .pkg (Phase 2), the GUI installers, and the CI matrix + Cosign
+  publish (Phase 4) remain open.
 
 ## Design
 
@@ -313,7 +323,9 @@ accepts the install on a fresh macOS account.
 |---|---|
 | `gui/src-tauri/tauri.windows.conf.json` | Tauri bundler config: WiX 3.x template path, signing identity (env-var driven). |
 | `gui/src-tauri/installers/windows/main.wxs` | WiX project that extends Tauri's default with Start Menu shortcuts and the `bv://` URL handler. |
-| `installers/cli/msi/{bvault.wxs,License.rtf}` | CLI WiX project; PATH entry; per-machine install. |
+| [`installers/cli/msi/{bvault.wxs,License.rtf}`](../installers/cli/msi/bvault.wxs) | CLI WiX project; PATH entry; per-machine install. **Done (local build via `make windows-cli-msi`; unsigned, x64 only).** |
+| [`installers/cli/nupkg/`](../installers/cli/nupkg/) | Chocolatey .nupkg (nuspec + tools; choco auto-shims the exe). Addition to the original plan. **Done (local build via `make windows-cli-nupkg`).** |
+| `Makefile` `windows-cli-msi` / `windows-cli-nupkg` / `windows-cli-packages` / `cli-packages` | Local Windows builds (candle/light + choco pack, version from Cargo.toml); `cli-packages` dispatches per host OS. **Done.** |
 | `.github/workflows/client-installers.yml` (extension) | `windows-2022` + arm64 matrix entries; Authenticode signing via the EV cert configured as a CI secret. |
 
 Acceptance: both MSIs pass Windows SmartScreen on a fresh install of
