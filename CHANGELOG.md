@@ -45,6 +45,17 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+- **Linux CLI packages now ship a real amd64 ELF when built off-Linux** (`Makefile`) --
+  `make linux-cli-rpm` / `linux-cli-deb` previously ran `cargo build` on the host arch, so on
+  a non-Linux host (e.g. an Apple-Silicon Mac) they produced an `aarch64` package wrapping a
+  macOS Mach-O binary that could never run on Linux. Both targets now always build for
+  `x86_64-unknown-linux-gnu` and, on any host that isn't native x86_64 Linux, cross-build the
+  binary inside Docker via `cross`; the rpm/deb are labelled `x86_64`/`amd64` accordingly and
+  `cargo generate-rpm` runs with `--auto-req disabled` off-Linux (no usable `ldd`). Artifacts
+  move to `target/x86_64-unknown-linux-gnu/{generate-rpm,debian}/`. Requires
+  `cargo install cross` + a running Docker/Podman on non-Linux hosts.
+
 ## [0.23.2] - 2026-07-03
 
 ### Added

@@ -359,34 +359,90 @@ container-image-run: ## Build (linux/arm64) and run the server image locally (co
 # ── Linux CLI packages (Wave 2 / Phase 1) ──────────────────────────────
 #
 # Builds .deb (cargo-deb) and .rpm (cargo-generate-rpm) for the bvault
-# CLI on the host's native arch. Static assets (manpage, completions)
-# live under installers/cli/ and are referenced by `[package.metadata.deb]`
-# + `[package.metadata.generate-rpm]` in Cargo.toml.
+# CLI. The packaged binary is always a Linux amd64 (x86_64) ELF. Static
+# assets (manpage, completions) live under installers/cli/ and are
+# referenced by `[package.metadata.deb]` + `[package.metadata.generate-rpm]`
+# in Cargo.toml.
 #
-# Pre-reqs (one-time): `cargo install cargo-deb cargo-generate-rpm`.
+# Host handling: on a native x86_64 Linux host we build directly with
+# `cargo`. On any other host — notably an Apple-Silicon (arm64) Mac —
+# we cross-build the Linux binary inside a Docker container via `cross`,
+# so the package ships a real Linux amd64 ELF and not the host's native
+# (e.g. macOS/arm64 Mach-O) binary. Building always targets the explicit
+# CLI_LINUX_TARGET triple so the artifact layout is identical on both
+# paths (target/$(CLI_LINUX_TARGET)/{release,generate-rpm,debian}/).
+#
+# Pre-reqs (one-time):
+#   native Linux : `cargo install cargo-deb cargo-generate-rpm`
+#   other hosts  : + `cargo install cross` and a running Docker/Podman
 # These targets do NOT auto-install the helpers — installing build-time
 # tooling automatically inside `make` would surprise CI.
+#
+# Override CLI_LINUX_TARGET (and the *_ARCH labels) to package a
+# different Linux triple.
+CLI_LINUX_TARGET    ?= x86_64-unknown-linux-gnu
+CLI_LINUX_RPM_ARCH  ?= x86_64
+CLI_LINUX_DEB_ARCH  ?= amd64
 
-linux-cli-deb: ## Build the bvault CLI .deb (cargo-deb; output under target/debian/)
+_CLI_UNAME_S := $(shell uname -s)
+_CLI_UNAME_M := $(shell uname -m)
+ifeq ($(_CLI_UNAME_S),Linux)
+ifneq ($(filter x86_64 amd64,$(_CLI_UNAME_M)),)
+CLI_LINUX_NATIVE := 1
+endif
+endif
+
+ifeq ($(CLI_LINUX_NATIVE),1)
+# Native x86_64 Linux: plain cargo, and let cargo-generate-rpm run its
+# ldd-based dependency discovery (it works on the real target).
+CLI_LINUX_CARGO   := cargo
+CLI_LINUX_AUTOREQ := auto
+else
+# Cross-building from a non-Linux/non-amd64 host: compile inside Docker
+# via `cross`, and disable rpm auto-req (the host has no usable `ldd`
+# and could not read a foreign-arch ELF anyway).
+CLI_LINUX_CARGO   := cross
+CLI_LINUX_AUTOREQ := disabled
+endif
+
+# Preflight for the cross path: fail early with an actionable message if
+# `cross` or a container engine is missing.
+define _cli_require_cross
+	@if [ "$(CLI_LINUX_CARGO)" = "cross" ]; then \
+		command -v cross >/dev/null 2>&1 || { \
+			echo "ERROR: this host is not native x86_64 Linux, so the Linux amd64"; \
+			echo "       binary is cross-built via 'cross', which is not installed."; \
+			echo "       Run: cargo install cross"; exit 1; }; \
+		{ docker info >/dev/null 2>&1 || podman info >/dev/null 2>&1; } || { \
+			echo "ERROR: 'cross' needs a running Docker or Podman engine."; \
+			echo "       Start Docker Desktop (or your Podman machine) and retry."; \
+			exit 1; }; \
+	fi
+endef
+
+linux-cli-deb: ## Build the bvault CLI .deb (Linux amd64; cross-built via Docker on non-Linux hosts)
 	@command -v cargo-deb >/dev/null 2>&1 || { \
 		echo "ERROR: cargo-deb not installed. Run: cargo install cargo-deb"; \
 		exit 1; \
 	}
-	cargo deb --no-strip
+	$(_cli_require_cross)
+	$(CLI_LINUX_CARGO) build --release --bin bvault --target $(CLI_LINUX_TARGET)
+	cargo deb --no-build --no-strip --target $(CLI_LINUX_TARGET)
 	@echo ""
-	@echo "==> .deb under target/debian/:"
-	@ls -lh target/debian/*.deb 2>/dev/null || true
+	@echo "==> .deb under target/$(CLI_LINUX_TARGET)/debian/:"
+	@ls -lh target/$(CLI_LINUX_TARGET)/debian/*.deb 2>/dev/null || true
 
-linux-cli-rpm: ## Build the bvault CLI .rpm (cargo-generate-rpm; output under target/generate-rpm/)
+linux-cli-rpm: ## Build the bvault CLI .rpm (Linux amd64; cross-built via Docker on non-Linux hosts)
 	@command -v cargo-generate-rpm >/dev/null 2>&1 || { \
 		echo "ERROR: cargo-generate-rpm not installed. Run: cargo install cargo-generate-rpm"; \
 		exit 1; \
 	}
-	cargo build --release --bin bvault
-	cargo generate-rpm
+	$(_cli_require_cross)
+	$(CLI_LINUX_CARGO) build --release --bin bvault --target $(CLI_LINUX_TARGET)
+	cargo generate-rpm --target $(CLI_LINUX_TARGET) --arch $(CLI_LINUX_RPM_ARCH) --auto-req $(CLI_LINUX_AUTOREQ)
 	@echo ""
-	@echo "==> .rpm under target/generate-rpm/:"
-	@ls -lh target/generate-rpm/*.rpm 2>/dev/null || true
+	@echo "==> .rpm under target/$(CLI_LINUX_TARGET)/generate-rpm/:"
+	@ls -lh target/$(CLI_LINUX_TARGET)/generate-rpm/*.rpm 2>/dev/null || true
 
 linux-cli-packages: linux-cli-deb linux-cli-rpm ## Build both .deb and .rpm for the bvault CLI
 
