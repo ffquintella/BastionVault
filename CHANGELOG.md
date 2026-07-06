@@ -45,7 +45,19 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.23.3] - 2026-07-06
+
 ### Fixed
+- **Linux CLI packages no longer require a bleeding-edge glibc** (`Cross.toml`) --
+  cross-built `bvault` binaries linked against `GLIBC_2.39` (the default
+  `cross` image `x86_64-unknown-linux-gnu:main` is built on Ubuntu 24.04), so they
+  failed on RHEL 8/9 and similar hosts with
+  `` /lib64/libc.so.6: version `GLIBC_2.39' not found ``. A new `Cross.toml` pins the
+  build to `ghcr.io/rust-cross/manylinux2014-cross:x86_64` (glibc 2.17), dropping the
+  binary's glibc floor to `GLIBC_2.16` -- runs on RHEL 7 and newer plus all modern
+  Debian/Ubuntu. The image ships cmake/perl/gcc so the C/asm crates (`aws-lc-sys`,
+  `ring`, `libsqlite3-sys`, `zstd-sys`) still build. Applies to both
+  `make linux-cli-rpm` and `make linux-cli-deb`.
 - **Linux CLI packages now ship a real amd64 ELF when built off-Linux** (`Makefile`) --
   `make linux-cli-rpm` / `linux-cli-deb` previously ran `cargo build` on the host arch, so on
   a non-Linux host (e.g. an Apple-Silicon Mac) they produced an `aarch64` package wrapping a
