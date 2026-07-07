@@ -226,6 +226,17 @@ async fn sys_audit_list_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// GET `/v2/sys/hsm/status` — HSM seal posture (read-only).
+async fn sys_hsm_status_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/hsm/status".to_string();
+    r.operation = Operation::Read;
+    handle_request(core, &mut r).await
+}
+
 /// POST `/sys/audit/{path}` — enable a new audit device.
 async fn sys_audit_enable_request_handler(
     req: HttpRequest,
@@ -3220,6 +3231,8 @@ pub fn init_sys_service(cfg: &mut web::ServiceConfig) {
                     .route(web::get().to(sys_policy_tests_read_request_handler))
                     .route(web::post().to(sys_policy_tests_write_request_handler)),
             )
+            // HSM seal status (features/hsm-support.md). v2-only, read-only.
+            .service(web::resource("/hsm/status").route(web::get().to(sys_hsm_status_request_handler)))
             // Per-principal default resource accounts (Resource Connect).
             // v2-only. Register the `self` and bare-list resources *before* the
             // `{path:.*}` wildcard so they win the match.

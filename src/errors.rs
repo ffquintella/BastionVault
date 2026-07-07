@@ -185,6 +185,24 @@ pub enum RvError {
     ErrBackupHmacFailed,
     #[error("Backup HMAC verification failed: file may be tampered.")]
     ErrBackupHmacMismatch,
+    #[error("HSM backend error: {0}")]
+    ErrHsm(String),
+    #[error("HSM is unavailable.")]
+    ErrHsmUnavailable,
+    #[error("HSM wrapped blob is invalid or malformed.")]
+    ErrHsmBlobInvalid,
+    #[error("HSM blob context/purpose/epoch does not match the expected binding.")]
+    ErrHsmContextMismatch,
+    #[error("HSM unwrap authorization is missing, invalid, or replayed.")]
+    ErrHsmAuthzInvalid,
+    #[error("HSM attestation verification failed: {0}")]
+    ErrHsmAttestationInvalid(String),
+    #[error("HSM seal configuration is invalid: {0}")]
+    ErrHsmConfigInvalid(String),
+    #[error("Mock HSM backend refuses to start in a production environment.")]
+    ErrHsmMockRefusedInProduction,
+    #[error("HSM migration transcript verification failed: {0}")]
+    ErrHsmTranscriptInvalid(String),
     #[error("PKI pem bundle is invalid.")]
     ErrPkiPemBundleInvalid,
     #[error("PKI ca public key of certificate does not match private key.")]
@@ -418,7 +436,10 @@ impl RvError {
             RvError::ErrBarrierSealed
             | RvError::ErrClusterNoLeader
             | RvError::ErrClusterQuorumLost
-            | RvError::ErrClusterUnhealthy => StatusCode::SERVICE_UNAVAILABLE,
+            | RvError::ErrClusterUnhealthy
+            | RvError::ErrHsmUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            RvError::ErrHsmAuthzInvalid => StatusCode::FORBIDDEN,
+            RvError::ErrHsmContextMismatch | RvError::ErrHsmBlobInvalid => StatusCode::BAD_REQUEST,
             RvError::ErrPermissionDenied => StatusCode::FORBIDDEN,
             RvError::ErrRouterMountNotFound => StatusCode::NOT_FOUND,
             RvError::ErrApiVersionMismatch => StatusCode::BAD_REQUEST,
@@ -513,6 +534,11 @@ impl PartialEq for RvError {
             | (RvError::ErrBackupCorrupted, RvError::ErrBackupCorrupted)
             | (RvError::ErrBackupHmacFailed, RvError::ErrBackupHmacFailed)
             | (RvError::ErrBackupHmacMismatch, RvError::ErrBackupHmacMismatch)
+            | (RvError::ErrHsmUnavailable, RvError::ErrHsmUnavailable)
+            | (RvError::ErrHsmBlobInvalid, RvError::ErrHsmBlobInvalid)
+            | (RvError::ErrHsmContextMismatch, RvError::ErrHsmContextMismatch)
+            | (RvError::ErrHsmAuthzInvalid, RvError::ErrHsmAuthzInvalid)
+            | (RvError::ErrHsmMockRefusedInProduction, RvError::ErrHsmMockRefusedInProduction)
             | (RvError::ErrPkiPemBundleInvalid, RvError::ErrPkiPemBundleInvalid)
             | (RvError::ErrPkiCertKeyMismatch, RvError::ErrPkiCertKeyMismatch)
             | (RvError::ErrPkiCertChainIncorrect, RvError::ErrPkiCertChainIncorrect)
@@ -534,6 +560,10 @@ impl PartialEq for RvError {
             (RvError::ErrResponse(a), RvError::ErrResponse(b)) => a == b,
             (RvError::ErrResponseStatus(sa, ta), RvError::ErrResponseStatus(sb, tb)) => sa == sb && ta == tb,
             (RvError::ErrString(a), RvError::ErrString(b)) => a == b,
+            (RvError::ErrHsm(a), RvError::ErrHsm(b)) => a == b,
+            (RvError::ErrHsmAttestationInvalid(a), RvError::ErrHsmAttestationInvalid(b)) => a == b,
+            (RvError::ErrHsmConfigInvalid(a), RvError::ErrHsmConfigInvalid(b)) => a == b,
+            (RvError::ErrHsmTranscriptInvalid(a), RvError::ErrHsmTranscriptInvalid(b)) => a == b,
             _ => false,
         }
     }

@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.23.4"
+version = "0.24.0"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -316,7 +316,10 @@ hkdf = "0.13"
 # account-key algorithm. Promoted from dev-deps to direct deps when
 # Phase 6.1 of the ACME spec landed. `digest 0.10` (matches rsa 0.9's
 # family). No new C deps; pure-Rust RustCrypto.
-p256 = { version = "0.13", features = ["ecdsa"], default-features = false }
+# `ecdh` added for the HSM `bv-identity` ECDH used by the HSM-to-HSM
+# replication channel and the hybrid-PQC seed derivation (feature
+# `hsm_mock` / `hsm_yubihsm2`). Pure-Rust; enables `elliptic-curve/ecdh`.
+p256 = { version = "0.13", features = ["ecdsa", "ecdh"], default-features = false }
 # OpenLDAP / AD password-rotation engine (`src/modules/ldap/`).
 # Pure-Rust LDAP client; we pick the `tls-rustls-aws-lc-rs` feature
 # so it consumes the same rustls + aws_lc_rs provider as the rest of
@@ -329,6 +332,17 @@ ldap3 = { version = "0.12", default-features = false, features = ["sync", "tls-r
 # default. Pure-Rust on top of curve25519-dalek (already transitive
 # via ed25519-dalek), so the marginal dep cost is the wrapper crate.
 x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
+
+# YubiHSM 2 client (feature `hsm_yubihsm2`). Pure-Rust, maintained by
+# iqlusion; `http` for the yubihsm-connector, `usb` for direct device
+# access, `passwords` for password-derived authentication keys. Optional
+# so the stock build (and the USB/libusb link dependency) is only paid for
+# by operators who enable the hardware backend. See features/hsm-support.md.
+# `untested` is required for `Client::derive_ecdh` (the crate gates ECDH
+# behind it and flags it experimental). BastionVault needs device ECDH for
+# the HSM-to-HSM replication channel and hybrid-PQC seed derivation; the
+# `BVAULT_TEST_YUBIHSM=1` suite validates it against real hardware before use.
+yubihsm = { version = "0.42.1", optional = true, default-features = false, features = ["http", "usb", "passwords", "untested"] }
 
 [build-dependencies]
 toml = "1.1.2"
@@ -441,6 +455,23 @@ transit_byok = []
 # pipelines opt in via this flag; everyone else pays nothing. See
 # `features/ssh-secret-engine.md` Phase 3.
 ssh_pqc = []
+
+# HSM Support (features/hsm-support.md). Two mutually-independent backends
+# behind the narrow `hsm::HsmBackend` trait, both off by default so the
+# stock build pulls neither the `yubihsm` crate nor its USB stack.
+#
+# `hsm_mock` is a pure-software backend (AES-GCM wrap, ed25519 authz,
+# p256 identity/ECDH) with a file-persisted object store. Zero new external
+# deps — reuses aes-gcm, p256, ed25519-dalek, serde_bytes already in tree.
+# It provides NO hardware protection and refuses to start in production; it
+# exists for dev, CI, and the homologation cluster (no USB passthrough).
+# Release packaging MUST NOT enable it.
+hsm_mock = []
+# `hsm_yubihsm2` is the production backend for the mandated YubiHSM 2, via
+# the pure-Rust `yubihsm` crate over the HTTP connector or direct USB.
+# `x509-cert` (attestation parsing) is already a direct dep, so the feature
+# only needs the `yubihsm` crate itself.
+hsm_yubihsm2 = ["dep:yubihsm"]
 
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5"

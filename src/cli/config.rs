@@ -107,6 +107,12 @@ pub struct Config {
     /// variable, which takes precedence over this value.
     #[serde(default)]
     pub plugin_runtime_dir: String,
+    /// Optional HSM seal block: `hsm "yubihsm2" { ... }` or `hsm "mock" { ... }`.
+    /// The map is keyed by the block label (the backend type). At most one
+    /// entry is permitted; more than one is a config error. Absent ⇒ the
+    /// classic operator-driven Shamir unseal. See `features/hsm-support.md`.
+    #[serde(default)]
+    pub hsm: HashMap<String, crate::hsm::HsmConfigBlock>,
 }
 
 #[derive(Debug, Copy, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -301,9 +307,26 @@ where
 }
 
 impl Config {
+    /// Resolve the optional `hsm "<label>" { ... }` block into a validated,
+    /// env-expanded seal config. `Ok(None)` when no HSM seal is configured;
+    /// an error when more than one block is present or the block is invalid.
+    pub fn resolve_hsm(&self) -> Result<Option<crate::hsm::ResolvedHsmConfig>, RvError> {
+        if self.hsm.is_empty() {
+            return Ok(None);
+        }
+        if self.hsm.len() > 1 {
+            return Err(RvError::ErrHsmConfigInvalid(
+                "at most one `hsm` seal block may be configured".into(),
+            ));
+        }
+        let (label, block) = self.hsm.iter().next().expect("len checked above");
+        Ok(Some(crate::hsm::resolve_config(label, block)?))
+    }
+
     pub fn merge(&mut self, other: Config) {
         self.listener.extend(other.listener);
         self.storage.extend(other.storage);
+        self.hsm.extend(other.hsm);
         if !other.api_addr.is_empty() {
             self.api_addr = other.api_addr;
         }

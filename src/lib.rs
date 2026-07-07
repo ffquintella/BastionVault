@@ -62,6 +62,7 @@ pub mod context;
 pub mod core;
 pub mod errors;
 pub mod handler;
+pub mod hsm;
 pub mod http;
 pub mod logging;
 pub mod logical;
@@ -72,6 +73,7 @@ pub mod mount;
 pub mod router;
 #[cfg(feature = "storage_mysql")]
 pub mod schema;
+pub mod seal;
 pub mod server_info;
 pub mod shamir;
 pub mod stats;

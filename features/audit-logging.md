@@ -128,6 +128,21 @@ restart — verified live against the HML cluster (2026-07-07),
 where denials on one node were invisible to a dashboard read
 served by the other.
 
+**Dashboard counters read from these stores (shipped)** — the same
+per-node/not-replicated defect affected the dashboard summary
+itself, not just the Audit page. `handle_dashboard_summary`
+(`src/modules/system/mod.rs`) now derives `audit_24h.denied` and
+`attention.failed_logins_1h` by range-scanning the replicated
+append stores (`sys/denial-audit/` for denials, `sys/login-audit/`
+for failed logins, excluding `logout` rows), bounded to the 24h /
+1h window with a since-key, so every HA node reports identical
+totals. `audit_24h.write_failures` has no backing store and keeps
+reading the in-memory `core.stats` ring. Covered by
+`test_dashboard_summary_counters_come_from_storage_not_ring`, which
+appends straight to the stores (simulating a peer node's request
+handling), asserts the in-memory ring stays empty, and confirms
+the summary still reports the storage-backed counts.
+
 FIDO2 login `begin` failures (unknown username, no enrolled
 passkey) are also recorded now — both the userpass-integrated
 path and the standalone `fido2/` backend wrap `login_begin` with a

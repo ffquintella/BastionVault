@@ -90,6 +90,50 @@ Response:
 }
 ~~~
 
+### HSM Seal Status
+
+Reports the active seal provider. With no `hsm "…"` block configured the vault
+uses the classic Shamir operator-unseal; configuring an HSM seal enables
+hardware-backed auto-unseal. Read-only; never returns secret material. See
+`features/hsm-support.md`.
+
+~~~
+GET /v2/sys/hsm/status
+~~~
+
+Shamir (default) response:
+
+~~~json
+{
+  "type": "shamir",
+  "auto_unseal": false,
+  "sealed": false,
+  "initialized": true
+}
+~~~
+
+HSM seal response:
+
+~~~json
+{
+  "type": "hsm",
+  "auto_unseal": true,
+  "backend": "yubihsm2",
+  "device_serial": "0012345678",
+  "node_id": "node-a",
+  "cluster_uuid": "…",
+  "epoch": 0,
+  "enrolled_nodes": 3,
+  "this_node_enrolled": true,
+  "recovery": "none",
+  "pqc_key_cache_ttl_secs": 60,
+  "sealed": false,
+  "initialized": true
+}
+~~~
+
+CLI equivalent: `bvault operator hsm status`.
+
 ### Mounts (Secrets Engines)
 
 **List all mounts**

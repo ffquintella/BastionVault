@@ -8,7 +8,7 @@
 //! of BastionVault.
 
 use std::{
-    ops::{Deref, DerefMut},
+    ops::Deref,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Weak,
@@ -32,6 +32,7 @@ use crate::{
         MountTable, MountsMonitor, MountsRouter, CORE_MOUNT_CONFIG_PATH, LOGICAL_BARRIER_PREFIX, SYSTEM_BARRIER_PREFIX,
     },
     router::Router,
+    seal::{SealProvider, ShamirSealProvider},
     shamir::{ShamirSecret, SHAMIR_OVERHEAD},
     storage::{
         barrier::SecurityBarrier, barrier_view::BarrierView, new_barrier, physical, Backend as PhysicalBackend,
@@ -142,6 +143,11 @@ pub struct Core {
     /// `sys/dashboard/summary`. Always present; incremented from the
     /// request hot path in [`Core::handle_request`].
     pub stats: Arc<crate::stats::DashboardStats>,
+    /// KEK custody policy. Empty ⇒ the classic operator-driven Shamir unseal.
+    /// When an [`crate::seal::hsm::HsmSealProvider`] is installed (from the
+    /// `hsm "..."` config block at server startup), `init` wraps the KEK under
+    /// the HSM and [`Core::auto_unseal`] recovers it without operator shares.
+    pub seal_provider_swap: std::sync::RwLock<Option<Arc<dyn SealProvider>>>,
 }
 
 impl Default for CoreState {
@@ -182,6 +188,7 @@ impl Default for Core {
             require_machine_identity: Arc::new(AtomicBool::new(false)),
             approle_require_machine: Arc::new(AtomicBool::new(true)),
             stats: Arc::new(crate::stats::DashboardStats::default()),
+            seal_provider_swap: std::sync::RwLock::new(None),
         }
     }
 }
@@ -276,6 +283,23 @@ impl Core {
         self.barrier.inited().await
     }
 
+    /// The active seal provider. Defaults to the classic Shamir provider when
+    /// none has been installed (i.e. no `hsm "..."` seal in the config).
+    pub fn seal_provider(&self) -> Arc<dyn SealProvider> {
+        match self.seal_provider_swap.read() {
+            Ok(guard) => guard.clone().unwrap_or_else(|| Arc::new(ShamirSealProvider::new())),
+            Err(_) => Arc::new(ShamirSealProvider::new()),
+        }
+    }
+
+    /// Install a seal provider (e.g. HSM auto-unseal). Called once at server
+    /// startup after the HSM backend is opened from config.
+    pub fn set_seal_provider(&self, provider: Arc<dyn SealProvider>) {
+        if let Ok(mut guard) = self.seal_provider_swap.write() {
+            *guard = Some(provider);
+        }
+    }
+
     pub async fn init(&self, seal_config: &SealConfig) -> Result<InitResult, RvError> {
         let inited = self.inited().await?;
         if inited {
@@ -322,11 +346,11 @@ impl Core {
         state.kek = kek.deref().clone();
         self.state.store(Arc::new(state));
 
-        if seal_config.secret_shares == 1 {
-            init_result.secret_shares.deref_mut().push(kek.deref().clone());
-        } else {
-            init_result.secret_shares = self.generate_unseal_keys().await?;
-        }
+        // KEK custody is delegated to the active seal provider. The default
+        // Shamir provider reproduces the original behaviour (split into
+        // operator shares, or the raw KEK for a 1-of-1 config); an HSM provider
+        // wraps the KEK under the device and returns no shares (auto-unseal).
+        init_result.secret_shares = self.seal_provider().init_kek(kek.deref().as_slice(), seal_config).await?;
 
         defer! (
             // Ensure the barrier is re-sealed
@@ -607,6 +631,54 @@ impl Core {
 
     pub async fn unseal(&self, key: &[u8]) -> Result<bool, RvError> {
         self.do_unseal(key, false).await
+    }
+
+    /// HSM auto-unseal: recover the KEK from the local HSM (no operator shares)
+    /// and bring the barrier up. Returns `Ok(false)` when the active seal
+    /// provider is share-based, and `Ok(true)` when already unsealed. Fail
+    /// closed: any error leaves the barrier sealed so an unreachable or
+    /// unenrolled HSM never opens the vault (spec § fail-closed).
+    pub async fn auto_unseal(&self) -> Result<bool, RvError> {
+        let provider = self.seal_provider();
+        if provider.requires_shares() {
+            return Ok(false);
+        }
+
+        let inited = self.barrier.inited().await?;
+        if !inited {
+            return Err(RvError::ErrBarrierNotInit);
+        }
+        if !self.barrier.sealed()? {
+            return Ok(true);
+        }
+
+        let kek = provider.recover_kek().await?;
+
+        self.barrier.unseal(kek.as_slice()).await?;
+
+        let mut state = (*self.state.load_full()).clone();
+        state.unseal_key_shares.clear();
+        state.hmac_key = self.barrier.derive_hmac_key()?;
+        state.system_view = Some(Arc::new(BarrierView::new(self.barrier.clone(), SYSTEM_BARRIER_PREFIX)));
+        state.sealed = false;
+        state.kek = kek.deref().clone();
+        self.state.store(Arc::new(state));
+
+        log::info!(target: "security", "vault auto-unsealed via HSM");
+
+        if let Err(e) = self.post_unseal().await {
+            let mut state = (*self.state.load_full()).clone();
+            state.unseal_key_shares.clear();
+            state.kek.clear();
+            state.hmac_key.clear();
+            state.system_view = None;
+            state.sealed = true;
+            self.state.store(Arc::new(state));
+            let _ = self.barrier.seal();
+            return Err(e);
+        }
+
+        Ok(true)
     }
 
     /// Unseals the bastion_vault once and immediately generates new unseal keys.

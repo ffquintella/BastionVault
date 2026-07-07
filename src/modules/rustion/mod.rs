@@ -1898,10 +1898,27 @@ impl RustionBackendInner {
             .new_acl_for_request(&auth.policies, None, &auth)
             .await?;
         let secret_prefix = format!("resources/secrets/{resource_name}/");
-        let caps = acl.capabilities(secret_prefix);
-        let may_connect = caps
-            .iter()
-            .any(|c| c == "connect" || c == "read" || c == "root");
+        // Evaluate the connect/read grant with a non-LIST capability check.
+        // `acl.capabilities()` probes with an `Operation::List`, and the ACL
+        // matcher deliberately bypasses scope gates for LIST (deferring the
+        // per-object filter to post-route). That makes the ungated grant of a
+        // scope-gated rule leak through — e.g. the baseline `default` policy's
+        // `path "resources/*" { capabilities = ["read", ...]; scopes = ["shared"] }`
+        // would hand every authenticated token a phantom `read` on this
+        // resource's secret path, defeating the gate. `explain_capability`
+        // resolves with a `Read` op and an identity-less dry-run request, so a
+        // scope-gated rule contributes nothing (its `scope_passes` fails
+        // closed) while an explicit ungated `connect`/`read` grant — or a root
+        // token — still passes. Root is covered because `explain_capability`
+        // reports `allowed`/`is_root` on the root branch regardless of the
+        // capability probed.
+        use crate::modules::policy::policy::Capability;
+        let may_connect = {
+            let connect = acl.explain_capability(&secret_prefix, Capability::Connect);
+            connect.allowed
+                || connect.is_root
+                || acl.explain_capability(&secret_prefix, Capability::Read).allowed
+        };
         if !may_connect {
             return Err(RvError::ErrPermissionDenied);
         }

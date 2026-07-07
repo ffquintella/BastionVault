@@ -172,6 +172,39 @@ storage "mysql" {
 | `password` | | Database password |
 | `database` | | Database name |
 
+## HSM Seal (optional)
+
+An optional `hsm "<backend>" { … }` block anchors the master key in a YubiHSM 2
+(`yubihsm2`, build feature `hsm_yubihsm2`) or a software mock (`mock`, build
+feature `hsm_mock`, dev/homolog only) and enables **auto-unseal**. At most one
+block is allowed. With no block, the classic Shamir operator-unseal is used.
+
+```hcl
+hsm "yubihsm2" {
+  connector         = "http://127.0.0.1:12345"   # or "usb"
+  auth_key_id       = 3
+  password          = "env:BVAULT_HSM_PASSWORD"   # plaintext rejected
+  domains           = [1]
+  pqc_key_cache_ttl = "60s"                        # "0" = strict per-op unwrap
+  recovery          = "none"                       # or "shamir-ceremony"
+  node_id           = "node-a"
+}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `connector` | | (yubihsm2) `yubihsm-connector` URL or `usb`. |
+| `auth_key_id` | `1` | (yubihsm2) HSM auth-key object id. |
+| `password` | | (yubihsm2) Auth credential; `env:VAR` supported, plaintext rejected. |
+| `domains` | `[1]` | (yubihsm2) YubiHSM domains for BastionVault objects. |
+| `state_path` | *(ephemeral)* | (mock) File backing the mock object store. |
+| `node_id` | `$HOSTNAME` | Node identity for context strings / per-node keys. |
+| `pqc_key_cache_ttl` | `60s` | Unwrapped-seed cache TTL; `0` disables caching. |
+| `recovery` | `none` | `none` or `shamir-ceremony` (init-time only). |
+
+> The mock backend has no hardware protection and refuses to start when
+> `BVAULT_ENV=production`. See the [HSM guide](hsm.md) for the full workflow.
+
 ## Environment Variables
 
 Configuration can also be influenced by environment variables:

@@ -225,6 +225,60 @@ impl Server {
         let bvault = BastionVault::new(backend, Some(&config))?;
         let core = bvault.core.load().clone();
 
+        // HSM seal: if the config declares an `hsm "..."` block, open the
+        // backend, install the auto-unseal seal provider, and attempt to
+        // unseal without operator shares. Fail-closed — any error leaves the
+        // vault sealed and is logged loudly; the process still starts so the
+        // condition is diagnosable (an invalid *config*, by contrast, aborts
+        // startup rather than silently falling back to Shamir).
+        match config.resolve_hsm() {
+            Ok(Some(hsm_cfg)) => {
+                let physical = core.physical.clone();
+                let hsm_core = core.clone();
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio runtime for HSM bootstrap");
+                let result = rt.block_on(async {
+                    let backend = crate::hsm::new_backend(&hsm_cfg).await?;
+                    log::info!(
+                        target: "security",
+                        "HSM seal backend `{}` (serial {}) online",
+                        backend.backend_type(),
+                        backend.device_serial()
+                    );
+                    let provider = std::sync::Arc::new(crate::seal::hsm::HsmSealProvider::new(
+                        backend,
+                        physical,
+                        hsm_cfg.clone(),
+                    ));
+                    hsm_core.set_seal_provider(provider);
+                    if hsm_core.inited().await? {
+                        hsm_core.auto_unseal().await
+                    } else {
+                        log::info!(
+                            target: "security",
+                            "HSM seal configured; vault not initialized — `operator init` will wrap the KEK under the HSM"
+                        );
+                        Ok(false)
+                    }
+                });
+                match result {
+                    Ok(true) => log::info!(target: "security", "HSM auto-unseal succeeded"),
+                    Ok(false) => {}
+                    Err(e) => log::error!(
+                        target: "security",
+                        "HSM auto-unseal failed; vault remains sealed: {e}"
+                    ),
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                log::error!("invalid HSM seal configuration: {e}");
+                return Err(e);
+            }
+        }
+
         // Phase 1.5: parse BASTIONVAULT_TRUSTED_PROXIES once at start.
         // Bad CIDRs are logged at warn level but do not abort the
         // server — operators expect tail-of-startup config issues to

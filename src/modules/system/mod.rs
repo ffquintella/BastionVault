@@ -149,6 +149,7 @@ impl SystemBackend {
         let sys_backend_policy_tests_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_policy_tests_write = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_dashboard_summary = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_hsm_status = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_owner_backfill = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_sso_settings_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_sso_settings_write = self.self_ptr.upgrade().unwrap().clone();
@@ -622,6 +623,15 @@ impl SystemBackend {
                     pattern: "dashboard/summary$",
                     operations: [
                         {op: Operation::Read, handler: sys_backend_dashboard_summary.handle_dashboard_summary}
+                    ]
+                },
+                {
+                    // HSM seal status: seal type, backend, device serial,
+                    // cluster epoch, enrolled-node count, recovery posture.
+                    // Read-only, no secret material. HTTP shim under /v2/sys.
+                    pattern: "hsm/status$",
+                    operations: [
+                        {op: Operation::Read, handler: sys_backend_hsm_status.handle_hsm_status}
                     ]
                 },
                 {
@@ -2750,6 +2760,24 @@ impl SystemBackend {
         Ok(Some(Response::data_response(data)))
     }
 
+    /// `GET v2/sys/hsm/status` — HSM seal posture for operators and the GUI.
+    /// Reports the active seal provider's type and, for the HSM provider, the
+    /// backend, device serial, cluster epoch, enrolled-node count, and recovery
+    /// mode. Never returns secret material.
+    pub async fn handle_hsm_status(
+        &self,
+        _backend: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let provider = self.core.seal_provider();
+        let mut status = provider.status().await?;
+        if let Some(obj) = status.as_object_mut() {
+            obj.insert("sealed".into(), json!(self.core.sealed()));
+            obj.insert("initialized".into(), json!(self.core.inited().await.unwrap_or(false)));
+        }
+        Ok(Some(Response::data_response(status.as_object().cloned())))
+    }
+
     pub async fn handle_internal_ui_mounts_read(
         &self,
         _backend: &dyn Backend,
@@ -4542,6 +4570,103 @@ mod mod_system_tests {
         assert!(
             attention.get("failed_logins_1h").and_then(|v| v.as_u64()).unwrap_or(0) >= 1,
             "the wrong-password login should be counted as a failed login: {ret:?}"
+        );
+    }
+
+    /// HA regression: the dashboard's `denied` and `failed_logins_1h`
+    /// counters must be derived from replicated storage, not the per-node
+    /// in-memory `stats` ring. In a cluster a denial handled by node A is
+    /// invisible to the ring on node B, so a summary served by B would
+    /// under-report. We simulate "an event another node recorded" by
+    /// appending directly to the replicated stores (bypassing the request
+    /// hot path that feeds the ring), then assert the summary reflects
+    /// them — proving the counts come from storage.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_dashboard_summary_counters_come_from_storage_not_ring() {
+        use crate::modules::credential::login_audit_store::{LoginAuditEntry, LoginAuditStore};
+        use crate::modules::system::denial_audit_store::{DenialAuditEntry, DenialAuditStore};
+
+        let mut server = TestHttpServer::new(
+            "test_dashboard_summary_counters_come_from_storage_not_ring",
+            true,
+        )
+        .await;
+        server.token = server.root_token.clone();
+
+        // Baseline: no denials or failed logins have flowed through this
+        // process's request path, so the in-memory ring is empty.
+        let now_secs = chrono::Utc::now().timestamp();
+        assert_eq!(server.core.stats.denied_24h(now_secs), 0, "ring denials start at zero");
+        assert_eq!(
+            server.core.stats.failed_logins_1h(now_secs),
+            0,
+            "ring failed-logins start at zero"
+        );
+
+        // Append two denials and one failed login straight to the
+        // replicated stores, as a peer node's request handling would —
+        // without ever touching this node's stats ring.
+        let denial_store = DenialAuditStore::from_core(&server.core).expect("denial store");
+        for path in ["secret/data/a", "secret/data/b"] {
+            denial_store
+                .append(DenialAuditEntry {
+                    ts: String::new(),
+                    user: "peer-node-caller".into(),
+                    path: path.into(),
+                    operation: "read".into(),
+                    authenticated: true,
+                    remote_addr: String::new(),
+                })
+                .await
+                .expect("append denial");
+        }
+        let login_store = LoginAuditStore::from_core(&server.core).expect("login store");
+        login_store
+            .append(LoginAuditEntry {
+                ts: String::new(),
+                username: "peer-node-user".into(),
+                mount: "auth/pass/".into(),
+                success: false,
+                action: "login".into(),
+                remote_addr: String::new(),
+                details: "bad password".into(),
+            })
+            .await
+            .expect("append failed login");
+        // A logout must never count as a failed login. We give it
+        // success=false (atypical — real logouts record success=true) so
+        // the `!success` filter alone would let it through, proving the
+        // `action != "logout"` guard is what excludes it.
+        login_store
+            .append(LoginAuditEntry {
+                ts: String::new(),
+                username: "peer-node-user".into(),
+                mount: "auth/pass/".into(),
+                success: false,
+                action: "logout".into(),
+                remote_addr: String::new(),
+                details: String::new(),
+            })
+            .await
+            .expect("append logout");
+
+        // The ring is still empty — these events never went through it.
+        assert_eq!(server.core.stats.denied_24h(now_secs), 0, "ring stays empty");
+        assert_eq!(server.core.stats.failed_logins_1h(now_secs), 0, "ring stays empty");
+
+        // The summary must nonetheless report the storage-backed counts.
+        let ret = server.read("sys/dashboard/summary", Some(&server.root_token)).unwrap().1;
+        let audit = ret.get("audit_24h").and_then(|v| v.as_object()).expect("audit_24h");
+        assert_eq!(
+            audit.get("denied").and_then(|v| v.as_u64()).unwrap_or(0),
+            2,
+            "denied must count the two stored denials, not the empty ring: {ret:?}"
+        );
+        let attention = ret.get("attention").and_then(|v| v.as_object()).expect("attention");
+        assert_eq!(
+            attention.get("failed_logins_1h").and_then(|v| v.as_u64()).unwrap_or(0),
+            1,
+            "failed_logins_1h must count the one stored failure (not the logout): {ret:?}"
         );
     }
 

@@ -2,8 +2,8 @@ use clap::{Parser, Subcommand};
 use sysexits::ExitCode;
 
 use super::{
-    operator_cloud_target_connect, operator_export, operator_ferrogate, operator_import,
-    operator_init, operator_seal, operator_unseal,
+    operator_cloud_target_connect, operator_export, operator_ferrogate, operator_hsm,
+    operator_import, operator_init, operator_seal, operator_unseal,
 };
 #[cfg(not(feature = "sync_handler"))]
 use super::{
@@ -63,6 +63,8 @@ pub enum Commands {
     /// reject / revoke). Operates against the running server with a root
     /// token and does NOT require an approved machine.
     Ferrogate(operator_ferrogate::Ferrogate),
+    /// Inspect the HSM seal (status). See `features/hsm-support.md`.
+    Hsm(operator_hsm::Hsm),
 }
 
 /// Grouping wrapper so we can hang `connect` (and future verbs like
@@ -109,6 +111,7 @@ impl Commands {
             Commands::Import(import) => import.execute(),
             Commands::CloudTarget(c) => c.execute(),
             Commands::Ferrogate(c) => c.execute(),
+            Commands::Hsm(c) => c.execute(),
         }
     }
 }

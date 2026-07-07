@@ -45,6 +45,78 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-07-07
+
+### Added
+
+#### HSM Support (YubiHSM 2)
+
+- **Hardware-backed seal, PQC key custody, and cluster key replication anchored in a per-node
+  YubiHSM 2** (`src/hsm/`, `src/seal/`, features/hsm-support.md). The master key (KEK), the
+  post-quantum key hierarchy, and every key-release decision can now be rooted in tamper-resistant
+  hardware instead of software-only entropy and storage. Two backends sit behind the narrow
+  `hsm::HsmBackend` trait, both off by default:
+  - `hsm_yubihsm2` (build feature) — the mandated production device, via the pure-Rust `yubihsm`
+    crate over the `yubihsm-connector` HTTP transport or direct USB.
+  - `hsm_mock` (build feature) — a software backend with a file-persisted object store for dev,
+    CI, and the homologation cluster (no USB passthrough). It provides **no** hardware protection,
+    is compile-time gated, and **refuses to start when `BVAULT_ENV=production`**.
+- **HSM auto-unseal** — configure an `hsm "yubihsm2" { … }` (or `hsm "mock" { … }`) seal block and
+  the server unwraps the KEK from the local device at startup, with no operator share entry. Every
+  unwrap is gated by an HSM-signed, replay-resistant (monotonic counter), context-explicit
+  authorization that is written to the security log. Fail-closed: an unreachable or unenrolled HSM
+  leaves the vault sealed. The classic Shamir operator-unseal remains the default when no `hsm`
+  block is present. (`src/seal/`, `src/core.rs`)
+- **Hybrid PQC key custody** — ML-KEM-768 / ML-DSA-65 seeds are derived from three independent
+  inputs (fresh host `OsRng`, HSM randomness, and an in-HSM ECDH secret) via HKDF-SHA-512 with
+  domain-separating context strings, wrapped under the device, and only ever unwrapped into
+  `Zeroizing` buffers for the immediate operation (or a bounded, zeroizing session cache).
+  (`src/hsm/derive.rs`, `src/hsm/custody.rs`)
+- **Cluster bootstrap, node enrollment, and HSM-to-HSM key replication** — a signed custody-root
+  trust anchor, attestation-verified enrollment of joining nodes (non-exportable keys required),
+  an ECDH-derived ChaCha20-Poly1305 replication channel, and dual-signed migration transcripts
+  binding every transferred blob. Each node ends up with its own HSM-wrapped copy; plaintext key
+  material never touches the wire or storage. (`src/hsm/enroll.rs`, `src/hsm/replicate.rs`)
+- **`GET v2/sys/hsm/status`** and **`bvault operator hsm status`** — report the active seal type
+  and, for the HSM seal, the backend, device serial, cluster epoch, enrolled-node count, and
+  recovery posture. Read-only; never returns secret material.
+  (`src/modules/system/mod.rs`, `src/http/sys.rs`, `src/api/sys.rs`, `src/cli/command/operator_hsm.rs`)
+
+### Security
+
+- **No software recovery path by default** for the HSM seal (`recovery = "none"`): losing every
+  cluster HSM makes the vault unrecoverable — the intended guarantee. An opt-in, init-time-only
+  `recovery = "shamir-ceremony"` escrow is available for operators who need it. All persisted key
+  material is HSM-wrapped and undecryptable without the key inside an enrolled device.
+  (features/hsm-support.md)
+
+### Fixed
+
+#### Rustion
+
+- **Connect-capability gate no longer leaks a phantom `read` to every authenticated token**
+  (`src/modules/rustion/mod.rs`) -- `handle_session_open_v2`'s connect gate checked the caller's
+  capability on `resources/secrets/<resource>/` via `acl.capabilities(...)`, which probes with an
+  `Operation::List`; the ACL matcher deliberately bypasses scope gates for LIST (deferring the
+  per-object filter to post-route). That let the baseline `default` policy's scope-gated
+  `path "resources/*" { capabilities = ["read", ...]; scopes = ["shared"] }` rule contribute a
+  phantom `read`, so a caller with **no** `connect`/`read`/`root` on the resource still passed the
+  gate and reached credential resolution/dispatch (failing later with 503) instead of being denied
+  403 up front. The gate now resolves the grant with `acl.explain_capability(prefix, Connect/Read)`
+  (a `Read`-op, identity-less dry-run): scope-gated rules fail closed while explicit ungated
+  `connect`/`read` grants and root tokens still pass.
+
+#### Dashboard
+
+- **Dashboard denial / failed-login counters are now cluster-correct** (`src/modules/system/mod.rs`) --
+  `sys/dashboard/summary`'s `audit_24h.denied` and `attention.failed_logins_1h` were read from the
+  in-memory `core.stats` ring, which is per-node and not replicated: a denial or failed login handled
+  by one HA node never showed in a summary served by another (confirmed live on the HML cluster).
+  Both counters now range-scan the replicated append stores instead -- denials from `sys/denial-audit/`
+  and failed logins from `sys/login-audit/` (logouts excluded), bounded to the 24h / 1h window via a
+  since-key -- so every node reports the same totals. `audit_24h.write_failures` has no backing store
+  and stays on the in-memory counter. (features/audit-logging.md)
+
 ## [0.23.4] - 2026-07-07
 
 ### Added

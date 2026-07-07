@@ -93,6 +93,12 @@ impl Sys<'_> {
         self.request_read(format!("{}/sys/seal-status", self.api_prefix()))
     }
 
+    /// HSM seal status (features/hsm-support.md). v2-only endpoint, so the
+    /// path is fixed to `/v2` regardless of the client's default API version.
+    pub fn hsm_status(&self) -> Result<HttpResponse, RvError> {
+        self.request_read("/v2/sys/hsm/status".to_string())
+    }
+
     pub fn health(&self) -> Result<HttpResponse, RvError> {
         self.request_read(format!("{}/sys/health", self.api_prefix()))
     }
