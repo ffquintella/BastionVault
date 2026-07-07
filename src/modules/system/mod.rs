@@ -1,6 +1,8 @@
 //! The system module is mainly used to configure BastionVault itself. For instance, the 'mount/'
 //! path is provided here to support mounting new modules in BastionVault via RESTful HTTP request.
 
+pub mod denial_audit_store;
+
 use std::{
     any::Any,
     collections::HashMap,
@@ -1571,16 +1573,13 @@ impl SystemBackend {
         // the matching zero-padded-nanos key for the range-scanned append
         // logs (`hist_seq` keys are nanoseconds since the epoch).
         let cutoff_rfc: Option<String> = since.map(|t| t.to_rfc3339());
-        let since_key: Option<String> = since.map(|t| {
-            let nanos = t.timestamp_nanos_opt().unwrap_or(0).max(0) as u128;
-            format!("{nanos:020}")
-        });
+        let since_key: Option<String> = since.map(Self::hist_since_key);
         let cutoff = cutoff_rfc.as_deref();
         let skey = since_key.as_deref();
 
         #[cfg(not(feature = "sync_handler"))]
-        let groups: [Vec<AuditEventBuilder>; 9] = {
-            let (policy, idgroups, assets, shares, users, files, logins, ssh_ca, ssh_sign) = tokio::join!(
+        let groups: [Vec<AuditEventBuilder>; 10] = {
+            let (policy, idgroups, assets, shares, users, files, logins, ssh_ca, ssh_sign, denials) = tokio::join!(
                 self.collect_policy_events(cutoff),
                 self.collect_identity_group_events(cutoff),
                 self.collect_asset_group_events(cutoff),
@@ -1590,15 +1589,16 @@ impl SystemBackend {
                 self.collect_login_events(skey),
                 self.collect_ssh_ca_events(skey),
                 self.collect_ssh_sign_events(skey),
+                self.collect_denial_events(skey),
             );
-            [policy, idgroups, assets, shares, users, files, logins, ssh_ca, ssh_sign]
+            [policy, idgroups, assets, shares, users, files, logins, ssh_ca, ssh_sign, denials]
         };
 
         // The sync handler build cannot use `tokio::join!`; run the
         // sources sequentially (these maybe-async methods resolve to
         // plain calls under `is_sync`).
         #[cfg(feature = "sync_handler")]
-        let groups: [Vec<AuditEventBuilder>; 9] = [
+        let groups: [Vec<AuditEventBuilder>; 10] = [
             self.collect_policy_events(cutoff),
             self.collect_identity_group_events(cutoff),
             self.collect_asset_group_events(cutoff),
@@ -1608,6 +1608,7 @@ impl SystemBackend {
             self.collect_login_events(skey),
             self.collect_ssh_ca_events(skey),
             self.collect_ssh_sign_events(skey),
+            self.collect_denial_events(skey),
         ];
 
         groups.into_iter().flatten().collect()
@@ -1870,6 +1871,86 @@ impl SystemBackend {
             }
         }
         events
+    }
+
+    /// Permission-denied requests from the core-level denial store.
+    /// Lazy-from-core, skip-on-sealed. `authenticated` distinguishes an
+    /// ACL rejection (valid token, insufficient policy) from a
+    /// missing/invalid token — both render as op `denied`, with the
+    /// reason carried in the fields column.
+    async fn collect_denial_events(&self, since_key: Option<&str>) -> Vec<AuditEventBuilder> {
+        let mut events = Vec::new();
+        if let Ok(store) =
+            crate::modules::system::denial_audit_store::DenialAuditStore::from_core(&self.core)
+        {
+            let res = match since_key {
+                Some(k) => store.list_since(k).await,
+                None => store.list_all().await,
+            };
+            if let Ok(entries) = res {
+                for e in entries {
+                    let mut fields = Vec::new();
+                    if !e.operation.is_empty() {
+                        fields.push(format!("op={}", e.operation));
+                    }
+                    fields.push(if e.authenticated {
+                        "reason=policy".to_string()
+                    } else {
+                        "reason=invalid-token".to_string()
+                    });
+                    if !e.remote_addr.is_empty() {
+                        fields.push(format!("from={}", e.remote_addr));
+                    }
+                    events.push(AuditEventBuilder {
+                        ts: e.ts,
+                        user: e.user,
+                        op: "denied".into(),
+                        category: "request".into(),
+                        target: e.path,
+                        changed_fields: fields,
+                        summary: String::new(),
+                    });
+                }
+            }
+        }
+        events
+    }
+
+    /// Zero-padded-nanoseconds key matching the append stores' `hist_seq`
+    /// format, so a time instant can bound a range scan to the recent
+    /// tail of a timestamp-keyed log.
+    fn hist_since_key(t: chrono::DateTime<chrono::Utc>) -> String {
+        let nanos = t.timestamp_nanos_opt().unwrap_or(0).max(0) as u128;
+        format!("{nanos:020}")
+    }
+
+    /// Count permission denials recorded at or after `since`, read from
+    /// the replicated denial store rather than the per-node in-memory
+    /// stats ring — so the count is identical on every HA node. A sealed
+    /// barrier or read error counts as zero (best-effort, like the other
+    /// dashboard sources).
+    async fn count_denials_since(&self, since: chrono::DateTime<chrono::Utc>) -> u64 {
+        let since_key = Self::hist_since_key(since);
+        match crate::modules::system::denial_audit_store::DenialAuditStore::from_core(&self.core) {
+            Ok(store) => store.list_since(&since_key).await.map(|v| v.len() as u64).unwrap_or(0),
+            Err(_) => 0,
+        }
+    }
+
+    /// Count failed authentication attempts recorded at or after `since`,
+    /// read from the replicated login-audit store (see
+    /// [`Self::count_denials_since`] for the HA rationale). A logout is
+    /// not a failed login; only rejected login attempts are counted.
+    async fn count_failed_logins_since(&self, since: chrono::DateTime<chrono::Utc>) -> u64 {
+        let since_key = Self::hist_since_key(since);
+        match crate::modules::credential::login_audit_store::LoginAuditStore::from_core(&self.core) {
+            Ok(store) => store
+                .list_since(&since_key)
+                .await
+                .map(|v| v.iter().filter(|e| !e.success && e.action != "logout").count() as u64)
+                .unwrap_or(0),
+            Err(_) => 0,
+        }
     }
 
     /// SSH CA lifecycle (create / delete of the signing CA) from the SSH
@@ -2627,11 +2708,17 @@ impl SystemBackend {
             .await
             .len();
 
-        // Request-level outcome counters from the in-memory aggregator
-        // (denied requests / failed logins / audit-write failures). These
-        // are process-wide (not per-namespace) — they describe the
-        // server's health, which is the same question regardless of which
-        // tenant the operator is viewing.
+        // Request-level outcome counters. These are process-wide (not
+        // per-namespace) — they describe the server's health, which is the
+        // same question regardless of which tenant the operator is
+        // viewing. Denials and failed logins are counted from replicated
+        // storage (`sys/denial-audit`, `sys/login-audit`) so every HA node
+        // reports the same totals: the in-memory `stats` ring is per-node,
+        // so a denial or failed login handled by another node would be
+        // invisible to a summary served here. Audit-write failures have no
+        // backing store yet, so they stay on the in-memory counter.
+        let denied_24h = self.count_denials_since(now - chrono::Duration::hours(24)).await;
+        let failed_logins_1h = self.count_failed_logins_since(now - chrono::Duration::hours(1)).await;
         let now_secs = now.timestamp();
         let stats = &self.core.stats;
 
@@ -2650,11 +2737,11 @@ impl SystemBackend {
             },
             "audit_24h": {
                 "total": audit_24h,
-                "denied": stats.denied_24h(now_secs),
+                "denied": denied_24h,
                 "write_failures": stats.audit_write_failures_24h(now_secs),
             },
             "attention": {
-                "failed_logins_1h": stats.failed_logins_1h(now_secs),
+                "failed_logins_1h": failed_logins_1h,
             },
         })
         .as_object()
@@ -4455,6 +4542,110 @@ mod mod_system_tests {
         assert!(
             attention.get("failed_logins_1h").and_then(|v| v.as_u64()).unwrap_or(0) >= 1,
             "the wrong-password login should be counted as a failed login: {ret:?}"
+        );
+    }
+
+    /// Regression: permission-denied requests must be persisted to the
+    /// audit trail (`sys/audit/events`), not just tallied in the
+    /// in-memory per-node dashboard counter. Covers both denial kinds:
+    /// an authenticated ACL rejection (valid token, insufficient
+    /// policy → `reason=policy`, user = display name) and an invalid
+    /// token (`reason=invalid-token`, user = `(unauthenticated)`).
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_audit_events_include_denied_requests() {
+        let mut server =
+            TestHttpServer::new("test_audit_events_include_denied_requests", true).await;
+        server.token = server.root_token.clone();
+
+        // Provision a low-privilege user (default policy only) and log in.
+        let _ = server
+            .write("sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), None)
+            .unwrap();
+        let _ = server
+            .write(
+                "auth/pass/users/lowpriv",
+                serde_json::json!({ "password": "hunter22XX!", "token_policies": "default", "ttl": 0 })
+                    .as_object()
+                    .cloned(),
+                None,
+            )
+            .unwrap();
+        let token = server
+            .write(
+                "auth/pass/login/lowpriv",
+                serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                None,
+            )
+            .unwrap()
+            .1
+            .get("auth")
+            .and_then(|a| a.get("client_token"))
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+
+        // An ACL denial: default policy cannot create ACL policies.
+        let denied = server
+            .write(
+                "sys/policies/acl/denied-into-audit",
+                serde_json::json!({ "policy": r#"path "x" { capabilities = ["read"] }"# })
+                    .as_object()
+                    .cloned(),
+                Some(&token),
+            )
+            .unwrap();
+        assert_eq!(denied.0, 403, "low-priv policy write must be forbidden");
+
+        // An invalid-token denial.
+        let bad = server.read("sys/policies/acl", Some("not-a-real-token")).unwrap();
+        assert_eq!(bad.0, 403, "an invalid token must be forbidden");
+
+        // Both denials must now be visible in the unified audit trail.
+        let ret = server.read("sys/audit/events", Some(&server.root_token)).unwrap().1;
+        let events = ret.get("events").and_then(|v| v.as_array()).expect("events array");
+        let denied_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.get("op").and_then(|v| v.as_str()) == Some("denied"))
+            .collect();
+
+        let acl_denial = denied_events
+            .iter()
+            .find(|e| {
+                e.get("target").and_then(|v| v.as_str())
+                    == Some("sys/policies/acl/denied-into-audit")
+            })
+            .unwrap_or_else(|| panic!("ACL denial missing from audit trail: {events:?}"));
+        assert_eq!(
+            acl_denial.get("category").and_then(|v| v.as_str()),
+            Some("request"),
+            "denials carry the request category"
+        );
+        let who = acl_denial.get("user").and_then(|v| v.as_str()).unwrap_or_default();
+        assert!(who.contains("lowpriv"), "ACL denial records the caller's display name: {who}");
+        let fields = acl_denial
+            .get("changed_fields")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|f| f.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert!(
+            fields.contains(&"reason=policy"),
+            "a valid-token denial is a policy rejection: {fields:?}"
+        );
+
+        let token_denial = denied_events
+            .iter()
+            .find(|e| {
+                e.get("user").and_then(|v| v.as_str()) == Some("(unauthenticated)")
+            })
+            .unwrap_or_else(|| panic!("invalid-token denial missing from audit trail: {events:?}"));
+        let fields = token_denial
+            .get("changed_fields")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|f| f.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert!(
+            fields.contains(&"reason=invalid-token"),
+            "an invalid-token denial must not claim a policy rejection: {fields:?}"
         );
     }
 

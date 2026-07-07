@@ -1018,6 +1018,14 @@ impl Core {
         // Request-outcome statistics for the operational dashboard.
         self.record_request_stats(req, &resp, err.as_ref(), now);
 
+        // Persist permission denials to the audit trail so they show up
+        // on the Audit page (the in-memory counter above is per-node and
+        // lost on restart). Best-effort — the 403 is returned unchanged
+        // whether or not the append succeeds.
+        if matches!(err.as_ref(), Some(RvError::ErrPermissionDenied)) {
+            crate::modules::system::denial_audit_store::record_denial(self, req).await;
+        }
+
         if err.is_some() {
             return Err(err.unwrap());
         }

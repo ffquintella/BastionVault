@@ -45,6 +45,26 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.23.4] - 2026-07-07
+
+### Added
+
+#### Audit Trail
+
+- **Permission-denied requests now appear in the audit trail** (`src/modules/system/denial_audit_store.rs`) --
+  every 403 is persisted to a new append-only denial store (`sys/denial-audit/<nanos>`) from the
+  `Core::handle_request` chokepoint and surfaces on the Admin → Audit page as op `denied`,
+  category `Request`, with the caller's display name (or `(unauthenticated)`), the denied path,
+  the attempted operation, `reason=policy` vs `reason=invalid-token`, and the peer address.
+  Previously the only trace of a denial was the in-memory per-node dashboard counter, which is
+  invisible on the Audit page, not replicated across cluster nodes, and lost on restart.
+  (features/audit-logging.md)
+- **FIDO2 login `begin` failures are now audited** -- an unknown username or a user with no
+  enrolled passkey on `auth/userpass/fido2/login/begin` (and the standalone `fido2/` backend)
+  previously left no audit trace; both now record a `login-failed` event tagged `stage=begin`.
+  Successful begins are not recorded (the `complete` call records the actual login outcome).
+  (features/audit-logging.md)
+
 ## [0.23.3] - 2026-07-06
 
 ### Fixed

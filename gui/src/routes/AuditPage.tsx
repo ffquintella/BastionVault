@@ -24,6 +24,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   user: "User / Role",
   file: "File",
   login: "Login",
+  request: "Request",
   "ssh-ca": "SSH CA",
   "ssh-sign": "SSH Sign",
 };
@@ -40,6 +41,7 @@ const CATEGORY_VARIANTS: Record<
   user: "neutral",
   file: "info",
   login: "info",
+  request: "error",
   "ssh-ca": "warning",
   "ssh-sign": "info",
 };
@@ -56,6 +58,7 @@ const OP_VARIANTS: Record<string, "info" | "success" | "warning" | "error" | "ne
   login: "success",
   "login-failed": "error",
   logout: "neutral",
+  denied: "error",
   sign: "success",
 };
 
@@ -267,6 +270,7 @@ export function AuditPage() {
                   { value: "login", label: "Login" },
                   { value: "login-failed", label: "Login failed" },
                   { value: "logout", label: "Logout" },
+                  { value: "denied", label: "Denied" },
                 ]}
               />
             </div>

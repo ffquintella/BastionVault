@@ -107,6 +107,34 @@ Both reuse the same store and aggregator: token logins go through
 `record_login_via_view` (system-view variant, like `record_logout`);
 SSO logins go through `record_login` from the backend's `Core`.
 
+**Request denials (shipped)** — every permission-denied request
+(the 403 path) is persisted to a flat system-view store
+(`src/modules/system/denial_audit_store.rs`,
+`sys/denial-audit/<nanos>`, mirroring `LoginAuditStore`) and
+surfaces on the aggregated Audit page as op `denied` under the
+`request` category. Recorded from a single chokepoint —
+`Core::handle_request`, next to the in-memory stats tally — so it
+covers denials raised anywhere in the pipeline (invalid/missing
+token, ACL rejection, machine-identity enforcement) without
+per-handler wiring. Each row carries the caller's display name
+(`(unauthenticated)` when the token didn't resolve), the denied
+path as the target, and fields `op=<operation>`,
+`reason=policy` | `reason=invalid-token`, and `from=<peer>`. The
+append is best-effort and never alters the 403. Rationale: before
+this store, the only trace of a denial was the in-memory per-node
+dashboard counter (`core.stats`), which never reaches the Audit
+page, is not replicated across cluster nodes, and is lost on
+restart — verified live against the HML cluster (2026-07-07),
+where denials on one node were invisible to a dashboard read
+served by the other.
+
+FIDO2 login `begin` failures (unknown username, no enrolled
+passkey) are also recorded now — both the userpass-integrated
+path and the standalone `fido2/` backend wrap `login_begin` with a
+failure-only `record_login` tagged `stage=begin`. Successful
+begins are deliberately not recorded: a begin is only a challenge,
+and `complete` records the actual login outcome.
+
 Logout is the Vault-compatible `auth/token/revoke-self` endpoint
 (`src/modules/auth/token_store.rs`, `handle_revoke_self`): it
 revokes the calling token (and its tree) and appends a `logout`

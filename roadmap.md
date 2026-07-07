@@ -44,7 +44,7 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | `[x]` Done | Identity Groups (user / app groups → policy mapping) | [spec](features/identity-groups.md) — policy union for UserPass / AppID / FIDO2, plus Phase 7 group-shared resources via `metadata { group_shared_resources = "true" }`. |
 | `[x]` Done | Per-User Scoping (ownership + policy templating + sharing) | [spec](features/per-user-scoping.md) — 11 phases + migration backfill (Phase 11: self-service claim + list badge). |
 | `[x]` Done | Asset Groups (collections of resources + KV paths) | [spec](features/resource-groups.md) — 13 phases incl. ownership, sharing, member redaction. |
-| `[x]` Done | Audit Logging (tamper-evident, HMAC chain) | Phase 1 file device shipped; syslog / HTTP devices [deferred](#deferred-sub-initiatives). |
+| `[x]` Done | Audit Logging (tamper-evident, HMAC chain) | Phase 1 file device shipped; syslog / HTTP devices [deferred](#deferred-sub-initiatives). Request denials (403s) persisted + surfaced on the Audit page as op `denied`; FIDO2 `begin` failures audited (`stage=begin`). |
 | `[x]` Done | Metrics (Prometheus) | Standard `/metrics` endpoint. |
 
 ### Cryptography

@@ -66,7 +66,43 @@ impl UserPassBackend {
 
 #[maybe_async::maybe_async]
 impl UserPassBackendInner {
+    /// Public entry point for `auth/userpass/fido2/login/begin`. Runs
+    /// the challenge issuance via `fido2_login_begin_inner` and records
+    /// *failures* to the login-audit trail — an unknown username or a
+    /// user with no enrolled passkey previously left no audit trace at
+    /// all. Successful begins are deliberately not recorded: a begin is
+    /// only a challenge, and the eventual `complete` call records the
+    /// actual login outcome (recording both would double-count every
+    /// successful security-key login). The audit write is best-effort
+    /// and never blocks or alters the result.
     pub async fn fido2_login_begin(
+        &self,
+        backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let username = req
+            .get_data("username")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_lowercase()))
+            .unwrap_or_else(|| "(unknown)".to_string());
+        let remote_addr = req.connection.as_ref().map(|c| c.peer_addr.clone()).unwrap_or_default();
+
+        let result = self.fido2_login_begin_inner(backend, req).await;
+        if let Err(e) = &result {
+            crate::modules::credential::login_audit_store::record_login(
+                &self.core,
+                "userpass/",
+                &username,
+                false,
+                &remote_addr,
+                &format!("method=fido2 stage=begin {e}"),
+            )
+            .await;
+        }
+        result
+    }
+
+    async fn fido2_login_begin_inner(
         &self,
         _backend: &dyn Backend,
         req: &mut Request,

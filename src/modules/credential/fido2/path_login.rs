@@ -98,7 +98,40 @@ impl Fido2BackendInner {
         }
     }
 
+    /// Public entry point: runs `login_begin_inner` and records
+    /// *failures* to the login-audit trail under the `fido2/` mount —
+    /// an unknown username or a user with no enrolled passkey
+    /// previously left no audit trace. Successful begins are not
+    /// recorded (a begin is only a challenge; `login_complete` records
+    /// the actual outcome). Best-effort, never alters the result.
     pub async fn login_begin(
+        &self,
+        backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let username = req
+            .get_data("username")
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_lowercase()))
+            .unwrap_or_else(|| "(unknown)".to_string());
+        let remote_addr = req.connection.as_ref().map(|c| c.peer_addr.clone()).unwrap_or_default();
+
+        let result = self.login_begin_inner(backend, req).await;
+        if let Err(e) = &result {
+            crate::modules::credential::login_audit_store::record_login(
+                &self.core,
+                "fido2/",
+                &username,
+                false,
+                &remote_addr,
+                &format!("stage=begin {e}"),
+            )
+            .await;
+        }
+        result
+    }
+
+    async fn login_begin_inner(
         &self,
         _backend: &dyn Backend,
         req: &mut Request,
