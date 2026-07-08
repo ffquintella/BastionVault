@@ -15,6 +15,7 @@ mod ha_tests {
     use std::env;
     use std::fs;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU16, Ordering};
 
     use serde_json::Value;
     use serial_test::serial;
@@ -26,20 +27,61 @@ mod ha_tests {
     const SECRET_API: &str = "ha_test_api_secret_12";
     const TABLE: &str = "vault_ha_test";
 
-    /// Port base: node N uses raft_port = BASE_RAFT + N - 1, api_port = BASE_API + N - 1.
-    const BASE_RAFT: u16 = 38210;
-    const BASE_API: u16 = 38220;
+    /// Each `TestCluster` gets its own disjoint port block. A dropped node's
+    /// sockets are released asynchronously — `Drop for HiqliteBackend` detaches
+    /// the graceful shutdown (which itself has a multi-second grace delay) onto
+    /// a background thread — so a previous test's cluster can still hold its
+    /// listeners while the next test starts. Reusing fixed ports across tests
+    /// therefore fails with "Address already in use" even under
+    /// `--test-threads=1`. Within a block: node N uses raft = base + N - 1 and
+    /// api = base + 10 + N - 1.
+    const PORT_BLOCK_BASE: u16 = 38210;
+    const PORT_BLOCK_SIZE: u16 = 20;
+    static NEXT_PORT_BLOCK: AtomicU16 = AtomicU16::new(0);
+
+    fn alloc_port_base() -> u16 {
+        PORT_BLOCK_BASE + NEXT_PORT_BLOCK.fetch_add(1, Ordering::Relaxed) * PORT_BLOCK_SIZE
+    }
+
+    fn raft_port(port_base: u16, node_id: u64) -> u16 {
+        port_base + (node_id as u16) - 1
+    }
+
+    fn api_port(port_base: u16, node_id: u64) -> u16 {
+        port_base + 10 + (node_id as u16) - 1
+    }
 
     fn should_run() -> bool {
         env::var("CARGO_TEST_HIQLITE").map_or(false, |v| v == "1")
     }
 
+    /// Wait until every given port can be bound again. Restarting a node reuses
+    /// its old ports, and the old instance releases them asynchronously (see
+    /// `alloc_port_base`), so an immediate rebind races the detached shutdown.
+    fn wait_for_ports_free(ports: &[u16]) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        for &port in ports {
+            loop {
+                match std::net::TcpListener::bind(("127.0.0.1", port)) {
+                    Ok(probe) => {
+                        drop(probe);
+                        break;
+                    }
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                    Err(e) => panic!("port {port} not released after 60s: {e}"),
+                }
+            }
+        }
+    }
+
     /// Build the `nodes` config string array for a 3-node cluster.
-    fn nodes_config() -> Value {
+    fn nodes_config(port_base: u16) -> Value {
         let nodes: Vec<Value> = (1..=3u64)
             .map(|id| {
-                let raft_port = BASE_RAFT + (id as u16) - 1;
-                let api_port = BASE_API + (id as u16) - 1;
+                let raft_port = raft_port(port_base, id);
+                let api_port = api_port(port_base, id);
                 Value::String(format!(
                     "{id}:127.0.0.1:{raft_port}:127.0.0.1:{api_port}"
                 ))
@@ -49,16 +91,20 @@ mod ha_tests {
     }
 
     /// Create config for a single node in a 3-node cluster.
-    fn make_node_conf(test_name: &str, node_id: u64) -> HashMap<String, Value> {
+    ///
+    /// Does NOT wipe the node's data dir — `TestCluster::new` clears the whole
+    /// test dir up front, and a restart must resume from on-disk Raft state: a
+    /// pristine node that is still listed in the membership triggers hiqlite's
+    /// remote leave-and-rejoin flow, which needs quorum and panics without it.
+    fn make_node_conf(test_name: &str, node_id: u64, port_base: u16) -> HashMap<String, Value> {
         let dir = env::temp_dir()
             .join("bvault_ha_test")
             .join(test_name)
             .join(format!("node{node_id}"));
-        let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
-        let raft_port = BASE_RAFT + (node_id as u16) - 1;
-        let api_port = BASE_API + (node_id as u16) - 1;
+        let raft_port = raft_port(port_base, node_id);
+        let api_port = api_port(port_base, node_id);
 
         let mut conf: HashMap<String, Value> = HashMap::new();
         conf.insert("data_dir".into(), Value::String(dir.to_string_lossy().into_owned()));
@@ -70,7 +116,7 @@ mod ha_tests {
         conf.insert("listen_addr_raft".into(), Value::String("127.0.0.1".into()));
         conf.insert("port_raft".into(), Value::Number(raft_port.into()));
         conf.insert("port_api".into(), Value::Number(api_port.into()));
-        conf.insert("nodes".into(), nodes_config());
+        conf.insert("nodes".into(), nodes_config(port_base));
         conf
     }
 
@@ -78,6 +124,7 @@ mod ha_tests {
     struct TestCluster {
         pub nodes: Vec<Option<Arc<HiqliteBackend>>>,
         test_name: String,
+        port_base: u16,
     }
 
     impl TestCluster {
@@ -87,9 +134,10 @@ mod ha_tests {
             let base_dir = env::temp_dir().join("bvault_ha_test").join(test_name);
             let _ = fs::remove_dir_all(&base_dir);
 
+            let port_base = alloc_port_base();
             let mut nodes: Vec<Option<Arc<HiqliteBackend>>> = Vec::new();
             for id in 1..=3u64 {
-                let conf = make_node_conf(test_name, id);
+                let conf = make_node_conf(test_name, id, port_base);
                 let backend = HiqliteBackend::new(&conf)
                     .unwrap_or_else(|e| panic!("Failed to create node {id}: {e}"));
                 nodes.push(Some(Arc::new(backend)));
@@ -101,6 +149,7 @@ mod ha_tests {
             Self {
                 nodes,
                 test_name: test_name.to_string(),
+                port_base,
             }
         }
 
@@ -137,13 +186,31 @@ mod ha_tests {
         }
 
         /// Stop a node by dropping it (1-indexed).
+        ///
+        /// NB: the drop only *initiates* shutdown — it runs detached with a
+        /// multi-second grace delay, so the node keeps serving Raft traffic for
+        /// ~10s. Use `wait_node_stopped` when a test needs the node actually gone.
         fn stop_node(&mut self, id: usize) {
             self.nodes[id - 1] = None;
         }
 
-        /// Restart a stopped node (1-indexed).
+        /// Block until a stopped node's detached shutdown has completed,
+        /// observed as its listeners being released (1-indexed).
+        fn wait_node_stopped(&self, id: usize) {
+            wait_for_ports_free(&[
+                raft_port(self.port_base, id as u64),
+                api_port(self.port_base, id as u64),
+            ]);
+        }
+
+        /// Restart a stopped node (1-indexed). Waits for the old instance's
+        /// detached shutdown to release the node's ports before rebinding.
         fn restart_node(&mut self, id: usize) {
-            let conf = make_node_conf(&self.test_name, id as u64);
+            wait_for_ports_free(&[
+                raft_port(self.port_base, id as u64),
+                api_port(self.port_base, id as u64),
+            ]);
+            let conf = make_node_conf(&self.test_name, id as u64, self.port_base);
             let backend = HiqliteBackend::new(&conf)
                 .unwrap_or_else(|e| panic!("Failed to restart node {id}: {e}"));
             self.nodes[id - 1] = Some(Arc::new(backend));
@@ -259,7 +326,7 @@ mod ha_tests {
         let old_leader_id = cluster.find_leader().await.expect("No leader");
 
         // Trigger step-down.
-        cluster.node(old_leader_id).trigger_failover().unwrap();
+        cluster.node(old_leader_id).trigger_failover().await.unwrap();
 
         // Wait for new leader.
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
@@ -457,10 +524,15 @@ mod ha_tests {
         cluster.node(leader_id).put(&entry).await.unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-        // Stop 2 of 3 nodes (quorum lost).
+        // Stop 2 of 3 nodes (quorum lost). Dropping only initiates a detached
+        // graceful shutdown with a ~10s grace delay, during which the followers
+        // still ack writes — wait until they are actually down before asserting
+        // that quorum is lost.
         let followers = cluster.find_followers().await;
         cluster.stop_node(followers[0]);
         cluster.stop_node(followers[1]);
+        cluster.wait_node_stopped(followers[0]);
+        cluster.wait_node_stopped(followers[1]);
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
         // Writes should fail (no quorum).

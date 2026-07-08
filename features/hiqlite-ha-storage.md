@@ -375,6 +375,15 @@ For same-key migration (keeping unseal keys), the backup format stores encrypted
 |---|---|
 | `tests/hiqlite_ha_fault_injection.rs` (8 multi-node test scenarios) | Done |
 
+Fixed 2026-07: the suite had been broken since inception — `trigger_failover()`
+POSTed to a `/cluster/step_down/db` route hiqlite never served (HTTP 404;
+openraft 0.9 has no leader-side step-down), and all tests shared fixed ports
+that a dropped cluster releases only asynchronously ("Address already in use"
+on every test after the first). Step-down is now implemented as a follower
+election takeover via a fork-added `POST /cluster/step_down/{raft_type}`
+route, each `TestCluster` allocates a disjoint port block, and restarts wait
+for the old instance's ports to be released.
+
 ## Testing Requirements
 
 ### Unit Tests (Phase 1 -- Done)

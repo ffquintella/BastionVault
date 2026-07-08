@@ -46,19 +46,21 @@ Returns the sealed state, number of key shares, threshold, and unseal progress.
 
 ## operator init
 
-Initialize a new vault. Generates the root key and splits it using Shamir's Secret Sharing.
+Initialize a new vault. With the default Shamir seal, generates the root key and splits it
+using Shamir's Secret Sharing; both flags are required. With an HSM seal (auto-unseal), run
+it bare — the root key is wrapped under the HSM and no unseal keys are produced.
 
 ~~~bash
-bvault operator init
-bvault operator init --key-shares=5 --key-threshold=3
+bvault operator init                                  # HSM (auto-unseal) vault
+bvault operator init --key-shares=5 --key-threshold=3 # Shamir-sealed vault
 ~~~
 
 | Option | Description |
 |--------|-------------|
-| `--key-shares` | Number of key shares to generate |
-| `--key-threshold` | Number of shares required to unseal |
+| `--key-shares` | Number of key shares to generate (required for Shamir; omit for HSM) |
+| `--key-threshold` | Number of shares required to unseal (required for Shamir; omit for HSM) |
 
-Returns a list of unseal keys and a root token. Store these securely.
+Returns a list of unseal keys (empty for an HSM seal) and a root token. Store these securely.
 
 ## operator unseal
 

@@ -239,6 +239,7 @@ The `sqlx` backend was removed because `libsqlite3-sys` link conflicts made the 
 
 - **`bvault cluster leave`** -- gracefully shuts down this node and leaves the Raft cluster via `client.shutdown()`.
 - **`bvault cluster remove-node --node-id N`** -- removes a failed node from the cluster by calling hiqlite's `DELETE /cluster/membership/db` management endpoint. Supports `--stay-as-learner` to demote instead of fully removing.
+- **`bvault cluster failover`** -- triggers a leader step-down on the current leader. openraft 0.9 has no leader-side step-down API, so the fork adds `POST /cluster/step_down/{raft_type}`: the leader resolves a follower voter from the Raft membership and asks it to start an election takeover (higher term), which the old leader yields to.
 
 **API Endpoints:**
 
@@ -249,6 +250,7 @@ The `sqlx` backend was removed because `libsqlite3-sys` link conflicts made the 
 
 - `remove_node(node_id, stay_as_learner)` -- calls hiqlite's management HTTP API via ureq.
 - `leave_cluster()` -- calls `client.shutdown()` for graceful departure.
+- `trigger_failover()` -- resolves a follower voter from Raft metrics and POSTs to its `/cluster/step_down/db` fork endpoint (election takeover). Errors if this node is not the leader.
 - `node_id()` -- returns this node's ID.
 
 ### Commands Not Implemented
@@ -257,7 +259,6 @@ The `sqlx` backend was removed because `libsqlite3-sys` link conflicts made the 
 |---------|--------|
 | `bvault cluster init` | Handled by config + first startup (hiqlite auto-bootstraps) |
 | `bvault cluster join` | Handled by config (`nodes` list) + restart |
-| `bvault cluster failover` | Not supported by hiqlite 0.13 (openraft 0.10+ required for leader step-down) |
 | `bvault cluster recover` | Requires manual config update + restart; hiqlite auto-heal covers most cases |
 
 ### Acceptance Criteria -- MET
@@ -332,22 +333,23 @@ bvault operator unseal
 | Single leader steady-state | Tested (unit test) |
 | Data persistence across restart | Scenario defined |
 | Migration file -> hiqlite | Tested (unit test) |
-| Follower restart | Requires multi-node test infra |
-| Leader restart | Requires multi-node test infra |
-| Leader failover | Requires multi-node test infra |
-| Quorum loss | Requires multi-node test infra |
+| Follower restart | Tested (`tests/hiqlite_ha_fault_injection.rs`) |
+| Leader restart | Tested (`tests/hiqlite_ha_fault_injection.rs`) |
+| Leader failover | Tested (`tests/hiqlite_ha_fault_injection.rs`) |
+| Quorum loss | Tested (`tests/hiqlite_ha_fault_injection.rs`) |
 | Network partition | Requires multi-node test infra |
 | Slow follower | Requires multi-node test infra |
-| Write bursts during leader change | Requires multi-node test infra |
+| Write bursts during leader change | Tested (write during election, `tests/hiqlite_ha_fault_injection.rs`) |
 | Auto-heal after ungraceful shutdown | Requires multi-node test infra |
 
-Multi-node integration tests require spawning 3 hiqlite nodes on different ports in the same test process. This infrastructure can be added when multi-node CI environments are available.
+Multi-node scenarios run as 3 in-process hiqlite nodes (`CARGO_TEST_HIQLITE=1 cargo test --test hiqlite_ha_fault_injection`). Each `TestCluster` allocates a disjoint port block and node restarts wait for the previous instance's detached shutdown to release its ports, so the suite is deterministic under `--test-threads=1` (enforced via `#[serial]`).
 
 ### Acceptance Criteria -- PARTIALLY MET
 
 - Single-node replicated write behavior is verified
 - Migration scenarios are covered
-- Multi-node failover and quorum-loss testing deferred to dedicated CI infrastructure
+- Multi-node failover, restart, and quorum-loss scenarios are covered by the fault-injection suite
+- Network-partition and slow-follower testing deferred (needs packet-level fault injection)
 
 ## Configuration
 

@@ -638,13 +638,18 @@ impl HiqliteBackend {
     /// Remove a node from the Raft cluster. Must be called on the leader.
     /// If `stay_as_learner` is true, the node is demoted to learner instead of fully removed.
     pub fn remove_node(&self, target_node_id: u64, stay_as_learner: bool) -> Result<(), RvError> {
-        let url = format!("{}/cluster/membership/db", self.api_addr);
+        // NB: the {raft_type} path segment deserializes via serde into hiqlite's
+        // RaftType enum, so the only valid values are "sqlite" / "cache" — "db"
+        // fails Path extraction with a 400 before reaching the handler.
+        let url = format!("{}/cluster/membership/sqlite", self.api_addr);
         let body = serde_json::json!({
             "node_id": target_node_id,
             "stay_as_learner": stay_as_learner,
         });
 
-        let mut agent_builder = ureq::Agent::config_builder();
+        // Report 4xx/5xx through our own status branch (with the response body)
+        // instead of ureq's bare "http status: NNN" transport error.
+        let mut agent_builder = ureq::Agent::config_builder().http_status_as_error(false);
         if self.tls_api_auto_certs {
             // Auto-generated self-signed certs require skipping certificate verification.
             // Peer authentication is handled by the X-API-SECRET challenge-response.
@@ -680,10 +685,44 @@ impl HiqliteBackend {
     }
 
     /// Trigger a leader step-down to initiate a new election. Must be called on the leader.
-    pub fn trigger_failover(&self) -> Result<(), RvError> {
-        let url = format!("{}/cluster/step_down/db", self.api_addr);
+    ///
+    /// openraft 0.9 has no leader-side step-down API, so the step-down is
+    /// driven from the other end: a follower's `/cluster/step_down` endpoint
+    /// (a fork addition) makes that follower start an election with a higher
+    /// term, which this leader observes and yields to. We resolve a follower
+    /// voter from the current membership and POST there.
+    pub async fn trigger_failover(&self) -> Result<(), RvError> {
+        let metrics = self.client.metrics_db().await.map_err(map_hiqlite_error)?;
+        let leader_id = metrics
+            .current_leader
+            .ok_or(RvError::ErrClusterNoLeader)?;
+        if leader_id != self.node_id {
+            return Err(RvError::ErrCluster(format!(
+                "this node ({}) is not the leader ({leader_id}); run failover against the leader",
+                self.node_id
+            )));
+        }
 
-        let mut agent_builder = ureq::Agent::config_builder();
+        let follower = metrics
+            .membership_config
+            .voter_ids()
+            .filter(|id| *id != leader_id)
+            .find_map(|id| metrics.membership_config.membership().get_node(&id))
+            .ok_or_else(|| {
+                RvError::ErrCluster(
+                    "no follower voter available to take over leadership".to_string(),
+                )
+            })?;
+
+        let scheme = self
+            .api_addr
+            .split_once("://")
+            .map_or("http", |(scheme, _)| scheme);
+        // "sqlite", not "db" — see the raft_type note in remove_node().
+        let url = format!("{scheme}://{}/cluster/step_down/sqlite", follower.addr_api);
+
+        // As in remove_node: keep 4xx/5xx as responses so the error carries the body.
+        let mut agent_builder = ureq::Agent::config_builder().http_status_as_error(false);
         if self.tls_api_auto_certs {
             agent_builder = agent_builder.tls_config(
                 ureq::tls::TlsConfig::builder()
@@ -802,15 +841,24 @@ mod test {
     use crate::test_utils::TEST_DIR;
 
     /// Returns true if hiqlite integration tests should run.
-    /// Set CARGO_TEST_HIQLITE=1 to enable (requires free ports 18100/18200).
+    /// Set CARGO_TEST_HIQLITE=1 to enable (requires free ports from 18100/18200 up).
     fn should_run() -> bool {
         env::var("CARGO_TEST_HIQLITE").map_or(false, |v| v == "1")
     }
+
+    /// Each conf gets its own port pair: a dropped backend releases its
+    /// listeners asynchronously (detached graceful shutdown), so consecutive
+    /// tests reusing fixed ports race it and fail with "Address already in use"
+    /// even under `#[serial]`.
+    static NEXT_PORT_OFFSET: std::sync::atomic::AtomicU16 =
+        std::sync::atomic::AtomicU16::new(0);
 
     fn make_test_conf(test_name: &str) -> HashMap<String, Value> {
         let dir = env::temp_dir().join(*TEST_DIR).join(test_name);
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
+
+        let offset = NEXT_PORT_OFFSET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let mut conf: HashMap<String, Value> = HashMap::new();
         conf.insert("data_dir".to_string(), Value::String(dir.to_string_lossy().into_owned()));
@@ -820,8 +868,8 @@ mod test {
         conf.insert("table".to_string(), Value::String("vault_test".to_string()));
         conf.insert("listen_addr_api".to_string(), Value::String("127.0.0.1".to_string()));
         conf.insert("listen_addr_raft".to_string(), Value::String("127.0.0.1".to_string()));
-        conf.insert("port_api".to_string(), Value::Number(18100.into()));
-        conf.insert("port_raft".to_string(), Value::Number(18200.into()));
+        conf.insert("port_api".to_string(), Value::Number((18100 + offset).into()));
+        conf.insert("port_raft".to_string(), Value::Number((18200 + offset).into()));
         conf
     }
 

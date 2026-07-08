@@ -81,12 +81,17 @@ impl Client {
 
 impl Sys<'_> {
     pub fn init(&self, init_req: &InitRequest) -> Result<HttpResponse, RvError> {
-        let data = json!({
-            "secret_shares": init_req.secret_shares,
-            "secret_threshold": init_req.secret_threshold,
-        });
+        // Omit unset share parameters so the server can apply its seal-aware
+        // defaults (HSM auto-unseal needs no shares).
+        let mut data = Map::new();
+        if let Some(shares) = init_req.secret_shares {
+            data.insert("secret_shares".to_string(), shares.into());
+        }
+        if let Some(threshold) = init_req.secret_threshold {
+            data.insert("secret_threshold".to_string(), threshold.into());
+        }
 
-        self.request_put(format!("{}/sys/init", self.api_prefix()), data.as_object().cloned())
+        self.request_put(format!("{}/sys/init", self.api_prefix()), Some(data))
     }
 
     pub fn seal_status(&self) -> Result<HttpResponse, RvError> {

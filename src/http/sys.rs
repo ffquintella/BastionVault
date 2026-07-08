@@ -43,8 +43,13 @@ pub struct ClusterStatusResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitRequest {
-    pub secret_shares: u8,
-    pub secret_threshold: u8,
+    /// Optional: an auto-unseal seal (HSM) produces no operator shares, so the
+    /// server defaults both to 1 when the request omits them. A Shamir seal
+    /// still requires both.
+    #[serde(default)]
+    pub secret_shares: Option<u8>,
+    #[serde(default)]
+    pub secret_threshold: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Zeroize)]
@@ -124,7 +129,27 @@ async fn sys_init_put_request_handler(
 ) -> Result<HttpResponse, RvError> {
     let payload = serde_json::from_slice::<InitRequest>(&body)?;
     body.clear();
-    let seal_config = SealConfig { secret_shares: payload.secret_shares, secret_threshold: payload.secret_threshold };
+
+    // The share parameters only mean something for a share-based (Shamir)
+    // seal. An auto-unseal seal (HSM) hands the KEK to the device and returns
+    // no operator shares, so a bare `operator init` must work: default to a
+    // 1/1 config. For Shamir there is no safe default — require both.
+    let seal_config = match (payload.secret_shares, payload.secret_threshold) {
+        (Some(shares), Some(threshold)) => SealConfig { secret_shares: shares, secret_threshold: threshold },
+        (None, None) if !core.seal_provider().requires_shares() => SealConfig { secret_shares: 1, secret_threshold: 1 },
+        (None, None) => {
+            return Ok(response_error(
+                StatusCode::BAD_REQUEST,
+                "secret_shares and secret_threshold are required when the vault uses the shamir seal",
+            ))
+        }
+        _ => {
+            return Ok(response_error(
+                StatusCode::BAD_REQUEST,
+                "secret_shares and secret_threshold must be provided together",
+            ))
+        }
+    };
 
     #[cfg(not(feature = "sync_handler"))]
     let result = core.init(&seal_config).await?;
@@ -1200,7 +1225,7 @@ async fn sys_cluster_failover_request_handler(
         use crate::storage::hiqlite::HiqliteBackend;
         let backend_any = _core.physical.as_ref() as &dyn std::any::Any;
         if let Some(hiqlite_backend) = backend_any.downcast_ref::<HiqliteBackend>() {
-            hiqlite_backend.trigger_failover()?;
+            hiqlite_backend.trigger_failover().await?;
             return Ok(response_ok(None, None));
         }
     }

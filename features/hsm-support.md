@@ -13,8 +13,11 @@ Because the YubiHSM 2 has no native ML-KEM / ML-DSA support, post-quantum keys u
   (feature `hsm_mock`, production-refusal guard), `YubiHsm2Backend` (feature `hsm_yubihsm2`,
   compiles against the real `yubihsm` 0.42 crate), `SealProvider` trait + `ShamirSealProvider`
   + `HsmSealProvider`, `Core` seal-provider dispatch + `Core::auto_unseal`, and HCL `hsm "…"`
-  config parsing. Files: `src/hsm/{mod,blob,context,authz,mock,yubihsm2}.rs`,
-  `src/seal/{mod,hsm}.rs`, `src/core.rs`, `src/cli/config.rs`.
+  config parsing. `bvault operator init` runs bare against an auto-unseal seal: `--key-shares` /
+  `--key-threshold` are optional, and `sys/init` defaults the seal config when the provider
+  auto-unseals while still requiring both parameters for Shamir. Files:
+  `src/hsm/{mod,blob,context,authz,mock,yubihsm2}.rs`, `src/seal/{mod,hsm}.rs`, `src/core.rs`,
+  `src/cli/config.rs`, `src/cli/command/operator_init.rs`, `src/http/sys.rs`.
 - **Phase 2 — Hybrid PQC key custody: Done.** HKDF-SHA-512 seed derivation (host entropy + HSM
   randomness + in-HSM ECDH) and `HsmCustodyKemProvider` / `HsmCustodySigProvider` with the
   unwrap-use-zeroize lifecycle and a bounded zeroizing session cache. Files:

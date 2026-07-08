@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.25.1] - 2026-07-08
+
 ### Changed
 
 #### HSM Support (features/hsm-support.md)
@@ -73,11 +75,9 @@ EXAMPLE ENTRY:
   merge, keeping the raft-client `AbortOnDrop` socket-leak fix, which is
   still not upstreamed. Picks up upstream's Raft rate-limiting and config
   hardening. The host pin moves to `=0.14.0`.
-  Note: the `hiqlite_ha_fault_injection` suite fails identically on the old
-  and new base — `trigger_failover()` targets `/cluster/step_down/db`, a
-  route hiqlite's management API has never served, and the fixed test ports
-  aren't released between in-process tests. Pre-existing since the suite was
-  added; tracked separately.
+  Note: the `hiqlite_ha_fault_injection` suite failed identically on the old
+  and new base — pre-existing since the suite was added; fixed in this
+  release (see Fixed below).
 
 #### Dependency Upgrades — Tier 2 (manifest bumps)
 
@@ -115,6 +115,45 @@ EXAMPLE ENTRY:
   still pulls serde_cbor transitively); `derivative` (RUSTSEC-2024-0388)
   → manual `Debug` impl in `utils/salt.rs`. The `RvError::RustlsPemFileError`
   variant is gone with its crate.
+
+### Fixed
+
+#### Cluster failover / HA fault-injection suite (features/hiqlite-ha-storage.md)
+
+- **`bvault cluster failover` (sys/step-down) never worked**: it POSTed to a
+  `/cluster/step_down/db` route that hiqlite's management API never served,
+  so every invocation failed with HTTP 404. The hiqlite fork now provides
+  `POST /cluster/step_down/{raft_type}` (openraft 0.9 has no leader-side
+  step-down, so the route triggers an election takeover on a follower), and
+  `HiqliteBackend::trigger_failover()` — now async — resolves a follower
+  voter from the Raft membership and targets it. Calling failover on a
+  non-leader node is rejected with a clear error instead of a 404.
+- **`bvault cluster remove-node` targeted an invalid management URL**:
+  `/cluster/membership/db` — the `{raft_type}` path segment only accepts
+  `sqlite` or `cache`, so the request died with HTTP 400 before reaching the
+  handler. Both management calls also now report the response body on
+  failure instead of ureq's bare "http status: NNN".
+- **hiqlite fork: graceful shutdown panics in embedded mode**:
+  `client.shutdown()` panicked with `SendError` on its final
+  notify-the-HTTP-servers step when the graceful-shutdown watchers were
+  already gone, and a repeat shutdown (graceful leave followed by the
+  embedding application's drop path) panicked re-sending shutdown requests
+  to already-terminated writers. `shutdown_execute` is now idempotent and
+  logs a warning instead of panicking on the final notify.
+- **HA fault-injection tests failed with "Address already in use"**
+  (`tests/hiqlite_ha_fault_injection.rs`): all tests shared fixed ports, but
+  a dropped cluster's listeners are released asynchronously (detached
+  graceful shutdown with a multi-second grace delay), so every test after
+  the first failed to bind even under `--test-threads=1`. Each `TestCluster`
+  now allocates its own disjoint port block, and node restarts wait for the
+  old instance's ports to be released before rebinding. Restarts also retain
+  the node's on-disk Raft state (the old config helper wiped the data dir on
+  every call, turning "restart" into a pristine rejoin — which needs quorum
+  and so deadlocked the quorum-loss test), and the quorum-loss test now
+  waits for stopped nodes to actually shut down before asserting writes
+  fail. The single-node hiqlite lib tests get unique ports per test for the
+  same reason. The suite had been broken since it was added (cf5f173b); all
+  8 scenarios now pass.
 
 ### Security
 
