@@ -32,6 +32,14 @@ ARG BUILDPLATFORM
 ARG TARGETPLATFORM
 ARG TARGETARCH
 
+# Optional Cargo feature list spliced into the bvault build (space- or
+# comma-separated, per cargo's `--features` syntax). Empty by default so
+# the stock image ships the default feature set unchanged. Used by
+# `make container-image-hml`, which passes `hsm_mock` to bake in the
+# mock HSM auto-unseal backend for the HML environment. See
+# features/hsm-support.md.
+ARG CARGO_FEATURES=""
+
 # Build tooling. The server crate is fully OpenSSL-free as of the
 # FIDO2 RP migration (`src/modules/credential/fido2/rp/`), so we no
 # longer need libssl-dev or the OPENSSL_STATIC dance that earlier
@@ -77,7 +85,7 @@ RUN set -eux; \
     export AR_${RUST_TARGET_VAR}=${CROSS_PFX}-ar; \
     : "${CARGO_BUILD_JOBS:=2}"; export CARGO_BUILD_JOBS; \
     export RUST_MIN_STACK=16777216; \
-    cargo build --release --target "$RUST_TARGET" --bin bvault; \
+    cargo build --release --target "$RUST_TARGET" ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin bvault; \
     cargo build --release --target "$RUST_TARGET" --bin bv-ssh-helper; \
     mkdir -p /out; \
     cp "target/${RUST_TARGET}/release/bvault"        /out/bvault; \
