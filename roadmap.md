@@ -54,7 +54,7 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | `[x]` Done | Post-Quantum Crypto Migration | [roadmap](roadmaps/post-quantum-crypto-migration.md) — host stack OpenSSL-free, including FIDO2 (now using an in-tree pure-Rust WebAuthn RP at `src/modules/credential/fido2/rp/`). |
 | `[x]` Done | Key Management (ML-KEM-768, ML-DSA-65, ChaCha20-Poly1305) | PQ-first stack. |
 | `[x]` Done | Key Rotation & Re-encryption | Re-encrypt with new barrier key on rotate. |
-| `[~]` In Progress | HSM Support | [spec](features/hsm-support.md) — YubiHSM 2 + mock backends, HSM auto-unseal, hybrid PQC custody, and cluster enrollment/replication implemented and tested with the mock; `v2/sys/hsm/status` + `bvault operator hsm status` shipped. Remaining: the networked enroll / rotate-epoch HTTP handshake (validated against real hardware / a live cluster). |
+| `[~]` In Progress | HSM Support | [spec](features/hsm-support.md) — YubiHSM 2 + mock backends, HSM auto-unseal, hybrid PQC custody, and cluster enrollment/replication implemented and tested with the mock; `v2/sys/hsm/status` + `bvault operator hsm status` + GUI HSM / Seal status page shipped. Remaining: the networked enroll / rotate-epoch HTTP handshake (validated against real hardware / a live cluster). |
 
 ### Storage
 

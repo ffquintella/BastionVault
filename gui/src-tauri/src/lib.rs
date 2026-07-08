@@ -219,6 +219,7 @@ pub fn run() {
             commands::system::get_server_info,
             commands::system::list_mounts,
             commands::system::list_auth_methods,
+            commands::system::hsm_status,
             commands::system::list_audit_events,
             commands::system::dashboard_summary,
             commands::system::list_sso_providers,

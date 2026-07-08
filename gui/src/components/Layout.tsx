@@ -114,6 +114,7 @@ const adminNav: NavItem[] = [
   { path: "/policies", label: "Policies" },
   { path: "/namespaces", label: "Namespaces" },
   { path: "/mounts", label: "Mounts" },
+  { path: "/hsm", label: "HSM / Seal", requires: [...SUPER_ADMIN] },
   { path: "/audit", label: "Audit" },
   { path: "/recordings", label: "Recordings" },
   { path: "/rustion-sessions", label: "Live Sessions" },

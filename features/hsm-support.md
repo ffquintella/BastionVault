@@ -26,7 +26,9 @@ Because the YubiHSM 2 has no native ML-KEM / ML-DSA support, post-quantum keys u
   Custody-root record, attestation-verified enrollment, ECDH replication channel, and dual-signed
   migration transcripts are implemented and tested with two mock devices in-process
   (`src/hsm/enroll.rs`, `src/hsm/replicate.rs`). `GET v2/sys/hsm/status` +
-  `bvault operator hsm status` are wired. **Remaining:** the *networked* enroll / rotate-epoch
+  `bvault operator hsm status` + a read-only **HSM / Seal** page in the desktop GUI
+  (`gui/src/routes/HsmStatusPage.tsx`, backed by the `hsm_status` Tauri command) are wired.
+  **Remaining:** the *networked* enroll / rotate-epoch
   HTTP handshake endpoints (a live multi-node exchange) — deferred until they can be validated
   against real hardware or a running cluster rather than shipped as untested stubs.
 
@@ -305,6 +307,7 @@ Dependencies: `yubihsm` crate (with `mockhsm` for the mock feature), behind `hsm
 | `src/hsm/replicate.rs` | HSM-to-HSM channel, transcript construction/dual-signing/verification, re-wrap on receipt |
 | `src/modules/system/` | `v2/sys/hsm/enroll`, `v2/sys/hsm/status`, `v2/sys/hsm/rotate-epoch` endpoints (+ actix shim for the logical routes) |
 | CLI | `bvault operator hsm enroll|status|rotate-epoch` |
+| `gui/src/routes/HsmStatusPage.tsx` | Read-only GUI **HSM / Seal** page (seal posture, HSM device, cluster key custody); backed by the `hsm_status` Tauri command |
 
 ### Not In Scope
 

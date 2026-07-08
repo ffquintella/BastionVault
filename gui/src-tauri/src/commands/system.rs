@@ -811,6 +811,31 @@ pub async fn list_auth_methods(state: State<'_, AppState>) -> CmdResult<Vec<Moun
     Ok(mount_map_to_info(&map))
 }
 
+/// Read the seal / HSM posture from `v2/sys/hsm/status`.
+///
+/// The response is intentionally polymorphic: a Shamir seal returns only
+/// `type` / `auto_unseal` / `sealed` / `initialized`, while the HSM seal
+/// provider adds the backend, device serial, cluster epoch, enrolled-node
+/// count, and recovery mode. We forward the server's `data` map verbatim
+/// (never any secret material — the server guarantees that) so the GUI can
+/// render whatever fields are present without this command needing to track
+/// the seal-provider schema. Routes through the Backend trait so it works in
+/// both embedded and remote mode.
+#[tauri::command]
+pub async fn hsm_status(state: State<'_, AppState>) -> CmdResult<Value> {
+    let resp = crate::commands::make_request(
+        &state,
+        Operation::Read,
+        "sys/hsm/status".to_string(),
+        None,
+    )
+    .await?;
+    let data = resp
+        .and_then(|r| r.data)
+        .ok_or("sys/hsm/status returned no data")?;
+    Ok(Value::Object(data))
+}
+
 /// Read `sys/internal/ui/mounts` through the full request pipeline
 /// so the ACL filter applies, and return the map under the given
 /// top-level field (`"secret"` or `"auth"`).

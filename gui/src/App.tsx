@@ -22,6 +22,7 @@ import { PoliciesPage } from "./routes/PoliciesPage";
 import { NamespacesPage } from "./routes/NamespacesPage";
 import { MountsPage } from "./routes/MountsPage";
 import { SettingsPage } from "./routes/SettingsPage";
+import { HsmStatusPage } from "./routes/HsmStatusPage";
 import { ExchangePage } from "./routes/ExchangePage";
 import { PkiPage } from "./routes/PkiPage";
 import { CertLifecyclePage } from "./routes/CertLifecyclePage";
@@ -153,6 +154,10 @@ export default function App() {
             <Route
               path="/settings"
               element={<ProtectedRoute><SettingsPage /></ProtectedRoute>}
+            />
+            <Route
+              path="/hsm"
+              element={<ProtectedRoute><HsmStatusPage /></ProtectedRoute>}
             />
             <Route
               path="/exchange"

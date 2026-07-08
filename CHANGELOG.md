@@ -45,6 +45,23 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-07-08
+
+### Added
+
+#### GUI HSM / Seal Status Page (features/hsm-support.md)
+
+- Add an **HSM / Seal** admin page to the desktop GUI that surfaces the
+  vault's seal posture read from `v2/sys/hsm/status`: seal type, sealed
+  state, initialization, and auto-unseal. When the vault is sealed with a
+  hardware security module it also shows the backend (YubiHSM 2 / mock),
+  device serial, recovery mode, PQC key-cache TTL, and the cluster
+  key-custody state (this node, cluster UUID, key epoch, enrolled-node
+  count, and whether this node is enrolled). Non-HSM seals render an
+  informational empty state. Gated to super-admin operators and routed
+  through the Backend trait so it works in both embedded and remote mode.
+- Add the `hsm_status` Tauri command backing the page.
+
 ## [0.24.1] - 2026-07-08
 
 ### Changed

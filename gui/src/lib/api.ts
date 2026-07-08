@@ -290,6 +290,28 @@ export interface ServerInfo {
 export const getServerInfo = () => invoke<ServerInfo>("get_server_info");
 export const listMounts = () => invoke<MountInfo[]>("list_mounts");
 export const listAuthMethods = () => invoke<MountInfo[]>("list_auth_methods");
+
+// Seal / HSM posture from `v2/sys/hsm/status`. The response is
+// polymorphic by seal provider: a Shamir seal returns only `type`,
+// `auto_unseal`, `sealed`, `initialized`; the HSM provider adds the
+// backend, device serial, cluster epoch, enrolled-node count, and
+// recovery mode. Fields absent for the active provider are `undefined`.
+export interface HsmStatus {
+  type: string;
+  auto_unseal: boolean;
+  sealed: boolean;
+  initialized: boolean;
+  backend?: string;
+  device_serial?: string | null;
+  node_id?: string;
+  cluster_uuid?: string | null;
+  epoch?: number | null;
+  enrolled_nodes?: number;
+  this_node_enrolled?: boolean;
+  recovery?: string;
+  pqc_key_cache_ttl_secs?: number;
+}
+export const hsmStatus = () => invoke<HsmStatus>("hsm_status");
 export const listAuditEvents = (from: string, to: string, limit?: number) =>
   invoke<AuditEvent[]>("list_audit_events", { from, to, limit });
 
