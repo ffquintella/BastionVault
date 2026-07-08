@@ -45,6 +45,23 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Security
+
+- Refresh all lockfile-level dependencies (`cargo update` + `npm update`,
+  Tier 1 of the July 2026 dependency-upgrade plan). Resolves
+  RUSTSEC-2026-0199 (bcrypt 0.19.2 — panic in `verify` on non-ASCII hash),
+  RUSTSEC-2026-0204 (crossbeam-epoch 0.9.20), RUSTSEC-2026-0205 (scc
+  double-free — dropped entirely via serial_test 3.5), and the unsound-flagged
+  anyhow 1.0.103, diesel 2.3.10, and rand 0.8.6/0.9.4 releases. Also picks up
+  actix-web 4.14, tauri 2.11.5, wry 0.55.1, zeroize 1.9, and ~170 other
+  compatible bumps; GUI npm deps refreshed to latest in-range (react 19.2.7,
+  vite 8.1.3, tailwind 4.3.2, vitest 4.1.10). Remaining known advisories:
+  quick-xml 0.36 (direct SAML/S3 pin — Tier 2 migration to 0.41 planned),
+  quick-xml 0.39 (transitive via s3-simple/cryptr, upstream), and
+  RUSTSEC-2023-0071 (rsa Marvin — no patched release; BastionVault only
+  performs public-key verification with `rsa`, so the private-key timing
+  side channel does not apply).
+
 ## [0.25.0] - 2026-07-08
 
 ### Added
