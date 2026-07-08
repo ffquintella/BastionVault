@@ -105,7 +105,7 @@ BastionVault runs as a Hiqlite (Raft) cluster. Each node is a separate host. **E
 
 - Feature flag: `hsm_mock`. Implements the same `HsmBackend` trait in software (backed by the yubihsm.rs `MockHsm` where possible, plus a file-persisted object store so dev clusters survive restarts).
 - Deterministic and network-free: usable in CI, unit tests, and the homologation cluster (HML containers have no USB passthrough).
-- **Guardrails**: the mock is compiled only under `hsm_mock`; release build profiles MUST NOT enable it. At runtime, if the seal config declares `backend = "mock"` the server logs a prominent warning and refuses to start when `BVAULT_ENV=production` (or the config sets `environment = "production"`).
+- **Guardrails**: the mock is compiled only under `hsm_mock`. The stock `cargo build`, the CLI packages, and the GUI leave it off; the **official container image bundles it** (alongside `hsm_yubihsm2`) so one image serves prod + homolog. The runtime guard is what makes bundling safe: if the seal config declares `backend = "mock"` the server logs a prominent warning and **refuses to start** when `BVAULT_ENV=production` (or the config sets `environment = "production"`), so a production node must use a real HSM (or Shamir).
 - The mock honors the same object model, capability masks, context strings, and wire formats, so dev/homolog exercise the identical code path minus the hardware.
 
 ### Backend abstraction
@@ -343,5 +343,5 @@ Dependencies: `yubihsm` crate (with `mockhsm` for the mock feature), behind `hsm
 - **HSM credentials**: the auth-key password is read via `env:` (or the OS keychain in GUI/embedded mode); plaintext credentials in config files are rejected outside dev builds.
 - **Capability minimization**: wrap keys carry only `wrap-data`/`unwrap-data`; identity keys cannot unwrap; authz keys can only sign. Provisioning code sets capability masks explicitly and enrollment verification checks them.
 - **No silent escrow**: `recovery = "none"` is the default and the documented posture — losing every cluster HSM loses the data. `shamir-ceremony` is an explicit, init-time-only, audited opt-in.
-- **Mock ≠ security**: the mock backend provides zero hardware protection and is compile-time gated; CI verifies release artifacts are built without `hsm_mock`.
+- **Mock ≠ security**: the mock backend provides zero hardware protection. The CLI/GUI release artifacts are built without `hsm_mock`; the container image bundles it but the runtime production-refusal guard prevents it from ever backing a production seal. Defense-in-depth rests on that guard, not on the feature being absent from the image.
 - **Denial of service vs. fail-closed**: an unreachable HSM keeps the node sealed (fail-closed). Cluster HA covers single-node HSM failures; monitoring should alert on HSM session errors before quorum is threatened.

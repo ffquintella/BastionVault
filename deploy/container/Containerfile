@@ -32,13 +32,16 @@ ARG BUILDPLATFORM
 ARG TARGETPLATFORM
 ARG TARGETARCH
 
-# Optional Cargo feature list spliced into the bvault build (space- or
-# comma-separated, per cargo's `--features` syntax). Empty by default so
-# the stock image ships the default feature set unchanged. Used by
-# `make container-image-hml`, which passes `hsm_mock` to bake in the
-# mock HSM auto-unseal backend for the HML environment. See
-# features/hsm-support.md.
-ARG CARGO_FEATURES=""
+# Both HSM auto-unseal backends are baked into the official image so a single
+# artifact serves production and homologation:
+#   - hsm_yubihsm2: real YubiHSM 2 (production). libusb is compiled statically
+#     from vendored C source (rusb `vendored` feature), so no libusb dev is
+#     needed here and no libusb .so is needed in the runtime stage.
+#   - hsm_mock: software mock for dev/homolog. It REFUSES to start when the
+#     environment is production, so shipping it here is safe — the active
+#     backend is chosen at runtime by the `hsm "<label>"` config block.
+# See features/hsm-support.md.
+ARG BVAULT_FEATURES="hsm_mock,hsm_yubihsm2"
 
 # Build tooling. The server crate is fully OpenSSL-free as of the
 # FIDO2 RP migration (`src/modules/credential/fido2/rp/`), so we no
@@ -85,7 +88,7 @@ RUN set -eux; \
     export AR_${RUST_TARGET_VAR}=${CROSS_PFX}-ar; \
     : "${CARGO_BUILD_JOBS:=2}"; export CARGO_BUILD_JOBS; \
     export RUST_MIN_STACK=16777216; \
-    cargo build --release --target "$RUST_TARGET" ${CARGO_FEATURES:+--features "$CARGO_FEATURES"} --bin bvault; \
+    cargo build --release --target "$RUST_TARGET" ${BVAULT_FEATURES:+--features "$BVAULT_FEATURES"} --bin bvault; \
     cargo build --release --target "$RUST_TARGET" --bin bv-ssh-helper; \
     mkdir -p /out; \
     cp "target/${RUST_TARGET}/release/bvault"        /out/bvault; \

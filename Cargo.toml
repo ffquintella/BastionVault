@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.24.0"
+version = "0.24.1"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -344,6 +344,13 @@ x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
 # `BVAULT_TEST_YUBIHSM=1` suite validates it against real hardware before use.
 yubihsm = { version = "0.42.1", optional = true, default-features = false, features = ["http", "usb", "passwords", "untested"] }
 
+# Pulled transitively by `yubihsm`'s `usb` feature; declared directly only to
+# force the `vendored` feature, which statically compiles libusb from bundled C
+# source with the (cross-)toolchain. This keeps the official container image
+# self-contained — no libusb-1.0 dev package in the builder and no libusb .so in
+# the minimal Wolfi runtime (Linux hotplug uses netlink, so no libudev either).
+rusb = { version = "0.9", optional = true, features = ["vendored"] }
+
 [build-dependencies]
 toml = "1.1.2"
 
@@ -458,20 +465,27 @@ ssh_pqc = []
 
 # HSM Support (features/hsm-support.md). Two mutually-independent backends
 # behind the narrow `hsm::HsmBackend` trait, both off by default so the
-# stock build pulls neither the `yubihsm` crate nor its USB stack.
+# stock `cargo build` (and the CLI .deb/.rpm and GUI) pull neither the
+# `yubihsm` crate nor its USB stack.
+#
+# NOTE: the OFFICIAL CONTAINER IMAGE (deploy/container/Containerfile) enables
+# BOTH backends so a single image serves production and homologation — the
+# active backend is chosen at runtime by the `hsm "<label>"` config block, and
+# the mock is fenced off in production by the runtime guard below. Only the
+# container image bundles them; every other build path leaves them off.
 #
 # `hsm_mock` is a pure-software backend (AES-GCM wrap, ed25519 authz,
 # p256 identity/ECDH) with a file-persisted object store. Zero new external
 # deps — reuses aes-gcm, p256, ed25519-dalek, serde_bytes already in tree.
-# It provides NO hardware protection and refuses to start in production; it
-# exists for dev, CI, and the homologation cluster (no USB passthrough).
-# Release packaging MUST NOT enable it.
+# It provides NO hardware protection and REFUSES TO START in production
+# (BVAULT_ENV=production / environment="production"); it exists for dev, CI,
+# and the homologation cluster (no USB passthrough).
 hsm_mock = []
 # `hsm_yubihsm2` is the production backend for the mandated YubiHSM 2, via
 # the pure-Rust `yubihsm` crate over the HTTP connector or direct USB.
-# `x509-cert` (attestation parsing) is already a direct dep, so the feature
-# only needs the `yubihsm` crate itself.
-hsm_yubihsm2 = ["dep:yubihsm"]
+# `x509-cert` (attestation parsing) is already a direct dep; `rusb` is declared
+# directly only to force libusb's `vendored` (static) build (see above).
+hsm_yubihsm2 = ["dep:yubihsm", "dep:rusb"]
 
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5"

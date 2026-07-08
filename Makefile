@@ -57,7 +57,7 @@ RUSTUP_CARGO_BIN ?= $(HOME)/.cargo/bin
 endif
 export PATH := $(RUSTUP_CARGO_BIN):$(PATH)
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugin-bump container-image container-image-hml container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages cli-packages
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages cli-packages
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -257,17 +257,6 @@ IMAGE_TAG      ?= $(VERSION)
 BUILDX         ?= 0
 INCLUDE_SHELL  ?= 1
 
-# Second ("moving") tag applied alongside IMAGE_TAG. Defaults to `latest`
-# for the stock build; variant targets (e.g. container-image-hml) override
-# it so a feature-specific image never clobbers the plain `:latest`.
-IMAGE_TAG_LATEST ?= latest
-
-# Optional Cargo feature list baked into the image's bvault binary,
-# forwarded to the Containerfile as the CARGO_FEATURES build-arg (empty =
-# default feature set). Override on the command line, or use a variant
-# target like container-image-hml which sets it to `hsm_mock`.
-CARGO_FEATURES ?=
-
 # Default `PLATFORM` to linux/amd64 so the image we build by default
 # matches what we publish from CI (Linux/amd64 runners) and what most
 # deployment targets expect. On Apple Silicon this goes through QEMU,
@@ -336,46 +325,17 @@ container-image: ## Build the server OCI image (auto-detects podman/docker, over
 			fi; \
 		fi; \
 	fi
-	@echo "==> Building $(IMAGE_NAME):$(IMAGE_TAG) ($(PLATFORM), INCLUDE_SHELL=$(INCLUDE_SHELL), CARGO_FEATURES='$(CARGO_FEATURES)') with $(CONTAINER_TOOL)"
+	@echo "==> Building $(IMAGE_NAME):$(IMAGE_TAG) ($(PLATFORM), INCLUDE_SHELL=$(INCLUDE_SHELL)) with $(CONTAINER_TOOL)"
 	$(_BUILD_CMD) \
 		--build-arg INCLUDE_SHELL=$(INCLUDE_SHELL) \
-		--build-arg CARGO_FEATURES=$(CARGO_FEATURES) \
 		-f deploy/container/Containerfile \
 		-t $(IMAGE_NAME):$(IMAGE_TAG) \
-		-t $(IMAGE_NAME):$(IMAGE_TAG_LATEST) \
+		-t $(IMAGE_NAME):latest \
 		.
 	@echo ""
-	@echo "==> Built $(IMAGE_NAME):$(IMAGE_TAG) and $(IMAGE_NAME):$(IMAGE_TAG_LATEST)"
+	@echo "==> Built $(IMAGE_NAME):$(IMAGE_TAG) and $(IMAGE_NAME):latest"
 	@echo "    Inspect: $(CONTAINER_TOOL) images $(IMAGE_NAME)"
 	@echo "    Run:     make container-image-run"
-
-# ── HML server image (mock HSM auto-unseal) ────────────────────────────
-#
-# Same OCI image as `container-image`, but the bvault binary is compiled
-# with the `hsm_mock` Cargo feature so the server can back its seal with
-# the software mock HSM (init → wrap KEK under the mock → auto-unseal on
-# restart, no operator shares). Intended for the HML environment
-# (segdc1vhm0003/0004). See features/hsm-support.md and docs/hsm.md.
-#
-# The build is tagged with an `hml` suffix so it never collides with the
-# stock image or its `:latest`:
-#   bastionvault:$(VERSION)-hml   (immutable, version-pinned)
-#   bastionvault:hml              (moving tag for the HML variant)
-#
-# The mock refuses to start under BVAULT_ENV=production / environment =
-# "production"; run these nodes non-production. The mock is dev/test
-# custody only — no hardware key protection. Override tags/platform the
-# same way as container-image, e.g.:
-#   make container-image-hml PLATFORM=linux/arm64
-container-image-hml: ## Build the server image with the mock HSM feature (hsm_mock), tagged with an hml suffix (:<version>-hml and :hml)
-	@$(MAKE) container-image \
-		CARGO_FEATURES=hsm_mock \
-		IMAGE_TAG=$(IMAGE_TAG)-hml \
-		IMAGE_TAG_LATEST=hml
-	@echo ""
-	@echo "==> HML image ready: $(IMAGE_NAME):$(IMAGE_TAG)-hml (mock HSM auto-unseal baked in)"
-	@echo "    Give each node an hsm \"mock\" { } block with a unique node_id + a persistent state_path,"
-	@echo "    then: bvault operator init  (returns NO unseal shares; auto-unseals on restart)."
 
 container-image-test: ## Test the Wolfi runtime images (static checks; set SMOKE=1 to also build + run-smoke the image)
 	@if [ "$(SMOKE)" = "1" ]; then \

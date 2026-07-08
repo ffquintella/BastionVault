@@ -25,8 +25,12 @@ key inside an enrolled device.
 
 ## Quick start (development, mock backend)
 
-The mock backend needs a build with the `hsm_mock` feature and a writable state
-file. It is intended for dev/CI/homolog only.
+The mock backend is intended for dev/CI/homolog only and needs a writable state
+file. The **official container image already bundles both HSM backends**
+(`hsm_mock` + `hsm_yubihsm2`), so no special build is required there — the mock
+still refuses to start when the environment is production. For a local
+`cargo`/CLI build (which ships neither backend by default) enable the feature
+explicitly:
 
 ```bash
 cargo build --features hsm_mock --bin bvault
@@ -44,8 +48,8 @@ listener "tcp" {
   tls_disable = "true"
 }
 
-# Dev / homolog ONLY. Requires the `hsm_mock` build feature and refuses to
-# start when the environment is production.
+# Dev / homolog ONLY. Bundled in the official image (and in any build with the
+# `hsm_mock` feature); refuses to start when the environment is production.
 hsm "mock" {
   state_path = "/var/lib/bastionvault/mock-hsm.json"
   node_id    = "dev-node-1"

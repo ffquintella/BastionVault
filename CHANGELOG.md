@@ -45,6 +45,22 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-07-08
+
+### Changed
+
+#### HSM packaging
+- Bundle both HSM backends (`hsm_mock` + `hsm_yubihsm2`) into the official
+  container image so a single artifact serves production and homologation; the
+  active backend is chosen at runtime by the `hsm "<label>"` config block. The
+  mock still refuses to start when the environment is production, so shipping it
+  is safe. The CLI packages and GUI continue to build without either backend.
+- Force libusb's `vendored` (static) build for the `hsm_yubihsm2` backend (new
+  direct `rusb` dep with `features = ["vendored"]`), so the image needs no
+  libusb dev in the builder and no libusb `.so` in the Wolfi runtime.
+- Remove the `container-image-hml` / `container-image-push-hml` make targets and
+  the `CARGO_FEATURES` build knob — superseded by the unified image above.
+
 ## [0.24.0] - 2026-07-07
 
 ### Added
