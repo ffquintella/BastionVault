@@ -57,6 +57,28 @@ EXAMPLE ENTRY:
   rejects a bare init with a clear error, and passing only one of the two
   flags is a client-side error.
 
+#### Dependency Upgrades — Tier 3 (coordinated majors)
+
+- Upgrade `wasmtime` 43 → 46 (root plugin runtime + GUI form-hook sandbox,
+  shared pin). No API changes needed; fuel metering and memory limits
+  verified by the plugin runtime test suites.
+- Upgrade `tonic` 0.12 → 0.14 + `prost` 0.13 → 0.14 (CMIS gRPC client for
+  the FerroGate `cmis_grpc` JWKS source). tonic 0.14 moved the prost codec
+  into the new `tonic-prost` crate and renamed `tonic::body::BoxBody` to
+  `Body`; the vendored `cmis_proto.rs` stubs were migrated in place (the
+  `.proto` is not vendored, so no regeneration). The custom hyper-rustls
+  PQ-TLS connector path compiles unchanged.
+- Rebase the hiqlite fork (`ffquintella/hiqlite`, branch `main-local`) onto
+  upstream **v0.14.0 stable** (from the `0.14.0-202606024` pre-release) via
+  merge, keeping the raft-client `AbortOnDrop` socket-leak fix, which is
+  still not upstreamed. Picks up upstream's Raft rate-limiting and config
+  hardening. The host pin moves to `=0.14.0`.
+  Note: the `hiqlite_ha_fault_injection` suite fails identically on the old
+  and new base — `trigger_failover()` targets `/cluster/step_down/db`, a
+  route hiqlite's management API has never served, and the fixed test ports
+  aren't released between in-process tests. Pre-existing since the suite was
+  added; tracked separately.
+
 #### Dependency Upgrades — Tier 2 (manifest bumps)
 
 - Upgrade `quick-xml` 0.36 → 0.41 (**security** — RUSTSEC-2026-0194/0195,

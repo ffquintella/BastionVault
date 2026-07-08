@@ -87,10 +87,11 @@ chrono = "0.4"
 zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
 diesel = { version = "2.3.8", features = ["mysql", "r2d2"], optional = true }
 r2d2 = { version = "0.8.10", optional = true }
-# Pinned to the 0.14 pre-release carried by our fork submodule
-# (`third_party/hiqlite`, branch `main-local`) which adds the raft-client
-# socket-leak fix. See the `[patch.crates-io]` entry below.
-hiqlite = { version = "=0.14.0-202606024", optional = true, features = ["sqlite", "dlock"] }
+# Pinned to our fork submodule (`third_party/hiqlite`, branch
+# `main-local`): upstream v0.14.0 stable plus the raft-client
+# socket-leak fix (AbortOnDrop), which is still not upstreamed as of
+# 2026-07. See the `[patch.crates-io]` entry below.
+hiqlite = { version = "=0.14.0", optional = true, features = ["sqlite", "dlock"] }
 cryptr = { version = "0.10", optional = true, default-features = false }
 # Cloud Storage Targets — Phase 2b: S3 via rusty-s3 (URL signing +
 # XML parsing only, ~15 transitive deps). HTTP is handled by the
@@ -223,7 +224,7 @@ uuid = { version = "1", features = ["v4"] }
 # `features/plugin-system.md`. We disable the cranelift parallel feature
 # to keep the dep tree small; cache + pooling-allocator are off until the
 # plugin system actually needs them.
-wasmtime = { version = "43", default-features = false, features = ["cranelift", "runtime", "wat", "async"] }
+wasmtime = { version = "46", default-features = false, features = ["cranelift", "runtime", "wat", "async"] }
 # PKI Secret Engine (Phase 1): pure-Rust X.509 + CRL stack. `rcgen`
 # handles DER encoding for certs / CSRs / CRLs and provides a `SigningKey`
 # trait we plug post-quantum signers into in Phase 2. We use the default
@@ -276,8 +277,11 @@ ferro-crypto = { path = "third_party/ferrogate-sdk-rust/crates/ferro-crypto" }
 # pre-generated from FerroGate's machine_identity.proto and vendored at
 # `src/modules/credential/ferrogate/cmis_proto.rs`, so protoc is NOT required to
 # build BastionVault — only the tonic/prost runtimes.
-tonic = { version = "0.12", default-features = false, features = ["transport", "prost", "codegen"] }
-prost = "0.13"
+tonic = { version = "0.14", default-features = false, features = ["transport", "codegen"] }
+# tonic 0.14 split the prost codec out of the core crate; the vendored
+# stubs in cmis_proto.rs reference `tonic_prost::ProstCodec`.
+tonic-prost = "0.14"
+prost = "0.14"
 # Custom-connector plumbing so the CMIS channel can use ferro-crypto's PQ-TLS
 # rustls config (a provider tonic's built-in TLS can't supply). All three are
 # already in the dependency tree; promoted to direct deps.

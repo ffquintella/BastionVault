@@ -149,7 +149,7 @@ pem = "3.0"
 # Version-pinned to match the host crate's `wasmtime = "43"` so the
 # two crates share a single compiled artifact in the workspace
 # build cache.
-wasmtime = { version = "43", default-features = false, features = ["cranelift", "runtime"] }
+wasmtime = { version = "46", default-features = false, features = ["cranelift", "runtime"] }
 # Used by `plugin_hooks::HookError` for `#[derive(Error)]`. Other GUI
 # error types historically `impl Display` by hand; the hook runner
 # has enough variants that the macro saves a meaningful chunk of
