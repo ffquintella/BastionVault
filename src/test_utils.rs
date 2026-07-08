@@ -17,8 +17,7 @@ use actix_web::{
     web, App, HttpResponse, HttpServer,
 };
 use lazy_static::lazy_static;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls_pemfile::{certs, private_key};
+use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use serde_json::{json, Map, Value};
 use tokio::sync::oneshot;
 use ureq::tls::{Certificate, ClientCert, PrivateKey, RootCerts, TlsConfig};
@@ -584,7 +583,7 @@ impl Drop for TestHttpServer {
 mod tests {
     use super::*;
 
-    #[ctor::ctor]
+    #[ctor::ctor(unsafe)]
     fn init() {
         let dir = env::temp_dir().join(*TEST_DIR);
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -802,15 +801,13 @@ fn build_test_rustls_server_config(tls: &TestTlsConfig) -> Result<rustls::Server
 
 fn load_test_rustls_cert_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>, RvError> {
     let cert_pem = fs::read(path)?;
-    let mut reader = cert_pem.as_slice();
-    Ok(certs(&mut reader).collect::<Result<Vec<_>, _>>()?)
+    Ok(CertificateDer::pem_slice_iter(&cert_pem).collect::<Result<Vec<_>, _>>()?)
 }
 
 fn load_test_rustls_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, RvError> {
     let key_pem = fs::read(path)?;
-    let mut reader = key_pem.as_slice();
-    private_key(&mut reader)?.ok_or_else(|| {
-        log::error!("no private key found in {}", path.display());
+    PrivateKeyDer::from_pem_slice(&key_pem).map_err(|err| {
+        log::error!("no usable private key in {}: {err}", path.display());
         RvError::ErrConfigLoadFailed
     })
 }

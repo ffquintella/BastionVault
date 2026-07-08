@@ -16,7 +16,7 @@ tauri-plugin-dialog = "2"
 # Development-only MCP bridge used by local AI assistants for GUI inspection
 # and automation. It is optional, feature-gated, and only registered by
 # debug builds when BASTION_TAURI_MCP=1 is set.
-tauri-plugin-mcp-bridge = { version = "0.11.1", optional = true }
+tauri-plugin-mcp-bridge = { version = "0.12", optional = true }
 bastion_vault = { path = "../..", default-features = false }
 # Slim client crate: HTTP client + Backend trait. Brought in
 # unconditionally because the GUI's Connect-page flows always need it.
@@ -36,12 +36,21 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
 # Argon2id KDF used by the password-encrypted backup envelope
 # (`commands/backup.rs`). Mirrors the host crate's argon2 pin.
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "std"] }
-keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+# v4's default `v1` feature auto-selects the platform-native store
+# (macOS Keychain / Windows Credential Manager / *nix Secret Service),
+# replacing v3's explicit apple-native/windows-native/linux-native
+# feature flags.
+keyring = "4"
 chrono = "0.4"
 dirs = "6"
 hex = "0.4"
 sha2 = "0.11"
-serde_cbor = "0.11"
+# CBOR writer for the WebAuthn attestationObject built in
+# `commands/fido2_native.rs`. Replaces the unmaintained `serde_cbor`
+# (RUSTSEC-2021-0127) and matches the ciborium-based parser the
+# server's in-tree FIDO2 RP uses. Note `authenticator` 0.5 still
+# pulls serde_cbor transitively.
+ciborium = "0.2"
 authenticator = { version = "0.5", default-features = false, features = ["crypto_rust"] }
 # `base64urlsafedata` (a small standalone crate, no OpenSSL) provides the
 # Base64UrlSafeData wrapper used in `commands/fido2_native.rs` for browser
@@ -84,7 +93,7 @@ x509-parser = { version = "0.18", features = ["verify"] }
 # Cron expression validator for scheduled-exports. Mirrors the dep the
 # core crate uses; pulled directly so the Tauri command can validate
 # operator input before persisting the schedule.
-cron = "0.16"
+cron = "0.17"
 uuid = { version = "1", features = ["v4"] }
 # Pure-Rust SSH client for the Resource Connect SSH session window.
 # Same crate the host's files_ssh_sync feature uses for SFTP/SCP
@@ -126,7 +135,7 @@ sspi = { version = "0.21", default-features = false, features = ["network_client
 # parsing. Pure-Rust PFX/PKCS#12 reader; `pbes1` feature covers the
 # legacy Windows-friendly cipher modes (RC2 / 3DES) that openssl had to
 # decrypt for us before we removed the C dep entirely.
-p12-keystore = { version = "0.2.1", features = ["pbes1"] }
+p12-keystore = { version = "0.3", features = ["pbes1"] }
 # PEM (RFC 7468) encoder for the cert / chain / PKCS#8 key blocks
 # the PKCS#12 import flow hands back to the server's `pem_bundle`
 # splitter. Mirrors the `pem` pin the host crate uses.

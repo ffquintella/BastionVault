@@ -23,9 +23,9 @@
 
 use std::collections::HashMap;
 
-use quick_xml::events::Event;
+use quick_xml::events::{BytesRef, Event};
 use quick_xml::name::QName;
-use quick_xml::Reader;
+use quick_xml::{Reader, XmlVersion};
 
 use crate::errors::RvError;
 
@@ -81,6 +81,12 @@ pub fn parse_response(xml: &[u8]) -> Result<ParsedResponse, RvError> {
     let mut in_assertion_depth: Option<usize> = None;
     let mut current_attribute: Option<(String, Vec<String>)> = None;
     let mut capture_text_into: Option<TextTarget> = None;
+    // Text content accumulator for the current capture target.
+    // quick-xml 0.41 delivers entity references (`&amp;`, `&#x41;`)
+    // as separate `GeneralRef` events between `Text` fragments, so a
+    // value like `Acme &amp; Co` arrives in three pieces — they're
+    // stitched here and flushed when the capture element closes.
+    let mut text_buf = String::new();
     let mut assertion = ParsedAssertion::default();
 
     loop {
@@ -203,35 +209,17 @@ pub fn parse_response(xml: &[u8]) -> Result<ParsedResponse, RvError> {
             }
 
             Ok(Event::Text(t)) => {
-                if let Some(target) = capture_text_into.as_ref() {
-                    let s = t.unescape().map_err(|e| {
+                if capture_text_into.is_some() {
+                    let s = t.xml10_content().map_err(|e| {
                         RvError::ErrString(format!("saml: invalid text node: {e}"))
                     })?;
-                    let trimmed = s.trim();
-                    if !trimmed.is_empty() {
-                        match target {
-                            TextTarget::NameId => assertion.name_id = trimmed.to_string(),
-                            TextTarget::AssertionIssuer => {
-                                assertion.issuer = trimmed.to_string();
-                            }
-                            TextTarget::ResponseIssuer => {
-                                out.issuer = trimmed.to_string();
-                            }
-                            TextTarget::Audience => {
-                                assertion
-                                    .audience_restrictions
-                                    .push(trimmed.to_string());
-                            }
-                            TextTarget::StatusMessage => {
-                                out.status_message = trimmed.to_string();
-                            }
-                            TextTarget::AttributeValue => {
-                                if let Some((_, values)) = current_attribute.as_mut() {
-                                    values.push(trimmed.to_string());
-                                }
-                            }
-                        }
-                    }
+                    text_buf.push_str(&s);
+                }
+            }
+
+            Ok(Event::GeneralRef(r)) => {
+                if capture_text_into.is_some() {
+                    text_buf.push_str(&resolve_entity_ref(&r)?);
                 }
             }
 
@@ -266,7 +254,36 @@ pub fn parse_response(xml: &[u8]) -> Result<ParsedResponse, RvError> {
                         | "StatusMessage"
                         | "AttributeValue"
                 ) {
-                    capture_text_into = None;
+                    if let Some(target) = capture_text_into.take() {
+                        let trimmed = text_buf.trim();
+                        if !trimmed.is_empty() {
+                            match target {
+                                TextTarget::NameId => {
+                                    assertion.name_id = trimmed.to_string();
+                                }
+                                TextTarget::AssertionIssuer => {
+                                    assertion.issuer = trimmed.to_string();
+                                }
+                                TextTarget::ResponseIssuer => {
+                                    out.issuer = trimmed.to_string();
+                                }
+                                TextTarget::Audience => {
+                                    assertion
+                                        .audience_restrictions
+                                        .push(trimmed.to_string());
+                                }
+                                TextTarget::StatusMessage => {
+                                    out.status_message = trimmed.to_string();
+                                }
+                                TextTarget::AttributeValue => {
+                                    if let Some((_, values)) = current_attribute.as_mut() {
+                                        values.push(trimmed.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        text_buf.clear();
+                    }
                 }
                 stack.pop();
             }
@@ -315,9 +332,29 @@ fn attr_value(
     attr: &quick_xml::events::attributes::Attribute<'_>,
     reader: &Reader<&[u8]>,
 ) -> String {
-    attr.decode_and_unescape_value(reader.decoder())
+    attr.decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
         .map(|c| c.into_owned())
         .unwrap_or_default()
+}
+
+/// Resolve a `GeneralRef` event (`&amp;`, `&#x41;`, …) to its
+/// replacement text. Fails closed on entity names outside the five
+/// XML-predefined ones — SAML responses carry no DTD, so a custom
+/// entity is malformed input (and a classic entity-expansion vector).
+pub(crate) fn resolve_entity_ref(r: &BytesRef<'_>) -> Result<String, RvError> {
+    if let Some(ch) = r.resolve_char_ref().map_err(|e| {
+        RvError::ErrString(format!("saml: invalid character reference: {e}"))
+    })? {
+        return Ok(ch.to_string());
+    }
+    let name = r
+        .decode()
+        .map_err(|e| RvError::ErrString(format!("saml: entity reference decode: {e}")))?;
+    quick_xml::escape::resolve_predefined_entity(&name)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            RvError::ErrString(format!("saml: unsupported entity reference '&{name};'"))
+        })
 }
 
 /// Given the byte offset just before a parsed start-tag (the
@@ -404,6 +441,42 @@ mod tests {
             a.attributes.get("groups"),
             Some(&vec!["engineering".to_string(), "admins".to_string()])
         );
+    }
+
+    #[test]
+    fn parse_stitches_entity_references_in_text() {
+        // quick-xml 0.41 splits `A &amp; B` into Text / GeneralRef /
+        // Text events; the parser must reassemble the full value.
+        let xml = r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
+    xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="resp-1">
+  <saml:Assertion ID="assert-1">
+    <saml:AttributeStatement>
+      <saml:Attribute Name="org">
+        <saml:AttributeValue>Acme &amp; Co &#x41;&#66;</saml:AttributeValue>
+      </saml:Attribute>
+    </saml:AttributeStatement>
+  </saml:Assertion>
+</samlp:Response>"#;
+        let parsed = parse_response(xml.as_bytes()).unwrap();
+        let a = parsed.assertion.unwrap();
+        assert_eq!(
+            a.attributes.get("org"),
+            Some(&vec!["Acme & Co AB".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_rejects_undeclared_custom_entity() {
+        // No DTD ⇒ any non-predefined entity is malformed input; the
+        // parser must fail closed rather than drop or mangle it.
+        let xml = r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
+    xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="resp-1">
+  <saml:Assertion ID="assert-1">
+    <saml:Issuer>&custom;</saml:Issuer>
+  </saml:Assertion>
+</samlp:Response>"#;
+        let err = parse_response(xml.as_bytes()).unwrap_err();
+        assert!(format!("{err}").contains("entity"));
     }
 
     #[test]

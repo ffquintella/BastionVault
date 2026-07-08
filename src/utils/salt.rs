@@ -2,7 +2,6 @@
 //! <https://github.com/hashicorp/vault/blob/main/sdk/helper/salt/salt.go>
 
 use better_default::Default;
-use derivative::Derivative;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
@@ -47,17 +46,22 @@ pub struct Salt {
     pub generated: bool,
 }
 
-#[derive(Derivative, Default)]
-#[derivative(Debug, Clone)]
+#[derive(Clone, Default)]
 pub struct Config {
     #[default(DEFAULT_LOCATION.to_string())]
     pub location: String,
-    #[derivative(Debug = "ignore")]
     #[default(DigestAlgorithm::Sha256)]
     pub hash_type: DigestAlgorithm,
-    #[derivative(Debug = "ignore")]
     #[default(DigestAlgorithm::Sha256)]
     pub hmac_type: DigestAlgorithm,
+}
+
+// Debug shows only `location`, matching the previous
+// `derivative(Debug = "ignore")` behavior for the digest fields.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config").field("location", &self.location).finish_non_exhaustive()
+    }
 }
 
 #[maybe_async::maybe_async]

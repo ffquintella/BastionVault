@@ -45,6 +45,55 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Changed
+
+#### HSM Support (features/hsm-support.md)
+
+- `bvault operator init` no longer requires `--key-shares` / `--key-threshold`:
+  both flags are now optional, and `PUT sys/init` accepts a body without
+  `secret_shares` / `secret_threshold`. When the server's seal provider
+  auto-unseals (HSM), a bare `operator init` initializes the vault with no
+  parameters and returns no unseal keys; on a Shamir seal the server still
+  rejects a bare init with a clear error, and passing only one of the two
+  flags is a client-side error.
+
+#### Dependency Upgrades — Tier 2 (manifest bumps)
+
+- Upgrade `quick-xml` 0.36 → 0.41 (**security** — RUSTSEC-2026-0194/0195,
+  DoS via unbounded namespace allocation / quadratic attribute checking in
+  the XML parser that handles untrusted SAML IdP responses). The SAML
+  response parser and exclusive-c14n canonicalizer now handle quick-xml's
+  split `Text`/`GeneralRef` event model: entity references (`&amp;`,
+  `&#x41;`) are stitched back into text values, and undeclared custom
+  entities are rejected (fail-closed; SAML carries no DTD). New unit tests
+  cover both paths.
+- Upgrade `keyring` 3 → 4 (root `cloud_keychain` + GUI). v4's `v1`
+  compatibility layer keeps the `Entry` API; the platform-native store
+  features are now automatic, and Linux moves from the dbus C binding to
+  the pure-Rust zbus Secret Service backend.
+- Upgrade `p12-keystore` 0.2 → 0.3 (GUI PKCS#12 CA import): new
+  `Pkcs12ImportPolicy` parameter (set to `Relaxed` to preserve the
+  pre-0.3 tolerance for sloppily-linked xca/Windows exports), and the
+  private key is now a typed wrapper read via `as_der()`.
+- Upgrade `rusty-s3` 0.9 → 0.10 (`cloud_s3`): `ListObjectsV2::parse_response`
+  now takes `&str`; the S3 LIST body is UTF-8-validated first.
+- Upgrade `ctor` 0.9 → 1.0: `#[ctor::ctor]` becomes `#[ctor::ctor(unsafe)]`
+  (test-only constructors).
+- Upgrade with no code changes: `cron` 0.17 (root + GUI), `sysinfo` 0.39,
+  `prometheus-client` 0.25, `stretto` 0.9, `tauri-plugin-mcp-bridge` 0.12,
+  and `toml` 1.1 in `bv-plugin-pack` (aligning with the root pin).
+
+### Removed
+
+- Replace unmaintained dependencies flagged by `cargo audit`:
+  `rustls-pemfile` (RUSTSEC-2025-0134) → `rustls-pki-types` `PemObject`
+  parsing for the TLS listener cert/key/CA loaders; the GUI's direct
+  `serde_cbor` (RUSTSEC-2021-0127) → `ciborium` for the WebAuthn
+  attestationObject (matching the server RP's parser; `authenticator` 0.5
+  still pulls serde_cbor transitively); `derivative` (RUSTSEC-2024-0388)
+  → manual `Debug` impl in `utils/salt.rs`. The `RvError::RustlsPemFileError`
+  variant is gone with its crate.
+
 ### Security
 
 - Refresh all lockfile-level dependencies (`cargo update` + `npm update`,

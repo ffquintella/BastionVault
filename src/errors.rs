@@ -347,9 +347,6 @@ pub enum RvError {
         source: rustls::Error,
     },
 
-    #[error("Some rustls_pemfile error happened")]
-    RustlsPemFileError(rustls_pemfile::Error),
-
     #[error("Some rustls_pki_types error happened")]
     RustlsPkiTypesPemFileError(rustls::pki_types::pem::Error),
 
@@ -578,12 +575,6 @@ impl<T> From<PoisonError<RwLockWriteGuard<'_, T>>> for RvError {
 impl<T> From<PoisonError<RwLockReadGuard<'_, T>>> for RvError {
     fn from(_: PoisonError<RwLockReadGuard<'_, T>>) -> Self {
         RvError::ErrRwLockReadPoison
-    }
-}
-
-impl From<rustls_pemfile::Error> for RvError {
-    fn from(err: rustls_pemfile::Error) -> Self {
-        RvError::RustlsPemFileError(err)
     }
 }
 

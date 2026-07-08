@@ -502,7 +502,8 @@ pub async fn fido2_native_register(
     let _ = app_handle.emit("fido2-status", "processing");
 
     // 7. Construct RegisterPublicKeyCredential for webauthn-rs
-    let att_obj_cbor = serde_cbor::to_vec(&result.att_obj)
+    let mut att_obj_cbor = Vec::new();
+    ciborium::into_writer(&result.att_obj, &mut att_obj_cbor)
         .map_err(|e| CommandError::from(format!("CBOR serialize error: {e}")))?;
 
     let cred_id = result.att_obj.auth_data.credential_data

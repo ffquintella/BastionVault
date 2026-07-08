@@ -94,7 +94,7 @@ pub mod test_utils;
 /// in a real deployment — gated on `cfg(test)` to keep it out of the
 /// shipping crate.
 #[cfg(test)]
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn maybe_act_as_test_subprocess_plugin() {
     if std::env::var("BV_PLUGIN_MODE").ok().as_deref() == Some("1") {
         crate::plugins::process_runtime::run_test_subprocess_plugin();

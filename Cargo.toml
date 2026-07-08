@@ -64,7 +64,6 @@ serde_bytes = "0.11"
 serde_yaml = "0.9"
 go-defer = "^0.1"
 rand = "^0.10"
-derivative = "2.2.0"
 enum-map = "2.7.3"
 strum = { version = "0.28", features = ["derive"] }
 strum_macros = "0.28"
@@ -97,19 +96,21 @@ cryptr = { version = "0.10", optional = true, default-features = false }
 # XML parsing only, ~15 transitive deps). HTTP is handled by the
 # existing `ureq` dep, so enabling `cloud_s3` does not pull in
 # reqwest / hyper / aws-sdk-*. See `features/cloud-storage-backend.md`.
-rusty-s3 = { version = "0.9", optional = true }
+rusty-s3 = { version = "0.10", optional = true }
 # Now non-optional: SAML Phase 3 (`src/modules/credential/saml/`) uses
 # it to parse IdP responses. `cloud_s3` also consumes it, but gating
 # it on that feature would force a feature-flag dance for the SAML
 # code path — keeping it always-on is simpler and the transitive
 # footprint is small (~3 crates).
-quick-xml = { version = "0.36" }
+quick-xml = { version = "0.41" }
 # OS keychain writer for `credentials_ref = "keychain:..."`. Uses the
 # platform-native secret store on macOS (Keychain) / Windows
-# (Credential Vault) / Linux (Secret Service). Feature-gated so
-# server-only operators who never use `keychain:` refs don't carry
-# the extra transitive deps (notably `dbus` on Linux).
-keyring = { version = "3", optional = true }
+# (Credential Vault) / Linux (Secret Service). v4's default `v1`
+# feature auto-selects the platform store (zbus-based Secret Service
+# on Linux — pure Rust, no dbus C dep). Feature-gated so server-only
+# operators who never use `keychain:` refs don't carry the extra
+# transitive deps.
+keyring = { version = "4", optional = true }
 bcrypt = "0.19"
 url = "2.5"
 ureq = { version = "3.3", features = ["json"] }
@@ -142,7 +143,10 @@ russh = { version = "=0.61.1", optional = true, default-features = true }
 russh-sftp = { version = "2", optional = true }
 http = "1"
 rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
-rustls-pemfile = "2.2"
+# PEM parsing for TLS cert / key / CA files via the `PemObject` trait
+# (rustls re-exports this crate as `rustls::pki_types`). Replaces the
+# unmaintained `rustls-pemfile` (RUSTSEC-2025-0134).
+rustls-pki-types = "1"
 webpki-roots = { version = "1.0", default-features = true }
 glob = "0.3"
 base64 = "0.22"
@@ -151,14 +155,14 @@ blake2b_simd = "1.0"
 derive_more = "2.1.1"
 dashmap = "6.1"
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "process", "time", "io-util"] }
-ctor = "0.9.1"
+ctor = "1.0"
 better_default = "1.0.5"
-prometheus-client = "0.24.1"
-sysinfo = "0.38.4"
+prometheus-client = "0.25"
+sysinfo = "0.39"
 prettytable = "0.10"
 rpassword = "7.4"
 async-trait = "0.1"
-stretto = "0.8"
+stretto = "0.9"
 priority-queue = "2.7"
 crossbeam-channel = "0.5"
 maybe-async = { version = "0.2", optional = false }
@@ -210,7 +214,7 @@ argon2 = { version = "0.5", default-features = false, features = ["alloc", "std"
 chacha20poly1305 = "0.10"
 # Scheduled-exports cron parser. Pure-Rust, no system deps. See
 # `features/scheduled-exports.md`.
-cron = "0.16"
+cron = "0.17"
 # `uuid` v4 is used for FIDO2 user-handle generation and for the
 # scheduled-exports id generation.
 uuid = { version = "1", features = ["v4"] }

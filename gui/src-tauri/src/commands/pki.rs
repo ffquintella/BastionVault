@@ -697,20 +697,25 @@ pub async fn pki_import_ca_pkcs12(
 ) -> CmdResult<PkiCaImportResult> {
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine;
-    use p12_keystore::KeyStore;
+    use p12_keystore::{KeyStore, Pkcs12ImportPolicy};
     use pem::Pem;
 
     let der = B64
         .decode(request.pkcs12_b64.trim())
         .map_err(|e| format!("pki_import_ca_pkcs12: base64 decode failed: {e}"))?;
-    let keystore = KeyStore::from_pkcs12(&der, &request.passphrase).map_err(|e| {
-        format!("pki_import_ca_pkcs12: passphrase rejected or container malformed: {e}")
-    })?;
+    // `Relaxed` matches the pre-0.3 import behavior: take whatever the
+    // container holds even when key/cert linking metadata is imperfect
+    // (xca and Windows exports are routinely sloppy here). `Strict`
+    // would silently drop such entries.
+    let keystore = KeyStore::from_pkcs12(&der, &request.passphrase, Pkcs12ImportPolicy::Relaxed)
+        .map_err(|e| {
+            format!("pki_import_ca_pkcs12: passphrase rejected or container malformed: {e}")
+        })?;
     let (_alias, chain_entry) = keystore
         .private_key_chain()
         .ok_or("pki_import_ca_pkcs12: container has no private key entry")?;
 
-    let chain = chain_entry.chain();
+    let chain = chain_entry.certs();
     let leaf = chain
         .first()
         .ok_or("pki_import_ca_pkcs12: container has no certificate")?;
@@ -720,7 +725,7 @@ pub async fn pki_import_ca_pkcs12(
     // shape the server's `pki/config/ca` `pem_bundle` splitter expects
     // behind a `PRIVATE KEY` header.
     let cert_pem = pem::encode(&Pem::new("CERTIFICATE", leaf.as_der().to_vec()));
-    let key_pem = pem::encode(&Pem::new("PRIVATE KEY", chain_entry.key().to_vec()));
+    let key_pem = pem::encode(&Pem::new("PRIVATE KEY", chain_entry.key().as_der().to_vec()));
 
     // Concat in any order — `split_pem_bundle` recognises both blocks
     // by tag. Append intermediate / root certs (if any) so an

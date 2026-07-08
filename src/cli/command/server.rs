@@ -13,11 +13,10 @@ use anyhow::format_err;
 use clap::Parser;
 use derive_more::Deref;
 use rustls::{
-    pki_types::{CertificateDer, PrivateKeyDer},
+    pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
     server::WebPkiClientVerifier,
     RootCertStore, ServerConfig,
 };
-use rustls_pemfile::{certs, private_key};
 use sysexits::ExitCode;
 
 use crate::{
@@ -450,23 +449,21 @@ fn publish_ca_for_local_clients(listener: &config::Listener) {
 
 fn load_rustls_cert_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>, RvError> {
     let cert_pem = fs::read(path).map_err(|err| format_err!("unable to read proxy cert {} - {}", path.display(), err))?;
-    let mut reader = cert_pem.as_slice();
-    Ok(certs(&mut reader).collect::<Result<Vec<_>, _>>()?)
+    Ok(CertificateDer::pem_slice_iter(&cert_pem).collect::<Result<Vec<_>, _>>()?)
 }
 
 fn load_rustls_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, RvError> {
     let key_pem = fs::read(path).map_err(|err| format_err!("unable to read proxy key {} - {}", path.display(), err))?;
-    let mut reader = key_pem.as_slice();
-    private_key(&mut reader)?.ok_or_else(|| {
-        log::error!("no private key found in {}", path.display());
+    PrivateKeyDer::from_pem_slice(&key_pem).map_err(|err| {
+        log::error!("no usable private key in {}: {err}", path.display());
         RvError::ErrConfigLoadFailed
     })
 }
 
 fn load_rustls_root_store(path: &Path) -> Result<RootCertStore, RvError> {
     let ca_pem = fs::read(path).map_err(|err| format_err!("unable to read client CA {} - {}", path.display(), err))?;
-    let mut reader = ca_pem.as_slice();
-    let cert_chain = certs(&mut reader).collect::<Result<Vec<_>, _>>()?;
+    let cert_chain =
+        CertificateDer::pem_slice_iter(&ca_pem).collect::<Result<Vec<_>, _>>()?;
 
     let mut roots = RootCertStore::empty();
     for cert in cert_chain {

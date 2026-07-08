@@ -509,7 +509,9 @@ fn parse_attr(tag: &str, name: &str) -> Option<String> {
 
 fn canonicalise_exclusive(xml: &[u8]) -> Result<Vec<u8>, RvError> {
     use quick_xml::events::Event;
-    use quick_xml::Reader;
+    use quick_xml::{Reader, XmlVersion};
+
+    use super::response::resolve_entity_ref;
 
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
@@ -551,7 +553,7 @@ fn canonicalise_exclusive(xml: &[u8]) -> Result<Vec<u8>, RvError> {
                         })?
                         .to_string();
                     let val = attr
-                        .decode_and_unescape_value(reader.decoder())
+                        .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
                         .map_err(|err| {
                             RvError::ErrString(format!("saml: c14n attr decode: {err}"))
                         })?
@@ -674,12 +676,22 @@ fn canonicalise_exclusive(xml: &[u8]) -> Result<Vec<u8>, RvError> {
                 ns_rendered_stack.pop();
             }
             Ok(Event::Text(t)) => {
-                // `unescape` gives us the text content with XML
-                // entities resolved (e.g. `&amp;` → `&`). The
-                // canonical output then re-escapes per c14n rules.
+                // quick-xml 0.41 delivers entity references as
+                // separate `GeneralRef` events, so `Text` fragments
+                // carry no `&...;` sequences — decoding (with the
+                // spec-mandated EOL normalization) is all that's
+                // left. The canonical output then re-escapes per
+                // c14n rules.
                 let s = t
-                    .unescape()
+                    .xml10_content()
                     .map_err(|e| RvError::ErrString(format!("saml: c14n text decode: {e}")))?;
+                write_text(&mut out, &s);
+            }
+            Ok(Event::GeneralRef(r)) => {
+                // Entity reference inside signed content: resolve to
+                // its replacement text (`&amp;` → `&`, `&#x41;` → `A`)
+                // and re-escape canonically like any other text.
+                let s = resolve_entity_ref(&r)?;
                 write_text(&mut out, &s);
             }
             Ok(Event::CData(c)) => {

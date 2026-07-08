@@ -330,7 +330,9 @@ impl FileTarget for S3Target {
             })
             .await?;
 
-            let parsed = ListObjectsV2::parse_response(&body)
+            let body_str = std::str::from_utf8(&body)
+                .map_err(|e| RvError::ErrString(format!("s3 target: LIST body utf-8: {e}")))?;
+            let parsed = ListObjectsV2::parse_response(body_str)
                 .map_err(|e| RvError::ErrString(format!("s3 target: LIST parse: {e}")))?;
 
             // Strip the object-prefix before returning so callers see
