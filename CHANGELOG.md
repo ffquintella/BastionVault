@@ -123,6 +123,32 @@ EXAMPLE ENTRY:
   `plugin-window-data-<handle>` events (pushed via `bvx.window_emit`) instead of
   polling. All of a plugin's windows are closed on instance teardown.
 
+- **Phase 4 — vault-API bridge** (Phase 4, `features/plugin-app-extensions.md`) --
+  app modules can call the vault through `bvx.api_request` (`{op, path, data}`),
+  riding the signed-in user's session token so the server ACL pipeline stays the
+  sole authority. The host substitutes `{mount}` and enforces the resolved path
+  stays under the plugin's mount **and** matches a declared `capabilities.app.api_paths`
+  prefix (same rules as surface bindings) — a path targeting another mount or `sys/`
+  is refused with `FORBIDDEN` without ever touching the backend. Works identically
+  in embedded and remote mode via the `Backend` trait. The app-module runtime is now
+  driven with async Wasmtime so the import can await dispatch.
+
+- **Phase 5 — network egress + admin consent** (Phase 5,
+  `features/plugin-app-extensions.md`) -- app modules with an admin grant can make
+  outbound HTTPS via `bvx.net_http`. A new pure `net_gate` enforcer (loopback /
+  RFC1918 / link-local / ULA / CGNAT / v4-mapped ranges all refused unless the admin
+  granted the literal IP or a `.internal` name) gates every request: grant presence,
+  scheme (`https`; cleartext `http` only for an exact-host grant with `https_only`
+  off), host allowlist (leading-label wildcard, default port only), and an SSRF
+  check on the resolved IPs — re-run on every redirect hop (max 3). Responses are
+  streamed with a hard 4 MiB cap, timeouts clamped to ≤ 60 s, and there is no cookie
+  jar or ambient proxy credential. Every call (allowed or refused) is recorded in a
+  per-plugin ring buffer (last 100). A **Network access** consent panel on the
+  Plugins admin page shows the manifest's requested hosts verbatim, an explicit
+  authorize tick (subset allowed, superset refused server-side), the live/stale grant
+  status, a revoke button, and the call ring. Without a grant, `bvx.net_http` returns
+  `NET_NOT_GRANTED`.
+
 ## [0.25.1] - 2026-07-08
 
 ### Changed

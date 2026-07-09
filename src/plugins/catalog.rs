@@ -709,6 +709,7 @@ impl PluginCatalog {
                     dynamic_menus: app.dynamic_menus,
                     windows_max_open: app.windows.max_open,
                     api_paths: app.api_paths.clone(),
+                    net_https_only: app.net.as_ref().map(|n| n.https_only).unwrap_or(true),
                 });
             entries.push(ActiveSurfaceEntry {
                 plugin: m.name.clone(),

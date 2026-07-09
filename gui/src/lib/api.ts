@@ -1495,6 +1495,13 @@ export interface PluginCapabilities {
   audit_emit: boolean;
   allowed_keys: string[];
   allowed_hosts: string[];
+  /** Extensibility v2 app-module capabilities (absent for v1 plugins). */
+  app?: {
+    dynamic_menus?: boolean;
+    windows?: { max_open: number };
+    api_paths?: string[];
+    net?: { hosts: string[]; https_only?: boolean } | null;
+  };
 }
 
 export interface PluginManifest {
@@ -1851,6 +1858,49 @@ export interface AppModuleStatus {
 /** Per-plugin app-module runtime state for the Plugins admin page. */
 export const pluginAppStatus = () =>
   invoke<AppModuleStatus[]>("plugin_app_status");
+
+// ── Admin network grants (Phase 5) ───────────────────────────────────
+
+export interface PluginNetGrant {
+  hosts: string[];
+  granted_by: string;
+  granted_at: string;
+  capability_sha256: string;
+}
+
+export interface PluginGrantsInfo {
+  /** Stored grant (or null when never granted). */
+  net: PluginNetGrant | null;
+  /** Whether the stored grant still matches the active manifest request. */
+  live: boolean;
+  /** Hosts the manifest requests — shown verbatim in the consent UI. */
+  requested_net_hosts: string[];
+}
+
+export const pluginGetGrants = (name: string) =>
+  invoke<PluginGrantsInfo>("plugins_get_grants", { name });
+
+/** Authorize (create/replace) the network grant. `hosts` must be a
+ *  subset of the manifest's requested hosts — the server refuses a
+ *  superset. */
+export const pluginSetGrants = (name: string, hosts: string[]) =>
+  invoke<void>("plugins_set_grants", { name, hosts });
+
+export const pluginDeleteGrants = (name: string) =>
+  invoke<void>("plugins_delete_grants", { name });
+
+export interface PluginNetCall {
+  at_unix_ms: number;
+  method: string;
+  host: string;
+  status: number | null;
+  bytes: number;
+  outcome: string;
+}
+
+/** The plugin's `bvx.net_http` call ring buffer (last 100). */
+export const pluginAppNetCalls = (plugin: string) =>
+  invoke<PluginNetCall[]>("plugin_app_net_calls", { plugin });
 
 // ── PKI Secret Engine ─────────────────────────────────────────────
 

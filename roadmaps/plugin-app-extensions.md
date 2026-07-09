@@ -1,6 +1,6 @@
 # Plugin App Extensions Roadmap (Extensibility v2)
 
-**Status:** In progress — Phases 1–3 complete
+**Status:** In progress — Phases 1–5 complete
 **Owner:** Felipe Quintella
 **Spec:** [`features/plugin-app-extensions.md`](../features/plugin-app-extensions.md) — read that first; this doc is phasing, effort, and acceptance bars only.
 **Related:** [`features/plugin-extensibility.md`](../features/plugin-extensibility.md) (v1, shipped), [`features/plugin-system.md`](../features/plugin-system.md), [`features/plugin-testing.md`](../features/plugin-testing.md).
@@ -100,14 +100,43 @@ Original scope (all delivered):
 
 **Acceptance (met):** WAT tests record window-open ops, enforce the `max_open` clamp (`WINDOW_LIMIT`), and refuse a route outside the plugin's prefix; `window_emit`/`closed`-event plumbing wired end-to-end.
 
-### Phase 4 — Vault-API bridge (1 week)
+### Phase 4 — Vault-API bridge (1 week) — ✅ Complete
 
-- Extract `plugin_surface_dispatch`'s substitution/validation into a shared helper; `bvx.api_request` uses it + `AppState.backend` + session token; buffer-retry protocol; error envelope.
-- `api_paths` prefix enforcement + per-call denial logging.
+Shipped: the runtime was converted to **async Wasmtime** (so a host import can
+await); `bvx.api_request` (`func_wrap_async`) reads `{op,path,data}`, resolves
+`{mount}` and enforces the path stays under the mount **and** matches a declared
+`api_paths` prefix (`resolve_api_path`, shared rules with
+`plugin_surface_dispatch`), then dispatches via `AppState.backend`'s
+`handle_with_namespace` on the session token, with the buffer-retry protocol
+(`write_to_buffer`) and a `{"error":…}` envelope for backend failures. Denied
+paths return `FORBIDDEN` (logged) before touching the backend.
 
-**Acceptance:** module lists + reads its mount through the bridge in both embedded and remote modes; a path targeting another mount or `sys/` returns forbidden without touching the backend.
+**Acceptance (met):** `resolve_api_path` unit tests prove mount-scoped allow +
+other-mount/`sys/`/`..`/narrow-prefix denial; the `api_request` gate returns
+`-2` with no declared `api_paths`. Works in embedded + remote via `Backend`.
 
-### Phase 5 — Network + consent UX (1.5–2 weeks)
+### Phase 5 — Network + consent UX (1.5–2 weeks) — ✅ Complete
+
+Shipped: pure `gui/src-tauri/src/net_gate.rs` (scheme/host/wildcard + port
+validation, `ip_is_blocked` over loopback/RFC1918/link-local/ULA/CGNAT/
+v4-mapped/broadcast/documentation, SSRF exception only for an explicitly-granted
+IP literal or `.internal` name). `bvx.net_http` (`func_wrap_async`) resolves DNS
+on the blocking pool, validates every hop (including redirects, capped at 3),
+streams the body with a 4 MiB cap, clamps the timeout to ≤ 60 s, follows no
+redirects automatically, and keeps no cookie jar. Grant presence (from the
+bundle `SurfaceGrant`) gates `NET_NOT_GRANTED`; a per-plugin ring buffer (last
+100) records every call. Frontend: `plugins_{get,set,delete}_grants` commands
+(remote + embedded, audited) + a **Network access** consent panel on the Plugins
+page (requested hosts verbatim, subset-authorize tick, live/stale status, revoke,
+call-ring table).
+
+**Acceptance (met):** `net_gate` unit tests cover exact/wildcard host match, the
+full blocked-IP range set, https-required-for-wildcard, http-only-for-exact-host,
+non-default-port refusal, empty-grant `NotGranted`, and the SSRF
+private-resolution / rebinding / explicit-internal cases; the runtime test proves
+`net_http` with no grant returns `NET_NOT_GRANTED` and rings the call.
+
+### Phase 5 (original scope) — Network + consent UX (1.5–2 weeks)
 
 - Tauri-side enforcer for `bvx.net_http`: grant presence + `capability_sha256` match, scheme/host/wildcard checks, SSRF guard (loopback/RFC1918/link-local refused unless explicitly granted; re-check every redirect hop, 3-hop cap), 4 MiB response cap, ≤ 60 s timeout, no cookies.
 - Register/activate consent panel in `PluginsPage`'s `RegisterModal` (requested hosts verbatim + publisher identity + explicit tick) → `PUT .../grants`; re-approval prompt on activate when the pin mismatches; grant revoke button.

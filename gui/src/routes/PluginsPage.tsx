@@ -33,6 +33,7 @@ export function PluginsPage() {
   const [invoking, setInvoking] = useState<PluginManifest | null>(null);
   const [configuring, setConfiguring] = useState<PluginManifest | null>(null);
   const [versioning, setVersioning] = useState<PluginManifest | null>(null);
+  const [networking, setNetworking] = useState<PluginManifest | null>(null);
   const [reloading, setReloading] = useState<string | null>(null);
   const [acceptUnsigned, setAcceptUnsigned] = useState<boolean | null>(null);
   const [acceptUnsignedBusy, setAcceptUnsignedBusy] = useState(false);
@@ -281,6 +282,7 @@ export function PluginsPage() {
                   onInvoke={() => setInvoking(p)}
                   onConfigure={() => setConfiguring(p)}
                   onVersions={() => setVersioning(p)}
+                  onNetwork={() => setNetworking(p)}
                   onReload={async () => {
                     setReloading(p.name);
                     try {
@@ -350,6 +352,13 @@ export function PluginsPage() {
         />
       )}
 
+      {networking && (
+        <GrantsModal
+          plugin={networking}
+          onClose={() => setNetworking(null)}
+        />
+      )}
+
       <ConfirmModal
         open={deletingName !== null}
         onClose={() => setDeletingName(null)}
@@ -370,6 +379,7 @@ function PluginRow({
   onVersions,
   onReload,
   onDelete,
+  onNetwork,
 }: {
   plugin: PluginManifest;
   reloading: boolean;
@@ -378,8 +388,10 @@ function PluginRow({
   onVersions: () => void;
   onReload: () => void;
   onDelete: () => void;
+  onNetwork: () => void;
 }) {
   const hasConfig = (plugin.config_schema?.length ?? 0) > 0;
+  const requestsNet = (plugin.capabilities.app?.net?.hosts?.length ?? 0) > 0;
   return (
     <div className="flex items-start justify-between p-3 border border-[var(--color-border)] rounded-md gap-3">
       <div className="flex-1 min-w-0">
@@ -406,6 +418,9 @@ function PluginRow({
           <Button size="sm" variant="secondary" onClick={onConfigure}>Configure</Button>
         )}
         <Button size="sm" variant="ghost" onClick={onVersions}>Versions</Button>
+        {requestsNet && (
+          <Button size="sm" variant="secondary" onClick={onNetwork}>Network</Button>
+        )}
         <Button size="sm" variant="ghost" onClick={onReload} loading={reloading}>
           Reload
         </Button>
@@ -1177,6 +1192,220 @@ function VersionsModal({
         the newly-active binary; subsequent invocations reuse the
         cached compile.
       </p>
+    </Modal>
+  );
+}
+
+/**
+ * Extensibility v2 (Phase 5): the admin network-grant consent panel.
+ * Shows the hosts the plugin's manifest *requests* verbatim, the
+ * current grant + whether it's still live against the active manifest,
+ * an explicit authorize tick (the operator picks which requested hosts
+ * to allow — a subset is fine, a superset is refused server-side), a
+ * revoke button, and the plugin's `bvx.net_http` call ring so the admin
+ * can see exactly what a granted plugin does with the grant.
+ */
+function GrantsModal({
+  plugin,
+  onClose,
+}: {
+  plugin: PluginManifest;
+  onClose: () => void;
+}) {
+  const { toast } = useToast();
+  const [info, setInfo] = useState<api.PluginGrantsInfo | null>(null);
+  const [checked, setChecked] = useState<Record<string, boolean>>({});
+  const [consent, setConsent] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [calls, setCalls] = useState<api.PluginNetCall[]>([]);
+
+  const load = React.useCallback(async () => {
+    try {
+      const r = await api.pluginGetGrants(plugin.name);
+      setInfo(r);
+      // Default the checkboxes to the current grant's hosts, or all
+      // requested hosts when there's no grant yet.
+      const base = r.net?.hosts ?? r.requested_net_hosts;
+      const seeded: Record<string, boolean> = {};
+      for (const h of r.requested_net_hosts) seeded[h] = base.includes(h);
+      setChecked(seeded);
+    } catch (e) {
+      toast("error", extractError(e));
+    }
+    try {
+      setCalls(await api.pluginAppNetCalls(plugin.name));
+    } catch {
+      // Ring is empty/unavailable when no instance is live — non-fatal.
+    }
+  }, [plugin.name, toast]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const selected = () =>
+    info ? info.requested_net_hosts.filter((h) => checked[h]) : [];
+
+  const authorize = async () => {
+    setBusy(true);
+    try {
+      await api.pluginSetGrants(plugin.name, selected());
+      toast("success", `Network access authorized for ${plugin.name}.`);
+      setConsent(false);
+      await load();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revoke = async () => {
+    setBusy(true);
+    try {
+      await api.pluginDeleteGrants(plugin.name);
+      toast("success", "Network grant revoked.");
+      await load();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const hasGrant = !!info?.net;
+
+  return (
+    <Modal
+      open={true}
+      onClose={onClose}
+      title={`Network access — ${plugin.name}`}
+      size="lg"
+      actions={
+        <>
+          <Button variant="ghost" onClick={onClose}>Close</Button>
+          {hasGrant && (
+            <Button variant="danger" onClick={revoke} loading={busy}>
+              Revoke
+            </Button>
+          )}
+          <Button
+            variant="primary"
+            onClick={authorize}
+            loading={busy}
+            disabled={!consent || selected().length === 0}
+          >
+            Authorize
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4 text-sm">
+        <p className="text-[var(--color-text-muted)]">
+          This plugin requests outbound network access. Grant it only if
+          you trust the publisher — a granted plugin can send data read
+          via the vault API to these hosts. Authorization is recorded in
+          the audit log.
+        </p>
+
+        {info && (
+          <div className="rounded-md border border-[var(--color-border)] p-3">
+            <p className="font-medium mb-1">Current grant</p>
+            {info.net ? (
+              <div className="text-xs space-y-0.5">
+                <p>
+                  Status:{" "}
+                  {info.live ? (
+                    <Badge label="live" variant="success" />
+                  ) : (
+                    <Badge label="stale — re-authorize" variant="warning" />
+                  )}
+                </p>
+                <p className="text-[var(--color-text-muted)]">
+                  Granted by {info.net.granted_by || "—"} at {info.net.granted_at}
+                </p>
+                <p className="font-mono break-all">
+                  hosts: {info.net.hosts.join(", ")}
+                </p>
+              </div>
+            ) : (
+              <p className="text-xs text-[var(--color-text-muted)]">
+                Not granted — the plugin's <code>bvx.net_http</code> calls
+                return <code>NET_NOT_GRANTED</code>.
+              </p>
+            )}
+          </div>
+        )}
+
+        <div>
+          <p className="font-medium mb-1">Requested hosts</p>
+          <div className="space-y-1">
+            {info?.requested_net_hosts.map((h) => (
+              <label key={h} className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={!!checked[h]}
+                  onChange={(e) =>
+                    setChecked((c) => ({ ...c, [h]: e.target.checked }))
+                  }
+                />
+                <span className="font-mono">{h}</span>
+              </label>
+            ))}
+            {info && info.requested_net_hosts.length === 0 && (
+              <p className="text-xs text-[var(--color-text-muted)]">
+                The manifest requests no network hosts.
+              </p>
+            )}
+          </div>
+        </div>
+
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={consent}
+            onChange={(e) => setConsent(e.target.checked)}
+          />
+          <span>Authorize network access to the selected hosts</span>
+        </label>
+
+        <div>
+          <p className="font-medium mb-1">Recent network calls</p>
+          {calls.length === 0 ? (
+            <p className="text-xs text-[var(--color-text-muted)]">
+              No calls recorded (the app module makes them at runtime).
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead className="text-[var(--color-text-muted)] text-left">
+                  <tr>
+                    <th className="pr-3">Method</th>
+                    <th className="pr-3">Host</th>
+                    <th className="pr-3">Status</th>
+                    <th className="pr-3">Bytes</th>
+                    <th>Outcome</th>
+                  </tr>
+                </thead>
+                <tbody className="font-mono">
+                  {calls
+                    .slice()
+                    .reverse()
+                    .map((c, i) => (
+                      <tr key={i}>
+                        <td className="pr-3">{c.method || "—"}</td>
+                        <td className="pr-3 break-all">{c.host || "—"}</td>
+                        <td className="pr-3">{c.status ?? "—"}</td>
+                        <td className="pr-3">{c.bytes}</td>
+                        <td>{c.outcome}</td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
     </Modal>
   );
 }

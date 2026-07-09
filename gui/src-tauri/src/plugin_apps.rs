@@ -26,11 +26,14 @@
 //! which is the desired clean-refusal until those phases land.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
+use bv_client::{Backend, Operation};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use wasmtime::{
-    AsContext, Caller, Engine, Instance, Linker, Module, Store, StoreLimits, StoreLimitsBuilder,
+    AsContext, AsContextMut, Caller, Engine, Instance, Linker, Module, Store, StoreLimits,
+    StoreLimitsBuilder,
 };
 
 /// Per-entry-point-call instruction ceiling (refueled each call).
@@ -44,11 +47,22 @@ pub const MAX_DYNAMIC_MENUS: usize = 16;
 /// Floor on `bvx_tick` cadence.
 pub const MIN_TICK_INTERVAL_MS: i64 = 30_000;
 
-// Return codes shared with the guest ABI (mirror the server `bv` codes;
-// -6/-7 reserved for net, added in Phase 5).
+/// Response-body cap for `bvx.net_http` (Phase 5).
+pub const MAX_NET_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+/// Ceiling on the per-plugin network call ring buffer (Phase 5).
+pub const NET_RING_CAP: usize = 100;
+/// Hard timeout ceiling for `bvx.net_http` (Phase 5).
+pub const NET_TIMEOUT_MAX_MS: u64 = 60_000;
+/// Redirect-hop cap for `bvx.net_http` (Phase 5) — every hop re-validated.
+pub const NET_MAX_REDIRECTS: usize = 3;
+
+// Return codes shared with the guest ABI (mirror the server `bv` codes).
 const RC_OK: i32 = 0;
 const RC_FORBIDDEN: i32 = -2;
+const RC_BUFFER_TOO_SMALL: i32 = -3;
 const RC_INTERNAL: i32 = -4;
+const RC_NET_NOT_GRANTED: i32 = -6;
+const RC_NET_HOST_DENIED: i32 = -7;
 const RC_WINDOW_LIMIT: i32 = -8;
 
 #[derive(Debug, Error)]
@@ -75,10 +89,46 @@ pub enum AppModuleError {
 pub struct AppCapsGate {
     pub dynamic_menus: bool,
     pub windows_max_open: u32,
-    /// Consumed by the `bvx.api_request` gate in Phase 4 (the vault-API
-    /// bridge); carried now so the instance already knows its scope.
-    #[allow(dead_code)]
+    /// Mount-scoped prefixes `bvx.api_request` may target (Phase 4).
     pub api_paths: Vec<String>,
+}
+
+/// Everything needed to instantiate one app-module instance: identity,
+/// capability gates, and the live session context the `bvx.api_request`
+/// / `bvx.net_http` imports ride (Phases 4/5).
+pub struct AppModuleConfig {
+    pub plugin: String,
+    pub version: String,
+    pub sha256: String,
+    /// The plugin's mount, substituted for `{mount}` in api_paths + calls.
+    pub mount: String,
+    pub caps: AppCapsGate,
+    /// Live dispatch handle for `bvx.api_request` (embedded or remote).
+    pub backend: Option<Arc<dyn Backend>>,
+    /// Session token the api bridge rides — server ACLs stay authoritative.
+    pub token: String,
+    pub namespace: Option<String>,
+    /// Granted outbound hosts (from the bundle grant). Empty = not
+    /// granted → `bvx.net_http` returns `NET_NOT_GRANTED`.
+    pub net_hosts: Vec<String>,
+    /// Manifest `https_only` flag (defaults true) — governs the http
+    /// exception in `net_gate`.
+    pub net_https_only: bool,
+}
+
+/// One recorded `bvx.net_http` call for the per-plugin ring buffer
+/// surfaced on the Plugins admin page.
+#[derive(Debug, Clone, Serialize)]
+pub struct NetCall {
+    pub at_unix_ms: i64,
+    pub method: String,
+    pub host: String,
+    /// HTTP status on success; `None` when the call was refused/failed
+    /// before a response (see `outcome`).
+    pub status: Option<u16>,
+    pub bytes: usize,
+    /// `"ok"` or a short refusal reason (`not_granted`, `host_denied`, …).
+    pub outcome: String,
 }
 
 /// A menu the plugin created/updated at runtime. Serialised to the
@@ -155,9 +205,21 @@ struct AppCtx {
     /// `/plugin/<plugin>/` — the only route prefix menus and windows
     /// may target.
     menu_prefix: String,
+    /// Plugin mount, substituted for `{mount}` in `bvx.api_request`.
+    mount: String,
     // capability gates copied from the manifest at build time
     dynamic_menus: bool,
     windows_max_open: u32,
+    /// Vault-API bridge scope (Phase 4). Empty = `bvx.api_request` denied.
+    api_paths: Vec<String>,
+    // live session context the async host imports ride (Phases 4/5)
+    backend: Option<Arc<dyn Backend>>,
+    token: String,
+    namespace: Option<String>,
+    // network capability (Phase 5)
+    net_hosts: Vec<String>,
+    net_https_only: bool,
+    net_ring: Vec<NetCall>,
     // accumulated state
     menus: BTreeMap<String, DynamicMenu>,
     open_windows: Vec<u32>,
@@ -165,6 +227,16 @@ struct AppCtx {
     window_ops: Vec<WindowOp>,
     response_window: Option<(u32, u32)>,
     limits: StoreLimits,
+}
+
+impl AppCtx {
+    /// Record a network call in the bounded ring buffer.
+    fn push_net_call(&mut self, call: NetCall) {
+        if self.net_ring.len() >= NET_RING_CAP {
+            self.net_ring.remove(0);
+        }
+        self.net_ring.push(call);
+    }
 }
 
 fn valid_section(s: &str) -> bool {
@@ -207,13 +279,40 @@ fn read_bytes(caller: &mut Caller<'_, AppCtx>, ptr: i32, len: i32) -> Option<Vec
     Some(buf)
 }
 
-/// Process-global fuel-metering engine for app modules.
+/// Write `src` into the guest's `(out_ptr, out_max)` window. Returns the
+/// byte length on success, `RC_BUFFER_TOO_SMALL` if it doesn't fit (the
+/// guest re-calls with a larger buffer), or `RC_INTERNAL` on a memory
+/// fault — the single choke point for the buffer-retry protocol, mirror
+/// of the server runtime's `write_to_buffer`.
+fn write_to_buffer(caller: &mut Caller<'_, AppCtx>, src: &[u8], out_ptr: i32, out_max: i32) -> i32 {
+    if out_ptr < 0 || out_max < 0 {
+        return RC_INTERNAL;
+    }
+    if src.len() as i64 > out_max as i64 {
+        return RC_BUFFER_TOO_SMALL;
+    }
+    let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else {
+        return RC_INTERNAL;
+    };
+    match memory.write(caller.as_context_mut(), out_ptr as usize, src) {
+        Ok(()) => src.len() as i32,
+        Err(_) => RC_INTERNAL,
+    }
+}
+
+/// Process-global fuel-metering **async** engine for app modules. Async
+/// support (fiber stacks) is what lets `bvx.api_request` / `bvx.net_http`
+/// await inside a host import; mirrors `src/plugins/module_cache.rs`.
 fn engine() -> &'static Engine {
     use std::sync::OnceLock;
     static ENGINE: OnceLock<Engine> = OnceLock::new();
     ENGINE.get_or_init(|| {
         let mut config = wasmtime::Config::new();
         config.consume_fuel(true);
+        // wasmtime ≥ 33 is always async-capable; setting the stack size
+        // is what the async store needs (mirrors the server runtime).
+        config.async_stack_size(1024 * 1024);
+        config.max_wasm_stack(1024 * 1024);
         config.cranelift_nan_canonicalization(true);
         Engine::new(&config).expect("wasmtime engine")
     })
@@ -404,7 +503,126 @@ fn register_bvx_imports(linker: &mut Linker<AppCtx>) -> Result<(), AppModuleErro
         )
         .map_err(map_err)?;
 
+    // bvx.api_request(req_ptr, req_len, out_ptr, out_max) -> i32 — async;
+    // the vault-API bridge (Phase 4). Rides the user's session token; the
+    // server ACL pipeline stays the sole authority.
+    linker
+        .func_wrap_async(
+            "bvx",
+            "api_request",
+            |mut caller: Caller<'_, AppCtx>, args: (i32, i32, i32, i32)| {
+                let (req_ptr, req_len, out_ptr, out_max) = args;
+                Box::new(async move {
+                    api_request_impl(&mut caller, req_ptr, req_len, out_ptr, out_max).await
+                })
+            },
+        )
+        .map_err(map_err)?;
+
+    // bvx.net_http(req_ptr, req_len, out_ptr, out_max) -> i32 — async;
+    // admin-granted outbound HTTPS (Phase 5), gated by `net_gate`.
+    linker
+        .func_wrap_async(
+            "bvx",
+            "net_http",
+            |mut caller: Caller<'_, AppCtx>, args: (i32, i32, i32, i32)| {
+                let (req_ptr, req_len, out_ptr, out_max) = args;
+                Box::new(async move {
+                    net_http_impl(&mut caller, req_ptr, req_len, out_ptr, out_max).await
+                })
+            },
+        )
+        .map_err(map_err)?;
+
     Ok(())
+}
+
+// ── bvx.api_request (Phase 4) ────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct ApiRequestInput {
+    op: String,
+    path: String,
+    #[serde(default)]
+    data: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// Substitute `{mount}` and enforce the request path stays inside the
+/// plugin's mount **and** matches a declared `api_paths` prefix. Returns
+/// the resolved path or `Err(())` (→ forbidden) without touching the
+/// backend. Shares the `{mount}`/`..`/escape rules with
+/// `plugin_surface_dispatch`.
+fn resolve_api_path(path: &str, mount: &str, api_paths: &[String]) -> Result<String, ()> {
+    let m = mount.trim_end_matches('/');
+    let resolved = path.replace("{mount}", m);
+    if resolved.contains('{') || resolved.contains("..") {
+        return Err(());
+    }
+    if !resolved.starts_with(m) {
+        return Err(());
+    }
+    let allowed = api_paths.iter().any(|p| {
+        let pp = p.replace("{mount}", m);
+        let pp = pp.trim_end_matches('/');
+        resolved == pp || resolved.starts_with(&format!("{pp}/"))
+    });
+    if !allowed {
+        return Err(());
+    }
+    Ok(resolved)
+}
+
+async fn api_request_impl(
+    caller: &mut Caller<'_, AppCtx>,
+    req_ptr: i32,
+    req_len: i32,
+    out_ptr: i32,
+    out_max: i32,
+) -> i32 {
+    // Gate: no declared api_paths → the bridge is disabled.
+    if caller.data().api_paths.is_empty() {
+        return RC_FORBIDDEN;
+    }
+    let Some(bytes) = read_bytes(caller, req_ptr, req_len) else {
+        return RC_INTERNAL;
+    };
+    let Ok(req) = serde_json::from_slice::<ApiRequestInput>(&bytes) else {
+        return RC_INTERNAL;
+    };
+    let op = match req.op.as_str() {
+        "read" => Operation::Read,
+        "write" => Operation::Write,
+        "delete" => Operation::Delete,
+        "list" => Operation::List,
+        _ => return RC_INTERNAL,
+    };
+    let mount = caller.data().mount.clone();
+    let api_paths = caller.data().api_paths.clone();
+    let resolved = match resolve_api_path(&req.path, &mount, &api_paths) {
+        Ok(p) => p,
+        Err(()) => {
+            log::warn!(target: "plugin_app",
+                "[{}] api_request denied: path `{}` outside api_paths",
+                caller.data().plugin, req.path);
+            return RC_FORBIDDEN;
+        }
+    };
+    let Some(backend) = caller.data().backend.clone() else {
+        return RC_INTERNAL;
+    };
+    let token = caller.data().token.clone();
+    let namespace = caller.data().namespace.clone();
+    let resp = backend
+        .handle_with_namespace(op, &resolved, req.data, &token, namespace.as_deref())
+        .await;
+    let out = match resp {
+        Ok(Some(r)) => serde_json::json!({ "data": r.data }),
+        Ok(None) => serde_json::json!({ "data": null }),
+        // Error envelope — a backend/ACL failure is data, not a host error.
+        Err(e) => serde_json::json!({ "error": e.to_string() }),
+    };
+    let out_bytes = serde_json::to_vec(&out).unwrap_or_default();
+    write_to_buffer(caller, &out_bytes, out_ptr, out_max)
 }
 
 fn now_unix_ms() -> i64 {
@@ -412,6 +630,207 @@ fn now_unix_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+// ── bvx.net_http (Phase 5) ───────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct NetRequestInput {
+    #[serde(default = "default_method")]
+    method: String,
+    url: String,
+    #[serde(default)]
+    headers: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    body_b64: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+fn default_method() -> String {
+    "GET".to_string()
+}
+
+/// Outcome of a `net_http` attempt: the terminal `(status, body, host)`
+/// on success, or `(guest_code, short_reason, host)` on refusal/failure.
+type NetResult = Result<(u16, Vec<u8>, String), (i32, &'static str, String)>;
+
+async fn net_http_impl(
+    caller: &mut Caller<'_, AppCtx>,
+    req_ptr: i32,
+    req_len: i32,
+    out_ptr: i32,
+    out_max: i32,
+) -> i32 {
+    let granted = caller.data().net_hosts.clone();
+    let https_only = caller.data().net_https_only;
+    let at = now_unix_ms();
+
+    // First gate: no grant at all.
+    if granted.is_empty() {
+        caller.data_mut().push_net_call(NetCall {
+            at_unix_ms: at,
+            method: String::new(),
+            host: String::new(),
+            status: None,
+            bytes: 0,
+            outcome: "not_granted".into(),
+        });
+        return RC_NET_NOT_GRANTED;
+    }
+
+    let Some(bytes) = read_bytes(caller, req_ptr, req_len) else {
+        return RC_INTERNAL;
+    };
+    let Ok(req) = serde_json::from_slice::<NetRequestInput>(&bytes) else {
+        return RC_INTERNAL;
+    };
+    let method = req.method.clone();
+
+    match net_fetch(&req, &granted, https_only).await {
+        Ok((status, body, host)) => {
+            let n = body.len();
+            caller.data_mut().push_net_call(NetCall {
+                at_unix_ms: at,
+                method,
+                host,
+                status: Some(status),
+                bytes: n,
+                outcome: "ok".into(),
+            });
+            use base64::Engine;
+            let out = serde_json::json!({
+                "status": status,
+                "bytes": n,
+                "body_b64": base64::engine::general_purpose::STANDARD.encode(&body),
+            });
+            let out_bytes = serde_json::to_vec(&out).unwrap_or_default();
+            write_to_buffer(caller, &out_bytes, out_ptr, out_max)
+        }
+        Err((code, reason, host)) => {
+            caller.data_mut().push_net_call(NetCall {
+                at_unix_ms: at,
+                method,
+                host,
+                status: None,
+                bytes: 0,
+                outcome: reason.into(),
+            });
+            code
+        }
+    }
+}
+
+/// Resolve a host:port to its IP set (blocking getaddrinfo on the tokio
+/// blocking pool). Returns `Err(())` on resolution failure.
+async fn resolve_ips(host: &str, port: u16) -> Result<Vec<std::net::IpAddr>, ()> {
+    let hostport = format!("{host}:{port}");
+    tokio::task::spawn_blocking(move || {
+        use std::net::ToSocketAddrs;
+        hostport
+            .to_socket_addrs()
+            .map(|it| it.map(|s| s.ip()).collect::<Vec<_>>())
+            .map_err(|_| ())
+    })
+    .await
+    .map_err(|_| ())?
+}
+
+/// Perform the request with manual, re-validated redirects. Every hop
+/// (including the first) is checked by `net_gate` for scheme/host/port
+/// and SSRF-safe resolved IPs; redirects are capped at
+/// [`NET_MAX_REDIRECTS`]; the response body is streamed with a hard
+/// [`MAX_NET_RESPONSE_BYTES`] cap; the timeout is clamped to
+/// [`NET_TIMEOUT_MAX_MS`]; no cookie jar, no ambient proxy creds.
+async fn net_fetch(req: &NetRequestInput, granted: &[String], https_only: bool) -> NetResult {
+    use futures_util::StreamExt;
+
+    let denied = |reason: &'static str, host: String| (RC_NET_HOST_DENIED, reason, host);
+
+    let mut url =
+        reqwest::Url::parse(&req.url).map_err(|_| denied("bad_url", String::new()))?;
+    let method = reqwest::Method::from_bytes(req.method.to_uppercase().as_bytes())
+        .map_err(|_| (RC_INTERNAL, "bad_method", String::new()))?;
+    let timeout = std::time::Duration::from_millis(
+        req.timeout_ms.unwrap_or(30_000).min(NET_TIMEOUT_MAX_MS),
+    );
+    let body = match &req.body_b64 {
+        Some(b) => {
+            use base64::Engine;
+            Some(
+                base64::engine::general_purpose::STANDARD
+                    .decode(b)
+                    .map_err(|_| (RC_INTERNAL, "bad_body_b64", String::new()))?,
+            )
+        }
+        None => None,
+    };
+
+    // No redirect-following (we re-validate manually), no cookie store
+    // (reqwest default), explicit timeout.
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .build()
+        .map_err(|_| (RC_INTERNAL, "client", String::new()))?;
+
+    let mut hops = 0usize;
+    loop {
+        let host = url.host_str().unwrap_or_default().to_string();
+        // 1–3: scheme / host allowlist / port.
+        let target =
+            crate::net_gate::validate_url(url.scheme(), url.host_str(), url.port(), granted, https_only)
+                .map_err(|e| match e {
+                    crate::net_gate::NetError::NotGranted => {
+                        (RC_NET_NOT_GRANTED, "not_granted", host.clone())
+                    }
+                    crate::net_gate::NetError::HostDenied => (RC_NET_HOST_DENIED, "host_denied", host.clone()),
+                })?;
+        // 4: SSRF — resolved IPs must be public unless explicitly granted.
+        let port = url.port_or_known_default().unwrap_or(443);
+        let ips = resolve_ips(&target.host, port)
+            .await
+            .map_err(|_| denied("dns", host.clone()))?;
+        crate::net_gate::check_resolved_ips(&target, &ips).map_err(|_| denied("ssrf", host.clone()))?;
+
+        let mut rb = client.request(method.clone(), url.clone());
+        for (k, v) in &req.headers {
+            rb = rb.header(k, v);
+        }
+        if let Some(b) = &body {
+            rb = rb.body(b.clone());
+        }
+        let resp = rb.send().await.map_err(|_| denied("send", host.clone()))?;
+        let status = resp.status();
+
+        if status.is_redirection() {
+            if hops >= NET_MAX_REDIRECTS {
+                return Err(denied("too_many_redirects", host));
+            }
+            let loc = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|h| h.to_str().ok())
+                .ok_or_else(|| denied("redirect_no_location", host.clone()))?;
+            let next = url.join(loc).map_err(|_| denied("bad_redirect", host.clone()))?;
+            url = next;
+            hops += 1;
+            continue; // re-validate the new hop from the top
+        }
+
+        // Terminal response — stream the body with a hard cap.
+        let code = status.as_u16();
+        let mut stream = resp.bytes_stream();
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| denied("body", host.clone()))?;
+            if buf.len() + chunk.len() > MAX_NET_RESPONSE_BYTES {
+                return Err(denied("body_too_large", host));
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        return Ok((code, buf, host));
+    }
 }
 
 /// A live app-module instance: persistent `Store` + `Instance`. Not
@@ -433,11 +852,8 @@ impl AppModuleInstance {
     /// Compile + instantiate a module and wire its `bvx.*` imports.
     /// Does not call `bvx_init` — the caller does that after storing
     /// the instance so an init that pushes menus is observed.
-    pub fn create(
-        plugin: &str,
-        version: &str,
-        sha256: &str,
-        caps: &AppCapsGate,
+    pub async fn create(
+        config: AppModuleConfig,
         wasm_bytes: &[u8],
     ) -> Result<Self, AppModuleError> {
         let module = Module::from_binary(engine(), wasm_bytes)
@@ -445,10 +861,18 @@ impl AppModuleInstance {
 
         let limits = StoreLimitsBuilder::new().memory_size(MEMORY_BYTES).build();
         let ctx = AppCtx {
-            plugin: plugin.to_string(),
-            menu_prefix: format!("/plugin/{plugin}/"),
-            dynamic_menus: caps.dynamic_menus,
-            windows_max_open: caps.windows_max_open,
+            plugin: config.plugin.clone(),
+            menu_prefix: format!("/plugin/{}/", config.plugin),
+            mount: config.mount.clone(),
+            dynamic_menus: config.caps.dynamic_menus,
+            windows_max_open: config.caps.windows_max_open,
+            api_paths: config.caps.api_paths.clone(),
+            backend: config.backend.clone(),
+            token: config.token.clone(),
+            namespace: config.namespace.clone(),
+            net_hosts: config.net_hosts.clone(),
+            net_https_only: config.net_https_only,
+            net_ring: Vec::new(),
             menus: BTreeMap::new(),
             open_windows: Vec::new(),
             next_window_handle: 1,
@@ -466,7 +890,8 @@ impl AppModuleInstance {
         register_bvx_imports(&mut linker)?;
 
         let instance = linker
-            .instantiate(&mut store, &module)
+            .instantiate_async(&mut store, &module)
+            .await
             .map_err(|e| AppModuleError::Instantiate(e.to_string()))?;
 
         // Required exports.
@@ -478,9 +903,9 @@ impl AppModuleInstance {
             .map_err(|_| AppModuleError::MissingAlloc)?;
 
         Ok(Self {
-            plugin: plugin.to_string(),
-            version: version.to_string(),
-            sha256: sha256.to_string(),
+            plugin: config.plugin,
+            version: config.version,
+            sha256: config.sha256,
             store,
             instance,
             last_tick_ms: 0,
@@ -491,6 +916,11 @@ impl AppModuleInstance {
     /// Snapshot of the plugin's current dynamic menus.
     pub fn menus(&self) -> Vec<DynamicMenu> {
         self.store.data().menus.values().cloned().collect()
+    }
+
+    /// Snapshot of the network call ring buffer (operator UX).
+    pub fn net_calls(&self) -> Vec<NetCall> {
+        self.store.data().net_ring.clone()
     }
 
     /// Drain the window ops recorded during the most recent call.
@@ -510,21 +940,24 @@ impl AppModuleInstance {
         self.store.data().open_windows.clone()
     }
 
-    pub fn call_init(&mut self, ctx_json: &[u8]) -> Result<Option<i32>, AppModuleError> {
-        self.invoke_ptr_len("bvx_init", ctx_json)
+    pub async fn call_init(&mut self, ctx_json: &[u8]) -> Result<Option<i32>, AppModuleError> {
+        self.invoke_ptr_len("bvx_init", ctx_json).await
     }
 
-    pub fn call_menu_click(&mut self, ev_json: &[u8]) -> Result<Option<i32>, AppModuleError> {
-        self.invoke_ptr_len("bvx_menu_click", ev_json)
+    pub async fn call_menu_click(&mut self, ev_json: &[u8]) -> Result<Option<i32>, AppModuleError> {
+        self.invoke_ptr_len("bvx_menu_click", ev_json).await
     }
 
-    pub fn call_window_event(&mut self, ev_json: &[u8]) -> Result<Option<i32>, AppModuleError> {
-        self.invoke_ptr_len("bvx_window_event", ev_json)
+    pub async fn call_window_event(
+        &mut self,
+        ev_json: &[u8],
+    ) -> Result<Option<i32>, AppModuleError> {
+        self.invoke_ptr_len("bvx_window_event", ev_json).await
     }
 
     /// Call `bvx_tick(now_ms)` if the 30 s floor has elapsed. Returns
     /// `Ok(None)` when the export is absent or the floor hasn't passed.
-    pub fn maybe_tick(&mut self, now_ms: i64) -> Result<Option<i32>, AppModuleError> {
+    pub async fn maybe_tick(&mut self, now_ms: i64) -> Result<Option<i32>, AppModuleError> {
         if now_ms - self.last_tick_ms < MIN_TICK_INTERVAL_MS {
             return Ok(None);
         }
@@ -537,7 +970,8 @@ impl AppModuleInstance {
         self.last_tick_ms = now_ms;
         self.reset_for_call()?;
         let status = func
-            .call(&mut self.store, now_ms)
+            .call_async(&mut self.store, now_ms)
+            .await
             .map_err(|e| AppModuleError::Invocation(e.to_string()))?;
         Ok(Some(status))
     }
@@ -555,7 +989,7 @@ impl AppModuleInstance {
     /// Invoke an optional `(ptr,len) -> i32` entry point. Returns
     /// `Ok(None)` when the export is absent (all entry points except
     /// `memory`/`bv_alloc` are optional).
-    fn invoke_ptr_len(
+    async fn invoke_ptr_len(
         &mut self,
         export: &str,
         json: &[u8],
@@ -576,7 +1010,8 @@ impl AppModuleInstance {
             .map_err(|_| AppModuleError::MissingAlloc)?;
         let len = json.len() as i32;
         let ptr = alloc
-            .call(&mut self.store, len)
+            .call_async(&mut self.store, len)
+            .await
             .map_err(|e| AppModuleError::Invocation(e.to_string()))?;
         let memory = self
             .instance
@@ -586,7 +1021,8 @@ impl AppModuleInstance {
             .write(&mut self.store, ptr as usize, json)
             .map_err(|e| AppModuleError::Invocation(e.to_string()))?;
         let status = func
-            .call(&mut self.store, (ptr, len))
+            .call_async(&mut self.store, (ptr, len))
+            .await
             .map_err(|e| AppModuleError::Invocation(e.to_string()))?;
         Ok(Some(status))
     }
@@ -599,7 +1035,7 @@ impl AppModuleInstance {
 
 use std::collections::HashMap;
 
-use bv_client::{Backend, SurfaceCache};
+use bv_client::SurfaceCache;
 use bv_plugin_surface::ActiveSurfaceBundle;
 use tauri::{AppHandle, Emitter, Manager, Runtime, State, WebviewUrl, WebviewWindowBuilder};
 
@@ -689,23 +1125,22 @@ pub async fn sync_from_bundle<R: Runtime>(
     app: &AppHandle<R>,
     state: &AppState,
     bundle: &ActiveSurfaceBundle,
-    backend: &dyn Backend,
+    backend: Arc<dyn Backend>,
     cache: &SurfaceCache,
     token: &str,
 ) {
     use std::collections::HashSet;
 
-    // Desired app modules from the bundle: (plugin, version, mount, ref).
-    let desired: Vec<(&str, &str, &str, &bv_plugin_surface::AppModuleRef)> = bundle
+    // Entries that ship an app module.
+    let desired: Vec<&bv_plugin_surface::ActiveSurfaceEntry> = bundle
         .entries
         .iter()
-        .filter_map(|e| {
-            e.app_module
-                .as_ref()
-                .map(|am| (e.plugin.as_str(), e.version.as_str(), e.mount.as_str(), am))
-        })
+        .filter(|e| e.app_module.is_some())
         .collect();
-    let desired_names: HashSet<&str> = desired.iter().map(|(p, _, _, _)| *p).collect();
+    let desired_names: HashSet<&str> = desired.iter().map(|e| e.plugin.as_str()).collect();
+
+    // Session context every app module's api/net imports ride.
+    let namespace = state.active_namespace.lock().await.clone();
 
     // Snapshot current instances (brief lock) to decide what to rebuild.
     let current: Vec<(String, String)> = {
@@ -717,36 +1152,48 @@ pub async fn sync_from_bundle<R: Runtime>(
 
     // Fetch bytes for new/changed modules (async; done outside the lock).
     struct Rebuild {
-        plugin: String,
-        version: String,
-        mount: String,
-        sha256: String,
-        caps: AppCapsGate,
+        config: AppModuleConfig,
         bytes: Vec<u8>,
     }
     let mut rebuilds: Vec<Rebuild> = Vec::new();
-    for (plugin, version, mount, am) in &desired {
-        let unchanged = current_sha.get(plugin) == Some(&am.sha256.as_str());
+    for e in &desired {
+        let am = e.app_module.as_ref().expect("filtered to Some");
+        let unchanged = current_sha.get(e.plugin.as_str()) == Some(&am.sha256.as_str());
         if unchanged {
             continue;
         }
-        match bv_client::ensure_asset(backend, cache, plugin, version, &am.sha256, token).await {
+        match bv_client::ensure_asset(&*backend, cache, &e.plugin, &e.version, &am.sha256, token)
+            .await
+        {
             Ok(Some(bytes)) => rebuilds.push(Rebuild {
-                plugin: plugin.to_string(),
-                version: version.to_string(),
-                mount: mount.to_string(),
-                sha256: am.sha256.clone(),
-                caps: AppCapsGate {
-                    dynamic_menus: am.dynamic_menus,
-                    windows_max_open: am.windows_max_open,
-                    api_paths: am.api_paths.clone(),
+                config: AppModuleConfig {
+                    plugin: e.plugin.clone(),
+                    version: e.version.clone(),
+                    sha256: am.sha256.clone(),
+                    mount: e.mount.clone(),
+                    caps: AppCapsGate {
+                        dynamic_menus: am.dynamic_menus,
+                        windows_max_open: am.windows_max_open,
+                        api_paths: am.api_paths.clone(),
+                    },
+                    backend: Some(backend.clone()),
+                    token: token.to_string(),
+                    namespace: namespace.clone(),
+                    // Granted hosts arrive live in the bundle grant; empty
+                    // (or absent) means the plugin is ungranted.
+                    net_hosts: e
+                        .grant
+                        .as_ref()
+                        .map(|g| g.net_hosts.clone())
+                        .unwrap_or_default(),
+                    net_https_only: am.net_https_only,
                 },
                 bytes,
             }),
             Ok(None) => log::warn!(target: "plugin_app",
-                "[{plugin}] app-module asset {} unavailable on server", am.sha256),
-            Err(e) => log::warn!(target: "plugin_app",
-                "[{plugin}] app-module asset fetch failed: {e}"),
+                "[{}] app-module asset {} unavailable on server", e.plugin, am.sha256),
+            Err(err) => log::warn!(target: "plugin_app",
+                "[{}] app-module asset fetch failed: {err}", e.plugin),
         }
     }
 
@@ -770,41 +1217,37 @@ pub async fn sync_from_bundle<R: Runtime>(
             }
         }
         for rb in rebuilds {
+            let plugin = rb.config.plugin.clone();
+            let version = rb.config.version.clone();
+            let mount = rb.config.mount.clone();
             // Replacing an existing version: close its windows first.
-            if let Some(old) = g.remove(&rb.plugin) {
+            if let Some(old) = g.remove(&plugin) {
                 for h in old.open_window_handles() {
-                    windows_to_close.push(format!("plugin-{}-{h}", rb.plugin));
+                    windows_to_close.push(format!("plugin-{plugin}-{h}"));
                 }
             }
-            match AppModuleInstance::create(
-                &rb.plugin,
-                &rb.version,
-                &rb.sha256,
-                &rb.caps,
-                &rb.bytes,
-            ) {
+            match AppModuleInstance::create(rb.config, &rb.bytes).await {
                 Ok(mut inst) => {
                     let ctx = serde_json::json!({
-                        "plugin": rb.plugin,
-                        "version": rb.version,
-                        "mount": rb.mount,
+                        "plugin": plugin,
+                        "version": version,
+                        "mount": mount,
                         "policies": [],
                         "locale": "en",
                     })
                     .to_string();
-                    if let Err(e) = inst.call_init(ctx.as_bytes()) {
-                        log::warn!(target: "plugin_app",
-                            "[{}] bvx_init failed: {e}", rb.plugin);
+                    if let Err(e) = inst.call_init(ctx.as_bytes()).await {
+                        log::warn!(target: "plugin_app", "[{plugin}] bvx_init failed: {e}");
                         inst.last_error = Some(e.to_string());
                     }
                     let ops = inst.drain_window_ops();
                     if !ops.is_empty() {
-                        init_ops.push((rb.plugin.clone(), ops));
+                        init_ops.push((plugin.clone(), ops));
                     }
-                    g.insert(rb.plugin.clone(), inst);
+                    g.insert(plugin.clone(), inst);
                 }
                 Err(e) => log::warn!(target: "plugin_app",
-                    "[{}] app module failed to instantiate: {e}", rb.plugin),
+                    "[{plugin}] app module failed to instantiate: {e}"),
             }
         }
         menus = collect_menus(&g);
@@ -855,7 +1298,7 @@ pub async fn handle_window_closed<R: Runtime>(app: &AppHandle<R>, plugin: &str, 
         Some(inst) => {
             inst.mark_window_closed(handle);
             let ev = serde_json::json!({ "handle": handle, "kind": "closed" }).to_string();
-            let _ = inst.call_window_event(ev.as_bytes());
+            let _ = inst.call_window_event(ev.as_bytes()).await;
             inst.drain_window_ops()
         }
         None => return,
@@ -878,7 +1321,7 @@ pub async fn tick_all<R: Runtime>(app: &AppHandle<R>, state: &AppState) {
         let plugins: Vec<String> = g.keys().cloned().collect();
         for p in plugins {
             if let Some(inst) = g.get_mut(&p) {
-                match inst.maybe_tick(now) {
+                match inst.maybe_tick(now).await {
                     Ok(Some(_)) => {
                         let ops = inst.drain_window_ops();
                         if !ops.is_empty() {
@@ -925,6 +1368,17 @@ pub async fn plugin_app_status(state: State<'_, AppState>) -> CmdResult<Vec<AppM
         .collect())
 }
 
+/// Phase 5: the per-plugin `bvx.net_http` call ring buffer (last 100),
+/// so an admin can see exactly what a granted plugin does with the grant.
+#[tauri::command]
+pub async fn plugin_app_net_calls(
+    state: State<'_, AppState>,
+    plugin: String,
+) -> CmdResult<Vec<NetCall>> {
+    let g = state.app_modules.lock().await;
+    Ok(g.get(&plugin).map(|i| i.net_calls()).unwrap_or_default())
+}
+
 /// Frontend calls this when a user clicks a plugin's *dynamic* menu, so
 /// the plugin can react (`bvx_menu_click`) — e.g. open a window.
 #[tauri::command]
@@ -938,7 +1392,7 @@ pub async fn plugin_app_menu_click<R: Runtime>(
     let ops = match g.get_mut(&plugin) {
         Some(inst) => {
             let ev = serde_json::json!({ "id": menu_id }).to_string();
-            if let Err(e) = inst.call_menu_click(ev.as_bytes()) {
+            if let Err(e) = inst.call_menu_click(ev.as_bytes()).await {
                 log::warn!(target: "plugin_app", "[{plugin}] bvx_menu_click failed: {e}");
                 inst.last_error = Some(e.to_string());
             }
@@ -970,6 +1424,27 @@ mod tests {
         }
     }
 
+    /// Build a config for a `totp`-plugin instance with the given caps
+    /// (no backend, no net grant) — enough for the menu/window tests.
+    fn cfg(caps: AppCapsGate, sha256: String) -> AppModuleConfig {
+        AppModuleConfig {
+            plugin: "totp".into(),
+            version: "1.0.0".into(),
+            sha256,
+            mount: "secret/totp".into(),
+            caps,
+            backend: None,
+            token: String::new(),
+            namespace: None,
+            net_hosts: vec![],
+            net_https_only: true,
+        }
+    }
+
+    async fn instance(caps: AppCapsGate, bytes: &[u8]) -> AppModuleInstance {
+        AppModuleInstance::create(cfg(caps, sha(bytes)), bytes).await.unwrap()
+    }
+
     /// A module whose `bvx_init` upserts one menu (with a badge) via
     /// `bvx.menu_upsert`, embedding the JSON in a data segment.
     fn menu_module_wat(menu_json: &str) -> Vec<u8> {
@@ -994,14 +1469,12 @@ mod tests {
         wat::parse_str(&wat).expect("valid wat")
     }
 
-    #[test]
-    fn init_upserts_a_dynamic_menu() {
+    #[tokio::test]
+    async fn init_upserts_a_dynamic_menu() {
         let json = r#"{"id":"totp.expiring","label":"Expiring soon","section":"secrets","route":"/plugin/totp/expiring","badge":"3"}"#;
         let bytes = menu_module_wat(json);
-        let mut inst =
-            AppModuleInstance::create("totp", "1.0.0", &sha(&bytes), &caps(true, 0), &bytes)
-                .unwrap();
-        let status = inst.call_init(b"{}").unwrap();
+        let mut inst = instance(caps(true, 0), &bytes).await;
+        let status = inst.call_init(b"{}").await.unwrap();
         assert_eq!(status, Some(RC_OK));
         let menus = inst.menus();
         assert_eq!(menus.len(), 1);
@@ -1010,64 +1483,54 @@ mod tests {
         assert_eq!(menus[0].plugin, "totp");
     }
 
-    #[test]
-    fn menu_upsert_forbidden_without_capability() {
+    #[tokio::test]
+    async fn menu_upsert_forbidden_without_capability() {
         // dynamic_menus = false → bvx.menu_upsert returns -2, no menu.
         let json = r#"{"id":"x","label":"X","section":"secrets","route":"/plugin/totp/x"}"#;
         let bytes = menu_module_wat(json);
-        let mut inst =
-            AppModuleInstance::create("totp", "1.0.0", &sha(&bytes), &caps(false, 0), &bytes)
-                .unwrap();
-        let status = inst.call_init(b"{}").unwrap();
+        let mut inst = instance(caps(false, 0), &bytes).await;
+        let status = inst.call_init(b"{}").await.unwrap();
         assert_eq!(status, Some(RC_FORBIDDEN));
         assert!(inst.menus().is_empty());
     }
 
-    #[test]
-    fn menu_with_route_outside_plugin_is_rejected() {
+    #[tokio::test]
+    async fn menu_with_route_outside_plugin_is_rejected() {
         // route points at another plugin → validate_menu rejects → -4.
         let json = r#"{"id":"x","label":"X","section":"secrets","route":"/plugin/other/x"}"#;
         let bytes = menu_module_wat(json);
-        let mut inst =
-            AppModuleInstance::create("totp", "1.0.0", &sha(&bytes), &caps(true, 0), &bytes)
-                .unwrap();
-        let status = inst.call_init(b"{}").unwrap();
+        let mut inst = instance(caps(true, 0), &bytes).await;
+        let status = inst.call_init(b"{}").await.unwrap();
         assert_eq!(status, Some(RC_INTERNAL));
         assert!(inst.menus().is_empty());
     }
 
-    #[test]
-    fn missing_optional_export_is_none() {
+    #[tokio::test]
+    async fn missing_optional_export_is_none() {
         // Module with no bvx_menu_click export → call returns Ok(None).
         let json = r#"{"id":"x","label":"X","section":"secrets","route":"/plugin/totp/x"}"#;
         let bytes = menu_module_wat(json);
-        let mut inst =
-            AppModuleInstance::create("totp", "1.0.0", &sha(&bytes), &caps(true, 0), &bytes)
-                .unwrap();
-        assert_eq!(inst.call_menu_click(b"{}").unwrap(), None);
+        let mut inst = instance(caps(true, 0), &bytes).await;
+        assert_eq!(inst.call_menu_click(b"{}").await.unwrap(), None);
     }
 
-    #[test]
-    fn undeclared_bvx_import_fails_instantiation() {
-        // Importing a bvx symbol the host doesn't register must fail —
-        // the Phase-2 acceptance invariant.
+    #[tokio::test]
+    async fn unknown_undeclared_import_fails_instantiation() {
+        // Importing a symbol the host doesn't register must fail.
         let wat = r#"
             (module
-              (import "bvx" "api_request" (func (param i32 i32 i32 i32) (result i32)))
+              (import "bvx" "does_not_exist" (func (param i32 i32) (result i32)))
               (memory (export "memory") 1)
               (func (export "bv_alloc") (param i32) (result i32) i32.const 0)
               (func (export "bvx_init") (param i32 i32) (result i32) i32.const 0))
         "#;
         let bytes = wat::parse_str(wat).unwrap();
-        // `AppModuleInstance` isn't `Debug` (holds a Wasmtime `Store`),
-        // so match on the result rather than `unwrap_err`.
-        let result =
-            AppModuleInstance::create("totp", "1.0.0", &sha(&bytes), &caps(true, 0), &bytes);
+        let result = AppModuleInstance::create(cfg(caps(true, 0), sha(&bytes)), &bytes).await;
         assert!(matches!(result, Err(AppModuleError::Instantiate(_))));
     }
 
-    #[test]
-    fn window_open_records_op_and_clamps() {
+    #[tokio::test]
+    async fn window_open_records_op_and_clamps() {
         // A module whose init opens two windows; max_open = 1 → 2nd -8.
         let wat = r#"
             (module
@@ -1080,19 +1543,17 @@ mod tests {
                 (call $open (i32.const 0) (i32.const 31))))
         "#;
         let bytes = wat::parse_str(wat).unwrap();
-        let mut inst =
-            AppModuleInstance::create("totp", "1.0.0", &sha(&bytes), &caps(false, 1), &bytes)
-                .unwrap();
+        let mut inst = instance(caps(false, 1), &bytes).await;
         // 2nd open hits the cap → returns WINDOW_LIMIT.
-        let status = inst.call_init(b"{}").unwrap();
+        let status = inst.call_init(b"{}").await.unwrap();
         assert_eq!(status, Some(RC_WINDOW_LIMIT));
         let ops = inst.drain_window_ops();
         assert_eq!(ops.len(), 1, "only the first open should be recorded");
         assert!(matches!(&ops[0], WindowOp::Open { route, .. } if route == "/plugin/totp/review"));
     }
 
-    #[test]
-    fn window_open_forbidden_without_capability() {
+    #[tokio::test]
+    async fn window_open_forbidden_without_capability() {
         let wat = r#"
             (module
               (import "bvx" "window_open" (func $open (param i32 i32) (result i32)))
@@ -1103,10 +1564,77 @@ mod tests {
                 (call $open (i32.const 0) (i32.const 31))))
         "#;
         let bytes = wat::parse_str(wat).unwrap();
-        let mut inst =
-            AppModuleInstance::create("totp", "1.0.0", &sha(&bytes), &caps(true, 0), &bytes)
-                .unwrap();
-        assert_eq!(inst.call_init(b"{}").unwrap(), Some(RC_FORBIDDEN));
+        let mut inst = instance(caps(true, 0), &bytes).await;
+        assert_eq!(inst.call_init(b"{}").await.unwrap(), Some(RC_FORBIDDEN));
         assert!(inst.drain_window_ops().is_empty());
+    }
+
+    // ── Phase 4: bvx.api_request path authorization ──
+
+    #[test]
+    fn resolve_api_path_allows_mount_scoped() {
+        let api = vec!["{mount}/".to_string()];
+        assert_eq!(
+            resolve_api_path("{mount}/approvals/42", "secret/totp", &api),
+            Ok("secret/totp/approvals/42".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_api_path_refuses_other_mount_and_sys() {
+        let api = vec!["{mount}/".to_string()];
+        // Another mount / sys / traversal / unresolved placeholder.
+        assert!(resolve_api_path("secret/other/x", "secret/totp", &api).is_err());
+        assert!(resolve_api_path("sys/plugins", "secret/totp", &api).is_err());
+        assert!(resolve_api_path("{mount}/../other", "secret/totp", &api).is_err());
+        assert!(resolve_api_path("{mount}/a/{name}", "secret/totp", &api).is_err());
+    }
+
+    #[test]
+    fn resolve_api_path_honours_narrow_prefix() {
+        // A plugin that only declared `{mount}/public/` can't reach
+        // `{mount}/private/`.
+        let api = vec!["{mount}/public/".to_string()];
+        assert!(resolve_api_path("{mount}/public/x", "secret/totp", &api).is_ok());
+        assert!(resolve_api_path("{mount}/private/x", "secret/totp", &api).is_err());
+    }
+
+    #[tokio::test]
+    async fn api_request_forbidden_without_api_paths() {
+        // No declared api_paths → the bridge is disabled → -2, and the
+        // backend is never touched (backend is None here).
+        let wat = r#"
+            (module
+              (import "bvx" "api_request" (func $api (param i32 i32 i32 i32) (result i32)))
+              (memory (export "memory") 1)
+              (func (export "bv_alloc") (param i32) (result i32) i32.const 4096)
+              (func (export "bvx_init") (param i32 i32) (result i32)
+                (call $api (i32.const 0) (i32.const 0) (i32.const 4096) (i32.const 1024))))
+        "#;
+        let bytes = wat::parse_str(wat).unwrap();
+        // caps with empty api_paths (the default from `caps`).
+        let mut inst = instance(caps(false, 0), &bytes).await;
+        assert_eq!(inst.call_init(b"{}").await.unwrap(), Some(RC_FORBIDDEN));
+    }
+
+    // ── Phase 5: bvx.net_http grant gate ──
+
+    #[tokio::test]
+    async fn net_http_not_granted_without_grant() {
+        // net_hosts empty (no admin grant) → -6, recorded in the ring.
+        let wat = r#"
+            (module
+              (import "bvx" "net_http" (func $net (param i32 i32 i32 i32) (result i32)))
+              (memory (export "memory") 1)
+              (func (export "bv_alloc") (param i32) (result i32) i32.const 4096)
+              (func (export "bvx_init") (param i32 i32) (result i32)
+                (call $net (i32.const 0) (i32.const 0) (i32.const 4096) (i32.const 1024))))
+        "#;
+        let bytes = wat::parse_str(wat).unwrap();
+        let mut inst = instance(caps(false, 0), &bytes).await;
+        assert_eq!(inst.call_init(b"{}").await.unwrap(), Some(RC_NET_NOT_GRANTED));
+        let calls = inst.net_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].outcome, "not_granted");
     }
 }

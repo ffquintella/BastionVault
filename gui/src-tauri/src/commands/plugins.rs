@@ -526,6 +526,176 @@ pub async fn plugins_set_config(
     outcome
 }
 
+// ── Extensibility v2 (Phase 5): admin network grants ──
+//
+// Proxies GET/PUT/DELETE /v1/sys/plugins/<name>/grants. Response shape
+// matches the server handler so the frontend is mode-agnostic.
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PluginGrantsResult {
+    /// The stored `NetGrant` JSON (or null when never granted).
+    pub net: Option<Value>,
+    /// Whether the stored grant is *live* against the active manifest's
+    /// current net request (a changed request voids it).
+    pub live: bool,
+    /// Hosts the manifest requests — rendered verbatim in the consent UI.
+    pub requested_net_hosts: Vec<String>,
+}
+
+/// Best-effort actor entity id for the embedded grant record. Mirrors
+/// the server handler + audit path (entity id lives in the token meta).
+async fn resolve_grant_actor(
+    core: &std::sync::Arc<bastion_vault::core::Core>,
+    token: &str,
+) -> String {
+    use bastion_vault::modules::auth::AuthModule;
+    if token.is_empty() {
+        return String::new();
+    }
+    let Some(am) = core.module_manager.get_module::<AuthModule>("auth") else {
+        return String::new();
+    };
+    let Some(ts) = am.token_store.load_full() else {
+        return String::new();
+    };
+    match ts.lookup(token).await {
+        Ok(Some(te)) => te
+            .meta
+            .get("entity_id")
+            .cloned()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(te.display_name),
+        _ => String::new(),
+    }
+}
+
+#[tauri::command]
+pub async fn plugins_get_grants(
+    state: State<'_, AppState>,
+    name: String,
+) -> CmdResult<PluginGrantsResult> {
+    if is_remote(&state).await {
+        let json = remote_call(&state, "GET", &format!("sys/plugins/{name}/grants"), None).await?;
+        return decode_json(json, "plugin grants");
+    }
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let storage = core.barrier.as_storage();
+    let catalog = PluginCatalog::new();
+    let manifest = catalog
+        .get_manifest(storage, &name)
+        .await
+        .map_err(CommandError::from)?
+        .ok_or("plugin not found")?;
+    let record = bastion_vault::plugins::grants::get(storage, &name)
+        .await
+        .map_err(CommandError::from)?;
+    let live = bastion_vault::plugins::grants::active_net_hosts(storage, &name, &manifest)
+        .await
+        .map_err(CommandError::from)?
+        .is_some();
+    let requested_net_hosts = manifest
+        .capabilities
+        .app
+        .net
+        .as_ref()
+        .map(|n| n.hosts.clone())
+        .unwrap_or_default();
+    Ok(PluginGrantsResult {
+        net: record
+            .and_then(|r| r.net)
+            .and_then(|n| serde_json::to_value(n).ok()),
+        live,
+        requested_net_hosts,
+    })
+}
+
+#[tauri::command]
+pub async fn plugins_set_grants(
+    state: State<'_, AppState>,
+    name: String,
+    hosts: Vec<String>,
+) -> CmdResult<()> {
+    if is_remote(&state).await {
+        let body = json!({ "net": { "hosts": hosts } }).as_object().cloned();
+        remote_call(&state, "PUT", &format!("sys/plugins/{name}/grants"), body).await?;
+        return Ok(());
+    }
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
+    drop(vault_guard);
+
+    let catalog = PluginCatalog::new();
+    let manifest = catalog
+        .get_manifest(core_arc.barrier.as_storage(), &name)
+        .await
+        .map_err(CommandError::from)?
+        .ok_or("plugin not found")?;
+    let token = state.token.lock().await.clone().unwrap_or_default();
+    let actor = resolve_grant_actor(&core_arc, &token).await;
+    let granted_at = chrono::Utc::now().to_rfc3339();
+    let outcome = bastion_vault::plugins::grants::put_net(
+        core_arc.barrier.as_storage(),
+        &name,
+        &manifest,
+        hosts.clone(),
+        &actor,
+        granted_at,
+    )
+    .await
+    .map(|_| ())
+    .map_err(CommandError::from);
+
+    let mut audit_body = serde_json::Map::new();
+    audit_body.insert("name".into(), Value::String(name.clone()));
+    audit_body.insert("hosts".into(), json!(hosts));
+    let err_str = outcome.as_ref().err().map(|e| format!("{e:?}"));
+    bastion_vault::audit::emit_sys_audit(
+        &core_arc,
+        &token,
+        &format!("sys/plugins/{name}/grants"),
+        bastion_vault::logical::Operation::Write,
+        Some(audit_body),
+        err_str.as_deref(),
+    )
+    .await;
+    outcome
+}
+
+#[tauri::command]
+pub async fn plugins_delete_grants(state: State<'_, AppState>, name: String) -> CmdResult<()> {
+    if is_remote(&state).await {
+        remote_call(&state, "DELETE", &format!("sys/plugins/{name}/grants"), None).await?;
+        return Ok(());
+    }
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
+    drop(vault_guard);
+
+    let outcome = bastion_vault::plugins::grants::delete(core_arc.barrier.as_storage(), &name)
+        .await
+        .map_err(CommandError::from);
+    let token = state.token.lock().await.clone().unwrap_or_default();
+    let mut audit_body = serde_json::Map::new();
+    audit_body.insert("name".into(), Value::String(name.clone()));
+    let err_str = outcome.as_ref().err().map(|e| format!("{e:?}"));
+    bastion_vault::audit::emit_sys_audit(
+        &core_arc,
+        &token,
+        &format!("sys/plugins/{name}/grants"),
+        bastion_vault::logical::Operation::Delete,
+        Some(audit_body),
+        err_str.as_deref(),
+    )
+    .await;
+    outcome
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PluginVersionsResult {
     pub versions: Vec<PluginManifest>,

@@ -116,7 +116,8 @@ pub async fn plugin_surfaces_refresh<R: Runtime>(
         .map_err(CommandError::from)?;
     // Extensibility v2: (re)instantiate app modules to match the fresh
     // bundle and emit their dynamic menus.
-    crate::plugin_apps::sync_from_bundle(&app, &state, &bundle, &*backend, &cache, &token).await;
+    crate::plugin_apps::sync_from_bundle(&app, &state, &bundle, backend.clone(), &cache, &token)
+        .await;
     Ok(PluginSurfacesResult { bundle })
 }
 
@@ -193,7 +194,8 @@ pub async fn plugin_surface_watch_tick<R: Runtime>(
     // Extensibility v2: on a bundle change, re-sync app modules; every
     // tick, give live modules a chance to run `bvx_tick` (30 s floor).
     if let Some(ref bundle) = new_bundle {
-        crate::plugin_apps::sync_from_bundle(&app, &state, bundle, &*backend, &cache, &token).await;
+        crate::plugin_apps::sync_from_bundle(&app, &state, bundle, backend.clone(), &cache, &token)
+            .await;
     } else {
         crate::plugin_apps::tick_all(&app, &state).await;
     }

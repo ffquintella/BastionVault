@@ -426,6 +426,15 @@ pub struct AppModuleRef {
     /// `bvx.api_request` may target (enforced host-side per call).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub api_paths: Vec<String>,
+    /// `capabilities.app.net.https_only` — governs the client enforcer's
+    /// cleartext-`http` exception. Defaults `true`. (The granted host
+    /// list itself rides the separately-gated [`SurfaceGrant`].)
+    #[serde(default = "default_true_bool")]
+    pub net_https_only: bool,
+}
+
+fn default_true_bool() -> bool {
+    true
 }
 
 /// Extensibility v2: the subset of a plugin's admin grant that clients

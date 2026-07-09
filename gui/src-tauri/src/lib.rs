@@ -2,6 +2,7 @@ mod backend;
 mod commands;
 mod embedded;
 mod error;
+mod net_gate;
 mod plugin_apps;
 mod plugin_hooks;
 mod preferences;
@@ -275,6 +276,9 @@ pub fn run() {
             commands::plugins::plugins_set_publishers,
             commands::plugins::plugins_get_config,
             commands::plugins::plugins_set_config,
+            commands::plugins::plugins_get_grants,
+            commands::plugins::plugins_set_grants,
+            commands::plugins::plugins_delete_grants,
             commands::plugins::plugins_versions,
             commands::plugins::plugins_activate_version,
             commands::plugins::plugins_delete_version,
@@ -290,6 +294,7 @@ pub fn run() {
             // Plugin App Extensions v2 — dynamic-menu click callback + status
             plugin_apps::plugin_app_menu_click,
             plugin_apps::plugin_app_status,
+            plugin_apps::plugin_app_net_calls,
             // Secrets
             commands::secrets::list_secrets,
             commands::secrets::read_secret,
