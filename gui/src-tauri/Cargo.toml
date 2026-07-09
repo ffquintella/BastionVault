@@ -198,3 +198,7 @@ mcp_local_dev = ["dep:tauri-plugin-mcp-bridge"]
 # without dragging the wasmtime `wat` feature into the runtime
 # build (which would balloon the GUI binary).
 wat = "1"
+# ABI-parity guard: the testkit's `bvx` conformance module is
+# instantiated against the *real* `plugin_apps` linker so a drift
+# between the testkit mock and this runtime fails CI (Phase 6).
+bastion-plugin-testkit = { path = "../../crates/bastion-plugin-testkit" }

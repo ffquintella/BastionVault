@@ -66,6 +66,7 @@ use wasmtime::{
     StoreLimitsBuilder, Trap, TypedFunc,
 };
 
+pub mod app;
 pub mod hooks;
 
 /// Default per-invocation fuel budget — matches

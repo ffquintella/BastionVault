@@ -1,6 +1,6 @@
 # Plugin App Extensions Roadmap (Extensibility v2)
 
-**Status:** In progress — Phases 1–5 + 7 complete; Phase 6 SDK shipped (testkit driver + reference plugins remain)
+**Status:** ✅ Complete — all 8 phases (0–7) shipped
 **Owner:** Felipe Quintella
 **Spec:** [`features/plugin-app-extensions.md`](../features/plugin-app-extensions.md) — read that first; this doc is phasing, effort, and acceptance bars only.
 **Related:** [`features/plugin-extensibility.md`](../features/plugin-extensibility.md) (v1, shipped), [`features/plugin-system.md`](../features/plugin-system.md), [`features/plugin-testing.md`](../features/plugin-testing.md).
@@ -144,7 +144,7 @@ private-resolution / rebinding / explicit-internal cases; the runtime test prove
 
 **Acceptance:** end-to-end: unsigned dev plugin requesting `net` gets `NET_NOT_GRANTED` until the admin ticks consent; after grant, an allowed host succeeds, a non-allowlisted host / redirect-to-10.0.0.1 / plain-http each fail with the right code; revoke propagates ≤ 30 s.
 
-### Phase 6 — SDK + testkit + reference plugins (1–1.5 weeks) — 🔶 SDK done
+### Phase 6 — SDK + testkit + reference plugins (1–1.5 weeks) — ✅ Complete
 
 Shipped: `bastion-plugin-sdk` `app` feature (`crates/bastion-plugin-sdk/src/app.rs`) —
 typed `AppHost` wrappers over every `bvx.*` import (`log`/`now_unix_ms`/`set_result`,
@@ -155,12 +155,20 @@ with buffer-retry ergonomics; the `AppModule` trait (`init`/`menu_click`/
 scripted API + net responses) so authors `cargo test` handlers without a GUI.
 12 SDK tests.
 
-Remaining: the standalone `bastion-plugin-testkit` `bvx` driver (instantiating an
-app-module WASM through the real `plugin_apps.rs` linker) + parity test, and the
-reference plugins (TOTP app module + `webhook-notify`) which live in the
-`plugins-ext` submodule (separate repo/workspace). The SDK `app` feature + its
-`host_test` mock already give authors everything needed to build and unit-test an
-app module; the real-linker path is covered by the `plugin_apps` runtime tests.
+Also shipped: `bastion-plugin-testkit::app::AppTestHost` — a `bvx` driver that
+instantiates an app-module `.wasm` against an in-memory mock host (captured
+menu/window calls, scripted `api_request` / `net_http`, the same capability
+gates), plus `bvx_conformance_wat()` / `BVX_IMPORTS` and an ABI-parity test in
+the gui crate that runs the conformance module through the **real**
+`plugin_apps` linker (drift fails CI). Reference plugin: `webhook-notify` in the
+`plugins-ext` repo (dynamic menu + badge, `bvx.api_request` mount reads, and an
+admin-granted webhook POST via `bvx.net_http` with graceful ungranted degrade;
+3 host_test unit tests). The TOTP example was left as a pure server secret
+engine — bolting an app module onto it needs a second WASM artifact and adds no
+coverage the `webhook-notify` reference doesn't already give.
+
+**Acceptance (met):** testkit `AppTestHost` tests + the gui `bvx` parity test are
+green; `webhook-notify` builds on the host and passes its unit tests.
 
 Original scope:
 - SDK `app` feature: `app_module!` macro, typed `Host` wrappers for all `bvx.*` imports.

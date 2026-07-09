@@ -157,7 +157,16 @@ EXAMPLE ENTRY:
   `window_event`/`tick`, all defaulting to no-ops), and an `app_module!` macro that
   emits the `bvx_*` exports. On non-wasm targets the imports fall back to in-memory
   stubs (captured menu/window calls, scripted API + network responses) so authors
-  can `cargo test` their handlers without a GUI.
+  can `cargo test` their handlers without a GUI. `bastion-plugin-testkit` grows an
+  `AppTestHost` `bvx` driver — it instantiates an app-module `.wasm` against an
+  in-memory mock host (captured menu/window calls, scripted `api_request` /
+  `net_http` replies, the same `dynamic_menus` / `windows.max_open` / `api_paths` /
+  grant gates as the real runtime) and drives the `bvx_*` entry points; a `bvx`
+  conformance module + an ABI-parity test (run through the real `plugin_apps`
+  linker) fail CI on testkit-vs-runtime drift. A reference app-module plugin,
+  `webhook-notify`, exercises the whole surface (dynamic menu + badge, mount reads
+  via `bvx.api_request`, and an admin-granted webhook POST via `bvx.net_http` that
+  degrades gracefully when ungranted) in the `plugins-ext` repo.
 
 - **Phase 7 — server-side `bv.net_http`** (Phase 7, `features/plugin-app-extensions.md`) --
   server WASM plugins get constrained outbound HTTPS, closing the gap that forced

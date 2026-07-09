@@ -1523,6 +1523,27 @@ mod tests {
 
     // ── Phase 5: bvx.net_http grant gate ──
 
+    /// ABI-parity guard (Phase 6): the testkit's `bvx` conformance
+    /// module imports every symbol the testkit mock registers. If the
+    /// real `plugin_apps` linker here doesn't register exactly that set,
+    /// instantiation fails — so testkit-vs-runtime drift fails CI.
+    #[tokio::test]
+    async fn bvx_conformance_matches_testkit_surface() {
+        let wat = bastion_plugin_testkit::app::bvx_conformance_wat();
+        let bytes = wat::parse_str(&wat).unwrap();
+        let caps = AppCapsGate {
+            dynamic_menus: true,
+            windows_max_open: 2,
+            api_paths: vec!["{mount}/".into()],
+        };
+        let result = AppModuleInstance::create(cfg(caps, sha(&bytes)), &bytes).await;
+        assert!(
+            result.is_ok(),
+            "the real bvx linker must satisfy the testkit conformance surface: {:?}",
+            result.err().map(|e| e.to_string()),
+        );
+    }
+
     #[tokio::test]
     async fn net_http_not_granted_without_grant() {
         // net_hosts empty (no admin grant) → -6, recorded in the ring.
