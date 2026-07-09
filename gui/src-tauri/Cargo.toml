@@ -1,6 +1,6 @@
 [package]
 name = "bastion-vault-gui"
-version = "0.25.1"
+version = "0.26.0"
 edition = "2021"
 description = "BastionVault Desktop GUI"
 

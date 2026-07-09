@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-07-09
+
 ### Added
 
 #### Plugin Unit-Test Infrastructure (features/plugin-testing.md)
