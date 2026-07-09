@@ -24,6 +24,33 @@ Everything is opt-in and additive: a plugin that ships no app module behaves exa
 - **Client-side checks are UX; the server is authority.** `bvx.api_request` rides the user's token — a malicious surface cannot widen permissions, only spend the ones the user already has.
 - **Widening requires ceremony.** All new capability fields participate in `PluginCatalog::check_capability_widening`; the network grant additionally requires a fresh admin approval whenever the requested capability set changes.
 
+## Delivery model — server-installed, zero per-client install
+
+Plugins (and their app modules) are installed **once on the server**; no
+artifact is ever installed on a client. Every connecting GUI is a generic
+renderer that pulls the plugin's GUI footprint from whatever server it is
+connected to, entirely over the `Backend` trait (in-process in embedded mode,
+HTTP in remote mode — identical behaviour either way):
+
+- **Surfaces** (menus/pages/forms) arrive in the aggregated
+  `GET /v1/sys/plugins/active-surfaces` bundle, with the existing ETag +
+  long-poll watcher so a server-side register/activate/delete propagates to
+  live clients without a reload (≤ ~30 s).
+- **The app-module WASM** is a content-addressed `client_assets` entry fetched
+  on demand via `GET /v1/sys/plugins/<name>/<version>/asset/<sha256>` (served
+  `immutable`), cached locally by sha256. The bundle's `app_module` descriptor
+  (asset ref + capability gates) is folded into the bundle ETag, so a new
+  version re-syncs and re-instantiates automatically.
+- **Grants** ride in-band in the same bundle.
+
+The `bvx.*` runtime is part of the GUI binary (host-owned) and is identical on
+every client, so a plugin ships only its WASM + `surface.json` — never any
+client-side runtime code. The app module *executes* in each client's Tauri
+backend (sandboxed Wasmtime, no ambient authority, `bvx.*` imports only) but is
+always *delivered* by the server. The only local artifact is a content-addressed
+download cache, re-populated from the server and invalidated by sha/ETag — not
+an install.
+
 ## Manifest extensions
 
 A new optional `capabilities.app` block (all fields default off) plus a new client-asset kind:
