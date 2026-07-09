@@ -2,6 +2,7 @@ mod backend;
 mod commands;
 mod embedded;
 mod error;
+mod plugin_apps;
 mod plugin_hooks;
 mod preferences;
 mod local_keystore;
@@ -286,6 +287,9 @@ pub fn run() {
             commands::plugin_surface::plugin_surface_dispatch,
             commands::plugin_surface::plugin_surface_hook,
             commands::plugin_surface::plugin_surface_watch_tick,
+            // Plugin App Extensions v2 — dynamic-menu click callback + status
+            plugin_apps::plugin_app_menu_click,
+            plugin_apps::plugin_app_status,
             // Secrets
             commands::secrets::list_secrets,
             commands::secrets::read_secret,

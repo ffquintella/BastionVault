@@ -120,7 +120,7 @@ pub struct SealOutcome {
 /// Write policy check per node. A literal-URL profile targets just the
 /// one node.
 #[tauri::command]
-pub async fn seal_vault(state: State<'_, AppState>) -> CmdResult<SealOutcome> {
+pub async fn seal_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> CmdResult<SealOutcome> {
     #[cfg(feature = "embedded_vault")]
     {
         use bastion_vault::logical::Operation as ServerOp;
@@ -170,6 +170,8 @@ pub async fn seal_vault(state: State<'_, AppState>) -> CmdResult<SealOutcome> {
 
             embedded::seal_vault(vault).await?;
             *state.backend.lock().await = None;
+            drop(vault_guard);
+            crate::plugin_apps::teardown_all(&app, &state).await;
             return Ok(SealOutcome {
                 status: VaultStatus { initialized: true, sealed: true, has_vault: true },
                 nodes: vec![crate::commands::connection::NodeSealResult {
@@ -207,6 +209,7 @@ pub async fn seal_vault(state: State<'_, AppState>) -> CmdResult<SealOutcome> {
             // the next request re-establishes rather than reusing a handle
             // pointed at a now-sealed node.
             *state.backend.lock().await = None;
+            crate::plugin_apps::teardown_all(&app, &state).await;
             return Ok(SealOutcome {
                 status: VaultStatus { initialized: true, sealed: true, has_vault: true },
                 nodes,
@@ -620,10 +623,11 @@ pub async fn recover_unseal_key(
 /// is still valid. The token IS cleared on the Rust side later by
 /// the open path when the new vault comes up; or on explicit sign-out.
 #[tauri::command]
-pub async fn disconnect_vault(state: State<'_, AppState>) -> CmdResult<()> {
+pub async fn disconnect_vault(app: tauri::AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
     *state.vault.lock().await = None;
     *state.backend.lock().await = None;
     *state.token.lock().await = None;
+    crate::plugin_apps::teardown_all(&app, &state).await;
     Ok(())
 }
 

@@ -1671,6 +1671,16 @@ export interface SurfaceMenu {
   section: SurfaceSection;
   route: string;
   min_policy?: string;
+  /** Extensibility v2: optional badge text (e.g. a pending count) a
+   *  dynamic menu can attach. Ignored on static menus. */
+  badge?: string;
+}
+
+/** Extensibility v2: a menu a plugin app module created at runtime via
+ *  `bvx.menu_upsert`, pushed to the frontend on the `plugin-menus-updated`
+ *  event. Same shape as a static `SurfaceMenu` plus the owning `plugin`. */
+export interface DynamicMenu extends SurfaceMenu {
+  plugin: string;
 }
 
 export interface SurfaceColumn {
@@ -1691,6 +1701,9 @@ export interface SurfaceTable {
   columns: SurfaceColumn[];
   row_actions?: SurfaceRowAction[];
   empty_text?: string;
+  /** Extensibility v2 (Phase 3): in a plugin window, refresh from
+   *  `plugin-window-data-<handle>` events instead of polling. */
+  subscribe?: boolean;
 }
 
 export interface SurfaceSubmit {
@@ -1718,6 +1731,9 @@ export interface SurfaceDetail {
   id: string;
   binding: SurfaceBinding;
   fields: SurfaceDetailField[];
+  /** Extensibility v2 (Phase 3): in a plugin window, refresh from
+   *  `plugin-window-data-<handle>` events instead of the `live` poll. */
+  subscribe?: boolean;
 }
 
 export type SurfaceComponent = SurfaceTable | SurfaceForm | SurfaceDetail;
@@ -1744,6 +1760,16 @@ export interface ActiveSurfaceEntry {
   surface: SurfaceManifest;
   /// `[asset_name, sha256]` pairs.
   assets: [string, string][];
+  /** Extensibility v2: live admin network grant (hosts only). */
+  grant?: { net_hosts: string[] } | null;
+  /** Extensibility v2: app-module descriptor when the plugin ships one. */
+  app_module?: {
+    asset_name: string;
+    sha256: string;
+    dynamic_menus: boolean;
+    windows_max_open: number;
+    api_paths: string[];
+  } | null;
 }
 
 export interface ActiveSurfaceBundle {
@@ -1806,6 +1832,25 @@ export const pluginSurfaceWatchTick = () =>
   invoke<{ updated: boolean; bundle: ActiveSurfaceBundle | null }>(
     "plugin_surface_watch_tick",
   );
+
+// ── Plugin App Extensions v2 (Phases 2/3) ────────────────────────────
+
+/** Notify a plugin's app module that the user clicked one of its
+ *  dynamic menus, so it can react (`bvx_menu_click`) — e.g. open a
+ *  window or refresh a badge. */
+export const pluginAppMenuClick = (plugin: string, menuId: string) =>
+  invoke<void>("plugin_app_menu_click", { plugin, menuId });
+
+export interface AppModuleStatus {
+  plugin: string;
+  version: string;
+  menu_count: number;
+  errored: string | null;
+}
+
+/** Per-plugin app-module runtime state for the Plugins admin page. */
+export const pluginAppStatus = () =>
+  invoke<AppModuleStatus[]>("plugin_app_status");
 
 // ── PKI Secret Engine ─────────────────────────────────────────────
 

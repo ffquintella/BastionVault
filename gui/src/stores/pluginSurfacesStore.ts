@@ -21,6 +21,11 @@ interface PluginSurfacesState {
    *  reads this to drive a non-modal "<plugin> updated" toast and
    *  resets it via `clearLastUpdate` after consumption. */
   lastUpdate: { plugin: string; version: string }[] | null;
+  /** Extensibility v2 (Phase 2): menus pushed at runtime by plugin app
+   *  modules via the `plugin-menus-updated` Tauri event. Merged with the
+   *  static bundle menus in `menusForSection`. Replaced wholesale on
+   *  each event; cleared on sign-out. */
+  dynamicMenus: api.DynamicMenu[];
   /** Fetch the active-surface bundle. Safe to call multiple times;
    *  the cache underneath this is content-addressed by ETag. */
   refresh: () => Promise<void>;
@@ -39,12 +44,22 @@ interface PluginSurfacesState {
   clear: () => void;
   /** Drop the `lastUpdate` marker after the toast has been shown. */
   clearLastUpdate: () => void;
+  /** Replace the dynamic-menu set (from the `plugin-menus-updated`
+   *  event). Passing `[]` clears them (instance teardown). */
+  setDynamicMenus: (menus: api.DynamicMenu[]) => void;
   /** Lookup helpers — return references into `bundle.entries` so a
-   *  consumer can render in a single pass without re-walking. */
+   *  consumer can render in a single pass without re-walking. Static
+   *  (bundle) and dynamic (app-module) menus are merged; `dynamic` +
+   *  `plugin` let the renderer route click callbacks. */
   menusForSection: (
     section: api.SurfaceSection,
     havePolicies: string[],
-  ) => Array<{ menu: api.SurfaceMenu; entry: api.ActiveSurfaceEntry }>;
+  ) => Array<{
+    menu: api.SurfaceMenu;
+    entry: api.ActiveSurfaceEntry | null;
+    plugin: string;
+    dynamic: boolean;
+  }>;
   pageByRoute: (
     route: string,
   ) => { page: api.SurfacePage; entry: api.ActiveSurfaceEntry } | null;
@@ -60,6 +75,7 @@ export const usePluginSurfacesStore = create<PluginSurfacesState>((set, get) => 
   loading: false,
   error: null,
   lastUpdate: null,
+  dynamicMenus: [],
 
   async refresh() {
     set({ loading: true, error: null });
@@ -127,6 +143,7 @@ export const usePluginSurfacesStore = create<PluginSurfacesState>((set, get) => 
       loading: false,
       error: null,
       lastUpdate: null,
+      dynamicMenus: [],
     });
   },
 
@@ -134,19 +151,38 @@ export const usePluginSurfacesStore = create<PluginSurfacesState>((set, get) => 
     set({ lastUpdate: null });
   },
 
+  setDynamicMenus(menus) {
+    set({ dynamicMenus: menus });
+  },
+
   menusForSection(section, havePolicies) {
+    // `min_policy` is a UX hint — server ACLs are the only real gate.
+    // Hide menus the active token wouldn't satisfy so the sidebar isn't
+    // cluttered with always-403 links.
+    const passesPolicy = (mp?: string) => !mp || havePolicies.includes(mp);
+    const out: Array<{
+      menu: api.SurfaceMenu;
+      entry: api.ActiveSurfaceEntry | null;
+      plugin: string;
+      dynamic: boolean;
+    }> = [];
     const b = get().bundle;
-    if (!b) return [];
-    const out: Array<{ menu: api.SurfaceMenu; entry: api.ActiveSurfaceEntry }> = [];
-    for (const entry of b.entries) {
-      for (const menu of entry.surface.menus ?? []) {
-        if (menu.section !== section) continue;
-        // `min_policy` is a UX hint — server ACLs are the only
-        // real gate. Hide menus the active token wouldn't satisfy
-        // so the sidebar isn't cluttered with always-403 links.
-        if (menu.min_policy && !havePolicies.includes(menu.min_policy)) continue;
-        out.push({ menu, entry });
+    if (b) {
+      for (const entry of b.entries) {
+        for (const menu of entry.surface.menus ?? []) {
+          if (menu.section !== section) continue;
+          if (!passesPolicy(menu.min_policy)) continue;
+          out.push({ menu, entry, plugin: entry.plugin, dynamic: false });
+        }
       }
+    }
+    // Dynamic menus pushed by app modules render identically to static
+    // ones; `dynamic: true` lets the slot fire the `bvx_menu_click`
+    // callback on navigation.
+    for (const menu of get().dynamicMenus) {
+      if (menu.section !== section) continue;
+      if (!passesPolicy(menu.min_policy)) continue;
+      out.push({ menu, entry: null, plugin: menu.plugin, dynamic: true });
     }
     return out;
   },

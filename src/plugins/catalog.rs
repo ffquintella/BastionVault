@@ -35,7 +35,9 @@
 //! new versioned entry exists, so the operator can clean them up
 //! manually when convenient.
 
-use bv_plugin_surface::{ActiveSurfaceBundle, ActiveSurfaceEntry, SurfaceGrant, SurfaceManifest};
+use bv_plugin_surface::{
+    ActiveSurfaceBundle, ActiveSurfaceEntry, AppModuleRef, SurfaceGrant, SurfaceManifest,
+};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -692,6 +694,22 @@ impl PluginCatalog {
             let grant = super::grants::active_net_hosts(storage, &m.name, &m)
                 .await?
                 .map(|net_hosts| SurfaceGrant { net_hosts });
+            // Extensibility v2 (Phase 2): describe the app module (if any)
+            // so the Tauri runtime can fetch + gate it from the bundle
+            // alone. Pair the `kind == "app-module"` client asset with the
+            // manifest's app-capability gates.
+            let app = &m.capabilities.app;
+            let app_module = m
+                .client_assets
+                .iter()
+                .find(|a| a.kind == "app-module")
+                .map(|a| AppModuleRef {
+                    asset_name: a.name.clone(),
+                    sha256: a.sha256.clone(),
+                    dynamic_menus: app.dynamic_menus,
+                    windows_max_open: app.windows.max_open,
+                    api_paths: app.api_paths.clone(),
+                });
             entries.push(ActiveSurfaceEntry {
                 plugin: m.name.clone(),
                 version: m.version.clone(),
@@ -699,6 +717,7 @@ impl PluginCatalog {
                 surface: parsed,
                 assets,
                 grant,
+                app_module,
             });
         }
         let etag = ActiveSurfaceBundle::compute_etag(&entries);

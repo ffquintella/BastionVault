@@ -1,4 +1,5 @@
-import { useLocation } from "react-router-dom";
+import type { ReactNode } from "react";
+import { useLocation, useSearchParams } from "react-router-dom";
 import { usePluginSurfacesStore } from "../../stores/pluginSurfacesStore";
 import { Layout } from "../Layout";
 import { Card, EmptyState } from "../ui";
@@ -18,24 +19,41 @@ import { SurfaceDetail } from "./SurfaceDetail";
  */
 export function SurfaceRouter() {
   const location = useLocation();
+  const [searchParams] = useSearchParams();
   const pageByRoute = usePluginSurfacesStore((s) => s.pageByRoute);
   const loading = usePluginSurfacesStore((s) => s.loading);
   const error = usePluginSurfacesStore((s) => s.error);
+
+  // Extensibility v2 (Phase 3): when rendered inside a plugin-owned
+  // window (`?pluginWindow=<handle>`), drop the host sidebar/chrome and
+  // render the page bare — the window is a focused surface, not the
+  // full app. The window handle is threaded to `subscribe`-enabled
+  // components so they consume `plugin-window-data-<handle>` events.
+  const pluginWindow = searchParams.get("pluginWindow");
+  const isPluginWindow = pluginWindow != null;
+  const Frame = ({ children }: { children: ReactNode }) =>
+    isPluginWindow ? (
+      <div className="min-h-screen bg-[var(--color-bg)] text-[var(--color-text)]">
+        {children}
+      </div>
+    ) : (
+      <Layout>{children}</Layout>
+    );
 
   const match = pageByRoute(location.pathname);
 
   if (loading && !match) {
     return (
-      <Layout>
+      <Frame>
         <div className="p-6 text-sm text-[var(--color-text-muted)]">
           Loading plugin surfaces…
         </div>
-      </Layout>
+      </Frame>
     );
   }
   if (error && !match) {
     return (
-      <Layout>
+      <Frame>
         <div className="p-6">
           <Card>
             <div className="p-4 text-sm text-[var(--color-danger)]">
@@ -43,19 +61,19 @@ export function SurfaceRouter() {
             </div>
           </Card>
         </div>
-      </Layout>
+      </Frame>
     );
   }
   if (!match) {
     return (
-      <Layout>
+      <Frame>
         <div className="p-6">
           <EmptyState
             title="Plugin page not found"
             description={`No registered plugin contributes a page at ${location.pathname}.`}
           />
         </div>
-      </Layout>
+      </Frame>
     );
   }
 
@@ -63,7 +81,7 @@ export function SurfaceRouter() {
   const refresh = usePluginSurfacesStore.getState().refresh;
 
   return (
-    <Layout>
+    <Frame>
       <div className="p-6 space-y-4">
         <div className="flex items-baseline justify-between">
           <h1 className="text-2xl font-bold">{page.title}</h1>
@@ -90,13 +108,17 @@ export function SurfaceRouter() {
                   />
                 )}
                 {c.kind === "detail" && (
-                  <SurfaceDetail spec={c} mount={entry.mount} />
+                  <SurfaceDetail
+                    spec={c}
+                    mount={entry.mount}
+                    windowHandle={pluginWindow}
+                  />
                 )}
               </div>
             </Card>
           ))}
         </div>
       </div>
-    </Layout>
+    </Frame>
   );
 }

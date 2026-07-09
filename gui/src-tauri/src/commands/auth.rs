@@ -245,7 +245,7 @@ pub async fn get_current_token(state: State<'_, AppState>) -> CmdResult<Option<S
 }
 
 #[tauri::command]
-pub async fn logout(state: State<'_, AppState>) -> CmdResult<()> {
+pub async fn logout(app: tauri::AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
     // Revoke the session token server-side so it can't be reused after
     // logout, and so the revocation is recorded as a `logout` audit
     // event. Best-effort: a failed revoke (token already expired,
@@ -264,5 +264,7 @@ pub async fn logout(state: State<'_, AppState>) -> CmdResult<()> {
         .await;
     }
     *state.token.lock().await = None;
+    // Extensibility v2: drop app-module instances + their windows.
+    crate::plugin_apps::teardown_all(&app, &state).await;
     Ok(())
 }

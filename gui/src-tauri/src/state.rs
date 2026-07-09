@@ -183,6 +183,11 @@ pub struct AppState {
     /// (`<dirs::cache>/com.bastionvault.gui/plugins/<vault-id>/`).
     /// Cleared when the operator switches vaults.
     pub plugin_surface_cache: Mutex<Option<bv_client::SurfaceCache>>,
+    /// Extensibility v2 (Phase 2/3): live app-module instances, keyed by
+    /// plugin name. Created lazily when a surface bundle carrying an
+    /// `app-module` asset arrives; torn down on sign-out / vault-switch /
+    /// seal / surface update. See `crate::plugin_apps`.
+    pub app_modules: Mutex<HashMap<String, crate::plugin_apps::AppModuleInstance>>,
 }
 
 /// Persistent identity of a Rustion-mediated session, captured at
@@ -218,6 +223,7 @@ impl AppState {
             connect_sessions: tokio::sync::Mutex::new(HashMap::new()),
             rustion_session_bundles: tokio::sync::Mutex::new(HashMap::new()),
             plugin_surface_cache: Mutex::new(None),
+            app_modules: Mutex::new(HashMap::new()),
         }
     }
 }

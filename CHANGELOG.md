@@ -95,6 +95,34 @@ EXAMPLE ENTRY:
   backwards-compatible: v1 plugins (no `app` block) are byte-identical, keep their
   existing signatures, and v1 GUIs ignore the new bundle field.
 
+- **Phase 2 — app-module runtime + dynamic menus** (Phase 2,
+  `features/plugin-app-extensions.md`) -- the first visible app-extension
+  feature. A new Tauri-backend Wasmtime runtime (`gui/src-tauri/src/plugin_apps.rs`)
+  runs a **stateful** app-module instance per plugin (created lazily when a surface
+  bundle carrying an `app-module` asset arrives; torn down on sign-out, vault-switch,
+  seal, or surface update), with the capability-gated `bvx.*` host import surface
+  (`bvx.log`, `bvx.now_unix_ms`, `bvx.set_result`, `bvx.menu_upsert`,
+  `bvx.menu_remove`) — same 256 MiB / 100 M-fuel-per-call / 4 MiB sandbox limits as
+  the form-hook sandbox, and a module importing an unregistered `bvx.*` symbol fails
+  to instantiate. A plugin can create/update sidebar menu items at runtime (with an
+  optional count `badge`), capped at 16 per plugin and validated host-side (route
+  prefix + section whitelist) on every call; menus are pushed to the webview on the
+  `plugin-menus-updated` event and render identically to static menus, and a click
+  invokes the plugin's `bvx_menu_click`. The Plugins admin data exposes per-plugin
+  app-module state (running / errored / menu count) via `plugin_app_status`.
+
+- **Phase 3 — plugin windows** (Phase 3, `features/plugin-app-extensions.md`) --
+  app modules can open, drive, and close their own secondary windows via
+  `bvx.window_open` / `bvx.window_close` / `bvx.window_emit` (clamped to the
+  manifest's `windows.max_open`, host cap 4). A plugin window renders only the
+  plugin's own declarative surface page behind the auth guard (label `plugin-<name>-<n>`,
+  URL `#/plugin/<name>/<route>?pluginWindow=<handle>`), with a host-drawn title
+  prefixed `"<plugin> — "` so it cannot spoof host chrome; closing it delivers a
+  `closed` event to the module's `bvx_window_event`. A new optional `subscribe`
+  component flag lets a surface `detail` in a plugin window refresh from
+  `plugin-window-data-<handle>` events (pushed via `bvx.window_emit`) instead of
+  polling. All of a plugin's windows are closed on instance teardown.
+
 ## [0.25.1] - 2026-07-08
 
 ### Changed

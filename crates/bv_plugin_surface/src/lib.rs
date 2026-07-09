@@ -394,6 +394,38 @@ pub struct ActiveSurfaceEntry {
     /// clients — which don't know the field — deserialize unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant: Option<SurfaceGrant>,
+    /// Extensibility v2 (Phase 2): descriptor for the plugin's app
+    /// module, when it ships one (a `client_assets` entry with
+    /// `kind = "app-module"`). Carries the content-addressed asset ref
+    /// plus the app-capability gates the Tauri-backend runtime needs to
+    /// register/deny `bvx.*` imports per call. `None` when the plugin
+    /// declares no app module. Omitted on the wire for v1 compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_module: Option<AppModuleRef>,
+}
+
+/// Extensibility v2: everything a client needs to instantiate and gate
+/// a plugin's app module without re-fetching the manifest. The network
+/// hosts are *not* here — they ride the separately-gated [`SurfaceGrant`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppModuleRef {
+    /// `client_assets` name of the app-module WASM (fetched via the
+    /// per-version asset endpoint, like any other client asset).
+    pub asset_name: String,
+    /// SHA-256 (hex) of the WASM bytes — content-addressed, verified on
+    /// fetch.
+    pub sha256: String,
+    /// `capabilities.app.dynamic_menus` — gates `bvx.menu_*`.
+    #[serde(default)]
+    pub dynamic_menus: bool,
+    /// `capabilities.app.windows.max_open` — gates `bvx.window_*` and
+    /// caps concurrent plugin windows (0 = windows disabled).
+    #[serde(default)]
+    pub windows_max_open: u32,
+    /// `capabilities.app.api_paths` — the mount-scoped prefixes
+    /// `bvx.api_request` may target (enforced host-side per call).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_paths: Vec<String>,
 }
 
 /// Extensibility v2: the subset of a plugin's admin grant that clients
@@ -433,6 +465,20 @@ impl ActiveSurfaceBundle {
                 hasher.update(b"grant:");
                 for host in &g.net_hosts {
                     hasher.update(host.as_bytes());
+                    hasher.update(b",");
+                }
+                hasher.update(b"\0");
+            }
+            // Fold the app-module descriptor so a new module sha or a
+            // capability change re-instantiates the runtime on refresh.
+            if let Some(am) = &e.app_module {
+                hasher.update(b"app:");
+                hasher.update(am.sha256.as_bytes());
+                hasher.update(b":");
+                hasher.update([am.dynamic_menus as u8]);
+                hasher.update(am.windows_max_open.to_le_bytes());
+                for p in &am.api_paths {
+                    hasher.update(p.as_bytes());
                     hasher.update(b",");
                 }
                 hasher.update(b"\0");
@@ -594,6 +640,7 @@ mod tests {
             surface: s,
             assets: vec![],
             grant: None,
+            app_module: None,
         }];
         let etag = ActiveSurfaceBundle::compute_etag(&entries);
         assert_eq!(etag.len(), 64); // sha256 hex
@@ -609,6 +656,7 @@ mod tests {
             surface: s,
             assets: vec![],
             grant: None,
+            app_module: None,
         };
         let ungranted = ActiveSurfaceBundle::compute_etag(std::slice::from_ref(&base));
         let mut granted = base.clone();

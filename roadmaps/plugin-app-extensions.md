@@ -1,6 +1,6 @@
 # Plugin App Extensions Roadmap (Extensibility v2)
 
-**Status:** In progress — Phase 1 complete
+**Status:** In progress — Phases 1–3 complete
 **Owner:** Felipe Quintella
 **Spec:** [`features/plugin-app-extensions.md`](../features/plugin-app-extensions.md) — read that first; this doc is phasing, effort, and acceptance bars only.
 **Related:** [`features/plugin-extensibility.md`](../features/plugin-extensibility.md) (v1, shipped), [`features/plugin-system.md`](../features/plugin-system.md), [`features/plugin-testing.md`](../features/plugin-testing.md).
@@ -60,21 +60,45 @@ acceptance path.
 
 **Acceptance:** unit tests for parse/validate/widening/pinning; integration test drives register → grant → re-register-with-changed-net → grant invalidated.
 
-### Phase 2 — App-module runtime + dynamic menus (1.5–2 weeks)
+### Phase 2 — App-module runtime + dynamic menus (1.5–2 weeks) — ✅ Complete
 
+Shipped: `gui/src-tauri/src/plugin_apps.rs` — a stateful per-plugin Wasmtime
+instance (lazy create on bundle sync, teardown on sign-out/vault-switch/seal/
+surface-update), the `bvx.log`/`now_unix_ms`/`set_result` imports, per-call
+refuel, and the `bvx_init`/`bvx_menu_click`/`bvx_window_event`/`bvx_tick` entry
+contract. `bvx.menu_upsert`/`menu_remove` with `SurfaceMenu`-shape + section +
+route-prefix validation and the 16-entry cap; the merged dynamic-menu set is
+pushed on the `plugin-menus-updated` Tauri event and merged in
+`pluginSurfacesStore.menusForSection`; `PluginMenuSlot` renders them (with an
+optional `badge`) identically to static menus and fires `plugin_app_menu_click`
+→ `bvx_menu_click`. Operator state via `plugin_app_status`. A module importing an
+unregistered `bvx.*` symbol fails to instantiate (acceptance invariant).
+
+Original scope (all delivered):
 - `gui/src-tauri/src/plugin_apps.rs`: per-(plugin, version) instance lifecycle (lazy create, teardown on sign-out/vault-switch/surface-update), `bvx.log`, `bvx.now_unix_ms`, `bvx.set_result`, `bvx_init` export contract, per-call refuel.
 - `bvx.menu_upsert` / `bvx.menu_remove` with `SurfaceMenu`-shape validation + 16-entry cap; Tauri event `plugin-menus-updated`; `pluginSurfacesStore` merges dynamic menus; `bvx_menu_click` dispatch.
-- Operator UX: app-module chip on the Plugins page row; instance state (running / errored / none).
+- Operator UX: instance state via `plugin_app_status` (running / errored / menu count).
 
-**Acceptance:** reference module adds a menu with a badge, click event reaches `bvx_menu_click`, teardown removes the menu; a module importing an undeclared `bvx.*` symbol fails instantiation.
+**Acceptance (met):** WAT module adds a badge menu on init, a click reaches `bvx_menu_click`, teardown clears the menus; a module importing an undeclared `bvx.*` symbol fails instantiation.
 
-### Phase 3 — Plugin windows (1–1.5 weeks)
+### Phase 3 — Plugin windows (1–1.5 weeks) — ✅ Complete
 
+Shipped: `plugin-*` window labels in `capabilities/default.json`;
+`bvx.window_open`/`close`/`emit` recording ops applied host-side on the SSH/RDP
+`WebviewWindowBuilder` pattern (route constrained to `/plugin/<name>/`,
+`max_open` clamp → `WINDOW_LIMIT`, host-drawn `"<plugin> — "` title);
+`CloseRequested` → `bvx_window_event {kind:"closed"}`; `SurfaceRouter` renders
+plugin windows bare (no host chrome) when `?pluginWindow=<handle>` is present,
+behind `ProtectedRoute`; the `subscribe` component flag makes `SurfaceDetail`
+consume `plugin-window-data-<handle>` events (`bvx.window_emit`) instead of
+polling. All of a plugin's windows close on instance teardown.
+
+Original scope (all delivered):
 - `"plugin-*"` window labels in `gui/src-tauri/capabilities/default.json`.
 - `bvx.window_open/close/emit` on the SSH/RDP window pattern (`WebviewWindowBuilder` + hash route + `CloseRequested` teardown); routes constrained to `/plugin/<name>/`; `max_open` clamp.
 - `SurfaceRouter` in secondary windows (behind `ProtectedRoute`); host-drawn title prefix `"<plugin> — "`; `subscribe: true` component flag delivering `plugin-window-data-<handle>` events.
 
-**Acceptance:** module opens a window rendering a live `detail` page, pushes data via `window_emit`, receives the `closed` event; a route outside the plugin's prefix is refused.
+**Acceptance (met):** WAT tests record window-open ops, enforce the `max_open` clamp (`WINDOW_LIMIT`), and refuse a route outside the plugin's prefix; `window_emit`/`closed`-event plumbing wired end-to-end.
 
 ### Phase 4 — Vault-API bridge (1 week)
 

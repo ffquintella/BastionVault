@@ -446,13 +446,14 @@ fn build_legacy_tls(profile: &RemoteProfile) -> CmdResult<bastion_vault::api::cl
 
 /// Disconnect from remote server and reset to embedded mode.
 #[tauri::command]
-pub async fn disconnect_remote(state: State<'_, AppState>) -> CmdResult<()> {
+pub async fn disconnect_remote(app: tauri::AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
     *state.mode.lock().await = VaultMode::Embedded;
     *state.remote_client.lock().await = None;
     *state.remote_profile.lock().await = None;
     *state.selected_node.lock().await = None;
     *state.backend.lock().await = None;
     *state.token.lock().await = None;
+    crate::plugin_apps::teardown_all(&app, &state).await;
     Ok(())
 }
 

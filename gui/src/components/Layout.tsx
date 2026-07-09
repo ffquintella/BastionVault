@@ -10,6 +10,7 @@ import { AboutModal } from "./AboutModal";
 import * as api from "../lib/api";
 import { PluginMenuSlot } from "./PluginMenuSlot";
 import { usePluginSurfacesStore } from "../stores/pluginSurfacesStore";
+import { listen } from "@tauri-apps/api/event";
 import { useToast } from "./ui/Toast";
 import { SUPER_ADMIN, isAdminUser } from "../lib/access";
 
@@ -178,6 +179,24 @@ export function Layout({ children }: LayoutProps) {
     startWatchPluginSurfaces,
     clearPluginSurfaces,
   ]);
+
+  // Plugin App Extensions v2 (Phase 2): the Tauri backend pushes the
+  // union of every app module's dynamic menus on `plugin-menus-updated`
+  // (after init, a menu click, a tick, or teardown). Mirror it into the
+  // store so `PluginMenuSlot` renders dynamic menus alongside static
+  // ones. Mount-once with the standard promise-unlisten cleanup.
+  const setDynamicMenus = usePluginSurfacesStore((s) => s.setDynamicMenus);
+  useEffect(() => {
+    let cancelled = false;
+    const unlisten = listen<api.DynamicMenu[]>("plugin-menus-updated", (ev) => {
+      if (cancelled) return;
+      setDynamicMenus(ev.payload ?? []);
+    });
+    return () => {
+      cancelled = true;
+      void unlisten.then((u) => u());
+    };
+  }, [setDynamicMenus]);
 
   // Phase 5: surface a non-modal toast whenever the watcher picks up
   // a new plugin-surface version. The store flips `lastUpdate` to

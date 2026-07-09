@@ -142,11 +142,13 @@ impl SurfaceCache {
                     .iter()
                     .map(|h| (String::new(), h.clone()))
                     .collect(),
-                // Grants live in the bundle envelope, not the cached
-                // per-plugin snapshot; the GUI cache layer replaces this
-                // synthesised bundle via `Backend::active_surfaces`
-                // whenever the etag check fails.
+                // Grants and the app-module descriptor live in the
+                // bundle envelope, not the cached per-plugin snapshot;
+                // the GUI cache layer replaces this synthesised bundle
+                // via `Backend::active_surfaces` whenever the etag check
+                // fails.
                 grant: None,
+                app_module: None,
             });
         }
         Some(ActiveSurfaceBundle { etag: meta.etag, entries })
@@ -528,6 +530,8 @@ mod tests {
             mount: format!("secret/{plugin}"),
             surface: sample_surface(plugin),
             assets: vec![],
+            grant: None,
+            app_module: None,
         };
         ActiveSurfaceBundle {
             etag: etag.to_string(),
@@ -627,6 +631,8 @@ mod tests {
             mount: "secret/extra".into(),
             surface: sample_surface("extra"),
             assets: vec![],
+            grant: None,
+            app_module: None,
         });
         bundle_a.etag = ActiveSurfaceBundle::compute_etag(&bundle_a.entries);
         let bundle_b = bundle_with("totp", "etag-2");

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import * as api from "../../lib/api";
 import { extractError } from "../../lib/error";
 
@@ -8,16 +9,25 @@ import { extractError } from "../../lib/error";
  * `live: true` re-issue the read on a 5-second cadence while the
  * page is mounted — useful for things like a TOTP code that
  * advances on its own.
+ *
+ * Extensibility v2 (Phase 3): when `spec.subscribe` is set and the
+ * component is rendered inside a plugin window (`windowHandle`
+ * present), it instead consumes `plugin-window-data-<handle>` events
+ * pushed by the plugin's app module via `bvx.window_emit` — no polling.
  */
 export function SurfaceDetail({
   spec,
   mount,
+  windowHandle,
 }: {
   spec: api.SurfaceDetail;
   mount: string;
+  windowHandle?: string | null;
 }) {
   const [data, setData] = useState<Record<string, unknown> | null>(null);
   const [err, setErr] = useState<string | null>(null);
+
+  const subscribed = !!spec.subscribe && windowHandle != null;
 
   useEffect(() => {
     let cancelled = false;
@@ -36,7 +46,23 @@ export function SurfaceDetail({
       }
     }
 
+    // Load once for the initial paint regardless of mode.
     void load();
+
+    if (subscribed) {
+      // Push mode: the app module drives updates via window_emit.
+      const unlisten = listen<Record<string, unknown>>(
+        `plugin-window-data-${windowHandle}`,
+        (ev) => {
+          if (!cancelled) setData(ev.payload ?? null);
+        },
+      );
+      return () => {
+        cancelled = true;
+        void unlisten.then((u) => u());
+      };
+    }
+
     if (spec.fields.some((f) => f.live)) {
       timer = setInterval(load, 5000);
     }
@@ -44,7 +70,7 @@ export function SurfaceDetail({
       cancelled = true;
       if (timer) clearInterval(timer);
     };
-  }, [spec.binding.op, spec.binding.path, spec.fields, mount]);
+  }, [spec.binding.op, spec.binding.path, spec.fields, mount, subscribed, windowHandle]);
 
   if (err) {
     return <div className="text-sm text-[var(--color-danger)] p-4">{err}</div>;

@@ -2,6 +2,7 @@ import { Link, useLocation } from "react-router-dom";
 import { useAuthStore } from "../stores/authStore";
 import { usePluginSurfacesStore } from "../stores/pluginSurfacesStore";
 import type { SurfaceSection } from "../lib/api";
+import { pluginAppMenuClick } from "../lib/api";
 
 /**
  * Sidebar slot that renders every plugin-contributed menu entry
@@ -19,20 +20,31 @@ export function PluginMenuSlot({ section }: { section: SurfaceSection }) {
   if (items.length === 0) return null;
   return (
     <div className="mt-1 space-y-0.5">
-      {items.map(({ menu }) => {
+      {items.map(({ menu, plugin, dynamic }) => {
         const active = location.pathname.startsWith(menu.route);
         return (
           <Link
-            key={menu.id}
+            key={dynamic ? `dyn:${plugin}:${menu.id}` : menu.id}
             to={menu.route}
-            className={`block px-2 py-1.5 rounded-md text-sm transition-colors truncate ${
+            onClick={() => {
+              // Notify the plugin's app module of the click so it can
+              // react (open a window, refresh a badge). Server ACLs
+              // remain authoritative; this is a UX callback only.
+              if (dynamic) void pluginAppMenuClick(plugin, menu.id);
+            }}
+            className={`flex items-center justify-between gap-2 px-2 py-1.5 rounded-md text-sm transition-colors ${
               active
                 ? "bg-[var(--color-primary-soft)] text-[var(--color-primary)]"
                 : "text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
             }`}
             title={menu.label}
           >
-            {menu.label}
+            <span className="truncate">{menu.label}</span>
+            {menu.badge && (
+              <span className="shrink-0 rounded-full bg-[var(--color-primary-soft)] text-[var(--color-primary)] text-xs px-1.5 py-0.5 tabular-nums">
+                {menu.badge}
+              </span>
+            )}
           </Link>
         );
       })}
