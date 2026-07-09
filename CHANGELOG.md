@@ -149,6 +149,26 @@ EXAMPLE ENTRY:
   status, a revoke button, and the call ring. Without a grant, `bvx.net_http` returns
   `NET_NOT_GRANTED`.
 
+- **Phase 6 — SDK app-module authoring** (Phase 6, `features/plugin-app-extensions.md`) --
+  `bastion-plugin-sdk` gains an `app` feature: a typed `AppHost` wrapping every
+  `bvx.*` import (`log`/`now_unix_ms`/`set_result`, `menu_upsert`/`menu_remove`,
+  `window_open`/`close`/`emit`, `api_request`, `http`) with the same buffer-retry
+  ergonomics as the existing `Host`, an `AppModule` trait (`init`/`menu_click`/
+  `window_event`/`tick`, all defaulting to no-ops), and an `app_module!` macro that
+  emits the `bvx_*` exports. On non-wasm targets the imports fall back to in-memory
+  stubs (captured menu/window calls, scripted API + network responses) so authors
+  can `cargo test` their handlers without a GUI.
+
+- **Phase 7 — server-side `bv.net_http`** (Phase 7, `features/plugin-app-extensions.md`) --
+  server WASM plugins get constrained outbound HTTPS, closing the gap that forced
+  the process runtime (with unconstrained OS egress) for any plugin needing the
+  network. The Phase-5 enforcement is now a shared, pure `net_gate` module plus a
+  shared SSRF-safe `net_http::fetch` (both in the `bastion_vault` crate, reused by
+  the client `bvx.net_http`), so the redirect/SSRF logic can't drift between the two
+  runtimes. `bv.net_http` is gated by the same admin grant record (loaded into the
+  plugin's runtime context at build time; a changed/absent request → `NET_NOT_GRANTED`)
+  and every call is audited (`sys/plugins/<name>/net`).
+
 ## [0.25.1] - 2026-07-08
 
 ### Changed

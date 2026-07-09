@@ -47,14 +47,10 @@ pub const MAX_DYNAMIC_MENUS: usize = 16;
 /// Floor on `bvx_tick` cadence.
 pub const MIN_TICK_INTERVAL_MS: i64 = 30_000;
 
-/// Response-body cap for `bvx.net_http` (Phase 5).
-pub const MAX_NET_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-/// Ceiling on the per-plugin network call ring buffer (Phase 5).
+/// Ceiling on the per-plugin network call ring buffer (Phase 5). The
+/// response cap / timeout / redirect limits live in the shared
+/// `bastion_vault::plugins::net_http`.
 pub const NET_RING_CAP: usize = 100;
-/// Hard timeout ceiling for `bvx.net_http` (Phase 5).
-pub const NET_TIMEOUT_MAX_MS: u64 = 60_000;
-/// Redirect-hop cap for `bvx.net_http` (Phase 5) — every hop re-validated.
-pub const NET_MAX_REDIRECTS: usize = 3;
 
 // Return codes shared with the guest ABI (mirror the server `bv` codes).
 const RC_OK: i32 = 0;
@@ -651,10 +647,8 @@ fn default_method() -> String {
     "GET".to_string()
 }
 
-/// Outcome of a `net_http` attempt: the terminal `(status, body, host)`
-/// on success, or `(guest_code, short_reason, host)` on refusal/failure.
-type NetResult = Result<(u16, Vec<u8>, String), (i32, &'static str, String)>;
-
+/// Build the guest's request, delegate to the shared SSRF-safe fetch,
+/// and record the outcome in the per-plugin call ring.
 async fn net_http_impl(
     caller: &mut Caller<'_, AppCtx>,
     req_ptr: i32,
@@ -662,6 +656,8 @@ async fn net_http_impl(
     out_ptr: i32,
     out_max: i32,
 ) -> i32 {
+    use bastion_vault::plugins::net_http;
+
     let granted = caller.data().net_hosts.clone();
     let https_only = caller.data().net_https_only;
     let at = now_unix_ms();
@@ -687,149 +683,57 @@ async fn net_http_impl(
     };
     let method = req.method.clone();
 
-    match net_fetch(&req, &granted, https_only).await {
-        Ok((status, body, host)) => {
-            let n = body.len();
+    use base64::Engine;
+    let body = match &req.body_b64 {
+        Some(b) => match base64::engine::general_purpose::STANDARD.decode(b) {
+            Ok(v) => Some(v),
+            Err(_) => return RC_INTERNAL,
+        },
+        None => None,
+    };
+    let net_req = net_http::NetRequest {
+        method: req.method,
+        url: req.url,
+        headers: req.headers,
+        body,
+        timeout_ms: req.timeout_ms.unwrap_or(30_000),
+    };
+
+    match net_http::fetch(&net_req, &granted, https_only).await {
+        Ok(resp) => {
+            let n = resp.body.len();
             caller.data_mut().push_net_call(NetCall {
                 at_unix_ms: at,
                 method,
-                host,
-                status: Some(status),
+                host: resp.host,
+                status: Some(resp.status),
                 bytes: n,
                 outcome: "ok".into(),
             });
-            use base64::Engine;
             let out = serde_json::json!({
-                "status": status,
+                "status": resp.status,
                 "bytes": n,
-                "body_b64": base64::engine::general_purpose::STANDARD.encode(&body),
+                "body_b64": base64::engine::general_purpose::STANDARD.encode(&resp.body),
             });
             let out_bytes = serde_json::to_vec(&out).unwrap_or_default();
             write_to_buffer(caller, &out_bytes, out_ptr, out_max)
         }
-        Err((code, reason, host)) => {
+        Err(e) => {
+            let code = match e {
+                net_http::NetFetchError::NotGranted { .. } => RC_NET_NOT_GRANTED,
+                net_http::NetFetchError::HostDenied { .. } => RC_NET_HOST_DENIED,
+                net_http::NetFetchError::Internal { .. } => RC_INTERNAL,
+            };
             caller.data_mut().push_net_call(NetCall {
                 at_unix_ms: at,
                 method,
-                host,
+                host: e.host().to_string(),
                 status: None,
                 bytes: 0,
-                outcome: reason.into(),
+                outcome: e.reason().into(),
             });
             code
         }
-    }
-}
-
-/// Resolve a host:port to its IP set (blocking getaddrinfo on the tokio
-/// blocking pool). Returns `Err(())` on resolution failure.
-async fn resolve_ips(host: &str, port: u16) -> Result<Vec<std::net::IpAddr>, ()> {
-    let hostport = format!("{host}:{port}");
-    tokio::task::spawn_blocking(move || {
-        use std::net::ToSocketAddrs;
-        hostport
-            .to_socket_addrs()
-            .map(|it| it.map(|s| s.ip()).collect::<Vec<_>>())
-            .map_err(|_| ())
-    })
-    .await
-    .map_err(|_| ())?
-}
-
-/// Perform the request with manual, re-validated redirects. Every hop
-/// (including the first) is checked by `net_gate` for scheme/host/port
-/// and SSRF-safe resolved IPs; redirects are capped at
-/// [`NET_MAX_REDIRECTS`]; the response body is streamed with a hard
-/// [`MAX_NET_RESPONSE_BYTES`] cap; the timeout is clamped to
-/// [`NET_TIMEOUT_MAX_MS`]; no cookie jar, no ambient proxy creds.
-async fn net_fetch(req: &NetRequestInput, granted: &[String], https_only: bool) -> NetResult {
-    use futures_util::StreamExt;
-
-    let denied = |reason: &'static str, host: String| (RC_NET_HOST_DENIED, reason, host);
-
-    let mut url =
-        reqwest::Url::parse(&req.url).map_err(|_| denied("bad_url", String::new()))?;
-    let method = reqwest::Method::from_bytes(req.method.to_uppercase().as_bytes())
-        .map_err(|_| (RC_INTERNAL, "bad_method", String::new()))?;
-    let timeout = std::time::Duration::from_millis(
-        req.timeout_ms.unwrap_or(30_000).min(NET_TIMEOUT_MAX_MS),
-    );
-    let body = match &req.body_b64 {
-        Some(b) => {
-            use base64::Engine;
-            Some(
-                base64::engine::general_purpose::STANDARD
-                    .decode(b)
-                    .map_err(|_| (RC_INTERNAL, "bad_body_b64", String::new()))?,
-            )
-        }
-        None => None,
-    };
-
-    // No redirect-following (we re-validate manually), no cookie store
-    // (reqwest default), explicit timeout.
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(timeout)
-        .build()
-        .map_err(|_| (RC_INTERNAL, "client", String::new()))?;
-
-    let mut hops = 0usize;
-    loop {
-        let host = url.host_str().unwrap_or_default().to_string();
-        // 1–3: scheme / host allowlist / port.
-        let target =
-            crate::net_gate::validate_url(url.scheme(), url.host_str(), url.port(), granted, https_only)
-                .map_err(|e| match e {
-                    crate::net_gate::NetError::NotGranted => {
-                        (RC_NET_NOT_GRANTED, "not_granted", host.clone())
-                    }
-                    crate::net_gate::NetError::HostDenied => (RC_NET_HOST_DENIED, "host_denied", host.clone()),
-                })?;
-        // 4: SSRF — resolved IPs must be public unless explicitly granted.
-        let port = url.port_or_known_default().unwrap_or(443);
-        let ips = resolve_ips(&target.host, port)
-            .await
-            .map_err(|_| denied("dns", host.clone()))?;
-        crate::net_gate::check_resolved_ips(&target, &ips).map_err(|_| denied("ssrf", host.clone()))?;
-
-        let mut rb = client.request(method.clone(), url.clone());
-        for (k, v) in &req.headers {
-            rb = rb.header(k, v);
-        }
-        if let Some(b) = &body {
-            rb = rb.body(b.clone());
-        }
-        let resp = rb.send().await.map_err(|_| denied("send", host.clone()))?;
-        let status = resp.status();
-
-        if status.is_redirection() {
-            if hops >= NET_MAX_REDIRECTS {
-                return Err(denied("too_many_redirects", host));
-            }
-            let loc = resp
-                .headers()
-                .get(reqwest::header::LOCATION)
-                .and_then(|h| h.to_str().ok())
-                .ok_or_else(|| denied("redirect_no_location", host.clone()))?;
-            let next = url.join(loc).map_err(|_| denied("bad_redirect", host.clone()))?;
-            url = next;
-            hops += 1;
-            continue; // re-validate the new hop from the top
-        }
-
-        // Terminal response — stream the body with a hard cap.
-        let code = status.as_u16();
-        let mut stream = resp.bytes_stream();
-        let mut buf: Vec<u8> = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|_| denied("body", host.clone()))?;
-            if buf.len() + chunk.len() > MAX_NET_RESPONSE_BYTES {
-                return Err(denied("body_too_large", host));
-            }
-            buf.extend_from_slice(&chunk);
-        }
-        return Ok((code, buf, host));
     }
 }
 

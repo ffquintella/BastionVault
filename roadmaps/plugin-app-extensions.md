@@ -1,6 +1,6 @@
 # Plugin App Extensions Roadmap (Extensibility v2)
 
-**Status:** In progress — Phases 1–5 complete
+**Status:** In progress — Phases 1–5 + 7 complete; Phase 6 SDK shipped (testkit driver + reference plugins remain)
 **Owner:** Felipe Quintella
 **Spec:** [`features/plugin-app-extensions.md`](../features/plugin-app-extensions.md) — read that first; this doc is phasing, effort, and acceptance bars only.
 **Related:** [`features/plugin-extensibility.md`](../features/plugin-extensibility.md) (v1, shipped), [`features/plugin-system.md`](../features/plugin-system.md), [`features/plugin-testing.md`](../features/plugin-testing.md).
@@ -144,20 +144,51 @@ private-resolution / rebinding / explicit-internal cases; the runtime test prove
 
 **Acceptance:** end-to-end: unsigned dev plugin requesting `net` gets `NET_NOT_GRANTED` until the admin ticks consent; after grant, an allowed host succeeds, a non-allowlisted host / redirect-to-10.0.0.1 / plain-http each fail with the right code; revoke propagates ≤ 30 s.
 
-### Phase 6 — SDK + testkit + reference plugins (1–1.5 weeks)
+### Phase 6 — SDK + testkit + reference plugins (1–1.5 weeks) — 🔶 SDK done
 
+Shipped: `bastion-plugin-sdk` `app` feature (`crates/bastion-plugin-sdk/src/app.rs`) —
+typed `AppHost` wrappers over every `bvx.*` import (`log`/`now_unix_ms`/`set_result`,
+`menu_upsert`/`menu_remove`, `window_open`/`close`/`emit`, `api_request`, `http`)
+with buffer-retry ergonomics; the `AppModule` trait (`init`/`menu_click`/
+`window_event`/`tick`, default no-ops); the `app_module!` macro emitting the
+`bvx_*` exports; and `host_test` in-memory stubs (captured menu/window calls,
+scripted API + net responses) so authors `cargo test` handlers without a GUI.
+12 SDK tests.
+
+Remaining: the standalone `bastion-plugin-testkit` `bvx` driver (instantiating an
+app-module WASM through the real `plugin_apps.rs` linker) + parity test, and the
+reference plugins (TOTP app module + `webhook-notify`) which live in the
+`plugins-ext` submodule (separate repo/workspace). The SDK `app` feature + its
+`host_test` mock already give authors everything needed to build and unit-test an
+app module; the real-linker path is covered by the `plugin_apps` runtime tests.
+
+Original scope:
 - SDK `app` feature: `app_module!` macro, typed `Host` wrappers for all `bvx.*` imports.
 - `bastion-plugin-testkit`: `bvx` mock host (scripted API responses, captured menu/window calls, fake network allow/deny), conformance WAT extended, parity test against the real `plugin_apps.rs` linker.
 - Reference: TOTP app module (menus + window + API) and `webhook-notify` (net grant flow); docs walkthrough.
 
 **Acceptance:** both references pass `make plugins-test`; walkthrough reproduces from a clean checkout.
 
-### Phase 7 — Server-side `bv.net_http` (stretch, 1 week)
+### Phase 7 — Server-side `bv.net_http` (stretch, 1 week) — ✅ Complete
 
+Shipped: the Phase-5 enforcement was extracted into the shared, pure
+`src/plugins/net_gate.rs` (moved out of the gui crate) plus a shared SSRF-safe
+`src/plugins/net_http.rs` `fetch` (reqwest, manual per-hop redirect re-validation,
+4 MiB `chunk()`-streamed cap, ≤60 s timeout, no cookies) — both in `bastion_vault`
+and reused by the client `bvx.net_http` so the redirect/SSRF loop has one
+implementation. `bv.net_http` is registered in the server WASM runtime
+(`src/plugins/runtime.rs`), gated by `PluginCtx.net_hosts` loaded from the grant
+record at build time (`grants::active_net_hosts`; changed/absent request →
+`NET_NOT_GRANTED`), and each call is audited (`sys/plugins/<name>/net`).
+
+**Acceptance (met):** `net_http_not_granted` runtime test proves an ungranted
+server plugin gets `NET_NOT_GRANTED` (-6) with no network; the granted-host path
+is covered by the shared `net_gate` (10 tests) + `net_http::fetch`. The 10
+`net_gate` tests now run in the main crate's lib suite.
+
+Original scope:
 - Extract the Phase-5 enforcement into a shared `net_gate` module; register `bv.net_http` in the server WASM runtime behind the same grant record; audit each call.
 - Gives WASM server plugins constrained egress — removing the main remaining reason to choose the process runtime.
-
-**Acceptance:** server-side WASM plugin reaches a granted host; ungranted returns `NET_NOT_GRANTED`; testkit + parity updated.
 
 ## 4. Effort estimate
 

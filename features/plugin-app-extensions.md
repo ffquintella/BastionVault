@@ -1,6 +1,6 @@
 # Plugin App Extensions (Plugin Extensibility v2)
 
-**Status:** In progress — **Phases 1–5 shipped**. P1 (server): `capabilities.app` manifest + validation + widening guard, `HOST_ABI_MINOR=1`, `src/plugins/grants.rs` net-grant records + `GET/PUT/DELETE /v1/sys/plugins/<name>/grants`, grant + app-module descriptor in the active-surfaces bundle. P2 (client): stateful Tauri-backend app-module runtime (`gui/src-tauri/src/plugin_apps.rs`, async Wasmtime) with `bvx.log`/`now`/`set_result` + dynamic menus (badge, 16-cap, `plugin-menus-updated`, `bvx_menu_click`). P3 (client): plugin windows (`bvx.window_*`, `plugin-*` labels, `pluginWindow` bare render, `subscribe` flag). P4 (client): `bvx.api_request` vault bridge (mount-scoped `api_paths`, session token, embedded+remote). P5 (client): `bvx.net_http` with the `net_gate` enforcer (scheme/host/wildcard + SSRF guard, per-hop redirect re-validation, 4 MiB/≤60 s caps, no cookies), per-plugin call ring, and the **Network access** admin consent panel. Phases 6–7 pending.
+**Status:** In progress — **Phases 1–5 shipped**. P1 (server): `capabilities.app` manifest + validation + widening guard, `HOST_ABI_MINOR=1`, `src/plugins/grants.rs` net-grant records + `GET/PUT/DELETE /v1/sys/plugins/<name>/grants`, grant + app-module descriptor in the active-surfaces bundle. P2 (client): stateful Tauri-backend app-module runtime (`gui/src-tauri/src/plugin_apps.rs`, async Wasmtime) with `bvx.log`/`now`/`set_result` + dynamic menus (badge, 16-cap, `plugin-menus-updated`, `bvx_menu_click`). P3 (client): plugin windows (`bvx.window_*`, `plugin-*` labels, `pluginWindow` bare render, `subscribe` flag). P4 (client): `bvx.api_request` vault bridge (mount-scoped `api_paths`, session token, embedded+remote). P5 (client): `bvx.net_http` with the `net_gate` enforcer (scheme/host/wildcard + SSRF guard, per-hop redirect re-validation, 4 MiB/≤60 s caps, no cookies), per-plugin call ring, and the **Network access** admin consent panel. P6: `bastion-plugin-sdk` `app` feature (`AppHost` typed `bvx.*` wrappers, `AppModule` trait, `app_module!` macro, host_test stubs) — the testkit `bvx` driver + reference plugins (`plugins-ext` submodule) remain. P7: shared `net_gate` + `net_http::fetch` (reused by client + server) and server-side `bv.net_http` gated by the same grant + audited.
 **Owner:** Felipe Quintella
 **Related:** [`features/plugin-system.md`](plugin-system.md) (server substrate), [`features/plugin-extensibility.md`](plugin-extensibility.md) (v1 surfaces + form hooks), [`roadmaps/plugin-app-extensions.md`](../roadmaps/plugin-app-extensions.md) (phasing), [`features/plugin-testing.md`](plugin-testing.md) (test infrastructure).
 
@@ -241,8 +241,8 @@ See [`roadmaps/plugin-app-extensions.md`](../roadmaps/plugin-app-extensions.md).
 | 3 | ✅ **Done.** Plugin windows (capability wildcard, `window_*`, window events, `subscribe` flag) | Yes |
 | 4 | ✅ **Done.** `bvx.api_request` bridge (shared validation with `plugin_surface_dispatch`) | Yes |
 | 5 | ✅ **Done.** `bvx.net_http` + consent UX + call ring buffer | Yes |
-| 6 | SDK `app` feature + testkit `bvx` mocks + reference plugins + docs | Yes |
-| 7 | (Stretch) server-side `bv.net_http` behind the same grant | Yes |
+| 6 | 🔶 **SDK `app` feature done** (macro + `AppHost` + host_test stubs); testkit `bvx` driver + reference plugins (`plugins-ext`) remain | Yes |
+| 7 | ✅ **Done.** Server-side `bv.net_http` behind the same grant (shared `net_gate` + `net_http`) | Yes |
 
 ## Tracking
 

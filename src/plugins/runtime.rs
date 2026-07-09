@@ -153,6 +153,13 @@ struct PluginCtx {
     /// supplied `key_handle` literally against this set before
     /// dispatching to the Transit backend.
     allowed_keys: std::collections::BTreeSet<String>,
+    /// Extensibility v2 (Phase 7): admin-granted outbound hosts for
+    /// `bv.net_http`, loaded from the grant record at build time. Empty
+    /// means the plugin has no live network grant → `NET_NOT_GRANTED`.
+    net_hosts: Vec<String>,
+    /// Manifest `capabilities.app.net.https_only` — governs the
+    /// cleartext-`http` exception in `net_gate`.
+    net_https_only: bool,
 }
 
 impl PluginCtx {
@@ -252,6 +259,25 @@ impl WasmRuntime {
             .memory_size(self.memory_budget)
             .build();
 
+        // Extensibility v2 (Phase 7): load the live network grant (if
+        // any) so `bv.net_http` is gated by the same admin-approved
+        // record the client enforcer uses. A changed/absent request →
+        // no hosts → `NET_NOT_GRANTED`.
+        let net_hosts = match &core {
+            Some(c) => super::grants::active_net_hosts(c.barrier.as_storage(), &manifest.name, manifest)
+                .await
+                .unwrap_or(None)
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let net_https_only = manifest
+            .capabilities
+            .app
+            .net
+            .as_ref()
+            .map(|n| n.https_only)
+            .unwrap_or(true);
+
         let ctx = PluginCtx {
             plugin_name: manifest.name.clone(),
             log_emit: manifest.capabilities.log_emit,
@@ -267,6 +293,8 @@ impl WasmRuntime {
                 .iter()
                 .cloned()
                 .collect(),
+            net_hosts,
+            net_https_only,
         };
 
         let mut store: Store<PluginCtx> = Store::new(self.cache.engine(), ctx);
@@ -589,10 +617,131 @@ fn register_host_imports(
         )
         .map_err(|e| RuntimeError::Engine(e.to_string()))?;
 
+    // Extensibility v2 (Phase 7): admin-granted outbound HTTPS. Gated by
+    // the grant record loaded into `PluginCtx.net_hosts` at build time,
+    // enforced by the shared `net_gate` + `net_http` (same code path as
+    // the client `bvx.net_http`). Ungranted → `NET_NOT_GRANTED`.
+    linker
+        .func_wrap_async(
+            "bv",
+            "net_http",
+            |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32)| {
+                let (rp, rl, op, om) = args;
+                Box::new(async move { net_http_impl(&mut caller, rp, rl, op, om).await })
+            },
+        )
+        .map_err(|e| RuntimeError::Engine(e.to_string()))?;
+
     // Suppress unused-variable warning when the manifest is not consulted
     // here yet — kept for future selective-registration logic.
     let _ = manifest;
     Ok(())
+}
+
+// Return codes for `bv.net_http` (mirror the client `bvx.net_http`).
+const NET_NOT_GRANTED: i32 = -6;
+const NET_HOST_DENIED: i32 = -7;
+
+#[derive(serde::Deserialize)]
+struct NetHttpRequest {
+    #[serde(default = "net_default_method")]
+    method: String,
+    url: String,
+    #[serde(default)]
+    headers: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    body_b64: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+fn net_default_method() -> String {
+    "GET".to_string()
+}
+
+/// `bv.net_http` — server WASM plugins' constrained egress. Reads the
+/// `{method,url,headers,body_b64,timeout_ms}` request, dispatches through
+/// the shared SSRF-safe `net_http::fetch` under the plugin's grant, writes
+/// the `{status,bytes,body_b64}` response, and audits the call.
+async fn net_http_impl(
+    caller: &mut Caller<'_, PluginCtx>,
+    req_ptr: i32,
+    req_len: i32,
+    out_ptr: i32,
+    out_max: i32,
+) -> i32 {
+    use base64::Engine;
+
+    let granted = caller.data().net_hosts.clone();
+    let https_only = caller.data().net_https_only;
+    let plugin = caller.data().plugin_name.clone();
+    let core = caller.data().core.clone();
+
+    let audit = |core: &Option<Arc<Core>>, method: &str, host: &str, outcome: &str, status: Option<u16>| {
+        if let Some(c) = core {
+            let mut body = serde_json::Map::new();
+            body.insert("method".into(), method.into());
+            body.insert("host".into(), host.into());
+            body.insert("outcome".into(), outcome.into());
+            if let Some(s) = status {
+                body.insert("status".into(), s.into());
+            }
+            let c = c.clone();
+            let path = format!("sys/plugins/{plugin}/net");
+            // Fire-and-forget: audit-emit must not fail the call.
+            tokio::spawn(async move {
+                crate::audit::emit_sys_audit(&c, "", &path, crate::logical::Operation::Write, Some(body), None).await;
+            });
+        }
+    };
+
+    if granted.is_empty() {
+        audit(&core, "", "", "not_granted", None);
+        return NET_NOT_GRANTED;
+    }
+
+    let Some(bytes) = read_bytes(caller, req_ptr, req_len) else {
+        return STORAGE_INTERNAL_ERROR;
+    };
+    let Ok(req) = serde_json::from_slice::<NetHttpRequest>(&bytes) else {
+        return STORAGE_INTERNAL_ERROR;
+    };
+    let method = req.method.clone();
+    let body = match &req.body_b64 {
+        Some(b) => match base64::engine::general_purpose::STANDARD.decode(b) {
+            Ok(v) => Some(v),
+            Err(_) => return STORAGE_INTERNAL_ERROR,
+        },
+        None => None,
+    };
+    let net_req = super::net_http::NetRequest {
+        method: req.method,
+        url: req.url,
+        headers: req.headers,
+        body,
+        timeout_ms: req.timeout_ms.unwrap_or(30_000),
+    };
+
+    match super::net_http::fetch(&net_req, &granted, https_only).await {
+        Ok(resp) => {
+            audit(&core, &method, &resp.host, "ok", Some(resp.status));
+            let out = serde_json::json!({
+                "status": resp.status,
+                "bytes": resp.body.len(),
+                "body_b64": base64::engine::general_purpose::STANDARD.encode(&resp.body),
+            });
+            let out_bytes = serde_json::to_vec(&out).unwrap_or_default();
+            write_to_buffer(caller, &out_bytes, out_ptr, out_max)
+        }
+        Err(e) => {
+            audit(&core, &method, e.host(), e.reason(), None);
+            match e {
+                super::net_http::NetFetchError::NotGranted { .. } => NET_NOT_GRANTED,
+                super::net_http::NetFetchError::HostDenied { .. } => NET_HOST_DENIED,
+                super::net_http::NetFetchError::Internal { .. } => STORAGE_INTERNAL_ERROR,
+            }
+        }
+    }
 }
 
 /// Common crypto-op dispatcher. The plugin sends:
@@ -1129,6 +1278,30 @@ mod tests {
         match out.outcome {
             InvokeOutcome::PluginError(7) => {}
             other => panic!("expected PluginError(7), got {other:?}"),
+        }
+    }
+
+    /// Phase 7: `bv.net_http` with no live grant (no `core` → empty
+    /// `net_hosts`) returns `NET_NOT_GRANTED` (-6) without any network,
+    /// surfacing as `PluginError(-6)`. The granted-host path is covered
+    /// by the shared `net_gate` unit tests + `net_http::fetch`.
+    #[tokio::test]
+    async fn net_http_not_granted() {
+        let wat = r#"
+        (module
+          (import "bv" "net_http" (func $net (param i32 i32 i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (func (export "bv_alloc") (param i32) (result i32) i32.const 4096)
+          (func (export "bv_run") (param i32 i32) (result i32)
+            (call $net (i32.const 0) (i32.const 0) (i32.const 4096) (i32.const 1024))))
+        "#;
+        let bytes = wat::parse_str(wat).unwrap();
+        let manifest = manifest_for(&bytes);
+        let runtime = WasmRuntime::new().unwrap();
+        let out = runtime.invoke(&manifest, &bytes, b"", None).await.unwrap();
+        match out.outcome {
+            InvokeOutcome::PluginError(-6) => {}
+            other => panic!("expected PluginError(-6) NET_NOT_GRANTED, got {other:?}"),
         }
     }
 

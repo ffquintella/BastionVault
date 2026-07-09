@@ -26,6 +26,8 @@ pub mod config;
 pub mod grants;
 pub mod logical_backend;
 pub mod manifest;
+pub mod net_gate;
+pub mod net_http;
 pub mod metrics;
 pub mod module_cache;
 pub mod process_runtime;

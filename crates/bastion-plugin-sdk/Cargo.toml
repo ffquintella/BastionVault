@@ -47,6 +47,11 @@ json = ["dep:serde", "dep:serde_json"]
 # serialise/deserialise glue around the hook export.
 surface = ["dep:bv_plugin_surface", "json"]
 
+# Extensibility v2 (Phase 6): app-module authoring — the `bastion_plugin_sdk::app`
+# module (`AppHost` typed `bvx.*` wrappers, the `AppModule` trait, and the
+# `app_module!` macro). Implies `json` for the request/response marshaling.
+app = ["json"]
+
 # Replace `extern "C"` host imports with thread-local stubs so plugin
 # authors can `cargo test` their handlers on the host. Implies the SDK
 # does not generate `#[no_mangle]` exports — those only appear in real

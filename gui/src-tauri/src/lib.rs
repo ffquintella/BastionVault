@@ -2,7 +2,6 @@ mod backend;
 mod commands;
 mod embedded;
 mod error;
-mod net_gate;
 mod plugin_apps;
 mod plugin_hooks;
 mod preferences;

@@ -50,6 +50,10 @@ use alloc::vec::Vec;
 mod host;
 pub use host::{Host, HostError, LogLevel};
 
+/// Extensibility v2 (Phase 6): app-module authoring surface.
+#[cfg(feature = "app")]
+pub mod app;
+
 #[cfg(feature = "host_test")]
 pub use host::test_support;
 

@@ -154,11 +154,6 @@ pem = "3.0"
 # await backend dispatch / HTTPS, so the store is driven with
 # `call_async` / `func_wrap_async` (same pattern as the server runtime).
 wasmtime = { version = "46", default-features = false, features = ["cranelift", "runtime", "async"] }
-# Extensibility v2 (Phase 5): `bvx.net_http` outbound client. rustls-TLS
-# to match the workspace TLS story; redirects are handled manually
-# (disabled here) so every hop is re-validated by `net_gate`, and there
-# is no cookie store (reqwest default) — no ambient credentials leak.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 # Used by `plugin_hooks::HookError` for `#[derive(Error)]`. Other GUI
 # error types historically `impl Display` by hand; the hook runner
 # has enough variants that the macro saves a meaningful chunk of
