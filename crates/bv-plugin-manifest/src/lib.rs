@@ -121,7 +121,96 @@ pub struct Capabilities {
     /// (the `register!` macro emits a single-shot loop).
     #[serde(default)]
     pub long_lived: bool,
+
+    /// Extensibility v2 (app extensions): programmatic app-module
+    /// capabilities — dynamic menus, plugin windows, the vault-API
+    /// bridge, and network. All fields default off, so a v1 plugin (no
+    /// `app` block) is byte-identical to before. Every field
+    /// participates in the catalog's capability-widening guard, and the
+    /// `net` request additionally requires a separate admin grant at
+    /// install (see `bastion_vault::plugins::grants`). A non-default
+    /// `app` block requires `abi_version` minor ≥ 1 (`"1.1"`).
+    ///
+    /// `skip_serializing_if` omits a default (v1) app block from the
+    /// canonical signing message, so **already-signed v1 plugins keep
+    /// verifying** — same discipline as `surface` / `client_assets`.
+    /// Only a plugin that actually declares an app capability changes
+    /// its own signed bytes.
+    #[serde(default, skip_serializing_if = "AppCapabilities::is_default")]
+    pub app: AppCapabilities,
 }
+
+/// Extensibility v2: the app-module capability surface. Requesting a
+/// capability here is necessary but, for `net`, not sufficient — the
+/// admin grant is the second key (see `features/plugin-app-extensions.md`
+/// § "The admin network grant").
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppCapabilities {
+    /// Enables `bvx.menu_upsert` / `bvx.menu_remove`.
+    #[serde(default)]
+    pub dynamic_menus: bool,
+    /// Enables `bvx.window_*`. `max_open` caps concurrently-open plugin
+    /// windows; the host clamps to ≤ [`MAX_PLUGIN_WINDOWS`]. `0` (the
+    /// default) disables windows entirely.
+    #[serde(default)]
+    pub windows: WindowsCapabilities,
+    /// Enables `bvx.api_request`. Each entry must start with `{mount}`,
+    /// contain no `..`, and not be absolute — the same rules as surface
+    /// bindings. Empty (default) disables the vault-API bridge.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub api_paths: Vec<String>,
+    /// Requests the network capability. `None` (default) means the
+    /// plugin never touches the network. A `Some` request is pinned at
+    /// registration but only usable after an admin grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net: Option<NetCapabilities>,
+}
+
+impl AppCapabilities {
+    /// True when the plugin declares *any* app-module capability. Used
+    /// to gate the `abi_version` minor requirement: a plugin that ships
+    /// an `app` block must target ABI `1.1`.
+    pub fn is_declared(&self) -> bool {
+        self.dynamic_menus
+            || self.windows.max_open > 0
+            || !self.api_paths.is_empty()
+            || self.net.is_some()
+    }
+
+    /// `true` when this is the default (no-op) app block — used as the
+    /// `skip_serializing_if` predicate so a v1 plugin's canonical
+    /// signing message is unchanged by this field's existence.
+    pub fn is_default(&self) -> bool {
+        !self.is_declared()
+    }
+}
+
+/// Window capability. `max_open` is the hard cap on concurrently-open
+/// plugin windows this plugin may hold.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WindowsCapabilities {
+    #[serde(default)]
+    pub max_open: u32,
+}
+
+/// Network capability request. The `hosts` allowlist is validated at
+/// registration with the same rules as `allowed_hosts`; the admin grant
+/// is pinned to a SHA-256 over this struct so any change (even a
+/// narrowing) voids the grant until re-approved.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetCapabilities {
+    /// Requested outbound host allowlist. No bare `*`, no ports,
+    /// wildcard only as the leading label (`*.example.com`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
+    /// When `true` (default), the client enforcer refuses plain `http`.
+    #[serde(default = "default_true")]
+    pub https_only: bool,
+}
+
+/// Host hard cap on a plugin's concurrently-open windows. `max_open`
+/// values above this are refused at registration.
+pub const MAX_PLUGIN_WINDOWS: u32 = 4;
 
 fn default_true() -> bool {
     true
@@ -227,7 +316,11 @@ fn default_abi_version() -> String {
 /// `(major, ≤ HOST_ABI_MINOR)` are accepted; cross-major mismatches
 /// are refused with a compatibility-matrix link in the error.
 pub const HOST_ABI_MAJOR: u32 = 1;
-pub const HOST_ABI_MINOR: u32 = 0;
+/// Bumped to `1` for Extensibility v2 (app extensions): the additive
+/// `bvx.*` host surface. Plugins that declare `capabilities.app` target
+/// `abi_version = "1.1"`; older hosts (minor 0) refuse them cleanly via
+/// [`check_abi_compatibility`] — the intended downgrade behavior.
+pub const HOST_ABI_MINOR: u32 = 1;
 
 /// Phase 5.4 — parse `"major.minor"` from a manifest. Returns
 /// `Err(_)` for any non-numeric or missing component so a typo'd
@@ -311,6 +404,7 @@ impl PluginManifest {
             }
         }
         let mut asset_names = std::collections::BTreeSet::new();
+        let mut app_module_count = 0usize;
         for a in &self.client_assets {
             if a.name.trim().is_empty() || a.name.contains('/') || a.name.contains("..") {
                 return Err("client_assets entry has invalid name");
@@ -320,6 +414,59 @@ impl PluginManifest {
             }
             if a.sha256.len() != 64 || !a.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
                 return Err("client_assets entry sha256 must be 64 hex chars");
+            }
+            // Extensibility v2: at most one app-module WASM asset per
+            // plugin version.
+            if a.kind == "app-module" {
+                app_module_count += 1;
+                if app_module_count > 1 {
+                    return Err("at most one client_assets entry may have kind=\"app-module\"");
+                }
+            }
+        }
+        self.validate_app_capabilities()?;
+        Ok(())
+    }
+
+    /// Extensibility v2: static invariants on the `capabilities.app`
+    /// block. Coarse, `&'static str`-message checks layered under the
+    /// catalog's authoritative (rich-message) validation — this also
+    /// runs in the `bv-plugin-pack` signer, so a malformed app manifest
+    /// is caught before it is ever signed. Rules mirror surface
+    /// bindings (`api_paths`) and `allowed_hosts` (`net.hosts`).
+    fn validate_app_capabilities(&self) -> Result<(), &'static str> {
+        let app = &self.capabilities.app;
+        if !app.is_declared() {
+            return Ok(());
+        }
+        // A declared app block requires the v2 ABI minor.
+        let (_maj, min) = parse_abi(&self.abi_version)
+            .map_err(|_| "abi_version must be MAJOR.MINOR")?;
+        if min < 1 {
+            return Err("capabilities.app requires abi_version minor >= 1 (\"1.1\")");
+        }
+        if app.windows.max_open > MAX_PLUGIN_WINDOWS {
+            return Err("capabilities.app.windows.max_open exceeds the host cap (4)");
+        }
+        for p in &app.api_paths {
+            if p.is_empty()
+                || !p.starts_with("{mount}")
+                || p.contains("..")
+                || p.starts_with('/')
+            {
+                return Err(
+                    "capabilities.app.api_paths entry must start with {mount}, be relative, and not contain ..",
+                );
+            }
+        }
+        if let Some(net) = &app.net {
+            for h in &net.hosts {
+                let t = h.trim();
+                if t.is_empty() || t == "*" || t.contains(':') {
+                    return Err(
+                        "capabilities.app.net.hosts entry must be a non-empty host without a port and not bare `*`",
+                    );
+                }
             }
         }
         Ok(())
@@ -631,6 +778,132 @@ mod tests {
         // long_lived is always present (it is part of the shared type),
         // which is exactly what the pack tool now emits too.
         assert!(json.contains("\"long_lived\":false"));
+    }
+
+    // ── Extensibility v2: capabilities.app tests ──
+
+    fn app_fixture() -> PluginManifest {
+        let mut m = fixture();
+        m.abi_version = "1.1".to_string();
+        m.capabilities.app = AppCapabilities {
+            dynamic_menus: true,
+            windows: WindowsCapabilities { max_open: 2 },
+            api_paths: vec!["{mount}/".to_string()],
+            net: Some(NetCapabilities {
+                hosts: vec!["hooks.example.com".to_string(), "*.status.example.net".to_string()],
+                https_only: true,
+            }),
+        };
+        m
+    }
+
+    #[test]
+    fn accepts_well_formed_app_block() {
+        app_fixture().validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_app_block_with_v1_abi() {
+        let mut m = app_fixture();
+        m.abi_version = "1.0".to_string();
+        let err = m.validate().unwrap_err();
+        assert!(err.contains("abi_version minor"));
+    }
+
+    #[test]
+    fn rejects_absolute_api_path() {
+        let mut m = app_fixture();
+        m.capabilities.app.api_paths = vec!["/etc/passwd".to_string()];
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_api_path_with_dotdot() {
+        let mut m = app_fixture();
+        m.capabilities.app.api_paths = vec!["{mount}/../other".to_string()];
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_api_path_not_under_mount() {
+        let mut m = app_fixture();
+        m.capabilities.app.api_paths = vec!["secret/other".to_string()];
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_bare_wildcard_net_host() {
+        let mut m = app_fixture();
+        m.capabilities.app.net.as_mut().unwrap().hosts = vec!["*".to_string()];
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_net_host_with_port() {
+        let mut m = app_fixture();
+        m.capabilities.app.net.as_mut().unwrap().hosts = vec!["host.example.com:443".to_string()];
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_windows_over_cap() {
+        let mut m = app_fixture();
+        m.capabilities.app.windows.max_open = MAX_PLUGIN_WINDOWS + 1;
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_two_app_module_assets() {
+        let mut m = app_fixture();
+        m.client_assets.push(ClientAssetRef {
+            name: "a.wasm".into(),
+            kind: "app-module".into(),
+            sha256: "0".repeat(64),
+            size: 1,
+        });
+        m.client_assets.push(ClientAssetRef {
+            name: "b.wasm".into(),
+            kind: "app-module".into(),
+            sha256: "1".repeat(64),
+            size: 1,
+        });
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn legacy_manifest_has_default_app_block() {
+        let json = r#"{
+            "name": "old-plugin",
+            "version": "0.1.0",
+            "abi_version": "1.0",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "size": 1024
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(m.capabilities.app.is_default());
+        assert!(!m.capabilities.app.is_declared());
+        m.validate().unwrap();
+    }
+
+    #[test]
+    fn default_app_block_omitted_from_signing_message() {
+        // A v1 plugin (default app block) must produce the same
+        // canonical signing message as before this field existed —
+        // otherwise every already-signed v1 plugin would fail
+        // re-verification on load.
+        let m = fixture();
+        let msg = signing_message(&m, b"x");
+        let json = std::str::from_utf8(&msg[32..]).unwrap();
+        assert!(!json.contains("\"app\""), "default app block must be omitted: {json}");
+    }
+
+    #[test]
+    fn declared_app_block_present_in_signing_message() {
+        let m = app_fixture();
+        let msg = signing_message(&m, b"x");
+        let json = std::str::from_utf8(&msg[32..]).unwrap();
+        assert!(json.contains("\"app\""));
+        assert!(json.contains("\"dynamic_menus\":true"));
     }
 
     #[test]

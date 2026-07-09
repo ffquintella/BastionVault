@@ -75,6 +75,26 @@ EXAMPLE ENTRY:
   admin grant recorded at install (`/v1/sys/plugins/<name>/grants`, audited,
   capability-hash-pinned, SSRF-guarded enforcement). Proposed; no phase started.
 
+- **Phase 1 — server manifest + network grants** (Phase 1,
+  `features/plugin-app-extensions.md`) -- the server-side foundation for
+  Extensibility v2. Plugins may now declare a `capabilities.app` block
+  (`dynamic_menus`, `windows.max_open`, `api_paths`, `net`) in their manifest;
+  it is validated at registration (api_paths mount-scoped, net hosts through the
+  existing allowlist rules, window cap ≤ 4, one `app-module` asset max) and every
+  `app` field participates in the capability-widening guard, so broadening any of
+  them requires DELETE + re-register. A non-default `app` block requires
+  `abi_version` "1.1"; the host ABI minor is now `1`, and older hosts refuse v2
+  manifests cleanly. New admin-only endpoints
+  `GET/PUT/DELETE /v1/sys/plugins/<name>/grants` record the operator's network
+  authorization at `core/plugins/engine/grants/<name>`, pinned to a SHA-256 over
+  the manifest's requested `net` block: any change to the request (even a
+  narrowing) voids the grant until re-approval, and the server refuses a grant
+  that is a superset of the request. Grants are audited (actor + hosts) and the
+  live grant is delivered in-band inside the `active-surfaces` bundle so
+  revocation propagates through the existing ETag/watcher (≤ 30 s). Additive and
+  backwards-compatible: v1 plugins (no `app` block) are byte-identical, keep their
+  existing signatures, and v1 GUIs ignore the new bundle field.
+
 ## [0.25.1] - 2026-07-08
 
 ### Changed

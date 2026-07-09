@@ -12,7 +12,7 @@
 //! `crate::plugins::manifest::*` unchanged.
 
 pub use bv_plugin_manifest::{
-    check_abi_compatibility, parse_abi, signing_message, Capabilities, ClientAssetRef,
-    ConfigField, ConfigFieldKind, PluginManifest, RuntimeKind, SurfaceRef, HOST_ABI_MAJOR,
-    HOST_ABI_MINOR,
+    check_abi_compatibility, parse_abi, signing_message, AppCapabilities, Capabilities,
+    ClientAssetRef, ConfigField, ConfigFieldKind, NetCapabilities, PluginManifest, RuntimeKind,
+    SurfaceRef, WindowsCapabilities, HOST_ABI_MAJOR, HOST_ABI_MINOR, MAX_PLUGIN_WINDOWS,
 };

@@ -385,6 +385,26 @@ pub struct ActiveSurfaceEntry {
     /// `(asset_name, sha256-hex)` pairs the client can fetch via the
     /// `/asset/<sha256>` endpoint. Order-stable.
     pub assets: Vec<(String, String)>,
+    /// Extensibility v2: the plugin's *live* admin grant, delivered
+    /// in-band so the Tauri-side network enforcer needs no extra round
+    /// trip and revocation propagates through the existing ETag/watcher
+    /// machinery. `None` when the plugin has no valid grant (never
+    /// requested, never granted, or the grant's `capability_sha256` no
+    /// longer matches the active manifest). Omitted on the wire so v1
+    /// clients — which don't know the field — deserialize unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<SurfaceGrant>,
+}
+
+/// Extensibility v2: the subset of a plugin's admin grant that clients
+/// need. Only the granted network hosts are shipped — never the grant
+/// metadata (actor, timestamp, capability hash), which stays server-side.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceGrant {
+    /// Granted outbound host allowlist (a subset of the manifest's
+    /// requested `capabilities.app.net.hosts`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub net_hosts: Vec<String>,
 }
 
 impl ActiveSurfaceBundle {
@@ -404,6 +424,17 @@ impl ActiveSurfaceBundle {
                 hasher.update(n.as_bytes());
                 hasher.update(b"=");
                 hasher.update(h.as_bytes());
+                hasher.update(b"\0");
+            }
+            // Fold the grant into the ETag so an admin approve/revoke
+            // changes the bundle hash and propagates to clients via the
+            // existing long-poll/watcher (revocation takes effect ≤ 30 s).
+            if let Some(g) = &e.grant {
+                hasher.update(b"grant:");
+                for host in &g.net_hosts {
+                    hasher.update(host.as_bytes());
+                    hasher.update(b",");
+                }
                 hasher.update(b"\0");
             }
             hasher.update(b"\n");
@@ -562,9 +593,32 @@ mod tests {
             mount: "secret/totp".into(),
             surface: s,
             assets: vec![],
+            grant: None,
         }];
         let etag = ActiveSurfaceBundle::compute_etag(&entries);
         assert_eq!(etag.len(), 64); // sha256 hex
+    }
+
+    #[test]
+    fn grant_changes_bundle_etag() {
+        let s = minimal_surface();
+        let base = ActiveSurfaceEntry {
+            plugin: "totp".into(),
+            version: "1.0.0".into(),
+            mount: "secret/totp".into(),
+            surface: s,
+            assets: vec![],
+            grant: None,
+        };
+        let ungranted = ActiveSurfaceBundle::compute_etag(std::slice::from_ref(&base));
+        let mut granted = base.clone();
+        granted.grant = Some(SurfaceGrant { net_hosts: vec!["hooks.example.com".into()] });
+        let granted_etag = ActiveSurfaceBundle::compute_etag(std::slice::from_ref(&granted));
+        // Approve → different ETag → clients refresh and pick up the grant.
+        assert_ne!(ungranted, granted_etag);
+        // Absent grant deserializes on v1 clients (field omitted on wire).
+        let wire = serde_json::to_string(&base).unwrap();
+        assert!(!wire.contains("grant"));
     }
 
     #[test]

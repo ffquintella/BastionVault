@@ -2031,6 +2031,177 @@ async fn sys_plugins_config_put_handler(
     result
 }
 
+// ── Extensibility v2: admin network grants ──
+//
+// GET/PUT/DELETE /v1/sys/plugins/<name>/grants — the operator-consent
+// half of the double-gated network capability. See
+// features/plugin-app-extensions.md § "The admin network grant" and
+// src/plugins/grants.rs. Admin ACL is inherited from the surrounding
+// /v1/sys/plugins/* scope; these handlers add no auth of their own.
+
+#[derive(Debug, Deserialize)]
+struct GrantsPutRequest {
+    /// The network grant to create/replace. Absent means "no net grant
+    /// in this request" — use DELETE to revoke.
+    #[serde(default)]
+    net: Option<GrantsNetPut>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GrantsNetPut {
+    /// Hosts the admin authorizes. Must echo (or narrow) the manifest's
+    /// requested `capabilities.app.net.hosts` — the server refuses a
+    /// superset.
+    #[serde(default)]
+    hosts: Vec<String>,
+}
+
+/// Best-effort actor entity id for the grant record's `granted_by`.
+/// Mirrors `crate::audit::sys_emit`'s token→identity resolution: the
+/// entity id lives in the token entry's `meta` map. Falls back to the
+/// token's display name, then empty — the authoritative actor record is
+/// the audit event emitted alongside, not this convenience field.
+async fn resolve_actor_entity_id(core: &Core, token: &str) -> String {
+    if token.is_empty() {
+        return String::new();
+    }
+    let Some(auth_module) = core
+        .module_manager
+        .get_module::<crate::modules::auth::AuthModule>("auth")
+    else {
+        return String::new();
+    };
+    let Some(token_store) = auth_module.token_store.load_full() else {
+        return String::new();
+    };
+    match token_store.lookup(token).await {
+        Ok(Some(te)) => te
+            .meta
+            .get("entity_id")
+            .cloned()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(te.display_name),
+        _ => String::new(),
+    }
+}
+
+async fn sys_plugins_grants_get_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let name = req.match_info().get("name").unwrap_or("").to_string();
+    let audit_path = format!("sys/plugins/{name}/grants");
+    let result: Result<HttpResponse, RvError> = (async move {
+        let catalog = crate::plugins::PluginCatalog::new();
+        let manifest = match catalog
+            .get_manifest(core.barrier.as_storage(), &name)
+            .await?
+        {
+            Some(m) => m,
+            None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
+        };
+        let record = crate::plugins::grants::get(core.barrier.as_storage(), &name).await?;
+        // Whether the stored grant is *live* against the active
+        // manifest's current net request (a changed request voids it).
+        let live = crate::plugins::grants::active_net_hosts(
+            core.barrier.as_storage(),
+            &name,
+            &manifest,
+        )
+        .await?
+        .is_some();
+        // Surface the manifest's requested hosts so the GUI can render
+        // the consent panel without a second fetch.
+        let requested_net_hosts: Vec<String> = manifest
+            .capabilities
+            .app
+            .net
+            .as_ref()
+            .map(|n| n.hosts.clone())
+            .unwrap_or_default();
+        Ok(response_json_ok(
+            None,
+            json!({
+                "net": record.and_then(|r| r.net),
+                "live": live,
+                "requested_net_hosts": requested_net_hosts,
+            }),
+        ))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Read).await;
+    result
+}
+
+async fn sys_plugins_grants_put_handler(
+    req: HttpRequest,
+    body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new(&req, &body, &core);
+    let name = req.match_info().get("name").unwrap_or("").to_string();
+    let token = request_auth(&req).client_token;
+    let audit_path = format!("sys/plugins/{name}/grants");
+    let result: Result<HttpResponse, RvError> = (async move {
+        let payload: GrantsPutRequest =
+            serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+        let Some(net) = payload.net else {
+            return Ok(response_error(
+                StatusCode::BAD_REQUEST,
+                "PUT body must include a `net` grant; use DELETE to revoke",
+            ));
+        };
+        let catalog = crate::plugins::PluginCatalog::new();
+        let manifest = match catalog
+            .get_manifest(core.barrier.as_storage(), &name)
+            .await?
+        {
+            Some(m) => m,
+            None => return Ok(response_error(StatusCode::NOT_FOUND, "plugin not found")),
+        };
+        let actor = resolve_actor_entity_id(&core, &token).await;
+        let granted_at = chrono::Utc::now().to_rfc3339();
+        let grant = match crate::plugins::grants::put_net(
+            core.barrier.as_storage(),
+            &name,
+            &manifest,
+            net.hosts,
+            &actor,
+            granted_at,
+        )
+        .await
+        {
+            Ok(g) => g,
+            // Superset / no-request refusals are client errors, not 500s.
+            Err(RvError::ErrString(msg)) => {
+                return Ok(response_error(StatusCode::BAD_REQUEST, &msg))
+            }
+            Err(e) => return Err(e),
+        };
+        Ok(response_json_ok(None, json!({ "net": grant })))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Write).await;
+    result
+}
+
+async fn sys_plugins_grants_delete_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let name = req.match_info().get("name").unwrap_or("").to_string();
+    let audit_path = format!("sys/plugins/{name}/grants");
+    let result: Result<HttpResponse, RvError> = (async move {
+        crate::plugins::grants::delete(core.barrier.as_storage(), &name).await?;
+        Ok(response_ok(None, None))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Delete).await;
+    result
+}
+
 // ── Phase 5.2: publisher allowlist + accept_unsigned engine flag ──
 
 #[derive(Debug, Deserialize)]
@@ -3064,6 +3235,14 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
             web::resource("/plugins/{name}/config")
                 .route(web::get().to(sys_plugins_config_get_handler))
                 .route(web::put().to(sys_plugins_config_put_handler)),
+        )
+        .service(
+            // Extensibility v2: admin network grants (admin ACL inherited
+            // from this scope). See src/plugins/grants.rs.
+            web::resource("/plugins/{name}/grants")
+                .route(web::get().to(sys_plugins_grants_get_handler))
+                .route(web::put().to(sys_plugins_grants_put_handler))
+                .route(web::delete().to(sys_plugins_grants_delete_handler)),
         )
         .service(
             web::resource("/plugins/{name}/reload")

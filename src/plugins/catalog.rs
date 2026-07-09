@@ -35,7 +35,7 @@
 //! new versioned entry exists, so the operator can clean them up
 //! manually when convenient.
 
-use bv_plugin_surface::{ActiveSurfaceBundle, ActiveSurfaceEntry, SurfaceManifest};
+use bv_plugin_surface::{ActiveSurfaceBundle, ActiveSurfaceEntry, SurfaceGrant, SurfaceManifest};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -240,31 +240,47 @@ impl PluginCatalog {
     /// will surface in Phase 5.3.
     fn validate_net_allowlist(manifest: &PluginManifest) -> Result<(), RvError> {
         for h in &manifest.capabilities.allowed_hosts {
-            let trimmed = h.trim();
-            if trimmed.is_empty() {
-                return Err(RvError::ErrString(
-                    "allowed_hosts entries must not be empty".into(),
-                ));
+            Self::validate_host_pattern(h, "allowed_hosts")?;
+        }
+        // Extensibility v2: the app-module network request is validated
+        // with the identical host rules — one source of truth.
+        if let Some(net) = &manifest.capabilities.app.net {
+            for h in &net.hosts {
+                Self::validate_host_pattern(h, "capabilities.app.net.hosts")?;
             }
-            if trimmed == "*" {
-                return Err(RvError::ErrString(
-                    "wildcard `*` is refused in allowed_hosts; require an explicit allowlist".into(),
-                ));
-            }
-            if trimmed.contains(':') {
+        }
+        Ok(())
+    }
+
+    /// Shared per-host allowlist rule used by both `allowed_hosts` and
+    /// `capabilities.app.net.hosts`. Bare `*` is rejected; embedded `*`
+    /// is allowed only in the *leading* label (`"*.example.com"` is
+    /// fine, `"foo.*.com"` is not); any `:` (a port) is rejected.
+    /// `field` names the offending list in the error message.
+    fn validate_host_pattern(h: &str, field: &str) -> Result<(), RvError> {
+        let trimmed = h.trim();
+        if trimmed.is_empty() {
+            return Err(RvError::ErrString(format!(
+                "{field} entries must not be empty"
+            )));
+        }
+        if trimmed == "*" {
+            return Err(RvError::ErrString(format!(
+                "wildcard `*` is refused in {field}; require an explicit allowlist"
+            )));
+        }
+        if trimmed.contains(':') {
+            return Err(RvError::ErrString(format!(
+                "{field} entry `{trimmed}` must not include a port",
+            )));
+        }
+        // `*` is allowed only as the entire first label.
+        if trimmed.contains('*') {
+            let leading_only = trimmed.starts_with("*.") && !trimmed[2..].contains('*');
+            if !leading_only {
                 return Err(RvError::ErrString(format!(
-                    "allowed_hosts entry `{trimmed}` must not include a port",
+                    "{field} entry `{trimmed}` may only use `*` as the leading label (`*.example.com`)",
                 )));
-            }
-            // `*` is allowed only as the entire first label.
-            if trimmed.contains('*') {
-                let leading_only = trimmed.starts_with("*.")
-                    && !trimmed[2..].contains('*');
-                if !leading_only {
-                    return Err(RvError::ErrString(format!(
-                        "allowed_hosts entry `{trimmed}` may only use `*` as the leading label (`*.example.com`)",
-                    )));
-                }
             }
         }
         Ok(())
@@ -317,6 +333,47 @@ impl PluginCatalog {
                 return Err(RvError::ErrString(format!(
                     "capability widening: allowed_hosts gained `{h}`; DELETE + re-register",
                 )));
+            }
+        }
+
+        // Extensibility v2: every `capabilities.app` field is a
+        // capability and participates in the widening guard. Enabling a
+        // family, raising the window cap, or gaining an api_path / net
+        // host all require DELETE + re-register.
+        let pa = &p.app;
+        let na = &n.app;
+        if !pa.dynamic_menus && na.dynamic_menus {
+            return Err(RvError::ErrString(
+                "capability widening: app.dynamic_menus cannot be enabled on re-register; DELETE + re-register"
+                    .into(),
+            ));
+        }
+        if na.windows.max_open > pa.windows.max_open {
+            return Err(RvError::ErrString(format!(
+                "capability widening: app.windows.max_open raised from {} to {}; DELETE + re-register",
+                pa.windows.max_open, na.windows.max_open,
+            )));
+        }
+        let prev_api: std::collections::BTreeSet<&String> = pa.api_paths.iter().collect();
+        for path in &na.api_paths {
+            if !prev_api.contains(path) {
+                return Err(RvError::ErrString(format!(
+                    "capability widening: app.api_paths gained `{path}`; DELETE + re-register",
+                )));
+            }
+        }
+        let prev_net: std::collections::BTreeSet<&String> = pa
+            .net
+            .as_ref()
+            .map(|c| c.hosts.iter().collect())
+            .unwrap_or_default();
+        if let Some(new_net) = &na.net {
+            for h in &new_net.hosts {
+                if !prev_net.contains(h) {
+                    return Err(RvError::ErrString(format!(
+                        "capability widening: app.net.hosts gained `{h}`; DELETE + re-register",
+                    )));
+                }
             }
         }
         Ok(())
@@ -626,12 +683,22 @@ impl PluginCatalog {
                 .iter()
                 .map(|a| (a.name.clone(), a.sha256.clone()))
                 .collect();
+            // Extensibility v2: ship the plugin's *live* network grant
+            // in-band. `active_net_hosts` returns the granted hosts only
+            // when the grant's pin still matches the active manifest's
+            // net request — a stale grant (changed/revoked capability)
+            // yields `None`, so the client sees the plugin as ungranted
+            // and revocation propagates through the bundle ETag.
+            let grant = super::grants::active_net_hosts(storage, &m.name, &m)
+                .await?
+                .map(|net_hosts| SurfaceGrant { net_hosts });
             entries.push(ActiveSurfaceEntry {
                 plugin: m.name.clone(),
                 version: m.version.clone(),
                 mount: mount_for_plugin(&m.name).unwrap_or_default(),
                 surface: parsed,
                 assets,
+                grant,
             });
         }
         let etag = ActiveSurfaceBundle::compute_etag(&entries);
@@ -979,6 +1046,117 @@ mod tests {
         m2.capabilities.audit_emit = true;
         let err = cat.put(&s, &m2, &bin2).await.unwrap_err();
         assert!(format!("{err:?}").contains("capability widening"));
+    }
+
+    // ── Extensibility v2: app-capability widening + net grants ──
+
+    fn manifest_with_app_net(name: &str, version: &str, binary: &[u8], hosts: &[&str]) -> PluginManifest {
+        use crate::plugins::manifest::{AppCapabilities, NetCapabilities};
+        let mut m = manifest_with(name, version, binary);
+        m.abi_version = "1.1".to_string();
+        m.capabilities.app = AppCapabilities {
+            net: Some(NetCapabilities {
+                hosts: hosts.iter().map(|h| h.to_string()).collect(),
+                https_only: true,
+            }),
+            ..Default::default()
+        };
+        m
+    }
+
+    #[tokio::test]
+    async fn app_dynamic_menus_widening_refused() {
+        let s = MemStorage::default();
+        enable_unsigned(&s).await;
+        let cat = PluginCatalog::new();
+        let bin = b"app-dm".to_vec();
+        let m = manifest_with("adm", "0.1.0", &bin); // app default (menus off)
+        cat.put(&s, &m, &bin).await.unwrap();
+        let bin2 = b"app-dm-2".to_vec();
+        let mut m2 = manifest_with("adm", "0.2.0", &bin2);
+        m2.abi_version = "1.1".to_string();
+        m2.capabilities.app.dynamic_menus = true;
+        let err = cat.put(&s, &m2, &bin2).await.unwrap_err();
+        assert!(format!("{err:?}").contains("app.dynamic_menus"));
+    }
+
+    #[tokio::test]
+    async fn app_net_host_widening_refused() {
+        let s = MemStorage::default();
+        enable_unsigned(&s).await;
+        let cat = PluginCatalog::new();
+        let bin = b"app-net".to_vec();
+        let m = manifest_with_app_net("anet", "0.1.0", &bin, &["a.example.com"]);
+        cat.put(&s, &m, &bin).await.unwrap();
+        // Adding a host on re-register is widening → refused.
+        let bin2 = b"app-net-2".to_vec();
+        let m2 = manifest_with_app_net("anet", "0.2.0", &bin2, &["a.example.com", "b.example.com"]);
+        let err = cat.put(&s, &m2, &bin2).await.unwrap_err();
+        assert!(format!("{err:?}").contains("app.net.hosts gained"));
+    }
+
+    #[tokio::test]
+    async fn app_net_embedded_wildcard_refused_at_registration() {
+        let s = MemStorage::default();
+        enable_unsigned(&s).await;
+        let cat = PluginCatalog::new();
+        let bin = b"app-net-wild".to_vec();
+        // `foo.*.com` passes the manifest's coarse check (not bare `*`,
+        // no port) but must be caught by the catalog's authoritative
+        // per-host rule — proving `validate_net_allowlist` covers
+        // `capabilities.app.net.hosts`, not just `allowed_hosts`.
+        let m = manifest_with_app_net("anw", "0.1.0", &bin, &["foo.*.com"]);
+        let err = cat.put(&s, &m, &bin).await.unwrap_err();
+        assert!(format!("{err:?}").contains("leading label"));
+    }
+
+    /// Roadmap Phase-1 acceptance: register (net requested) → grant →
+    /// re-register with a *changed* (narrowed) net set → grant
+    /// invalidated because the capability pin no longer matches.
+    #[tokio::test]
+    async fn net_grant_invalidated_by_changed_capability() {
+        let s = MemStorage::default();
+        enable_unsigned(&s).await;
+        let cat = PluginCatalog::new();
+
+        // v0.1.0 requests two hosts; it becomes the active version.
+        let bin = b"wh-v1".to_vec();
+        let m1 = manifest_with_app_net("wh", "0.1.0", &bin, &["a.example.com", "b.example.com"]);
+        cat.put(&s, &m1, &bin).await.unwrap();
+
+        // Admin grants a narrowed subset.
+        super::super::grants::put_net(
+            &s,
+            "wh",
+            &m1,
+            vec!["a.example.com".into()],
+            "admin-entity",
+            "2026-07-09T00:00:00Z".into(),
+        )
+        .await
+        .unwrap();
+
+        // Grant is live against the active manifest.
+        let active = cat.get_manifest(&s, "wh").await.unwrap().unwrap();
+        assert_eq!(
+            super::super::grants::active_net_hosts(&s, "wh", &active).await.unwrap(),
+            Some(vec!["a.example.com".to_string()]),
+        );
+
+        // Re-register a narrowed v0.2.0 (drops b → not widening) and
+        // activate it. The requested net capability changed, so the pin
+        // no longer matches and the grant is void.
+        let bin2 = b"wh-v2".to_vec();
+        let m2 = manifest_with_app_net("wh", "0.2.0", &bin2, &["a.example.com"]);
+        cat.put(&s, &m2, &bin2).await.unwrap();
+        cat.set_active(&s, "wh", "0.2.0").await.unwrap();
+        let active2 = cat.get_manifest(&s, "wh").await.unwrap().unwrap();
+        assert_eq!(active2.version, "0.2.0");
+        assert_eq!(
+            super::super::grants::active_net_hosts(&s, "wh", &active2).await.unwrap(),
+            None,
+            "a changed net request must void the grant until re-approval",
+        );
     }
 
     /// Phase 5.5 — wildcard hosts are refused at registration.

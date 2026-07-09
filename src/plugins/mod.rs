@@ -23,6 +23,7 @@
 
 pub mod catalog;
 pub mod config;
+pub mod grants;
 pub mod logical_backend;
 pub mod manifest;
 pub mod metrics;

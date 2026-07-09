@@ -142,6 +142,11 @@ impl SurfaceCache {
                     .iter()
                     .map(|h| (String::new(), h.clone()))
                     .collect(),
+                // Grants live in the bundle envelope, not the cached
+                // per-plugin snapshot; the GUI cache layer replaces this
+                // synthesised bundle via `Backend::active_surfaces`
+                // whenever the etag check fails.
+                grant: None,
             });
         }
         Some(ActiveSurfaceBundle { etag: meta.etag, entries })

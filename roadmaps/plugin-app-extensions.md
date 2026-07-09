@@ -1,6 +1,6 @@
 # Plugin App Extensions Roadmap (Extensibility v2)
 
-**Status:** Proposed
+**Status:** In progress — Phase 1 complete
 **Owner:** Felipe Quintella
 **Spec:** [`features/plugin-app-extensions.md`](../features/plugin-app-extensions.md) — read that first; this doc is phasing, effort, and acceptance bars only.
 **Related:** [`features/plugin-extensibility.md`](../features/plugin-extensibility.md) (v1, shipped), [`features/plugin-system.md`](../features/plugin-system.md), [`features/plugin-testing.md`](../features/plugin-testing.md).
@@ -34,7 +34,23 @@ Land `features/plugin-app-extensions.md` + this roadmap. Decide the ABI story: m
 
 **Acceptance:** docs merged; roadmap.md row added.
 
-### Phase 1 — Server: manifest + grants (1–1.5 weeks)
+### Phase 1 — Server: manifest + grants (1–1.5 weeks) — ✅ Complete
+
+Shipped: `AppCapabilities { dynamic_menus, windows, api_paths, net }` under
+`Capabilities.app` (all `serde(default)`, omitted from the canonical signing
+message when default so v1 signatures survive); registration validation
+(`api_paths` mount-scoped, `net.hosts` through the shared host-pattern rule,
+`windows.max_open ≤ 4`, one `app-module` asset); widening-guard entries for every
+`app` field; `HOST_ABI_MINOR = 1`; `src/plugins/grants.rs` (net-grant record at
+`core/plugins/engine/grants/<name>`, `capability_sha256` pin, superset refusal,
+`active_net_hosts` live-gate); `GET/PUT/DELETE /v1/sys/plugins/<name>/grants`
+(admin ACL, audited via `emit_sys_audit`); grant hosts shipped in
+`ActiveSurfaceEntry.grant` and folded into the bundle ETag. Tests: manifest
+validation, surface ETag, grant round-trip/pinning/superset, catalog app-field
+widening, and the register→grant→re-register-with-changed-net→invalidated
+acceptance path.
+
+
 
 - `bv-plugin-manifest`: `AppCapabilities { dynamic_menus, windows, api_paths, net }` under `Capabilities.app` (all `serde(default)`); validation (api_paths must start `{mount}`, net hosts through the `validate_net_allowlist` rules); `HOST_ABI_MINOR = 1`.
 - `catalog.rs`: widening-guard entries for every `app` field; `client_assets.kind == "app-module"` uniqueness check.

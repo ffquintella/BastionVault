@@ -1,6 +1,6 @@
 # Plugin App Extensions (Plugin Extensibility v2)
 
-**Status:** Proposed — spec ratified in this document; no phase started.
+**Status:** In progress — **Phase 1 shipped** (server: `capabilities.app` manifest + validation + widening guard, `HOST_ABI_MINOR=1`, `src/plugins/grants.rs` net-grant records + `GET/PUT/DELETE /v1/sys/plugins/<name>/grants`, grant in the active-surfaces bundle). Phases 2–7 pending.
 **Owner:** Felipe Quintella
 **Related:** [`features/plugin-system.md`](plugin-system.md) (server substrate), [`features/plugin-extensibility.md`](plugin-extensibility.md) (v1 surfaces + form hooks), [`roadmaps/plugin-app-extensions.md`](../roadmaps/plugin-app-extensions.md) (phasing), [`features/plugin-testing.md`](plugin-testing.md) (test infrastructure).
 
@@ -208,8 +208,8 @@ See [`roadmaps/plugin-app-extensions.md`](../roadmaps/plugin-app-extensions.md).
 
 | Phase | Scope | Ships value alone? |
 |---|---|---|
-| 0 | Spec ratification (this doc) + ABI minor bump plan | — |
-| 1 | Manifest `capabilities.app` + validation + widening guard + grants storage/endpoints/audit (server) | Yes — grant plumbing usable by API consumers |
+| 0 | ✅ Spec ratification (this doc) + ABI minor bump plan | — |
+| 1 | ✅ **Done.** Manifest `capabilities.app` + validation + widening guard + grants storage/endpoints/audit (server) | Yes — grant plumbing usable by API consumers |
 | 2 | App-module runtime in Tauri backend + `bvx.log/now/set_result` + dynamic menus end-to-end | Yes — first visible feature |
 | 3 | Plugin windows (capability wildcard, `window_*`, window events, `subscribe` flag) | Yes |
 | 4 | `bvx.api_request` bridge (shared validation with `plugin_surface_dispatch`) | Yes |
