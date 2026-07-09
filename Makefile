@@ -57,7 +57,7 @@ RUSTUP_CARGO_BIN ?= $(HOME)/.cargo/bin
 endif
 export PATH := $(RUSTUP_CARGO_BIN):$(PATH)
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages cli-packages
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages cli-packages
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -1002,3 +1002,21 @@ plugin-bump: ## Bump plugin versions across plugins-ext (type=major|minor|patch,
 plugins-clean: ## Remove plugins-ext build artefacts
 	@rm -rf $(PLUGINS_DIR)/target $(PLUGINS_OUT)
 	@echo "plugins-clean complete."
+
+# Plugin unit-test infrastructure (features/plugin-testing.md).
+# Three layers, cheapest first:
+#   1. testkit self-tests   — the mock host + form-hook runner
+#   2. ABI parity           — testkit's conformance module through the
+#                             REAL WasmRuntime, so the mock can't drift
+#                             from src/plugins/runtime.rs
+#   3. host substrate tests — the in-crate `plugins::` module tests
+#                             (runtime, catalog, manifest, verifier…)
+plugins-test: ## Run plugin unit tests: testkit, host ABI parity, plugin substrate
+	@echo "==> bastion-plugin-testkit unit tests"
+	cargo test -p bastion-plugin-testkit
+	@echo "==> ABI parity: testkit vs src/plugins/runtime.rs"
+	cargo test --test test_plugin_testkit_parity
+	@echo "==> host plugin substrate unit tests (src/plugins/*)"
+	cargo test --lib plugins::
+	@echo ""
+	@echo "==> plugins-test complete."

@@ -45,6 +45,36 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### Plugin Unit-Test Infrastructure (features/plugin-testing.md)
+
+- **`bastion-plugin-testkit` crate** (`crates/bastion-plugin-testkit/`) -- unit-test
+  harness that drives compiled plugin `.wasm` artifacts through the real `bv_run`
+  ABI against an in-memory mock host: full `bv.*` import surface (log, response,
+  config, clock, storage with prefix-rebase isolation, audit, crypto with
+  allowlist gating), capability gates and return codes identical to
+  `src/plugins/runtime.rs`, pinnable clock, seeded deterministic RNG, captured
+  logs/audit events, storage seeding + dump, and a form-hook runner mirroring
+  the GUI's Tauri sandbox (empty linker, packed-i64 ABI, 4 MiB caps). 20 self-tests.
+- **ABI parity guard** (`tests/test_plugin_testkit_parity.rs`) -- the testkit's
+  conformance module (importing every mirrored `bv.*` symbol) is instantiated
+  against the real `WasmRuntime` and cross-checked for invoke semantics, so
+  mock-vs-runtime drift fails CI.
+- **`make plugins-test`** -- runs the testkit self-tests, the ABI parity guard,
+  and the in-crate `plugins::` substrate unit tests in one command.
+
+#### Plugin App Extensions design (features/plugin-app-extensions.md)
+
+- **Extensibility v2 spec + roadmap** (`features/plugin-app-extensions.md`,
+  `roadmaps/plugin-app-extensions.md`) -- design for programmatic GUI plugin
+  extensions: sandboxed app modules (Tauri-backend Wasmtime, `bvx.*` host
+  imports) with dynamic menu items, plugin-created windows on the SSH/RDP
+  secondary-window pattern, mount-scoped vault-API calls through the user's
+  session, and network access double-gated by a manifest flag plus an explicit
+  admin grant recorded at install (`/v1/sys/plugins/<name>/grants`, audited,
+  capability-hash-pinned, SSRF-guarded enforcement). Proposed; no phase started.
+
 ## [0.25.1] - 2026-07-08
 
 ### Changed

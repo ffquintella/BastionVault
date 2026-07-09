@@ -24,6 +24,7 @@ members = [
     ".",
     "crates/bv_crypto",
     "crates/bastion-plugin-sdk",
+    "crates/bastion-plugin-testkit",
     "crates/bv-client",
     "crates/bv-plugin-pack",
     "crates/bv-plugin-manifest",
@@ -380,6 +381,11 @@ pkcs8 = { version = "0.10", features = ["pem", "alloc"] }
 # can compile small WAT modules inline rather than checking in pre-built
 # `.wasm` blobs.
 wat = "1"
+# ABI-parity guard: tests/test_plugin_testkit_parity.rs drives the
+# testkit's conformance module through the real WasmRuntime so the
+# mock host in bastion-plugin-testkit cannot drift from
+# src/plugins/runtime.rs without failing CI.
+bastion-plugin-testkit = { path = "crates/bastion-plugin-testkit" }
 
 [features]
 # `ssh_pqc` is on in the default build so the GUI's "Generate CA →

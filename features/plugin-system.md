@@ -345,6 +345,11 @@ The feature is considered complete. **5.11 reference-plugin integration tests** 
 
 ## Testing Requirements
 
+> **Unit-test infrastructure:** compiled plugin artifacts are unit-testable
+> against this ABI without a vault via `crates/bastion-plugin-testkit`
+> (mock host + ABI parity guard + `make plugins-test`) — see
+> [features/plugin-testing.md](plugin-testing.md).
+
 ### Unit Tests
 
 - Manifest parser: every field in the spec round-trips through parse/serialise; unknown top-level keys are rejected.

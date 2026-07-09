@@ -2,6 +2,7 @@
 
 **Status:** Done — all 8 phases shipped. See [roadmap](../roadmaps/plugin-extensibility-redesign.md) for the original delivery plan.
 **Owner:** Felipe Quintella
+**Successor:** [features/plugin-app-extensions.md](plugin-app-extensions.md) (v2 — programmatic app modules: dynamic menus, plugin windows, vault-API, admin-granted network). Proposed.
 
 This is the operator- and plugin-author-facing spec for the redesign tracked in [`roadmaps/plugin-extensibility-redesign.md`](../roadmaps/plugin-extensibility-redesign.md). Read the roadmap first for motivation, threat model, and phasing. This spec is the contract.
 
