@@ -88,6 +88,15 @@ EXAMPLE ENTRY:
   `Dockerfile` + `build-in-docker.sh`) — so a Mac produces the Linux GUI
   installers under Docker Desktop's amd64 emulation, with cargo/node/target
   caches in named volumes.
+- **Build the GUI Windows `.msi` off-Windows in a disposable Tart VM.**
+  Windows can't run in a container, so `make gui-windows-msi` off-Windows
+  spins up a native ARM64 Windows 11 VM via
+  [Tart](https://tart.run) (Apple Virtualization) and cross-compiles to
+  `x86_64-pc-windows-msvc`, producing an x64 `.msi`. The ephemeral VM is
+  cloned from a toolchain base image and deleted after each build
+  (`gui/src-tauri/installers/windows/` — `build-in-vm.sh`, `provision.ps1`,
+  `build.ps1`, and a Packer template that builds the base image from a free
+  Win11 ARM64 ISO).
 
 ### Changed
 

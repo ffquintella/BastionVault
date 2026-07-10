@@ -669,14 +669,19 @@ else
 	@GUI_BUNDLE_FEATURES=$(GUI_BUNDLE_FEATURES) bash gui/src-tauri/installers/linux/build-in-docker.sh
 endif
 
-gui-windows-msi: gui-deps prune-stale ## Build the GUI .msi (Windows only; Tauri WiX bundler)
-ifneq ($(OS),Windows_NT)
-	@echo "ERROR: gui-windows-msi must run on Windows (Tauri needs WebView2 + WiX to build the GUI .msi)."; exit 1
-else
+gui-windows-msi: ## Build the GUI .msi (native on Windows; disposable Tart Win11 ARM64 VM elsewhere)
+ifeq ($(OS),Windows_NT)
+	@$(MAKE) gui-deps prune-stale
 	cd gui && $(GUI_TAURI) build --bundles msi -- --features $(GUI_BUNDLE_FEATURES)
 	@echo ""
 	@echo "==> GUI .msi under gui/src-tauri/target/release/bundle/msi/:"
 	@ls -lh gui/src-tauri/target/release/bundle/msi/*.msi 2>/dev/null || true
+else ifeq ($(shell uname -s),Darwin)
+	@echo "==> not on Windows — building the GUI .msi (x64) in a disposable Tart Win11 ARM64 VM"
+	@GUI_BUNDLE_FEATURES=$(GUI_BUNDLE_FEATURES) bash gui/src-tauri/installers/windows/build-in-vm.sh
+else
+	@echo "ERROR: off-Windows GUI .msi builds use Tart (Apple Virtualization), which is macOS-only."; \
+	 echo "       Build on a Windows host, or use the macOS Tart path."; exit 1
 endif
 
 gui-macos-pkg: gui-deps prune-stale ## Build the GUI .pkg (macOS only; Tauri .app wrapped by productbuild)

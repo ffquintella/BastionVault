@@ -106,9 +106,13 @@ CI matrix (Phase 4) remain open, as do the GUI installers.
   exercised on a Mac. The **Linux `.deb`/`.rpm` build off-Linux inside an
   emulated `linux/amd64` Docker container**
   ([installers/linux/Dockerfile](../gui/src-tauri/installers/linux/Dockerfile))
-  — slower than a native build, but no Linux host required. The Windows
-  `.msi` still needs a Windows host (no equivalent emulated WebView2
-  path); that is a CI concern.
+  — slower than a native build, but no Linux host required (verified: both
+  bundles build on a Mac). The **Windows `.msi` builds off-Windows in a
+  disposable native ARM64 Windows 11 VM** (Tart / Apple Virtualization)
+  that cross-compiles to x64
+  ([installers/windows/](../gui/src-tauri/installers/windows/)) — no
+  Windows host required, though it needs a one-time base image from a free
+  Win11 ARM64 ISO and a first-run validation.
 - Platform-native signing (GPG deb/rpm, Authenticode msi, notarised pkg),
   Cosign, the `manifest.json` publish, and the CI matrix (Phase 4) remain
   open, as does the `bv://` deep-link handler (needs app-side support).
@@ -371,7 +375,7 @@ macOS account — pending CI signing identity.
 
 | File | Purpose |
 |---|---|
-| `gui/src-tauri/tauri.conf.json` `bundle.windows` | GUI `.msi` via Tauri's default WiX bundler (Start Menu shortcut auto-created). **Wired — `make gui-windows-msi` on a Windows host; verify + Authenticode-sign in CI.** |
+| `gui/src-tauri/tauri.conf.json` `bundle.windows` + `installers/windows/` (Tart VM) | GUI `.msi` via Tauri's default WiX bundler. **Wired 2026-07-10.** On Windows, `make gui-windows-msi` runs the bundler directly. Off-Windows it builds in a **disposable native ARM64 Windows 11 VM** (Tart, Apple Virtualization) and **cross-compiles to x64** (`x86_64-pc-windows-msvc`) — `installers/windows/{build-in-vm.sh,provision.ps1,build.ps1,packer/}`. Needs a one-time base image built from a free Win11 ARM64 ISO; validate on first run. Authenticode-sign in CI. |
 | `gui/src-tauri/installers/windows/main.wxs` (`bv://` URL handler) | **Deferred** — a custom WiX fragment for the `bv://` scheme is only useful once the GUI handles deep-link URLs (Tauri deep-link plugin + app-side handling), a separate feature. Left off the default build to avoid shipping an unverified, non-functional registry entry. |
 | [`installers/cli/msi/{bvault.wxs,License.rtf}`](../installers/cli/msi/bvault.wxs) | CLI WiX 3.x project; PATH entry; per-machine install. The WixUI license dialog is gated behind `WithUI=1` so the same .wxs builds under native WiX (`candle`/`light`) and under `wixl` (msitools). **Done (unsigned, x64 only).** |
 | [`installers/cli/nupkg/`](../installers/cli/nupkg/) | Chocolatey .nupkg. `build-nupkg.py` assembles the OPC package on any host (no Chocolatey); native Windows still uses `choco pack`. Addition to the original plan. **Done.** |
