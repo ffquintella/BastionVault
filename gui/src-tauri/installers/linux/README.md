@@ -2,9 +2,28 @@
 
 The GUI's Linux `.deb` + `.rpm` bundles are produced by Tauri's bundler
 (`make gui-linux-packages` → `tauri build --bundles deb,rpm`). This
-directory holds the maintainer scriptlets the bundler injects.
+directory holds the maintainer scriptlets the bundler injects and the
+emulated-amd64 Docker builder used to build off-Linux.
 
-## Status: wired — verify on a Linux build host
+## Building
+
+`make gui-linux-packages` picks the path automatically:
+
+- **On Linux** — builds natively; bundles land under
+  `gui/src-tauri/target/release/bundle/{deb,rpm}/`. Needs the system
+  `webkit2gtk-4.1` + `libsoup3` dev packages installed.
+- **Off Linux (macOS / anything else)** — Tauri cannot cross-compile the
+  GUI (WebKitGTK is a native build- *and* run-time dependency), so the
+  build runs inside an **emulated amd64 Linux container**
+  ([`Dockerfile`](Dockerfile), driven by
+  [`build-in-docker.sh`](build-in-docker.sh)). On an Apple-Silicon Mac
+  this runs under Docker Desktop's amd64 emulation (QEMU/Rosetta), so a
+  Mac produces the Linux GUI installers with no native Linux host. The
+  finished bundles are copied to `target/linux-docker/{deb,rpm}/`.
+  **Emulated compilation is slow** (the first full backend build can take
+  the better part of an hour); the cargo registry, `node_modules`, and
+  `CARGO_TARGET_DIR` are cached in named Docker volumes so later runs are
+  faster.
 
 The bundler config is wired in
 [`gui/src-tauri/tauri.conf.json`](../../tauri.conf.json) under
@@ -14,27 +33,22 @@ The bundler config is wired in
 - `postInstallScript` → `installers/linux/postinst`
 - `preRemoveScript`  → `installers/linux/prerm`
 
-Building the GUI needs a Linux host with the system `webkit2gtk-4.1` +
-`libsoup3` dev packages (Tauri cannot cross-build the GUI — the WebView
-runtime is platform-native). `make gui-linux-packages` is host-gated to
-Linux for that reason. Everything here is authored against Tauri 2.x's
-documented bundler config, but the produced `.deb` / `.rpm` have not been
-exercised on a Linux runner yet — do that pass before publishing:
+### Verify before publishing
 
-1. `make gui-linux-packages` on a Linux/amd64 host. Confirm Tauri writes
-   a `.deb` and `.rpm` under `gui/src-tauri/target/release/bundle/`.
-2. `apt install ./bastionvault-gui_X.Y.Z_amd64.deb` (and the `.rpm` on a
+1. `apt install ./bastionvault-gui_X.Y.Z_amd64.deb` (and the `.rpm` on a
    Fedora/RHEL box); confirm the desktop entry appears and the postinst
    ran (`update-desktop-database` / icon cache refreshed).
-3. Confirm uninstall runs `prerm` and leaves no stale desktop/MIME state.
+2. Confirm uninstall runs `prerm` and leaves no stale desktop/MIME state.
 
 ## Contents
 
 ```
 gui/src-tauri/installers/linux/
-├── README.md  (this file)
-├── postinst   # desktop-db / MIME / icon-cache refresh on install
-└── prerm      # same refresh on removal
+├── README.md          (this file)
+├── Dockerfile         # emulated amd64 GUI builder (webkit + rust + node)
+├── build-in-docker.sh # build the .deb/.rpm in the container, copy them out
+├── postinst           # desktop-db / MIME / icon-cache refresh on install
+└── prerm              # same refresh on removal
 ```
 
 ## Not yet wired: the `bv://` URL handler

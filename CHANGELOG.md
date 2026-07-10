@@ -80,6 +80,14 @@ EXAMPLE ENTRY:
   `.deb`/`.rpm` runtime `depends` + `postInstallScript`/`preRemoveScript`
   (the previously-staged postinst/prerm scriptlets), and macOS
   `minimumSystemVersion`.
+- **Build the GUI Linux `.deb`/`.rpm` off-Linux in an emulated amd64
+  Docker container.** Because Tauri cannot cross-compile the GUI
+  (WebKitGTK is a native build+runtime dependency), `make
+  gui-linux-packages` now builds natively on Linux and, on any other host,
+  inside a `linux/amd64` container (`gui/src-tauri/installers/linux/`
+  `Dockerfile` + `build-in-docker.sh`) — so a Mac produces the Linux GUI
+  installers under Docker Desktop's amd64 emulation, with cargo/node/target
+  caches in named volumes.
 
 ### Changed
 

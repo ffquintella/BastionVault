@@ -657,14 +657,16 @@ endif
 
 GUI_BUNDLE_FEATURES ?= storage_hiqlite,ssh_pqc
 
-gui-linux-packages: gui-deps prune-stale ## Build the GUI .deb + .rpm (Linux only; Tauri bundler)
-ifneq ($(shell uname -s),Linux)
-	@echo "ERROR: gui-linux-packages must run on Linux (Tauri needs WebKitGTK to build the GUI)."; exit 1
-else
+gui-linux-packages: ## Build the GUI .deb + .rpm (native on Linux; emulated amd64 Docker container elsewhere)
+ifeq ($(shell uname -s),Linux)
+	@$(MAKE) gui-deps prune-stale
 	cd gui && $(GUI_TAURI) build --bundles deb,rpm -- --features $(GUI_BUNDLE_FEATURES)
 	@echo ""
 	@echo "==> GUI bundles under gui/src-tauri/target/release/bundle/:"
 	@ls -lh gui/src-tauri/target/release/bundle/deb/*.deb gui/src-tauri/target/release/bundle/rpm/*.rpm 2>/dev/null || true
+else
+	@echo "==> not on Linux — building the GUI .deb/.rpm in an emulated amd64 Docker container"
+	@GUI_BUNDLE_FEATURES=$(GUI_BUNDLE_FEATURES) bash gui/src-tauri/installers/linux/build-in-docker.sh
 endif
 
 gui-windows-msi: gui-deps prune-stale ## Build the GUI .msi (Windows only; Tauri WiX bundler)
