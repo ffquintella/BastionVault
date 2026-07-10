@@ -52,7 +52,7 @@ EXAMPLE ENTRY:
 
 ### Changed
 
-- **Smart-card (`rdp-cert`) RDP under a `rustion-required` policy no longer fails closed on the BastionVault side.** The GUI RDP connect resolver now routes smart-card credentials through the bastion (sending the cert + key + PIN into the session-open envelope) instead of refusing to dial. Live-AD validation of the PKINIT exchange and supplying the upstream TLS SPKI for the CredSSP `pubKeyAuth` binding remain pending (build-gated behind `rustion_pkinit_sspi`).
+- **Smart-card (`rdp-cert`) RDP under a `rustion-required` policy no longer fails closed on the BastionVault side.** The GUI RDP connect resolver now routes smart-card credentials through the bastion (sending the cert + key + PIN into the session-open envelope) instead of refusing to dial. On the Rustion side the sspi Kerberos PKINIT engine now compiles as the `pkinit` cargo feature (the rc.18 crypto-chain migration landed), and its ML-DSA-65 signature-verification path was re-validated in a clean Linux container. Only live-AD validation of the actual PKINIT handshake against a real KDC and wiring the upstream TLS SPKI for the CredSSP `pubKeyAuth` binding remain.
 
 ### Security
 
