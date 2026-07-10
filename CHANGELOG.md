@@ -45,6 +45,8 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-07-10
+
 ### Added
 
 - **Rustion integration Phase 9.4 — bastion host-key / TLS pinning in the GUI dialler** (cross-repo with Rustion, listener schema v2). Enrolled Rustion targets now record the bastion's SSH host-key fingerprint (`SHA256:…`) and RDP gateway TLS leaf digest (`sha256:…`), discovered via `GET /v1/listeners` at enrolment and on manual refresh (new `RustionTarget.ssh_host_key_fingerprint` / `rdp_tls_pin_sha256` fields, surfaced on the target read response and as pinned/unpinned badges on Settings → Rustion Bastions). Requires Rustion ≥ the release that ships persistent RDP TLS certs + listener schema v2.
