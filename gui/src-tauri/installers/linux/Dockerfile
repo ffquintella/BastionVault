@@ -20,10 +20,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 #   - toolchain glue  : build-essential, pkg-config, file, curl, wget, git,
 #                       ca-certificates, perl (vendored OpenSSL), libssl-dev
 #   - crypto asm      : nasm + cmake (aws-lc-sys / ring)
+#   - hardware tokens : libudev-dev (libudev-sys via the FIDO2/YubiKey HID
+#                       stack) + libpcsclite-dev (pcsc, smart-card / PIV)
 #   - bundlers        : dpkg-dev (.deb), rpm + fakeroot (.rpm)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential pkg-config file curl wget git ca-certificates \
         perl libssl-dev nasm cmake dpkg-dev rpm fakeroot \
+        libudev-dev libpcsclite-dev \
         libwebkit2gtk-4.1-dev librsvg2-dev \
         libayatana-appindicator3-dev libxdo-dev \
     && rm -rf /var/lib/apt/lists/*
