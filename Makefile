@@ -57,7 +57,7 @@ RUSTUP_CARGO_BIN ?= $(HOME)/.cargo/bin
 endif
 export PATH := $(RUSTUP_CARGO_BIN):$(PATH)
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi gui-macos-pkg gui-packages
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi gui-macos-pkg gui-packages sign-packages
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -696,6 +696,22 @@ else
 		bash gui/src-tauri/installers/macos/build-gui-pkg.sh
 	@ls -lh target/pkg/BastionVault-*.pkg 2>/dev/null || true
 endif
+
+# ── Signing (Phase 4) ──────────────────────────────────────────────────
+#
+# Sign whatever installers are on disk with WHATEVER keys you supply via the
+# environment (any GPG key, any code-signing .pfx/PEM, any Developer ID, any
+# cosign key). Each mechanism is independent + optional — provide a key and
+# that type is signed; omit it and it is skipped. Cosign + SHA256SUMS cover
+# every artifact. See installers/sign/README.md for the full env-var list.
+#
+#   BV_GPG_KEY=… BV_WIN_PFX=… BV_COSIGN_KEY=… make sign-packages
+#
+# SIGN_DIRS overrides the scan roots (default: target/).
+SIGN_DIRS ?=
+
+sign-packages: ## Sign built installers with any keys you provide (env-driven; see installers/sign/README.md)
+	@bash installers/sign/sign-artifacts.sh $(SIGN_DIRS)
 
 gui-packages: ## Build the GUI installer(s) for this host (Linux: deb+rpm; macOS: pkg; Windows: msi)
 ifeq ($(OS),Windows_NT)

@@ -98,6 +98,19 @@ EXAMPLE ENTRY:
   `build.ps1`, and a Packer template that builds the base image from a free
   Win11 ARM64 ISO).
 
+#### Native Client Installers — key-agnostic signing step (Phase 4, features/packaging-client-binaries.md)
+
+- **`make sign-packages`** (`installers/sign/sign-artifacts.sh`) signs any
+  built installers with whatever keys you supply via the environment — GPG
+  for `.deb`/`.rpm`, Authenticode for `.msi`/`.exe` (via `osslsigncode`, so
+  it runs off-Windows), Developer ID + notarization for `.pkg`, optional
+  NuGet for `.nupkg` — plus a cross-platform Cosign signature and a
+  `SHA256SUMS` over every artifact. Each mechanism is independent and
+  optional (provide a key → it signs; omit it → it skips); native-signing
+  failures fail the run loud, Cosign is best-effort. Nothing is tied to a
+  specific HSM/identity — bring any key. Verified end-to-end on macOS with
+  throwaway keys against the real deb/rpm/pkg/msi/nupkg artifacts.
+
 ### Changed
 
 - **`installers/cli/msi/bvault.wxs` now builds under both native WiX and

@@ -113,9 +113,19 @@ CI matrix (Phase 4) remain open, as do the GUI installers.
   ([installers/windows/](../gui/src-tauri/installers/windows/)) — no
   Windows host required, though it needs a one-time base image from a free
   Win11 ARM64 ISO and a first-run validation.
-- Platform-native signing (GPG deb/rpm, Authenticode msi, notarised pkg),
-  Cosign, the `manifest.json` publish, and the CI matrix (Phase 4) remain
-  open, as does the `bv://` deep-link handler (needs app-side support).
+- **Signing is wired as a key-agnostic step** (Phase 4, partial):
+  [`installers/sign/sign-artifacts.sh`](../installers/sign/sign-artifacts.sh)
+  (`make sign-packages`) signs any artifacts on disk with whatever keys the
+  operator supplies via env — GPG (deb/rpm), Authenticode (msi/exe via
+  `osslsigncode`, runs off-Windows), Developer ID + notarization (pkg),
+  optional NuGet (nupkg) — plus a cross-platform Cosign signature and
+  `SHA256SUMS` over every artifact. Each mechanism is independent/optional;
+  native failures fail the run loud. Verified end-to-end on macOS with
+  throwaway keys against the real artifacts.
+- Remaining Phase 4: the CI matrix + real release keys (GPG release subkey,
+  EV Authenticode, Apple Developer ID) plugged into that step, the
+  `manifest.json` publish, and GitHub Releases. The `bv://` deep-link
+  handler (needs app-side support) is also still open.
 
 ## Design
 
@@ -394,7 +404,8 @@ entry — pending Authenticode signing in CI.
 
 | File | Purpose |
 |---|---|
-| `.github/workflows/client-installers.yml` (extension) | Final job: cosign-sign every artefact; generate `manifest.json` matching the shape in [features/packaging-distribution-website.md](packaging-distribution-website.md); upload everything to the GitHub release. |
+| [`installers/sign/sign-artifacts.sh`](../installers/sign/sign-artifacts.sh) | **Done.** Key-agnostic signing step (`make sign-packages`): platform-native signatures (GPG deb/rpm, Authenticode msi/exe via `osslsigncode`, Developer ID + notarize pkg, optional NuGet nupkg) + Cosign over every artifact + `SHA256SUMS`, all driven by env-supplied keys. Verified on macOS. |
+| `.github/workflows/client-installers.yml` (extension) | Final job: run the signing step with the CI release keys; generate `manifest.json` matching the shape in [features/packaging-distribution-website.md](packaging-distribution-website.md); upload everything to the GitHub release. |
 | `tools/build-manifest/` | Small Rust helper that takes a directory of artefacts and emits a valid `manifest.json`. |
 | `docs/docs/operations/installing-clients.md` | End-user docs: per-platform install + verify steps. |
 
