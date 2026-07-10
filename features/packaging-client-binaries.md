@@ -53,27 +53,53 @@ deliberately separate.
 
 ## Current State
 
-- **Linux CLI packages ship locally (Phase 1, CLI side done).**
+**All four CLI installer formats build locally from a single host**
+(`make cli-packages-all`). The Linux and Windows amd64 binaries are
+cross-compiled in Docker via [`cross`](https://github.com/cross-rs/cross),
+so a Mac or Linux workstation produces the whole set; the macOS `.pkg`
+still needs a Mac for Apple's `pkgbuild`. Platform-native signing and the
+CI matrix (Phase 4) remain open, as do the GUI installers.
+
+- **Linux CLI packages (Phase 1, CLI side done).**
   `make linux-cli-packages` builds the `bastionvault` .deb (`cargo-deb`)
   and .rpm (`cargo-generate-rpm`) with the binary, manpage, and
   bash/zsh/fish completions from [installers/cli/](../installers/cli/).
-  No CI matrix and no GPG signing yet.
-- **Windows CLI packages ship locally (Phase 3, CLI side wired
-  2026-07-03).** `make windows-cli-msi` builds the .msi from the CLI-only
-  WiX 3.x project at [installers/cli/msi/bvault.wxs](../installers/cli/msi/bvault.wxs)
-  (Program Files install + system PATH entry, `WixUI_Minimal` license
-  dialog); `make windows-cli-nupkg` packs a Chocolatey package from
-  [installers/cli/nupkg/](../installers/cli/nupkg/) (choco auto-shims the
-  exe). `make windows-cli-packages` builds both; `make cli-packages`
-  dispatches per host OS. Must run on a Windows host (candle/light/choco);
-  x64 only; no Authenticode signing yet. The .nupkg is an addition to the
-  original plan (which listed only the .msi for Windows).
+  On a non-x86_64-Linux host the ELF is cross-built via `cross`. No CI
+  matrix and no GPG signing yet.
+- **macOS CLI .pkg (Phase 2, CLI side done 2026-07-10).**
+  `make macos-cli-pkg` runs [`installers/cli/pkg/build-macos-pkg.sh`](../installers/cli/pkg/build-macos-pkg.sh):
+  `pkgbuild` lays out `/usr/local/bin/bvault`, the gzipped manpage, and
+  the bash + zsh completions, then `productbuild` wraps it as a
+  distribution `.pkg` (arch-guarded via
+  [`distribution.xml`](../installers/cli/pkg/distribution.xml)). Builds
+  for the host arch by default; `CLI_MAC_TARGET=` selects the other arch
+  (a Mac cross-builds both natively). Unsigned unless `INSTALLER_IDENTITY`
+  is set; notarisation is a CI step. macOS only.
+- **Windows CLI packages (Phase 3, CLI side).** Two build paths,
+  auto-selected by host OS:
+  - **On Windows** — WiX 3.x `candle`/`light` build the .msi (with the
+    `WixUI_Minimal` license dialog) from
+    [installers/cli/msi/bvault.wxs](../installers/cli/msi/bvault.wxs), and
+    `choco pack` builds the .nupkg from
+    [installers/cli/nupkg/](../installers/cli/nupkg/).
+  - **On macOS / Linux (Docker, wired 2026-07-10)** — `cross` compiles
+    `bvault.exe` for `x86_64-pc-windows-gnu` in a container, then
+    [`wixl` (msitools)](https://gitlab.gnome.org/GNOME/msitools) links the
+    .msi (silent-install; the WixUI dialog is gated behind `WithUI=1` and
+    omitted here) and
+    [`build-nupkg.py`](../installers/cli/nupkg/build-nupkg.py) assembles
+    the .nupkg — no Windows runner, no Chocolatey. The same `bvault.wxs`
+    serves both toolchains.
+
+  `make windows-cli-packages` builds both; `make cli-packages` dispatches
+  per host OS. x64 only; no Authenticode signing yet. The .nupkg is an
+  addition to the original plan (which listed only the .msi for Windows).
 - The Tauri GUI crate's `bundle.targets` is `"all"` in
   [gui/src-tauri/tauri.conf.json](../gui/src-tauri/tauri.conf.json), but
   no CI runs `tauri build` against the cross-platform matrix and no
   signing identity is configured.
-- macOS .pkg (Phase 2), the GUI installers, and the CI matrix + Cosign
-  publish (Phase 4) remain open.
+- The GUI installers (all platforms) and the CI matrix + Cosign publish
+  (Phase 4) remain open.
 
 ## Design
 
@@ -268,17 +294,23 @@ gui/src-tauri/
 
 installers/cli/
 ├── README.md
-├── deb/
-│   └── (cargo-deb metadata in root Cargo.toml)
-├── rpm/
-│   └── (cargo-generate-rpm metadata in root Cargo.toml)
-├── pkg/
-│   ├── pkgbuild.sh
-│   ├── productbuild.sh
-│   └── distribution.xml
-└── msi/
-    ├── bvault.wxs                    # WiX 3.x project (CLI-only)
-    └── License.rtf
+├── manpage/bvault.1                 # roff manpage (deb/rpm/pkg)
+├── completions/                     # bash / zsh / fish (deb/rpm/pkg)
+│   ├── bvault.bash
+│   ├── _bvault
+│   └── bvault.fish
+│   # .deb / .rpm carry no dir of their own: cargo-deb +
+│   # cargo-generate-rpm metadata lives in the root Cargo.toml.
+├── pkg/                             # macOS .pkg
+│   ├── build-macos-pkg.sh           # pkgbuild + productbuild wrapper
+│   └── distribution.xml             # productbuild distribution (templated)
+├── msi/                             # Windows .msi
+│   ├── bvault.wxs                   # WiX 3.x project (CLI-only; wixl-compatible)
+│   └── License.rtf
+└── nupkg/                           # Windows Chocolatey .nupkg
+    ├── bastionvault-cli.nuspec
+    ├── build-nupkg.py               # host-independent OPC assembler
+    └── tools/{LICENSE,VERIFICATION}.txt
 
 .github/workflows/
 └── client-installers.yml             # The 6-job matrix described above
@@ -310,12 +342,17 @@ files. Acceptance (GUI): pending the first Linux-host `tauri build` pass.
 |---|---|
 | `gui/src-tauri/tauri.macos.conf.json` | Tauri bundler config: .app target, signing identity (env-var driven). |
 | `gui/src-tauri/installers/macos/distribution.xml` + scripts | productbuild wrap. |
-| `installers/cli/pkg/{pkgbuild,productbuild}.sh` + `distribution.xml` | CLI .pkg builder. |
+| [`installers/cli/pkg/build-macos-pkg.sh`](../installers/cli/pkg/build-macos-pkg.sh) + [`distribution.xml`](../installers/cli/pkg/distribution.xml) | CLI .pkg builder (pkgbuild + productbuild). **Done (local build via `make macos-cli-pkg`; unsigned unless `INSTALLER_IDENTITY` set; host arch or `CLI_MAC_TARGET=`).** |
 | `.github/workflows/client-installers.yml` (extension) | `macos-13` + `macos-14` matrix entries; `notarytool submit --wait`; `stapler staple`. |
 
-Acceptance: a notarised, stapled `.pkg` for both GUI and CLI installs
-cleanly via `installer -pkg … -target /` and via Munki; Gatekeeper
-accepts the install on a fresh macOS account.
+Acceptance (CLI, met today): `make macos-cli-pkg` produces a
+distribution `.pkg`; `pkgutil --expand` / `--payload-files` confirm the
+payload lays down `/usr/local/bin/bvault`, the gzipped manpage, and the
+bash/zsh completions, with the distribution's `hostArchitectures` guard
+matching the built arch. Acceptance (GUI + signing): a notarised,
+stapled `.pkg` for both GUI and CLI installs cleanly via `installer -pkg
+… -target /` and via Munki; Gatekeeper accepts the install on a fresh
+macOS account — pending CI signing identity.
 
 ### Phase 3 — Windows .msi (GUI + CLI, x64 + arm64)
 
@@ -323,13 +360,18 @@ accepts the install on a fresh macOS account.
 |---|---|
 | `gui/src-tauri/tauri.windows.conf.json` | Tauri bundler config: WiX 3.x template path, signing identity (env-var driven). |
 | `gui/src-tauri/installers/windows/main.wxs` | WiX project that extends Tauri's default with Start Menu shortcuts and the `bv://` URL handler. |
-| [`installers/cli/msi/{bvault.wxs,License.rtf}`](../installers/cli/msi/bvault.wxs) | CLI WiX project; PATH entry; per-machine install. **Done (local build via `make windows-cli-msi`; unsigned, x64 only).** |
-| [`installers/cli/nupkg/`](../installers/cli/nupkg/) | Chocolatey .nupkg (nuspec + tools; choco auto-shims the exe). Addition to the original plan. **Done (local build via `make windows-cli-nupkg`).** |
-| `Makefile` `windows-cli-msi` / `windows-cli-nupkg` / `windows-cli-packages` / `cli-packages` | Local Windows builds (candle/light + choco pack, version from Cargo.toml); `cli-packages` dispatches per host OS. **Done.** |
+| [`installers/cli/msi/{bvault.wxs,License.rtf}`](../installers/cli/msi/bvault.wxs) | CLI WiX 3.x project; PATH entry; per-machine install. The WixUI license dialog is gated behind `WithUI=1` so the same .wxs builds under native WiX (`candle`/`light`) and under `wixl` (msitools). **Done (unsigned, x64 only).** |
+| [`installers/cli/nupkg/`](../installers/cli/nupkg/) | Chocolatey .nupkg. `build-nupkg.py` assembles the OPC package on any host (no Chocolatey); native Windows still uses `choco pack`. Addition to the original plan. **Done.** |
+| `Makefile` `windows-cli-msi` / `windows-cli-nupkg` / `windows-cli-packages` / `cli-packages` / `cli-packages-all` | Host-aware: native WiX/choco on Windows, else Docker cross (`x86_64-pc-windows-gnu`) + `wixl` + `build-nupkg.py`. **Done.** |
 | `.github/workflows/client-installers.yml` (extension) | `windows-2022` + arm64 matrix entries; Authenticode signing via the EV cert configured as a CI secret. |
 
-Acceptance: both MSIs pass Windows SmartScreen on a fresh install of
-Windows 11; uninstall removes every file and registry entry.
+Acceptance (build, met today): `make windows-cli-packages` produces
+`bvault-<version>-windows-x64.msi` and
+`bastionvault-cli.<version>.nupkg` — on Windows via WiX/choco, and on
+macOS/Linux via the Docker cross + `wixl` + `build-nupkg.py` path.
+Acceptance (install + signing): both MSIs pass Windows SmartScreen on a
+fresh install of Windows 11 and uninstall removes every file and registry
+entry — pending Authenticode signing in CI.
 
 ### Phase 4 — Cosign + manifest.json + GitHub Release publish
 

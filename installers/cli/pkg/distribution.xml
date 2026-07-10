@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  productbuild distribution definition for the BastionVault CLI .pkg.
+
+  build-macos-pkg.sh substitutes @VERSION@ and @HOSTARCH@ before handing
+  this to productbuild. The component package it wraps is
+  built by `pkgbuild` and dropped next to this file as `component.pkg`.
+
+  customize="never" gives a straight-through install (no feature tree);
+  the CLI is a single component. enable_localSystem restricts the install
+  to the boot volume — the binary lands in /usr/local, which is a
+  system-wide location, so a per-user install makes no sense here.
+-->
+<installer-gui-script minSpecVersion="2">
+    <title>BastionVault CLI</title>
+    <organization>io.bastionvault</organization>
+    <options customize="never" require-scripts="false" hostArchitectures="@HOSTARCH@"/>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.bastionvault.cli"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="com.bastionvault.cli" visible="false">
+        <pkg-ref id="com.bastionvault.cli"/>
+    </choice>
+    <pkg-ref id="com.bastionvault.cli" version="@VERSION@" onConclusion="none">component.pkg</pkg-ref>
+</installer-gui-script>

@@ -45,6 +45,35 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+#### Native Client Installers — CLI track finalized across all platforms (Phases 2 + 3, features/packaging-client-binaries.md)
+
+- **macOS CLI `.pkg`** (`make macos-cli-pkg`) — a distribution-style
+  installer that drops `bvault`, the gzipped manpage, and the bash + zsh
+  completions under `/usr/local`, built with Apple's `pkgbuild` +
+  `productbuild` via `installers/cli/pkg/build-macos-pkg.sh`. Builds for
+  the host arch by default; `CLI_MAC_TARGET=` selects the other arch.
+  Unsigned unless `INSTALLER_IDENTITY` is set (notarisation is a CI step).
+- **Build the Windows amd64 `.msi` and `.nupkg` off-Windows, via Docker.**
+  `make windows-cli-msi` / `windows-cli-nupkg` are now host-aware: on
+  Windows they use the WiX 3.x toolset and `choco pack` as before; on
+  macOS/Linux they cross-compile `bvault.exe` for `x86_64-pc-windows-gnu`
+  with `cross` (Docker), then build the `.msi` with `wixl` (msitools) and
+  the `.nupkg` with the new host-independent `build-nupkg.py`. No Windows
+  runner or Chocolatey required.
+- **`make cli-packages-all`** — build every CLI installer format (Linux
+  deb/rpm + Windows msi/nupkg via Docker, plus the macOS pkg on a Mac)
+  from a single host.
+
+### Changed
+
+- **`installers/cli/msi/bvault.wxs` now builds under both native WiX and
+  `wixl`.** The `WixUI_Minimal` license dialog is gated behind a `WithUI`
+  variable (set only on the `candle`/`light` path), so `wixl` — which has
+  no UI extension — links the same project into a silent-install MSI for
+  the Docker build path.
+
 ## [0.27.0] - 2026-07-10
 
 ### Added

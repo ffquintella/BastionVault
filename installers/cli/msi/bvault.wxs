@@ -31,8 +31,18 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of BastionVault CLI is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
+    <!--
+      The interactive license dialog (WixUI_Minimal) is only available with
+      the native WiX toolset's WixUIExtension. The Docker/off-Windows build
+      path uses msitools' `wixl`, which has no UI extension and produces a
+      silent-install MSI (the enterprise `msiexec /i /qn` case). `make
+      windows-cli-msi` defines WithUI only for the candle/light build, so
+      the same .wxs serves both toolchains.
+    -->
+    <?if $(var.WithUI) = "1" ?>
     <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
     <UIRef Id="WixUI_Minimal" />
+    <?endif?>
 
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">

@@ -15,3 +15,15 @@
 # Applies to both `make linux-cli-rpm` and `make linux-cli-deb`.
 [target.x86_64-unknown-linux-gnu]
 image = "ghcr.io/rust-cross/manylinux2014-cross:x86_64"
+
+# Windows amd64 cross-build (for `make windows-cli-msi` / `-nupkg` on a
+# non-Windows host). cross's default `x86_64-pc-windows-gnu` image ships
+# the mingw-w64 toolchain but NOT nasm, so aws-lc-sys aborts its build:
+#   NASM command not found! Build cannot continue.
+# The crypto C/asm crates in this tree (aws-lc-sys, ring) need nasm for the
+# x86_64 assembly and cmake for aws-lc's build; clang/libclang cover any
+# bindgen path. Install them into the build container before the compile.
+[target.x86_64-pc-windows-gnu]
+pre-build = [
+    "apt-get update && apt-get install --assume-yes --no-install-recommends nasm cmake clang libclang-dev",
+]
