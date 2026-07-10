@@ -66,6 +66,21 @@ EXAMPLE ENTRY:
   deb/rpm + Windows msi/nupkg via Docker, plus the macOS pkg on a Mac)
   from a single host.
 
+#### Native Client Installers — GUI track wired to Tauri's bundler (features/packaging-client-binaries.md)
+
+- **GUI installers via Tauri's bundler**, with per-host `make` targets:
+  `gui-linux-packages` (`.deb` + `.rpm`), `gui-windows-msi` (`.msi`), and
+  `gui-macos-pkg` (Tauri `.app` wrapped into a `/Applications` `.pkg` via
+  `gui/src-tauri/installers/macos/build-gui-pkg.sh`). `gui-packages`
+  dispatches per host OS. A Tauri GUI cannot be cross-built in Docker
+  (the WebView runtime is platform-native), so each format builds on its
+  own OS.
+- **Wire the GUI bundler config** in `gui/src-tauri/tauri.conf.json`:
+  publisher/homepage/category/description/license metadata, Linux
+  `.deb`/`.rpm` runtime `depends` + `postInstallScript`/`preRemoveScript`
+  (the previously-staged postinst/prerm scriptlets), and macOS
+  `minimumSystemVersion`.
+
 ### Changed
 
 - **`installers/cli/msi/bvault.wxs` now builds under both native WiX and
@@ -73,6 +88,14 @@ EXAMPLE ENTRY:
   variable (set only on the `candle`/`light` path), so `wixl` — which has
   no UI extension — links the same project into a silent-install MSI for
   the Docker build path.
+
+### Fixed
+
+- **GUI version drift.** `gui/src-tauri/Cargo.toml`, `gui/package.json`,
+  and `gui/src-tauri/tauri.conf.json` were left at `0.26.0` while the
+  workspace released `0.27.0`, so a GUI installer reported the wrong
+  version. Re-synced the three GUI version fields (and `Cargo.lock`) to
+  the workspace version.
 
 ## [0.27.0] - 2026-07-10
 

@@ -57,7 +57,7 @@ RUSTUP_CARGO_BIN ?= $(HOME)/.cargo/bin
 endif
 export PATH := $(RUSTUP_CARGO_BIN):$(PATH)
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi gui-macos-pkg gui-packages
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -637,6 +637,68 @@ ifeq ($(shell uname -s),Darwin)
 	@$(MAKE) macos-cli-pkg
 else
 	@echo "==> skipping macOS .pkg (not on a Mac; .pkg needs Apple's pkgbuild)"
+endif
+
+# ── GUI installers (Tauri bundler) ─────────────────────────────────────
+#
+# The GUI is a Tauri app; its installers are produced by Tauri's bundler
+# (`tauri build --bundles ...`). Unlike the CLI, a Tauri GUI CANNOT be
+# cross-built in Docker — the WebView runtime is platform-native
+# (WebView2 on Windows, WebKitGTK on Linux, WebKit on macOS), so each
+# format must be built on its own OS. That is why these targets are
+# host-gated (and why the cross-platform matrix lives in CI, not here).
+#
+# The feature list mirrors `gui-build` (storage_hiqlite + ssh_pqc) so the
+# packaged GUI ships the same capabilities as a normal production build.
+#
+#   Linux  : make gui-linux-packages   → .deb + .rpm (bundle/deb, bundle/rpm)
+#   macOS  : make gui-macos-pkg         → .app wrapped into a .pkg (target/pkg)
+#   Windows: make gui-windows-msi       → .msi (bundle/msi)
+
+GUI_BUNDLE_FEATURES ?= storage_hiqlite,ssh_pqc
+
+gui-linux-packages: gui-deps prune-stale ## Build the GUI .deb + .rpm (Linux only; Tauri bundler)
+ifneq ($(shell uname -s),Linux)
+	@echo "ERROR: gui-linux-packages must run on Linux (Tauri needs WebKitGTK to build the GUI)."; exit 1
+else
+	cd gui && $(GUI_TAURI) build --bundles deb,rpm -- --features $(GUI_BUNDLE_FEATURES)
+	@echo ""
+	@echo "==> GUI bundles under gui/src-tauri/target/release/bundle/:"
+	@ls -lh gui/src-tauri/target/release/bundle/deb/*.deb gui/src-tauri/target/release/bundle/rpm/*.rpm 2>/dev/null || true
+endif
+
+gui-windows-msi: gui-deps prune-stale ## Build the GUI .msi (Windows only; Tauri WiX bundler)
+ifneq ($(OS),Windows_NT)
+	@echo "ERROR: gui-windows-msi must run on Windows (Tauri needs WebView2 + WiX to build the GUI .msi)."; exit 1
+else
+	cd gui && $(GUI_TAURI) build --bundles msi -- --features $(GUI_BUNDLE_FEATURES)
+	@echo ""
+	@echo "==> GUI .msi under gui/src-tauri/target/release/bundle/msi/:"
+	@ls -lh gui/src-tauri/target/release/bundle/msi/*.msi 2>/dev/null || true
+endif
+
+gui-macos-pkg: gui-deps prune-stale ## Build the GUI .pkg (macOS only; Tauri .app wrapped by productbuild)
+ifneq ($(shell uname -s),Darwin)
+	@echo "ERROR: gui-macos-pkg must run on macOS (Tauri needs macOS to build the .app; pkgbuild is Apple's)."; exit 1
+else
+	cd gui && $(GUI_TAURI) build --bundles app -- --features $(GUI_BUNDLE_FEATURES)
+	@APP=$$(find gui/src-tauri/target target -type d -name 'BastionVault.app' -path '*/bundle/macos/*' 2>/dev/null | head -1); \
+	 if [ -z "$$APP" ]; then echo "ERROR: BastionVault.app not found under */bundle/macos/ after tauri build"; exit 1; fi; \
+	 echo "==> wrapping $$APP into a .pkg"; \
+	 VERSION=$(VERSION) APP_PATH=$$APP OUTPUT_DIR=target/pkg \
+		bash gui/src-tauri/installers/macos/build-gui-pkg.sh
+	@ls -lh target/pkg/BastionVault-*.pkg 2>/dev/null || true
+endif
+
+gui-packages: ## Build the GUI installer(s) for this host (Linux: deb+rpm; macOS: pkg; Windows: msi)
+ifeq ($(OS),Windows_NT)
+	@$(MAKE) gui-windows-msi
+else ifeq ($(shell uname -s),Linux)
+	@$(MAKE) gui-linux-packages
+else ifeq ($(shell uname -s),Darwin)
+	@$(MAKE) gui-macos-pkg
+else
+	@echo "ERROR: unknown host — no GUI installer format wired"; exit 1
 endif
 
 # ── Container image push (Sonatype Nexus, Docker Hub, GHCR, …) ─────────

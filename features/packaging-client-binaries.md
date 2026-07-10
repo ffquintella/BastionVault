@@ -94,12 +94,21 @@ CI matrix (Phase 4) remain open, as do the GUI installers.
   `make windows-cli-packages` builds both; `make cli-packages` dispatches
   per host OS. x64 only; no Authenticode signing yet. The .nupkg is an
   addition to the original plan (which listed only the .msi for Windows).
-- The Tauri GUI crate's `bundle.targets` is `"all"` in
-  [gui/src-tauri/tauri.conf.json](../gui/src-tauri/tauri.conf.json), but
-  no CI runs `tauri build` against the cross-platform matrix and no
-  signing identity is configured.
-- The GUI installers (all platforms) and the CI matrix + Cosign publish
-  (Phase 4) remain open.
+- **GUI installers are wired to Tauri's bundler** in
+  [gui/src-tauri/tauri.conf.json](../gui/src-tauri/tauri.conf.json)
+  (package metadata, icons, Linux `depends` + maintainer scripts, macOS
+  `minimumSystemVersion`), with per-host `make` targets:
+  `gui-linux-packages` (`.deb`+`.rpm`), `gui-windows-msi` (`.msi`), and
+  `gui-macos-pkg` (Tauri `.app` wrapped into a `/Applications` `.pkg` by
+  [build-gui-pkg.sh](../gui/src-tauri/installers/macos/build-gui-pkg.sh)).
+  **A Tauri GUI cannot be cross-built in Docker** — the WebView runtime
+  is platform-native (WebView2 / WebKitGTK / WebKit) — so each format
+  builds on its own OS; that per-platform matrix is a CI concern. The
+  macOS GUI `.pkg` path is exercised on a Mac; the Linux `.deb`/`.rpm` and
+  Windows `.msi` are wired and await a native-host build pass.
+- Platform-native signing (GPG deb/rpm, Authenticode msi, notarised pkg),
+  Cosign, the `manifest.json` publish, and the CI matrix (Phase 4) remain
+  open, as does the `bv://` deep-link handler (needs app-side support).
 
 ## Design
 
@@ -278,19 +287,20 @@ PATH entry for the install dir
 
 ```
 gui/src-tauri/
-├── tauri.conf.json                   # already exists; extend bundler config
-├── tauri.linux.conf.json             # per-platform overrides (deb/rpm)
-├── tauri.macos.conf.json             # per-platform overrides (pkg signing)
-├── tauri.windows.conf.json           # per-platform overrides (msi/WiX)
+├── tauri.conf.json                   # bundle.{linux,macOS} bundler config
+│                                     # (per-platform overrides inline, not
+│                                     #  separate tauri.<os>.conf.json files)
 └── installers/
     ├── linux/
-    │   ├── postinst                  # desktop-file-utils + MIME
-    │   └── prerm
-    ├── macos/
-    │   ├── distribution.xml          # productbuild distribution definition
-    │   └── scripts/                  # preinstall / postinstall
-    └── windows/
-        └── main.wxs                  # WiX 3.x project (extends Tauri default)
+    │   ├── postinst                  # desktop-db / MIME / icon-cache refresh
+    │   ├── prerm
+    │   └── README.md
+    └── macos/
+        ├── build-gui-pkg.sh          # wrap Tauri .app → /Applications .pkg
+        ├── distribution.xml          # productbuild distribution definition
+        └── README.md
+    # windows/: GUI .msi uses Tauri's default WiX bundler; a custom
+    # main.wxs (bv:// handler) is deferred with the deep-link feature.
 
 installers/cli/
 ├── README.md
@@ -323,7 +333,7 @@ installers/cli/
 | File | Purpose |
 |---|---|
 | [`gui/src-tauri/installers/linux/postinst`](../gui/src-tauri/installers/linux/postinst) + [`prerm`](../gui/src-tauri/installers/linux/prerm) | XDG / MIME / icon-cache registration on install / removal. **Done.** |
-| `gui/src-tauri/tauri.conf.json` `bundle.linux.{deb,rpm}.files` | Wiring of the postinst/prerm into the Tauri bundler. **Deferred** — wiring it cold without a real `tauri build` pass on Linux invites silent format drift; lands on first Linux-host build. See `gui/src-tauri/installers/linux/README.md`. |
+| `gui/src-tauri/tauri.conf.json` `bundle.linux.{deb,rpm}` | Wiring of the postinst/prerm + runtime `depends` into the Tauri bundler (documented Tauri 2.x `postInstallScript` / `preRemoveScript` keys). **Wired 2026-07-10; verify on a Linux build host** — Tauri cannot cross-build the GUI (WebKitGTK is platform-native), so the produced `.deb`/`.rpm` await a Linux-host `make gui-linux-packages` pass. See `gui/src-tauri/installers/linux/README.md`. |
 | Root [`Cargo.toml`](../Cargo.toml) `[package.metadata.deb]` + `[package.metadata.generate-rpm]` | CLI .deb / .rpm. **Done.** |
 | [`installers/cli/manpage/bvault.1`](../installers/cli/manpage/bvault.1) + [`installers/cli/completions/`](../installers/cli/completions/) | Static manpage + bash/zsh/fish completion stubs. Phase-1 hand-written; a follow-up will plug `clap_mangen` / `clap_complete` for derived output. **Done.** |
 | [`installers/cli/README.md`](../installers/cli/README.md) | How to build locally. **Done.** |
@@ -340,8 +350,8 @@ files. Acceptance (GUI): pending the first Linux-host `tauri build` pass.
 
 | File | Purpose |
 |---|---|
-| `gui/src-tauri/tauri.macos.conf.json` | Tauri bundler config: .app target, signing identity (env-var driven). |
-| `gui/src-tauri/installers/macos/distribution.xml` + scripts | productbuild wrap. |
+| `gui/src-tauri/tauri.conf.json` `bundle.macOS` | Tauri bundler config: `.app` target + `minimumSystemVersion` (signing identity is env-var driven at build time). **Done.** |
+| [`gui/src-tauri/installers/macos/build-gui-pkg.sh`](../gui/src-tauri/installers/macos/build-gui-pkg.sh) + [`distribution.xml`](../gui/src-tauri/installers/macos/distribution.xml) | Wrap the Tauri `.app` into a `/Applications` `.pkg` (pkgbuild + productbuild). **Done — `make gui-macos-pkg`; unsigned unless `INSTALLER_IDENTITY` set.** |
 | [`installers/cli/pkg/build-macos-pkg.sh`](../installers/cli/pkg/build-macos-pkg.sh) + [`distribution.xml`](../installers/cli/pkg/distribution.xml) | CLI .pkg builder (pkgbuild + productbuild). **Done (local build via `make macos-cli-pkg`; unsigned unless `INSTALLER_IDENTITY` set; host arch or `CLI_MAC_TARGET=`).** |
 | `.github/workflows/client-installers.yml` (extension) | `macos-13` + `macos-14` matrix entries; `notarytool submit --wait`; `stapler staple`. |
 
@@ -358,8 +368,8 @@ macOS account — pending CI signing identity.
 
 | File | Purpose |
 |---|---|
-| `gui/src-tauri/tauri.windows.conf.json` | Tauri bundler config: WiX 3.x template path, signing identity (env-var driven). |
-| `gui/src-tauri/installers/windows/main.wxs` | WiX project that extends Tauri's default with Start Menu shortcuts and the `bv://` URL handler. |
+| `gui/src-tauri/tauri.conf.json` `bundle.windows` | GUI `.msi` via Tauri's default WiX bundler (Start Menu shortcut auto-created). **Wired — `make gui-windows-msi` on a Windows host; verify + Authenticode-sign in CI.** |
+| `gui/src-tauri/installers/windows/main.wxs` (`bv://` URL handler) | **Deferred** — a custom WiX fragment for the `bv://` scheme is only useful once the GUI handles deep-link URLs (Tauri deep-link plugin + app-side handling), a separate feature. Left off the default build to avoid shipping an unverified, non-functional registry entry. |
 | [`installers/cli/msi/{bvault.wxs,License.rtf}`](../installers/cli/msi/bvault.wxs) | CLI WiX 3.x project; PATH entry; per-machine install. The WixUI license dialog is gated behind `WithUI=1` so the same .wxs builds under native WiX (`candle`/`light`) and under `wixl` (msitools). **Done (unsigned, x64 only).** |
 | [`installers/cli/nupkg/`](../installers/cli/nupkg/) | Chocolatey .nupkg. `build-nupkg.py` assembles the OPC package on any host (no Chocolatey); native Windows still uses `choco pack`. Addition to the original plan. **Done.** |
 | `Makefile` `windows-cli-msi` / `windows-cli-nupkg` / `windows-cli-packages` / `cli-packages` / `cli-packages-all` | Host-aware: native WiX/choco on Windows, else Docker cross (`x86_64-pc-windows-gnu`) + `wixl` + `build-nupkg.py`. **Done.** |
