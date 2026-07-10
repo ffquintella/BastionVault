@@ -232,12 +232,19 @@ impl UserPassBackendInner {
             auth.metadata.insert("entity_id".to_string(), entity_id);
         }
         // Stamp the namespace binding so the issued token may operate in its
-        // login namespace (and only there; child-visible is opt-in elsewhere).
+        // login namespace. `child_visible` is not hardcoded off: it follows the
+        // login namespace's `child_visible_default` flag, so an operator can opt
+        // a namespace (e.g. root) into minting child-visible admin tokens that
+        // also reach descendant namespaces without a separate per-namespace
+        // login. Default stays false, preserving the strict-isolation baseline.
+        let child_visible =
+            crate::modules::namespace::token_binding::login_child_visible(&self.core, &ns_path)
+                .await;
         crate::modules::namespace::token_binding::stamp_binding(
             &mut auth.metadata,
             &ns_path,
             &ns_uuid,
-            false,
+            child_visible,
         );
 
         // Ensure token_policies mirrors effective policies before

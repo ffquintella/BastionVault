@@ -287,11 +287,16 @@ impl UserPassBackendInner {
         {
             auth.metadata.insert("entity_id".to_string(), entity_id);
         }
+        // child_visible follows the login namespace's `child_visible_default`
+        // flag (see `path_login` for the rationale); default false.
+        let child_visible =
+            crate::modules::namespace::token_binding::login_child_visible(&self.core, &ns_path)
+                .await;
         crate::modules::namespace::token_binding::stamp_binding(
             &mut auth.metadata,
             &ns_path,
             &ns_uuid,
-            false,
+            child_visible,
         );
         user_entry.populate_token_auth(&mut auth);
 

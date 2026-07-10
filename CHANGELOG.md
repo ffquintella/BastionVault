@@ -45,6 +45,97 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-07-10
+
+### Fixed
+
+#### Namespace-bound tokens can now reach the self-service endpoints (features/namespaces-multitenancy.md)
+
+- **A token logged in to a non-root namespace could not call
+  `sys/capabilities-self`, `auth/token/lookup-self`, or the token
+  renew/revoke-self endpoints — every one returned `HTTP 403`.** A namespace
+  resolves a token's named policies from its own keyspace (`get_policy_ns`), and
+  a freshly-created child namespace "starts empty": it has no `default` policy
+  and inherits none from root, so the token carried no grant on any self
+  endpoint. Namespace policies could not re-grant them either, because
+  `refuse_cross_namespace_paths` rejects root-owned `sys/*` / `auth/*` rules in a
+  tenant policy. Every authenticated token bound to a non-root namespace now
+  implicitly carries a `namespace-self` ACL policy granting **only**
+  caller-introspecting / self-service paths (token lookup/renew/revoke-self,
+  `sys/capabilities-self`, `sys/internal/ui/resultant-acl`, lease + wrapping
+  self-service, `identity/entity/self`, `identity/sharing/for-me`, and the
+  per-token `cubbyhole/*`). It is injected in ACL construction
+  (`PolicyStore::new_acl_inner`), never stored, listed, or assignable, so no
+  per-namespace seeding or backfill of existing namespaces is needed, and it
+  carries no tenant data access. The root hot path is unchanged — the policy is
+  added only for a non-empty namespace binding; root tokens already get the same
+  endpoints from their real `default` policy. This is the general fix for the gap
+  the `capabilities-self` binding-awareness work surfaced.
+  (`policy_store::NAMESPACE_SELF_POLICY`)
+
+#### Namespace token binding — misleading capabilities + opaque 403s (features/namespaces-multitenancy.md)
+
+- **`sys/capabilities-self` is now namespace-binding-aware.** It is a `sys/`
+  path and therefore exempt from the request-time token-binding check, so it
+  used to report a token's raw *policy* capabilities on paths inside a namespace
+  the token could not actually operate in. The GUI then lit up write controls
+  (Create Secret, Generate CA, …) that every real request into the namespace
+  rejected with an unexplained `HTTP 403: Permission denied`. The handler now
+  mirrors the binding verdict: when the active `X-BastionVault-Namespace`
+  names a namespace the token may not operate in, it returns **no capabilities**
+  and adds `namespace_operable: false` plus `token_namespace` / `active_namespace`
+  so clients can explain the mismatch. Root-scoped and operable requests are
+  unchanged. The `capabilities-self` HTTP shim now forwards the namespace header
+  (`copy_namespace_header`) like its sibling `sys/` handlers, so remote GUI mode
+  gets the same honesty as embedded mode.
+
+### Added
+
+#### Configure the root namespace's `child_visible_default` (features/namespaces-multitenancy.md)
+
+- **The root namespace is now configurable through a dedicated self-config
+  route.** The by-path route (`sys/namespaces/<path>`) requires a non-empty
+  path, so the root record (path `""`) was unreachable — a root-bound admin
+  could never be granted child-visible reach and had to log in directly to each
+  target namespace. `sys/namespaces` now also answers **Read** and **Write**,
+  operating on the caller's *own* namespace (the `X-BastionVault-Namespace`
+  header, or root when unscoped), symmetric with its existing LIST. This is the
+  only supported way to read or update the root record's `child_visible_default`
+  and quotas. Root/sudo-gated via the existing `namespaces` / `namespaces/*`
+  root paths; works embedded and over HTTP (the `/v1/sys/namespaces/{path:.*}`
+  shim already routes the empty-path case).
+  (`system::handle_namespace_self_read` / `handle_namespace_self_write`)
+- **GUI: a "root" row on the Namespaces page** shows root's child-visible status
+  and exposes a **Configure root** action. Enabling `child_visible_default` on
+  root surfaces a prominent warning.
+- **Security note (default-off, deliberately).** Enabling `child_visible_default`
+  on the *root* namespace makes **every** token minted at a root login (e.g. a
+  userpass user who authenticates with no namespace header) child-visible, so it
+  can operate in **every** descendant namespace (still subject to ACL). This is a
+  broad grant — it is off by default and should stay off unless root-bound admins
+  are intended to reach all tenants. Prefer binding an admin to the specific
+  parent namespace they administer instead.
+
+#### Child-visible admin tokens at login (features/namespaces-multitenancy.md)
+
+- **Login now honors each namespace's `child_visible_default` flag.** The three
+  login backends (userpass, userpass+FIDO2, approle) previously hardcoded
+  `child_visible = false` when stamping a token's namespace binding, so the
+  stored `child_visible_default` flag was never consulted — a root/parent-bound
+  admin could not operate in a descendant namespace without a separate per-tenant
+  login. Tokens minted in a namespace whose `child_visible_default` is `true` are
+  now stamped child-visible and may operate in descendant namespaces (still
+  subject to ACL). Default remains `false`, preserving strict isolation.
+  (`token_binding::login_child_visible`)
+
+#### GUI: namespace read-only banner (features/namespaces-multitenancy.md)
+
+- **A persistent banner explains when the session token cannot operate in the
+  active namespace** (bound to another namespace, without child-visibility),
+  instead of letting the operator walk into an opaque 403. Driven by the new
+  `namespace_operable` field on `capabilities-self`.
+  (`gui/src/components/NamespaceGuardBanner.tsx`)
+
 ## [0.27.1] - 2026-07-10
 
 ### Added

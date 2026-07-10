@@ -5,6 +5,7 @@ import { useAuthStore } from "../stores/authStore";
 import { StatusBadge } from "./StatusBadge";
 import { BackupModal } from "./BackupModal";
 import { NamespaceSwitcher } from "./NamespaceSwitcher";
+import { NamespaceGuardBanner } from "./NamespaceGuardBanner";
 import { TitleBar } from "./TitleBar";
 import { AboutModal } from "./AboutModal";
 import * as api from "../lib/api";
@@ -359,6 +360,8 @@ export function Layout({ children }: LayoutProps) {
         onAbout={() => setAboutOpen(true)}
         title={`BastionVault — ${subtitle}`}
       />
+
+      <NamespaceGuardBanner />
 
       <div className="flex flex-1 min-h-0">
       {/* Sidebar */}

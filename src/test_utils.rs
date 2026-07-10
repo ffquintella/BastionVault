@@ -314,6 +314,20 @@ impl TestHttpServer {
         token: Option<&str>,
         tls_client_auth: Option<TestTlsClientAuth>,
     ) -> Result<(u16, Value), RvError> {
+        self.request_with_headers(method, path, data, token, tls_client_auth, &[])
+    }
+
+    /// Like [`Self::request`] but with caller-supplied extra request headers
+    /// (e.g. `X-BastionVault-Namespace` to exercise multi-tenancy routing).
+    pub fn request_with_headers(
+        &self,
+        method: &str,
+        path: &str,
+        data: Option<Map<String, Value>>,
+        token: Option<&str>,
+        tls_client_auth: Option<TestTlsClientAuth>,
+        extra_headers: &[(&str, &str)],
+    ) -> Result<(u16, Value), RvError> {
         let url = format!("{}/{}", self.url_prefix, path);
         println!("request url: {}, method: {}", url, method);
         let tk = token.unwrap_or(&self.root_token);
@@ -370,6 +384,9 @@ impl TestHttpServer {
             .header("Accept", "application/json");
         if !path.ends_with("/login") {
             req_builder = req_builder.header("X-BastionVault-Token", tk);
+        }
+        for (name, value) in extra_headers {
+            req_builder = req_builder.header(*name, *value);
         }
 
         let response_result = if let Some(send_data) = data {

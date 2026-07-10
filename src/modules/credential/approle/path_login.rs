@@ -440,11 +440,16 @@ impl AppRoleBackendInner {
 
         let mut auth = Auth { metadata, ..Default::default() };
         auth.internal_data.insert("role_name".to_string(), role_entry.name.clone());
+        // child_visible follows the login namespace's `child_visible_default`
+        // flag (see the userpass login for the rationale); default false.
+        let child_visible =
+            crate::modules::namespace::token_binding::login_child_visible(&self.core, &ns_path)
+                .await;
         crate::modules::namespace::token_binding::stamp_binding(
             &mut auth.metadata,
             &ns_path,
             &ns_uuid,
-            false,
+            child_visible,
         );
 
         // Union token_policies with policies attached through identity

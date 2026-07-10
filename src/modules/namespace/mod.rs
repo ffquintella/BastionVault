@@ -251,6 +251,63 @@ mod tests {
         let _ = test_read_api(&core, &root, "sys/namespaces/engineering", false).await;
     }
 
+    /// The root namespace's `child_visible_default` is configurable through the
+    /// dedicated self-config route (`sys/namespaces`, empty path) — the by-path
+    /// catch-all cannot address it. Flipping it on makes tokens minted at a root
+    /// login child-visible, so they can reach descendant namespaces.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_root_child_visible_via_self_config_route() {
+        use crate::modules::namespace::token_binding::login_child_visible;
+
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_ns_root_self_config").await;
+        let store = store_of(&core);
+
+        // Read the root config through the self-route. Default: not child-visible.
+        let resp = test_read_api(&core, &root, "sys/namespaces", true).await.unwrap().unwrap();
+        let data = resp.data.unwrap();
+        assert_eq!(data["path"], "");
+        assert_eq!(data["child_visible_default"], false);
+
+        // A token minted at a root login is confined to root by default.
+        assert!(!login_child_visible(&core, "").await);
+
+        // Flip child_visible_default on for root via the self-route, and set a
+        // quota to confirm quotas are updatable here too.
+        test_write_api(
+            &core,
+            &root,
+            "sys/namespaces",
+            true,
+            json!({ "child_visible_default": true, "max_mounts": 7 }).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+
+        // Persisted: read back through the route and directly from the store.
+        let resp = test_read_api(&core, &root, "sys/namespaces", true).await.unwrap().unwrap();
+        let data = resp.data.unwrap();
+        assert_eq!(data["child_visible_default"], true);
+        assert_eq!(data["quotas"]["max_mounts"], 7);
+        let stored = store.get_by_path("").await.unwrap().unwrap();
+        assert!(stored.is_root());
+        assert!(stored.child_visible_default);
+
+        // Now a root-login token is child-visible → reaches every descendant.
+        assert!(login_child_visible(&core, "").await);
+
+        // Turning it back off is likewise honored.
+        test_write_api(
+            &core,
+            &root,
+            "sys/namespaces",
+            true,
+            json!({ "child_visible_default": false }).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+        assert!(!login_child_visible(&core, "").await);
+    }
+
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_per_namespace_mount_isolation_end_to_end() {
         use crate::logical::{Operation, Request};

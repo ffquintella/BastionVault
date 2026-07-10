@@ -155,6 +155,8 @@ impl SystemBackend {
         let sys_backend_sso_settings_write = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_sso_providers = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_namespace_list = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_namespace_self_read = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_namespace_self_write = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_namespace_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_namespace_write = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_namespace_delete = self.self_ptr.upgrade().unwrap().clone();
@@ -717,14 +719,58 @@ impl SystemBackend {
                     ]
                 },
                 {
-                    // Multi-tenancy: list child namespaces of the caller's
-                    // namespace (root unless an X-BastionVault-Namespace header
-                    // scopes the request). Reached via the v2/ API prefix.
+                    // Multi-tenancy: operate on the caller's *own* namespace —
+                    // the one named by the X-BastionVault-Namespace header, or
+                    // the root namespace when the request is unscoped. LIST
+                    // returns the caller namespace's direct children; READ/WRITE
+                    // read and update the caller namespace's own config. This is
+                    // the only supported way to configure the *root* namespace:
+                    // the by-path catch-all below requires a non-empty path, so
+                    // the root record (path "") is unreachable through it.
                     pattern: "namespaces/?$",
+                    fields: {
+                        "max_storage_bytes": {
+                            field_type: FieldType::Int,
+                            default: 0,
+                            description: "Quota: max barrier-encrypted bytes (0 = unlimited)."
+                        },
+                        "max_leases": {
+                            field_type: FieldType::Int,
+                            default: 0,
+                            description: "Quota: max live leases (0 = unlimited)."
+                        },
+                        "request_rate": {
+                            field_type: FieldType::Int,
+                            default: 0,
+                            description: "Quota: requests/sec token-bucket rate (0 = unlimited)."
+                        },
+                        "max_mounts": {
+                            field_type: FieldType::Int,
+                            default: 0,
+                            description: "Quota: max mounts (0 = unlimited)."
+                        },
+                        "max_entities": {
+                            field_type: FieldType::Int,
+                            default: 0,
+                            description: "Quota: max identity entities (0 = unlimited)."
+                        },
+                        "max_child_namespaces": {
+                            field_type: FieldType::Int,
+                            default: 0,
+                            description: "Quota: max child namespaces (0 = unlimited)."
+                        },
+                        "child_visible_default": {
+                            field_type: FieldType::Bool,
+                            default: false,
+                            description: "Default child_visible flag for tokens minted in this namespace. WARNING: setting this on the root namespace makes every token minted at a root login able to operate in EVERY descendant namespace."
+                        }
+                    },
                     operations: [
-                        {op: Operation::List, handler: sys_backend_namespace_list.handle_namespace_list}
+                        {op: Operation::List,  handler: sys_backend_namespace_list.handle_namespace_list},
+                        {op: Operation::Read,  handler: sys_backend_namespace_self_read.handle_namespace_self_read},
+                        {op: Operation::Write, handler: sys_backend_namespace_self_write.handle_namespace_self_write}
                     ],
-                    help: "List child namespaces."
+                    help: "List child namespaces, or read/update the caller's own (root when unscoped) namespace config."
                 },
                 {
                     // Read / create-or-update / delete a namespace by path.
@@ -2546,6 +2592,45 @@ impl SystemBackend {
             .auth
             .clone()
             .ok_or(RvError::ErrPermissionDenied)?;
+
+        // Multi-tenancy honesty: `sys/capabilities-self` is a `sys/` path, so it
+        // is exempt from `enforce_request_token_binding` and would otherwise
+        // report a token's *policy* capabilities on paths inside a namespace the
+        // token may not actually operate in — the GUI then enables write
+        // controls the server rejects with 403 at request time. Mirror the
+        // request-time binding verdict here: when the active namespace header
+        // names a namespace this token cannot operate in, advertise no
+        // capabilities and surface the mismatch so the UI can explain it rather
+        // than let the caller walk into an opaque denial.
+        let active_ns = self
+            .resolve_request_namespace(req)
+            .await?
+            .map(|(_, path)| path);
+        let operable = match active_ns.as_deref() {
+            Some(ns_path) => {
+                crate::modules::namespace::token_binding::token_operable(&auth, ns_path)
+            }
+            None => true,
+        };
+
+        if !operable {
+            let (token_ns, _) =
+                crate::modules::namespace::token_binding::binding_from_metadata(&auth.metadata);
+            let mut capabilities = Map::new();
+            for path in &paths {
+                capabilities.insert(path.clone(), Value::Array(vec![]));
+            }
+            let mut data = capabilities.clone();
+            data.insert("capabilities".into(), Value::Object(capabilities));
+            data.insert("namespace_operable".into(), Value::Bool(false));
+            data.insert("token_namespace".into(), Value::String(token_ns));
+            data.insert(
+                "active_namespace".into(),
+                Value::String(active_ns.unwrap_or_default()),
+            );
+            return Ok(Some(Response::data_response(Some(data))));
+        }
+
         let policy_store = policy_module.policy_store.load();
         let acl: ACL = policy_store
             .new_acl_for_request(&auth.policies, None, &auth)
@@ -2593,6 +2678,10 @@ impl SystemBackend {
         // keys; mirror that so existing clients work unchanged.
         let mut data = capabilities.clone();
         data.insert("capabilities".into(), Value::Object(capabilities));
+        // Binding-awareness flag (see the early-return above). `true` here means
+        // the token may operate in the active namespace (or the request is
+        // root-scoped), so the advertised capabilities are actionable.
+        data.insert("namespace_operable".into(), Value::Bool(true));
 
         Ok(Some(Response::data_response(Some(data))))
     }
@@ -3034,6 +3123,58 @@ impl SystemBackend {
         let parent = namespace_header_from_map(req.headers.as_ref()).unwrap_or_default();
         let children = store.list_children(&parent).await?;
         Ok(Some(Response::list_response(&children)))
+    }
+
+    /// Read the caller's *own* namespace config — the namespace named by the
+    /// X-BastionVault-Namespace header, or the root namespace when the request
+    /// is unscoped. This is the only route that can read the root record, which
+    /// the by-path catch-all cannot reach (it requires a non-empty path).
+    pub async fn handle_namespace_self_read(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_namespace_store()?;
+        let path = namespace_header_from_map(req.headers.as_ref()).unwrap_or_default();
+        match store.get_by_path(&path).await? {
+            Some(ns) => Ok(Some(Self::namespace_to_response(&ns))),
+            None => Err(bv_error_response_status!(404, &format!("no such namespace: {path:?}"))),
+        }
+    }
+
+    /// Update the caller's *own* namespace config (quotas + child-visible
+    /// default). Update-only: the caller's namespace always exists, so this
+    /// never creates. The primary use is configuring the *root* namespace,
+    /// which the by-path catch-all cannot address.
+    ///
+    /// Security: enabling `child_visible_default` on the root namespace grants
+    /// every token minted at a root login child-visible reach into *every*
+    /// descendant namespace (see `token_binding::token_may_operate`). It is
+    /// deliberately default-off and gated to root/sudo callers.
+    pub async fn handle_namespace_self_write(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let store = self.resolve_namespace_store()?;
+        let path = namespace_header_from_map(req.headers.as_ref()).unwrap_or_default();
+
+        let quotas = NamespaceQuotas {
+            max_storage_bytes: req.get_data_or_default("max_storage_bytes")?.as_u64().unwrap_or(0),
+            max_leases: req.get_data_or_default("max_leases")?.as_u64().unwrap_or(0),
+            request_rate: req.get_data_or_default("request_rate")?.as_u64().unwrap_or(0),
+            max_mounts: req.get_data_or_default("max_mounts")?.as_u64().unwrap_or(0),
+            max_entities: req.get_data_or_default("max_entities")?.as_u64().unwrap_or(0),
+            max_child_namespaces: req
+                .get_data_or_default("max_child_namespaces")?
+                .as_u64()
+                .unwrap_or(0),
+        };
+        let child_visible_default =
+            req.get_data_or_default("child_visible_default")?.as_bool().unwrap_or(false);
+
+        let ns = store.update(&path, Some(quotas), Some(child_visible_default)).await?;
+        Ok(Some(Self::namespace_to_response(&ns)))
     }
 
     pub async fn handle_namespace_read(
@@ -3704,6 +3845,257 @@ mod mod_system_tests {
         let both_caps = caps_for(&login("both"));
         assert!(both_caps.contains(&"connect".to_string()), "got {both_caps:?}");
         assert!(both_caps.contains(&"read".to_string()), "got {both_caps:?}");
+    }
+
+    /// Regression (namespace token binding): `capabilities-self` must reflect
+    /// whether the calling token may actually *operate* in the active
+    /// namespace — not just its raw policy capabilities. A token bound to one
+    /// namespace, browsing another it cannot operate in, previously saw full
+    /// capabilities (the handler is `sys/`-scoped, hence exempt from the
+    /// request-time binding check), so the GUI enabled write controls the
+    /// server then rejected with 403. This test reproduces the reported bug
+    /// (a root-bound login switched to a child namespace) and also verifies
+    /// that `child_visible_default` is honored at login.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_capabilities_self_namespace_binding_aware() {
+        let mut server = TestHttpServer::new("test_caps_self_ns_binding", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+        server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
+
+        // Namespace tree: `nsa` mints child-visible tokens, `nsb` does not.
+        for (path, cvd) in [("nsa", true), ("nsa/sub", true), ("nsb", false), ("nsb/sub", false)] {
+            let (s, r) = server
+                .write(
+                    &format!("v1/sys/namespaces/{path}"),
+                    serde_json::json!({ "child_visible_default": cvd }).as_object().cloned(),
+                    Some(&root),
+                )
+                .unwrap();
+            assert!((200..300).contains(&s), "ns create {path}: {s} {r:?}");
+        }
+
+        // A wildcard policy so ACL would grant everything everywhere — this
+        // proves the empty result below comes from *binding*, not from a
+        // missing policy grant.
+        server
+            .write(
+                "v1/sys/policies/acl/broad",
+                serde_json::json!({
+                    "policy": "path \"*\" { capabilities = [\"create\", \"read\", \"update\", \"delete\", \"list\"] }"
+                })
+                .as_object()
+                .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        server
+            .write(
+                "v1/sys/auth/pass",
+                serde_json::json!({ "type": "userpass" }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        server
+            .write(
+                "v1/auth/pass/users/alice",
+                serde_json::json!({ "password": "hunter22XX!", "token_policies": "broad", "ttl": 0 })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+
+        // Login carrying an optional namespace header; returns the token.
+        let login_ns = |server: &TestHttpServer, ns: Option<&str>| -> String {
+            let headers: Vec<(&str, &str)> =
+                ns.map(|n| vec![("X-BastionVault-Namespace", n)]).unwrap_or_default();
+            server
+                .request_with_headers(
+                    "POST",
+                    "v1/auth/pass/login/alice",
+                    serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                    None,
+                    None,
+                    &headers,
+                )
+                .unwrap()
+                .1
+                .get("auth")
+                .and_then(|a| a.get("client_token"))
+                .and_then(|v| v.as_str())
+                .unwrap()
+                .to_string()
+        };
+
+        // capabilities-self against `secret/data/x` with an optional active-ns header.
+        let caps_ns = |server: &TestHttpServer, token: &str, ns: Option<&str>| -> Value {
+            let headers: Vec<(&str, &str)> =
+                ns.map(|n| vec![("X-BastionVault-Namespace", n)]).unwrap_or_default();
+            let (s, r) = server
+                .request_with_headers(
+                    "POST",
+                    "v2/sys/capabilities-self",
+                    serde_json::json!({ "paths": ["secret/data/x"] }).as_object().cloned(),
+                    Some(token),
+                    None,
+                    &headers,
+                )
+                .unwrap();
+            assert_eq!(s, 200, "capabilities-self must 200: {r:?}");
+            r
+        };
+
+        // The reported bug: a token bound to root (login with no header;
+        // root's child_visible_default is false) switched to a child namespace
+        // must report itself inoperable with empty capabilities.
+        let root_bound = login_ns(&server, None);
+        let denied = caps_ns(&server, &root_bound, Some("nsa"));
+        assert_eq!(
+            denied["namespace_operable"],
+            serde_json::json!(false),
+            "root-bound token must be inoperable in a child namespace: {denied:?}"
+        );
+        assert_eq!(denied["token_namespace"], serde_json::json!(""));
+        assert_eq!(denied["active_namespace"], serde_json::json!("nsa"));
+        assert_eq!(
+            denied["capabilities"]["secret/data/x"],
+            serde_json::json!([]),
+            "capabilities must be empty when the token cannot operate here"
+        );
+
+        // Control: the SAME token at root is operable, and the wildcard policy
+        // surfaces — confirming the empty result above was binding, not ACL.
+        let at_root = caps_ns(&server, &root_bound, None);
+        assert_eq!(at_root["namespace_operable"], serde_json::json!(true));
+        assert!(
+            at_root["capabilities"]["secret/data/x"]
+                .as_array()
+                .map(|a| a.contains(&serde_json::json!("create")))
+                .unwrap_or(false),
+            "root-scoped caps must surface: {at_root:?}"
+        );
+
+        // child_visible_default honored at login: read the minted token's
+        // binding straight from the login response's `auth.metadata` (no
+        // follow-up call, which would need a per-namespace policy grant). A
+        // token minted in `nsa` (child_visible_default = true) carries
+        // child_visible = true; one minted in `nsb` (false) does not.
+        let login_meta = |server: &TestHttpServer, ns: &str| -> Value {
+            server
+                .request_with_headers(
+                    "POST",
+                    "v1/auth/pass/login/alice",
+                    serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                    None,
+                    None,
+                    &[("X-BastionVault-Namespace", ns)],
+                )
+                .unwrap()
+                .1["auth"]["metadata"]
+                .clone()
+        };
+
+        let nsa_meta = login_meta(&server, "nsa");
+        assert_eq!(
+            nsa_meta["namespace_path"],
+            serde_json::json!("nsa"),
+            "token must be bound to its login namespace: {nsa_meta:?}"
+        );
+        assert_eq!(
+            nsa_meta["child_visible"],
+            serde_json::json!("true"),
+            "login must honor child_visible_default = true: {nsa_meta:?}"
+        );
+
+        let nsb_meta = login_meta(&server, "nsb");
+        assert_eq!(
+            nsb_meta["child_visible"],
+            serde_json::json!("false"),
+            "login must honor child_visible_default = false: {nsb_meta:?}"
+        );
+    }
+
+    /// Multi-tenancy regression: a token bound to a non-root namespace must be
+    /// able to reach the self-service endpoints (`sys/capabilities-self`,
+    /// `auth/token/lookup-self`, …). A child namespace "starts empty" — it has
+    /// no `default` policy and inherits none from root — so before the implicit
+    /// `namespace-self` grant these preflighted to 403, leaving a namespace
+    /// principal unable to look itself up or query its own capabilities.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_namespace_bound_token_reaches_self_endpoints() {
+        let mut server = TestHttpServer::new("test_ns_self_endpoints", true).await;
+        let root = server.root_token.clone();
+        server.token = root.clone();
+        server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
+
+        // A child namespace and a userpass user whose only policy exists at
+        // root (so it is absent from the child keyspace — the "empty
+        // namespace" condition).
+        let (s, r) = server
+            .write("v1/sys/namespaces/nsx", serde_json::json!({}).as_object().cloned(), Some(&root))
+            .unwrap();
+        assert!((200..300).contains(&s), "ns create: {s} {r:?}");
+        server
+            .write(
+                "v1/sys/policies/acl/rootonly",
+                serde_json::json!({ "policy": "path \"secret/data/z\" { capabilities = [\"read\"] }" })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        server
+            .write("v1/sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), Some(&root))
+            .unwrap();
+        server
+            .write(
+                "v1/auth/pass/users/bob",
+                serde_json::json!({ "password": "hunter22XX!", "token_policies": "rootonly", "ttl": 0 })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+
+        // Log in inside `nsx` → the minted token is bound to `nsx`.
+        let (s, r) = server
+            .request_with_headers(
+                "POST",
+                "v1/auth/pass/login/bob",
+                serde_json::json!({ "password": "hunter22XX!" }).as_object().cloned(),
+                None,
+                None,
+                &[("X-BastionVault-Namespace", "nsx")],
+            )
+            .unwrap();
+        assert_eq!(s, 200, "namespace login must succeed: {r:?}");
+        let token = r["auth"]["client_token"].as_str().unwrap().to_string();
+        assert_eq!(r["auth"]["metadata"]["namespace_path"], serde_json::json!("nsx"));
+
+        // capabilities-self succeeds (was 403 before the fix) and reports the
+        // token as operable in its own namespace.
+        let (s, r) = server
+            .request_with_headers(
+                "POST",
+                "v2/sys/capabilities-self",
+                serde_json::json!({ "paths": ["secret/data/z"] }).as_object().cloned(),
+                Some(&token),
+                None,
+                &[("X-BastionVault-Namespace", "nsx")],
+            )
+            .unwrap();
+        assert_eq!(s, 200, "namespace-bound capabilities-self must succeed: {r:?}");
+        assert_eq!(r["namespace_operable"], serde_json::json!(true));
+
+        // lookup-self succeeds and returns the caller's own token record.
+        let (s, r) = server.read("v1/auth/token/lookup-self", Some(&token)).unwrap();
+        assert_eq!(s, 200, "namespace-bound lookup-self must succeed: {r:?}");
+        assert_eq!(
+            r["data"]["meta"]["namespace_path"],
+            serde_json::json!("nsx"),
+            "lookup-self must return the caller's own record: {r:?}"
+        );
     }
 
     /// Regression: `capabilities-self` must not advertise scope-gated

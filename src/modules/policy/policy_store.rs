@@ -247,6 +247,67 @@ path "resource-group/groups/+" {
 }
 "#;
 
+// Implicit self-service policy for namespace-bound tokens.
+//
+// Multi-tenancy gap: a token whose login namespace is non-root resolves its
+// named policies from that namespace's own keyspace (see `get_policy_ns`). A
+// freshly-created namespace "starts empty" — it has no `default` policy, and a
+// policy written at root is absent from the child keyspace — so a namespace
+// token has no grant on the self-service endpoints (`sys/capabilities-self`,
+// `auth/token/lookup-self`, token renew/revoke-self, …). Namespace policies
+// also cannot re-grant these: `refuse_cross_namespace_paths` rejects `sys/*` /
+// `auth/*` rules in a namespace policy because those paths are root-owned. That
+// left a namespace principal with no way to introspect its own token.
+//
+// The fix: every authenticated token bound to a non-root namespace implicitly
+// carries this policy in its ACL (injected in `new_acl_inner`). It grants ONLY
+// caller-introspecting / self-service endpoints — each acts solely on the
+// caller's own token, identity, capabilities, cubbyhole, or wrapping tokens, so
+// it is safe for any authenticated principal regardless of tenant. These paths
+// are `sys/` / `auth/` / `identity/` (global, never namespace-rewritten), so the
+// bare path rules match the un-rewritten request paths exactly. Root tokens are
+// unaffected: this is only added when the bound namespace path is non-empty, and
+// root already grants the same set via its own `default` policy.
+//
+// It is never stored, never listed, and never assignable — it exists purely as
+// an in-memory ACL contribution, so no per-namespace seeding or backfill of
+// existing namespaces is required.
+const NAMESPACE_SELF_POLICY_NAME: &str = "namespace-self";
+static NAMESPACE_SELF_POLICY: &str = r#"
+# --- Token self-service ---
+path "auth/token/lookup-self" { capabilities = ["read"] }
+path "auth/token/renew-self"  { capabilities = ["update"] }
+path "auth/token/revoke-self" { capabilities = ["update"] }
+path "auth/token/audit-login" { capabilities = ["update"] }
+
+# --- Capability / ACL introspection ---
+path "sys/capabilities-self"          { capabilities = ["update"] }
+path "sys/internal/ui/resultant-acl"  { capabilities = ["read"] }
+
+# --- Caller-introspecting identity lookups (only ever return the caller) ---
+path "identity/entity/self"   { capabilities = ["read"] }
+path "identity/sharing/for-me" { capabilities = ["read", "list"] }
+
+# --- Lease self-service (requires knowing the lease id up front) ---
+path "sys/renew"          { capabilities = ["update"] }
+path "sys/leases/renew"   { capabilities = ["update"] }
+path "sys/leases/lookup"  { capabilities = ["update"] }
+
+# --- Response-wrapping self-service ---
+path "sys/wrapping/wrap"   { capabilities = ["update"] }
+path "sys/wrapping/lookup" { capabilities = ["update"] }
+path "sys/wrapping/unwrap" { capabilities = ["update"] }
+
+# --- Stateless utility ---
+path "sys/tools/hash"   { capabilities = ["update"] }
+path "sys/tools/hash/*" { capabilities = ["update"] }
+
+# --- Private per-token workspace ---
+path "cubbyhole/*" {
+    capabilities = ["create", "read", "update", "delete", "list"]
+}
+"#;
+
 // Administrator baseline. Full access to every path with every
 // capability — the equivalent of `root` for non-root tokens. Issued
 // for break-glass / day-1 admin use; pair with audit logging.
@@ -798,6 +859,16 @@ lazy_static! {
         vec!["root", RESPONSE_WRAPPING_POLICY_NAME, CONTROL_GROUP_POLICY_NAME,];
     pub static ref NON_ASSIGNABLE_POLICIES: Vec<&'static str> =
         vec![RESPONSE_WRAPPING_POLICY_NAME, CONTROL_GROUP_POLICY_NAME,];
+    /// Parsed, cached instance of the implicit self-service policy granted to
+    /// every namespace-bound token. Parsed once at first use; the built-in HCL
+    /// is a compile-time constant so a parse failure is a programmer error.
+    static ref NAMESPACE_SELF_POLICY_PARSED: Arc<Policy> = {
+        let mut p = Policy::from_str(NAMESPACE_SELF_POLICY)
+            .expect("built-in namespace self-service policy must parse");
+        p.name = NAMESPACE_SELF_POLICY_NAME.to_string();
+        p.policy_type = PolicyType::Acl;
+        Arc::new(p)
+    };
 }
 
 /// Represents a policy entry in the policy store.
@@ -1426,6 +1497,17 @@ impl PolicyStore {
             {
                 all_policies.push(policy);
             }
+        }
+
+        // Multi-tenancy: a namespace-bound token's named policies resolve from
+        // its (initially empty) namespace keyspace, so it would otherwise carry
+        // no grant on the self-service endpoints — it could not even look itself
+        // up or query its own capabilities. Inject the implicit self-service
+        // policy for any non-root binding. Root tokens (`ns_path == ""`) are
+        // untouched; they get the same endpoints from their real `default`
+        // policy, so the pre-namespace hot path is byte-for-byte unchanged.
+        if !ns_path.is_empty() {
+            all_policies.push(NAMESPACE_SELF_POLICY_PARSED.clone());
         }
 
         if let Some(ap) = additional_policies {
@@ -3231,6 +3313,85 @@ mod mod_policy_store_tests {
         let policies = policy_store.list_policy(PolicyType::Acl).await.unwrap();
         assert!(!policies.contains(&policy1_name.to_string()));
         assert!(policies.contains(&policy2_name.to_string()));
+    }
+
+    /// Multi-tenancy self-service gap: a token bound to a non-root namespace
+    /// resolves its named policies from that namespace's (initially empty)
+    /// keyspace, so it would carry no grant on the self endpoints. Verify the
+    /// implicit `namespace-self` policy is injected into ACL construction for
+    /// namespace-bound tokens (granting the self endpoints) while leaving the
+    /// root hot path — and tenant data access — untouched.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_namespace_bound_token_gets_self_service_acl() {
+        use crate::logical::Auth;
+        use crate::modules::namespace::token_binding::stamp_binding;
+
+        let (_bvault, core, _root_token) =
+            new_unseal_test_bastion_vault("test_ns_self_service_acl").await;
+        let policy_store = PolicyStore::new(&core).await.unwrap();
+
+        // A namespace-bound token. Its named policies (`default`, plus one that
+        // does not exist) resolve to nothing in the empty `nsa` keyspace — the
+        // exact "child namespace starts empty" condition.
+        let mut ns_auth =
+            Auth { policies: vec!["default".into(), "nonexistent".into()], ..Default::default() };
+        stamp_binding(&mut ns_auth.metadata, "nsa", "uuid-nsa", false);
+
+        let acl = policy_store
+            .new_acl_for_request(&ns_auth.policies, None, &ns_auth)
+            .await
+            .unwrap();
+
+        // Self-service endpoints are reachable despite the empty keyspace.
+        for (path, cap) in [
+            ("sys/capabilities-self", "update"),
+            ("auth/token/lookup-self", "read"),
+            ("auth/token/renew-self", "update"),
+            ("auth/token/revoke-self", "update"),
+            ("sys/internal/ui/resultant-acl", "read"),
+            ("cubbyhole/scratch", "read"),
+        ] {
+            let caps = acl.capabilities(path.to_string());
+            assert!(
+                caps.iter().any(|c| c == cap),
+                "namespace token must have `{cap}` on `{path}`, got {caps:?}"
+            );
+            assert!(
+                !caps.iter().any(|c| c == "deny"),
+                "namespace token must not be denied on `{path}`, got {caps:?}"
+            );
+        }
+
+        // No privilege over-grant: tenant data paths remain denied. The
+        // implicit policy only carries self/introspection endpoints.
+        assert_eq!(
+            acl.capabilities("secret/data/x".to_string()),
+            vec!["deny".to_string()],
+            "self policy must not grant tenant data access"
+        );
+
+        // The root hot path is byte-for-byte unchanged: a root-bound token
+        // (no namespace binding) carrying a policy that does NOT grant the self
+        // endpoints must still be denied them — the implicit policy is only
+        // injected for non-root bindings.
+        let mut rootonly = Policy::from_str("path \"secret/data/y\" { capabilities = [\"read\"] }").unwrap();
+        rootonly.name = "rootonly".to_string();
+        policy_store.set_policy(rootonly).await.unwrap();
+
+        let root_auth = Auth { policies: vec!["rootonly".into()], ..Default::default() };
+        let root_acl = policy_store
+            .new_acl_for_request(&root_auth.policies, None, &root_auth)
+            .await
+            .unwrap();
+        assert_eq!(
+            root_acl.capabilities("sys/capabilities-self".to_string()),
+            vec!["deny".to_string()],
+            "root path must not gain the implicit namespace self-service policy"
+        );
+        assert!(
+            root_acl.capabilities("secret/data/y".to_string()).iter().any(|c| c == "read"),
+            "the root-bound token's own policy must still apply"
+        );
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

@@ -36,10 +36,15 @@ export function NamespacesPage() {
   const { toast } = useToast();
   const [namespaces, setNamespaces] = useState<string[]>([]);
   const [details, setDetails] = useState<Record<string, NamespaceInfo>>({});
+  const [rootInfo, setRootInfo] = useState<NamespaceInfo | null>(null);
   const [loading, setLoading] = useState(true);
 
   const [showEdit, setShowEdit] = useState(false);
   const [editMode, setEditMode] = useState<"create" | "update">("create");
+  // True when the modal is editing the root namespace (path ""), which is
+  // reachable only through the dedicated self-config route, not the by-path
+  // catch-all. Root can never be created or deleted.
+  const [formIsRoot, setFormIsRoot] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
   const [formPath, setFormPath] = useState("");
@@ -55,6 +60,14 @@ export function NamespacesPage() {
   async function loadAll() {
     setLoading(true);
     try {
+      // Root namespace config is fetched separately: it is not part of the
+      // child list, and is reached via the dedicated self-config route (empty
+      // path). A failure here should not blank the whole page.
+      try {
+        setRootInfo(await api.readNamespace(""));
+      } catch {
+        setRootInfo(null);
+      }
       const result = await api.listNamespaces();
       setNamespaces(result.namespaces);
       const map: Record<string, NamespaceInfo> = {};
@@ -78,6 +91,7 @@ export function NamespacesPage() {
 
   function openCreate() {
     setEditMode("create");
+    setFormIsRoot(false);
     setFormPath("");
     setFormQuotas(EMPTY_QUOTAS);
     setFormChildVisible(false);
@@ -87,24 +101,37 @@ export function NamespacesPage() {
   function openEdit(path: string) {
     const info = details[path];
     setEditMode("update");
+    setFormIsRoot(false);
     setFormPath(path);
     setFormQuotas(info ? info.quotas : EMPTY_QUOTAS);
     setFormChildVisible(info ? info.child_visible_default : false);
     setShowEdit(true);
   }
 
+  function openEditRoot() {
+    setEditMode("update");
+    setFormIsRoot(true);
+    setFormPath("");
+    setFormQuotas(rootInfo ? rootInfo.quotas : EMPTY_QUOTAS);
+    setFormChildVisible(rootInfo ? rootInfo.child_visible_default : false);
+    setShowEdit(true);
+  }
+
   async function save() {
-    const path = formPath.trim().replace(/^\/+|\/+$/g, "");
-    if (!path) {
+    // Root (formIsRoot) is addressed by the empty path; every other namespace
+    // requires a non-empty path.
+    const path = formIsRoot ? "" : formPath.trim().replace(/^\/+|\/+$/g, "");
+    if (!formIsRoot && !path) {
       toast("error", "Namespace path is required");
       return;
     }
     setSaving(true);
     try {
       await api.writeNamespace(path, formQuotas, formChildVisible);
+      const label = formIsRoot ? "root" : `"${path}"`;
       toast(
         "success",
-        editMode === "create" ? `Namespace "${path}" created` : `Namespace "${path}" updated`,
+        editMode === "create" ? `Namespace "${path}" created` : `Namespace ${label} updated`,
       );
       setShowEdit(false);
       await loadAll();
@@ -141,6 +168,32 @@ export function NamespacesPage() {
           </div>
           <Button onClick={openCreate}>New namespace</Button>
         </div>
+
+        <Card>
+          <div className="flex items-center justify-between gap-3 p-4">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-sm">root</span>
+                <span className="text-xs rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-400">
+                  implicit
+                </span>
+                {rootInfo?.child_visible_default && (
+                  <span className="text-xs rounded bg-amber-900/50 px-1.5 py-0.5 text-amber-300">
+                    child-visible
+                  </span>
+                )}
+              </div>
+              <p className="mt-1 text-xs text-zinc-500">
+                {rootInfo?.child_visible_default
+                  ? "Tokens minted at a root login can operate in EVERY descendant namespace."
+                  : "Tokens minted at a root login are confined to root unless they log in to a child namespace directly."}
+              </p>
+            </div>
+            <Button variant="ghost" size="sm" onClick={openEditRoot} disabled={!rootInfo}>
+              Configure root
+            </Button>
+          </div>
+        </Card>
 
         <Card>
           {loading ? (
@@ -207,22 +260,30 @@ export function NamespacesPage() {
       <Modal
         open={showEdit}
         onClose={() => setShowEdit(false)}
-        title={editMode === "create" ? "Create namespace" : `Edit ${formPath}`}
+        title={
+          formIsRoot
+            ? "Configure root namespace"
+            : editMode === "create"
+              ? "Create namespace"
+              : `Edit ${formPath}`
+        }
         size="md"
       >
         <div className="grid grid-cols-2 gap-3">
-          <div className="col-span-2">
-            <label className="block text-sm mb-1">Path</label>
-            <Input
-              value={formPath}
-              onChange={(e) => setFormPath(e.target.value)}
-              placeholder="engineering/platform"
-              disabled={editMode === "update"}
-            />
-            <p className="text-xs text-zinc-500 mt-1">
-              Slash-delimited. The parent namespace must already exist.
-            </p>
-          </div>
+          {!formIsRoot && (
+            <div className="col-span-2">
+              <label className="block text-sm mb-1">Path</label>
+              <Input
+                value={formPath}
+                onChange={(e) => setFormPath(e.target.value)}
+                placeholder="engineering/platform"
+                disabled={editMode === "update"}
+              />
+              <p className="text-xs text-zinc-500 mt-1">
+                Slash-delimited. The parent namespace must already exist.
+              </p>
+            </div>
+          )}
 
           {QUOTA_FIELDS.map((f) => (
             <div key={f.key}>
@@ -247,6 +308,14 @@ export function NamespacesPage() {
             />
             Default <span className="font-mono">child_visible</span> for tokens minted here
           </label>
+          {formIsRoot && formChildVisible && (
+            <p className="col-span-2 rounded border border-amber-800 bg-amber-900/30 p-2 text-xs text-amber-300">
+              Warning: with this enabled on <span className="font-mono">root</span>, every token
+              minted at a root login (e.g. a userpass user who logs in with no namespace selected)
+              can operate in <strong>every</strong> descendant namespace. Leave off unless you
+              intend root-bound admins to reach all tenants.
+            </p>
+          )}
         </div>
 
         <div className="flex justify-end gap-2 mt-4">

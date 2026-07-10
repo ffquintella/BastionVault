@@ -2257,6 +2257,21 @@ export const sessionRustionInfo = (token: string) =>
 export type CapabilitiesResult = {
   /** Path → capability strings, e.g. `{"resources/secrets/db/": ["connect"]}`. */
   paths: Record<string, string[]>;
+  /**
+   * Multi-tenancy: `false` when the active namespace names a tenant the current
+   * token may not operate in (a token bound to another namespace, without
+   * child-visibility). In that case every capability set above is empty and the
+   * UI should surface the binding mismatch rather than offer controls the
+   * server will 403. `true` for root-scoped requests and operable namespaces.
+   * Older/single-tenant servers omit it; the bridge defaults it to `true`.
+   */
+  namespace_operable: boolean;
+  /** Namespace the token is bound to (`""` = root). Meaningful only when
+   *  `namespace_operable` is `false`. */
+  token_namespace: string;
+  /** Active namespace the request targeted (`""` = root). Meaningful only when
+   *  `namespace_operable` is `false`. */
+  active_namespace: string;
 };
 
 export const capabilitiesSelf = (paths: string[]) =>

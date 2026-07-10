@@ -974,6 +974,12 @@ async fn sys_capabilities_self_request_handler(
     r.path = "sys/capabilities-self".to_string();
     r.operation = Operation::Write;
     r.body = Some(payload);
+    // Forward the active-namespace selector so the handler can report
+    // whether the token may actually operate in that namespace (binding
+    // awareness), not just its raw policy capabilities. Embedded mode sets
+    // this header directly; over HTTP (remote GUI) it must be copied here,
+    // like every sibling sys handler does.
+    copy_namespace_header(&req, &mut r);
 
     handle_request(core, &mut r).await
 }
@@ -3548,6 +3554,48 @@ mod namespace_route_tests {
             err.contains("no such namespace"),
             "404 must come from the logical handler, not the actix scope: {resp:?}"
         );
+    }
+
+    /// The root namespace (empty path) is configurable over HTTP through the
+    /// self-config route — GET/POST `/v1/sys/namespaces/` with no path. The GUI
+    /// addresses it exactly this way (`format!("sys/namespaces/{{path}}")` with
+    /// an empty path). This is the only HTTP entry point that can read or write
+    /// the root record.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_root_namespace_self_config_over_http() {
+        let mut server = TestHttpServer::new("test_ns_root_self_config_http", true).await;
+        server.token = server.root_token.clone();
+        let token = server.root_token.clone();
+
+        // Read the root config: path "" ⇒ URL `/v1/sys/namespaces/`.
+        let (status, resp) = server
+            .request("GET", "sys/namespaces/", None, Some(&token), None)
+            .unwrap();
+        assert_eq!(status, 200, "read root config must reach the self handler: {resp:?}");
+        let data = resp.get("data").cloned().unwrap_or(resp.clone());
+        assert_eq!(data["path"], "");
+        assert_eq!(data["child_visible_default"], false);
+
+        // Enable child_visible_default on root via POST to the same path.
+        let (status, resp) = server
+            .request(
+                "POST",
+                "sys/namespaces/",
+                json!({ "child_visible_default": true }).as_object().cloned(),
+                Some(&token),
+                None,
+            )
+            .unwrap();
+        assert!(status == 200 || status == 204, "write root config failed: {status} {resp:?}");
+
+        // Read back: the flag is persisted on the root record.
+        let (status, resp) = server
+            .request("GET", "sys/namespaces/", None, Some(&token), None)
+            .unwrap();
+        assert_eq!(status, 200, "read-after-write must reach the self handler: {resp:?}");
+        let data = resp.get("data").cloned().unwrap_or(resp.clone());
+        assert_eq!(data["path"], "");
+        assert_eq!(data["child_visible_default"], true);
     }
 }
 
