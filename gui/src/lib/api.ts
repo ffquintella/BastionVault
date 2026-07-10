@@ -1906,6 +1906,8 @@ export const pluginAppNetCalls = (plugin: string) =>
 
 export const pkiListMounts = () => invoke<PkiMountInfo[]>("pki_list_mounts");
 export const pkiEnableMount = (path: string) => invoke<void>("pki_enable_mount", { path });
+/** Unmount (delete) the PKI engine at `path`. Destroys all data in the mount. */
+export const pkiDisableMount = (path: string) => invoke<void>("pki_disable_mount", { path });
 
 export const pkiListIssuers = (mount: string) =>
   invoke<PkiIssuerListResult>("pki_list_issuers", { mount });

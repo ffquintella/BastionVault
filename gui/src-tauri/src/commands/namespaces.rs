@@ -1,11 +1,15 @@
 //! Namespace management commands (multi-tenancy).
 //!
-//! These drive the `v2/sys/namespaces` CRUD surface. They operate on the root
-//! namespace's view (no `X-BastionVault-Namespace` header): `list` returns the
-//! root's direct children and `write`/`read`/`delete` address namespaces by
-//! their full slash-delimited path. A namespace *switcher* that scopes other
-//! requests to a child namespace requires per-request header plumbing through
-//! the `bv_client` backend trait and is tracked as a follow-up.
+//! These drive the `v2/sys/namespaces` CRUD surface. `write`/`read`/`delete`
+//! address namespaces by their full slash-delimited path from the root's view
+//! (no `X-BastionVault-Namespace` header). `list` walks the whole tree so
+//! nested namespaces (e.g. `dti/esi`) surface everywhere the flat list is
+//! consumed (this page, the namespace switcher, Users / AppRole scoping) — the
+//! logical `sys/namespaces` LIST route only returns a parent's *direct*
+//! children (leaf names), so we recurse, scoping each level with the namespace
+//! header, and return full slash-delimited paths.
+
+use std::collections::VecDeque;
 
 use bv_client::Operation;
 use serde::Serialize;
@@ -15,7 +19,7 @@ use tauri::State;
 use crate::error::CmdResult;
 use crate::state::AppState;
 
-use super::make_request_root;
+use super::{dispatch_with_token_ns, make_request_root};
 
 #[derive(Serialize, Default)]
 pub struct NamespaceQuotas {
@@ -82,23 +86,55 @@ fn to_info(data: Option<&Map<String, Value>>, fallback_path: &str) -> NamespaceI
     }
 }
 
-#[tauri::command]
-pub async fn list_namespaces(state: State<'_, AppState>) -> CmdResult<NamespaceListResult> {
-    let resp =
-        make_request_root(&state, Operation::List, "sys/namespaces".to_string(), None).await?;
-    match resp {
-        Some(r) => {
-            let namespaces = r
-                .data
+/// Direct child leaf names of `parent` (root when `None`), from the logical
+/// `sys/namespaces` LIST route scoped by the namespace header.
+async fn list_direct_children(
+    state: &State<'_, AppState>,
+    token: &str,
+    parent: Option<&str>,
+) -> CmdResult<Vec<String>> {
+    let resp = dispatch_with_token_ns(
+        state,
+        Operation::List,
+        "sys/namespaces".to_string(),
+        None,
+        token,
+        parent,
+    )
+    .await?;
+    Ok(resp
+        .and_then(|r| {
+            r.data
                 .as_ref()
                 .and_then(|d| d.get("keys"))
                 .and_then(|v| v.as_array())
                 .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            Ok(NamespaceListResult { namespaces })
+        })
+        .unwrap_or_default())
+}
+
+#[tauri::command]
+pub async fn list_namespaces(state: State<'_, AppState>) -> CmdResult<NamespaceListResult> {
+    // Breadth-first walk of the namespace tree: each level lists a parent's
+    // direct children (leaf names) scoped by the namespace header, then queues
+    // each child's full path to descend into. Yields every descendant as a full
+    // slash-delimited path, regardless of nesting depth.
+    let token = state.token.lock().await.clone().unwrap_or_default();
+    let mut namespaces = Vec::new();
+    let mut queue: VecDeque<Option<String>> = VecDeque::from([None]);
+    while let Some(parent) = queue.pop_front() {
+        let leaves = list_direct_children(&state, &token, parent.as_deref()).await?;
+        for leaf in leaves {
+            let full = match &parent {
+                Some(p) => format!("{p}/{leaf}"),
+                None => leaf,
+            };
+            queue.push_back(Some(full.clone()));
+            namespaces.push(full);
         }
-        None => Ok(NamespaceListResult { namespaces: vec![] }),
     }
+    namespaces.sort();
+    Ok(NamespaceListResult { namespaces })
 }
 
 #[tauri::command]

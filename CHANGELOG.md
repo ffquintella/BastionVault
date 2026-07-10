@@ -45,7 +45,27 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.27.1] - 2026-07-10
+
 ### Added
+
+#### PKI mount lifecycle + per-mount access in the GUI (features/pki-secret-engine.md)
+
+- **Unmount a PKI engine from the PKI page.** The mount picker now carries an
+  **Unmount** action (full-admin only) that deletes the selected mount through a
+  new `pki_disable_mount` Tauri command (`DELETE /v1/sys/mounts/<path>/`), behind
+  a destructive confirm that spells out it discards every issuer, key, role, and
+  stored certificate under the mount. Mounting/unmounting remain full-admin
+  operations — they route through the root/sudo `sys/mounts/*` path — so a
+  delegated `pki-admin` administers a mount's contents but cannot create or
+  destroy the mount itself.
+- **Per-mount admin is resolved against the selected mount.** The PKI page
+  previously derived "admin" from a global policy-name list, so any `pki-admin`
+  looked like an administrator of *every* PKI mount. It now resolves admin per
+  mount via `capabilities-self` on that mount's admin-only `keys` path (full
+  admins still short-circuit without a round-trip), so a policy scoped to
+  `pki-corp/*` unlocks the admin surfaces (Keys/Tidy tabs, issuer/role/key
+  lifecycle) on `pki-corp/` but not on `pki/`.
 
 #### Native Client Installers — CLI track finalized across all platforms (Phases 2 + 3, features/packaging-client-binaries.md)
 
@@ -120,6 +140,16 @@ EXAMPLE ENTRY:
   the Docker build path.
 
 ### Fixed
+
+- **Nested namespaces were invisible in the GUI.** The Namespaces page (and
+  the sidebar namespace switcher, plus Users / AppRole namespace scoping) only
+  listed the root's *direct* children, so a child-of-a-child like `dti/esi`
+  never appeared even though it was created successfully. The `list_namespaces`
+  Tauri command (`gui/src-tauri/src/commands/namespaces.rs`) now walks the whole
+  namespace tree breadth-first — scoping each level with the namespace header
+  and returning full slash-delimited paths — so descendants at any depth show
+  up. The logical `sys/namespaces` LIST route keeps its direct-children (leaf)
+  semantics; the recursion lives entirely in the GUI command layer.
 
 - **GUI version drift.** `gui/src-tauri/Cargo.toml`, `gui/package.json`,
   and `gui/src-tauri/tauri.conf.json` were left at `0.26.0` while the

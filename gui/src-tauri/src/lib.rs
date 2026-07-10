@@ -403,6 +403,7 @@ pub fn run() {
             // PKI Secret Engine
             commands::pki::pki_list_mounts,
             commands::pki::pki_enable_mount,
+            commands::pki::pki_disable_mount,
             commands::pki::pki_list_issuers,
             commands::pki::pki_read_issuer,
             commands::pki::pki_rename_issuer,

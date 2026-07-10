@@ -65,6 +65,8 @@ Crypto building blocks now in tree (additions over what was already present):
 
 Already in tree from prior work and reused: `rsa = "0.9"`, `x509-parser = "0.17"`, `zeroize`, `rand = "0.10"`, `der = "0.7"` (transitive via `x509-cert`), `spki = "0.7"` (transitive via `x509-cert`).
 
+**GUI mount lifecycle + per-mount access.** The desktop PKI page manages the mount table as well as a mount's contents. Mounting (`pki_enable_mount`) and unmounting (`pki_disable_mount` — `DELETE /v1/sys/mounts/<path>/`, behind a destructive confirm) are exposed only to full admins, because `sys/mounts/*` is a root/sudo path server-side; a delegated `pki-admin` cannot create or destroy a mount. In-mount admin surfaces (Keys/Tidy tabs, issuer/role/key lifecycle) are gated **per selected mount** via `capabilities-self` on that mount's admin-only `keys` path, rather than a global policy-name list — so a policy scoped to `pki-corp/*` grants admin on `pki-corp/` but leaves `pki/` read-only, and vice-versa. This is GUI gating only; the server still authorizes every request.
+
 ## Design
 
 ### Crypto Stack (no OpenSSL, no `aws-lc-sys`)

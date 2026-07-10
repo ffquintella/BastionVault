@@ -110,6 +110,20 @@ pub async fn pki_enable_mount(state: State<'_, AppState>, path: String) -> CmdRe
     Ok(())
 }
 
+/// Unmount (delete) the PKI engine at `path/`. Operator-friendly equivalent
+/// of `DELETE /v1/sys/mounts/<path>/`. This is destructive: the barrier view
+/// backing the mount is cleared, so every issuer, key, role, and stored
+/// certificate under it is discarded. Like the mount write, it routes through
+/// `sys/mounts/*`, which the server treats as a root/sudo path — a delegated
+/// `pki-admin` token cannot unmount, so the GUI only offers this to full
+/// admins.
+#[tauri::command]
+pub async fn pki_disable_mount(state: State<'_, AppState>, path: String) -> CmdResult<()> {
+    let path = path.trim_end_matches('/');
+    make_request(&state, Operation::Delete, format!("sys/mounts/{path}/"), None).await?;
+    Ok(())
+}
+
 // ── Issuers ───────────────────────────────────────────────────────
 
 #[derive(Serialize)]

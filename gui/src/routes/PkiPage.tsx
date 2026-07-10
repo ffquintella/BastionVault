@@ -32,22 +32,62 @@ import type {
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 import { useAuthStore } from "../stores/authStore";
+import { SUPER_ADMIN } from "../lib/access";
 
-// Policy names that authorise PKI administration (issuer lifecycle,
-// mount enable, key/tidy management). `pki-user` is intentionally
-// excluded — that baseline grants issuance and read of public material
-// only. Mirrors the server-side `pki-admin` policy in `policy_store.rs`.
-const PKI_ADMIN_POLICIES = new Set([
-  "root",
-  "admin",
-  "administrator",
-  "super-admin",
-  "pki-admin",
-]);
+// Full-admin policy names carry `*`/sudo everywhere, so PKI administration is
+// implied without a capability round-trip. `pki-admin` is deliberately NOT in
+// this set: its grant is scoped to a specific mount prefix (`pki/*` for the
+// builtin policy), so whether it confers admin depends on which mount is being
+// viewed — that is resolved per-mount in `usePkiAdmin` below.
+const SUPER_ADMIN_POLICIES = new Set<string>(SUPER_ADMIN);
 
-function usePkiAdmin(): boolean {
+// Capabilities on a mount's admin-only `keys` path that mark the caller as an
+// administrator of that mount. `pki-user` has no ACL on `<mount>/keys`, so it
+// resolves to a non-admin; `pki-admin` (or a custom per-mount policy) does.
+const PKI_ADMIN_CAPS = ["create", "update", "delete", "list", "sudo", "root"];
+
+/**
+ * Whether the caller may administer the PKI engine mounted at `mount`
+ * (issuer/role/key lifecycle, tidy). Full admins are granted immediately;
+ * everyone else is resolved per-mount against `capabilities-self` on the
+ * mount's admin-only `keys` path. This makes the GUI reflect per-mount access:
+ * a policy scoped to `pki-corp/*` grants admin on `pki-corp/` but not on
+ * `pki/`. Returns `false` while the check is in flight and on denial, so
+ * read-only callers never see admin controls flash then 403. GUI gating only —
+ * the server still enforces every request.
+ */
+function usePkiAdmin(mount: string): boolean {
   const policies = useAuthStore((s) => s.policies);
-  return policies.some((p) => PKI_ADMIN_POLICIES.has(p));
+  const isSuper = policies.some((p) => SUPER_ADMIN_POLICIES.has(p));
+  const [allowed, setAllowed] = useState(isSuper);
+  useEffect(() => {
+    if (isSuper) {
+      setAllowed(true);
+      return;
+    }
+    const m = mount.replace(/\/$/, "");
+    if (!m) {
+      setAllowed(false);
+      return;
+    }
+    let cancelled = false;
+    setAllowed(false);
+    const path = `${m}/keys`;
+    api
+      .capabilitiesSelf([path])
+      .then((r) => {
+        if (cancelled) return;
+        const caps = r.paths[path] ?? [];
+        setAllowed(caps.some((c) => PKI_ADMIN_CAPS.includes(c)));
+      })
+      .catch(() => {
+        if (!cancelled) setAllowed(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mount, isSuper]);
+  return allowed;
 }
 
 type TabId =
@@ -158,13 +198,27 @@ function extractCn(dn: string): string {
 
 export function PkiPage() {
   const { toast } = useToast();
-  const isAdmin = usePkiAdmin();
   const [mounts, setMounts] = useState<PkiMountInfo[]>([]);
   const [activeMount, setActiveMount] = useState<string>("");
+  // Per-mount admin gates the in-mount surfaces (Keys/Tidy tabs, issuer/role/
+  // key lifecycle). Mounting and unmounting are mount-table operations that
+  // route through `sys/mounts/*` — a root/sudo path — so they are gated on
+  // full-admin (`isFullAdmin`) instead, matching the Mounts admin page. A
+  // delegated `pki-admin` administers the mount's contents but cannot create
+  // or destroy the mount itself.
+  const isAdmin = usePkiAdmin(activeMount);
+  // Mount-table ops route through the root/sudo `sys/mounts/*` path, so only a
+  // true super-admin (not a scoped `exchange-admin`/`plugin-admin`) can mount
+  // or unmount — offering the button to anyone else would just 403.
+  const isFullAdmin = useAuthStore((s) =>
+    s.policies.some((p) => SUPER_ADMIN_POLICIES.has(p)),
+  );
   const [tab, setTab] = useState<TabId>("issuers");
   const [showEnable, setShowEnable] = useState(false);
   const [newMountPath, setNewMountPath] = useState("pki/");
   const [enabling, setEnabling] = useState(false);
+  const [unmountTarget, setUnmountTarget] = useState<string | null>(null);
+  const [unmounting, setUnmounting] = useState(false);
   // The XCA importer ships as an external plugin; the tab only appears
   // when the plugin (named `xca-import`) is registered on this vault.
   const [xcaPluginPresent, setXcaPluginPresent] = useState(false);
@@ -222,6 +276,28 @@ export function PkiPage() {
     }
   }
 
+  async function handleUnmount() {
+    const target = unmountTarget;
+    if (!target) return;
+    setUnmounting(true);
+    try {
+      await api.pkiDisableMount(target);
+      toast("success", `Unmounted PKI engine at ${target}/`);
+      setUnmountTarget(null);
+      // Drop the active selection if we just removed it, then re-list so the
+      // picker falls back to whatever remains (or the empty state).
+      const remaining = mounts.filter(
+        (m) => m.path.replace(/\/$/, "") !== target,
+      );
+      setActiveMount(remaining[0]?.path.replace(/\/$/, "") ?? "");
+      await refreshMounts();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setUnmounting(false);
+    }
+  }
+
   const mountOptions = mounts.length === 0
     ? [{ value: "", label: "No PKI mounts" }]
     : mounts.map((m) => ({
@@ -234,7 +310,7 @@ export function PkiPage() {
       <div className="space-y-4">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <h1 className="text-xl font-semibold">PKI</h1>
-          {isAdmin && (
+          {isFullAdmin && (
             <Button onClick={() => setShowEnable(true)}>+ Mount PKI engine</Button>
           )}
         </div>
@@ -253,6 +329,15 @@ export function PkiPage() {
             <Button variant="ghost" onClick={refreshMounts}>
               Refresh
             </Button>
+            {isFullAdmin && activeMount && (
+              <Button
+                variant="danger"
+                className="ml-auto"
+                onClick={() => setUnmountTarget(activeMount)}
+              >
+                Unmount
+              </Button>
+            )}
           </div>
         </Card>
 
@@ -261,12 +346,12 @@ export function PkiPage() {
             <EmptyState
               title="No PKI engine mounted"
               description={
-                isAdmin
+                isFullAdmin
                   ? "Mount the PKI engine on a path (typically `pki/`) to manage CAs, roles, and certificate issuance."
                   : "No PKI engine is available. Contact an administrator."
               }
               action={
-                isAdmin ? (
+                isFullAdmin ? (
                   <Button onClick={() => setShowEnable(true)}>Mount PKI engine</Button>
                 ) : undefined
               }
@@ -346,6 +431,16 @@ export function PkiPage() {
           </p>
         </div>
       </Modal>
+
+      <ConfirmModal
+        open={unmountTarget !== null}
+        onClose={() => setUnmountTarget(null)}
+        onConfirm={handleUnmount}
+        loading={unmounting}
+        title="Unmount PKI engine"
+        message={`Unmount the PKI engine at "${unmountTarget}/"? This permanently destroys every issuer, key, role, and stored certificate under this mount. This cannot be undone.`}
+        confirmLabel="Unmount"
+      />
     </Layout>
   );
 }
@@ -354,7 +449,7 @@ export function PkiPage() {
 
 function IssuersTab({ mount }: { mount: string }) {
   const { toast } = useToast();
-  const isAdmin = usePkiAdmin();
+  const isAdmin = usePkiAdmin(mount);
   const [issuers, setIssuers] = useState<PkiIssuerSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [detail, setDetail] = useState<PkiIssuerDetail | null>(null);

@@ -47,8 +47,12 @@ The HTTP surface follows Vault Enterprise's: every endpoint accepts an `X-Bastio
 > **Remaining follow-ups:**
 > - **`cert`-login** namespace binding, and **tenant self-service of `sys/*`**
 >   (today reachable only by root/sudo tokens carrying the namespace header).
-> - A recursive GUI namespace **tree + rename** (the page lists root children
->   flat; server-side rename is also not yet implemented).
+> - A GUI namespace **tree view + rename**. The list now surfaces the full
+>   tree (the `list_namespaces` Tauri command walks it breadth-first and returns
+>   full slash-delimited paths, so nested namespaces like `dti/esi` appear on
+>   the Namespaces page, the switcher, and Users / AppRole scoping), but it is
+>   still rendered as a flat list rather than an indented tree, and server-side
+>   rename is not yet implemented.
 > - **Namespace-scoped auth mounts** (per-tenant credentials) — the larger
 >   alternative to Phase 5's login-restriction model; deferred.
 >
