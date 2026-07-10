@@ -110,6 +110,24 @@ pub struct RustionTarget {
     /// how stale the discovered coords are.
     #[serde(default)]
     pub listeners_synced_at: String,
+    /// Pinned OpenSSH host-key fingerprint of the bastion's SSH proxy
+    /// (`SHA256:<base64>`), discovered via `GET /v1/listeners`. When set,
+    /// the GUI SSH dialler enforces it — a mismatch aborts the connect
+    /// (fail-closed). Empty means the bastion advertised no fingerprint
+    /// (pre-v2 listener schema, or SSH proxy not co-located) and the
+    /// dialler falls back to unpinned TOFU. Discovery is trust-on-first-
+    /// use at enrolment; a later flip of this value (a rotated host key)
+    /// is refused by the dialler until the operator re-runs discovery.
+    #[serde(default)]
+    pub ssh_host_key_fingerprint: String,
+    /// Pinned SHA-256 of the bastion's RDP gateway TLS leaf certificate
+    /// (`sha256:<hex>`), discovered via `GET /v1/listeners`. The RDP
+    /// dialler skips CA verification (the cert is self-signed with no
+    /// chain), so this pin is the *only* authentication of the bastion's
+    /// RDP TLS identity — a mismatch aborts the connect. Empty means the
+    /// bastion advertised no fingerprint and the dialler stays unpinned.
+    #[serde(default)]
+    pub rdp_tls_pin_sha256: String,
 }
 
 fn default_enabled() -> bool {
@@ -130,7 +148,6 @@ pub enum HealthStatus {
     #[default]
     Unknown,
 }
-
 
 impl HealthStatus {
     /// True when the dispatcher is allowed to route traffic to this

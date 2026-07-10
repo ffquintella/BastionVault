@@ -35,6 +35,19 @@ export interface RustionTargetSummary {
    *  emitted by the server so list/health views can render a badge
    *  without loading the PEM body. */
   tls_pinned: boolean;
+  /** Discovered OpenSSH host-key fingerprint of the bastion's SSH proxy
+   *  (`SHA256:…`), pinned by the SSH dialler. Populated by listener
+   *  discovery; empty when the bastion advertised none (pre-v2 Rustion
+   *  or SSH proxy not co-located). */
+  ssh_host_key_fingerprint?: string;
+  /** Discovered SHA-256 of the bastion's RDP gateway TLS leaf cert
+   *  (`sha256:…`), pinned by the RDP dialler. Empty when the bastion
+   *  advertised none. */
+  rdp_tls_pin_sha256?: string;
+  /** ISO-8601 timestamp of the last successful `GET /v1/listeners`
+   *  discovery pull, or empty before any pull. The pin fields above are
+   *  only meaningful once this is set. */
+  listeners_synced_at?: string;
 }
 
 export interface RustionTargetHealth {

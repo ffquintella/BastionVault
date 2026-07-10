@@ -123,11 +123,7 @@ fn filter_in_order(
     let mut dropped = Vec::new();
     for id in ids {
         let Some(target) = targets.iter().find(|t| &t.id == id) else {
-            dropped.push(DroppedTarget {
-                id: id.clone(),
-                name: id.clone(),
-                reason: DropReason::NotRegistered,
-            });
+            dropped.push(DroppedTarget { id: id.clone(), name: id.clone(), reason: DropReason::NotRegistered });
             continue;
         };
         if !target.enabled {
@@ -158,11 +154,7 @@ fn plan_pinned(
     health: &dyn Fn(&str) -> Option<RustionTargetHealth>,
 ) -> DispatchPlan {
     let (candidates, dropped) = filter_in_order(pinned, targets, health);
-    DispatchPlan {
-        mode: Mode::OrderedFallback,
-        candidates,
-        dropped,
-    }
+    DispatchPlan { mode: Mode::OrderedFallback, candidates, dropped }
 }
 
 /// Resolve the candidates for a named bastion group. Members are
@@ -183,11 +175,7 @@ pub fn plan_group<R: rand::Rng>(
     if shuffle {
         candidates.shuffle(rng);
     }
-    DispatchPlan {
-        mode: Mode::Group,
-        candidates,
-        dropped,
-    }
+    DispatchPlan { mode: Mode::Group, candidates, dropped }
 }
 
 fn plan_random_pool<R: rand::Rng>(
@@ -218,11 +206,7 @@ fn plan_random_pool<R: rand::Rng>(
         candidates.push(target.clone());
     }
     candidates.shuffle(rng);
-    DispatchPlan {
-        mode: Mode::RandomPool,
-        candidates,
-        dropped,
-    }
+    DispatchPlan { mode: Mode::RandomPool, candidates, dropped }
 }
 
 /// Decide whether to advance to the next candidate after a session-open
@@ -283,28 +267,17 @@ mod tests {
             rdp_listener_host: String::new(),
             rdp_listener_port: 0,
             listeners_synced_at: String::new(),
+            ssh_host_key_fingerprint: String::new(),
+            rdp_tls_pin_sha256: String::new(),
         }
     }
 
     fn health_map(rows: &[(&str, HealthStatus)]) -> impl Fn(&str) -> Option<RustionTargetHealth> {
         let owned: Vec<(String, RustionTargetHealth)> = rows
             .iter()
-            .map(|(id, status)| {
-                (
-                    (*id).to_string(),
-                    RustionTargetHealth {
-                        status: *status,
-                        ..Default::default()
-                    },
-                )
-            })
+            .map(|(id, status)| ((*id).to_string(), RustionTargetHealth { status: *status, ..Default::default() }))
             .collect();
-        move |id: &str| {
-            owned
-                .iter()
-                .find(|(k, _)| k == id)
-                .map(|(_, v)| v.clone())
-        }
+        move |id: &str| owned.iter().find(|(k, _)| k == id).map(|(_, v)| v.clone())
     }
 
     fn rng() -> rand::rngs::StdRng {
@@ -313,22 +286,14 @@ mod tests {
 
     #[test]
     fn pinned_list_filters_and_preserves_order() {
-        let targets = vec![
-            target("rt_a", "eu-1", true),
-            target("rt_b", "eu-2", true),
-            target("rt_c", "us-1", true),
-        ];
+        let targets = vec![target("rt_a", "eu-1", true), target("rt_b", "eu-2", true), target("rt_c", "us-1", true)];
         let pinned = ["rt_a".to_string(), "rt_b".to_string(), "rt_c".to_string()];
-        let health = health_map(&[
-            ("rt_a", HealthStatus::Up),
-            ("rt_b", HealthStatus::Down),
-            ("rt_c", HealthStatus::Up),
-        ]);
+        let health =
+            health_map(&[("rt_a", HealthStatus::Up), ("rt_b", HealthStatus::Down), ("rt_c", HealthStatus::Up)]);
 
         let plan = plan(Some(&pinned), &targets, &health, &mut rng());
         assert_eq!(plan.mode, Mode::OrderedFallback);
-        assert_eq!(plan.candidates.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
-                   vec!["rt_a", "rt_c"]);
+        assert_eq!(plan.candidates.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["rt_a", "rt_c"]);
         assert_eq!(plan.dropped.len(), 1);
         assert_eq!(plan.dropped[0].id, "rt_b");
         assert!(matches!(plan.dropped[0].reason, DropReason::NotUp(HealthStatus::Down)));
@@ -341,14 +306,10 @@ mod tests {
             target("rt_b", "eu-2", false), // disabled
         ];
         let pinned = ["rt_a".to_string(), "rt_b".to_string(), "rt_missing".to_string()];
-        let health = health_map(&[
-            ("rt_a", HealthStatus::Up),
-            ("rt_b", HealthStatus::Up),
-        ]);
+        let health = health_map(&[("rt_a", HealthStatus::Up), ("rt_b", HealthStatus::Up)]);
 
         let plan = plan(Some(&pinned), &targets, &health, &mut rng());
-        assert_eq!(plan.candidates.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
-                   vec!["rt_a"]);
+        assert_eq!(plan.candidates.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["rt_a"]);
         let dropped_ids: Vec<&str> = plan.dropped.iter().map(|d| d.id.as_str()).collect();
         assert_eq!(dropped_ids, vec!["rt_b", "rt_missing"]);
         assert!(matches!(plan.dropped[0].reason, DropReason::Disabled));
@@ -357,16 +318,9 @@ mod tests {
 
     #[test]
     fn empty_pin_falls_into_random_pool() {
-        let targets = vec![
-            target("rt_a", "eu-1", true),
-            target("rt_b", "eu-2", true),
-            target("rt_c", "us-1", true),
-        ];
-        let health = health_map(&[
-            ("rt_a", HealthStatus::Up),
-            ("rt_b", HealthStatus::Up),
-            ("rt_c", HealthStatus::Down),
-        ]);
+        let targets = vec![target("rt_a", "eu-1", true), target("rt_b", "eu-2", true), target("rt_c", "us-1", true)];
+        let health =
+            health_map(&[("rt_a", HealthStatus::Up), ("rt_b", HealthStatus::Up), ("rt_c", HealthStatus::Down)]);
 
         // No pinned list → random pool, healthy targets only.
         let plan = plan(None, &targets, &health, &mut rng());
@@ -384,16 +338,8 @@ mod tests {
 
     #[test]
     fn random_pool_uses_supplied_rng_for_deterministic_tests() {
-        let targets = vec![
-            target("rt_a", "eu-1", true),
-            target("rt_b", "eu-2", true),
-            target("rt_c", "us-1", true),
-        ];
-        let health = health_map(&[
-            ("rt_a", HealthStatus::Up),
-            ("rt_b", HealthStatus::Up),
-            ("rt_c", HealthStatus::Up),
-        ]);
+        let targets = vec![target("rt_a", "eu-1", true), target("rt_b", "eu-2", true), target("rt_c", "us-1", true)];
+        let health = health_map(&[("rt_a", HealthStatus::Up), ("rt_b", HealthStatus::Up), ("rt_c", HealthStatus::Up)]);
         // Different seeds produce different orderings.
         let mut rng_a = rand::rngs::StdRng::seed_from_u64(1);
         let mut rng_b = rand::rngs::StdRng::seed_from_u64(2);
@@ -412,25 +358,15 @@ mod tests {
 
     #[test]
     fn group_ordered_preserves_declared_order_and_filters_health() {
-        let targets = vec![
-            target("rt_a", "eu-1", true),
-            target("rt_b", "eu-2", true),
-            target("rt_c", "us-1", true),
-        ];
+        let targets = vec![target("rt_a", "eu-1", true), target("rt_b", "eu-2", true), target("rt_c", "us-1", true)];
         let members = ["rt_a".to_string(), "rt_b".to_string(), "rt_c".to_string()];
-        let health = health_map(&[
-            ("rt_a", HealthStatus::Up),
-            ("rt_b", HealthStatus::Down),
-            ("rt_c", HealthStatus::Up),
-        ]);
+        let health =
+            health_map(&[("rt_a", HealthStatus::Up), ("rt_b", HealthStatus::Down), ("rt_c", HealthStatus::Up)]);
         let plan = plan_group(&members, false, &targets, &health, &mut rng());
         assert_eq!(plan.mode, Mode::Group);
         assert_eq!(plan.mode.as_str(), "group");
         // Ordered group keeps declared order, drops the down member.
-        assert_eq!(
-            plan.candidates.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
-            vec!["rt_a", "rt_c"]
-        );
+        assert_eq!(plan.candidates.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["rt_a", "rt_c"]);
     }
 
     #[test]
@@ -441,12 +377,7 @@ mod tests {
             target("rt_c", "us-1", true),
             target("rt_d", "us-2", true),
         ];
-        let members = [
-            "rt_a".to_string(),
-            "rt_b".to_string(),
-            "rt_c".to_string(),
-            "rt_d".to_string(),
-        ];
+        let members = ["rt_a".to_string(), "rt_b".to_string(), "rt_c".to_string(), "rt_d".to_string()];
         let health = health_map(&[
             ("rt_a", HealthStatus::Up),
             ("rt_b", HealthStatus::Up),
@@ -473,9 +404,7 @@ mod tests {
 
     #[test]
     fn should_advance_falls_through_on_transport_and_5xx() {
-        assert!(should_advance(&OpenAttemptOutcome::Transport(
-            "tcp connect timeout".into()
-        )));
+        assert!(should_advance(&OpenAttemptOutcome::Transport("tcp connect timeout".into())));
         assert!(should_advance(&OpenAttemptOutcome::Http(503, "capacity".into())));
         assert!(should_advance(&OpenAttemptOutcome::Http(502, "bad gateway".into())));
     }

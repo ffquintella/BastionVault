@@ -45,6 +45,20 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Added
+
+- **Rustion integration Phase 9.4 — bastion host-key / TLS pinning in the GUI dialler** (cross-repo with Rustion, listener schema v2). Enrolled Rustion targets now record the bastion's SSH host-key fingerprint (`SHA256:…`) and RDP gateway TLS leaf digest (`sha256:…`), discovered via `GET /v1/listeners` at enrolment and on manual refresh (new `RustionTarget.ssh_host_key_fingerprint` / `rdp_tls_pin_sha256` fields, surfaced on the target read response and as pinned/unpinned badges on Settings → Rustion Bastions). Requires Rustion ≥ the release that ships persistent RDP TLS certs + listener schema v2.
+- **Rustion integration Phase 9.5 — smart-card RDP (`rdp-cert`) through the bastion via Kerberos PKINIT / SPNEGO** (cross-repo with Rustion). The BVRG-v1 envelope credential now carries the certificate DER (in `material`) plus the DER private key + PIN + optional domain (sealed in `credential.extra`); Rustion's control plane exposes them via new `SessionCredential::rdp_cert_{der,key,pin,domain}` accessors, and its RDP proxy dispatches `rdp-cert` into a new `bv_credssp_kerberos` driver that builds an sspi smart-card `CredSspClient` in Kerberos-Negotiate mode (`TERMSRV/<host>` SPN), mirroring the ironrdp path the GUI direct smart-card flow proves against real Active Directory. New `session/open` request fields `credential_key` / `credential_pin` / `credential_domain`. The sspi Kerberos engine is compiled only under the `rustion_pkinit_sspi` build cfg so the default Rustion build keeps its lean dependency set; without the cfg the smart-card material is still extracted + validated and the proxy returns a precise "engine not built" error.
+
+### Changed
+
+- **Smart-card (`rdp-cert`) RDP under a `rustion-required` policy no longer fails closed on the BastionVault side.** The GUI RDP connect resolver now routes smart-card credentials through the bastion (sending the cert + key + PIN into the session-open envelope) instead of refusing to dial. Live-AD validation of the PKINIT exchange and supplying the upstream TLS SPKI for the CredSSP `pubKeyAuth` binding remain pending (build-gated behind `rustion_pkinit_sspi`).
+
+### Security
+
+- **The operator→bastion hop is now authenticated.** Previously the GUI dialled a Rustion bastion's SSH proxy with no host-key pin (unpinned TOFU) and its RDP gateway with no TLS certificate verification, so a man-in-the-middle on that segment could impersonate the bastion and capture the one-shot session ticket. The SSH dialler now pins the bastion's host key via the existing `HostKeyHandler`, and the RDP dialler verifies the TLS leaf's SHA-256 against the discovered pin after the TLS upgrade (before any session bytes flow). Both fail closed on mismatch. Bastions that advertise no fingerprint (pre-v2 Rustion) keep the prior unpinned behaviour with a warning.
+- **The operator's smart-card private key never touches the operator's disk on the `rdp-cert` bastion path.** It is sealed into the ML-KEM-768-encrypted BVRG-v1 envelope and decrypted only inside the Rustion process, where it lives in `Zeroizing` buffers for the lifetime of the upstream handshake.
+
 ## [0.26.0] - 2026-07-09
 
 ### Added

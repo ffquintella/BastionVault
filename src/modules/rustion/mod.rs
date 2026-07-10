@@ -20,16 +20,15 @@ use serde_json::{Map, Value};
 
 use super::Module;
 use crate::{
+    bv_error_response_status, bv_error_string,
     context::Context,
     core::Core,
     errors::RvError,
     logical::{
-        secret::Secret, Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation,
-        Request, Response,
+        secret::Secret, Backend, Field, FieldType, LogicalBackend, Operation, Path, PathOperation, Request, Response,
     },
-    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path,
-    new_path_internal, new_secret, new_secret_internal,
-    bv_error_response_status, bv_error_string,
+    new_fields, new_fields_internal, new_logical_backend, new_logical_backend_internal, new_path, new_path_internal,
+    new_secret, new_secret_internal,
 };
 
 pub mod attest_timer;
@@ -42,33 +41,23 @@ pub mod health;
 pub mod http;
 pub mod listeners;
 pub mod master;
-pub mod poller;
 pub mod policy;
+pub mod poller;
 pub mod probe;
 pub mod recordings;
 pub mod telemetry;
 
 fn read_string_list(req: &Request, key: &str) -> Vec<String> {
     match req.get_data(key) {
-        Ok(Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|x| x.as_str().map(String::from))
-            .collect(),
-        Ok(Value::String(s)) => s
-            .split(',')
-            .map(|x| x.trim().to_string())
-            .filter(|x| !x.is_empty())
-            .collect(),
+        Ok(Value::Array(arr)) => arr.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+        Ok(Value::String(s)) => s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect(),
         _ => Vec::new(),
     }
 }
 
 fn read_tier_fields(req: &Request) -> policy::PolicyTier {
     let pick = |k: &str| -> Option<String> {
-        req.get_data(k)
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .filter(|s| !s.is_empty())
+        req.get_data(k).ok().and_then(|v| v.as_str().map(|s| s.to_string())).filter(|s| !s.is_empty())
     };
     let transport = pick("transport").and_then(|s| match s.as_str() {
         "direct" => Some(policy::Transport::Direct),
@@ -83,25 +72,12 @@ fn read_tier_fields(req: &Request) -> policy::PolicyTier {
         _ => None,
     });
     let bastion_group = pick("bastion_group");
-    let lock = req
-        .get_data("lock")
-        .ok()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    policy::PolicyTier {
-        transport,
-        bastions: read_string_list(req, "bastions"),
-        bastion_group,
-        recording,
-        lock,
-    }
+    let lock = req.get_data("lock").ok().and_then(|v| v.as_bool()).unwrap_or(false);
+    policy::PolicyTier { transport, bastions: read_string_list(req, "bastions"), bastion_group, recording, lock }
 }
 
 fn group_to_map(g: &policy::BastionGroup) -> Map<String, Value> {
-    serde_json::to_value(g)
-        .ok()
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default()
+    serde_json::to_value(g).ok().and_then(|v| v.as_object().cloned()).unwrap_or_default()
 }
 
 fn tier_doc_to_map(
@@ -114,15 +90,7 @@ fn tier_doc_to_map(
     if let Some(t) = tier.transport {
         m.insert("transport".into(), Value::String(t.as_str().into()));
     }
-    m.insert(
-        "bastions".into(),
-        Value::Array(
-            tier.bastions
-                .iter()
-                .map(|s| Value::String(s.clone()))
-                .collect(),
-        ),
-    );
+    m.insert("bastions".into(), Value::Array(tier.bastions.iter().map(|s| Value::String(s.clone())).collect()));
     if let Some(ref g) = tier.bastion_group {
         m.insert("bastion_group".into(), Value::String(g.clone()));
     }
@@ -145,14 +113,10 @@ pub mod session;
 pub mod store;
 pub mod webhook_verify;
 
-pub use config::{
-    HealthStatus, HybridPubKey, RustionTarget, RustionTargetHealth, RustionTargetInput,
-};
+pub use config::{HealthStatus, HybridPubKey, RustionTarget, RustionTargetHealth, RustionTargetInput};
 pub use health::{apply_probe, ProbeOutcome, FAILURE_THRESHOLD};
 pub use master::{MasterConfig, MasterPubKeyExport, MasterStore};
-pub use probe::{
-    probe_target_now, run_probe_pass, start_pinger, PROBE_AUTHORITY, PROBE_TIMEOUT, TICK_INTERVAL,
-};
+pub use probe::{probe_target_now, run_probe_pass, start_pinger, PROBE_AUTHORITY, PROBE_TIMEOUT, TICK_INTERVAL};
 pub use store::RustionStore;
 
 static RUSTION_BACKEND_HELP: &str = r#"
@@ -198,9 +162,7 @@ pub struct RustionBackend {
 
 impl RustionBackend {
     pub fn new(core: Arc<Core>) -> Self {
-        Self {
-            inner: Arc::new(RustionBackendInner { core }),
-        }
+        Self { inner: Arc::new(RustionBackendInner { core }) }
     }
 
     pub fn new_backend(&self) -> LogicalBackend {
@@ -587,6 +549,9 @@ impl RustionBackend {
                         "credential_username": { field_type: FieldType::Str, default: "", description: "Username on the target host." },
                         "credential_material": { field_type: FieldType::Str, default: "", description: "Base64-encoded credential bytes." },
                         "credential_cert": { field_type: FieldType::Str, default: "", description: "For `ssh-cert`: signed OpenSSH certificate text, sealed into the envelope's `credential.extra[\"cert\"]`. Must be a declared field or `get_data` cannot read it back after server-side minting." },
+                        "credential_key": { field_type: FieldType::Str, default: "", description: "For `rdp-cert`: base64-encoded DER private key matching the certificate in `credential_material`, sealed into the envelope's `credential.extra[\"key\"]`." },
+                        "credential_pin": { field_type: FieldType::Str, default: "", description: "For `rdp-cert`: smart-card PIN, sealed into `credential.extra[\"pin\"]`." },
+                        "credential_domain": { field_type: FieldType::Str, default: "", description: "For `rdp-cert`: optional AD domain / realm, sealed into `credential.extra[\"domain\"]`." },
                         "credential_serial": { field_type: FieldType::Str, default: "", description: "Minted cert serial, surfaced on the brokered-session audit row." },
                         "ttl_secs": { field_type: FieldType::Int, default: 3600, description: "Requested session TTL." },
                         "max_renewals": { field_type: FieldType::Int, default: 3, description: "Max renewal count." },
@@ -933,10 +898,7 @@ impl RustionBackendInner {
 
     fn input_from_req(req: &Request, fallback_name: &str) -> Result<RustionTargetInput, RvError> {
         let pick = |k: &str| -> String {
-            req.get_data(k)
-                .ok()
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .unwrap_or_default()
+            req.get_data(k).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
         };
         let name = if fallback_name.is_empty() {
             pick("name")
@@ -956,32 +918,18 @@ impl RustionBackendInner {
             .get_data("tags")
             .ok()
             .and_then(|v| match v {
-                Value::Array(arr) => Some(
-                    arr.iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect::<Vec<_>>(),
-                ),
-                Value::String(s) => Some(
-                    s.split(',')
-                        .map(|x| x.trim().to_string())
-                        .filter(|x| !x.is_empty())
-                        .collect(),
-                ),
+                Value::Array(arr) => Some(arr.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>()),
+                Value::String(s) => {
+                    Some(s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+                }
                 _ => None,
             })
             .unwrap_or_default();
-        let enabled = req
-            .get_data("enabled")
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+        let enabled = req.get_data("enabled").ok().and_then(|v| v.as_bool()).unwrap_or(true);
         Ok(RustionTargetInput {
             name,
             endpoint: pick("endpoint"),
-            public_key: HybridPubKey {
-                ed25519: pick("public_key_ed25519"),
-                mldsa65: pick("public_key_mldsa65"),
-            },
+            public_key: HybridPubKey { ed25519: pick("public_key_ed25519"), mldsa65: pick("public_key_mldsa65") },
             kem_public_key: pick("kem_public_key"),
             description: pick("description"),
             tags,
@@ -991,21 +939,13 @@ impl RustionBackendInner {
         })
     }
 
-    pub async fn handle_noop(
-        &self,
-        _b: &dyn Backend,
-        _req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_noop(&self, _b: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
         Ok(None)
     }
 
     // ─── Targets ────────────────────────────────────────────────────
 
-    pub async fn handle_targets_list(
-        &self,
-        _b: &dyn Backend,
-        _req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_targets_list(&self, _b: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let ids = store.list_target_ids().await?;
         Ok(Some(Response::list_response(&ids)))
@@ -1054,11 +994,7 @@ impl RustionBackendInner {
         Ok(())
     }
 
-    pub async fn handle_target_create(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_target_create(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let input = Self::input_from_req(req, "")?;
         Self::validate_target_pubkeys(&input)?;
@@ -1103,6 +1039,8 @@ impl RustionBackendInner {
                 info.ssh.port,
                 info.rdp.advertised_host.as_str(),
                 info.rdp.port,
+                info.ssh.pin.as_str(),
+                info.rdp.pin.as_str(),
             )
             .await
     }
@@ -1120,14 +1058,11 @@ impl RustionBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
-        let id = req
-            .get_data("id")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
-        let target = store.get_target(&id).await?.ok_or_else(|| {
-            bv_error_response_status!(404, &format!("rustion target `{id}` not found"))
-        })?;
+        let id = req.get_data("id")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let target = store
+            .get_target(&id)
+            .await?
+            .ok_or_else(|| bv_error_response_status!(404, &format!("rustion target `{id}` not found")))?;
         let info = listeners::discover(&target).await?;
         let updated = store
             .set_listener_info(
@@ -1136,52 +1071,40 @@ impl RustionBackendInner {
                 info.ssh.port,
                 info.rdp.advertised_host.as_str(),
                 info.rdp.port,
+                info.ssh.pin.as_str(),
+                info.rdp.pin.as_str(),
             )
             .await?;
         log::info!(
-            "rustion: refreshed listener info for target {} (ssh={}:{} rdp={}:{})",
+            "rustion: refreshed listener info for target {} (ssh={}:{} rdp={}:{} \
+             ssh_pin={} rdp_pin={})",
             id,
             updated.ssh_listener_host,
             updated.ssh_listener_port,
             updated.rdp_listener_host,
             updated.rdp_listener_port,
+            if updated.ssh_host_key_fingerprint.is_empty() { "none" } else { &updated.ssh_host_key_fingerprint },
+            if updated.rdp_tls_pin_sha256.is_empty() { "none" } else { &updated.rdp_tls_pin_sha256 },
         );
         Ok(Some(target_response(&updated)))
     }
 
-    pub async fn handle_target_read(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_target_read(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
-        let id = req
-            .get_data("id")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
+        let id = req.get_data("id")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         match store.get_target(&id).await? {
             Some(t) => Ok(Some(target_response(&t))),
-            None => Err(bv_error_response_status!(404, &format!(
-                "rustion target `{id}` not found"
-            ))),
+            None => Err(bv_error_response_status!(404, &format!("rustion target `{id}` not found"))),
         }
     }
 
-    pub async fn handle_target_update(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_target_update(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
-        let id = req
-            .get_data("id")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
-        let existing = store.get_target(&id).await?.ok_or_else(|| {
-            bv_error_response_status!(404, &format!("rustion target `{id}` not found"))
-        })?;
+        let id = req.get_data("id")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        let existing = store
+            .get_target(&id)
+            .await?
+            .ok_or_else(|| bv_error_response_status!(404, &format!("rustion target `{id}` not found")))?;
         // Patch semantics: empty fields preserve existing values.
         let mut input = Self::input_from_req(req, &existing.name)?;
         if input.endpoint.is_empty() {
@@ -1220,11 +1143,7 @@ impl RustionBackendInner {
             || updated.public_key.mldsa65 != existing.public_key.mldsa65;
         log::info!(
             "{}: id={} name={} endpoint={} fingerprint={}",
-            if rotated {
-                audit::TARGET_ROTATE
-            } else {
-                audit::TARGET_UPDATE
-            },
+            if rotated { audit::TARGET_ROTATE } else { audit::TARGET_UPDATE },
             updated.id,
             updated.name,
             updated.endpoint,
@@ -1233,17 +1152,9 @@ impl RustionBackendInner {
         Ok(Some(target_response(&updated)))
     }
 
-    pub async fn handle_target_delete(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_target_delete(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
-        let id = req
-            .get_data("id")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
+        let id = req.get_data("id")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         store.delete_target(&id).await?;
         log::info!("{}: id={}", audit::TARGET_DELETE, id);
         Ok(None)
@@ -1251,11 +1162,7 @@ impl RustionBackendInner {
 
     // ─── Health ─────────────────────────────────────────────────────
 
-    pub async fn handle_health_all(
-        &self,
-        _b: &dyn Backend,
-        _req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_health_all(&self, _b: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let ids = store.list_target_ids().await?;
         let mut entries: Vec<Value> = Vec::with_capacity(ids.len());
@@ -1274,23 +1181,11 @@ impl RustionBackendInner {
                 m.insert("last_ok_at".into(), Value::String(ts.to_rfc3339()));
             }
             m.insert("last_error".into(), Value::String(health.last_error));
-            m.insert(
-                "latency_ms_p50".into(),
-                Value::Number(health.latency_ms_p50.into()),
-            );
-            m.insert(
-                "consecutive_failures".into(),
-                Value::Number(health.consecutive_failures.into()),
-            );
+            m.insert("latency_ms_p50".into(), Value::Number(health.latency_ms_p50.into()));
+            m.insert("consecutive_failures".into(), Value::Number(health.consecutive_failures.into()));
             m.insert("version".into(), Value::String(health.version));
-            m.insert(
-                "active_sessions".into(),
-                Value::Number(health.active_sessions.into()),
-            );
-            m.insert(
-                "updated_at".into(),
-                Value::String(health.updated_at.to_rfc3339()),
-            );
+            m.insert("active_sessions".into(), Value::Number(health.active_sessions.into()));
+            m.insert("updated_at".into(), Value::String(health.updated_at.to_rfc3339()));
             entries.push(Value::Object(m));
         }
         let mut data = Map::new();
@@ -1300,11 +1195,7 @@ impl RustionBackendInner {
 
     // ─── Probe (manual trigger) ────────────────────────────────────
 
-    pub async fn handle_probe_all(
-        &self,
-        _b: &dyn Backend,
-        _req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_probe_all(&self, _b: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
         let core = self.core.clone();
         probe::run_probe_pass(&core).await?;
         // Surface the freshened cache straight back so the caller
@@ -1312,23 +1203,13 @@ impl RustionBackendInner {
         self.handle_health_all(_b, _req).await
     }
 
-    pub async fn handle_probe_one(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
-        let id = req
-            .get_data("id")?
-            .as_str()
-            .ok_or(RvError::ErrRequestFieldInvalid)?
-            .to_string();
+    pub async fn handle_probe_one(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let id = req.get_data("id")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
         let store = self.resolve_store()?;
         let target = store
             .get_target(&id)
             .await?
-            .ok_or_else(|| bv_error_response_status!(404, &format!(
-                "rustion target `{id}` not found"
-            )))?;
+            .ok_or_else(|| bv_error_response_status!(404, &format!("rustion target `{id}` not found")))?;
         // Reuse the same client + state-machine path the background
         // pinger uses so single-target test = exactly one tick of
         // the regular probe loop.
@@ -1337,73 +1218,44 @@ impl RustionBackendInner {
         let mut data = Map::new();
         data.insert("id".into(), Value::String(target.id.clone()));
         data.insert("name".into(), Value::String(target.name.clone()));
-        data.insert(
-            "status".into(),
-            Value::String(health.status.as_str().to_string()),
-        );
+        data.insert("status".into(), Value::String(health.status.as_str().to_string()));
         data.insert("last_error".into(), Value::String(health.last_error));
-        data.insert(
-            "latency_ms_p50".into(),
-            Value::Number(health.latency_ms_p50.into()),
-        );
+        data.insert("latency_ms_p50".into(), Value::Number(health.latency_ms_p50.into()));
         data.insert("version".into(), Value::String(health.version));
-        data.insert(
-            "active_sessions".into(),
-            Value::Number(health.active_sessions.into()),
-        );
-        data.insert(
-            "consecutive_failures".into(),
-            Value::Number(health.consecutive_failures.into()),
-        );
+        data.insert("active_sessions".into(), Value::Number(health.active_sessions.into()));
+        data.insert("consecutive_failures".into(), Value::Number(health.consecutive_failures.into()));
         if let Some(ts) = health.last_ok_at {
             data.insert("last_ok_at".into(), Value::String(ts.to_rfc3339()));
         }
-        data.insert(
-            "updated_at".into(),
-            Value::String(health.updated_at.to_rfc3339()),
-        );
+        data.insert("updated_at".into(), Value::String(health.updated_at.to_rfc3339()));
         Ok(Some(Response::data_response(Some(data))))
     }
 
     // ─── Master cert config ────────────────────────────────────────
 
-    pub async fn handle_master_read(
-        &self,
-        _b: &dyn Backend,
-        _req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_master_read(&self, _b: &dyn Backend, _req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_master_store()?;
         let cfg = store.get_or_default().await?;
         Ok(Some(master_config_response(&cfg)))
     }
 
-    pub async fn handle_master_write(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_master_write(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_master_store()?;
         let mut cfg = store.get_or_default().await?;
         let mut touched = false;
-        if let Some(v) = req.get_data("pki_mount").ok().and_then(|v| v.as_str().map(String::from))
-        {
+        if let Some(v) = req.get_data("pki_mount").ok().and_then(|v| v.as_str().map(String::from)) {
             if !v.is_empty() && v != cfg.pki_mount {
                 cfg.pki_mount = v;
                 touched = true;
             }
         }
-        if let Some(v) = req.get_data("pki_role").ok().and_then(|v| v.as_str().map(String::from))
-        {
+        if let Some(v) = req.get_data("pki_role").ok().and_then(|v| v.as_str().map(String::from)) {
             if !v.is_empty() && v != cfg.pki_role {
                 cfg.pki_role = v;
                 touched = true;
             }
         }
-        if let Some(v) = req
-            .get_data("pki_role_pqc")
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-        {
+        if let Some(v) = req.get_data("pki_role_pqc").ok().and_then(|v| v.as_str().map(String::from)) {
             // Empty string clears the binding; non-empty sets it. Compare
             // against the current value so we don't churn `updated_at` on
             // a no-op write.
@@ -1413,31 +1265,19 @@ impl RustionBackendInner {
                 touched = true;
             }
         }
-        if let Some(v) = req
-            .get_data("issuer_ref")
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-        {
+        if let Some(v) = req.get_data("issuer_ref").ok().and_then(|v| v.as_str().map(String::from)) {
             if v != cfg.issuer_ref {
                 cfg.issuer_ref = v;
                 touched = true;
             }
         }
-        if let Some(n) = req
-            .get_data("default_ttl_secs")
-            .ok()
-            .and_then(|v| v.as_u64())
-        {
+        if let Some(n) = req.get_data("default_ttl_secs").ok().and_then(|v| v.as_u64()) {
             if n > 0 && n != cfg.default_ttl_secs {
                 cfg.default_ttl_secs = n;
                 touched = true;
             }
         }
-        if let Some(n) = req
-            .get_data("rotate_grace_secs")
-            .ok()
-            .and_then(|v| v.as_u64())
-        {
+        if let Some(n) = req.get_data("rotate_grace_secs").ok().and_then(|v| v.as_u64()) {
             if n > 0 && n != cfg.rotate_grace_secs {
                 cfg.rotate_grace_secs = n;
                 touched = true;
@@ -1450,11 +1290,7 @@ impl RustionBackendInner {
         Ok(Some(master_config_response(&cfg)))
     }
 
-    pub async fn handle_session_open(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_session_open(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         use base64::{engine::general_purpose::STANDARD, Engine as _};
         let store = self.resolve_store()?;
         let master_store = self.resolve_master_store()?;
@@ -1464,40 +1300,32 @@ impl RustionBackendInner {
             .map_err(|e| bv_error_string!(&format!("master signing key: {e}")))?;
 
         let pick = |k: &str| -> String {
-            req.get_data(k)
-                .ok()
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .unwrap_or_default()
+            req.get_data(k).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
         };
-        let pick_u = |k: &str, default: u64| -> u64 {
-            req.get_data(k)
-                .ok()
-                .and_then(|v| v.as_u64())
-                .unwrap_or(default)
-        };
+        let pick_u =
+            |k: &str, default: u64| -> u64 { req.get_data(k).ok().and_then(|v| v.as_u64()).unwrap_or(default) };
 
         let credential_material_b64 = pick("credential_material");
         let credential_material = STANDARD
             .decode(credential_material_b64.as_bytes())
             .map_err(|e| bv_error_string!(&format!("credential_material base64 decode: {e}")))?;
 
-        let bastions_raw = req
-            .get_data("bastions")
-            .ok()
-            .and_then(|v| match v {
-                Value::Array(arr) => Some(
-                    arr.iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect::<Vec<_>>(),
-                ),
-                Value::String(s) => Some(
-                    s.split(',')
-                        .map(|x| x.trim().to_string())
-                        .filter(|x| !x.is_empty())
-                        .collect(),
-                ),
-                _ => None,
-            });
+        // `rdp-cert` smart-card material: DER private key (base64) + PIN
+        // (+ optional domain), sealed into the envelope's `extra` map.
+        let credential_key_b64 = pick("credential_key");
+        let credential_key = if credential_key_b64.is_empty() {
+            Vec::new()
+        } else {
+            STANDARD
+                .decode(credential_key_b64.as_bytes())
+                .map_err(|e| bv_error_string!(&format!("credential_key base64 decode: {e}")))?
+        };
+
+        let bastions_raw = req.get_data("bastions").ok().and_then(|v| match v {
+            Value::Array(arr) => Some(arr.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>()),
+            Value::String(s) => Some(s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()),
+            _ => None,
+        });
 
         let hostkey_pin = pick("target_hostkey_pin");
 
@@ -1527,51 +1355,30 @@ impl RustionBackendInner {
             .get_data("asset_group_ids")
             .ok()
             .and_then(|v| match v {
-                Value::Array(arr) => Some(
-                    arr.iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect::<Vec<_>>(),
-                ),
-                Value::String(s) => Some(
-                    s.split(',')
-                        .map(|x| x.trim().to_string())
-                        .filter(|x| !x.is_empty())
-                        .collect(),
-                ),
+                Value::Array(arr) => Some(arr.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>()),
+                Value::String(s) => {
+                    Some(s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+                }
                 _ => None,
             })
             .unwrap_or_default();
 
-        let type_policy = if resource_type_hint.is_empty() {
-            None
-        } else {
-            policy_store.get_type(&resource_type_hint).await?
-        };
+        let type_policy =
+            if resource_type_hint.is_empty() { None } else { policy_store.get_type(&resource_type_hint).await? };
         let mut ag_policies: Vec<policy::AssetGroupPolicy> = Vec::new();
         for ag_id in &asset_group_ids {
             if let Some(p) = policy_store.get_asset_group(ag_id).await? {
                 ag_policies.push(p);
             }
         }
-        let resource_policy = if resource_id_hint.is_empty() {
-            None
-        } else {
-            policy_store.get_resource(&resource_id_hint).await?
-        };
+        let resource_policy =
+            if resource_id_hint.is_empty() { None } else { policy_store.get_resource(&resource_id_hint).await? };
 
-        let effective = policy::resolve(
-            &global_policy,
-            type_policy.as_ref(),
-            &ag_policies,
-            resource_policy.as_ref(),
-        );
+        let effective = policy::resolve(&global_policy, type_policy.as_ref(), &ag_policies, resource_policy.as_ref());
         if let Some(ref lv) = effective.lock_violation {
             return Err(bv_error_response_status!(
                 403,
-                &format!(
-                    "rustion policy lock violation ({} locked by `{}`): {}",
-                    lv.field, lv.locking_tier, lv.detail
-                )
+                &format!("rustion policy lock violation ({} locked by `{}`): {}", lv.field, lv.locking_tier, lv.detail)
             ));
         }
 
@@ -1579,8 +1386,7 @@ impl RustionBackendInner {
         // it set any (overriding the caller); else use the caller's
         // list; else use the bastion_group's members if a group is
         // pinned; else fall through to the dispatcher's random pool.
-        let mut effective_bastions: Option<Vec<String>> =
-            bastions_raw.filter(|v| !v.is_empty());
+        let mut effective_bastions: Option<Vec<String>> = bastions_raw.filter(|v| !v.is_empty());
         // When the list is resolved from a named group, remember the
         // group name + its selection mode so the dispatcher can shuffle a
         // `random` group and audit can attribute the choice to the group.
@@ -1609,10 +1415,7 @@ impl RustionBackendInner {
             // global-pool fallback semantics).
             let any = store.list_target_ids().await?;
             if any.is_empty() {
-                return Err(bv_error_response_status!(
-                    403,
-                    "rustion-required policy: no bastions enrolled"
-                ));
+                return Err(bv_error_response_status!(403, "rustion-required policy: no bastions enrolled"));
             }
         }
 
@@ -1635,11 +1438,7 @@ impl RustionBackendInner {
             target_host: pick("target_host"),
             target_port: u16::try_from(pick_u("target_port", 22)).unwrap_or(22),
             target_protocol: pick("target_protocol"),
-            target_hostkey_pin: if hostkey_pin.is_empty() {
-                None
-            } else {
-                Some(hostkey_pin)
-            },
+            target_hostkey_pin: if hostkey_pin.is_empty() { None } else { Some(hostkey_pin) },
             credential_kind: pick("credential_kind"),
             credential_username: pick("credential_username"),
             credential_material,
@@ -1651,6 +1450,9 @@ impl RustionBackendInner {
                     Some(c)
                 }
             },
+            credential_key,
+            credential_pin: pick("credential_pin"),
+            credential_domain: pick("credential_domain"),
             ttl_secs: u32::try_from(pick_u("ttl_secs", 3600)).unwrap_or(3600),
             max_renewals: u8::try_from(pick_u("max_renewals", 3)).unwrap_or(3),
             recording: recording_choice,
@@ -1662,25 +1464,11 @@ impl RustionBackendInner {
         // Operator context from the calling token's metadata. Source-IP
         // is pulled from the request's remote-addr field; the rest
         // come from the auth metadata stamped at login.
-        let auth = req.auth.as_ref().ok_or_else(|| {
-            bv_error_response_status!(401, "no authenticated caller")
-        })?;
+        let auth = req.auth.as_ref().ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
         let operator = envelope::OperatorContext {
-            vault_user_id: auth
-                .metadata
-                .get("entity_id")
-                .cloned()
-                .unwrap_or_default(),
-            vault_user_name: auth
-                .metadata
-                .get("username")
-                .cloned()
-                .unwrap_or_default(),
-            vault_session_id: auth
-                .metadata
-                .get("session_id")
-                .cloned()
-                .unwrap_or_default(),
+            vault_user_id: auth.metadata.get("entity_id").cloned().unwrap_or_default(),
+            vault_user_name: auth.metadata.get("username").cloned().unwrap_or_default(),
+            vault_session_id: auth.metadata.get("session_id").cloned().unwrap_or_default(),
             // See operator_context() — same source-of-truth.
             src_ip: operator_src_ip(req),
             // Phase 9.1 — the deployment_id field is sourced from BV's
@@ -1688,10 +1476,7 @@ impl RustionBackendInner {
             // not from the caller's auth metadata. Rustion authorities
             // pin this at approval time and refuse envelopes whose
             // deployment_id doesn't match.
-            deployment_id: master_store
-                .get_or_init_deployment_id()
-                .await
-                .unwrap_or_default(),
+            deployment_id: master_store.get_or_init_deployment_id().await.unwrap_or_default(),
         };
 
         // Brokered-session audit context. A minted `ssh-cert` / `ssh-otp`
@@ -1865,16 +1650,10 @@ impl RustionBackendInner {
         b: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let resource_name = req
-            .get_data("resource_name")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let resource_name =
+            req.get_data("resource_name").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         if resource_name.is_empty() {
-            return Err(bv_error_response_status!(
-                400,
-                "v2 session/open requires `resource_name`"
-            ));
+            return Err(bv_error_response_status!(400, "v2 session/open requires `resource_name`"));
         }
 
         // (1) Connect-capability gate on the resource's secret path. This
@@ -1883,20 +1662,13 @@ impl RustionBackendInner {
         // may call the endpoint; this guards who may connect to *this*
         // resource. `read`/`root` imply connect, so existing read+connect
         // users keep working with no policy change.
-        let auth = req
-            .auth
-            .clone()
-            .ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
+        let auth = req.auth.clone().ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
         let policy_module = self
             .core
             .module_manager
             .get_module::<crate::modules::policy::PolicyModule>("policy")
             .ok_or_else(|| bv_error_string!("policy module not registered"))?;
-        let acl = policy_module
-            .policy_store
-            .load()
-            .new_acl_for_request(&auth.policies, None, &auth)
-            .await?;
+        let acl = policy_module.policy_store.load().new_acl_for_request(&auth.policies, None, &auth).await?;
         let secret_prefix = format!("resources/secrets/{resource_name}/");
         // Evaluate the connect/read grant with a non-LIST capability check.
         // `acl.capabilities()` probes with an `Operation::List`, and the ACL
@@ -1915,9 +1687,7 @@ impl RustionBackendInner {
         use crate::modules::policy::policy::Capability;
         let may_connect = {
             let connect = acl.explain_capability(&secret_prefix, Capability::Connect);
-            connect.allowed
-                || connect.is_root
-                || acl.explain_capability(&secret_prefix, Capability::Read).allowed
+            connect.allowed || connect.is_root || acl.explain_capability(&secret_prefix, Capability::Read).allowed
         };
         if !may_connect {
             return Err(RvError::ErrPermissionDenied);
@@ -1928,17 +1698,11 @@ impl RustionBackendInner {
         // ldap/ssh-engine/pki kinds still resolve client-side and pass
         // material through). The `secret` kind is resolved here so a
         // connect-only caller never needs `read` on the secret.
-        let cred_material_present = req
-            .get_data("credential_material")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| !s.is_empty()))
-            .unwrap_or(false);
+        let cred_material_present =
+            req.get_data("credential_material").ok().and_then(|v| v.as_str().map(|s| !s.is_empty())).unwrap_or(false);
         if !cred_material_present {
             let cs = req.get_data("credential_source").ok().ok_or_else(|| {
-                bv_error_response_status!(
-                    400,
-                    "v2 session/open requires `credential_material` or `credential_source`"
-                )
+                bv_error_response_status!(400, "v2 session/open requires `credential_material` or `credential_source`")
             })?;
             let kind = cs.get("kind").and_then(|v| v.as_str()).unwrap_or_default();
             match kind {
@@ -1946,33 +1710,17 @@ impl RustionBackendInner {
                     let secret_id = cs
                         .get("secret_id")
                         .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            bv_error_response_status!(400, "credential_source.secret_id is required")
-                        })?
+                        .ok_or_else(|| bv_error_response_status!(400, "credential_source.secret_id is required"))?
                         .to_string();
-                    let (material_b64, username) = self
-                        .resolve_secret_credential(&resource_name, &secret_id, &auth)
-                        .await?;
+                    let (material_b64, username) =
+                        self.resolve_secret_credential(&resource_name, &secret_id, &auth).await?;
                     let data = req.data.get_or_insert_with(Map::new);
                     data.insert("credential_material".into(), Value::String(material_b64));
-                    if data
-                        .get("credential_kind")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .is_empty()
-                    {
-                        data.insert(
-                            "credential_kind".into(),
-                            Value::String("ssh-password".into()),
-                        );
+                    if data.get("credential_kind").and_then(|v| v.as_str()).unwrap_or_default().is_empty() {
+                        data.insert("credential_kind".into(), Value::String("ssh-password".into()));
                     }
                     if let Some(u) = username {
-                        if data
-                            .get("credential_username")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .is_empty()
-                        {
+                        if data.get("credential_username").and_then(|v| v.as_str()).unwrap_or_default().is_empty() {
                             data.insert("credential_username".into(), Value::String(u));
                         }
                     }
@@ -1990,22 +1738,14 @@ impl RustionBackendInner {
                         .and_then(|v| v.as_str())
                         .map(|s| s.trim().trim_end_matches('/').to_string())
                         .filter(|s| !s.is_empty())
-                        .ok_or_else(|| {
-                            bv_error_response_status!(400, "credential_source.ssh_mount is required")
-                        })?;
+                        .ok_or_else(|| bv_error_response_status!(400, "credential_source.ssh_mount is required"))?;
                     let ssh_role = cs
                         .get("ssh_role")
                         .and_then(|v| v.as_str())
                         .filter(|s| !s.is_empty())
-                        .ok_or_else(|| {
-                            bv_error_response_status!(400, "credential_source.ssh_role is required")
-                        })?
+                        .ok_or_else(|| bv_error_response_status!(400, "credential_source.ssh_role is required"))?
                         .to_string();
-                    let mode = cs
-                        .get("mode")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or("ca");
+                    let mode = cs.get("mode").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or("ca");
                     match mode {
                         "ca" => {
                             let principal = req
@@ -2013,26 +1753,13 @@ impl RustionBackendInner {
                                 .ok()
                                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                                 .filter(|s| !s.is_empty());
-                            let minted = self
-                                .mint_brokered_ssh_cert(&ssh_mount, &ssh_role, principal.as_deref())
-                                .await?;
+                            let minted =
+                                self.mint_brokered_ssh_cert(&ssh_mount, &ssh_role, principal.as_deref()).await?;
                             let data = req.data.get_or_insert_with(Map::new);
-                            data.insert(
-                                "credential_kind".into(),
-                                Value::String("ssh-cert".into()),
-                            );
-                            data.insert(
-                                "credential_material".into(),
-                                Value::String(minted.private_key_b64),
-                            );
-                            data.insert(
-                                "credential_cert".into(),
-                                Value::String(minted.certificate),
-                            );
-                            data.insert(
-                                "credential_serial".into(),
-                                Value::String(minted.serial.clone()),
-                            );
+                            data.insert("credential_kind".into(), Value::String("ssh-cert".into()));
+                            data.insert("credential_material".into(), Value::String(minted.private_key_b64));
+                            data.insert("credential_cert".into(), Value::String(minted.certificate));
+                            data.insert("credential_serial".into(), Value::String(minted.serial.clone()));
                             if let Some(p) = principal {
                                 if data
                                     .get("credential_username")
@@ -2040,10 +1767,7 @@ impl RustionBackendInner {
                                     .unwrap_or_default()
                                     .is_empty()
                                 {
-                                    data.insert(
-                                        "credential_username".into(),
-                                        Value::String(p),
-                                    );
+                                    data.insert("credential_username".into(), Value::String(p));
                                 }
                             }
                         }
@@ -2115,23 +1839,11 @@ impl RustionBackendInner {
         let path = format!("resources/secrets/{resource_name}/{secret_id}");
         let mut sub = Request::new(&path);
         sub.operation = Operation::Read;
-        let resp = self
-            .core
-            .router
-            .handle_request(&mut sub)
-            .await?
-            .ok_or_else(|| {
-                bv_error_response_status!(
-                    404,
-                    &format!("resource secret `{secret_id}` not found for `{resource_name}`")
-                )
-            })?;
+        let resp = self.core.router.handle_request(&mut sub).await?.ok_or_else(|| {
+            bv_error_response_status!(404, &format!("resource secret `{secret_id}` not found for `{resource_name}`"))
+        })?;
         let data = resp.data.unwrap_or_default();
-        let password = data
-            .get("password")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
+        let password = data.get("password").and_then(|v| v.as_str()).unwrap_or_default().to_string();
         if password.is_empty() {
             return Err(bv_error_response_status!(
                 422,
@@ -2141,11 +1853,7 @@ impl RustionBackendInner {
                 )
             ));
         }
-        let username = data
-            .get("username")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(String::from);
+        let username = data.get("username").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
 
         // Mirror the resource module's security-log line so "who pulled a
         // credential to broker a connect-only session" lands in security.log
@@ -2207,54 +1915,34 @@ impl RustionBackendInner {
         let path = format!("{ssh_mount}/sign/{ssh_role}");
         let mut sub = Request::new_write_request(&path, Some(body));
         sub.operation = Operation::Write;
-        let resp = self
-            .core
-            .router
-            .handle_request(&mut sub)
-            .await?
-            .ok_or_else(|| {
-                bv_error_response_status!(
-                    502,
-                    &format!("ssh engine `{path}` returned no response while minting brokered cert")
-                )
-            })?;
+        let resp = self.core.router.handle_request(&mut sub).await?.ok_or_else(|| {
+            bv_error_response_status!(
+                502,
+                &format!("ssh engine `{path}` returned no response while minting brokered cert")
+            )
+        })?;
         let data = resp.data.unwrap_or_default();
         let certificate = data
             .get("signed_key")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
-                bv_error_response_status!(
-                    502,
-                    &format!("ssh engine `{path}` sign response missing `signed_key`")
-                )
+                bv_error_response_status!(502, &format!("ssh engine `{path}` sign response missing `signed_key`"))
             })?
             .to_string();
-        let serial = data
-            .get("serial_number")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
+        let serial = data.get("serial_number").and_then(|v| v.as_str()).unwrap_or_default().to_string();
 
         // Base64 the private key, then drop the plaintext copy. From here
         // the key lives only inside the sealed envelope ciphertext.
         let private_key_b64 = STANDARD.encode(private_openssh.as_bytes());
         drop(private_openssh);
 
-        Ok(MintedSshCert {
-            private_key_b64,
-            certificate,
-            serial,
-        })
+        Ok(MintedSshCert { private_key_b64, certificate, serial })
     }
 
     // ─── Phase 5: renew + kill ──────────────────────────────────────
 
-    pub async fn handle_session_renew(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_session_renew(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let master_store = self.resolve_master_store()?;
         let master = master_store
@@ -2263,10 +1951,7 @@ impl RustionBackendInner {
             .map_err(|e| bv_error_string!(&format!("master signing key: {e}")))?;
 
         let pick = |k: &str| -> String {
-            req.get_data(k)
-                .ok()
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .unwrap_or_default()
+            req.get_data(k).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
         };
         let extend_secs = req
             .get_data("extend_secs")
@@ -2301,25 +1986,17 @@ impl RustionBackendInner {
                 );
                 Ok(Some(Response::data_response(Some(data))))
             }
-            Err(session::SessionRenewError::BastionNotFound(id)) => Err(bv_error_response_status!(
-                404,
-                &format!("bastion_not_found: {id}")
-            )),
+            Err(session::SessionRenewError::BastionNotFound(id)) => {
+                Err(bv_error_response_status!(404, &format!("bastion_not_found: {id}")))
+            }
             Err(session::SessionRenewError::Http { status, body }) => {
-                Err(bv_error_response_status!(
-                    status,
-                    &format!("bastion_rejected: {body}")
-                ))
+                Err(bv_error_response_status!(status, &format!("bastion_rejected: {body}")))
             }
             Err(e) => Err(bv_error_string!(&format!("{e}"))),
         }
     }
 
-    pub async fn handle_session_kill(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_session_kill(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let master_store = self.resolve_master_store()?;
         let master = master_store
@@ -2328,10 +2005,7 @@ impl RustionBackendInner {
             .map_err(|e| bv_error_string!(&format!("master signing key: {e}")))?;
 
         let pick = |k: &str| -> String {
-            req.get_data(k)
-                .ok()
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .unwrap_or_default()
+            req.get_data(k).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
         };
         let operator = self.operator_context(req).await?;
         let request = session::SessionKillRequest {
@@ -2346,23 +2020,14 @@ impl RustionBackendInner {
                 data.insert("session_id".into(), Value::String(resp.session_id.clone()));
                 data.insert("terminated_at".into(), Value::String(resp.terminated_at));
                 data.insert("bastion_id".into(), Value::String(resp.bastion_id.clone()));
-                log::info!(
-                    "{}: session_id={} bastion={}",
-                    audit::SESSION_TERMINATE,
-                    resp.session_id,
-                    resp.bastion_id,
-                );
+                log::info!("{}: session_id={} bastion={}", audit::SESSION_TERMINATE, resp.session_id, resp.bastion_id,);
                 Ok(Some(Response::data_response(Some(data))))
             }
-            Err(session::SessionRenewError::BastionNotFound(id)) => Err(bv_error_response_status!(
-                404,
-                &format!("bastion_not_found: {id}")
-            )),
+            Err(session::SessionRenewError::BastionNotFound(id)) => {
+                Err(bv_error_response_status!(404, &format!("bastion_not_found: {id}")))
+            }
             Err(session::SessionRenewError::Http { status, body }) => {
-                Err(bv_error_response_status!(
-                    status,
-                    &format!("bastion_rejected: {body}")
-                ))
+                Err(bv_error_response_status!(status, &format!("bastion_rejected: {body}")))
             }
             Err(e) => Err(bv_error_string!(&format!("{e}"))),
         }
@@ -2386,21 +2051,13 @@ impl RustionBackendInner {
             .await
             .map_err(|e| bv_error_string!(&format!("master signing key: {e}")))?;
         let operator = self.operator_context(req).await?;
-        let bastion_id = req
-            .get_data("bastion_id")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .filter(|s| !s.is_empty());
+        let bastion_id =
+            req.get_data("bastion_id").ok().and_then(|v| v.as_str().map(|s| s.to_string())).filter(|s| !s.is_empty());
 
         let outcomes = if let Some(id) = bastion_id {
             match enrolment::attest_bastion(&store, &master, &operator, &id).await {
                 Ok(r) => {
-                    log::info!(
-                        "{}: bastion={} correlation={}",
-                        audit::MASTER_ATTEST,
-                        r.bastion_id,
-                        r.correlation_id
-                    );
+                    log::info!("{}: bastion={} correlation={}", audit::MASTER_ATTEST, r.bastion_id, r.correlation_id);
                     enrolment::AttestAllResult {
                         attempted: 1,
                         succeeded: 1,
@@ -2412,10 +2069,7 @@ impl RustionBackendInner {
                     attempted: 1,
                     succeeded: 0,
                     failed: 1,
-                    results: vec![enrolment::AttestOutcome::Err {
-                        bastion_id: id,
-                        error: e.to_string(),
-                    }],
+                    results: vec![enrolment::AttestOutcome::Err { bastion_id: id, error: e.to_string() }],
                 },
             }
         } else {
@@ -2424,18 +2078,12 @@ impl RustionBackendInner {
                 .map_err(|e| bv_error_string!(&format!("attest_all: {e}")))?;
             for o in &r.results {
                 if let enrolment::AttestOutcome::Ok(ok) = o {
-                    log::info!(
-                        "{}: bastion={} correlation={}",
-                        audit::MASTER_ATTEST,
-                        ok.bastion_id,
-                        ok.correlation_id
-                    );
+                    log::info!("{}: bastion={} correlation={}", audit::MASTER_ATTEST, ok.bastion_id, ok.correlation_id);
                 }
             }
             r
         };
-        let value = serde_json::to_value(&outcomes)
-            .map_err(|e| bv_error_string!(&format!("encode: {e}")))?;
+        let value = serde_json::to_value(&outcomes).map_err(|e| bv_error_string!(&format!("encode: {e}")))?;
         let data = match value {
             Value::Object(m) => m,
             _ => Map::new(),
@@ -2460,11 +2108,8 @@ impl RustionBackendInner {
             .await
             .map_err(|e| bv_error_string!(&format!("master signing key: {e}")))?;
         let operator = self.operator_context(req).await?;
-        let bastion_id = req
-            .get_data("bastion_id")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let bastion_id =
+            req.get_data("bastion_id").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         let reason = req
             .get_data("reason")
             .ok()
@@ -2473,9 +2118,7 @@ impl RustionBackendInner {
         let target = store
             .get_target(&bastion_id)
             .await?
-            .ok_or_else(|| {
-                bv_error_response_status!(404, &format!("bastion_not_found: {bastion_id}"))
-            })?;
+            .ok_or_else(|| bv_error_response_status!(404, &format!("bastion_not_found: {bastion_id}")))?;
         let result = enrolment::deenrol_bastion(&target, &master, &operator, &reason)
             .await
             .map_err(|e| bv_error_string!(&format!("{e}")))?;
@@ -2488,10 +2131,7 @@ impl RustionBackendInner {
         );
         let mut data = Map::new();
         data.insert("bastion_id".into(), Value::String(result.bastion_id));
-        data.insert(
-            "correlation_id".into(),
-            Value::String(result.correlation_id),
-        );
+        data.insert("correlation_id".into(), Value::String(result.correlation_id));
         data.insert("reason".into(), Value::String(reason));
         Ok(Some(Response::data_response(Some(data))))
     }
@@ -2504,10 +2144,7 @@ impl RustionBackendInner {
         let recordings = self.resolve_recordings_store()?;
         let ids = recordings.list_ids().await?;
         let mut data = Map::new();
-        data.insert(
-            "recordings".into(),
-            Value::Array(ids.into_iter().map(Value::String).collect()),
-        );
+        data.insert("recordings".into(), Value::Array(ids.into_iter().map(Value::String).collect()));
         Ok(Some(Response::data_response(Some(data))))
     }
 
@@ -2521,8 +2158,7 @@ impl RustionBackendInner {
         let Some(entry) = recordings.get(&rid).await? else {
             return Err(bv_error_response_status!(404, &format!("recording `{rid}` not found")));
         };
-        let json = serde_json::to_value(&entry)
-            .map_err(|e| bv_error_string!(&format!("encode recording: {e}")))?;
+        let json = serde_json::to_value(&entry).map_err(|e| bv_error_string!(&format!("encode recording: {e}")))?;
         let data = json.as_object().cloned().unwrap_or_default();
         Ok(Some(Response::data_response(Some(data))))
     }
@@ -2537,26 +2173,17 @@ impl RustionBackendInner {
         let recordings = self.resolve_recordings_store()?;
         // Path looks like `recordings/<rid>/blob` after the mount
         // strip. Pull the rid out by walking the components.
-        let rid = req
-            .path
-            .strip_prefix("recordings/")
-            .and_then(|s| s.strip_suffix("/blob"))
-            .unwrap_or("")
-            .to_string();
+        let rid = req.path.strip_prefix("recordings/").and_then(|s| s.strip_suffix("/blob")).unwrap_or("").to_string();
         if rid.is_empty() {
             return Err(bv_error_response_status!(400, "recording_id is required"));
         }
-        let (bytes, format, sha256) =
-            recordings::fetch_blob(&store, &recordings, &rid).await?;
+        let (bytes, format, sha256) = recordings::fetch_blob(&store, &recordings, &rid).await?;
         let mut data = Map::new();
         data.insert("recording_id".into(), Value::String(rid));
         data.insert("format".into(), Value::String(format));
         data.insert("sha256".into(), Value::String(sha256));
         data.insert("bytes_b64".into(), Value::String(STANDARD.encode(&bytes)));
-        data.insert(
-            "size_bytes".into(),
-            Value::Number((bytes.len() as u64).into()),
-        );
+        data.insert("size_bytes".into(), Value::Number((bytes.len() as u64).into()));
         Ok(Some(Response::data_response(Some(data))))
     }
 
@@ -2565,19 +2192,12 @@ impl RustionBackendInner {
         _b: &dyn Backend,
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
-        let recording_id = req
-            .get_data("recording_id")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+        let recording_id =
+            req.get_data("recording_id").ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
         if recording_id.is_empty() {
             return Err(bv_error_response_status!(400, "recording_id is required"));
         }
-        let sha256_mismatch = req
-            .get_data("sha256_mismatch")
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let sha256_mismatch = req.get_data("sha256_mismatch").ok().and_then(|v| v.as_bool()).unwrap_or(false);
         // The caller's identity is already in the audit chain via the
         // BV token; we just emit the structured log line that SOC
         // tooling joins on.
@@ -2604,21 +2224,14 @@ impl RustionBackendInner {
         let store = self.resolve_store()?;
         let recordings = self.resolve_recordings_store()?;
         let pick = |k: &str| -> String {
-            req.get_data(k)
-                .ok()
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .unwrap_or_default()
+            req.get_data(k).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
         };
         let bastion_id = pick("bastion_id");
         let session_id = pick("session_id");
         if bastion_id.is_empty() || session_id.is_empty() {
-            return Err(bv_error_response_status!(
-                400,
-                "bastion_id and session_id are required"
-            ));
+            return Err(bv_error_response_status!(400, "bastion_id and session_id are required"));
         }
-        let entry =
-            recordings::pull_recording(&store, &recordings, &bastion_id, &session_id).await?;
+        let entry = recordings::pull_recording(&store, &recordings, &bastion_id, &session_id).await?;
         log::info!(
             "{}: recording_id={} session_id={} bastion={} mode=pull",
             audit::RECORDING_LINKED,
@@ -2626,8 +2239,7 @@ impl RustionBackendInner {
             entry.session_id,
             entry.bastion_id
         );
-        let json = serde_json::to_value(&entry)
-            .map_err(|e| bv_error_string!(&format!("encode recording: {e}")))?;
+        let json = serde_json::to_value(&entry).map_err(|e| bv_error_string!(&format!("encode recording: {e}")))?;
         let data = json.as_object().cloned().unwrap_or_default();
         Ok(Some(Response::data_response(Some(data))))
     }
@@ -2639,20 +2251,13 @@ impl RustionBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let store = self.resolve_store()?;
         let recordings = self.resolve_recordings_store()?;
-        let bastion_id = req
-            .get_data("bastion_id")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
-            .unwrap_or_default();
+        let bastion_id =
+            req.get_data("bastion_id").ok().and_then(|v| v.as_str().map(|s| s.trim().to_string())).unwrap_or_default();
 
         // Empty bastion_id → sweep every enrolled target. Per-bastion
         // failures are recorded rather than aborting the whole sweep, so
         // one unreachable bastion doesn't mask recoveries from the rest.
-        let ids = if bastion_id.is_empty() {
-            store.list_target_ids().await?
-        } else {
-            vec![bastion_id]
-        };
+        let ids = if bastion_id.is_empty() { store.list_target_ids().await? } else { vec![bastion_id] };
 
         let mut reports = Vec::new();
         let mut errors = Map::new();
@@ -2718,10 +2323,7 @@ impl RustionBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
         let tier = read_tier_fields(req);
-        let g = policy::GlobalPolicy {
-            tier,
-            updated_at: Some(chrono::Utc::now()),
-        };
+        let g = policy::GlobalPolicy { tier, updated_at: Some(chrono::Utc::now()) };
         pol.put_global(&g).await?;
         log::info!("{}: lock={}", audit::POLICY_GLOBAL_UPDATE, g.tier.lock);
         Ok(Some(Response::data_response(Some(Map::new()))))
@@ -2735,10 +2337,7 @@ impl RustionBackendInner {
         let pol = self.resolve_policy_store()?;
         let names = pol.list_groups().await?;
         let mut data = Map::new();
-        data.insert(
-            "groups".into(),
-            Value::Array(names.into_iter().map(Value::String).collect()),
-        );
+        data.insert("groups".into(), Value::Array(names.into_iter().map(Value::String).collect()));
         Ok(Some(Response::data_response(Some(data))))
     }
 
@@ -2749,10 +2348,7 @@ impl RustionBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
         let pick = |k: &str| -> String {
-            req.get_data(k)
-                .ok()
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .unwrap_or_default()
+            req.get_data(k).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
         };
         let name = pick("name");
         if name.is_empty() {
@@ -2764,10 +2360,7 @@ impl RustionBackendInner {
             _ => policy::Selection::Ordered,
         };
         if pol.get_group(&name).await?.is_some() {
-            return Err(bv_error_response_status!(
-                409,
-                &format!("bastion group `{name}` already exists")
-            ));
+            return Err(bv_error_response_status!(409, &format!("bastion group `{name}` already exists")));
         }
         let now = chrono::Utc::now();
         let g = policy::BastionGroup {
@@ -2789,11 +2382,7 @@ impl RustionBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
-        let name = req
-            .path
-            .strip_prefix("bastion-groups/")
-            .unwrap_or("")
-            .to_string();
+        let name = req.path.strip_prefix("bastion-groups/").unwrap_or("").to_string();
         let Some(g) = pol.get_group(&name).await? else {
             return Err(bv_error_response_status!(404, &format!("bastion group `{name}` not found")));
         };
@@ -2806,44 +2395,25 @@ impl RustionBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
-        let name = req
-            .path
-            .strip_prefix("bastion-groups/")
-            .unwrap_or("")
-            .to_string();
+        let name = req.path.strip_prefix("bastion-groups/").unwrap_or("").to_string();
         let Some(mut g) = pol.get_group(&name).await? else {
             return Err(bv_error_response_status!(404, &format!("bastion group `{name}` not found")));
         };
         if let Ok(members) = req.get_data("members") {
             if let Value::Array(arr) = members {
-                g.members = arr
-                    .iter()
-                    .filter_map(|x| x.as_str().map(String::from))
-                    .collect();
+                g.members = arr.iter().filter_map(|x| x.as_str().map(String::from)).collect();
             } else if let Value::String(s) = members {
-                g.members = s
-                    .split(',')
-                    .map(|x| x.trim().to_string())
-                    .filter(|x| !x.is_empty())
-                    .collect();
+                g.members = s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
             }
         }
-        if let Some(s) = req
-            .get_data("selection")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-        {
+        if let Some(s) = req.get_data("selection").ok().and_then(|v| v.as_str().map(|s| s.to_string())) {
             g.selection = match s.as_str() {
                 "random" => policy::Selection::Random,
                 "ordered" => policy::Selection::Ordered,
                 _ => g.selection,
             };
         }
-        if let Some(d) = req
-            .get_data("description")
-            .ok()
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-        {
+        if let Some(d) = req.get_data("description").ok().and_then(|v| v.as_str().map(|s| s.to_string())) {
             g.description = d;
         }
         g.updated_at = chrono::Utc::now();
@@ -2858,11 +2428,7 @@ impl RustionBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
-        let name = req
-            .path
-            .strip_prefix("bastion-groups/")
-            .unwrap_or("")
-            .to_string();
+        let name = req.path.strip_prefix("bastion-groups/").unwrap_or("").to_string();
         // Refuse the delete while any locked policy tier still pins this
         // group — otherwise a `rustion-required` lock would silently
         // degrade to the random pool. The operator must repoint or unlock
@@ -2910,19 +2476,10 @@ impl RustionBackendInner {
         let pol = self.resolve_policy_store()?;
         let name = req.path.strip_prefix("policy/type/").unwrap_or("").to_string();
         let tier = read_tier_fields(req);
-        let p = policy::TypePolicy {
-            type_name: name.clone(),
-            tier,
-            updated_at: chrono::Utc::now(),
-        };
+        let p = policy::TypePolicy { type_name: name.clone(), tier, updated_at: chrono::Utc::now() };
         pol.put_type(&p).await?;
         log::info!("{}: type={}", audit::POLICY_TYPE_UPDATE, name);
-        Ok(Some(Response::data_response(Some(tier_doc_to_map(
-            &p.tier,
-            Some(&p.type_name),
-            None,
-            Some(p.updated_at),
-        )))))
+        Ok(Some(Response::data_response(Some(tier_doc_to_map(&p.tier, Some(&p.type_name), None, Some(p.updated_at))))))
     }
 
     pub async fn handle_policy_type_delete(
@@ -2945,11 +2502,7 @@ impl RustionBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
-        let id = req
-            .path
-            .strip_prefix("policy/asset-group/")
-            .unwrap_or("")
-            .to_string();
+        let id = req.path.strip_prefix("policy/asset-group/").unwrap_or("").to_string();
         match pol.get_asset_group(&id).await? {
             Some(p) => Ok(Some(Response::data_response(Some(tier_doc_to_map(
                 &p.tier,
@@ -2967,37 +2520,13 @@ impl RustionBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
-        let id = req
-            .path
-            .strip_prefix("policy/asset-group/")
-            .unwrap_or("")
-            .to_string();
+        let id = req.path.strip_prefix("policy/asset-group/").unwrap_or("").to_string();
         let tier = read_tier_fields(req);
-        let priority = req
-            .get_data("priority")
-            .ok()
-            .and_then(|v| v.as_i64())
-            .map(|n| n as i32)
-            .unwrap_or(0);
-        let p = policy::AssetGroupPolicy {
-            asset_group_id: id.clone(),
-            priority,
-            tier,
-            updated_at: chrono::Utc::now(),
-        };
+        let priority = req.get_data("priority").ok().and_then(|v| v.as_i64()).map(|n| n as i32).unwrap_or(0);
+        let p = policy::AssetGroupPolicy { asset_group_id: id.clone(), priority, tier, updated_at: chrono::Utc::now() };
         pol.put_asset_group(&p).await?;
-        log::info!(
-            "{}: asset_group={} priority={}",
-            audit::POLICY_ASSET_GROUP_UPDATE,
-            id,
-            priority
-        );
-        Ok(Some(Response::data_response(Some(tier_doc_to_map(
-            &p.tier,
-            None,
-            Some(p.priority),
-            Some(p.updated_at),
-        )))))
+        log::info!("{}: asset_group={} priority={}", audit::POLICY_ASSET_GROUP_UPDATE, id, priority);
+        Ok(Some(Response::data_response(Some(tier_doc_to_map(&p.tier, None, Some(p.priority), Some(p.updated_at))))))
     }
 
     // ─── Per-resource policy ────────────────────────────────────────
@@ -3008,18 +2537,11 @@ impl RustionBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
-        let id = req
-            .path
-            .strip_prefix("policy/resource/")
-            .unwrap_or("")
-            .to_string();
+        let id = req.path.strip_prefix("policy/resource/").unwrap_or("").to_string();
         match pol.get_resource(&id).await? {
-            Some(p) => Ok(Some(Response::data_response(Some(tier_doc_to_map(
-                &p.tier,
-                None,
-                None,
-                Some(p.updated_at),
-            ))))),
+            Some(p) => {
+                Ok(Some(Response::data_response(Some(tier_doc_to_map(&p.tier, None, None, Some(p.updated_at))))))
+            }
             None => Err(bv_error_response_status!(404, &format!("resource policy `{id}` not set"))),
         }
     }
@@ -3030,11 +2552,7 @@ impl RustionBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
-        let id = req
-            .path
-            .strip_prefix("policy/resource/")
-            .unwrap_or("")
-            .to_string();
+        let id = req.path.strip_prefix("policy/resource/").unwrap_or("").to_string();
         let mut tier = read_tier_fields(req);
         // Per-resource overrides may NOT set `lock = true` — only the
         // three higher tiers can lock. Refuse a write that tries.
@@ -3056,37 +2574,22 @@ impl RustionBackendInner {
         if !probe.locked_by.is_empty() {
             // If the operator's write would *weaken* anything the global
             // tier locked, refuse outright. Anything else is allowed.
-            let proposed_res = policy::ResourcePolicy {
-                resource_id: id.clone(),
-                tier: tier.clone(),
-                updated_at: chrono::Utc::now(),
-            };
+            let proposed_res =
+                policy::ResourcePolicy { resource_id: id.clone(), tier: tier.clone(), updated_at: chrono::Utc::now() };
             let test = policy::resolve(&global, None, &[], Some(&proposed_res));
             if test.lock_violation.is_some() {
                 let lv = test.lock_violation.as_ref().unwrap();
                 return Err(bv_error_response_status!(
                     403,
-                    &format!(
-                        "per-resource write blocked by upstream lock on {}: {}",
-                        lv.field, lv.detail
-                    )
+                    &format!("per-resource write blocked by upstream lock on {}: {}", lv.field, lv.detail)
                 ));
             }
         }
         tier.lock = false; // Defensive: per-resource never locks.
-        let p = policy::ResourcePolicy {
-            resource_id: id.clone(),
-            tier,
-            updated_at: chrono::Utc::now(),
-        };
+        let p = policy::ResourcePolicy { resource_id: id.clone(), tier, updated_at: chrono::Utc::now() };
         pol.put_resource(&p).await?;
         log::info!("{}: resource={}", audit::POLICY_RESOURCE_UPDATE, id);
-        Ok(Some(Response::data_response(Some(tier_doc_to_map(
-            &p.tier,
-            None,
-            None,
-            Some(p.updated_at),
-        )))))
+        Ok(Some(Response::data_response(Some(tier_doc_to_map(&p.tier, None, None, Some(p.updated_at))))))
     }
 
     // ─── Migration action ───────────────────────────────────────────
@@ -3097,11 +2600,7 @@ impl RustionBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let pol = self.resolve_policy_store()?;
-        let confirm = req
-            .get_data("confirm")
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let confirm = req.get_data("confirm").ok().and_then(|v| v.as_bool()).unwrap_or(false);
         let current = pol.get_global().await?;
         let proposed = policy::GlobalPolicy {
             tier: policy::PolicyTier {
@@ -3114,22 +2613,10 @@ impl RustionBackendInner {
         let mut data = Map::new();
         data.insert(
             "current_transport".into(),
-            Value::String(
-                current
-                    .tier
-                    .transport
-                    .map(|t| t.as_str().to_string())
-                    .unwrap_or_else(|| "(unset)".into()),
-            ),
+            Value::String(current.tier.transport.map(|t| t.as_str().to_string()).unwrap_or_else(|| "(unset)".into())),
         );
-        data.insert(
-            "current_lock".into(),
-            Value::Bool(current.tier.lock),
-        );
-        data.insert(
-            "proposed_transport".into(),
-            Value::String("rustion-required".into()),
-        );
+        data.insert("current_lock".into(), Value::Bool(current.tier.lock));
+        data.insert("proposed_transport".into(), Value::String("rustion-required".into()));
         data.insert("proposed_lock".into(), Value::Bool(true));
         if confirm {
             pol.put_global(&proposed).await?;
@@ -3165,10 +2652,7 @@ impl RustionBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let pick = |k: &str| -> String {
-            req.get_data(k)
-                .ok()
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .unwrap_or_default()
+            req.get_data(k).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
         };
         let resource_id = pick("resource_id");
         let resource_type = pick("resource_type");
@@ -3176,29 +2660,16 @@ impl RustionBackendInner {
 
         let pol = self.resolve_policy_store()?;
         let global = pol.get_global().await?;
-        let type_policy = if resource_type.is_empty() {
-            None
-        } else {
-            pol.get_type(&resource_type).await?
-        };
+        let type_policy = if resource_type.is_empty() { None } else { pol.get_type(&resource_type).await? };
         let mut ag_policies: Vec<policy::AssetGroupPolicy> = Vec::new();
         for ag_id in &asset_group_ids {
             if let Some(p) = pol.get_asset_group(ag_id).await? {
                 ag_policies.push(p);
             }
         }
-        let resource_policy = if resource_id.is_empty() {
-            None
-        } else {
-            pol.get_resource(&resource_id).await?
-        };
+        let resource_policy = if resource_id.is_empty() { None } else { pol.get_resource(&resource_id).await? };
 
-        let effective = policy::resolve(
-            &global,
-            type_policy.as_ref(),
-            &ag_policies,
-            resource_policy.as_ref(),
-        );
+        let effective = policy::resolve(&global, type_policy.as_ref(), &ag_policies, resource_policy.as_ref());
 
         // Resolve the bastion-group members if the resolver picked one,
         // so the caller doesn't need to fan out to /bastion-groups/<name>.
@@ -3214,56 +2685,20 @@ impl RustionBackendInner {
         let _ = &mut bastion_group_resolved; // kept for future audit surface
 
         let mut data = Map::new();
-        data.insert(
-            "transport".into(),
-            Value::String(effective.transport.as_str().to_string()),
-        );
-        data.insert(
-            "transport_source".into(),
-            Value::String(effective.transport_source.to_string()),
-        );
-        data.insert(
-            "bastions".into(),
-            Value::Array(
-                effective_bastions
-                    .iter()
-                    .cloned()
-                    .map(Value::String)
-                    .collect(),
-            ),
-        );
-        data.insert(
-            "bastion_group".into(),
-            Value::String(effective.bastion_group.clone().unwrap_or_default()),
-        );
-        data.insert(
-            "bastions_source".into(),
-            Value::String(effective.bastions_source.to_string()),
-        );
-        data.insert(
-            "recording".into(),
-            Value::String(effective.recording.as_str().to_string()),
-        );
-        data.insert(
-            "recording_source".into(),
-            Value::String(effective.recording_source.to_string()),
-        );
+        data.insert("transport".into(), Value::String(effective.transport.as_str().to_string()));
+        data.insert("transport_source".into(), Value::String(effective.transport_source.to_string()));
+        data.insert("bastions".into(), Value::Array(effective_bastions.iter().cloned().map(Value::String).collect()));
+        data.insert("bastion_group".into(), Value::String(effective.bastion_group.clone().unwrap_or_default()));
+        data.insert("bastions_source".into(), Value::String(effective.bastions_source.to_string()));
+        data.insert("recording".into(), Value::String(effective.recording.as_str().to_string()));
+        data.insert("recording_source".into(), Value::String(effective.recording_source.to_string()));
         data.insert(
             "locked_by".into(),
-            Value::Array(
-                effective
-                    .locked_by
-                    .iter()
-                    .map(|s| Value::String((*s).to_string()))
-                    .collect(),
-            ),
+            Value::Array(effective.locked_by.iter().map(|s| Value::String((*s).to_string())).collect()),
         );
         if let Some(ref lv) = effective.lock_violation {
             let mut lvm = Map::new();
-            lvm.insert(
-                "locking_tier".into(),
-                Value::String(lv.locking_tier.to_string()),
-            );
+            lvm.insert("locking_tier".into(), Value::String(lv.locking_tier.to_string()));
             lvm.insert("field".into(), Value::String(lv.field.to_string()));
             lvm.insert("detail".into(), Value::String(lv.detail.clone()));
             data.insert("lock_violation".into(), Value::Object(lvm));
@@ -3283,10 +2718,7 @@ impl RustionBackendInner {
         req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let pick = |k: &str| -> String {
-            req.get_data(k)
-                .ok()
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .unwrap_or_default()
+            req.get_data(k).ok().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default()
         };
         let resource_id = pick("resource_id");
         let resource_type = pick("resource_type");
@@ -3294,28 +2726,15 @@ impl RustionBackendInner {
 
         let pol = self.resolve_policy_store()?;
         let global = pol.get_global().await?;
-        let type_policy = if resource_type.is_empty() {
-            None
-        } else {
-            pol.get_type(&resource_type).await?
-        };
+        let type_policy = if resource_type.is_empty() { None } else { pol.get_type(&resource_type).await? };
         let mut ag_policies: Vec<policy::AssetGroupPolicy> = Vec::new();
         for ag_id in &asset_group_ids {
             if let Some(p) = pol.get_asset_group(ag_id).await? {
                 ag_policies.push(p);
             }
         }
-        let resource_policy = if resource_id.is_empty() {
-            None
-        } else {
-            pol.get_resource(&resource_id).await?
-        };
-        let effective = policy::resolve(
-            &global,
-            type_policy.as_ref(),
-            &ag_policies,
-            resource_policy.as_ref(),
-        );
+        let resource_policy = if resource_id.is_empty() { None } else { pol.get_resource(&resource_id).await? };
+        let effective = policy::resolve(&global, type_policy.as_ref(), &ag_policies, resource_policy.as_ref());
 
         // Resolve the bastion list + group + selection (mirrors session/open).
         let mut bastions = effective.bastions.clone();
@@ -3356,8 +2775,7 @@ impl RustionBackendInner {
             if group_name.is_some() && !bastions.is_empty() {
                 dispatcher::plan_group(&bastions, shuffle, &targets, &health, &mut rng)
             } else {
-                let pinned: Option<&[String]> =
-                    if bastions.is_empty() { None } else { Some(&bastions) };
+                let pinned: Option<&[String]> = if bastions.is_empty() { None } else { Some(&bastions) };
                 dispatcher::plan(pinned, &targets, &health, &mut rng)
             }
         };
@@ -3393,14 +2811,8 @@ impl RustionBackendInner {
 
         let mut data = Map::new();
         data.insert("mode".into(), Value::String(plan.mode.as_str().to_string()));
-        data.insert(
-            "group_name".into(),
-            Value::String(group_name.unwrap_or_default()),
-        );
-        data.insert(
-            "source_tier".into(),
-            Value::String(effective.bastions_source.to_string()),
-        );
+        data.insert("group_name".into(), Value::String(group_name.unwrap_or_default()));
+        data.insert("source_tier".into(), Value::String(effective.bastions_source.to_string()));
         data.insert("candidates".into(), Value::Array(candidates));
         data.insert("dropped".into(), Value::Array(dropped));
         Ok(Some(Response::data_response(Some(data))))
@@ -3418,13 +2830,10 @@ impl RustionBackendInner {
             .module_manager
             .get_module::<RustionModule>("rustion")
             .ok_or_else(|| bv_error_string!("rustion module not registered"))?;
-        let cache = module
-            .telemetry_cache()
-            .ok_or_else(|| bv_error_string!("telemetry cache not initialized"))?;
+        let cache = module.telemetry_cache().ok_or_else(|| bv_error_string!("telemetry cache not initialized"))?;
         let snaps = cache.list_snapshots().await;
         let mut data = Map::new();
-        let json = serde_json::to_value(&snaps)
-            .map_err(|e| bv_error_string!(&format!("encode telemetry: {e}")))?;
+        let json = serde_json::to_value(&snaps).map_err(|e| bv_error_string!(&format!("encode telemetry: {e}")))?;
         data.insert("targets".into(), json);
         Ok(Some(Response::data_response(Some(data))))
     }
@@ -3444,26 +2853,11 @@ impl RustionBackendInner {
     /// identity-stamping logic. Phase 9.1: deployment_id comes from
     /// the master store, not the auth metadata.
     async fn operator_context(&self, req: &Request) -> Result<envelope::OperatorContext, RvError> {
-        let auth = req
-            .auth
-            .as_ref()
-            .ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
+        let auth = req.auth.as_ref().ok_or_else(|| bv_error_response_status!(401, "no authenticated caller"))?;
         Ok(envelope::OperatorContext {
-            vault_user_id: auth
-                .metadata
-                .get("entity_id")
-                .cloned()
-                .unwrap_or_default(),
-            vault_user_name: auth
-                .metadata
-                .get("username")
-                .cloned()
-                .unwrap_or_default(),
-            vault_session_id: auth
-                .metadata
-                .get("session_id")
-                .cloned()
-                .unwrap_or_default(),
+            vault_user_id: auth.metadata.get("entity_id").cloned().unwrap_or_default(),
+            vault_user_name: auth.metadata.get("username").cloned().unwrap_or_default(),
+            vault_session_id: auth.metadata.get("session_id").cloned().unwrap_or_default(),
             // The operator's public IP. Sourced from the resolved
             // `peer_addr_derived` (post-X-Forwarded-For walk) so a
             // reverse proxy doesn't collapse every operator to the
@@ -3475,11 +2869,7 @@ impl RustionBackendInner {
             // *auth token* and stamping it here would leak it into
             // Rustion's audit chain.
             src_ip: operator_src_ip(req),
-            deployment_id: self
-                .resolve_master_store()?
-                .get_or_init_deployment_id()
-                .await
-                .unwrap_or_default(),
+            deployment_id: self.resolve_master_store()?.get_or_init_deployment_id().await.unwrap_or_default(),
         })
     }
 
@@ -3510,10 +2900,7 @@ impl RustionBackendInner {
         data.insert("ed25519_pem".into(), Value::String(export.ed25519_pem));
         data.insert("mldsa65_pem".into(), Value::String(export.mldsa65_pem));
         data.insert("fingerprint".into(), Value::String(export.fingerprint));
-        data.insert(
-            "current_serial".into(),
-            Value::String(export.current_serial),
-        );
+        data.insert("current_serial".into(), Value::String(export.current_serial));
         if let Some(ts) = export.current_not_after {
             data.insert("current_not_after".into(), Value::String(ts.to_rfc3339()));
         }
@@ -3521,62 +2908,31 @@ impl RustionBackendInner {
         Ok(Some(Response::data_response(Some(data))))
     }
 
-    pub async fn handle_master_issue(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_master_issue(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_master_store()?;
-        let issuer = master::CoreMasterCertIssuer {
-            core: self.core.clone(),
-            client_token: req.client_token.clone(),
-        };
-        let outcome = store
-            .issue(&issuer)
-            .await
-            .map_err(|e| bv_error_response_status!(400, &format!("master issue: {e}")))?;
-        Ok(Some(Response::data_response(Some(issue_outcome_to_map(
-            &outcome,
-        )))))
+        let issuer = master::CoreMasterCertIssuer { core: self.core.clone(), client_token: req.client_token.clone() };
+        let outcome =
+            store.issue(&issuer).await.map_err(|e| bv_error_response_status!(400, &format!("master issue: {e}")))?;
+        Ok(Some(Response::data_response(Some(issue_outcome_to_map(&outcome)))))
     }
 
-    pub async fn handle_master_rotate(
-        &self,
-        _b: &dyn Backend,
-        req: &mut Request,
-    ) -> Result<Option<Response>, RvError> {
+    pub async fn handle_master_rotate(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
         let store = self.resolve_master_store()?;
-        let issuer = master::CoreMasterCertIssuer {
-            core: self.core.clone(),
-            client_token: req.client_token.clone(),
-        };
-        let outcome = store
-            .rotate(&issuer)
-            .await
-            .map_err(|e| bv_error_response_status!(400, &format!("master rotate: {e}")))?;
-        Ok(Some(Response::data_response(Some(issue_outcome_to_map(
-            &outcome,
-        )))))
+        let issuer = master::CoreMasterCertIssuer { core: self.core.clone(), client_token: req.client_token.clone() };
+        let outcome =
+            store.rotate(&issuer).await.map_err(|e| bv_error_response_status!(400, &format!("master rotate: {e}")))?;
+        Ok(Some(Response::data_response(Some(issue_outcome_to_map(&outcome)))))
     }
 }
 
 fn issue_outcome_to_map(outcome: &master::IssueOutcome) -> Map<String, Value> {
     let mut data = Map::new();
     data.insert("serial".into(), Value::String(outcome.serial.clone()));
-    data.insert(
-        "not_after".into(),
-        Value::String(outcome.not_after.to_rfc3339()),
-    );
-    data.insert(
-        "algorithm".into(),
-        Value::String(outcome.algorithm.clone()),
-    );
+    data.insert("not_after".into(), Value::String(outcome.not_after.to_rfc3339()));
+    data.insert("algorithm".into(), Value::String(outcome.algorithm.clone()));
     data.insert("rotated".into(), Value::Bool(outcome.rotated));
     if let Some(ts) = outcome.previous_grace_until {
-        data.insert(
-            "previous_grace_until".into(),
-            Value::String(ts.to_rfc3339()),
-        );
+        data.insert("previous_grace_until".into(), Value::String(ts.to_rfc3339()));
     }
     data
 }
@@ -3620,59 +2976,34 @@ fn target_response(t: &RustionTarget) -> Response {
     pk.insert("ed25519".into(), Value::String(t.public_key.ed25519.clone()));
     pk.insert("mldsa65".into(), Value::String(t.public_key.mldsa65.clone()));
     data.insert("public_key".into(), Value::Object(pk));
-    data.insert(
-        "kem_public_key".into(),
-        Value::String(t.kem_public_key.clone()),
-    );
+    data.insert("kem_public_key".into(), Value::String(t.kem_public_key.clone()));
     data.insert("fingerprint".into(), Value::String(t.fingerprint.clone()));
     data.insert("description".into(), Value::String(t.description.clone()));
-    data.insert(
-        "tags".into(),
-        Value::Array(t.tags.iter().cloned().map(Value::String).collect()),
-    );
+    data.insert("tags".into(), Value::Array(t.tags.iter().cloned().map(Value::String).collect()));
     data.insert("enabled".into(), Value::Bool(t.enabled));
-    data.insert(
-        "default_recording_dir".into(),
-        Value::String(t.default_recording_dir.clone()),
-    );
+    data.insert("default_recording_dir".into(), Value::String(t.default_recording_dir.clone()));
     // Expose whether a TLS pin is configured (boolean), not the PEM
     // itself — keeps health/list responses compact and prevents the
     // pin from leaking into log scrapes. The full PEM is still
     // readable via the per-id Read handler.
-    data.insert(
-        "tls_pinned".into(),
-        Value::Bool(!t.tls_pinned_cert_pem.trim().is_empty()),
-    );
-    data.insert(
-        "tls_pinned_cert_pem".into(),
-        Value::String(t.tls_pinned_cert_pem.clone()),
-    );
+    data.insert("tls_pinned".into(), Value::Bool(!t.tls_pinned_cert_pem.trim().is_empty()));
+    data.insert("tls_pinned_cert_pem".into(), Value::String(t.tls_pinned_cert_pem.clone()));
     data.insert("created_at".into(), Value::String(t.created_at.to_rfc3339()));
     data.insert("updated_at".into(), Value::String(t.updated_at.to_rfc3339()));
     // Phase 9.3 — discovered listener coords. `host` is empty when
     // discovery hasn't run or the bastion bound to an unspecified
     // address; the Connect path falls back to the endpoint host in
     // that case.
-    data.insert(
-        "ssh_listener_host".into(),
-        Value::String(t.ssh_listener_host.clone()),
-    );
-    data.insert(
-        "ssh_listener_port".into(),
-        Value::Number(t.ssh_listener_port.into()),
-    );
-    data.insert(
-        "rdp_listener_host".into(),
-        Value::String(t.rdp_listener_host.clone()),
-    );
-    data.insert(
-        "rdp_listener_port".into(),
-        Value::Number(t.rdp_listener_port.into()),
-    );
-    data.insert(
-        "listeners_synced_at".into(),
-        Value::String(t.listeners_synced_at.clone()),
-    );
+    data.insert("ssh_listener_host".into(), Value::String(t.ssh_listener_host.clone()));
+    data.insert("ssh_listener_port".into(), Value::Number(t.ssh_listener_port.into()));
+    data.insert("rdp_listener_host".into(), Value::String(t.rdp_listener_host.clone()));
+    data.insert("rdp_listener_port".into(), Value::Number(t.rdp_listener_port.into()));
+    data.insert("listeners_synced_at".into(), Value::String(t.listeners_synced_at.clone()));
+    // Discovered transport-identity pins the GUI dialler enforces. The
+    // connect resolver reads these off the target record; the GUI shows
+    // them (and whether each protocol is pinned) on the bastion detail.
+    data.insert("ssh_host_key_fingerprint".into(), Value::String(t.ssh_host_key_fingerprint.clone()));
+    data.insert("rdp_tls_pin_sha256".into(), Value::String(t.rdp_tls_pin_sha256.clone()));
     let map: Map<String, Value> = data.into_iter().collect();
     Response::data_response(Some(map))
 }
@@ -3681,24 +3012,12 @@ fn master_config_response(cfg: &MasterConfig) -> Response {
     let mut data = Map::new();
     data.insert("pki_mount".into(), Value::String(cfg.pki_mount.clone()));
     data.insert("pki_role".into(), Value::String(cfg.pki_role.clone()));
-    data.insert(
-        "pki_role_pqc".into(),
-        Value::String(cfg.pki_role_pqc.clone().unwrap_or_default()),
-    );
+    data.insert("pki_role_pqc".into(), Value::String(cfg.pki_role_pqc.clone().unwrap_or_default()));
     data.insert("issuer_ref".into(), Value::String(cfg.issuer_ref.clone()));
     data.insert("algorithm".into(), Value::String(cfg.algorithm.clone()));
-    data.insert(
-        "default_ttl_secs".into(),
-        Value::Number(cfg.default_ttl_secs.into()),
-    );
-    data.insert(
-        "rotate_grace_secs".into(),
-        Value::Number(cfg.rotate_grace_secs.into()),
-    );
-    data.insert(
-        "current_serial".into(),
-        Value::String(cfg.current_serial.clone()),
-    );
+    data.insert("default_ttl_secs".into(), Value::Number(cfg.default_ttl_secs.into()));
+    data.insert("rotate_grace_secs".into(), Value::Number(cfg.rotate_grace_secs.into()));
+    data.insert("current_serial".into(), Value::String(cfg.current_serial.clone()));
     if let Some(ts) = cfg.current_not_after {
         data.insert("current_not_after".into(), Value::String(ts.to_rfc3339()));
     }
@@ -3709,20 +3028,17 @@ fn master_config_response(cfg: &MasterConfig) -> Response {
         data.insert("previous_not_after".into(), Value::String(ts.to_rfc3339()));
     }
     if let Some(ts) = cfg.previous_grace_until {
-        data.insert(
-            "previous_grace_until".into(),
-            Value::String(ts.to_rfc3339()),
-        );
+        data.insert("previous_grace_until".into(), Value::String(ts.to_rfc3339()));
     }
+    data.insert("updated_at".into(), Value::String(cfg.updated_at.to_rfc3339()));
     data.insert(
-        "updated_at".into(),
-        Value::String(cfg.updated_at.to_rfc3339()),
+        "configured".into(),
+        Value::Bool(
+            !cfg.pki_mount.is_empty()
+                && !cfg.pki_role.is_empty()
+                && cfg.pki_role_pqc.as_deref().map(|s| !s.is_empty()).unwrap_or(false),
+        ),
     );
-    data.insert("configured".into(), Value::Bool(
-        !cfg.pki_mount.is_empty()
-            && !cfg.pki_role.is_empty()
-            && cfg.pki_role_pqc.as_deref().map(|s| !s.is_empty()).unwrap_or(false),
-    ));
     Response::data_response(Some(data))
 }
 
@@ -3823,9 +3139,7 @@ mod connect_only_tests {
         let mut backend = super::RustionBackend::new(server.core.clone()).new_backend();
         backend.init().expect("backend init compiles route regexes");
         for pat in ["session/open", "v2/session/open"] {
-            let (path, _) = backend
-                .match_path(pat)
-                .unwrap_or_else(|| panic!("route `{pat}` should match"));
+            let (path, _) = backend.match_path(pat).unwrap_or_else(|| panic!("route `{pat}` should match"));
             for field in ["credential_cert", "credential_serial"] {
                 assert!(
                     path.get_field(field).is_some(),
@@ -3856,9 +3170,7 @@ mod connect_only_tests {
         server
             .write(
                 "resources/secrets/db/ssh",
-                serde_json::json!({ "password": "hunter2", "username": "deploy" })
-                    .as_object()
-                    .cloned(),
+                serde_json::json!({ "password": "hunter2", "username": "deploy" }).as_object().cloned(),
                 Some(&root),
             )
             .unwrap();
@@ -3872,10 +3184,7 @@ mod connect_only_tests {
                 "path \"resources/secrets/db/*\" { capabilities = [\"connect\"] }\n\
                  path \"rustion/*\" { capabilities = [\"create\", \"update\", \"read\"] }",
             ),
-            (
-                "no-connect",
-                "path \"rustion/*\" { capabilities = [\"create\", \"update\", \"read\"] }",
-            ),
+            ("no-connect", "path \"rustion/*\" { capabilities = [\"create\", \"update\", \"read\"] }"),
         ];
         for (name, body) in policies {
             server
@@ -3888,11 +3197,7 @@ mod connect_only_tests {
         }
 
         server
-            .write(
-                "sys/auth/pass",
-                serde_json::json!({ "type": "userpass" }).as_object().cloned(),
-                Some(&root),
-            )
+            .write("sys/auth/pass", serde_json::json!({ "type": "userpass" }).as_object().cloned(), Some(&root))
             .unwrap();
         for (user, policy) in [("conn", "connect-only"), ("noconn", "no-connect")] {
             server
@@ -3949,9 +3254,7 @@ mod connect_only_tests {
         let noconn = login("noconn");
 
         // Connect-only caller cannot read the stored credential directly.
-        let (read_status, _) = server
-            .request("GET", "resources/secrets/db/ssh", None, Some(&conn), None)
-            .unwrap();
+        let (read_status, _) = server.request("GET", "resources/secrets/db/ssh", None, Some(&conn), None).unwrap();
         assert_eq!(read_status, 403, "connect-only must be denied a direct secret read");
 
         // ...but its v2 session-open passes the connect gate and resolves the

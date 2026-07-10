@@ -58,6 +58,14 @@ pub struct RustionTargetSummary {
     /// ISO-8601 timestamp of the last successful listener-info pull.
     #[serde(default)]
     pub listeners_synced_at: String,
+    /// Discovered OpenSSH host-key fingerprint (`SHA256:…`) the SSH
+    /// dialler pins. Empty when the bastion advertised none.
+    #[serde(default)]
+    pub ssh_host_key_fingerprint: String,
+    /// Discovered TLS leaf digest (`sha256:…`) the RDP dialler pins.
+    /// Empty when the bastion advertised none.
+    #[serde(default)]
+    pub rdp_tls_pin_sha256: String,
 }
 
 #[derive(Serialize, Default)]
@@ -156,26 +164,14 @@ fn default_enabled() -> bool {
 }
 
 #[tauri::command]
-pub async fn rustion_target_list(
-    state: State<'_, AppState>,
-) -> CmdResult<Vec<RustionTargetSummary>> {
-    let resp = make_request(
-        &state,
-        Operation::List,
-        format!("{RUSTION_MOUNT}targets/"),
-        None,
-    )
-    .await?;
+pub async fn rustion_target_list(state: State<'_, AppState>) -> CmdResult<Vec<RustionTargetSummary>> {
+    let resp = make_request(&state, Operation::List, format!("{RUSTION_MOUNT}targets/"), None).await?;
     let keys: Vec<String> = resp
         .as_ref()
         .and_then(|r| r.data.as_ref())
         .and_then(|d| d.get("keys"))
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default();
     let mut out = Vec::with_capacity(keys.len());
     for id in keys {
@@ -187,17 +183,8 @@ pub async fn rustion_target_list(
 }
 
 #[tauri::command]
-pub async fn rustion_target_read(
-    state: State<'_, AppState>,
-    id: String,
-) -> CmdResult<RustionTargetSummary> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("{RUSTION_MOUNT}targets/{id}"),
-        None,
-    )
-    .await?;
+pub async fn rustion_target_read(state: State<'_, AppState>, id: String) -> CmdResult<RustionTargetSummary> {
+    let resp = make_request(&state, Operation::Read, format!("{RUSTION_MOUNT}targets/{id}"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(target_summary_from_map(&data))
 }
@@ -211,32 +198,14 @@ pub async fn rustion_target_upsert(
     let mut body = Map::new();
     body.insert("name".into(), Value::String(input.name));
     body.insert("endpoint".into(), Value::String(input.endpoint));
-    body.insert(
-        "public_key_ed25519".into(),
-        Value::String(input.public_key_ed25519),
-    );
-    body.insert(
-        "public_key_mldsa65".into(),
-        Value::String(input.public_key_mldsa65),
-    );
-    body.insert(
-        "kem_public_key".into(),
-        Value::String(input.kem_public_key),
-    );
+    body.insert("public_key_ed25519".into(), Value::String(input.public_key_ed25519));
+    body.insert("public_key_mldsa65".into(), Value::String(input.public_key_mldsa65));
+    body.insert("kem_public_key".into(), Value::String(input.kem_public_key));
     body.insert("description".into(), Value::String(input.description));
-    body.insert(
-        "tags".into(),
-        Value::Array(input.tags.into_iter().map(Value::String).collect()),
-    );
+    body.insert("tags".into(), Value::Array(input.tags.into_iter().map(Value::String).collect()));
     body.insert("enabled".into(), Value::Bool(input.enabled));
-    body.insert(
-        "default_recording_dir".into(),
-        Value::String(input.default_recording_dir),
-    );
-    body.insert(
-        "tls_pinned_cert_pem".into(),
-        Value::String(input.tls_pinned_cert_pem),
-    );
+    body.insert("default_recording_dir".into(), Value::String(input.default_recording_dir));
+    body.insert("tls_pinned_cert_pem".into(), Value::String(input.tls_pinned_cert_pem));
 
     let path = match id {
         Some(id) => format!("{RUSTION_MOUNT}targets/{id}"),
@@ -257,40 +226,21 @@ pub async fn rustion_target_refresh_listeners(
     state: State<'_, AppState>,
     id: String,
 ) -> CmdResult<RustionTargetSummary> {
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}targets/{id}/listeners/refresh"),
-        None,
-    )
-    .await?;
+    let resp =
+        make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}targets/{id}/listeners/refresh"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(target_summary_from_map(&data))
 }
 
 #[tauri::command]
 pub async fn rustion_target_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    make_request(
-        &state,
-        Operation::Delete,
-        format!("{RUSTION_MOUNT}targets/{id}"),
-        None,
-    )
-    .await?;
+    make_request(&state, Operation::Delete, format!("{RUSTION_MOUNT}targets/{id}"), None).await?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn rustion_target_health_all(
-    state: State<'_, AppState>,
-) -> CmdResult<Vec<RustionTargetHealth>> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("{RUSTION_MOUNT}targets/health"),
-        None,
-    )
-    .await?;
+pub async fn rustion_target_health_all(state: State<'_, AppState>) -> CmdResult<Vec<RustionTargetHealth>> {
+    let resp = make_request(&state, Operation::Read, format!("{RUSTION_MOUNT}targets/health"), None).await?;
     let arr = resp
         .as_ref()
         .and_then(|r| r.data.as_ref())
@@ -328,13 +278,7 @@ pub async fn rustion_target_probe(
 
 #[tauri::command]
 pub async fn rustion_master_read(state: State<'_, AppState>) -> CmdResult<RustionMasterConfig> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("{RUSTION_MOUNT}master/config"),
-        None,
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Read, format!("{RUSTION_MOUNT}master/config"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(master_config_from_map(&data))
 }
@@ -352,33 +296,18 @@ pub async fn rustion_master_write(
         body.insert("pki_role".into(), Value::String(input.pki_role));
     }
     if !input.pki_role_pqc.is_empty() {
-        body.insert(
-            "pki_role_pqc".into(),
-            Value::String(input.pki_role_pqc),
-        );
+        body.insert("pki_role_pqc".into(), Value::String(input.pki_role_pqc));
     }
     if !input.issuer_ref.is_empty() {
         body.insert("issuer_ref".into(), Value::String(input.issuer_ref));
     }
     if input.default_ttl_secs > 0 {
-        body.insert(
-            "default_ttl_secs".into(),
-            Value::Number(input.default_ttl_secs.into()),
-        );
+        body.insert("default_ttl_secs".into(), Value::Number(input.default_ttl_secs.into()));
     }
     if input.rotate_grace_secs > 0 {
-        body.insert(
-            "rotate_grace_secs".into(),
-            Value::Number(input.rotate_grace_secs.into()),
-        );
+        body.insert("rotate_grace_secs".into(), Value::Number(input.rotate_grace_secs.into()));
     }
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}master/config"),
-        Some(body),
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}master/config"), Some(body)).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(master_config_from_map(&data))
 }
@@ -388,16 +317,8 @@ pub async fn rustion_master_write(
 /// issue` — both sides hit `rustion/master/issue`. Used by the
 /// Bootstrap Master wizard in the GUI.
 #[tauri::command]
-pub async fn rustion_master_issue(
-    state: State<'_, AppState>,
-) -> CmdResult<RustionMasterIssueResult> {
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}master/issue"),
-        None,
-    )
-    .await?;
+pub async fn rustion_master_issue(state: State<'_, AppState>) -> CmdResult<RustionMasterIssueResult> {
+    let resp = make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}master/issue"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(RustionMasterIssueResult {
         serial: s(&data, "serial"),
@@ -418,10 +339,7 @@ fn master_config_from_map(data: &Map<String, Value>) -> RustionMasterConfig {
         current_serial: s(data, "current_serial"),
         current_not_after: s(data, "current_not_after"),
         updated_at: s(data, "updated_at"),
-        configured: data
-            .get("configured")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        configured: data.get("configured").and_then(|v| v.as_bool()).unwrap_or(false),
     }
 }
 
@@ -483,36 +401,18 @@ pub async fn rustion_session_open(
     let mut body = Map::new();
     body.insert("target_host".into(), Value::String(request.target_host));
     body.insert("target_port".into(), Value::Number(request.target_port.into()));
-    body.insert(
-        "target_protocol".into(),
-        Value::String(request.target_protocol),
-    );
+    body.insert("target_protocol".into(), Value::String(request.target_protocol));
     if let Some(pin) = request.target_hostkey_pin {
         body.insert("target_hostkey_pin".into(), Value::String(pin));
     }
-    body.insert(
-        "credential_kind".into(),
-        Value::String(request.credential_kind),
-    );
-    body.insert(
-        "credential_username".into(),
-        Value::String(request.credential_username),
-    );
-    body.insert(
-        "credential_material".into(),
-        Value::String(request.credential_material_b64),
-    );
+    body.insert("credential_kind".into(), Value::String(request.credential_kind));
+    body.insert("credential_username".into(), Value::String(request.credential_username));
+    body.insert("credential_material".into(), Value::String(request.credential_material_b64));
     body.insert("ttl_secs".into(), Value::Number(request.ttl_secs.into()));
-    body.insert(
-        "max_renewals".into(),
-        Value::Number(request.max_renewals.into()),
-    );
+    body.insert("max_renewals".into(), Value::Number(request.max_renewals.into()));
     body.insert("recording".into(), Value::String(request.recording));
     if let Some(list) = request.bastions {
-        body.insert(
-            "bastions".into(),
-            Value::Array(list.into_iter().map(Value::String).collect()),
-        );
+        body.insert("bastions".into(), Value::Array(list.into_iter().map(Value::String).collect()));
     }
     // Phase 7.3 — policy resolver hints. BV looks these up in its
     // policy store to walk the full type → asset-group → resource
@@ -524,36 +424,19 @@ pub async fn rustion_session_open(
         body.insert("resource_type".into(), Value::String(rt));
     }
     if let Some(ags) = request.asset_group_ids {
-        body.insert(
-            "asset_group_ids".into(),
-            Value::Array(ags.into_iter().map(Value::String).collect()),
-        );
+        body.insert("asset_group_ids".into(), Value::Array(ags.into_iter().map(Value::String).collect()));
     }
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}session/open"),
-        Some(body),
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}session/open"), Some(body)).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     let tried = data
         .get("bastion_candidates_tried")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default();
     Ok(RustionSessionOpenResult {
         session_id: s(&data, "session_id"),
         host: s(&data, "host"),
-        port: data
-            .get("port")
-            .and_then(|v| v.as_u64())
-            .and_then(|n| u16::try_from(n).ok())
-            .unwrap_or(0),
+        port: data.get("port").and_then(|v| v.as_u64()).and_then(|n| u16::try_from(n).ok()).unwrap_or(0),
         ticket: s(&data, "ticket"),
         expires_at: s(&data, "expires_at"),
         protocol: s(&data, "protocol"),
@@ -595,35 +478,15 @@ pub async fn rustion_session_renew(
     let mut body = Map::new();
     body.insert("bastion_id".into(), Value::String(request.bastion_id));
     body.insert("session_id".into(), Value::String(request.session_id));
-    body.insert(
-        "correlation_id".into(),
-        Value::String(request.correlation_id),
-    );
-    body.insert(
-        "extend_secs".into(),
-        Value::Number(request.extend_secs.into()),
-    );
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}session/renew"),
-        Some(body),
-    )
-    .await?;
+    body.insert("correlation_id".into(), Value::String(request.correlation_id));
+    body.insert("extend_secs".into(), Value::Number(request.extend_secs.into()));
+    let resp = make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}session/renew"), Some(body)).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(RustionSessionRenewResult {
         session_id: s(&data, "session_id"),
         expires_at: s(&data, "expires_at"),
-        renewals_used: data
-            .get("renewals_used")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as u32)
-            .unwrap_or(0),
-        max_renewals: data
-            .get("max_renewals")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as u32)
-            .unwrap_or(0),
+        renewals_used: data.get("renewals_used").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(0),
+        max_renewals: data.get("max_renewals").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(0),
         bastion_id: s(&data, "bastion_id"),
     })
 }
@@ -652,17 +515,8 @@ pub async fn rustion_session_kill(
     let mut body = Map::new();
     body.insert("bastion_id".into(), Value::String(request.bastion_id));
     body.insert("session_id".into(), Value::String(request.session_id));
-    body.insert(
-        "correlation_id".into(),
-        Value::String(request.correlation_id),
-    );
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}session/kill"),
-        Some(body),
-    )
-    .await?;
+    body.insert("correlation_id".into(), Value::String(request.correlation_id));
+    let resp = make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}session/kill"), Some(body)).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(RustionSessionKillResult {
         session_id: s(&data, "session_id"),
@@ -713,22 +567,12 @@ fn recording_from_map(data: &Map<String, Value>) -> RustionRecordingEntry {
 
 #[tauri::command]
 pub async fn rustion_recordings_list(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("{RUSTION_MOUNT}recordings"),
-        None,
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Read, format!("{RUSTION_MOUNT}recordings"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(data
         .get("recordings")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default())
 }
 
@@ -737,13 +581,7 @@ pub async fn rustion_recording_read(
     state: State<'_, AppState>,
     recording_id: String,
 ) -> CmdResult<RustionRecordingEntry> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("{RUSTION_MOUNT}recordings/{recording_id}"),
-        None,
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Read, format!("{RUSTION_MOUNT}recordings/{recording_id}"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(recording_from_map(&data))
 }
@@ -763,13 +601,7 @@ pub async fn rustion_recording_pull(
     let mut body = Map::new();
     body.insert("bastion_id".into(), Value::String(request.bastion_id));
     body.insert("session_id".into(), Value::String(request.session_id));
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}recordings/pull"),
-        Some(body),
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}recordings/pull"), Some(body)).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(recording_from_map(&data))
 }
@@ -790,17 +622,9 @@ pub async fn rustion_recordings_reconcile(
     bastion_id: Option<String>,
 ) -> CmdResult<RustionReconcileReport> {
     let mut body = Map::new();
-    body.insert(
-        "bastion_id".into(),
-        Value::String(bastion_id.unwrap_or_default()),
-    );
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}recordings/reconcile"),
-        Some(body),
-    )
-    .await?;
+    body.insert("bastion_id".into(), Value::String(bastion_id.unwrap_or_default()));
+    let resp =
+        make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}recordings/reconcile"), Some(body)).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     let num = |k: &str| -> u64 { data.get(k).and_then(|v| v.as_u64()).unwrap_or(0) };
     Ok(RustionReconcileReport {
@@ -841,21 +665,9 @@ pub async fn rustion_recording_replay_log(
     input: RustionRecordingReplayLog,
 ) -> CmdResult<()> {
     let mut body = Map::new();
-    body.insert(
-        "recording_id".into(),
-        Value::String(input.recording_id),
-    );
-    body.insert(
-        "sha256_mismatch".into(),
-        Value::Bool(input.sha256_mismatch),
-    );
-    make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}recordings/replay-log"),
-        Some(body),
-    )
-    .await?;
+    body.insert("recording_id".into(), Value::String(input.recording_id));
+    body.insert("sha256_mismatch".into(), Value::Bool(input.sha256_mismatch));
+    make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}recordings/replay-log"), Some(body)).await?;
     Ok(())
 }
 
@@ -864,15 +676,10 @@ pub async fn rustion_recording_replay_log(
 /// new window calls `rustion_recording_blob` itself; we don't pass
 /// the bytes via the spawn channel because they can be many MB.
 #[tauri::command]
-pub async fn rustion_open_replay_window(
-    app: tauri::AppHandle,
-    recording_id: String,
-) -> CmdResult<()> {
+pub async fn rustion_open_replay_window(app: tauri::AppHandle, recording_id: String) -> CmdResult<()> {
     use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
     if recording_id.is_empty() {
-        return Err(crate::error::CommandError::from(
-            "recording_id is required".to_string(),
-        ));
+        return Err(crate::error::CommandError::from("recording_id is required".to_string()));
     }
     let window_label = format!("replay-{}", sanitize_label(&recording_id));
     // If a window for this recording is already open, focus it
@@ -881,10 +688,7 @@ pub async fn rustion_open_replay_window(
         let _ = existing.set_focus();
         return Ok(());
     }
-    let url = format!(
-        "index.html#/session-replay?recording={}",
-        urlencoding::encode(&recording_id),
-    );
+    let url = format!("index.html#/session-replay?recording={}", urlencoding::encode(&recording_id),);
     WebviewWindowBuilder::new(&app, &window_label, WebviewUrl::App(url.into()))
         .title(format!("BastionVault — Replay {recording_id}"))
         .inner_size(1200.0, 800.0)
@@ -895,9 +699,7 @@ pub async fn rustion_open_replay_window(
 }
 
 fn sanitize_label(s: &str) -> String {
-    s.chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-        .collect()
+    s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect()
 }
 
 #[tauri::command]
@@ -905,13 +707,8 @@ pub async fn rustion_recording_blob(
     state: State<'_, AppState>,
     recording_id: String,
 ) -> CmdResult<RustionRecordingBlob> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("{RUSTION_MOUNT}recordings/{recording_id}/blob"),
-        None,
-    )
-    .await?;
+    let resp =
+        make_request(&state, Operation::Read, format!("{RUSTION_MOUNT}recordings/{recording_id}/blob"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(RustionRecordingBlob {
         recording_id: s(&data, "recording_id"),
@@ -935,16 +732,8 @@ pub struct RustionPolicyTier {
 }
 
 #[tauri::command]
-pub async fn rustion_policy_global_read(
-    state: State<'_, AppState>,
-) -> CmdResult<RustionPolicyTier> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("{RUSTION_MOUNT}policy/global"),
-        None,
-    )
-    .await?;
+pub async fn rustion_policy_global_read(state: State<'_, AppState>) -> CmdResult<RustionPolicyTier> {
+    let resp = make_request(&state, Operation::Read, format!("{RUSTION_MOUNT}policy/global"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(RustionPolicyTier {
         transport: s(&data, "transport"),
@@ -960,18 +749,12 @@ pub async fn rustion_policy_global_read(
 }
 
 #[tauri::command]
-pub async fn rustion_policy_global_write(
-    state: State<'_, AppState>,
-    input: RustionPolicyTier,
-) -> CmdResult<()> {
+pub async fn rustion_policy_global_write(state: State<'_, AppState>, input: RustionPolicyTier) -> CmdResult<()> {
     let mut body = Map::new();
     if !input.transport.is_empty() {
         body.insert("transport".into(), Value::String(input.transport));
     }
-    body.insert(
-        "bastions".into(),
-        Value::Array(input.bastions.into_iter().map(Value::String).collect()),
-    );
+    body.insert("bastions".into(), Value::Array(input.bastions.into_iter().map(Value::String).collect()));
     if !input.bastion_group.is_empty() {
         body.insert("bastion_group".into(), Value::String(input.bastion_group));
     }
@@ -979,13 +762,7 @@ pub async fn rustion_policy_global_write(
         body.insert("recording".into(), Value::String(input.recording));
     }
     body.insert("lock".into(), Value::Bool(input.lock));
-    make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}policy/global"),
-        Some(body),
-    )
-    .await?;
+    make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}policy/global"), Some(body)).await?;
     Ok(())
 }
 
@@ -1016,16 +793,8 @@ fn group_from_map(data: &Map<String, Value>) -> RustionBastionGroup {
 }
 
 #[tauri::command]
-pub async fn rustion_bastion_group_list(
-    state: State<'_, AppState>,
-) -> CmdResult<Vec<String>> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("{RUSTION_MOUNT}bastion-groups"),
-        None,
-    )
-    .await?;
+pub async fn rustion_bastion_group_list(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
+    let resp = make_request(&state, Operation::Read, format!("{RUSTION_MOUNT}bastion-groups"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(data
         .get("groups")
@@ -1035,17 +804,8 @@ pub async fn rustion_bastion_group_list(
 }
 
 #[tauri::command]
-pub async fn rustion_bastion_group_read(
-    state: State<'_, AppState>,
-    name: String,
-) -> CmdResult<RustionBastionGroup> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("{RUSTION_MOUNT}bastion-groups/{name}"),
-        None,
-    )
-    .await?;
+pub async fn rustion_bastion_group_read(state: State<'_, AppState>, name: String) -> CmdResult<RustionBastionGroup> {
+    let resp = make_request(&state, Operation::Read, format!("{RUSTION_MOUNT}bastion-groups/{name}"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(group_from_map(&data))
 }
@@ -1066,19 +826,10 @@ pub async fn rustion_bastion_group_create(
 ) -> CmdResult<RustionBastionGroup> {
     let mut body = Map::new();
     body.insert("name".into(), Value::String(input.name));
-    body.insert(
-        "members".into(),
-        Value::Array(input.members.into_iter().map(Value::String).collect()),
-    );
+    body.insert("members".into(), Value::Array(input.members.into_iter().map(Value::String).collect()));
     body.insert("selection".into(), Value::String(input.selection));
     body.insert("description".into(), Value::String(input.description));
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}bastion-groups"),
-        Some(body),
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}bastion-groups"), Some(body)).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(group_from_map(&data))
 }
@@ -1090,35 +841,18 @@ pub async fn rustion_bastion_group_update(
     input: RustionBastionGroupInput,
 ) -> CmdResult<RustionBastionGroup> {
     let mut body = Map::new();
-    body.insert(
-        "members".into(),
-        Value::Array(input.members.into_iter().map(Value::String).collect()),
-    );
+    body.insert("members".into(), Value::Array(input.members.into_iter().map(Value::String).collect()));
     body.insert("selection".into(), Value::String(input.selection));
     body.insert("description".into(), Value::String(input.description));
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}bastion-groups/{name}"),
-        Some(body),
-    )
-    .await?;
+    let resp =
+        make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}bastion-groups/{name}"), Some(body)).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(group_from_map(&data))
 }
 
 #[tauri::command]
-pub async fn rustion_bastion_group_delete(
-    state: State<'_, AppState>,
-    name: String,
-) -> CmdResult<()> {
-    make_request(
-        &state,
-        Operation::Delete,
-        format!("{RUSTION_MOUNT}bastion-groups/{name}"),
-        None,
-    )
-    .await?;
+pub async fn rustion_bastion_group_delete(state: State<'_, AppState>, name: String) -> CmdResult<()> {
+    make_request(&state, Operation::Delete, format!("{RUSTION_MOUNT}bastion-groups/{name}"), None).await?;
     Ok(())
 }
 
@@ -1151,17 +885,8 @@ fn type_policy_from_map(data: &Map<String, Value>) -> RustionTypePolicy {
 }
 
 #[tauri::command]
-pub async fn rustion_policy_type_read(
-    state: State<'_, AppState>,
-    type_name: String,
-) -> CmdResult<RustionTypePolicy> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("{RUSTION_MOUNT}policy/type/{type_name}"),
-        None,
-    )
-    .await?;
+pub async fn rustion_policy_type_read(state: State<'_, AppState>, type_name: String) -> CmdResult<RustionTypePolicy> {
+    let resp = make_request(&state, Operation::Read, format!("{RUSTION_MOUNT}policy/type/{type_name}"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(type_policy_from_map(&data))
 }
@@ -1176,10 +901,7 @@ pub async fn rustion_policy_type_write(
     if !input.transport.is_empty() {
         body.insert("transport".into(), Value::String(input.transport));
     }
-    body.insert(
-        "bastions".into(),
-        Value::Array(input.bastions.into_iter().map(Value::String).collect()),
-    );
+    body.insert("bastions".into(), Value::Array(input.bastions.into_iter().map(Value::String).collect()));
     if !input.bastion_group.is_empty() {
         body.insert("bastion_group".into(), Value::String(input.bastion_group));
     }
@@ -1187,28 +909,13 @@ pub async fn rustion_policy_type_write(
         body.insert("recording".into(), Value::String(input.recording));
     }
     body.insert("lock".into(), Value::Bool(input.lock));
-    make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}policy/type/{type_name}"),
-        Some(body),
-    )
-    .await?;
+    make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}policy/type/{type_name}"), Some(body)).await?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn rustion_policy_type_delete(
-    state: State<'_, AppState>,
-    type_name: String,
-) -> CmdResult<()> {
-    make_request(
-        &state,
-        Operation::Delete,
-        format!("{RUSTION_MOUNT}policy/type/{type_name}"),
-        None,
-    )
-    .await?;
+pub async fn rustion_policy_type_delete(state: State<'_, AppState>, type_name: String) -> CmdResult<()> {
+    make_request(&state, Operation::Delete, format!("{RUSTION_MOUNT}policy/type/{type_name}"), None).await?;
     Ok(())
 }
 
@@ -1240,20 +947,12 @@ pub async fn rustion_policy_asset_group_read(
     state: State<'_, AppState>,
     asset_group_id: String,
 ) -> CmdResult<RustionAssetGroupPolicy> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("{RUSTION_MOUNT}policy/asset-group/{asset_group_id}"),
-        None,
-    )
-    .await?;
+    let resp =
+        make_request(&state, Operation::Read, format!("{RUSTION_MOUNT}policy/asset-group/{asset_group_id}"), None)
+            .await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(RustionAssetGroupPolicy {
-        priority: data
-            .get("priority")
-            .and_then(|v| v.as_i64())
-            .map(|n| n as i32)
-            .unwrap_or(0),
+        priority: data.get("priority").and_then(|v| v.as_i64()).map(|n| n as i32).unwrap_or(0),
         transport: s(&data, "transport"),
         bastions: data
             .get("bastions")
@@ -1278,10 +977,7 @@ pub async fn rustion_policy_asset_group_write(
     if !input.transport.is_empty() {
         body.insert("transport".into(), Value::String(input.transport));
     }
-    body.insert(
-        "bastions".into(),
-        Value::Array(input.bastions.into_iter().map(Value::String).collect()),
-    );
+    body.insert("bastions".into(), Value::Array(input.bastions.into_iter().map(Value::String).collect()));
     if !input.bastion_group.is_empty() {
         body.insert("bastion_group".into(), Value::String(input.bastion_group));
     }
@@ -1289,13 +985,8 @@ pub async fn rustion_policy_asset_group_write(
         body.insert("recording".into(), Value::String(input.recording));
     }
     body.insert("lock".into(), Value::Bool(input.lock));
-    make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}policy/asset-group/{asset_group_id}"),
-        Some(body),
-    )
-    .await?;
+    make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}policy/asset-group/{asset_group_id}"), Some(body))
+        .await?;
     Ok(())
 }
 
@@ -1304,13 +995,8 @@ pub async fn rustion_policy_resource_read(
     state: State<'_, AppState>,
     resource_id: String,
 ) -> CmdResult<RustionPolicyTier> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("{RUSTION_MOUNT}policy/resource/{resource_id}"),
-        None,
-    )
-    .await?;
+    let resp =
+        make_request(&state, Operation::Read, format!("{RUSTION_MOUNT}policy/resource/{resource_id}"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(RustionPolicyTier {
         transport: s(&data, "transport"),
@@ -1335,10 +1021,7 @@ pub async fn rustion_policy_resource_write(
     if !input.transport.is_empty() {
         body.insert("transport".into(), Value::String(input.transport));
     }
-    body.insert(
-        "bastions".into(),
-        Value::Array(input.bastions.into_iter().map(Value::String).collect()),
-    );
+    body.insert("bastions".into(), Value::Array(input.bastions.into_iter().map(Value::String).collect()));
     if !input.bastion_group.is_empty() {
         body.insert("bastion_group".into(), Value::String(input.bastion_group));
     }
@@ -1346,13 +1029,7 @@ pub async fn rustion_policy_resource_write(
         body.insert("recording".into(), Value::String(input.recording));
     }
     body.insert("lock".into(), Value::Bool(false));
-    make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}policy/resource/{resource_id}"),
-        Some(body),
-    )
-    .await?;
+    make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}policy/resource/{resource_id}"), Some(body)).await?;
     Ok(())
 }
 
@@ -1374,25 +1051,14 @@ pub async fn rustion_policy_force_rustion(
 ) -> CmdResult<RustionForceRustionResult> {
     let mut body = Map::new();
     body.insert("confirm".into(), Value::Bool(confirm));
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}policy/force-rustion"),
-        Some(body),
-    )
-    .await?;
+    let resp =
+        make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}policy/force-rustion"), Some(body)).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(RustionForceRustionResult {
         current_transport: s(&data, "current_transport"),
-        current_lock: data
-            .get("current_lock")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        current_lock: data.get("current_lock").and_then(|v| v.as_bool()).unwrap_or(false),
         proposed_transport: s(&data, "proposed_transport"),
-        proposed_lock: data
-            .get("proposed_lock")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        proposed_lock: data.get("proposed_lock").and_then(|v| v.as_bool()).unwrap_or(false),
         applied: data.get("applied").and_then(|v| v.as_bool()).unwrap_or(false),
         note: s(&data, "note"),
     })
@@ -1450,30 +1116,15 @@ pub async fn rustion_policy_effective(
         body.insert("resource_id".into(), Value::String(request.resource_id));
     }
     if !request.resource_type.is_empty() {
-        body.insert(
-            "resource_type".into(),
-            Value::String(request.resource_type),
-        );
+        body.insert("resource_type".into(), Value::String(request.resource_type));
     }
     if !request.asset_group_ids.is_empty() {
         body.insert(
             "asset_group_ids".into(),
-            Value::Array(
-                request
-                    .asset_group_ids
-                    .into_iter()
-                    .map(Value::String)
-                    .collect(),
-            ),
+            Value::Array(request.asset_group_ids.into_iter().map(Value::String).collect()),
         );
     }
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}policy/effective"),
-        Some(body),
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}policy/effective"), Some(body)).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     let lock_violation = data.get("lock_violation").and_then(|v| match v {
         Value::Object(m) => Some(RustionLockViolation {
@@ -1557,13 +1208,7 @@ pub async fn rustion_dispatcher_preview(
             Value::Array(request.asset_group_ids.into_iter().map(Value::String).collect()),
         );
     }
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}dispatcher/preview"),
-        Some(body),
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}dispatcher/preview"), Some(body)).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     let candidates = data
         .get("candidates")
@@ -1571,11 +1216,7 @@ pub async fn rustion_dispatcher_preview(
         .map(|a| {
             a.iter()
                 .filter_map(|x| x.as_object())
-                .map(|m| RustionDispatcherCandidate {
-                    id: s(m, "id"),
-                    name: s(m, "name"),
-                    status: s(m, "status"),
-                })
+                .map(|m| RustionDispatcherCandidate { id: s(m, "id"), name: s(m, "name"), status: s(m, "status") })
                 .collect()
         })
         .unwrap_or_default();
@@ -1585,11 +1226,7 @@ pub async fn rustion_dispatcher_preview(
         .map(|a| {
             a.iter()
                 .filter_map(|x| x.as_object())
-                .map(|m| RustionDispatcherDropped {
-                    id: s(m, "id"),
-                    name: s(m, "name"),
-                    reason: s(m, "reason"),
-                })
+                .map(|m| RustionDispatcherDropped { id: s(m, "id"), name: s(m, "name"), reason: s(m, "reason") })
                 .collect()
         })
         .unwrap_or_default();
@@ -1667,31 +1304,16 @@ fn session_from_value(v: &Value) -> RustionTelemetrySession {
         authority: s(&obj, "authority"),
         protocol: s(&obj, "protocol"),
         target_host: s(&obj, "target_host"),
-        target_port: obj
-            .get("target_port")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as u16)
-            .unwrap_or(0),
+        target_port: obj.get("target_port").and_then(|v| v.as_u64()).map(|n| n as u16).unwrap_or(0),
         target_user: s(&obj, "target_user"),
         operator_vault_user: s(&obj, "operator_vault_user"),
         operator_src_ip: s(&obj, "operator_src_ip"),
         correlation_id: s(&obj, "correlation_id"),
         opened_at: s(&obj, "opened_at"),
         expires_at: s(&obj, "expires_at"),
-        renewals_used: obj
-            .get("renewals_used")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as u32)
-            .unwrap_or(0),
-        max_renewals: obj
-            .get("max_renewals")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as u32)
-            .unwrap_or(0),
-        killed_at: obj
-            .get("killed_at")
-            .and_then(|v| v.as_str())
-            .map(String::from),
+        renewals_used: obj.get("renewals_used").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(0),
+        max_renewals: obj.get("max_renewals").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(0),
+        killed_at: obj.get("killed_at").and_then(|v| v.as_str()).map(String::from),
     }
 }
 
@@ -1720,10 +1342,7 @@ fn target_from_value(v: &Value) -> RustionTelemetryTarget {
                 arr.iter()
                     .filter_map(|pair| {
                         let p = pair.as_array()?;
-                        Some((
-                            p.first()?.as_str()?.to_string(),
-                            p.get(1)?.as_u64().unwrap_or(0),
-                        ))
+                        Some((p.first()?.as_str()?.to_string(), p.get(1)?.as_u64().unwrap_or(0)))
                     })
                     .collect()
             })
@@ -1735,10 +1354,7 @@ fn target_from_value(v: &Value) -> RustionTelemetryTarget {
                 arr.iter()
                     .filter_map(|pair| {
                         let p = pair.as_array()?;
-                        Some((
-                            p.first()?.as_str()?.to_string(),
-                            p.get(1)?.as_u64().unwrap_or(0),
-                        ))
+                        Some((p.first()?.as_str()?.to_string(), p.get(1)?.as_u64().unwrap_or(0)))
                     })
                     .collect()
             })
@@ -1753,14 +1369,8 @@ fn target_from_value(v: &Value) -> RustionTelemetryTarget {
         target_id: s(&obj, "target_id"),
         target_name: s(&obj, "target_name"),
         authority: s(&obj, "authority"),
-        last_pull_at: obj
-            .get("last_pull_at")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        last_pull_error: obj
-            .get("last_pull_error")
-            .and_then(|v| v.as_str())
-            .map(String::from),
+        last_pull_at: obj.get("last_pull_at").and_then(|v| v.as_str()).map(String::from),
+        last_pull_error: obj.get("last_pull_error").and_then(|v| v.as_str()).map(String::from),
         active,
         history,
         stats,
@@ -1774,14 +1384,8 @@ fn audit_entry_from_value(v: &Value) -> RustionAuditEntry {
         sequence: u64_field(&obj, "sequence"),
         timestamp: s(&obj, "timestamp"),
         actor: s(&obj, "actor"),
-        session_id: obj
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        source_addr: obj
-            .get("source_addr")
-            .and_then(|v| v.as_str())
-            .map(String::from),
+        session_id: obj.get("session_id").and_then(|v| v.as_str()).map(String::from),
+        source_addr: obj.get("source_addr").and_then(|v| v.as_str()).map(String::from),
         event: obj.get("event").cloned().unwrap_or(Value::Null),
         hash: s(&obj, "hash"),
         target_id: s(&obj, "target_id"),
@@ -1789,16 +1393,8 @@ fn audit_entry_from_value(v: &Value) -> RustionAuditEntry {
 }
 
 #[tauri::command]
-pub async fn rustion_telemetry_list(
-    state: State<'_, AppState>,
-) -> CmdResult<Vec<RustionTelemetryTarget>> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("{RUSTION_MOUNT}telemetry"),
-        None,
-    )
-    .await?;
+pub async fn rustion_telemetry_list(state: State<'_, AppState>) -> CmdResult<Vec<RustionTelemetryTarget>> {
+    let resp = make_request(&state, Operation::Read, format!("{RUSTION_MOUNT}telemetry"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(data
         .get("targets")
@@ -1808,16 +1404,8 @@ pub async fn rustion_telemetry_list(
 }
 
 #[tauri::command]
-pub async fn rustion_telemetry_poll(
-    state: State<'_, AppState>,
-) -> CmdResult<Vec<RustionTelemetryTarget>> {
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}telemetry/poll"),
-        None,
-    )
-    .await?;
+pub async fn rustion_telemetry_poll(state: State<'_, AppState>) -> CmdResult<Vec<RustionTelemetryTarget>> {
+    let resp = make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}telemetry/poll"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(data
         .get("targets")
@@ -1829,31 +1417,15 @@ pub async fn rustion_telemetry_poll(
 // ─── Phase 9.1: deployment_id ───────────────────────────────────
 
 #[tauri::command]
-pub async fn rustion_deployment_id_read(
-    state: State<'_, AppState>,
-) -> CmdResult<String> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("{RUSTION_MOUNT}deployment-id"),
-        None,
-    )
-    .await?;
+pub async fn rustion_deployment_id_read(state: State<'_, AppState>) -> CmdResult<String> {
+    let resp = make_request(&state, Operation::Read, format!("{RUSTION_MOUNT}deployment-id"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(s(&data, "deployment_id"))
 }
 
 #[tauri::command]
-pub async fn rustion_master_pubkey_export(
-    state: State<'_, AppState>,
-) -> CmdResult<RustionMasterPubkey> {
-    let resp = make_request(
-        &state,
-        Operation::Read,
-        format!("{RUSTION_MOUNT}master/pubkey"),
-        None,
-    )
-    .await?;
+pub async fn rustion_master_pubkey_export(state: State<'_, AppState>) -> CmdResult<RustionMasterPubkey> {
+    let resp = make_request(&state, Operation::Read, format!("{RUSTION_MOUNT}master/pubkey"), None).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(RustionMasterPubkey {
         algorithm: s(&data, "algorithm"),
@@ -1862,27 +1434,18 @@ pub async fn rustion_master_pubkey_export(
         fingerprint: s(&data, "fingerprint"),
         current_serial: s(&data, "current_serial"),
         current_not_after: s(&data, "current_not_after"),
-        issued: data
-            .get("issued")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        issued: data.get("issued").and_then(|v| v.as_bool()).unwrap_or(false),
     })
 }
 
 // ─── helpers ───────────────────────────────────────────────────────
 
 fn s(data: &Map<String, Value>, key: &str) -> String {
-    data.get(key)
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .unwrap_or_default()
+    data.get(key).and_then(|v| v.as_str()).map(String::from).unwrap_or_default()
 }
 
 fn u32_field(data: &Map<String, Value>, key: &str) -> u32 {
-    data.get(key)
-        .and_then(|v| v.as_u64())
-        .and_then(|n| u32::try_from(n).ok())
-        .unwrap_or(0)
+    data.get(key).and_then(|v| v.as_u64()).and_then(|n| u32::try_from(n).ok()).unwrap_or(0)
 }
 
 fn u64_field(data: &Map<String, Value>, key: &str) -> u64 {
@@ -1895,25 +1458,15 @@ fn target_summary_from_map(data: &Map<String, Value>) -> RustionTargetSummary {
         .and_then(|v| v.as_object())
         .map(|pk| {
             (
-                pk.get("ed25519")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-                    .unwrap_or_default(),
-                pk.get("mldsa65")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-                    .unwrap_or_default(),
+                pk.get("ed25519").and_then(|v| v.as_str()).map(String::from).unwrap_or_default(),
+                pk.get("mldsa65").and_then(|v| v.as_str()).map(String::from).unwrap_or_default(),
             )
         })
         .unwrap_or_default();
     let tags = data
         .get("tags")
         .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default();
     RustionTargetSummary {
         id: s(data, "id"),
@@ -1922,20 +1475,14 @@ fn target_summary_from_map(data: &Map<String, Value>) -> RustionTargetSummary {
         fingerprint: s(data, "fingerprint"),
         description: s(data, "description"),
         tags,
-        enabled: data
-            .get("enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
+        enabled: data.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
         default_recording_dir: s(data, "default_recording_dir"),
         created_at: s(data, "created_at"),
         updated_at: s(data, "updated_at"),
         public_key_ed25519: ed25519,
         public_key_mldsa65: mldsa65,
         kem_public_key: s(data, "kem_public_key"),
-        tls_pinned: data
-            .get("tls_pinned")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        tls_pinned: data.get("tls_pinned").and_then(|v| v.as_bool()).unwrap_or(false),
         tls_pinned_cert_pem: s(data, "tls_pinned_cert_pem"),
         ssh_listener_host: s(data, "ssh_listener_host"),
         ssh_listener_port: data
@@ -1950,6 +1497,8 @@ fn target_summary_from_map(data: &Map<String, Value>) -> RustionTargetSummary {
             .and_then(|n| u16::try_from(n).ok())
             .unwrap_or(0),
         listeners_synced_at: s(data, "listeners_synced_at"),
+        ssh_host_key_fingerprint: s(data, "ssh_host_key_fingerprint"),
+        rdp_tls_pin_sha256: s(data, "rdp_tls_pin_sha256"),
     }
 }
 
@@ -1961,10 +1510,7 @@ fn health_from_value(v: Value) -> RustionTargetHealth {
         id: s(&data, "id"),
         name: s(&data, "name"),
         endpoint: s(&data, "endpoint"),
-        enabled: data
-            .get("enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
+        enabled: data.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
         status: s(&data, "status"),
         last_ok_at: s(&data, "last_ok_at"),
         last_error: s(&data, "last_error"),
@@ -2007,13 +1553,7 @@ pub async fn rustion_authority_attest(
     if let Some(id) = bastion_id {
         body.insert("bastion_id".into(), Value::String(id));
     }
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}authority/attest"),
-        Some(body),
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}authority/attest"), Some(body)).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
 
     let results: Vec<RustionAttestOutcome> = data
@@ -2038,21 +1578,9 @@ pub async fn rustion_authority_attest(
         .unwrap_or_default();
 
     Ok(RustionAttestResult {
-        attempted: data
-            .get("attempted")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as u32)
-            .unwrap_or(0),
-        succeeded: data
-            .get("succeeded")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as u32)
-            .unwrap_or(0),
-        failed: data
-            .get("failed")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as u32)
-            .unwrap_or(0),
+        attempted: data.get("attempted").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(0),
+        succeeded: data.get("succeeded").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(0),
+        failed: data.get("failed").and_then(|v| v.as_u64()).map(|n| n as u32).unwrap_or(0),
         results,
     })
 }
@@ -2076,13 +1604,7 @@ pub async fn rustion_target_deenrol(
     if let Some(r) = reason {
         body.insert("reason".into(), Value::String(r));
     }
-    let resp = make_request(
-        &state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}target/deenrol"),
-        Some(body),
-    )
-    .await?;
+    let resp = make_request(&state, Operation::Write, format!("{RUSTION_MOUNT}target/deenrol"), Some(body)).await?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     Ok(RustionDeenrolResult {
         bastion_id: s(&data, "bastion_id"),

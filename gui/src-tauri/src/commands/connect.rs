@@ -73,35 +73,31 @@ pub async fn session_open_ssh(
     let meta = read_resource_meta(&state, &request.resource_name).await?;
 
     // Resolve the profile.
-    let profile = find_profile(&meta, &request.profile_id)
-        .ok_or_else(|| CommandError::from(format!(
+    let profile = find_profile(&meta, &request.profile_id).ok_or_else(|| {
+        CommandError::from(format!(
             "profile `{}` not found on resource `{}`",
             request.profile_id, request.resource_name
-        )))?;
+        ))
+    })?;
 
     // Compute the effective target, user, port from the profile +
     // resource metadata defaults.
     let host_candidates = profile_host_candidates(&profile, &meta);
     if host_candidates.is_empty() {
-        return Err(CommandError::from("resource has no hostname or ip_address; set one or override target_host on the profile".to_string()));
+        return Err(CommandError::from(
+            "resource has no hostname or ip_address; set one or override target_host on the profile".to_string(),
+        ));
     }
     let port = profile_port(&profile);
     let username = profile_username(&profile);
     // Allow empty here; LDAP sources can supply the username via
     // `effective_username`. We re-validate after resolution.
-    let host_key_fingerprint = profile
-        .get("host_key_pin")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let host_key_fingerprint = profile.get("host_key_pin").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
     // Pick the resource's first host candidate as the policy's
     // `target_host` — what the bastion dials after consuming the ticket.
     // The resource's full candidate list still applies on the direct path.
-    let primary_target_host = host_candidates
-        .first()
-        .cloned()
-        .unwrap_or_default();
+    let primary_target_host = host_candidates.first().cloned().unwrap_or_default();
 
     // For secret-backed credentials, prefer server-side resolution through
     // `rustion/v2/session/open`: BastionVault resolves and injects the
@@ -110,14 +106,8 @@ pub async fn session_open_ssh(
     // credential on this path. Returns `Direct` when the policy doesn't
     // route through a bastion, in which case we fall back to the
     // client-side resolution path below (Secret + LDAP / SSH-engine / PKI).
-    let credential_source = profile
-        .get("credential_source")
-        .cloned()
-        .unwrap_or(Value::Null);
-    let credential_source_kind = credential_source
-        .get("kind")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let credential_source = profile.get("credential_source").cloned().unwrap_or(Value::Null);
+    let credential_source_kind = credential_source.get("kind").and_then(|v| v.as_str()).unwrap_or("");
 
     // `secret` and `ssh-engine` sources resolve server-side on the v2
     // path: BastionVault either injects the stored secret (`secret`) or
@@ -126,26 +116,26 @@ pub async fn session_open_ssh(
     // policy doesn't route through a bastion, `open_rustion_session_v2_ssh`
     // returns `Direct` and we fall back to the client-side path below
     // (which mints locally for a direct dial).
-    let v2_route: Option<ConnectRoute> =
-        if credential_source_kind == "secret" || credential_source_kind == "ssh-engine" {
-            let r = open_rustion_session_v2_ssh(
-                &state,
-                &request.resource_name,
-                &meta,
-                &profile,
-                &primary_target_host,
-                port,
-                &username,
-                &credential_source,
-            )
-            .await?;
-            match r {
-                ConnectRoute::Rustion { .. } => Some(r),
-                ConnectRoute::Direct => None,
-            }
-        } else {
-            None
-        };
+    let v2_route: Option<ConnectRoute> = if credential_source_kind == "secret" || credential_source_kind == "ssh-engine"
+    {
+        let r = open_rustion_session_v2_ssh(
+            &state,
+            &request.resource_name,
+            &meta,
+            &profile,
+            &primary_target_host,
+            port,
+            &username,
+            &credential_source,
+        )
+        .await?;
+        match r {
+            ConnectRoute::Rustion { .. } => Some(r),
+            ConnectRoute::Direct => None,
+        }
+    } else {
+        None
+    };
 
     // `credential` is `Some` only on the client-side path (direct dials and
     // non-secret kinds). The v2 server-side path dials the bastion with the
@@ -180,8 +170,7 @@ pub async fn session_open_ssh(
         let username = resolved.effective_username.unwrap_or(username);
         if username.is_empty() {
             return Err(CommandError::from(
-                "SSH profile has no username (set profile.username or use an LDAP credential source)"
-                    .to_string(),
+                "SSH profile has no username (set profile.username or use an LDAP credential source)".to_string(),
             ));
         }
         let route = resolve_ssh_connect_route(
@@ -202,50 +191,46 @@ pub async fn session_open_ssh(
     // the operator connects to bastion_host:bastion_port as user
     // `operator` with the ticket as the SSH password. The bastion has
     // its own host key, so the resource's `host_key_pin` no longer
-    // applies (TOFU on first connect — bastion host-key pinning lands
-    // in a follow-up).
-    let (
-        host_candidates,
-        port,
-        username_for_dial,
-        credential_for_dial,
-        host_key_fingerprint,
-        rustion_label,
-    ) = match &route {
-        ConnectRoute::Direct => {
-            let cred = credential.clone().ok_or_else(|| {
-                CommandError::from("direct dial requires a resolved credential".to_string())
-            })?;
-            (
-                host_candidates,
-                port,
-                username.clone(),
-                cred,
-                host_key_fingerprint,
-                None,
-            )
-        }
-        ConnectRoute::Rustion {
-            bastion_host,
-            bastion_port,
-            ticket,
-            bastion_name,
-            ..
-        } => {
-            log::info!(
-                "resource-connect/ssh: routing through Rustion bastion `{}` ({}:{})",
-                bastion_name, bastion_host, bastion_port
-            );
-            (
-                vec![bastion_host.clone()],
-                *bastion_port,
-                "operator".to_string(),
-                SshCredential::Password(Zeroizing::new(ticket.clone())),
-                String::new(),
-                Some(bastion_name.clone()),
-            )
-        }
-    };
+    // applies — we pin the *bastion's* host key instead, using the
+    // fingerprint discovered from `GET /v1/listeners` and stored on the
+    // target record (`bastion_pin`). Empty means the bastion advertised
+    // no fingerprint (pre-v2 listener schema); the SSH dialler then logs
+    // an unpinned-TOFU warning rather than failing, matching the direct
+    // path's posture for an unset pin.
+    let (host_candidates, port, username_for_dial, credential_for_dial, host_key_fingerprint, rustion_label) =
+        match &route {
+            ConnectRoute::Direct => {
+                let cred = credential
+                    .clone()
+                    .ok_or_else(|| CommandError::from("direct dial requires a resolved credential".to_string()))?;
+                (host_candidates, port, username.clone(), cred, host_key_fingerprint, None)
+            }
+            ConnectRoute::Rustion { bastion_host, bastion_port, ticket, bastion_name, bastion_pin, .. } => {
+                if bastion_pin.is_empty() {
+                    log::warn!(
+                        "resource-connect/ssh: bastion `{}` advertised no host-key fingerprint \
+                     — dialling unpinned (TOFU). Run `rustion_target_refresh_listeners` against \
+                     a Rustion ≥ listener-schema-v2 to enable pinning.",
+                        bastion_name
+                    );
+                }
+                log::info!(
+                    "resource-connect/ssh: routing through Rustion bastion `{}` ({}:{}) host-key-pin={}",
+                    bastion_name,
+                    bastion_host,
+                    bastion_port,
+                    if bastion_pin.is_empty() { "none" } else { bastion_pin.as_str() }
+                );
+                (
+                    vec![bastion_host.clone()],
+                    *bastion_port,
+                    "operator".to_string(),
+                    SshCredential::Password(Zeroizing::new(ticket.clone())),
+                    bastion_pin.clone(),
+                    Some(bastion_name.clone()),
+                )
+            }
+        };
 
     // Walk the host candidates in order (IP before hostname when
     // both are set on the resource). Fall back to the next candidate
@@ -292,10 +277,8 @@ pub async fn session_open_ssh(
                     return Err(CommandError::from(e));
                 }
                 Err(_) => {
-                    let msg = format!(
-                        "ssh: connect+auth to {host}:{port} timed out after {}s",
-                        CONNECT_TIMEOUT.as_secs()
-                    );
+                    let msg =
+                        format!("ssh: connect+auth to {host}:{port} timed out after {}s", CONNECT_TIMEOUT.as_secs());
                     if !is_last {
                         log::warn!("resource-connect/ssh: {msg}; trying next candidate");
                         last_err = Some(msg);
@@ -305,9 +288,8 @@ pub async fn session_open_ssh(
                 }
             }
         }
-        found.ok_or_else(|| CommandError::from(
-            last_err.unwrap_or_else(|| "ssh: no host candidates succeeded".into())
-        ))?
+        found
+            .ok_or_else(|| CommandError::from(last_err.unwrap_or_else(|| "ssh: no host candidates succeeded".into())))?
     };
     let host = chosen_host;
     let label = match &rustion_label {
@@ -357,22 +339,18 @@ pub async fn session_open_ssh(
         ..
     } = &route
     {
-        state
-            .rustion_session_bundles
-            .lock()
-            .await
-            .insert(
-                outcome.token.clone(),
-                crate::state::RustionSessionBundle {
-                    session_id: session_id.clone(),
-                    bastion_id: bastion_id.clone(),
-                    bastion_name: bastion_name.clone(),
-                    correlation_id: correlation_id.clone(),
-                    expires_at: expires_at.clone(),
-                    max_renewals: *max_renewals,
-                    protocol: "ssh".to_string(),
-                },
-            );
+        state.rustion_session_bundles.lock().await.insert(
+            outcome.token.clone(),
+            crate::state::RustionSessionBundle {
+                session_id: session_id.clone(),
+                bastion_id: bastion_id.clone(),
+                bastion_name: bastion_name.clone(),
+                correlation_id: correlation_id.clone(),
+                expires_at: expires_at.clone(),
+                max_renewals: *max_renewals,
+                protocol: "ssh".to_string(),
+            },
+        );
     }
 
     // Spawn the SessionSshWindow into a new WebviewWindow. The
@@ -417,17 +395,9 @@ pub async fn session_open_ssh(
         }
     });
 
-    log::info!(
-        "resource-connect/ssh: spawned window {window_label} for {label}"
-    );
+    log::info!("resource-connect/ssh: spawned window {window_label} for {label}");
 
-    let _ = record_recent_session(
-        &state,
-        &request.resource_name,
-        &profile,
-        SessionProtocolTag::Ssh,
-    )
-    .await;
+    let _ = record_recent_session(&state, &request.resource_name, &profile, SessionProtocolTag::Ssh).await;
 
     Ok(SshOpenResponse {
         token: outcome.token,
@@ -445,15 +415,9 @@ pub struct SshInputRequest {
 }
 
 #[tauri::command]
-pub async fn session_input(
-    state: State<'_, AppState>,
-    request: SshInputRequest,
-) -> CmdResult<()> {
-    let bytes = session::ssh::decode_b64(&request.bytes_b64)
-        .map_err(CommandError::from)?;
-    session::ssh::send_control(&state, &request.token, SshControl::Data(bytes))
-        .await
-        .map_err(CommandError::from)
+pub async fn session_input(state: State<'_, AppState>, request: SshInputRequest) -> CmdResult<()> {
+    let bytes = session::ssh::decode_b64(&request.bytes_b64).map_err(CommandError::from)?;
+    session::ssh::send_control(&state, &request.token, SshControl::Data(bytes)).await.map_err(CommandError::from)
 }
 
 #[derive(Deserialize)]
@@ -464,20 +428,10 @@ pub struct SshResizeRequest {
 }
 
 #[tauri::command]
-pub async fn session_resize(
-    state: State<'_, AppState>,
-    request: SshResizeRequest,
-) -> CmdResult<()> {
-    session::ssh::send_control(
-        &state,
-        &request.token,
-        SshControl::Resize {
-            cols: request.cols,
-            rows: request.rows,
-        },
-    )
-    .await
-    .map_err(CommandError::from)
+pub async fn session_resize(state: State<'_, AppState>, request: SshResizeRequest) -> CmdResult<()> {
+    session::ssh::send_control(&state, &request.token, SshControl::Resize { cols: request.cols, rows: request.rows })
+        .await
+        .map_err(CommandError::from)
 }
 
 #[derive(Deserialize)]
@@ -524,28 +478,18 @@ pub async fn session_open_rdp(
     let host_candidates = profile_host_candidates(&profile, &meta);
     if host_candidates.is_empty() {
         return Err(CommandError::from(
-            "resource has no hostname or ip_address; set one or override target_host on the profile"
-                .to_string(),
+            "resource has no hostname or ip_address; set one or override target_host on the profile".to_string(),
         ));
     }
-    let port = profile
-        .get("target_port")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| u16::try_from(n).ok())
-        .unwrap_or(3389);
+    let port = profile.get("target_port").and_then(|v| v.as_u64()).and_then(|n| u16::try_from(n).ok()).unwrap_or(3389);
     let username = profile_username(&profile);
     // For RDP we don't fail when the profile username is empty
     // — LDAP credential sources supply it. The check after
     // resolution catches the case where every source path is also
     // empty.
 
-    let resolved = resolve_rdp_credential(
-        &state,
-        &request.resource_name,
-        &profile,
-        request.operator_credential.as_ref(),
-    )
-    .await?;
+    let resolved =
+        resolve_rdp_credential(&state, &request.resource_name, &profile, request.operator_credential.as_ref()).await?;
     let username = resolved.effective_username.unwrap_or(username);
     if username.is_empty() {
         return Err(CommandError::from(
@@ -556,10 +500,7 @@ pub async fn session_open_rdp(
     let on_close = resolved.on_close;
     let credential = resolved.credential;
     let domain = resolved.domain;
-    let aggressive_performance = profile
-        .get("rdp_aggressive_performance")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let aggressive_performance = profile.get("rdp_aggressive_performance").and_then(|v| v.as_bool()).unwrap_or(false);
 
     // Phase 7.4 — consult the Rustion policy resolver. Mirrors the SSH
     // path: when transport requires (or prefers) a bastion AND the
@@ -567,10 +508,7 @@ pub async fn session_open_rdp(
     // dial the bastion with `mstshash=<ticket>` as the X.224 routing
     // token. Smartcard credentials under `rustion-required` fail closed
     // (the bastion's `rdp-cert` PKINIT path is tracked separately).
-    let primary_target_host = host_candidates
-        .first()
-        .cloned()
-        .unwrap_or_default();
+    let primary_target_host = host_candidates.first().cloned().unwrap_or_default();
     let route = resolve_rdp_connect_route(
         &state,
         &request.resource_name,
@@ -591,6 +529,7 @@ pub async fn session_open_rdp(
         domain_for_dial,
         routing_token,
         rustion_label,
+        tls_pin_for_dial,
     ) = match &route {
         ConnectRoute::Direct => (
             host_candidates,
@@ -600,17 +539,25 @@ pub async fn session_open_rdp(
             domain.clone(),
             None,
             None,
+            // Direct RDP keeps its existing behaviour (no bastion pin);
+            // resource-level RDP TLS pinning is out of scope here.
+            None,
         ),
-        ConnectRoute::Rustion {
-            bastion_host,
-            bastion_port,
-            ticket,
-            bastion_name,
-            ..
-        } => {
+        ConnectRoute::Rustion { bastion_host, bastion_port, ticket, bastion_name, bastion_pin, .. } => {
+            if bastion_pin.is_empty() {
+                log::warn!(
+                    "resource-connect/rdp: bastion `{}` advertised no TLS fingerprint — \
+                     dialling without pin verification. Run `rustion_target_refresh_listeners` \
+                     against a Rustion ≥ listener-schema-v2 to enable pinning.",
+                    bastion_name
+                );
+            }
             log::info!(
-                "resource-connect/rdp: routing through Rustion bastion `{}` ({}:{})",
-                bastion_name, bastion_host, bastion_port
+                "resource-connect/rdp: routing through Rustion bastion `{}` ({}:{}) tls-pin={}",
+                bastion_name,
+                bastion_host,
+                bastion_port,
+                if bastion_pin.is_empty() { "none" } else { bastion_pin.as_str() }
             );
             (
                 vec![bastion_host.clone()],
@@ -627,6 +574,7 @@ pub async fn session_open_rdp(
                 None,
                 Some(format!("mstshash={ticket}")),
                 Some(bastion_name.clone()),
+                (!bastion_pin.is_empty()).then(|| bastion_pin.clone()),
             )
         }
     };
@@ -656,6 +604,7 @@ pub async fn session_open_rdp(
                     on_close: on_close.clone(),
                     aggressive_performance,
                     routing_token: routing_token.clone(),
+                    tls_pin_sha256: tls_pin_for_dial.clone(),
                 },
             )
             .await;
@@ -676,20 +625,16 @@ pub async fn session_open_rdp(
                 }
             }
         }
-        found.ok_or_else(|| CommandError::from(
-            last_err.unwrap_or_else(|| "rdp: no host candidates succeeded".into())
-        ))?
+        found
+            .ok_or_else(|| CommandError::from(last_err.unwrap_or_else(|| "rdp: no host candidates succeeded".into())))?
     };
     let label = match &rustion_label {
         Some(name) => format!(
             "rdp {target_user}@{target_host}:{target_port} via rustion[{name}]",
             target_user = profile_username(&profile),
             target_host = primary_target_host,
-            target_port = profile
-                .get("target_port")
-                .and_then(|v| v.as_u64())
-                .and_then(|n| u16::try_from(n).ok())
-                .unwrap_or(3389),
+            target_port =
+                profile.get("target_port").and_then(|v| v.as_u64()).and_then(|n| u16::try_from(n).ok()).unwrap_or(3389),
         ),
         None => format!("rdp {username}@{host}:{port}"),
     };
@@ -706,22 +651,18 @@ pub async fn session_open_rdp(
         ..
     } = &route
     {
-        state
-            .rustion_session_bundles
-            .lock()
-            .await
-            .insert(
-                outcome.token.clone(),
-                crate::state::RustionSessionBundle {
-                    session_id: session_id.clone(),
-                    bastion_id: bastion_id.clone(),
-                    bastion_name: bastion_name.clone(),
-                    correlation_id: correlation_id.clone(),
-                    expires_at: expires_at.clone(),
-                    max_renewals: *max_renewals,
-                    protocol: "rdp".to_string(),
-                },
-            );
+        state.rustion_session_bundles.lock().await.insert(
+            outcome.token.clone(),
+            crate::state::RustionSessionBundle {
+                session_id: session_id.clone(),
+                bastion_id: bastion_id.clone(),
+                bastion_name: bastion_name.clone(),
+                correlation_id: correlation_id.clone(),
+                expires_at: expires_at.clone(),
+                max_renewals: *max_renewals,
+                protocol: "rdp".to_string(),
+            },
+        );
     }
 
     let window_label = format!("rdp-{}", outcome.token);
@@ -759,13 +700,7 @@ pub async fn session_open_rdp(
         }
     });
 
-    let _ = record_recent_session(
-        &state,
-        &request.resource_name,
-        &profile,
-        SessionProtocolTag::Rdp,
-    )
-    .await;
+    let _ = record_recent_session(&state, &request.resource_name, &profile, SessionProtocolTag::Rdp).await;
 
     Ok(RdpOpenResponse {
         token: outcome.token,
@@ -789,31 +724,17 @@ pub struct RdpInputMouseRequest {
 }
 
 #[tauri::command]
-pub async fn session_input_rdp_mouse(
-    state: State<'_, AppState>,
-    request: RdpInputMouseRequest,
-) -> CmdResult<()> {
+pub async fn session_input_rdp_mouse(state: State<'_, AppState>, request: RdpInputMouseRequest) -> CmdResult<()> {
     let ctl = match (request.button.as_deref(), request.button_index) {
-        (Some("down"), Some(idx)) => session::rdp::RdpControl::PointerButton {
-            button_index: idx,
-            pressed: true,
-            x: request.x,
-            y: request.y,
-        },
-        (Some("up"), Some(idx)) => session::rdp::RdpControl::PointerButton {
-            button_index: idx,
-            pressed: false,
-            x: request.x,
-            y: request.y,
-        },
-        _ => session::rdp::RdpControl::PointerMove {
-            x: request.x,
-            y: request.y,
-        },
+        (Some("down"), Some(idx)) => {
+            session::rdp::RdpControl::PointerButton { button_index: idx, pressed: true, x: request.x, y: request.y }
+        }
+        (Some("up"), Some(idx)) => {
+            session::rdp::RdpControl::PointerButton { button_index: idx, pressed: false, x: request.x, y: request.y }
+        }
+        _ => session::rdp::RdpControl::PointerMove { x: request.x, y: request.y },
     };
-    session::rdp::send_control(&state, &request.token, ctl)
-        .await
-        .map_err(CommandError::from)
+    session::rdp::send_control(&state, &request.token, ctl).await.map_err(CommandError::from)
 }
 
 #[derive(Deserialize)]
@@ -824,17 +745,11 @@ pub struct RdpInputKeyRequest {
 }
 
 #[tauri::command]
-pub async fn session_input_rdp_key(
-    state: State<'_, AppState>,
-    request: RdpInputKeyRequest,
-) -> CmdResult<()> {
+pub async fn session_input_rdp_key(state: State<'_, AppState>, request: RdpInputKeyRequest) -> CmdResult<()> {
     session::rdp::send_control(
         &state,
         &request.token,
-        session::rdp::RdpControl::Key {
-            js_code: request.js_code,
-            pressed: request.pressed,
-        },
+        session::rdp::RdpControl::Key { js_code: request.js_code, pressed: request.pressed },
     )
     .await
     .map_err(CommandError::from)
@@ -848,17 +763,11 @@ pub struct RdpInputResizeRequest {
 }
 
 #[tauri::command]
-pub async fn session_input_rdp_resize(
-    state: State<'_, AppState>,
-    request: RdpInputResizeRequest,
-) -> CmdResult<()> {
+pub async fn session_input_rdp_resize(state: State<'_, AppState>, request: RdpInputResizeRequest) -> CmdResult<()> {
     session::rdp::send_control(
         &state,
         &request.token,
-        session::rdp::RdpControl::Resize {
-            width: request.width,
-            height: request.height,
-        },
+        session::rdp::RdpControl::Resize { width: request.width, height: request.height },
     )
     .await
     .map_err(CommandError::from)
@@ -882,9 +791,9 @@ async fn resolve_rdp_credential(
     profile: &Value,
     operator_credential: Option<&OperatorCredential>,
 ) -> Result<ResolvedRdpCredential, CommandError> {
-    let cs = profile.get("credential_source").ok_or_else(|| {
-        CommandError::from("profile is missing credential_source".to_string())
-    })?;
+    let cs = profile
+        .get("credential_source")
+        .ok_or_else(|| CommandError::from("profile is missing credential_source".to_string()))?;
     let kind = cs.get("kind").and_then(|v| v.as_str()).unwrap_or("");
     match kind {
         "secret" => {
@@ -894,15 +803,9 @@ async fn resolve_rdp_credential(
                 .ok_or_else(|| CommandError::from("credential_source.secret_id is required"))?;
             let path = format!("{RESOURCE_MOUNT}secrets/{resource_name}/{secret_id}");
             let resp = make_request(state, Operation::Read, path, None).await?;
-            let data: HashMap<String, Value> = resp
-                .and_then(|r| r.data)
-                .map(|m| m.into_iter().collect())
-                .unwrap_or_default();
-            let password = data
-                .get("password")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_default();
+            let data: HashMap<String, Value> =
+                resp.and_then(|r| r.data).map(|m| m.into_iter().collect()).unwrap_or_default();
+            let password = data.get("password").and_then(|v| v.as_str()).map(String::from).unwrap_or_default();
             if password.is_empty() {
                 return Err(CommandError::from(format!(
                     "secret `{secret_id}` carries no `password` field — RDP CredSSP requires a password"
@@ -921,22 +824,17 @@ async fn resolve_rdp_credential(
         }
         "ldap" => {
             let ldap_mount = ldap_mount_prefix(cs)?;
-            let bind_mode = cs
-                .get("bind_mode")
-                .and_then(|v| v.as_str())
-                .unwrap_or("operator");
+            let bind_mode = cs.get("bind_mode").and_then(|v| v.as_str()).unwrap_or("operator");
             match bind_mode {
                 "operator" => {
                     let oc = operator_credential.ok_or_else(|| {
                         CommandError::from(
-                            "ldap bind_mode = operator requires operator_credential on the open request"
-                                .to_string(),
+                            "ldap bind_mode = operator requires operator_credential on the open request".to_string(),
                         )
                     })?;
                     if oc.username.is_empty() || oc.password.is_empty() {
                         return Err(CommandError::from(
-                            "operator-supplied LDAP credential must carry both username and password"
-                                .to_string(),
+                            "operator-supplied LDAP credential must carry both username and password".to_string(),
                         ));
                     }
                     let (effective_user, domain) = split_domain_user(&oc.username);
@@ -949,34 +847,24 @@ async fn resolve_rdp_credential(
                     })
                 }
                 "static_role" => {
-                    let role = cs
-                        .get("static_role")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            CommandError::from(
-                                "ldap bind_mode = static_role requires credential_source.static_role"
-                                    .to_string(),
-                            )
-                        })?;
+                    let role = cs.get("static_role").and_then(|v| v.as_str()).ok_or_else(|| {
+                        CommandError::from(
+                            "ldap bind_mode = static_role requires credential_source.static_role".to_string(),
+                        )
+                    })?;
                     let path = format!("{ldap_mount}static-cred/{role}");
                     let resp = make_request(state, Operation::Read, path, None).await?;
-                    let data: HashMap<String, Value> = resp
-                        .and_then(|r| r.data)
-                        .map(|m| m.into_iter().collect())
-                        .unwrap_or_default();
+                    let data: HashMap<String, Value> =
+                        resp.and_then(|r| r.data).map(|m| m.into_iter().collect()).unwrap_or_default();
                     let username = data
                         .get("username")
                         .and_then(|v| v.as_str())
-                        .ok_or_else(|| CommandError::from(format!(
-                            "ldap static-cred/{role} missing `username`"
-                        )))?
+                        .ok_or_else(|| CommandError::from(format!("ldap static-cred/{role} missing `username`")))?
                         .to_string();
                     let password = data
                         .get("password")
                         .and_then(|v| v.as_str())
-                        .ok_or_else(|| CommandError::from(format!(
-                            "ldap static-cred/{role} missing `password`"
-                        )))?
+                        .ok_or_else(|| CommandError::from(format!("ldap static-cred/{role} missing `password`")))?
                         .to_string();
                     let (effective_user, domain) = split_domain_user(&username);
                     Ok(ResolvedRdpCredential {
@@ -987,41 +875,29 @@ async fn resolve_rdp_credential(
                     })
                 }
                 "library_set" => {
-                    let set = cs
-                        .get("library_set")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            CommandError::from(
-                                "ldap bind_mode = library_set requires credential_source.library_set"
-                                    .to_string(),
-                            )
-                        })?;
+                    let set = cs.get("library_set").and_then(|v| v.as_str()).ok_or_else(|| {
+                        CommandError::from(
+                            "ldap bind_mode = library_set requires credential_source.library_set".to_string(),
+                        )
+                    })?;
                     let path = format!("{ldap_mount}library/{set}/check-out");
                     let resp = make_request(state, Operation::Write, path, None).await?;
-                    let data: HashMap<String, Value> = resp
-                        .and_then(|r| r.data)
-                        .map(|m| m.into_iter().collect())
-                        .unwrap_or_default();
+                    let data: HashMap<String, Value> =
+                        resp.and_then(|r| r.data).map(|m| m.into_iter().collect()).unwrap_or_default();
                     let username = data
                         .get("username")
                         .and_then(|v| v.as_str())
-                        .ok_or_else(|| CommandError::from(format!(
-                            "ldap library/{set}/check-out missing `username`"
-                        )))?
+                        .ok_or_else(|| CommandError::from(format!("ldap library/{set}/check-out missing `username`")))?
                         .to_string();
                     let password = data
                         .get("password")
                         .and_then(|v| v.as_str())
-                        .ok_or_else(|| CommandError::from(format!(
-                            "ldap library/{set}/check-out missing `password`"
-                        )))?
+                        .ok_or_else(|| CommandError::from(format!("ldap library/{set}/check-out missing `password`")))?
                         .to_string();
                     let lease_id = data
                         .get("lease_id")
                         .and_then(|v| v.as_str())
-                        .ok_or_else(|| CommandError::from(format!(
-                            "ldap library/{set}/check-out missing `lease_id`"
-                        )))?
+                        .ok_or_else(|| CommandError::from(format!("ldap library/{set}/check-out missing `lease_id`")))?
                         .to_string();
                     let (effective_user, domain) = split_domain_user(&username);
                     Ok(ResolvedRdpCredential {
@@ -1037,36 +913,31 @@ async fn resolve_rdp_credential(
                         }),
                     })
                 }
-                other => Err(CommandError::from(format!(
-                    "unknown ldap bind_mode `{other}`"
-                ))),
+                other => Err(CommandError::from(format!("unknown ldap bind_mode `{other}`"))),
             }
         }
         "pki" => {
             let issued = issue_pki_credential(state, resource_name, cs).await?;
             let certificate_der = pem_body_to_der(&issued.certificate, "CERTIFICATE")?;
-            let private_key_der =
-                pem_body_to_der(&issued.private_key, "PRIVATE KEY")
-                    // RSA private keys often come in PEM-wrapped
-                    // PKCS#1 form (`-----BEGIN RSA PRIVATE KEY-----`)
-                    // — accept both forms and let the IronRDP
-                    // connector's PKCS#8/PKCS#1 fallback sort it out.
-                    .or_else(|_| pem_body_to_der(&issued.private_key, "RSA PRIVATE KEY"))?;
+            let private_key_der = pem_body_to_der(&issued.private_key, "PRIVATE KEY")
+                // RSA private keys often come in PEM-wrapped
+                // PKCS#1 form (`-----BEGIN RSA PRIVATE KEY-----`)
+                // — accept both forms and let the IronRDP
+                // connector's PKCS#8/PKCS#1 fallback sort it out.
+                .or_else(|_| pem_body_to_der(&issued.private_key, "RSA PRIVATE KEY"))?;
             log::info!(
                 "resource-connect/rdp: pki/issue produced cert (serial {}) — wiring as CredSSP smartcard",
                 issued.serial_number
             );
             Ok(ResolvedRdpCredential {
-                credential: session::rdp::RdpCredential::SmartCard(
-                    session::rdp::SmartCardCredential {
-                        certificate_der,
-                        private_key_der,
-                        // Synthetic PIN — the PIV emulator inside
-                        // sspi-rs accepts any non-empty value
-                        // since there's no hardware to enforce it.
-                        pin: "0000".to_string(),
-                    },
-                ),
+                credential: session::rdp::RdpCredential::SmartCard(session::rdp::SmartCardCredential {
+                    certificate_der,
+                    private_key_der,
+                    // Synthetic PIN — the PIV emulator inside
+                    // sspi-rs accepts any non-empty value
+                    // since there's no hardware to enforce it.
+                    pin: "0000".to_string(),
+                }),
                 effective_username: None, // smart-card cred carries the UPN itself
                 domain: None,
                 on_close: None,
@@ -1091,9 +962,7 @@ async fn resolve_rdp_credential(
             }
             let password = if !accounts.windows_password.is_empty() {
                 accounts.windows_password.clone()
-            } else if let Some(oc) =
-                operator_credential.filter(|o| !o.password.is_empty())
-            {
+            } else if let Some(oc) = operator_credential.filter(|o| !o.password.is_empty()) {
                 oc.password.clone()
             } else {
                 return Err(CommandError::from(
@@ -1110,9 +979,7 @@ async fn resolve_rdp_credential(
                 on_close: None,
             })
         }
-        other => Err(CommandError::from(format!(
-            "credential source `{other}` lands in a later phase"
-        ))),
+        other => Err(CommandError::from(format!("credential source `{other}` lands in a later phase"))),
     }
 }
 
@@ -1209,21 +1076,13 @@ pub async fn resource_login_class(
 }
 
 #[tauri::command]
-pub async fn session_close(
-    state: State<'_, AppState>,
-    request: SshCloseRequest,
-) -> CmdResult<()> {
+pub async fn session_close(state: State<'_, AppState>, request: SshCloseRequest) -> CmdResult<()> {
     // Best-effort fan-out: we don't know whether the token names
     // an SSH or RDP session, so try both. The mismatched one
     // returns an error we ignore. drop_session removes either kind
     // and yields any captured cleanup hook.
     let _ = session::ssh::send_control(&state, &request.token, SshControl::Close).await;
-    let _ = session::rdp::send_control(
-        &state,
-        &request.token,
-        session::rdp::RdpControl::Close,
-    )
-    .await;
+    let _ = session::rdp::send_control(&state, &request.token, session::rdp::RdpControl::Close).await;
     let cleanup_ssh = session::ssh::drop_session(&state, &request.token).await;
     let cleanup_rdp = session::rdp::drop_session(&state, &request.token).await;
     if let Some(c) = cleanup_ssh.or(cleanup_rdp) {
@@ -1238,11 +1097,7 @@ pub async fn session_close(
 /// the session record dangling, which is worse.
 async fn run_cleanup(state: &State<'_, AppState>, cleanup: crate::session::SessionCleanup) {
     match cleanup.kind {
-        crate::session::SessionCleanupKind::LdapLibraryCheckIn {
-            ldap_mount,
-            library_set,
-            lease_id,
-        } => {
+        crate::session::SessionCleanupKind::LdapLibraryCheckIn { ldap_mount, library_set, lease_id } => {
             let path = format!("{ldap_mount}/library/{library_set}/check-in");
             let mut body = Map::new();
             body.insert("lease_id".into(), Value::String(lease_id.clone()));
@@ -1286,16 +1141,19 @@ const RUSTION_MOUNT: &str = "rustion/";
 ///      (2) yields a usable host but the session/open response carried
 ///      a port.
 ///
-/// Returns `(host, port)` so the dial uses a coherent pair from a
+/// Returns `(host, port, pin)` so the dial uses a coherent set from a
 /// single source rather than mixing host from (3) with port from (2)
-/// which could resolve to a stale listener after a config change.
+/// which could resolve to a stale listener after a config change. `pin`
+/// is the protocol's discovered transport-identity pin off the target
+/// record (`ssh_host_key_fingerprint` for SSH, `rdp_tls_pin_sha256` for
+/// RDP), empty when the bastion advertised none.
 async fn resolve_bastion_dial_coords(
     state: &State<'_, AppState>,
     bastion_id: &str,
     protocol: BastionProtocol,
     returned_host: &str,
     returned_port: u16,
-) -> (String, u16) {
+) -> (String, u16, String) {
     fn is_unspecified(h: &str) -> bool {
         let t = h.trim();
         t.is_empty() || t == "0.0.0.0" || t == "::" || t == "[::]" || t == "*"
@@ -1303,14 +1161,7 @@ async fn resolve_bastion_dial_coords(
     let target = if bastion_id.is_empty() {
         None
     } else {
-        match make_request(
-            state,
-            Operation::Read,
-            format!("{RUSTION_MOUNT}targets/{bastion_id}"),
-            None,
-        )
-        .await
-        {
+        match make_request(state, Operation::Read, format!("{RUSTION_MOUNT}targets/{bastion_id}"), None).await {
             Ok(r) => r.and_then(|x| x.data),
             Err(e) => {
                 log::warn!(
@@ -1322,48 +1173,47 @@ async fn resolve_bastion_dial_coords(
         }
     };
 
+    // Protocol's discovered transport pin off the target record. Read
+    // once here so every return path carries it alongside host/port.
+    let pin = target
+        .as_ref()
+        .map(|data| {
+            let key = match protocol {
+                BastionProtocol::Ssh => "ssh_host_key_fingerprint",
+                BastionProtocol::Rdp => "rdp_tls_pin_sha256",
+            };
+            data.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+        })
+        .unwrap_or_default();
+
     // Tier 1: discovered listener-info on the target record.
     if let Some(ref data) = target {
         let (host_key, port_key) = match protocol {
             BastionProtocol::Ssh => ("ssh_listener_host", "ssh_listener_port"),
             BastionProtocol::Rdp => ("rdp_listener_host", "rdp_listener_port"),
         };
-        let stored_host = data
-            .get(host_key)
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let stored_port = data
-            .get(port_key)
-            .and_then(|v| v.as_u64())
-            .and_then(|n| u16::try_from(n).ok())
-            .unwrap_or(0);
+        let stored_host = data.get(host_key).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let stored_port = data.get(port_key).and_then(|v| v.as_u64()).and_then(|n| u16::try_from(n).ok()).unwrap_or(0);
         if !is_unspecified(&stored_host) && stored_port != 0 {
             log::info!(
                 "resource-connect: bastion `{bastion_id}` using stored listener coords \
                  {protocol:?} {stored_host}:{stored_port} (synced_at={})",
-                data.get("listeners_synced_at")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("never")
+                data.get("listeners_synced_at").and_then(|v| v.as_str()).unwrap_or("never")
             );
-            return (stored_host, stored_port);
+            return (stored_host, stored_port, pin);
         }
     }
 
     // Tier 2: the session/open echo, when its host is specified.
     if !is_unspecified(returned_host) {
-        return (returned_host.to_string(), returned_port);
+        return (returned_host.to_string(), returned_port, pin);
     }
 
     // Tier 3: endpoint-host fallback. The session/open port still wins
     // — it's the SSH/RDP proxy port, distinct from the control-plane
     // port we'd strip off the endpoint.
     if let Some(data) = target {
-        let endpoint = data
-            .get("endpoint")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let endpoint = data.get("endpoint").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let host_only = if endpoint.starts_with('[') {
             endpoint
                 .strip_prefix('[')
@@ -1381,14 +1231,14 @@ async fn resolve_bastion_dial_coords(
                  `{returned_host}`; substituting `{host_only}` from target endpoint \
                  (run `rustion_target_refresh_listeners` to discover the canonical host)"
             );
-            return (host_only, returned_port);
+            return (host_only, returned_port, pin);
         }
         log::warn!(
             "resource-connect: bastion `{bastion_id}` endpoint `{endpoint}` yields no \
              usable dial host; keeping `{returned_host}` and the dial will likely fail"
         );
     }
-    (returned_host.to_string(), returned_port)
+    (returned_host.to_string(), returned_port, pin)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1424,6 +1274,11 @@ enum ConnectRoute {
         correlation_id: String,
         expires_at: String,
         max_renewals: u32,
+        /// Protocol transport-identity pin discovered off the target
+        /// record: SSH host-key fingerprint (`SHA256:…`) for the SSH
+        /// path, TLS leaf digest (`sha256:…`) for RDP. Empty when the
+        /// bastion advertised none — the dialler then stays unpinned.
+        bastion_pin: String,
     },
 }
 
@@ -1441,22 +1296,14 @@ async fn collect_policy_hints(
     meta: &Map<String, Value>,
 ) -> (String, String, Vec<String>) {
     let resource_id = resource_name.to_string();
-    let resource_type = meta
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let resource_type = meta.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let mut asset_group_ids: Vec<String> = Vec::new();
     let path = format!("resource-group/by-resource/{resource_name}");
     if let Ok(resp) = make_request(state, Operation::Read, path, None).await {
-        if let Some(arr) = resp
-            .and_then(|r| r.data)
-            .and_then(|d| d.get("groups").cloned())
-            .and_then(|v| match v {
-                Value::Array(a) => Some(a),
-                _ => None,
-            })
-        {
+        if let Some(arr) = resp.and_then(|r| r.data).and_then(|d| d.get("groups").cloned()).and_then(|v| match v {
+            Value::Array(a) => Some(a),
+            _ => None,
+        }) {
             for g in arr {
                 if let Some(s) = g.as_str() {
                     asset_group_ids.push(s.to_string());
@@ -1499,30 +1346,15 @@ async fn read_effective_policy(
         body.insert("resource_id".into(), Value::String(resource_id.to_string()));
     }
     if !resource_type.is_empty() {
-        body.insert(
-            "resource_type".into(),
-            Value::String(resource_type.to_string()),
-        );
+        body.insert("resource_type".into(), Value::String(resource_type.to_string()));
     }
     if !asset_group_ids.is_empty() {
         body.insert(
             "asset_group_ids".into(),
-            Value::Array(
-                asset_group_ids
-                    .iter()
-                    .cloned()
-                    .map(Value::String)
-                    .collect(),
-            ),
+            Value::Array(asset_group_ids.iter().cloned().map(Value::String).collect()),
         );
     }
-    let resp = match make_request(
-        state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}policy/effective"),
-        Some(body),
-    )
-    .await
+    let resp = match make_request(state, Operation::Write, format!("{RUSTION_MOUNT}policy/effective"), Some(body)).await
     {
         Ok(resp) => resp,
         // A caller who can reach the resource and read its secret but
@@ -1539,40 +1371,20 @@ async fn read_effective_policy(
         Err(e) => return Err(e),
     };
     let data = resp.and_then(|r| r.data).unwrap_or_default();
-    let transport = data
-        .get("transport")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let transport = data.get("transport").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let bastions = data
         .get("bastions")
         .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect()
-        })
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default();
-    let recording = data
-        .get("recording")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let recording = data.get("recording").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let lock_violation = data.get("lock_violation").and_then(|v| match v {
-        Value::Object(m) => Some(
-            m.get("detail")
-                .and_then(|d| d.as_str())
-                .unwrap_or("rustion policy lock violation")
-                .to_string(),
-        ),
+        Value::Object(m) => {
+            Some(m.get("detail").and_then(|d| d.as_str()).unwrap_or("rustion policy lock violation").to_string())
+        }
         _ => None,
     });
-    Ok(EffectivePolicyView {
-        transport,
-        bastions,
-        recording,
-        lock_violation,
-    })
+    Ok(EffectivePolicyView { transport, bastions, recording, lock_violation })
 }
 
 /// Resolved SSH login-class verdict for the connect path. Mirrors the
@@ -1601,10 +1413,7 @@ async fn read_effective_login_class(
         body.insert("resource_id".into(), Value::String(resource_id.to_string()));
     }
     if !resource_type.is_empty() {
-        body.insert(
-            "resource_type".into(),
-            Value::String(resource_type.to_string()),
-        );
+        body.insert("resource_type".into(), Value::String(resource_type.to_string()));
     }
     if !asset_group_ids.is_empty() {
         body.insert(
@@ -1619,19 +1428,11 @@ async fn read_effective_login_class(
     // does not affect — a brokered resource simply can't hold a static
     // SSH credential in the first place, so the direct-path dial has
     // nothing to fall back to.
-    let resp = match make_request(
-        state,
-        Operation::Write,
-        "ssh-broker/policy/effective".to_string(),
-        Some(body),
-    )
-    .await
+    let resp = match make_request(state, Operation::Write, "ssh-broker/policy/effective".to_string(), Some(body)).await
     {
         Ok(r) => r,
         Err(e) => {
-            log::warn!(
-                "ssh-broker/policy/effective unavailable ({e:?}); defaulting login_class to shared-credential"
-            );
+            log::warn!("ssh-broker/policy/effective unavailable ({e:?}); defaulting login_class to shared-credential");
             return Ok(EffectiveLoginClassView {
                 login_class: "shared-credential".to_string(),
                 login_class_source: "default".to_string(),
@@ -1641,36 +1442,20 @@ async fn read_effective_login_class(
         }
     };
     let data = resp.and_then(|r| r.data).unwrap_or_default();
-    let login_class = data
-        .get("login_class")
-        .and_then(|v| v.as_str())
-        .unwrap_or("shared-credential")
-        .to_string();
-    let login_class_source = data
-        .get("login_class_source")
-        .and_then(|v| v.as_str())
-        .unwrap_or("default")
-        .to_string();
+    let login_class = data.get("login_class").and_then(|v| v.as_str()).unwrap_or("shared-credential").to_string();
+    let login_class_source = data.get("login_class_source").and_then(|v| v.as_str()).unwrap_or("default").to_string();
     let login_class_chain = data
         .get("login_class_chain")
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default();
     let lock_violation = data.get("lock_violation").and_then(|v| match v {
-        Value::Object(m) => Some(
-            m.get("detail")
-                .and_then(|d| d.as_str())
-                .unwrap_or("ssh login_class lock violation")
-                .to_string(),
-        ),
+        Value::Object(m) => {
+            Some(m.get("detail").and_then(|d| d.as_str()).unwrap_or("ssh login_class lock violation").to_string())
+        }
         _ => None,
     });
-    Ok(EffectiveLoginClassView {
-        login_class,
-        login_class_source,
-        login_class_chain,
-        lock_violation,
-    })
+    Ok(EffectiveLoginClassView { login_class, login_class_source, login_class_chain, lock_violation })
 }
 
 /// Decide whether to dial direct or route through Rustion. When the
@@ -1698,15 +1483,11 @@ async fn resolve_ssh_connect_route(
     credential: &SshCredential,
 ) -> Result<ConnectRoute, CommandError> {
     const BASTION_PROTOCOL: BastionProtocol = BastionProtocol::Ssh;
-    let (resource_id, resource_type, asset_group_ids) =
-        collect_policy_hints(state, resource_name, meta).await;
-    let effective =
-        read_effective_policy(state, &resource_id, &resource_type, &asset_group_ids).await?;
+    let (resource_id, resource_type, asset_group_ids) = collect_policy_hints(state, resource_name, meta).await;
+    let effective = read_effective_policy(state, &resource_id, &resource_type, &asset_group_ids).await?;
 
     if let Some(detail) = effective.lock_violation {
-        return Err(CommandError::from(format!(
-            "rustion policy lock violation: {detail}"
-        )));
+        return Err(CommandError::from(format!("rustion policy lock violation: {detail}")));
     }
 
     let prefer_rustion = match effective.transport.as_str() {
@@ -1729,7 +1510,8 @@ async fn resolve_ssh_connect_route(
                 return Err(CommandError::from(
                     "rustion-required policy: only ssh-password credentials are supported \
                      through the bastion proxy today (private-key and certificate flows are \
-                     not yet wired). Refusing to dial direct.".to_string(),
+                     not yet wired). Refusing to dial direct."
+                        .to_string(),
                 ));
             }
             log::warn!(
@@ -1740,56 +1522,25 @@ async fn resolve_ssh_connect_route(
         }
     };
 
-    let ttl_secs = profile
-        .get("ttl_secs")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| u32::try_from(n).ok())
-        .unwrap_or(3600);
-    let max_renewals = profile
-        .get("max_renewals")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| u8::try_from(n).ok())
-        .unwrap_or(3);
-    let recording = if effective.recording.is_empty() {
-        "always".to_string()
-    } else {
-        effective.recording.clone()
-    };
+    let ttl_secs = profile.get("ttl_secs").and_then(|v| v.as_u64()).and_then(|n| u32::try_from(n).ok()).unwrap_or(3600);
+    let max_renewals =
+        profile.get("max_renewals").and_then(|v| v.as_u64()).and_then(|n| u8::try_from(n).ok()).unwrap_or(3);
+    let recording = if effective.recording.is_empty() { "always".to_string() } else { effective.recording.clone() };
 
-    let credential_material_b64 =
-        base64::engine::general_purpose::STANDARD.encode(password.as_bytes());
+    let credential_material_b64 = base64::engine::general_purpose::STANDARD.encode(password.as_bytes());
 
     let mut body = Map::new();
     body.insert("target_host".into(), Value::String(target_host.to_string()));
     body.insert("target_port".into(), Value::Number(target_port.into()));
     body.insert("target_protocol".into(), Value::String("ssh".to_string()));
-    body.insert(
-        "credential_kind".into(),
-        Value::String("ssh-password".to_string()),
-    );
-    body.insert(
-        "credential_username".into(),
-        Value::String(target_user.to_string()),
-    );
-    body.insert(
-        "credential_material".into(),
-        Value::String(credential_material_b64),
-    );
+    body.insert("credential_kind".into(), Value::String("ssh-password".to_string()));
+    body.insert("credential_username".into(), Value::String(target_user.to_string()));
+    body.insert("credential_material".into(), Value::String(credential_material_b64));
     body.insert("ttl_secs".into(), Value::Number(ttl_secs.into()));
     body.insert("max_renewals".into(), Value::Number(max_renewals.into()));
     body.insert("recording".into(), Value::String(recording));
     if !effective.bastions.is_empty() {
-        body.insert(
-            "bastions".into(),
-            Value::Array(
-                effective
-                    .bastions
-                    .iter()
-                    .cloned()
-                    .map(Value::String)
-                    .collect(),
-            ),
-        );
+        body.insert("bastions".into(), Value::Array(effective.bastions.iter().cloned().map(Value::String).collect()));
     }
     if !resource_id.is_empty() {
         body.insert("resource_id".into(), Value::String(resource_id));
@@ -1798,23 +1549,11 @@ async fn resolve_ssh_connect_route(
         body.insert("resource_type".into(), Value::String(resource_type));
     }
     if !asset_group_ids.is_empty() {
-        body.insert(
-            "asset_group_ids".into(),
-            Value::Array(asset_group_ids.into_iter().map(Value::String).collect()),
-        );
+        body.insert("asset_group_ids".into(), Value::Array(asset_group_ids.into_iter().map(Value::String).collect()));
     }
-    let resp = make_request(
-        state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}session/open"),
-        Some(body),
-    )
-    .await
-    .map_err(|e| {
-        CommandError::from(format!(
-            "rustion session/open failed: {e:?}"
-        ))
-    })?;
+    let resp = make_request(state, Operation::Write, format!("{RUSTION_MOUNT}session/open"), Some(body))
+        .await
+        .map_err(|e| CommandError::from(format!("rustion session/open failed: {e:?}")))?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     parse_rustion_ticket_bundle(state, data, BASTION_PROTOCOL, max_renewals as u32).await
 }
@@ -1829,63 +1568,23 @@ async fn parse_rustion_ticket_bundle(
     protocol: BastionProtocol,
     max_renewals: u32,
 ) -> Result<ConnectRoute, CommandError> {
-    let returned_host = data
-        .get("host")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let bastion_port = data
-        .get("port")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| u16::try_from(n).ok())
-        .unwrap_or(0);
-    let ticket = data
-        .get("ticket")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let bastion_name = data
-        .get("bastion_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let bastion_id = data
-        .get("bastion_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let returned_host = data.get("host").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let bastion_port = data.get("port").and_then(|v| v.as_u64()).and_then(|n| u16::try_from(n).ok()).unwrap_or(0);
+    let ticket = data.get("ticket").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let bastion_name = data.get("bastion_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let bastion_id = data.get("bastion_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     // Phase 9.3: prefer the stored listener coords (set at enrolment by
     // `rustion_target_refresh_listeners`) over the session/open echo, and
     // fall back to the target endpoint host when neither is usable.
     let bastion_port_in = bastion_port;
-    let (bastion_host, bastion_port) = resolve_bastion_dial_coords(
-        state,
-        &bastion_id,
-        protocol,
-        &returned_host,
-        bastion_port_in,
-    )
-    .await;
+    let (bastion_host, bastion_port, bastion_pin) =
+        resolve_bastion_dial_coords(state, &bastion_id, protocol, &returned_host, bastion_port_in).await;
     if bastion_host.is_empty() || bastion_port == 0 || ticket.is_empty() {
-        return Err(CommandError::from(
-            "rustion session/open returned an incomplete ticket bundle".to_string(),
-        ));
+        return Err(CommandError::from("rustion session/open returned an incomplete ticket bundle".to_string()));
     }
-    let session_id = data
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let correlation_id = data
-        .get("correlation_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let expires_at = data
-        .get("expires_at")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+    let session_id = data.get("session_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let correlation_id = data.get("correlation_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let expires_at = data.get("expires_at").and_then(|v| v.as_str()).unwrap_or("").to_string();
     Ok(ConnectRoute::Rustion {
         bastion_host,
         bastion_port,
@@ -1896,6 +1595,7 @@ async fn parse_rustion_ticket_bundle(
         correlation_id,
         expires_at,
         max_renewals,
+        bastion_pin,
     })
 }
 
@@ -1918,15 +1618,11 @@ async fn open_rustion_session_v2_ssh(
     credential_source: &Value,
 ) -> Result<ConnectRoute, CommandError> {
     const BASTION_PROTOCOL: BastionProtocol = BastionProtocol::Ssh;
-    let (resource_id, resource_type, asset_group_ids) =
-        collect_policy_hints(state, resource_name, meta).await;
-    let effective =
-        read_effective_policy(state, &resource_id, &resource_type, &asset_group_ids).await?;
+    let (resource_id, resource_type, asset_group_ids) = collect_policy_hints(state, resource_name, meta).await;
+    let effective = read_effective_policy(state, &resource_id, &resource_type, &asset_group_ids).await?;
 
     if let Some(detail) = effective.lock_violation {
-        return Err(CommandError::from(format!(
-            "rustion policy lock violation: {detail}"
-        )));
+        return Err(CommandError::from(format!("rustion policy lock violation: {detail}")));
     }
 
     let prefer_rustion = match effective.transport.as_str() {
@@ -1940,21 +1636,10 @@ async fn open_rustion_session_v2_ssh(
         return Ok(ConnectRoute::Direct);
     }
 
-    let ttl_secs = profile
-        .get("ttl_secs")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| u32::try_from(n).ok())
-        .unwrap_or(3600);
-    let max_renewals = profile
-        .get("max_renewals")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| u8::try_from(n).ok())
-        .unwrap_or(3);
-    let recording = if effective.recording.is_empty() {
-        "always".to_string()
-    } else {
-        effective.recording.clone()
-    };
+    let ttl_secs = profile.get("ttl_secs").and_then(|v| v.as_u64()).and_then(|n| u32::try_from(n).ok()).unwrap_or(3600);
+    let max_renewals =
+        profile.get("max_renewals").and_then(|v| v.as_u64()).and_then(|n| u8::try_from(n).ok()).unwrap_or(3);
+    let recording = if effective.recording.is_empty() { "always".to_string() } else { effective.recording.clone() };
 
     let mut body = Map::new();
     // The reference, not the material — BastionVault resolves it.
@@ -1970,10 +1655,7 @@ async fn open_rustion_session_v2_ssh(
     body.insert("max_renewals".into(), Value::Number(max_renewals.into()));
     body.insert("recording".into(), Value::String(recording));
     if !effective.bastions.is_empty() {
-        body.insert(
-            "bastions".into(),
-            Value::Array(effective.bastions.iter().cloned().map(Value::String).collect()),
-        );
+        body.insert("bastions".into(), Value::Array(effective.bastions.iter().cloned().map(Value::String).collect()));
     }
     if !resource_id.is_empty() {
         body.insert("resource_id".into(), Value::String(resource_id));
@@ -1982,30 +1664,24 @@ async fn open_rustion_session_v2_ssh(
         body.insert("resource_type".into(), Value::String(resource_type));
     }
     if !asset_group_ids.is_empty() {
-        body.insert(
-            "asset_group_ids".into(),
-            Value::Array(asset_group_ids.into_iter().map(Value::String).collect()),
-        );
+        body.insert("asset_group_ids".into(), Value::Array(asset_group_ids.into_iter().map(Value::String).collect()));
     }
 
-    let resp = make_request(
-        state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}v2/session/open"),
-        Some(body),
-    )
-    .await
-    .map_err(|e| CommandError::from(format!("rustion v2 session/open failed: {e:?}")))?;
+    let resp = make_request(state, Operation::Write, format!("{RUSTION_MOUNT}v2/session/open"), Some(body))
+        .await
+        .map_err(|e| CommandError::from(format!("rustion v2 session/open failed: {e:?}")))?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     parse_rustion_ticket_bundle(state, data, BASTION_PROTOCOL, max_renewals as u32).await
 }
 
 /// RDP analogue of [`resolve_ssh_connect_route`]. Same shape; differs in:
 ///   - `target_protocol` is `rdp` on the rustion envelope;
-///   - the credential kind sent to Rustion is `rdp-password`;
-///   - smart-card credentials cannot ride through the bastion (Rustion
-///     surfaces them as `rdp-cert` and rejects the BV-injection path
-///     today), so they fail closed under `rustion-required`.
+///   - `rdp-password` sends the password as `credential_material`;
+///   - `rdp-cert` (smart-card) sends the certificate DER as
+///     `credential_material` plus the DER private key + PIN as
+///     `credential_key` / `credential_pin`. The bastion drives the
+///     upstream Kerberos PKINIT / SPNEGO CredSSP exchange with the
+///     smart-card identity (Rustion `bv_credssp_kerberos`, sspi-backed).
 #[allow(clippy::too_many_arguments)]
 async fn resolve_rdp_connect_route(
     state: &State<'_, AppState>,
@@ -2018,15 +1694,11 @@ async fn resolve_rdp_connect_route(
     credential: &session::rdp::RdpCredential,
 ) -> Result<ConnectRoute, CommandError> {
     const BASTION_PROTOCOL: BastionProtocol = BastionProtocol::Rdp;
-    let (resource_id, resource_type, asset_group_ids) =
-        collect_policy_hints(state, resource_name, meta).await;
-    let effective =
-        read_effective_policy(state, &resource_id, &resource_type, &asset_group_ids).await?;
+    let (resource_id, resource_type, asset_group_ids) = collect_policy_hints(state, resource_name, meta).await;
+    let effective = read_effective_policy(state, &resource_id, &resource_type, &asset_group_ids).await?;
 
     if let Some(detail) = effective.lock_violation {
-        return Err(CommandError::from(format!(
-            "rustion policy lock violation: {detail}"
-        )));
+        return Err(CommandError::from(format!("rustion policy lock violation: {detail}")));
     }
 
     let prefer_rustion = match effective.transport.as_str() {
@@ -2038,79 +1710,61 @@ async fn resolve_rdp_connect_route(
         return Ok(ConnectRoute::Direct);
     }
 
-    // Only rdp-password rides through the bastion proxy today. The
-    // Rustion side rejects rdp-cert at the CredSSP-injection driver
-    // (PKINIT/SPNEGO needs a separate path), so smartcard sessions
-    // either fail closed under `rustion-required` or fall back to the
-    // direct PIV emulator under `rustion-preferred`.
-    let password = match credential {
-        session::rdp::RdpCredential::Password(p) => p.to_string(),
-        session::rdp::RdpCredential::SmartCard(_) => {
-            if effective.transport == "rustion-required" {
-                return Err(CommandError::from(
-                    "rustion-required policy: smart-card (rdp-cert) credentials cannot route \
-                     through the bastion yet (PKINIT/SPNEGO path is separate). Refusing to \
-                     dial direct.".to_string(),
-                ));
-            }
-            log::warn!(
-                "resource-connect/rdp: rustion-preferred but credential is smart-card; \
-                 falling back to direct dial"
-            );
-            return Ok(ConnectRoute::Direct);
-        }
+    // Both rdp-password and rdp-cert (smart-card) route through the
+    // bastion. For rdp-password the bastion drives upstream NLA via
+    // NTLMv2 (`bv_credssp`); for rdp-cert it drives Kerberos PKINIT /
+    // SPNEGO CredSSP with the operator's smart-card identity
+    // (`bv_credssp_kerberos`, sspi-backed). The operator's own RDP
+    // client only ever presents the one-shot ticket — it never sees the
+    // target credential either way.
+    struct BrokeredCred {
+        kind: &'static str,
+        /// Base64: password bytes (rdp-password) or certificate DER
+        /// (rdp-cert).
+        material_b64: String,
+        /// Base64 DER private key — rdp-cert only.
+        key_b64: Option<String>,
+        /// Smart-card PIN — rdp-cert only.
+        pin: Option<String>,
+    }
+    let cred = match credential {
+        session::rdp::RdpCredential::Password(p) => BrokeredCred {
+            kind: "rdp-password",
+            material_b64: base64::engine::general_purpose::STANDARD.encode(p.as_bytes()),
+            key_b64: None,
+            pin: None,
+        },
+        session::rdp::RdpCredential::SmartCard(sc) => BrokeredCred {
+            kind: "rdp-cert",
+            material_b64: base64::engine::general_purpose::STANDARD.encode(&sc.certificate_der),
+            key_b64: Some(base64::engine::general_purpose::STANDARD.encode(&sc.private_key_der)),
+            pin: Some(sc.pin.clone()),
+        },
     };
 
-    let ttl_secs = profile
-        .get("ttl_secs")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| u32::try_from(n).ok())
-        .unwrap_or(3600);
-    let max_renewals = profile
-        .get("max_renewals")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| u8::try_from(n).ok())
-        .unwrap_or(3);
-    let recording = if effective.recording.is_empty() {
-        "always".to_string()
-    } else {
-        effective.recording.clone()
-    };
-
-    let credential_material_b64 =
-        base64::engine::general_purpose::STANDARD.encode(password.as_bytes());
+    let ttl_secs = profile.get("ttl_secs").and_then(|v| v.as_u64()).and_then(|n| u32::try_from(n).ok()).unwrap_or(3600);
+    let max_renewals =
+        profile.get("max_renewals").and_then(|v| v.as_u64()).and_then(|n| u8::try_from(n).ok()).unwrap_or(3);
+    let recording = if effective.recording.is_empty() { "always".to_string() } else { effective.recording.clone() };
 
     let mut body = Map::new();
     body.insert("target_host".into(), Value::String(target_host.to_string()));
     body.insert("target_port".into(), Value::Number(target_port.into()));
     body.insert("target_protocol".into(), Value::String("rdp".to_string()));
-    body.insert(
-        "credential_kind".into(),
-        Value::String("rdp-password".to_string()),
-    );
-    body.insert(
-        "credential_username".into(),
-        Value::String(target_user.to_string()),
-    );
-    body.insert(
-        "credential_material".into(),
-        Value::String(credential_material_b64),
-    );
+    body.insert("credential_kind".into(), Value::String(cred.kind.to_string()));
+    body.insert("credential_username".into(), Value::String(target_user.to_string()));
+    body.insert("credential_material".into(), Value::String(cred.material_b64));
+    if let Some(key_b64) = cred.key_b64 {
+        body.insert("credential_key".into(), Value::String(key_b64));
+    }
+    if let Some(pin) = cred.pin {
+        body.insert("credential_pin".into(), Value::String(pin));
+    }
     body.insert("ttl_secs".into(), Value::Number(ttl_secs.into()));
     body.insert("max_renewals".into(), Value::Number(max_renewals.into()));
     body.insert("recording".into(), Value::String(recording));
     if !effective.bastions.is_empty() {
-        body.insert(
-            "bastions".into(),
-            Value::Array(
-                effective
-                    .bastions
-                    .iter()
-                    .cloned()
-                    .map(Value::String)
-                    .collect(),
-            ),
-        );
+        body.insert("bastions".into(), Value::Array(effective.bastions.iter().cloned().map(Value::String).collect()));
     }
     if !resource_id.is_empty() {
         body.insert("resource_id".into(), Value::String(resource_id));
@@ -2119,31 +1773,16 @@ async fn resolve_rdp_connect_route(
         body.insert("resource_type".into(), Value::String(resource_type));
     }
     if !asset_group_ids.is_empty() {
-        body.insert(
-            "asset_group_ids".into(),
-            Value::Array(asset_group_ids.into_iter().map(Value::String).collect()),
-        );
+        body.insert("asset_group_ids".into(), Value::Array(asset_group_ids.into_iter().map(Value::String).collect()));
     }
-    let resp = make_request(
-        state,
-        Operation::Write,
-        format!("{RUSTION_MOUNT}session/open"),
-        Some(body),
-    )
-    .await
-    .map_err(|e| {
-        CommandError::from(format!(
-            "rustion session/open failed: {e:?}"
-        ))
-    })?;
+    let resp = make_request(state, Operation::Write, format!("{RUSTION_MOUNT}session/open"), Some(body))
+        .await
+        .map_err(|e| CommandError::from(format!("rustion session/open failed: {e:?}")))?;
     let data = resp.and_then(|r| r.data).unwrap_or_default();
     parse_rustion_ticket_bundle(state, data, BASTION_PROTOCOL, max_renewals as u32).await
 }
 
-async fn read_resource_meta(
-    state: &State<'_, AppState>,
-    name: &str,
-) -> Result<Map<String, Value>, CommandError> {
+async fn read_resource_meta(state: &State<'_, AppState>, name: &str) -> Result<Map<String, Value>, CommandError> {
     let path = format!("{RESOURCE_MOUNT}resources/{name}");
     let resp = make_request(state, Operation::Read, path, None).await?;
     Ok(resp.and_then(|r| r.data).unwrap_or_default())
@@ -2152,11 +1791,7 @@ async fn read_resource_meta(
 fn find_profile(meta: &Map<String, Value>, profile_id: &str) -> Option<Value> {
     meta.get("connection_profiles")
         .and_then(|v| v.as_array())
-        .and_then(|arr| {
-            arr.iter()
-                .find(|p| p.get("id").and_then(|i| i.as_str()) == Some(profile_id))
-                .cloned()
-        })
+        .and_then(|arr| arr.iter().find(|p| p.get("id").and_then(|i| i.as_str()) == Some(profile_id)).cloned())
 }
 
 /// Ordered list of host candidates to try when opening a session.
@@ -2202,19 +1837,11 @@ fn is_connect_layer_error(err: &str) -> bool {
 }
 
 fn profile_port(profile: &Value) -> u16 {
-    profile
-        .get("target_port")
-        .and_then(|v| v.as_u64())
-        .and_then(|n| u16::try_from(n).ok())
-        .unwrap_or(22)
+    profile.get("target_port").and_then(|v| v.as_u64()).and_then(|n| u16::try_from(n).ok()).unwrap_or(22)
 }
 
 fn profile_username(profile: &Value) -> String {
-    profile
-        .get("username")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string()
+    profile.get("username").and_then(|v| v.as_str()).unwrap_or("").to_string()
 }
 
 /// What the SSH engine minted for a brokered session. Populated only by
@@ -2251,9 +1878,9 @@ async fn resolve_ssh_credential(
     meta: &Map<String, Value>,
     operator_credential: Option<&OperatorCredential>,
 ) -> Result<(ResolvedSshCredential, EffectiveLoginClassView), CommandError> {
-    let cs = profile.get("credential_source").ok_or_else(|| {
-        CommandError::from("profile is missing credential_source".to_string())
-    })?;
+    let cs = profile
+        .get("credential_source")
+        .ok_or_else(|| CommandError::from("profile is missing credential_source".to_string()))?;
     let kind = cs.get("kind").and_then(|v| v.as_str()).unwrap_or("");
 
     // Brokered login-class enforcement (direct path). If the resource
@@ -2287,9 +1914,7 @@ async fn resolve_ssh_credential(
         "pki" => resolve_pki_ssh(state, resource_name, cs).await,
         "ssh-engine" => resolve_ssh_engine_ssh(state, profile, meta, cs).await,
         "default-account" => resolve_default_account_ssh(state, profile, meta, cs).await,
-        other => Err(CommandError::from(format!(
-            "unknown credential source `{other}`"
-        ))),
+        other => Err(CommandError::from(format!("unknown credential source `{other}`"))),
     }?;
     Ok((resolved, lc))
 }
@@ -2307,37 +1932,16 @@ struct SelfDefaultAccounts {
     windows_password: String,
 }
 
-async fn fetch_self_default_accounts(
-    state: &State<'_, AppState>,
-) -> Result<SelfDefaultAccounts, CommandError> {
-    let resp = make_request(
-        state,
-        Operation::Read,
-        "sys/identity/default-account/self".to_string(),
-        None,
-    )
-    .await?;
-    let data: HashMap<String, Value> = resp
-        .and_then(|r| r.data)
-        .map(|m| m.into_iter().collect())
-        .unwrap_or_default();
-    let field = |k: &str| {
-        data.get(k)
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string()
-    };
+async fn fetch_self_default_accounts(state: &State<'_, AppState>) -> Result<SelfDefaultAccounts, CommandError> {
+    let resp = make_request(state, Operation::Read, "sys/identity/default-account/self".to_string(), None).await?;
+    let data: HashMap<String, Value> = resp.and_then(|r| r.data).map(|m| m.into_iter().collect()).unwrap_or_default();
+    let field = |k: &str| data.get(k).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
     Ok(SelfDefaultAccounts {
         linux: field("linux"),
         macos: field("macos"),
         windows: field("windows"),
         // Passwords are not trimmed — they may legitimately contain whitespace.
-        windows_password: data
-            .get("windows_password")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+        windows_password: data.get("windows_password").and_then(|v| v.as_str()).unwrap_or("").to_string(),
     })
 }
 
@@ -2346,10 +1950,7 @@ async fn fetch_self_default_accounts(
 /// `bsd` / `unix` / unset); BSD/Unix/unknown fall back to the Linux account.
 /// Fails closed with an operator-facing message when no account is set for that
 /// family — never silently substitutes a profile username.
-async fn resolve_default_account(
-    state: &State<'_, AppState>,
-    os_type: &str,
-) -> Result<String, CommandError> {
+async fn resolve_default_account(state: &State<'_, AppState>, os_type: &str) -> Result<String, CommandError> {
     let accounts = fetch_self_default_accounts(state).await?;
     let account = match os_type {
         "windows" => accounts.windows,
@@ -2372,11 +1973,7 @@ async fn resolve_default_account(
 
 /// Read the resource's structured OS family for default-account resolution.
 fn resource_os_type(meta: &Map<String, Value>) -> String {
-    meta.get("os_type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string()
+    meta.get("os_type").and_then(|v| v.as_str()).unwrap_or("").trim().to_string()
 }
 
 /// Resolve a `default-account` SSH source: brokers a credential from the SSH
@@ -2437,11 +2034,7 @@ async fn resolve_ssh_engine_ssh(
         .filter(|s| !s.is_empty())
         .ok_or_else(|| CommandError::from("credential_source.ssh_role is required"))?
         .to_string();
-    let mode = cs
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("ca");
+    let mode = cs.get("mode").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or("ca");
 
     match mode {
         "ca" => sign_ssh_engine_ca(state, &ssh_mount, &ssh_role, profile).await,
@@ -2452,9 +2045,7 @@ async fn resolve_ssh_engine_ssh(
              cert auth); use a PQC-aware standalone client against ssh/sign/<role>"
                 .to_string(),
         )),
-        other => Err(CommandError::from(format!(
-            "credential_source.mode `{other}` is not one of ca | otp | pqc"
-        ))),
+        other => Err(CommandError::from(format!("credential_source.mode `{other}` is not one of ca | otp | pqc"))),
     }
 }
 
@@ -2465,9 +2056,7 @@ fn ssh_engine_mount_prefix(cs: &Value) -> Result<String, CommandError> {
         .map(|s| s.trim().to_string())
         .ok_or_else(|| CommandError::from("credential_source.ssh_mount is required"))?;
     if raw.is_empty() {
-        return Err(CommandError::from(
-            "credential_source.ssh_mount must not be empty".to_string(),
-        ));
+        return Err(CommandError::from("credential_source.ssh_mount must not be empty".to_string()));
     }
     Ok(format!("{}/", raw.trim_end_matches('/')))
 }
@@ -2500,51 +2089,30 @@ async fn sign_ssh_engine_ca(
     // `valid_principals` is left to the role's `default_user`.
     let mut body = Map::new();
     body.insert("public_key".into(), Value::String(public_openssh));
-    if let Some(user) = profile
-        .get("username")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(user) = profile.get("username").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
         body.insert("valid_principals".into(), Value::String(user.to_string()));
     }
 
     let path = format!("{ssh_mount}sign/{ssh_role}");
     let resp = make_request(state, Operation::Write, path, Some(body)).await?;
-    let data: HashMap<String, Value> = resp
-        .and_then(|r| r.data)
-        .map(|m| m.into_iter().collect())
-        .unwrap_or_default();
+    let data: HashMap<String, Value> = resp.and_then(|r| r.data).map(|m| m.into_iter().collect()).unwrap_or_default();
     let signed_key = data
         .get("signed_key")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            CommandError::from(format!(
-                "ssh/{ssh_role} sign response missing `signed_key`"
-            ))
-        })?
+        .ok_or_else(|| CommandError::from(format!("ssh/{ssh_role} sign response missing `signed_key`")))?
         .to_string();
     // Capture the cert serial so the session can be joined to the
     // `ssh/sign` issuance audit row.
-    let cert_serial = data
-        .get("serial_number")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(String::from);
+    let cert_serial = data.get("serial_number").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
 
     Ok(ResolvedSshCredential {
-        credential: SshCredential::Cert {
-            pem: Zeroizing::new(private_openssh.to_string()),
-            cert_openssh: signed_key,
-        },
+        credential: SshCredential::Cert { pem: Zeroizing::new(private_openssh.to_string()), cert_openssh: signed_key },
         // CA-mode roles enforce `valid_principals` themselves; don't
         // second-guess the profile's username here.
         effective_username: None,
         on_close: None,
-        engine_mint: Some(EngineMint {
-            mode: "ca".into(),
-            cert_serial,
-        }),
+        engine_mint: Some(EngineMint { mode: "ca".into(), cert_serial }),
     })
 }
 
@@ -2565,11 +2133,7 @@ async fn mint_ssh_engine_otp(
         .get("target_host")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .or_else(|| {
-            meta.get("ip_address")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-        })
+        .or_else(|| meta.get("ip_address").and_then(|v| v.as_str()).filter(|s| !s.is_empty()))
         .ok_or_else(|| {
             CommandError::from(
                 "ssh-engine OTP mode needs an IP — set the resource's ip_address \
@@ -2589,44 +2153,26 @@ async fn mint_ssh_engine_otp(
 
     let mut body = Map::new();
     body.insert("ip".into(), Value::String(target_ip));
-    if let Some(user) = profile
-        .get("username")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(user) = profile.get("username").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
         body.insert("username".into(), Value::String(user.to_string()));
     }
 
     let path = format!("{ssh_mount}creds/{ssh_role}");
     let resp = make_request(state, Operation::Write, path, Some(body)).await?;
-    let data: HashMap<String, Value> = resp
-        .and_then(|r| r.data)
-        .map(|m| m.into_iter().collect())
-        .unwrap_or_default();
+    let data: HashMap<String, Value> = resp.and_then(|r| r.data).map(|m| m.into_iter().collect()).unwrap_or_default();
     let otp = data
         .get("key")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            CommandError::from(format!(
-                "ssh/{ssh_role} creds response missing `key`"
-            ))
-        })?
+        .ok_or_else(|| CommandError::from(format!("ssh/{ssh_role} creds response missing `key`")))?
         .to_string();
-    let effective_username = data
-        .get("username")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .filter(|s| !s.is_empty());
+    let effective_username = data.get("username").and_then(|v| v.as_str()).map(String::from).filter(|s| !s.is_empty());
 
     Ok(ResolvedSshCredential {
         credential: SshCredential::Password(Zeroizing::new(otp)),
         effective_username,
         on_close: None,
-        engine_mint: Some(EngineMint {
-            mode: "otp".into(),
-            cert_serial: None,
-        }),
+        engine_mint: Some(EngineMint { mode: "otp".into(), cert_serial: None }),
     })
 }
 
@@ -2649,10 +2195,7 @@ async fn resolve_pki_ssh(
 ) -> Result<ResolvedSshCredential, CommandError> {
     let issued = issue_pki_credential(state, resource_name, cs).await?;
     Ok(ResolvedSshCredential {
-        credential: SshCredential::PrivateKey {
-            pem: Zeroizing::new(issued.private_key),
-            passphrase: None,
-        },
+        credential: SshCredential::PrivateKey { pem: Zeroizing::new(issued.private_key), passphrase: None },
         // Don't override the profile.username — the PKI cert's CN
         // is the hostname, not the OS user the operator wants to
         // log in as. Profile.username stays authoritative.
@@ -2703,50 +2246,26 @@ async fn issue_pki_credential(
     if let Some(alt) = cs.get("alt_names").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
         body.insert("alt_names".into(), Value::String(alt.to_string()));
     }
-    if let Some(ttl) = cs
-        .get("cert_ttl_secs")
-        .and_then(|v| v.as_u64())
-        .filter(|n| *n > 0)
-    {
+    if let Some(ttl) = cs.get("cert_ttl_secs").and_then(|v| v.as_u64()).filter(|n| *n > 0) {
         body.insert("ttl".into(), Value::String(format!("{ttl}s")));
     }
 
     let path = format!("{pki_mount}issue/{pki_role}");
     let resp = make_request(state, Operation::Write, path, Some(body)).await?;
-    let data: HashMap<String, Value> = resp
-        .and_then(|r| r.data)
-        .map(|m| m.into_iter().collect())
-        .unwrap_or_default();
+    let data: HashMap<String, Value> = resp.and_then(|r| r.data).map(|m| m.into_iter().collect()).unwrap_or_default();
     let private_key = data
         .get("private_key")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| CommandError::from(format!(
-            "pki/{pki_role} issue response missing `private_key`"
-        )))?
+        .ok_or_else(|| CommandError::from(format!("pki/{pki_role} issue response missing `private_key`")))?
         .to_string();
     let certificate = data
         .get("certificate")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| CommandError::from(format!(
-            "pki/{pki_role} issue response missing `certificate`"
-        )))?
+        .ok_or_else(|| CommandError::from(format!("pki/{pki_role} issue response missing `certificate`")))?
         .to_string();
-    let issuing_ca = data
-        .get("issuing_ca")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .unwrap_or_default();
-    let serial_number = data
-        .get("serial_number")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .unwrap_or_default();
-    Ok(PkiIssued {
-        certificate,
-        private_key,
-        issuing_ca,
-        serial_number,
-    })
+    let issuing_ca = data.get("issuing_ca").and_then(|v| v.as_str()).map(String::from).unwrap_or_default();
+    let serial_number = data.get("serial_number").and_then(|v| v.as_str()).map(String::from).unwrap_or_default();
+    Ok(PkiIssued { certificate, private_key, issuing_ca, serial_number })
 }
 
 /// Decode a PEM block into the underlying DER bytes. We don't
@@ -2757,24 +2276,14 @@ async fn issue_pki_credential(
 fn pem_body_to_der(pem: &str, label: &str) -> Result<Vec<u8>, CommandError> {
     let begin = format!("-----BEGIN {label}-----");
     let end = format!("-----END {label}-----");
-    let start = pem
-        .find(&begin)
-        .ok_or_else(|| CommandError::from(format!("pem: missing `{begin}`")))?
-        + begin.len();
-    let stop = pem
-        .find(&end)
-        .ok_or_else(|| CommandError::from(format!("pem: missing `{end}`")))?;
+    let start = pem.find(&begin).ok_or_else(|| CommandError::from(format!("pem: missing `{begin}`")))? + begin.len();
+    let stop = pem.find(&end).ok_or_else(|| CommandError::from(format!("pem: missing `{end}`")))?;
     if stop <= start {
         return Err(CommandError::from(format!("pem: malformed `{label}`")));
     }
-    let body: String = pem[start..stop]
-        .chars()
-        .filter(|c| !c.is_ascii_whitespace())
-        .collect();
+    let body: String = pem[start..stop].chars().filter(|c| !c.is_ascii_whitespace()).collect();
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    STANDARD
-        .decode(body.as_bytes())
-        .map_err(|e| CommandError::from(format!("pem: base64 decode `{label}`: {e}")))
+    STANDARD.decode(body.as_bytes()).map_err(|e| CommandError::from(format!("pem: base64 decode `{label}`: {e}")))
 }
 
 fn pki_mount_prefix(cs: &Value) -> Result<String, CommandError> {
@@ -2784,9 +2293,7 @@ fn pki_mount_prefix(cs: &Value) -> Result<String, CommandError> {
         .map(|s| s.trim().to_string())
         .ok_or_else(|| CommandError::from("credential_source.pki_mount is required"))?;
     if raw.is_empty() {
-        return Err(CommandError::from(
-            "credential_source.pki_mount must not be empty".to_string(),
-        ));
+        return Err(CommandError::from("credential_source.pki_mount must not be empty".to_string()));
     }
     let trimmed = raw.trim_end_matches('/');
     Ok(format!("{trimmed}/"))
@@ -2803,35 +2310,16 @@ async fn resolve_secret_ssh(
         .ok_or_else(|| CommandError::from("credential_source.secret_id is required"))?;
     let path = format!("{RESOURCE_MOUNT}secrets/{resource_name}/{secret_id}");
     let resp = make_request(state, Operation::Read, path, None).await?;
-    let data: HashMap<String, Value> = resp
-        .and_then(|r| r.data)
-        .map(|m| m.into_iter().collect())
-        .unwrap_or_default();
+    let data: HashMap<String, Value> = resp.and_then(|r| r.data).map(|m| m.into_iter().collect()).unwrap_or_default();
 
-    let private_key = data
-        .get("private_key")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .unwrap_or_default();
-    let passphrase = data
-        .get("passphrase")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .unwrap_or_default();
-    let password = data
-        .get("password")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .unwrap_or_default();
+    let private_key = data.get("private_key").and_then(|v| v.as_str()).map(String::from).unwrap_or_default();
+    let passphrase = data.get("passphrase").and_then(|v| v.as_str()).map(String::from).unwrap_or_default();
+    let password = data.get("password").and_then(|v| v.as_str()).map(String::from).unwrap_or_default();
 
     let credential = if !private_key.is_empty() {
         SshCredential::PrivateKey {
             pem: Zeroizing::new(private_key),
-            passphrase: if passphrase.is_empty() {
-                None
-            } else {
-                Some(Zeroizing::new(passphrase))
-            },
+            passphrase: if passphrase.is_empty() { None } else { Some(Zeroizing::new(passphrase)) },
         }
     } else if !password.is_empty() {
         SshCredential::Password(Zeroizing::new(password))
@@ -2842,11 +2330,7 @@ async fn resolve_secret_ssh(
     };
     Ok(ResolvedSshCredential {
         credential,
-        effective_username: data
-            .get("username")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .filter(|s| !s.is_empty()),
+        effective_username: data.get("username").and_then(|v| v.as_str()).map(String::from).filter(|s| !s.is_empty()),
         on_close: None,
         engine_mint: None,
     })
@@ -2872,22 +2356,17 @@ async fn resolve_ldap_ssh(
     operator_credential: Option<&OperatorCredential>,
 ) -> Result<ResolvedSshCredential, CommandError> {
     let ldap_mount = ldap_mount_prefix(cs)?;
-    let bind_mode = cs
-        .get("bind_mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("operator");
+    let bind_mode = cs.get("bind_mode").and_then(|v| v.as_str()).unwrap_or("operator");
     match bind_mode {
         "operator" => {
             let oc = operator_credential.ok_or_else(|| {
                 CommandError::from(
-                    "ldap bind_mode = operator requires operator_credential on the open request"
-                        .to_string(),
+                    "ldap bind_mode = operator requires operator_credential on the open request".to_string(),
                 )
             })?;
             if oc.username.is_empty() || oc.password.is_empty() {
                 return Err(CommandError::from(
-                    "operator-supplied LDAP credential must carry both username and password"
-                        .to_string(),
+                    "operator-supplied LDAP credential must carry both username and password".to_string(),
                 ));
             }
             // We don't run an extra LDAP simple-bind validation
@@ -2906,38 +2385,22 @@ async fn resolve_ldap_ssh(
             })
         }
         "static_role" => {
-            let role = cs
-                .get("static_role")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    CommandError::from(
-                        "ldap bind_mode = static_role requires credential_source.static_role"
-                            .to_string(),
-                    )
-                })?;
+            let role = cs.get("static_role").and_then(|v| v.as_str()).ok_or_else(|| {
+                CommandError::from("ldap bind_mode = static_role requires credential_source.static_role".to_string())
+            })?;
             let path = format!("{ldap_mount}static-cred/{role}");
             let resp = make_request(state, Operation::Read, path, None).await?;
-            let data: HashMap<String, Value> = resp
-                .and_then(|r| r.data)
-                .map(|m| m.into_iter().collect())
-                .unwrap_or_default();
+            let data: HashMap<String, Value> =
+                resp.and_then(|r| r.data).map(|m| m.into_iter().collect()).unwrap_or_default();
             let username = data
                 .get("username")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    CommandError::from(format!(
-                        "ldap static-cred/{role} missing `username`"
-                    ))
-                })?
+                .ok_or_else(|| CommandError::from(format!("ldap static-cred/{role} missing `username`")))?
                 .to_string();
             let password = data
                 .get("password")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    CommandError::from(format!(
-                        "ldap static-cred/{role} missing `password`"
-                    ))
-                })?
+                .ok_or_else(|| CommandError::from(format!("ldap static-cred/{role} missing `password`")))?
                 .to_string();
             Ok(ResolvedSshCredential {
                 credential: SshCredential::Password(Zeroizing::new(password)),
@@ -2947,47 +2410,27 @@ async fn resolve_ldap_ssh(
             })
         }
         "library_set" => {
-            let set = cs
-                .get("library_set")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    CommandError::from(
-                        "ldap bind_mode = library_set requires credential_source.library_set"
-                            .to_string(),
-                    )
-                })?;
+            let set = cs.get("library_set").and_then(|v| v.as_str()).ok_or_else(|| {
+                CommandError::from("ldap bind_mode = library_set requires credential_source.library_set".to_string())
+            })?;
             let path = format!("{ldap_mount}library/{set}/check-out");
             let resp = make_request(state, Operation::Write, path, None).await?;
-            let data: HashMap<String, Value> = resp
-                .and_then(|r| r.data)
-                .map(|m| m.into_iter().collect())
-                .unwrap_or_default();
+            let data: HashMap<String, Value> =
+                resp.and_then(|r| r.data).map(|m| m.into_iter().collect()).unwrap_or_default();
             let username = data
                 .get("username")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    CommandError::from(format!(
-                        "ldap library/{set}/check-out missing `username`"
-                    ))
-                })?
+                .ok_or_else(|| CommandError::from(format!("ldap library/{set}/check-out missing `username`")))?
                 .to_string();
             let password = data
                 .get("password")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    CommandError::from(format!(
-                        "ldap library/{set}/check-out missing `password`"
-                    ))
-                })?
+                .ok_or_else(|| CommandError::from(format!("ldap library/{set}/check-out missing `password`")))?
                 .to_string();
             let lease_id = data
                 .get("lease_id")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    CommandError::from(format!(
-                        "ldap library/{set}/check-out missing `lease_id`"
-                    ))
-                })?
+                .ok_or_else(|| CommandError::from(format!("ldap library/{set}/check-out missing `lease_id`")))?
                 .to_string();
             Ok(ResolvedSshCredential {
                 credential: SshCredential::Password(Zeroizing::new(password)),
@@ -3018,9 +2461,7 @@ fn ldap_mount_prefix(cs: &Value) -> Result<String, CommandError> {
         .map(|s| s.trim().to_string())
         .ok_or_else(|| CommandError::from("credential_source.ldap_mount is required"))?;
     if raw.is_empty() {
-        return Err(CommandError::from(
-            "credential_source.ldap_mount must not be empty".to_string(),
-        ));
+        return Err(CommandError::from("credential_source.ldap_mount must not be empty".to_string()));
     }
     let trimmed = raw.trim_end_matches('/');
     Ok(format!("{trimmed}/"))
@@ -3061,11 +2502,7 @@ async fn record_recent_session(
     protocol: SessionProtocolTag,
 ) -> Result<(), CommandError> {
     let mut meta = read_resource_meta(state, resource_name).await?;
-    let mut recent: Vec<Value> = meta
-        .get("recent_sessions")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let mut recent: Vec<Value> = meta.get("recent_sessions").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let actor = caller_display(state).await;
     let entry = serde_json::json!({
         "ts": now_rfc3339(),
@@ -3080,28 +2517,18 @@ async fn record_recent_session(
     }
     meta.insert("recent_sessions".into(), Value::Array(recent));
     let path = format!("{RESOURCE_MOUNT}resources/{resource_name}");
-    let _ = make_request(state, Operation::Write, path, Some(meta))
-        .await
-        .map_err(|e| {
-            log::warn!(
-                "resource-connect: record_recent_session for `{resource_name}` failed: {e:?}"
-            );
-            e
-        });
+    let _ = make_request(state, Operation::Write, path, Some(meta)).await.map_err(|e| {
+        log::warn!("resource-connect: record_recent_session for `{resource_name}` failed: {e:?}");
+        e
+    });
     Ok(())
 }
 
 fn now_rfc3339() -> String {
     use std::time::SystemTime;
-    let secs = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0) as i64;
+    let secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
     let tm = libc_time_breakdown(secs);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        tm.year, tm.mon, tm.mday, tm.hour, tm.minute, tm.second
-    )
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", tm.year, tm.mon, tm.mday, tm.hour, tm.minute, tm.second)
 }
 
 struct BrokenDownTime {
@@ -3134,11 +2561,7 @@ fn libc_time_breakdown(unix: i64) -> BrokenDownTime {
         days -= dy;
         year += 1;
     }
-    let months = [
-        31u64,
-        if is_leap(year) { 29 } else { 28 },
-        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
-    ];
+    let months = [31u64, if is_leap(year) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let mut mon = 1u32;
     for &dm in &months {
         if days < dm {
@@ -3147,14 +2570,7 @@ fn libc_time_breakdown(unix: i64) -> BrokenDownTime {
         days -= dm;
         mon += 1;
     }
-    BrokenDownTime {
-        year,
-        mon,
-        mday: days as u32 + 1,
-        hour,
-        minute,
-        second,
-    }
+    BrokenDownTime { year, mon, mday: days as u32 + 1, hour, minute, second }
 }
 
 fn is_leap(y: i32) -> bool {
@@ -3183,9 +2599,7 @@ mod tests {
     #[test]
     fn permission_denied_matches_remote_and_embedded_shapes() {
         // Remote backend (RemoteBackend → HTTP).
-        assert!(is_permission_denied(&CommandError::from(
-            "HTTP 403: Permission denied"
-        )));
+        assert!(is_permission_denied(&CommandError::from("HTTP 403: Permission denied")));
         // Embedded backend (RvError::ErrPermissionDenied display).
         assert!(is_permission_denied(&CommandError::from("permission denied")));
         // Case-insensitive.
@@ -3194,12 +2608,8 @@ mod tests {
 
     #[test]
     fn permission_denied_ignores_unrelated_errors() {
-        assert!(!is_permission_denied(&CommandError::from(
-            "HTTP 500: internal error"
-        )));
-        assert!(!is_permission_denied(&CommandError::from(
-            "node `h` is unavailable: reset"
-        )));
+        assert!(!is_permission_denied(&CommandError::from("HTTP 500: internal error")));
+        assert!(!is_permission_denied(&CommandError::from("node `h` is unavailable: reset")));
         assert!(!is_permission_denied(&CommandError::from("404 not found")));
     }
 

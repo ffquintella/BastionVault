@@ -39,10 +39,8 @@ use std::time::Duration;
 
 use ironrdp::connector::connection_activation::ConnectionActivationState;
 use ironrdp::connector::{
-    ClientConnector, Config as ConnectorConfig, ConnectionResult, Credentials, DesktopSize,
-    SmartCardIdentity,
+    ClientConnector, Config as ConnectorConfig, ConnectionResult, Credentials, DesktopSize, SmartCardIdentity,
 };
-use ironrdp::pdu::nego::NegoRequestData;
 use ironrdp::displaycontrol::client::DisplayControlClient;
 use ironrdp::displaycontrol::pdu::MonitorLayoutEntry;
 use ironrdp::dvc::DrdynvcClient;
@@ -50,6 +48,7 @@ use ironrdp::pdu::gcc::KeyboardType;
 use ironrdp::pdu::geometry::InclusiveRectangle;
 use ironrdp::pdu::input::fast_path::{FastPathInput, FastPathInputEvent, KeyboardFlags};
 use ironrdp::pdu::input::mouse::{MousePdu, PointerFlags};
+use ironrdp::pdu::nego::NegoRequestData;
 use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
 use ironrdp::pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
 use ironrdp::session::fast_path;
@@ -90,6 +89,16 @@ pub struct RdpOpenArgs {
     /// When `None`, ironrdp's default (a cookie with the username) is
     /// used. Phase 7.4 of the Rustion integration.
     pub routing_token: Option<String>,
+    /// Optional pinned SHA-256 of the server's TLS leaf certificate
+    /// (`sha256:<hex>`). Set when dialling a Rustion bastion whose TLS
+    /// fingerprint was discovered via `GET /v1/listeners`. The RDP TLS
+    /// layer does **not** verify the cert against any CA (it's a
+    /// self-signed leaf with no chain), so when this is `Some` the pin
+    /// is the *only* authentication of the peer's TLS identity: a
+    /// mismatch aborts the connect (fail-closed). `None` keeps the
+    /// prior unpinned behaviour (direct dials, or a bastion that
+    /// advertised no fingerprint).
+    pub tls_pin_sha256: Option<String>,
 }
 
 /// What kind of credential the operator picked for this session.
@@ -199,17 +208,11 @@ pub async fn open_rdp_session(
         // Real async DNS — earlier code used `now_or_never()` which
         // returned `None` for every non-trivial lookup and surfaced
         // as a spurious "dns lookup returned no addresses".
-        let resolved = tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            tokio::net::lookup_host(host_port.clone()),
-        )
-        .await
-        .map_err(|_| format!("rdp: DNS lookup for {} timed out", args.host))?
-        .map_err(|e| format!("rdp: parse/resolve {}: {e}", host_port))?;
-        resolved
-            .into_iter()
-            .next()
-            .ok_or_else(|| format!("rdp: DNS lookup for {} returned no addresses", args.host))?
+        let resolved = tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::lookup_host(host_port.clone()))
+            .await
+            .map_err(|_| format!("rdp: DNS lookup for {} timed out", args.host))?
+            .map_err(|e| format!("rdp: parse/resolve {}: {e}", host_port))?;
+        resolved.into_iter().next().ok_or_else(|| format!("rdp: DNS lookup for {} returned no addresses", args.host))?
     };
     let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(target))
         .await
@@ -226,8 +229,7 @@ pub async fn open_rdp_session(
     // capability-set callback is invoked when the server announces
     // its supported monitor count / scaling — we don't need anything
     // from it today, so reply with an empty SVC message vector.
-    let drdynvc =
-        DrdynvcClient::new().with_dynamic_channel(DisplayControlClient::new(|_caps| Ok(Vec::new())));
+    let drdynvc = DrdynvcClient::new().with_dynamic_channel(DisplayControlClient::new(|_caps| Ok(Vec::new())));
     let mut connector = ClientConnector::new(cfg, local).with_static_channel(drdynvc);
     let should_upgrade = ironrdp_async::connect_begin(&mut framed, &mut connector)
         .await
@@ -237,9 +239,21 @@ pub async fn open_rdp_session(
     // as `x509_cert::Certificate`; extract the SubjectPublicKeyInfo
     // bytes for the connector's CredSSP / TLS-binding requirements.
     let initial = framed.into_inner_no_leftover();
-    let (upgraded, server_cert) = ironrdp_tls::upgrade(initial, args.host.as_str())
-        .await
-        .map_err(|e| format!("rdp: TLS upgrade: {e}"))?;
+    let (upgraded, server_cert) =
+        ironrdp_tls::upgrade(initial, args.host.as_str()).await.map_err(|e| format!("rdp: TLS upgrade: {e}"))?;
+
+    // Bastion TLS pinning. The RDP TLS handshake above trusts any cert
+    // (self-signed leaf, no chain to a CA), so when a pin is supplied it
+    // is the sole authentication of the peer's TLS identity. Verify the
+    // leaf's DER SHA-256 against the pin discovered from the bastion's
+    // `/v1/listeners`; a mismatch is fail-closed — abort before any
+    // session bytes flow. Non-bastion (direct) dials pass `None` and
+    // keep the prior behaviour.
+    if let Some(pin) = args.tls_pin_sha256.as_deref() {
+        verify_tls_pin(&server_cert, pin)?;
+        log::info!("resource-connect/rdp: bastion TLS leaf cert matched pin {pin}");
+    }
+
     let server_pubkey = ironrdp_tls::extract_tls_server_public_key(&server_cert)
         .ok_or_else(|| "rdp: server cert missing SubjectPublicKeyInfo".to_string())?
         .to_vec();
@@ -291,19 +305,9 @@ pub async fn open_rdp_session(
             }),
         );
     }
-    log::info!(
-        "resource-connect/rdp: opened session token={token} label={} ({}:{})",
-        args.label, args.host, args.port
-    );
+    log::info!("resource-connect/rdp: opened session token={token} label={} ({}:{})", args.label, args.host, args.port);
 
-    Ok(RdpOpenOutcome {
-        token,
-        frame_event,
-        closed_event,
-        resize_event,
-        width,
-        height,
-    })
+    Ok(RdpOpenOutcome { token, frame_event, closed_event, resize_event, width, height })
 }
 
 fn build_connector_config(args: &RdpOpenArgs) -> ConnectorConfig {
@@ -312,13 +316,9 @@ fn build_connector_config(args: &RdpOpenArgs) -> ConnectorConfig {
     // Security so the Phase-4 flow against NLA-disabled hosts
     // keeps working unchanged.
     let (credentials, enable_credssp) = match &args.credential {
-        RdpCredential::Password(pw) => (
-            Credentials::UsernamePassword {
-                username: args.username.clone(),
-                password: pw.as_str().to_owned(),
-            },
-            false,
-        ),
+        RdpCredential::Password(pw) => {
+            (Credentials::UsernamePassword { username: args.username.clone(), password: pw.as_str().to_owned() }, false)
+        }
         RdpCredential::SmartCard(sc) => (
             Credentials::SmartCard {
                 pin: sc.pin.clone(),
@@ -349,10 +349,7 @@ fn build_connector_config(args: &RdpOpenArgs) -> ConnectorConfig {
         keyboard_functional_keys_count: 12,
         ime_file_name: String::new(),
         dig_product_id: String::new(),
-        desktop_size: DesktopSize {
-            width: 1024,
-            height: 600,
-        },
+        desktop_size: DesktopSize { width: 1024, height: 600 },
         bitmap: None,
         client_build: 0,
         client_name: "BastionVault".to_owned(),
@@ -374,10 +371,7 @@ fn build_connector_config(args: &RdpOpenArgs) -> ConnectorConfig {
         // X.224 routing-token slot; the bastion consumes it at the
         // Connection Request stage and skips local auth. None on the
         // direct path keeps ironrdp's default behaviour (username cookie).
-        request_data: args
-            .routing_token
-            .as_ref()
-            .map(|t| NegoRequestData::routing_token(t.clone())),
+        request_data: args.routing_token.as_ref().map(|t| NegoRequestData::routing_token(t.clone())),
         autologon: false,
         enable_audio_playback: false,
         pointer_software_rendering: true,
@@ -418,9 +412,7 @@ struct CredSspNetworkClient {
 
 impl CredSspNetworkClient {
     fn new() -> Self {
-        Self {
-            inner: sspi::network_client::reqwest_network_client::ReqwestNetworkClient,
-        }
+        Self { inner: sspi::network_client::reqwest_network_client::ReqwestNetworkClient }
     }
 }
 
@@ -428,22 +420,19 @@ impl NetworkClient for CredSspNetworkClient {
     fn send(
         &mut self,
         request: &ironrdp::connector::sspi::generator::NetworkRequest,
-    ) -> impl std::future::Future<Output = ironrdp::connector::ConnectorResult<Vec<u8>>>
-    {
+    ) -> impl std::future::Future<Output = ironrdp::connector::ConnectorResult<Vec<u8>>> {
         // Clone the request so the task closure owns it; the
         // borrow lives only as long as `send`.
         let req = request.clone();
         let client = self.inner.clone();
         async move {
-            let result = tokio::task::spawn_blocking(move || {
-                sspi::network_client::NetworkClient::send(&client, &req)
-            })
-            .await
-            .map_err(|e| {
-                let msg = format!("rdp: network task: {e}");
-                log::error!("{msg}");
-                ironrdp::connector::general_err!("rdp: network task")
-            })?;
+            let result = tokio::task::spawn_blocking(move || sspi::network_client::NetworkClient::send(&client, &req))
+                .await
+                .map_err(|e| {
+                    let msg = format!("rdp: network task: {e}");
+                    log::error!("{msg}");
+                    ironrdp::connector::general_err!("rdp: network task")
+                })?;
             result.map_err(|e| {
                 let msg = format!("rdp: network: {e}");
                 log::error!("{msg}");
@@ -467,11 +456,7 @@ async fn active_stage_loop<S>(
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + 'static,
 {
-    let mut image = DecodedImage::new(
-        ironrdp::graphics::image_processing::PixelFormat::RgbA32,
-        width,
-        height,
-    );
+    let mut image = DecodedImage::new(ironrdp::graphics::image_processing::PixelFormat::RgbA32, width, height);
     let mut active_stage = ActiveStage::new(connection_result);
     let mut emit_buf = Vec::new();
 
@@ -677,14 +662,10 @@ where
     let mut buf = WriteBuf::new();
     loop {
         buf.clear();
-        let written = single_sequence_step_read(framed, seq, &mut buf)
-            .await
-            .map_err(|e| format!("reactivation step: {e:?}"))?;
+        let written =
+            single_sequence_step_read(framed, seq, &mut buf).await.map_err(|e| format!("reactivation step: {e:?}"))?;
         if written.size().is_some() {
-            framed
-                .write_all(buf.filled())
-                .await
-                .map_err(|e| format!("reactivation write: {e:?}"))?;
+            framed.write_all(buf.filled()).await.map_err(|e| format!("reactivation write: {e:?}"))?;
         }
         if let ConnectionActivationState::Finalized {
             io_channel_id,
@@ -718,14 +699,7 @@ where
 /// The framebuffer is stored row-strided at `image.width()`; the
 /// caller's rect is usually smaller, so we walk row-by-row and copy
 /// only the spanned columns.
-fn pack_subrect(
-    image: &DecodedImage,
-    x: u16,
-    y: u16,
-    w: u16,
-    h: u16,
-    out: &mut Vec<u8>,
-) {
+fn pack_subrect(image: &DecodedImage, x: u16, y: u16, w: u16, h: u16, out: &mut Vec<u8>) {
     let bpp = image.bytes_per_pixel();
     let stride = usize::from(image.width()) * bpp;
     let row_bytes = usize::from(w) * bpp;
@@ -771,12 +745,7 @@ fn control_to_fastpath(ctl: RdpControl) -> Option<FastPathInput> {
             x_position: x,
             y_position: y,
         }),
-        RdpControl::PointerButton {
-            button_index,
-            pressed,
-            x,
-            y,
-        } => {
+        RdpControl::PointerButton { button_index, pressed, x, y } => {
             // JS MouseEvent.button: 0=left, 1=middle, 2=right.
             let button = match button_index {
                 0 => PointerFlags::LEFT_BUTTON,
@@ -899,37 +868,20 @@ fn js_code_to_ps2_scancode(code: &str) -> Option<u8> {
     })
 }
 
-pub async fn send_control(
-    state: &crate::state::AppState,
-    token: &str,
-    ctl: RdpControl,
-) -> Result<(), String> {
+pub async fn send_control(state: &crate::state::AppState, token: &str, ctl: RdpControl) -> Result<(), String> {
     let sessions = state.connect_sessions.lock().await;
     match sessions.get(token) {
-        Some(SessionState::Rdp(s)) => s
-            .input_tx
-            .send(ctl)
-            .await
-            .map_err(|_| "rdp control channel closed".to_string()),
-        Some(_) => Err(format!(
-            "session `{token}` is not an RDP session (cannot route RDP control)"
-        )),
+        Some(SessionState::Rdp(s)) => s.input_tx.send(ctl).await.map_err(|_| "rdp control channel closed".to_string()),
+        Some(_) => Err(format!("session `{token}` is not an RDP session (cannot route RDP control)")),
         None => Err(format!("session token `{token}` not found")),
     }
 }
 
-pub async fn drop_session(
-    state: &crate::state::AppState,
-    token: &str,
-) -> Option<SessionCleanup> {
+pub async fn drop_session(state: &crate::state::AppState, token: &str) -> Option<SessionCleanup> {
     let mut sessions = state.connect_sessions.lock().await;
     let removed = sessions.remove(token);
     drop(sessions);
-    state
-        .rustion_session_bundles
-        .lock()
-        .await
-        .remove(token);
+    state.rustion_session_bundles.lock().await.remove(token);
     match removed {
         Some(SessionState::Rdp(s)) => {
             log::info!("resource-connect/rdp: closed session token={token}");
@@ -943,3 +895,82 @@ pub async fn drop_session(
     }
 }
 
+/// `sha256:<hex>` of a DER blob, lowercase hex — the canonical pin
+/// shape Rustion advertises and BV stores.
+fn cert_der_sha256(der: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(der);
+    let mut out = String::with_capacity(7 + digest.len() * 2);
+    out.push_str("sha256:");
+    for b in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{b:02x}");
+    }
+    out
+}
+
+/// Compare the observed TLS leaf certificate against a pinned
+/// `sha256:<hex>` digest. Returns `Ok(())` on match, an error string on
+/// mismatch or if the cert can't be re-encoded. The comparison tolerates
+/// an optional `sha256:` prefix and is case-insensitive on the hex so an
+/// operator-pasted pin in either form still matches.
+fn verify_tls_pin(server_cert: &x509_cert::Certificate, pin: &str) -> Result<(), String> {
+    use x509_cert::der::Encode as _;
+    let der = server_cert.to_der().map_err(|e| format!("rdp: re-encode server cert for pin check: {e}"))?;
+    let observed = cert_der_sha256(&der);
+    if tls_pin_matches(&observed, pin) {
+        Ok(())
+    } else {
+        Err(format!(
+            "rdp: bastion TLS certificate does not match the pinned fingerprint \
+             (expected {pin}, observed {observed}). Refusing to connect. If the \
+             bastion's TLS certificate was rotated, re-run listener discovery on \
+             the Rustion target to update the pin."
+        ))
+    }
+}
+
+/// Normalise + compare two fingerprints. Both sides are lowercased and
+/// any leading `sha256:` is stripped so `sha256:AB…` and `ab…` match.
+fn tls_pin_matches(observed: &str, expected: &str) -> bool {
+    fn norm(s: &str) -> String {
+        let lower = s.trim().to_ascii_lowercase();
+        lower.strip_prefix("sha256:").unwrap_or(&lower).to_string()
+    }
+    let e = norm(expected);
+    !e.is_empty() && norm(observed) == e
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::{cert_der_sha256, tls_pin_matches};
+
+    #[test]
+    fn sha256_shape_is_lowercase_hex_with_prefix() {
+        assert_eq!(
+            cert_der_sha256(&[0xde, 0xad, 0xbe, 0xef]),
+            "sha256:5f78c33274e43fa9de5659265c1d917e25c03722dcb0b8d27db8d5feaa813953"
+        );
+    }
+
+    #[test]
+    fn pin_match_tolerates_prefix_and_case() {
+        let obs = "sha256:5f78c33274e43fa9de5659265c1d917e25c03722dcb0b8d27db8d5feaa813953";
+        // exact
+        assert!(tls_pin_matches(obs, obs));
+        // no prefix on expected
+        assert!(tls_pin_matches(obs, "5f78c33274e43fa9de5659265c1d917e25c03722dcb0b8d27db8d5feaa813953"));
+        // uppercase expected
+        assert!(tls_pin_matches(obs, "SHA256:5F78C33274E43FA9DE5659265C1D917E25C03722DCB0B8D27DB8D5FEAA813953"));
+    }
+
+    #[test]
+    fn pin_mismatch_and_empty_are_rejected() {
+        let obs = "sha256:5f78c33274e43fa9de5659265c1d917e25c03722dcb0b8d27db8d5feaa813953";
+        assert!(!tls_pin_matches(obs, "sha256:0000"));
+        // An empty expected pin must never be treated as a match — that
+        // would silently disable pinning.
+        assert!(!tls_pin_matches(obs, ""));
+        assert!(!tls_pin_matches(obs, "sha256:"));
+    }
+}

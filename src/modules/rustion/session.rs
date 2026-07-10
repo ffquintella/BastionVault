@@ -61,6 +61,21 @@ pub struct SessionOpenRequest {
     /// ephemeral private key. Empty for every other kind.
     #[serde(default)]
     pub credential_cert: Option<String>,
+    /// For `rdp-cert` (smart-card RDP through the bastion): the DER
+    /// private key matching the certificate in `credential_material`.
+    /// Sealed into the envelope's `credential.extra["key"]`. Empty for
+    /// every other kind.
+    #[serde(default, with = "serde_bytes_compat")]
+    pub credential_key: Vec<u8>,
+    /// For `rdp-cert`: the smart-card PIN, sealed into
+    /// `credential.extra["pin"]`. Empty for every other kind.
+    #[serde(default)]
+    pub credential_pin: String,
+    /// For `rdp-cert`: optional AD domain / realm, sealed into
+    /// `credential.extra["domain"]`. Empty when the cert's UPN is
+    /// authoritative.
+    #[serde(default)]
+    pub credential_domain: String,
 
     /// Session policy from the profile. Rustion clamps `ttl_secs` to
     /// the authority record's `max_session_secs` regardless.
@@ -148,35 +163,21 @@ pub async fn open_session(
     request: &SessionOpenRequest,
 ) -> Result<SessionOpenResponse, SessionOpenError> {
     // 1. Pull the registry + health snapshot the dispatcher needs.
-    let ids = store
-        .list_target_ids()
-        .await
-        .map_err(|e| SessionOpenError::Store(format!("{e}")))?;
+    let ids = store.list_target_ids().await.map_err(|e| SessionOpenError::Store(format!("{e}")))?;
     let mut targets: Vec<RustionTarget> = Vec::with_capacity(ids.len());
     for id in &ids {
-        if let Some(t) = store
-            .get_target(id)
-            .await
-            .map_err(|e| SessionOpenError::Store(format!("{e}")))?
-        {
+        if let Some(t) = store.get_target(id).await.map_err(|e| SessionOpenError::Store(format!("{e}")))? {
             targets.push(t);
         }
     }
     let mut health_cache: Vec<(String, RustionTargetHealth)> = Vec::new();
     for t in &targets {
-        if let Some(h) = store
-            .get_health(&t.id)
-            .await
-            .map_err(|e| SessionOpenError::Store(format!("{e}")))?
-        {
+        if let Some(h) = store.get_health(&t.id).await.map_err(|e| SessionOpenError::Store(format!("{e}")))? {
             health_cache.push((t.id.clone(), h));
         }
     }
     let health = |id: &str| -> Option<RustionTargetHealth> {
-        health_cache
-            .iter()
-            .find(|(k, _)| k == id)
-            .map(|(_, v)| v.clone())
+        health_cache.iter().find(|(k, _)| k == id).map(|(_, v)| v.clone())
     };
 
     let pinned_ref: Option<&[String]> = request.bastions.as_deref();
@@ -204,10 +205,7 @@ pub async fn open_session(
                     bastion_name: target.name.clone(),
                     outcome: format!("envelope_build: {e}"),
                 });
-                return Err(SessionOpenError::Envelope(format!(
-                    "target `{}`: {e}",
-                    target.name
-                )));
+                return Err(SessionOpenError::Envelope(format!("target `{}`: {e}", target.name)));
             }
         };
 
@@ -258,35 +256,21 @@ pub async fn open_session_v2(
     operator: &OperatorContext,
     request: &SessionOpenRequest,
 ) -> Result<SessionOpenResponse, SessionOpenError> {
-    let ids = store
-        .list_target_ids()
-        .await
-        .map_err(|e| SessionOpenError::Store(format!("{e}")))?;
+    let ids = store.list_target_ids().await.map_err(|e| SessionOpenError::Store(format!("{e}")))?;
     let mut targets: Vec<RustionTarget> = Vec::with_capacity(ids.len());
     for id in &ids {
-        if let Some(t) = store
-            .get_target(id)
-            .await
-            .map_err(|e| SessionOpenError::Store(format!("{e}")))?
-        {
+        if let Some(t) = store.get_target(id).await.map_err(|e| SessionOpenError::Store(format!("{e}")))? {
             targets.push(t);
         }
     }
     let mut health_cache: Vec<(String, RustionTargetHealth)> = Vec::new();
     for t in &targets {
-        if let Some(h) = store
-            .get_health(&t.id)
-            .await
-            .map_err(|e| SessionOpenError::Store(format!("{e}")))?
-        {
+        if let Some(h) = store.get_health(&t.id).await.map_err(|e| SessionOpenError::Store(format!("{e}")))? {
             health_cache.push((t.id.clone(), h));
         }
     }
     let health = |id: &str| -> Option<RustionTargetHealth> {
-        health_cache
-            .iter()
-            .find(|(k, _)| k == id)
-            .map(|(_, v)| v.clone())
+        health_cache.iter().find(|(k, _)| k == id).map(|(_, v)| v.clone())
     };
 
     // Scope the (`!Send`) ThreadRng to the synchronous planning step so
@@ -320,10 +304,7 @@ pub async fn open_session_v2(
         let built = match build_open_envelope(master, target, operator, request) {
             Ok(b) => b,
             Err(e) => {
-                return Err(SessionOpenError::Envelope(format!(
-                    "target `{}`: {e}",
-                    target.name
-                )));
+                return Err(SessionOpenError::Envelope(format!("target `{}`: {e}", target.name)));
             }
         };
 
@@ -372,11 +353,7 @@ pub async fn open_session_v2(
                 bastion_id: target.id.clone(),
                 bastion_name: target.name.clone(),
                 bastion_selection,
-                bastion_candidates_tried: tried_ids
-                    .iter()
-                    .take(tried_ids.len() - 1)
-                    .cloned()
-                    .collect(),
+                bastion_candidates_tried: tried_ids.iter().take(tried_ids.len() - 1).cloned().collect(),
                 correlation_id: built.correlation_id.clone(),
             });
         }
@@ -427,6 +404,15 @@ fn build_open_envelope(
             username: request.credential_username.clone(),
             material: request.credential_material.clone(),
             cert: request.credential_cert.clone(),
+            rdp_cert: if request.credential_kind == "rdp-cert" {
+                Some(envelope::RdpCertMaterial {
+                    private_key_der: request.credential_key.clone(),
+                    pin: request.credential_pin.clone(),
+                    domain: request.credential_domain.clone(),
+                })
+            } else {
+                None
+            },
         },
         request.ttl_secs,
         request.max_renewals,
@@ -436,11 +422,7 @@ fn build_open_envelope(
 }
 
 #[maybe_async::maybe_async]
-async fn post_envelope(
-    client: &reqwest::Client,
-    target: &RustionTarget,
-    built: &BuiltEnvelope,
-) -> OpenAttemptOutcome {
+async fn post_envelope(client: &reqwest::Client, target: &RustionTarget, built: &BuiltEnvelope) -> OpenAttemptOutcome {
     let url = format!("https://{}/v1/sessions", target.endpoint.trim_end_matches('/'));
     let result = client
         .post(&url)
@@ -528,22 +510,12 @@ pub async fn renew_session(
         .map_err(|e| SessionRenewError::Master(format!("{e}")))?
         .ok_or_else(|| SessionRenewError::BastionNotFound(request.bastion_id.clone()))?;
 
-    let built = envelope::build_renew(
-        master,
-        &target,
-        operator,
-        &request.correlation_id,
-        request.extend_secs,
-    )
-    .map_err(|e| SessionRenewError::Envelope(format!("{e}")))?;
+    let built = envelope::build_renew(master, &target, operator, &request.correlation_id, request.extend_secs)
+        .map_err(|e| SessionRenewError::Envelope(format!("{e}")))?;
 
     let client = super::http::build_client_for(&target, Duration::from_secs(10))
         .map_err(|e| SessionRenewError::Transport(format!("{e}")))?;
-    let url = format!(
-        "https://{}/v1/sessions/{}/renew",
-        target.endpoint.trim_end_matches('/'),
-        request.session_id
-    );
+    let url = format!("https://{}/v1/sessions/{}/renew", target.endpoint.trim_end_matches('/'), request.session_id);
     let resp = client
         .post(&url)
         .header("X-Rustion-Authority", "bastion-vault")
@@ -556,10 +528,7 @@ pub async fn renew_session(
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(SessionRenewError::Http {
-            status: status.as_u16(),
-            body,
-        });
+        return Err(SessionRenewError::Http { status: status.as_u16(), body });
     }
 
     #[derive(Deserialize)]
@@ -569,10 +538,7 @@ pub async fn renew_session(
         renewals_used: u8,
         max_renewals: u8,
     }
-    let body: Body = resp
-        .json()
-        .await
-        .map_err(|e| SessionRenewError::Envelope(format!("body parse: {e}")))?;
+    let body: Body = resp.json().await.map_err(|e| SessionRenewError::Envelope(format!("body parse: {e}")))?;
 
     Ok(SessionRenewResponse {
         session_id: body.session_id,
@@ -603,11 +569,7 @@ pub async fn kill_session(
 
     let client = super::http::build_client_for(&target, Duration::from_secs(10))
         .map_err(|e| SessionRenewError::Transport(format!("{e}")))?;
-    let url = format!(
-        "https://{}/v1/sessions/{}",
-        target.endpoint.trim_end_matches('/'),
-        request.session_id
-    );
+    let url = format!("https://{}/v1/sessions/{}", target.endpoint.trim_end_matches('/'), request.session_id);
     let resp = client
         .delete(&url)
         .header("X-Rustion-Authority", "bastion-vault")
@@ -620,10 +582,7 @@ pub async fn kill_session(
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(SessionRenewError::Http {
-            status: status.as_u16(),
-            body,
-        });
+        return Err(SessionRenewError::Http { status: status.as_u16(), body });
     }
 
     #[derive(Deserialize)]
@@ -631,10 +590,7 @@ pub async fn kill_session(
         session_id: String,
         terminated_at: String,
     }
-    let body: Body = resp
-        .json()
-        .await
-        .map_err(|e| SessionRenewError::Envelope(format!("body parse: {e}")))?;
+    let body: Body = resp.json().await.map_err(|e| SessionRenewError::Envelope(format!("body parse: {e}")))?;
     Ok(SessionKillResponse {
         session_id: body.session_id,
         terminated_at: body.terminated_at,
@@ -672,13 +628,9 @@ mod serde_bytes_compat {
                 .collect(),
             serde_json::Value::String(s) => {
                 use base64::{engine::general_purpose::STANDARD, Engine as _};
-                STANDARD
-                    .decode(s.as_bytes())
-                    .map_err(|e| Error::custom(format!("base64 decode: {e}")))
+                STANDARD.decode(s.as_bytes()).map_err(|e| Error::custom(format!("base64 decode: {e}")))
             }
-            _ => Err(Error::custom(
-                "credential_material must be a base64 string or u8 array",
-            )),
+            _ => Err(Error::custom("credential_material must be a base64 string or u8 array")),
         }
     }
 }

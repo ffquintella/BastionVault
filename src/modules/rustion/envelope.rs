@@ -18,8 +18,8 @@
 //! the Rustion-side control-plane crate.
 
 use bv_crypto::{
-    bvrg, BvrgCredential, BvrgError, BvrgMasterPublicKey, BvrgMasterSigningKey, BvrgOperator,
-    BvrgPayload, BvrgSession, BvrgTarget,
+    bvrg, BvrgCredential, BvrgError, BvrgMasterPublicKey, BvrgMasterSigningKey, BvrgOperator, BvrgPayload, BvrgSession,
+    BvrgTarget,
 };
 use uuid::Uuid;
 
@@ -67,6 +67,55 @@ pub struct CredentialMaterial {
     /// `material` carries the matching ephemeral private key. `None` for
     /// every other kind.
     pub cert: Option<String>,
+    /// For `rdp-cert` (smart-card RDP through the bastion): the private
+    /// key + PIN + optional domain that go alongside the certificate.
+    /// `material` carries the certificate DER; this struct carries the
+    /// rest, sealed into the envelope's `credential.extra` map under
+    /// `key` / `pin` / `domain`. Rustion decrypts them inside its own
+    /// process and drives the upstream Kerberos PKINIT / SPNEGO CredSSP
+    /// exchange with the smart-card identity. `None` for every other
+    /// kind.
+    pub rdp_cert: Option<RdpCertMaterial>,
+}
+
+/// Smart-card material for an `rdp-cert` envelope. The certificate DER
+/// travels in `CredentialMaterial::material`; the private key + PIN
+/// travel here and are sealed into `credential.extra`.
+#[derive(Debug, Clone)]
+pub struct RdpCertMaterial {
+    /// DER-encoded private key matching the certificate. PKCS#1 or
+    /// PKCS#8; the bastion's sspi smart-card identity parses either.
+    pub private_key_der: Vec<u8>,
+    /// Smart-card PIN. The bastion's emulated PIV card accepts any
+    /// non-empty value; carried so the sspi credential is well-formed.
+    pub pin: String,
+    /// Optional AD domain / realm. Empty when the UPN in the cert is
+    /// authoritative.
+    pub domain: String,
+}
+
+/// Build the `credential.extra` CBOR map for a credential, or `None`
+/// when the kind carries no side data. Keeps the two cert-bearing kinds
+/// (`ssh-cert` text vs `rdp-cert` key/pin/domain) in one place so the
+/// wire shape Rustion reads back stays in lockstep with what we write.
+fn build_credential_extra(credential: &CredentialMaterial) -> Option<ciborium::value::Value> {
+    use ciborium::value::Value as CborValue;
+    if let Some(cert) = &credential.cert {
+        // ssh-cert: the signed OpenSSH certificate text.
+        return Some(CborValue::Map(vec![(CborValue::Text("cert".to_string()), CborValue::Text(cert.clone()))]));
+    }
+    if let Some(rc) = &credential.rdp_cert {
+        // rdp-cert: private key (DER bytes) + PIN (+ optional domain).
+        let mut map = vec![
+            (CborValue::Text("key".to_string()), CborValue::Bytes(rc.private_key_der.clone())),
+            (CborValue::Text("pin".to_string()), CborValue::Text(rc.pin.clone())),
+        ];
+        if !rc.domain.is_empty() {
+            map.push((CborValue::Text("domain".to_string()), CborValue::Text(rc.domain.clone())));
+        }
+        return Some(CborValue::Map(map));
+    }
+    None
 }
 
 /// Build an `open` envelope. Phase 3 calls this once the operator's
@@ -107,26 +156,17 @@ pub fn build_open(
             hostkey_pin: op_target_hostkey_pin,
         }),
         credential: Some(BvrgCredential {
+            // Seal any credential-kind side data into `extra`: for
+            // `ssh-cert` the signed OpenSSH cert text under `cert`; for
+            // `rdp-cert` the smart-card private key + PIN under
+            // `key`/`pin`/`domain`. Rustion decrypts inside its own
+            // process. Other kinds carry no `extra`.
+            extra: build_credential_extra(&credential),
             kind: credential.kind,
             username: credential.username,
             material: credential.material,
-            // For `ssh-cert`, seal the OpenSSH certificate text under
-            // `extra["cert"]` (a CBOR map). Rustion decrypts it inside its
-            // own process and presents the (key, cert) pair to the target
-            // `sshd`. Other kinds carry no `extra`.
-            extra: credential.cert.map(|cert| {
-                use ciborium::value::Value as CborValue;
-                CborValue::Map(vec![(
-                    CborValue::Text("cert".to_string()),
-                    CborValue::Text(cert),
-                )])
-            }),
         }),
-        session: Some(BvrgSession {
-            ttl_secs,
-            max_renewals,
-            recording: recording.to_string(),
-        }),
+        session: Some(BvrgSession { ttl_secs, max_renewals, recording: recording.to_string() }),
         operator: BvrgOperator {
             vault_user_id: operator.vault_user_id.clone(),
             vault_user_name: operator.vault_user_name.clone(),
@@ -140,12 +180,7 @@ pub fn build_open(
     let rustion_pub = resolve_kem_pubkey(target)?;
     let bytes = bvrg::build(&payload, master, &rustion_pub)?;
     let fingerprint = envelope_fingerprint(&bytes)?;
-    Ok(BuiltEnvelope {
-        bytes,
-        fingerprint,
-        nonce,
-        correlation_id,
-    })
+    Ok(BuiltEnvelope { bytes, fingerprint, nonce, correlation_id })
 }
 
 /// Build a `renew` envelope referencing the same `correlation_id` +
@@ -168,11 +203,7 @@ pub fn build_renew(
         not_after: issued_at + 5 * 60,
         target: None,
         credential: None,
-        session: Some(BvrgSession {
-            ttl_secs: extend_secs,
-            max_renewals: 0,
-            recording: "always".to_string(),
-        }),
+        session: Some(BvrgSession { ttl_secs: extend_secs, max_renewals: 0, recording: "always".to_string() }),
         operator: BvrgOperator {
             vault_user_id: operator.vault_user_id.clone(),
             vault_user_name: operator.vault_user_name.clone(),
@@ -186,12 +217,7 @@ pub fn build_renew(
     let rustion_pub = resolve_kem_pubkey(target)?;
     let bytes = bvrg::build(&payload, master, &rustion_pub)?;
     let fingerprint = envelope_fingerprint(&bytes)?;
-    Ok(BuiltEnvelope {
-        bytes,
-        fingerprint,
-        nonce,
-        correlation_id: correlation_id.to_string(),
-    })
+    Ok(BuiltEnvelope { bytes, fingerprint, nonce, correlation_id: correlation_id.to_string() })
 }
 
 /// Build a `kill` envelope. Rustion drops the matching session
@@ -227,12 +253,7 @@ pub fn build_kill(
     let rustion_pub = resolve_kem_pubkey(target)?;
     let bytes = bvrg::build(&payload, master, &rustion_pub)?;
     let fingerprint = envelope_fingerprint(&bytes)?;
-    Ok(BuiltEnvelope {
-        bytes,
-        fingerprint,
-        nonce,
-        correlation_id: correlation_id.to_string(),
-    })
+    Ok(BuiltEnvelope { bytes, fingerprint, nonce, correlation_id: correlation_id.to_string() })
 }
 
 /// Build a `deenrol` envelope. Phase 9.2 — BV sends this just before
@@ -275,12 +296,7 @@ pub fn build_deenrol(
     // surfaced only in the BV-side audit. Rustion infers the deenrol
     // intent from `op = "deenrol"`.
     let _ = extra;
-    Ok(BuiltEnvelope {
-        bytes,
-        fingerprint,
-        nonce,
-        correlation_id,
-    })
+    Ok(BuiltEnvelope { bytes, fingerprint, nonce, correlation_id })
 }
 
 /// Build an `attest` envelope. Phase 9's weekly re-attestation timer
@@ -316,12 +332,7 @@ pub fn build_attest(
     let rustion_pub = resolve_kem_pubkey(target)?;
     let bytes = bvrg::build(&payload, master, &rustion_pub)?;
     let fingerprint = envelope_fingerprint(&bytes)?;
-    Ok(BuiltEnvelope {
-        bytes,
-        fingerprint,
-        nonce,
-        correlation_id,
-    })
+    Ok(BuiltEnvelope { bytes, fingerprint, nonce, correlation_id })
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────
@@ -347,9 +358,7 @@ fn resolve_kem_pubkey(target: &RustionTarget) -> Result<Vec<u8>, BvrgError> {
     if target.kem_public_key.trim().is_empty() {
         return Err(BvrgError::PublicKeyLength);
     }
-    STANDARD
-        .decode(target.kem_public_key.as_bytes())
-        .map_err(|_| BvrgError::PublicKeyLength)
+    STANDARD.decode(target.kem_public_key.as_bytes()).map_err(|_| BvrgError::PublicKeyLength)
 }
 
 /// Compute the same SHA-256(magic || ct_len || ct) the verify path
@@ -457,6 +466,8 @@ mod tests {
             rdp_listener_host: String::new(),
             rdp_listener_port: 0,
             listeners_synced_at: String::new(),
+            ssh_host_key_fingerprint: String::new(),
+            rdp_tls_pin_sha256: String::new(),
         }
     }
 
@@ -490,6 +501,7 @@ mod tests {
                 username: "deploy".into(),
                 material: b"hunter2".to_vec(),
                 cert: None,
+                rdp_cert: None,
             },
             3600,
             3,
@@ -497,8 +509,7 @@ mod tests {
         )
         .expect("build_open");
 
-        let verified =
-            bvrg::verify(&built.bytes, &master_pub, kp.secret_key()).expect("verify");
+        let verified = bvrg::verify(&built.bytes, &master_pub, kp.secret_key()).expect("verify");
         assert_eq!(verified.payload.op, "open");
         assert_eq!(verified.payload.correlation_id, built.correlation_id);
         assert_eq!(verified.envelope_fingerprint, built.fingerprint);
@@ -527,8 +538,10 @@ mod tests {
             CredentialMaterial {
                 kind: "ssh-cert".into(),
                 username: "alice".into(),
-                material: b"-----BEGIN OPENSSH PRIVATE KEY-----\nEPHEMERAL\n-----END OPENSSH PRIVATE KEY-----\n".to_vec(),
+                material: b"-----BEGIN OPENSSH PRIVATE KEY-----\nEPHEMERAL\n-----END OPENSSH PRIVATE KEY-----\n"
+                    .to_vec(),
                 cert: Some("ssh-ed25519-cert-v01@openssh.com AAAA... alice".into()),
+                rdp_cert: None,
             },
             900,
             0,
@@ -540,10 +553,7 @@ mod tests {
         let cred = verified.payload.credential.expect("credential present");
         assert_eq!(cred.kind, "ssh-cert");
         assert_eq!(cred.username, "alice");
-        assert!(
-            !cred.material.is_empty(),
-            "ephemeral private key must be carried in material"
-        );
+        assert!(!cred.material.is_empty(), "ephemeral private key must be carried in material");
         // The cert text round-trips under extra["cert"], matching
         // Rustion's `SessionCredential::openssh_cert` extraction.
         let extra = cred.extra.expect("extra map present");
@@ -559,16 +569,80 @@ mod tests {
     }
 
     #[test]
+    fn build_open_rdp_cert_seals_key_pin_domain_in_extra() {
+        // A brokered `rdp-cert` envelope carries the certificate DER in
+        // `material` and the smart-card private key + PIN (+ domain)
+        // under `extra` — the shape Rustion's RDP proxy consumes to drive
+        // upstream Kerberos PKINIT / SPNEGO CredSSP.
+        let master = BvrgMasterSigningKey::generate().unwrap();
+        let master_pub = master.public_key();
+        let kp = MlKem768Provider.generate_keypair().unwrap();
+        let target = synthetic_target_with_kem_pub(kp.public_key());
+
+        let built = build_open(
+            &master,
+            &target,
+            &op_ctx(),
+            "win-db01.internal",
+            3389,
+            "rdp",
+            None,
+            CredentialMaterial {
+                kind: "rdp-cert".into(),
+                username: "alice@corp.example".into(),
+                material: b"\x30\x82CERTDER".to_vec(),
+                cert: None,
+                rdp_cert: Some(RdpCertMaterial {
+                    private_key_der: b"\x30\x82KEYDER".to_vec(),
+                    pin: "0000".into(),
+                    domain: "CORP".into(),
+                }),
+            },
+            900,
+            0,
+            "always",
+        )
+        .expect("build_open");
+
+        let verified = bvrg::verify(&built.bytes, &master_pub, kp.secret_key()).expect("verify");
+        let cred = verified.payload.credential.unwrap();
+        assert_eq!(cred.kind, "rdp-cert");
+        assert_eq!(cred.material, b"\x30\x82CERTDER", "cert DER in material");
+        let ciborium::value::Value::Map(pairs) = cred.extra.expect("extra map") else {
+            panic!("extra must be a CBOR map");
+        };
+        let key = pairs
+            .iter()
+            .find(|(k, _)| k.as_text() == Some("key"))
+            .and_then(|(_, v)| match v {
+                ciborium::value::Value::Bytes(b) => Some(b.clone()),
+                _ => None,
+            })
+            .expect("key bytes in extra");
+        assert_eq!(key, b"\x30\x82KEYDER");
+        let pin = pairs
+            .iter()
+            .find(|(k, _)| k.as_text() == Some("pin"))
+            .and_then(|(_, v)| v.as_text())
+            .expect("pin in extra");
+        assert_eq!(pin, "0000");
+        let domain = pairs
+            .iter()
+            .find(|(k, _)| k.as_text() == Some("domain"))
+            .and_then(|(_, v)| v.as_text())
+            .expect("domain in extra");
+        assert_eq!(domain, "CORP");
+    }
+
+    #[test]
     fn build_renew_carries_correlation() {
         let master = BvrgMasterSigningKey::generate().unwrap();
         let master_pub = master.public_key();
         let kp = MlKem768Provider.generate_keypair().unwrap();
         let target = synthetic_target_with_kem_pub(kp.public_key());
 
-        let built =
-            build_renew(&master, &target, &op_ctx(), "uuid-corr-original", 1800).unwrap();
-        let verified =
-            bvrg::verify(&built.bytes, &master_pub, kp.secret_key()).expect("verify");
+        let built = build_renew(&master, &target, &op_ctx(), "uuid-corr-original", 1800).unwrap();
+        let verified = bvrg::verify(&built.bytes, &master_pub, kp.secret_key()).expect("verify");
         assert_eq!(verified.payload.op, "renew");
         assert_eq!(verified.payload.correlation_id, "uuid-corr-original");
         assert!(verified.payload.session.unwrap().ttl_secs == 1800);
@@ -604,12 +678,8 @@ mod tests {
         assert!(bvrg::verify(&built.bytes, &curr_pub, kp.secret_key()).is_err());
 
         // Current + previous accepts and reports the previous index.
-        let (verified, idx) = verify_with_grace(
-            &built.bytes,
-            &[curr_pub.clone(), prev_pub.clone()],
-            kp.secret_key(),
-        )
-        .expect("verify_with_grace");
+        let (verified, idx) = verify_with_grace(&built.bytes, &[curr_pub.clone(), prev_pub.clone()], kp.secret_key())
+            .expect("verify_with_grace");
         assert_eq!(verified.payload.op, "attest");
         assert_eq!(idx, 1);
     }

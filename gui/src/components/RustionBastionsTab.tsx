@@ -88,6 +88,36 @@ function PubkeyHealthBadges({ kemPublicKey, mldsa65PublicKey }: PubkeyHealthBadg
   );
 }
 
+/// Transport-identity pin status for the bastion hop. When listener
+/// discovery has captured a fingerprint the dialler enforces it (green);
+/// when it hasn't, the hop falls back to unpinned TOFU (SSH) / no TLS
+/// verification (RDP) and the operator should re-run discovery against a
+/// Rustion that advertises listener schema v2. The full fingerprint is in
+/// the badge tooltip.
+function PinBadges({ target }: { target: RustionTargetSummary }) {
+  const sshPin = target.ssh_host_key_fingerprint ?? "";
+  const rdpPin = target.rdp_tls_pin_sha256 ?? "";
+  // Nothing synced yet at all — stay quiet rather than shout "unpinned"
+  // on a target whose listeners were never discovered.
+  if (!target.listeners_synced_at) return null;
+  return (
+    <div className="flex gap-1 mt-1 flex-wrap">
+      <span title={sshPin || "no SSH host-key fingerprint advertised"}>
+        <Badge
+          label={sshPin ? "SSH host-key pinned" : "SSH unpinned"}
+          variant={sshPin ? "success" : "warning"}
+        />
+      </span>
+      <span title={rdpPin || "no RDP TLS fingerprint advertised"}>
+        <Badge
+          label={rdpPin ? "RDP TLS pinned" : "RDP unpinned"}
+          variant={rdpPin ? "success" : "warning"}
+        />
+      </span>
+    </div>
+  );
+}
+
 export function RustionBastionsTab() {
   const { toast } = useToast();
   const [targets, setTargets] = useState<RustionTargetSummary[]>([]);
@@ -261,6 +291,7 @@ export function RustionBastionsTab() {
                       </td>
                       <td className="py-2 pr-3 font-mono text-xs">
                         {t.endpoint}
+                        <PinBadges target={t} />
                       </td>
                       <td className="py-2 pr-3 text-xs">
                         {h?.latency_ms_p50 ? `${h.latency_ms_p50} ms` : "—"}
