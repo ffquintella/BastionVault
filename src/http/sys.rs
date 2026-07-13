@@ -952,6 +952,10 @@ async fn sys_get_internal_ui_mounts_request_handler(
     let mut r = request_auth(&req);
     r.path = "sys/internal/ui/mounts".to_string();
     r.operation = Operation::Read;
+    // Forward the active-namespace selector so the handler lists the mounts of
+    // the target namespace, not root's. Without this the remote (HTTP) GUI
+    // sees root's engines in every child namespace and then 404s on use.
+    copy_namespace_header(&req, &mut r);
 
     handle_request(core, &mut r).await
 }
@@ -1041,6 +1045,7 @@ async fn sys_get_internal_ui_mount_request_handler(
     let mut r = request_auth(&req);
     r.path = "sys/internal/ui/mounts/".to_owned() + name.into_inner().as_str();
     r.operation = Operation::Read;
+    copy_namespace_header(&req, &mut r);
 
     handle_request(core, &mut r).await
 }

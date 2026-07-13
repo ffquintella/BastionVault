@@ -45,6 +45,24 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.28.2] - 2026-07-13
+
+### Fixed
+
+- **`sys/internal/ui/mounts` now reports the active namespace's mounts, not
+  root's.** The handler unconditionally enumerated Core's (root) mount router,
+  so the GUI believed `secret/`, `resources/`, … existed inside every child
+  namespace (which start empty). Once a token could actually operate in a child
+  namespace, every resource/secret call there 404'd with `Router mount not
+  found`. The handler now resolves the active namespace and lists the
+  registry's tenant-scoped mounts (auth methods stay global); the HTTP shim
+  forwards the `X-BastionVault-Namespace` header like the other sys routes. A
+  stray duplicate root-router loop was removed.
+- **GUI Resources page degrades gracefully when the resource engine isn't
+  mounted in the active namespace.** Instead of a red "Resource search failed:
+  HTTP 404: Router mount not found" toast, it now shows a "Resource engine not
+  enabled here" empty state pointing to Admin → Mounts.
+
 ## [0.28.1] - 2026-07-13
 
 ### Changed

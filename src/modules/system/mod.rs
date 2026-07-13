@@ -2914,46 +2914,61 @@ impl SystemBackend {
             }
         };
 
-        let mounts_router = self.core.mounts_router();
-        let entries = mounts_router.entries.read()?;
-        for (path, entry) in entries.iter() {
-            let me = entry.read()?;
-            if has_access(&me) {
-                if is_authed {
-                    secret_mounts.insert(path.clone(), Value::Object(self.mount_info(&me)));
-                } else {
-                    secret_mounts.insert(
-                        path.clone(),
-                        json!({
-                            "type": me.logical_type.clone(),
-                            "description": me.description.clone(),
-                            "options": me.options.clone(),
-                        }),
-                    );
+        // Secret-engine mounts are namespace-scoped: in a child namespace they
+        // live in the namespace registry, NOT Core's (root) mount router.
+        // Returning the root table here is what made the GUI believe
+        // `secret/`, `resources/`, … existed in a child namespace that has no
+        // such mount (child namespaces start empty) — every subsequent
+        // operation then 404'd with `ErrRouterMountNotFound`. Resolve the
+        // active namespace and enumerate the correct table. (Mirrors
+        // `handle_mount_table` / `handle_dashboard_summary`.)
+        match self.resolve_request_namespace(req).await? {
+            Some((uuid, path)) => {
+                // Child namespace: list the registry's tenant-scoped mounts,
+                // ACL-gated like the root branch. The registry gives only
+                // `(path, type, description)`, which is all this endpoint's
+                // consumers (`list_mounts` / `list_auth_methods`) read.
+                if let Some(acl) = acl.as_ref().filter(|_| is_authed) {
+                    let registry = self.namespace_registry()?;
+                    for (mount_path, logical_type, description) in
+                        registry.list_mounts(&self.core, &uuid, &path).await?
+                    {
+                        if acl.has_mount_access(&mount_path) {
+                            secret_mounts.insert(
+                                mount_path,
+                                json!({ "type": logical_type, "description": description }),
+                            );
+                        }
+                    }
+                }
+            }
+            None => {
+                let mounts_router = self.core.mounts_router();
+                let entries = mounts_router.entries.read()?;
+                for (path, entry) in entries.iter() {
+                    let me = entry.read()?;
+                    if has_access(&me) {
+                        if is_authed {
+                            secret_mounts
+                                .insert(path.clone(), Value::Object(self.mount_info(&me)));
+                        } else {
+                            secret_mounts.insert(
+                                path.clone(),
+                                json!({
+                                    "type": me.logical_type.clone(),
+                                    "description": me.description.clone(),
+                                    "options": me.options.clone(),
+                                }),
+                            );
+                        }
+                    }
                 }
             }
         }
 
-        let mounts_router = self.core.mounts_router();
-        let entries = mounts_router.entries.read()?;
-        for (path, entry) in entries.iter() {
-            let me = entry.read()?;
-            if has_access(&me) {
-                if is_authed {
-                    secret_mounts.insert(path.clone(), Value::Object(self.mount_info(&me)));
-                } else {
-                    secret_mounts.insert(
-                        path.clone(),
-                        json!({
-                            "type": me.logical_type.clone(),
-                            "description": me.description.clone(),
-                            "options": me.options.clone(),
-                        }),
-                    );
-                }
-            }
-        }
-
+        // Auth methods are global (not namespace-scoped) in the current
+        // phases, so they always come from the root auth router regardless of
+        // the active namespace.
         let entries = auth_module.mounts_router.entries.read()?;
         for (path, entry) in entries.iter() {
             let me = entry.read()?;
@@ -5264,6 +5279,67 @@ mod mod_system_tests {
                 auth.keys().collect::<Vec<_>>(),
             );
         }
+    }
+
+    /// `sys/internal/ui/mounts` must report the *active namespace's* secret
+    /// engines, not the root mount table. Regression for the GUI showing
+    /// root's `resources/`/`secret/` inside a child namespace (which starts
+    /// empty), so every real operation there 404'd with `ErrRouterMountNotFound`.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_system_internal_ui_mounts_namespace_scoped() {
+        let mut server = TestHttpServer::new("test_ui_mounts_ns_scoped", true).await;
+        let root = server.root_token.clone();
+        server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
+
+        // A child namespace, created empty (no default mounts, per spec).
+        let (s, r) = server
+            .write(
+                "v1/sys/namespaces/nschild",
+                serde_json::json!({}).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert!((200..300).contains(&s), "ns create: {s} {r:?}");
+
+        let ui_mounts = |ns: Option<&str>| -> serde_json::Map<String, Value> {
+            let headers: Vec<(&str, &str)> =
+                ns.map(|n| vec![("X-BastionVault-Namespace", n)]).unwrap_or_default();
+            let (s, r) = server
+                .request_with_headers(
+                    "GET",
+                    "v1/sys/internal/ui/mounts",
+                    None,
+                    Some(&root),
+                    None,
+                    &headers,
+                )
+                .unwrap();
+            assert_eq!(s, 200, "ui/mounts must 200: {r:?}");
+            r.get("secret").and_then(|v| v.as_object()).cloned().unwrap_or_default()
+        };
+
+        // Root (no header): the default engines are present.
+        let root_secret = ui_mounts(None);
+        assert!(
+            root_secret.contains_key("resources/") && root_secret.contains_key("secret/"),
+            "root must list its default engines: {:?}",
+            root_secret.keys().collect::<Vec<_>>()
+        );
+
+        // Child namespace: it has no `resources/`/`secret/` mount, so they must
+        // NOT leak in from root. (Before the fix, root's table was returned
+        // verbatim regardless of the active namespace.)
+        let child_secret = ui_mounts(Some("nschild"));
+        assert!(
+            !child_secret.contains_key("resources/"),
+            "child namespace must not report root's resources/ mount: {:?}",
+            child_secret.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !child_secret.contains_key("secret/"),
+            "child namespace must not report root's secret/ mount: {:?}",
+            child_secret.keys().collect::<Vec<_>>()
+        );
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]

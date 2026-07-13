@@ -237,6 +237,10 @@ export function ResourcesPage() {
   // resource list per session and page over it client-side.
   const sharedResourcesRef = useRef<string[] | null>(null);
   const [sharedFallback, setSharedFallback] = useState(false);
+  // True when the resource engine isn't mounted in the active namespace
+  // (child namespaces start empty). Not an error — render a "not enabled
+  // here" empty state instead of a scary toast.
+  const [engineMissing, setEngineMissing] = useState(false);
 
   useEffect(() => {
     loadTypeConfig();
@@ -338,6 +342,7 @@ export function ResourcesPage() {
       const token = ++fetchTokenRef.current;
       if (reset) {
         setLoading(true);
+        setEngineMissing(false);
       } else {
         setLoadingMore(true);
       }
@@ -406,7 +411,14 @@ export function ResourcesPage() {
           setTotal(0);
           setHasMore(false);
         }
-        toast("error", `Resource search failed: ${extractError(e)}`);
+        // The resource engine isn't mounted in the active namespace (child
+        // namespaces start empty). That's an expected state, not a failure —
+        // show a "not enabled here" empty state instead of an error toast.
+        if (extractError(e).includes("Router mount not found")) {
+          setEngineMissing(true);
+        } else {
+          toast("error", `Resource search failed: ${extractError(e)}`);
+        }
       } finally {
         if (fetchTokenRef.current === token) {
           setLoading(false);
@@ -707,6 +719,11 @@ export function ResourcesPage() {
 
         {loading ? (
           <p className="text-sm text-[var(--color-text-muted)]">Loading...</p>
+        ) : engineMissing ? (
+          <EmptyState
+            title="Resource engine not enabled here"
+            description="This namespace has no resource engine mounted, so there's nothing to manage yet. An administrator can enable it from Admin → Mounts (mount type “resource” at resources/)."
+          />
         ) : cards.length === 0 ? (
           <EmptyState title="No resources"
             description={
