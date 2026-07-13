@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.28.6] - 2026-07-13
+
+### Fixed
+
+- **Namespace switcher no longer flickers on navigation** (`gui/src/stores/namespaceStore.ts`, `gui/src/components/NamespaceSwitcher.tsx`) -- the sidebar namespace picker previously disappeared and slowly reappeared on every menu change, because each page renders its own `<Layout>` and the switcher re-fetched the namespace list on every remount, rendering nothing until the async fetch resolved. Namespace state now lives in a module-level Zustand store seeded from `localStorage`, so it paints its cached value instantly and refreshes in the background only once per session. `NamespacesPage` invalidates the cache after create/delete so the switcher stays accurate without a manual reload.
+
 ## [0.28.5] - 2026-07-13
 
 ### Fixed

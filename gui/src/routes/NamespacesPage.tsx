@@ -13,6 +13,7 @@ import {
 import type { NamespaceInfo, NamespaceQuotas } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
+import { useNamespaceStore } from "../stores/namespaceStore";
 
 const EMPTY_QUOTAS: NamespaceQuotas = {
   max_storage_bytes: 0,
@@ -34,6 +35,8 @@ const QUOTA_FIELDS: { key: keyof NamespaceQuotas; label: string; hint: string }[
 
 export function NamespacesPage() {
   const { toast } = useToast();
+  // Keep the sidebar switcher's cached list in sync after create/delete.
+  const refreshNamespaces = useNamespaceStore((s) => s.refresh);
   const [namespaces, setNamespaces] = useState<string[]>([]);
   const [details, setDetails] = useState<Record<string, NamespaceInfo>>({});
   const [rootInfo, setRootInfo] = useState<NamespaceInfo | null>(null);
@@ -135,6 +138,7 @@ export function NamespacesPage() {
       );
       setShowEdit(false);
       await loadAll();
+      void refreshNamespaces();
     } catch (e) {
       toast("error", extractError(e));
     } finally {
@@ -149,6 +153,7 @@ export function NamespacesPage() {
       toast("success", `Namespace "${deleteTarget}" deleted`);
       setDeleteTarget(null);
       await loadAll();
+      void refreshNamespaces();
     } catch (e) {
       toast("error", extractError(e));
     }

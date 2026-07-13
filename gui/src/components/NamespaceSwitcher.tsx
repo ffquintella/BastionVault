@@ -1,50 +1,35 @@
 import { useEffect, useState } from "react";
-import * as api from "../lib/api";
-
-const STORAGE_KEY = "bv.activeNamespace";
+import { useNamespaceStore } from "../stores/namespaceStore";
 
 /**
  * Top-of-sidebar namespace picker (multi-tenancy). Selecting a namespace sets
  * the session's active namespace on the backend — every subsequent logical
  * request carries the `X-BastionVault-Namespace` header — then reloads so all
- * pages re-fetch their data under the new tenant. The backend `AppState` is the
- * source of truth across webview reloads; `localStorage` only mirrors the
- * current value for display continuity.
+ * pages re-fetch their data under the new tenant.
+ *
+ * State lives in `useNamespaceStore`, a module-level cache seeded from
+ * `localStorage`. Because each page mounts its own `<Layout>`, an in-component
+ * fetch would re-run on every navigation and briefly render nothing — the
+ * "disappear then reappear" flicker. The store persists across route changes,
+ * so the switcher paints its cached value immediately and refreshes in the
+ * background only once per session.
  */
 export function NamespaceSwitcher() {
-  const [namespaces, setNamespaces] = useState<string[]>([]);
-  const [active, setActive] = useState<string>("");
+  const namespaces = useNamespaceStore((s) => s.namespaces);
+  const active = useNamespaceStore((s) => s.active);
+  const ensureLoaded = useNamespaceStore((s) => s.ensureLoaded);
+  const setActive = useNamespaceStore((s) => s.setActive);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const [list, current] = await Promise.all([
-          api.listNamespaces().catch(() => ({ namespaces: [] as string[] })),
-          api.getActiveNamespace().catch(() => ""),
-        ]);
-        if (cancelled) return;
-        setNamespaces(list.namespaces);
-        setActive(current);
-        if (current) localStorage.setItem(STORAGE_KEY, current);
-        else localStorage.removeItem(STORAGE_KEY);
-      } catch {
-        /* namespaces unavailable (e.g. minimal build) — hide gracefully */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    void ensureLoaded();
+  }, [ensureLoaded]);
 
   async function onChange(e: React.ChangeEvent<HTMLSelectElement>) {
     const next = e.target.value;
     setBusy(true);
     try {
-      await api.setActiveNamespace(next);
-      if (next) localStorage.setItem(STORAGE_KEY, next);
-      else localStorage.removeItem(STORAGE_KEY);
+      await setActive(next);
       // Reload so every page re-fetches under the new namespace.
       window.location.reload();
     } catch {
@@ -53,7 +38,8 @@ export function NamespaceSwitcher() {
   }
 
   // Nothing to switch between — don't clutter the sidebar on single-tenant
-  // deployments that never created a child namespace.
+  // deployments that never created a child namespace. Seeded from cache, so
+  // multi-tenant sessions render immediately without a load flicker.
   if (namespaces.length === 0 && !active) return null;
 
   return (
