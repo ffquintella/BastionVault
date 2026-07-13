@@ -45,6 +45,33 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.28.3] - 2026-07-13
+
+### Added
+
+- **New namespaces are seeded with default secret engines.** Creating a
+  namespace now mounts a default engine set (`secret/` kv-v2, `resources/`,
+  `files/`, `resource-group/`, `identity/`) so it is usable immediately instead
+  of starting empty — which had collapsed the GUI's mount-gated nav (Resources,
+  Secrets, Files, …) the moment you switched into a child namespace. Bastion
+  engines (`rustion/`, `ssh-broker/`) and `pki`/`ssh` remain opt-in per
+  namespace. Seeding is best-effort (a failed mount is logged, not fatal).
+
+### Changed
+
+- **Namespace deletion cascade-unmounts.** Because every namespace is now
+  auto-seeded with engines, `DELETE sys/namespaces/<path>` tears down the
+  namespace's mounts (clearing each engine's data) before removing the record,
+  rather than refusing while mounts exist. Child namespaces still block
+  deletion. Deleting a namespace therefore destroys the data it held.
+
+### Fixed
+
+- **`sys/dashboard/summary` counts are now namespace-scoped.** The HTTP shim did
+  not forward the `X-BastionVault-Namespace` header, so the Dashboard showed
+  root's engine/policy/identity counts in every child namespace. Same header-
+  forwarding gap as the `ui/mounts` fix.
+
 ## [0.28.2] - 2026-07-13
 
 ### Fixed

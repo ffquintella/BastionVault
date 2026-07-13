@@ -21,7 +21,12 @@
 //! to the same path by [`super::router::rewrite_request_for_namespace`] before
 //! routing. The pre-route auth pipeline runs unchanged for both.
 //!
-//! Child namespaces start empty (no default mounts) per the spec.
+//! [`ensure_router`] itself never seeds mounts — a namespace with no persisted
+//! mount table gets an empty one. New namespaces are instead seeded with a
+//! default engine set at *create* time by the `sys/namespaces` write handler
+//! (`SystemModule::seed_default_namespace_mounts`), and torn down by the
+//! cascade in `handle_namespace_delete`, so the registry layer stays purely
+//! mechanical.
 
 use std::sync::Arc;
 

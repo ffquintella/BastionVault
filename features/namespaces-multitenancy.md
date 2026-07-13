@@ -363,10 +363,10 @@ The biggest non-`namespace/` change is the **mount router**: today there is one 
 LIST   /v1/sys/namespaces                          # list children of caller's namespace
 GET    /v1/sys/namespaces                          # read the caller's OWN namespace config (root when unscoped)
 POST   /v1/sys/namespaces                          # update the caller's OWN namespace config (quotas + child_visible_default)
-POST   /v1/sys/namespaces/<path>                   # create
+POST   /v1/sys/namespaces/<path>                   # create (seeds default engines: secret/, resources/, files/, resource-group/, identity/)
 GET    /v1/sys/namespaces/<path>                   # read metadata + quotas
 PATCH  /v1/sys/namespaces/<path>                   # update (rename, quotas, child_visible default)
-DELETE /v1/sys/namespaces/<path>                   # delete (refused unless empty)
+DELETE /v1/sys/namespaces/<path>                   # delete (cascade-unmounts engines + clears their data; refused if it has child namespaces)
 POST   /v1/sys/namespaces/<path>/seal              # seal a single namespace (Phase 4 nice-to-have)
 POST   /v1/sys/namespaces/<path>/unseal            # symmetric
 GET    /v1/sys/namespaces/<path>/quotas

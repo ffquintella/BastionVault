@@ -3236,9 +3236,57 @@ impl SystemBackend {
         let ns = if store.get_by_path(&path).await?.is_some() {
             store.update(&path, Some(quotas), Some(child_visible_default)).await?
         } else {
-            store.create(&path, quotas, child_visible_default).await?
+            let ns = store.create(&path, quotas, child_visible_default).await?;
+            // Seed the default secret engines so a new namespace is usable out
+            // of the box (otherwise it starts empty and the GUI's mount-gated
+            // nav collapses). Best-effort — see `seed_default_namespace_mounts`.
+            self.seed_default_namespace_mounts(&ns.uuid, &ns.path).await;
+            ns
         };
         Ok(Some(Self::namespace_to_response(&ns)))
+    }
+
+    /// Secret engines mounted into every newly created namespace so it is
+    /// immediately usable. Mirrors the core defaults a fresh root install
+    /// receives, minus `sys/` (implicit and global — never namespaced) and the
+    /// bastion-fleet engines (`rustion/`, `ssh-broker/`) which are opt-in.
+    /// `pki`/`ssh` are likewise not defaults anywhere and stay per-namespace.
+    const DEFAULT_NAMESPACE_MOUNTS: &'static [(&'static str, &'static str, &'static str)] = &[
+        ("secret/", "kv-v2", "key/value secret storage"),
+        ("resources/", "resource", "infrastructure resource storage"),
+        ("files/", "files", "binary file resources (keys, certs, configs)"),
+        ("resource-group/", "resource-group", "named collections of resources"),
+        ("identity/", "identity", "user and application group management"),
+    ];
+
+    /// Seed a freshly created namespace with [`Self::DEFAULT_NAMESPACE_MOUNTS`].
+    /// Best-effort: a single mount failure is logged and does not abort the
+    /// namespace creation, so the namespace still exists and the operator can
+    /// mount the remainder manually.
+    async fn seed_default_namespace_mounts(&self, ns_uuid: &str, ns_path: &str) {
+        let Some(module) =
+            self.core.module_manager.get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+        else {
+            log::warn!(target: "namespace", "cannot seed default mounts: namespace module unavailable");
+            return;
+        };
+        for (path, logical_type, description) in Self::DEFAULT_NAMESPACE_MOUNTS {
+            let me = crate::mount::MountEntry {
+                table: crate::mount::MOUNT_TABLE_TYPE.to_string(),
+                tainted: false,
+                uuid: crate::utils::generate_uuid(),
+                path: path.to_string(),
+                logical_type: logical_type.to_string(),
+                description: description.to_string(),
+                ..Default::default()
+            };
+            if let Err(e) = module.registry.mount(&self.core, ns_uuid, ns_path, &me).await {
+                log::warn!(
+                    target: "namespace",
+                    "seeding default mount {path} in namespace {ns_path:?} failed: {e}"
+                );
+            }
+        }
     }
 
     pub async fn handle_namespace_delete(
@@ -3249,20 +3297,40 @@ impl SystemBackend {
         let store = self.resolve_namespace_store()?;
         let path = req.get_data_as_str("path")?;
 
-        // Refuse deletion while the namespace still holds mounts. The mount
-        // table lives in the per-namespace router registry, so resolve the
-        // namespace's UUID and ask the registry for its mount count.
-        let mount_count = match store.get_by_path(&path).await? {
-            Some(ns) => self
-                .core
-                .module_manager
-                .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
-                .map(|m| m.registry.mount_count(&ns.uuid))
-                .unwrap_or(0),
-            None => 0,
-        };
+        // Cascade-unmount: tear down the namespace's engines (and their data)
+        // before removing the namespace record. Namespaces are auto-seeded with
+        // default engines, so a strict "unmount everything first" guard would
+        // make even an unused namespace undeletable. Child namespaces still
+        // block deletion (enforced in `store.delete`). `unmount_one` clears each
+        // engine's barrier view, so this destroys any secrets/resources the
+        // namespace held — deleting a tenant removes the tenant's data.
+        if let Some(ns) = store.get_by_path(&path).await? {
+            if let Some(module) =
+                self.core.module_manager.get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+            {
+                let mounts = module
+                    .registry
+                    .list_mounts(&self.core, &ns.uuid, &ns.path)
+                    .await
+                    .unwrap_or_default();
+                for (mount_path, _type, _desc) in mounts {
+                    if let Err(e) =
+                        module.registry.unmount(&self.core, &ns.uuid, &ns.path, &mount_path).await
+                    {
+                        log::warn!(
+                            target: "namespace",
+                            "cascade-unmount {mount_path} in namespace {:?} failed: {e}",
+                            ns.path
+                        );
+                    }
+                }
+                module.registry.forget(&ns.uuid);
+            }
+        }
 
-        store.delete(&path, mount_count).await?;
+        // Mounts are gone now; `store.delete` still refuses the root and any
+        // namespace that has child namespaces.
+        store.delete(&path, 0).await?;
         Ok(None)
     }
 
@@ -5283,15 +5351,16 @@ mod mod_system_tests {
 
     /// `sys/internal/ui/mounts` must report the *active namespace's* secret
     /// engines, not the root mount table. Regression for the GUI showing
-    /// root's `resources/`/`secret/` inside a child namespace (which starts
-    /// empty), so every real operation there 404'd with `ErrRouterMountNotFound`.
+    /// root's full engine list inside a child namespace, so every real
+    /// operation there 404'd with `ErrRouterMountNotFound`. Also covers mount
+    /// seeding: a newly created namespace carries its own default engines.
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_system_internal_ui_mounts_namespace_scoped() {
         let mut server = TestHttpServer::new("test_ui_mounts_ns_scoped", true).await;
         let root = server.root_token.clone();
         server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
 
-        // A child namespace, created empty (no default mounts, per spec).
+        // Creating a namespace seeds it with the default engines.
         let (s, r) = server
             .write(
                 "v1/sys/namespaces/nschild",
@@ -5326,18 +5395,22 @@ mod mod_system_tests {
             root_secret.keys().collect::<Vec<_>>()
         );
 
-        // Child namespace: it has no `resources/`/`secret/` mount, so they must
-        // NOT leak in from root. (Before the fix, root's table was returned
-        // verbatim regardless of the active namespace.)
+        // Child namespace: reports its OWN seeded default engines...
         let child_secret = ui_mounts(Some("nschild"));
+        for engine in ["secret/", "resources/", "files/", "resource-group/", "identity/"] {
+            assert!(
+                child_secret.contains_key(engine),
+                "seeded child namespace must report its default engine {engine}: {:?}",
+                child_secret.keys().collect::<Vec<_>>()
+            );
+        }
+        // ...but NOT root-only mounts (`rustion/`, `ssh-broker/` are core
+        // defaults at root yet deliberately excluded from the namespace seed),
+        // proving the listing is the child's tenant-scoped table — not root's
+        // returned verbatim (the original bug).
         assert!(
-            !child_secret.contains_key("resources/"),
-            "child namespace must not report root's resources/ mount: {:?}",
-            child_secret.keys().collect::<Vec<_>>()
-        );
-        assert!(
-            !child_secret.contains_key("secret/"),
-            "child namespace must not report root's secret/ mount: {:?}",
+            !child_secret.contains_key("rustion/"),
+            "child namespace must not report root-only mounts (no cross-namespace leak): {:?}",
             child_secret.keys().collect::<Vec<_>>()
         );
     }

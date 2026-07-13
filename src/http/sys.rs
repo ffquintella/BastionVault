@@ -238,6 +238,9 @@ async fn sys_dashboard_summary_request_handler(
     let mut r = request_auth(&req);
     r.path = "sys/dashboard/summary".to_string();
     r.operation = Operation::Read;
+    // Scope the counts to the active namespace; without this the dashboard
+    // shows root's engine/policy/identity counts in every child namespace.
+    copy_namespace_header(&req, &mut r);
     handle_request(core, &mut r).await
 }
 
