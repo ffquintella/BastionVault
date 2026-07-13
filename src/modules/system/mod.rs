@@ -5471,6 +5471,64 @@ mod mod_system_tests {
         );
     }
 
+    /// Policy CRUD via `sys/policies/acl` is scoped by the active namespace
+    /// (`writer_namespace_path` reads the header). Regression for the policy
+    /// shims not forwarding it — the Policies page in a child namespace then
+    /// listed/edited root's policies.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_sys_policies_are_namespace_scoped() {
+        let mut server = TestHttpServer::new("test_sys_policies_ns_scoped", true).await;
+        let root = server.root_token.clone();
+        server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
+
+        let (s, r) = server
+            .write("v1/sys/namespaces/pns", serde_json::json!({}).as_object().cloned(), Some(&root))
+            .unwrap();
+        assert!((200..300).contains(&s), "ns create: {s} {r:?}");
+
+        // A policy written at root (no header).
+        let (s, r) = server
+            .request_with_headers(
+                "POST",
+                "v1/sys/policies/acl/root-only-pol",
+                serde_json::json!({ "policy": "path \"secret/*\" { capabilities = [\"read\"] }" })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+                None,
+                &[],
+            )
+            .unwrap();
+        assert!((200..300).contains(&s), "root policy write: {s} {r:?}");
+
+        // Listing at root includes it...
+        let (s, r) =
+            server.request_with_headers("GET", "v1/sys/policies/acl", None, Some(&root), None, &[]).unwrap();
+        assert_eq!(s, 200, "root policy list: {r:?}");
+        assert!(
+            serde_json::to_string(&r).unwrap().contains("root-only-pol"),
+            "root's policy must appear in the root list: {r:?}"
+        );
+
+        // ...but listing scoped to `pns` must NOT (the header scopes the query
+        // to the child's own — empty — policy keyspace).
+        let (s, r) = server
+            .request_with_headers(
+                "GET",
+                "v1/sys/policies/acl",
+                None,
+                Some(&root),
+                None,
+                &[("X-BastionVault-Namespace", "pns")],
+            )
+            .unwrap();
+        assert_eq!(s, 200, "namespaced policy list: {r:?}");
+        assert!(
+            !serde_json::to_string(&r).unwrap().contains("root-only-pol"),
+            "root's policy must NOT leak into a child namespace's policy list: {r:?}"
+        );
+    }
+
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_system_internal_ui_mounts_path() {
         let mut test_http_server = TestHttpServer::new("test_system_internal_ui_mounts_path", true).await;

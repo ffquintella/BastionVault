@@ -45,6 +45,20 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.28.5] - 2026-07-13
+
+### Fixed
+
+- **Policy CRUD (`sys/policy*`, `sys/policies/acl*`, `sys/policy-tests/*`) is now
+  namespace-scoped over HTTP.** All ten policy shims failed to forward the
+  `X-BastionVault-Namespace` header, so the Policies page in a child namespace
+  listed, read, wrote, and deleted **root's** policies (the handlers scope by
+  the header via `writer_namespace_path`). Completes a full audit of every
+  `sys` HTTP shim: the header is now forwarded by every namespace-aware route
+  (mounts, ui/mounts, dashboard, namespaces, ns-assignment, default-account,
+  capabilities-self, and policies); genuinely global routes (seal/init, HSM,
+  cluster, health, auth-method enable/disable, plugins) correctly omit it.
+
 ## [0.28.4] - 2026-07-13
 
 ### Fixed

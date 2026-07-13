@@ -828,6 +828,9 @@ async fn sys_list_policy_request_handler(
     let mut r = request_auth(&req);
     r.path = "sys/policy".to_string();
     r.operation = Operation::List;
+    // Policy CRUD is scoped by the active namespace (`writer_namespace_path`
+    // reads this header); without it the Policies page always hits root.
+    copy_namespace_header(&req, &mut r);
 
     handle_request(core, &mut r).await
 }
@@ -846,6 +849,7 @@ async fn sys_read_policy_request_handler(
     if policy_name.is_empty() {
         r.operation = Operation::List;
     }
+    copy_namespace_header(&req, &mut r);
 
     handle_request(core, &mut r).await
 }
@@ -868,6 +872,7 @@ async fn sys_write_policy_request_handler(
     r.path = "sys/policy/".to_owned() + policy_name.as_str();
     r.operation = Operation::Write;
     r.body = Some(payload);
+    copy_namespace_header(&req, &mut r);
 
     handle_request(core, &mut r).await
 }
@@ -885,6 +890,7 @@ async fn sys_delete_policy_request_handler(
     let mut r = request_auth(&req);
     r.path = "sys/policy/".to_owned() + policy_name.as_str();
     r.operation = Operation::Delete;
+    copy_namespace_header(&req, &mut r);
 
     handle_request(core, &mut r).await
 }
@@ -896,6 +902,7 @@ async fn sys_list_policies_request_handler(
     let mut r = request_auth(&req);
     r.path = "sys/policies/acl".to_string();
     r.operation = Operation::List;
+    copy_namespace_header(&req, &mut r);
 
     handle_request(core, &mut r).await
 }
@@ -914,6 +921,7 @@ async fn sys_read_policies_request_handler(
     if policy_name.is_empty() {
         r.operation = Operation::List;
     }
+    copy_namespace_header(&req, &mut r);
 
     handle_request(core, &mut r).await
 }
@@ -936,6 +944,7 @@ async fn sys_write_policies_request_handler(
     r.path = "sys/policies/acl/".to_owned() + policy_name.as_str();
     r.operation = Operation::Write;
     r.body = Some(payload);
+    copy_namespace_header(&req, &mut r);
 
     handle_request(core, &mut r).await
 }
@@ -953,6 +962,7 @@ async fn sys_delete_policies_request_handler(
     let mut r = request_auth(&req);
     r.path = "sys/policies/acl/".to_owned() + policy_name.as_str();
     r.operation = Operation::Delete;
+    copy_namespace_header(&req, &mut r);
 
     handle_request(core, &mut r).await
 }
@@ -1017,6 +1027,7 @@ async fn sys_policy_tests_read_request_handler(
     let mut r = request_auth(&req);
     r.path = format!("sys/policy-tests/{policy_name}");
     r.operation = Operation::Read;
+    copy_namespace_header(&req, &mut r);
 
     handle_request(core, &mut r).await
 }
@@ -1045,6 +1056,7 @@ async fn sys_policy_tests_write_request_handler(
     r.path = format!("sys/policy-tests/{policy_name}");
     r.operation = Operation::Write;
     r.body = Some(payload);
+    copy_namespace_header(&req, &mut r);
 
     handle_request(core, &mut r).await
 }
