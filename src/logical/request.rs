@@ -21,6 +21,14 @@ pub struct Request {
     pub path: String,
     pub match_path: Option<Arc<Path>>,
     pub headers: Option<HashMap<String, String>>,
+    /// Active namespace path (e.g. `dti/esi`) resolved once from the
+    /// namespace header by `rewrite_request_for_namespace` at the top of
+    /// `Core::handle_request`. `None` for the root namespace or when no
+    /// namespace header is present. Set even for header-scoped paths
+    /// (`sys/`, `auth/`, `identity/`) whose path string is *not*
+    /// rewritten, so downstream owner/share/ACL bookkeeping can key
+    /// records on the namespace regardless of path-rewrite behavior.
+    pub namespace_path: Option<String>,
     pub body: Option<Map<String, Value>>,
     pub data: Option<Map<String, Value>>,
     pub client_token: String,

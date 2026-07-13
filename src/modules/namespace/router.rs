@@ -151,19 +151,6 @@ pub async fn rewrite_request_for_namespace(core: &Core, req: &mut Request) -> Re
         return Ok(());
     }
 
-    // Deployment-level backends are addressed at the root mount and scope
-    // themselves by the namespace *header* (not by path rewriting): `sys/`
-    // (incl. policy + audit + namespace CRUD), `auth/` logins, and the
-    // `identity/` backend (per-namespace entities/groups via the header). Their
-    // handlers read the header directly, so leave the path untouched — rewriting
-    // would misroute them into the namespace's logical mount table.
-    if req.path.starts_with("sys/")
-        || req.path.starts_with("auth/")
-        || req.path.starts_with("identity/")
-    {
-        return Ok(());
-    }
-
     let Some(module) = core.module_manager.get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME) else {
         return Ok(());
     };
@@ -171,12 +158,38 @@ pub async fn rewrite_request_for_namespace(core: &Core, req: &mut Request) -> Re
         return Ok(());
     };
 
+    // Deployment-level backends are addressed at the root mount and scope
+    // themselves by the namespace *header* (not by path rewriting): `sys/`
+    // (incl. policy + audit + namespace CRUD), `auth/` logins, and the
+    // `identity/` backend (per-namespace entities/groups via the header). Their
+    // handlers read the header directly, so leave the path untouched — rewriting
+    // would misroute them into the namespace's logical mount table.
+    //
+    // We still resolve the namespace and record it on the request so
+    // header-scoped handlers (notably the `identity/owner/*` and
+    // `identity/share/*` endpoints) can key owner/share records on the active
+    // namespace. Resolution is best-effort here — an unknown namespace header
+    // on a header-scoped path is simply ignored (left root-scoped) rather than
+    // hard-failing, preserving the previous early-return behavior.
+    let header_scoped = req.path.starts_with("sys/")
+        || req.path.starts_with("auth/")
+        || req.path.starts_with("identity/");
+    if header_scoped {
+        if let Some(ns) = store.get_by_path(&ns_path).await? {
+            if !ns.is_root() {
+                req.namespace_path = Some(ns.path.clone());
+            }
+        }
+        return Ok(());
+    }
+
     let ns = store.get_by_path(&ns_path).await?.ok_or_else(|| {
         crate::bv_error_response_status!(404, &format!("no such namespace: {ns_path:?}"))
     })?;
     if ns.is_root() {
         return Ok(());
     }
+    req.namespace_path = Some(ns.path.clone());
 
     // Make sure the namespace's mounts are wired into the shared router before
     // we route into them.

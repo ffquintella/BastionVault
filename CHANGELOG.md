@@ -45,6 +45,13 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.28.7] - 2026-07-13
+
+### Fixed
+
+- **Secrets created in a non-root namespace no longer show as "unowned"** (`src/modules/identity/owner_store.rs`, `src/modules/namespace/router.rs`, `src/logical/request.rs`, `src/modules/policy/policy_store.rs`, `src/modules/identity/mod.rs`, `src/modules/system/mod.rs`) -- a KV secret created while a child namespace (e.g. `dti/esi`) was active was written with its owner stamped under a namespace-prefixed, `data`-infixed key (`dti/esi/secret/data/github`), because `canonicalize_kv_path` only strips the KV v2 `data`/`metadata` segment when it sits at index 1. The header-scoped owner read (`identity/owner/kv`) and the entire KV sharing subsystem looked the record up under the mount-relative key (`secret/github`), so they never matched and the GUI badge read "unowned" -- and, for the same reason, a secret could not be shared inside a child namespace and its owner-scope ACL keyed on an ugly un-stripped path. Ownership, sharing, and the owner-scope/shared-scope ACL now all key on one namespace-scoped canonical form `<ns>/<mount>/<key>` via `OwnerStore::canonicalize_kv_path_scoped`. The active namespace is resolved once in `rewrite_request_for_namespace` and carried on `Request.namespace_path` (set even for header-scoped `identity/`/`sys/` paths whose path string is not rewritten). Root-namespace behavior is byte-for-byte unchanged. Existing mis-keyed child-namespace records self-heal on the next write (or via the Claim/transfer endpoints, which are now namespace-scoped too); shares already created in a child namespace must be re-granted. (Extends the namespace-header audit line behind 0.28.2--0.28.6.)
+- **Scheduled exports reject empty/relative destination paths** (`src/scheduled_exports/schedule.rs`, `src/http/sys.rs`, `gui/src-tauri/src/commands/scheduled_exports.rs`) -- a schedule saved with an empty (or relative) `local_path` silently wrote backups into the server's working directory (via `Path::new("").join(name)`) while the listing endpoint got `NotFound` on the empty string and reported zero backups -- a backup that ran, succeeded, and was then unlistable. Create/update now validate the destination via `DestinationKind::validate()` and reject a non-absolute path with `400`, at both the HTTP and embedded-GUI boundaries.
+
 ## [0.28.6] - 2026-07-13
 
 ### Fixed

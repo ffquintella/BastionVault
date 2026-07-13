@@ -131,7 +131,7 @@ Verification runs *immediately after* the export completes, against the file the
 
 A schedule can have one or more destinations. The runner produces the `.bvx` once and writes it to each destination atomically:
 
-- **`local_path`** — write to a directory on the BastionVault host. Atomic via tmp-then-rename.
+- **`local_path`** — write to a directory on the BastionVault host. Atomic via tmp-then-rename. The path **must be absolute** and non-empty: create/update reject anything else with `400` (`DestinationKind::validate()`). An empty or relative path would resolve against the server process's working directory on write (`Path::new("").join(name)`) while the listing endpoint `read_dir`s the empty string and gets `NotFound` — producing a backup that ran successfully yet could never be listed or restored.
 - **`cloud_target`** — push to an existing cloud-storage backend ([features/cloud-storage-backend.md](cloud-storage-backend.md)) using the `FileTarget` trait. Reuses OAuth tokens, key obfuscation, and retry behaviour the cloud-storage feature already ships.
 - **`http_webhook`** — POST the `.bvx` to a configured URL with the schedule metadata. Out of scope for Phase 1.
 

@@ -1321,7 +1321,16 @@ impl SystemBackend {
             bv_error_response_status!(500, "owner store not initialized")
         })?;
 
-        store.set_kv_owner(&path, &new_owner).await?;
+        // Scope to the namespace-qualified key so a transfer performed while a
+        // child namespace is active reassigns the same record the owner-read,
+        // ACL, and share paths use. The admin GUI sends the mount-relative
+        // path with the active namespace in the request header.
+        let key = crate::modules::identity::owner_store::OwnerStore::canonicalize_kv_path_scoped(
+            &path,
+            req.namespace_path.as_deref(),
+        )
+        .unwrap_or_else(|| path.clone());
+        store.set_kv_owner(&key, &new_owner).await?;
 
         let mut data = Map::new();
         data.insert("path".into(), Value::String(path));
@@ -1362,7 +1371,16 @@ impl SystemBackend {
             bv_error_response_status!(500, "owner store not initialized")
         })?;
 
-        if let Some(existing) = store.get_kv_owner(&path).await? {
+        // Claim under the namespace-qualified key so the "Claim ownership"
+        // action captures the record the badge/ACL/share paths read (the GUI
+        // sends the mount-relative path with the active namespace header).
+        let key = crate::modules::identity::owner_store::OwnerStore::canonicalize_kv_path_scoped(
+            &path,
+            req.namespace_path.as_deref(),
+        )
+        .unwrap_or_else(|| path.clone());
+
+        if let Some(existing) = store.get_kv_owner(&key).await? {
             // Refuse to overwrite. Use sys/kv-owner/transfer (admin)
             // to reassign an existing owner.
             return Err(bv_error_response_status!(
@@ -1374,7 +1392,7 @@ impl SystemBackend {
             ));
         }
 
-        store.set_kv_owner(&path, &caller_id).await?;
+        store.set_kv_owner(&key, &caller_id).await?;
 
         let mut data = Map::new();
         data.insert("path".into(), Value::String(path));
@@ -2273,21 +2291,27 @@ impl SystemBackend {
         let mut kv_already = 0usize;
         let mut kv_invalid: Vec<String> = Vec::new();
         for path in &kv_paths {
-            // `canonicalize_kv_path` returns None for malformed input
-            // (empty segments, `..`, etc.). We surface those separately
-            // so the operator sees exactly which paths were skipped.
-            if crate::modules::identity::owner_store::OwnerStore::canonicalize_kv_path(path)
-                .is_none()
-            {
+            // Namespace-qualify each supplied path (admin sends mount-relative
+            // paths with the active namespace in the request header) so the
+            // stamped key matches what the write/owner-read/ACL paths use.
+            // `canonicalize_kv_path_scoped` returns None for malformed input
+            // (empty segments, `..`, etc.); we surface those separately so the
+            // operator sees exactly which paths were skipped.
+            let Some(key) =
+                crate::modules::identity::owner_store::OwnerStore::canonicalize_kv_path_scoped(
+                    path,
+                    req.namespace_path.as_deref(),
+                )
+            else {
                 kv_invalid.push(path.clone());
                 continue;
-            }
-            match store.get_kv_owner(path).await? {
+            };
+            match store.get_kv_owner(&key).await? {
                 Some(_) => kv_already += 1,
                 None => {
                     if !dry_run {
                         store
-                            .record_kv_owner_if_absent(path, &entity_id)
+                            .record_kv_owner_if_absent(&key, &entity_id)
                             .await?;
                     }
                     kv_stamped += 1;

@@ -602,10 +602,33 @@ fn extract_share_identifiers(
         .ok_or_else(|| bv_error_string!("invalid share kind"))?;
     let target_path = decode_b64url_path(&target_b64)
         .ok_or_else(|| bv_error_string!("invalid target segment (expected base64url)"))?;
+    let target_path = scope_kv_target(kind, target_path, req);
     if grantee.trim().is_empty() {
         return Err(bv_error_string!("grantee is required"));
     }
     Ok((kind, target_path, grantee))
+}
+
+/// Namespace-qualify a KV share target so it keys on the same
+/// `<ns>/<mount>/<key>` string that `post_route` stamps ownership under
+/// and that `require_share_admin` / `resolve_target_shared_caps` look up.
+/// The GUI sends mount-relative paths (`secret/github`) with the active
+/// namespace in the request header; without this, a child-namespace share
+/// would be stored and queried under a key that never matches the owner
+/// record. Non-KV kinds (resource/file/group) have their own flat naming
+/// and are returned unchanged. Idempotent: a target that already carries
+/// the namespace prefix is left as-is.
+fn scope_kv_target(kind: ShareTargetKind, target_path: String, req: &Request) -> String {
+    match kind {
+        ShareTargetKind::KvSecret => {
+            owner_store::OwnerStore::canonicalize_kv_path_scoped(
+                &target_path,
+                req.namespace_path.as_deref(),
+            )
+            .unwrap_or(target_path)
+        }
+        _ => target_path,
+    }
 }
 
 /// Render an optional `OwnerRecord` plus the inquired target into a
@@ -1343,6 +1366,7 @@ impl IdentityBackendInner {
             .ok_or_else(|| bv_error_string!("invalid share kind"))?;
         let target_path = decode_b64url_path(&target_b64)
             .ok_or_else(|| bv_error_string!("invalid target segment (expected base64url)"))?;
+        let target_path = scope_kv_target(kind, target_path, req);
 
         self.require_share_admin(req, kind, &target_path).await?;
 
@@ -1410,11 +1434,15 @@ impl IdentityBackendInner {
             url_kind
         };
 
+        // A body `target_path` override arrives in raw (non-encoded) form and
+        // must be namespace-qualified the same way `extract_share_identifiers`
+        // qualifies the URL form (which produced `url_target_path`).
         let target_path = req
             .get_data("target_path")
             .ok()
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .filter(|s| !s.trim().is_empty())
+            .map(|p| scope_kv_target(kind, p, req))
             .unwrap_or(url_target_path);
 
         let capabilities: Vec<String> = req
@@ -1645,7 +1673,17 @@ impl IdentityBackendInner {
             .owner_store()
             .ok_or_else(|| bv_error_string!("owner store unavailable"))?;
 
-        let rec = store.get_kv_owner(&path).await?;
+        // The GUI sends the mount-relative path (`secret/github`) with the
+        // active namespace in the request header. Look the owner up under the
+        // namespace-scoped canonical key so a child-namespace secret's owner —
+        // stamped as `<ns>/<mount>/<key>` by `post_route` — is found. The
+        // mount-relative `path` is still echoed for display.
+        let key = owner_store::OwnerStore::canonicalize_kv_path_scoped(
+            &path,
+            req.namespace_path.as_deref(),
+        )
+        .unwrap_or_else(|| path.clone());
+        let rec = store.get_kv_owner(&key).await?;
         Ok(Some(Response::data_response(Some(owner_response(
             "kv-secret",
             &path,

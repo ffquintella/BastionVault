@@ -81,6 +81,45 @@ impl OwnerStore {
         if canonical.is_empty() { None } else { Some(canonical) }
     }
 
+    /// Namespace-scoped canonical KV owner key: `<ns>/<mount>/<key>`.
+    ///
+    /// Owner records are stored in a single global store, so the key must
+    /// carry the namespace to keep two namespaces that both hold, say,
+    /// `secret/github` distinct. This normalizes the *two* path forms that
+    /// reach the owner store into one canonical string:
+    ///
+    /// * **Request paths** (post-`rewrite_request_for_namespace`) arrive
+    ///   namespace-prefixed and with the KV v2 `data`/`metadata` infix,
+    ///   e.g. `dti/esi/secret/data/github`.
+    /// * **Client paths** (the base64url the GUI sends to `identity/owner/*`
+    ///   and `identity/share/*`) arrive mount-relative with no namespace and
+    ///   no infix, e.g. `secret/github`.
+    ///
+    /// `ns_path` is the active namespace (`req.namespace_path`), or `None`
+    /// for root. We strip a leading `ns_path` if the raw path already carries
+    /// it, canonicalize the mount-relative remainder with the existing
+    /// [`canonicalize_kv_path`] (which strips the `data`/`metadata` infix at
+    /// index 1), then re-prepend `ns_path`. For root (`None`) this is
+    /// identical to `canonicalize_kv_path`, so existing root data and callers
+    /// are unaffected.
+    ///
+    /// [`canonicalize_kv_path`]: Self::canonicalize_kv_path
+    pub fn canonicalize_kv_path_scoped(raw: &str, ns_path: Option<&str>) -> Option<String> {
+        let trimmed = raw.trim().trim_matches('/');
+        let ns = ns_path.map(|n| n.trim().trim_matches('/')).filter(|n| !n.is_empty());
+        let rel = match ns {
+            Some(n) => trimmed
+                .strip_prefix(&format!("{n}/"))
+                .unwrap_or(trimmed),
+            None => trimmed,
+        };
+        let rel_canon = Self::canonicalize_kv_path(rel)?;
+        Some(match ns {
+            Some(n) => format!("{n}/{rel_canon}"),
+            None => rel_canon,
+        })
+    }
+
     fn kv_key(canonical: &str) -> String {
         URL_SAFE_NO_PAD.encode(canonical.as_bytes())
     }
@@ -328,5 +367,92 @@ impl OwnerStore {
             return Ok(());
         }
         self.file_view.delete(id.trim()).await
+    }
+}
+
+#[cfg(test)]
+mod scoped_key_tests {
+    use super::OwnerStore;
+
+    // Root namespace (ns_path = None) must be byte-identical to the
+    // legacy `canonicalize_kv_path` so existing root records and callers
+    // are untouched.
+    #[test]
+    fn root_matches_legacy_canonicalization() {
+        for raw in ["secret/data/github", "secret/metadata/github", "secret/github"] {
+            assert_eq!(
+                OwnerStore::canonicalize_kv_path_scoped(raw, None),
+                OwnerStore::canonicalize_kv_path(raw),
+                "scoped(None) must equal legacy for {raw:?}",
+            );
+        }
+    }
+
+    // The two path forms that reach the owner store in a child namespace
+    // must canonicalize to the SAME key. This is the core of the
+    // "unowned in a non-root namespace" fix: the write path arrives
+    // namespace-prefixed and with the KV v2 `data` infix, while the GUI
+    // owner/share read arrives mount-relative.
+    #[test]
+    fn child_ns_write_and_read_forms_agree() {
+        let ns = Some("dti/esi");
+        // Write path (rewritten, with `data` infix).
+        let write = OwnerStore::canonicalize_kv_path_scoped("dti/esi/secret/data/github", ns);
+        // GUI read path (mount-relative b64-decoded, no infix, no ns).
+        let read = OwnerStore::canonicalize_kv_path_scoped("secret/github", ns);
+        assert_eq!(write, Some("dti/esi/secret/github".to_string()));
+        assert_eq!(read, write, "write and read forms must key identically");
+    }
+
+    // `metadata` infix (LIST / delete paths) normalizes the same way.
+    #[test]
+    fn child_ns_metadata_infix_stripped() {
+        let ns = Some("dti/esi");
+        assert_eq!(
+            OwnerStore::canonicalize_kv_path_scoped("dti/esi/secret/metadata/a/b", ns),
+            Some("dti/esi/secret/a/b".to_string()),
+        );
+    }
+
+    // A nested namespace (multi-segment ns_path) is preserved as a whole
+    // and not confused with the mount segment.
+    #[test]
+    fn nested_ns_prefix_preserved() {
+        let ns = Some("a/b/c");
+        assert_eq!(
+            OwnerStore::canonicalize_kv_path_scoped("a/b/c/secret/data/k", ns),
+            Some("a/b/c/secret/k".to_string()),
+        );
+        // And the mount-relative read form lands on the same key.
+        assert_eq!(
+            OwnerStore::canonicalize_kv_path_scoped("secret/k", ns),
+            Some("a/b/c/secret/k".to_string()),
+        );
+    }
+
+    // Two distinct namespaces holding the same mount-relative secret get
+    // distinct keys — the isolation property that a global owner store
+    // otherwise lacks.
+    #[test]
+    fn distinct_namespaces_do_not_collide() {
+        let a = OwnerStore::canonicalize_kv_path_scoped("secret/github", Some("team-a"));
+        let b = OwnerStore::canonicalize_kv_path_scoped("secret/github", Some("team-b"));
+        assert_ne!(a, b);
+    }
+
+    // Idempotence: feeding an already-scoped key back through must be a
+    // no-op, since downstream store methods re-run `canonicalize_kv_path`
+    // internally on whatever we hand them.
+    #[test]
+    fn already_scoped_key_is_idempotent() {
+        let ns = Some("dti/esi");
+        let once = OwnerStore::canonicalize_kv_path_scoped("dti/esi/secret/data/github", ns).unwrap();
+        // Re-scoping the canonical form, and running the plain canonicalizer
+        // that the store methods apply internally, both leave it unchanged.
+        assert_eq!(
+            OwnerStore::canonicalize_kv_path_scoped(&once, ns),
+            Some(once.clone()),
+        );
+        assert_eq!(OwnerStore::canonicalize_kv_path(&once), Some(once));
     }
 }

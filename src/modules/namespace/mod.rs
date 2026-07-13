@@ -391,6 +391,116 @@ mod tests {
         assert!(store.delete("tenant-a", registry.mount_count(&a_uuid)).await.is_err());
     }
 
+    /// End-to-end regression for the "secret shows as unowned in a
+    /// non-root namespace" bug. A KV secret created through the namespace
+    /// header must be reported as *owned* by the `identity/owner/kv`
+    /// endpoint (the GUI badge path). Before the namespace-scoped owner
+    /// key landed, the write stamped ownership under a namespace-prefixed,
+    /// `data`-infixed key (`tenant-a/secret/data/github`) while the
+    /// header-scoped owner read looked up the mount-relative key
+    /// (`secret/github`) — they never matched, so the badge read "unowned".
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_kv_owner_scoped_to_namespace() {
+        use crate::logical::{Operation, Request};
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        use serde_json::Value;
+        use std::collections::HashMap;
+
+        let (_bvault, core, root) =
+            new_unseal_test_bastion_vault("test_ns_kv_owner_scoped").await;
+
+        async fn ns_req(
+            core: &Arc<Core>,
+            token: &str,
+            op: Operation,
+            path: &str,
+            ns: Option<&str>,
+            body: Option<serde_json::Map<String, serde_json::Value>>,
+        ) -> Result<Option<crate::logical::Response>, RvError> {
+            let mut req = Request::new(path);
+            req.operation = op;
+            req.client_token = token.to_string();
+            req.body = body;
+            if let Some(ns) = ns {
+                let mut h = HashMap::new();
+                h.insert("x-bastionvault-namespace".to_string(), ns.to_string());
+                req.headers = Some(h);
+            }
+            core.handle_request(&mut req).await
+        }
+
+        let store = store_of(&core);
+        store.create("tenant-a", NamespaceQuotas::default(), false).await.unwrap();
+
+        // Mount kv-v2 at secret/ inside tenant-a and create a secret via the
+        // namespace header — exactly the GUI's create flow.
+        ns_req(
+            &core,
+            &root,
+            Operation::Write,
+            "sys/mounts/secret/",
+            Some("tenant-a"),
+            json!({ "type": "kv-v2" }).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+        ns_req(
+            &core,
+            &root,
+            Operation::Write,
+            "secret/data/github",
+            Some("tenant-a"),
+            json!({ "data": { "token": "ghp_x" } }).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+
+        // The owner-read endpoint must report the secret as owned inside
+        // tenant-a. The GUI sends the mount-relative path; the namespace
+        // rides in the header.
+        let seg = URL_SAFE_NO_PAD.encode("secret/github");
+        let owned = ns_req(
+            &core,
+            &root,
+            Operation::Read,
+            &format!("identity/owner/kv/{seg}"),
+            Some("tenant-a"),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .data
+        .unwrap();
+        assert_eq!(
+            owned["owned"],
+            Value::Bool(true),
+            "a secret created in a child namespace must show as owned",
+        );
+        assert_eq!(owned["entity_id"], Value::String("root".into()));
+
+        // Isolation: the same mount-relative path in the ROOT namespace keys
+        // to a different owner record, which does not exist.
+        let root_view = ns_req(
+            &core,
+            &root,
+            Operation::Read,
+            &format!("identity/owner/kv/{seg}"),
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .data
+        .unwrap();
+        assert_eq!(
+            root_view["owned"],
+            Value::Bool(false),
+            "root namespace must not see the child namespace's owner record",
+        );
+    }
+
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_token_namespace_binding_enforced() {
         use crate::logical::{Operation, Request};

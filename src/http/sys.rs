@@ -2652,6 +2652,9 @@ async fn sys_scheduled_exports_create_handler(
 
         use std::str::FromStr;
         cron::Schedule::from_str(&input.cron).map_err(|_| RvError::ErrRequestInvalid)?;
+        if let Err(msg) = input.destination.validate() {
+            return Ok(response_error(StatusCode::BAD_REQUEST, &msg));
+        }
 
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
@@ -2712,6 +2715,9 @@ async fn sys_scheduled_exports_update_handler(
 
         use std::str::FromStr;
         cron::Schedule::from_str(&input.cron).map_err(|_| RvError::ErrRequestInvalid)?;
+        if let Err(msg) = input.destination.validate() {
+            return Ok(response_error(StatusCode::BAD_REQUEST, &msg));
+        }
 
         let store = crate::scheduled_exports::ScheduleStore::new();
         let existing = store.get(core.barrier.as_storage(), &id).await?;
@@ -3891,5 +3897,48 @@ mod scheduled_export_backup_tests {
         assert_eq!(status, 404, "restore on unknown schedule must be 404");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_create_and_update_reject_non_absolute_destination() {
+        let mut server = TestHttpServer::new("test_sched_dest_validation", true).await;
+        server.token = server.root_token.clone();
+        let token = server.root_token.clone();
+
+        // Empty destination path — the incident case — must be rejected at
+        // create with 400, never persisted as a silently-unlistable schedule.
+        for bad in ["", "   ", "relative/dir"] {
+            let body = json!({
+                "name": "bad-dest",
+                "cron": "0 0 3 * * *",
+                "format": "json",
+                "scope": { "kind": "full", "include": [] },
+                "destination": { "kind": "local_path", "path": bad },
+                "password_ref": null,
+                "allow_plaintext": true,
+                "enabled": true,
+            });
+            let (status, resp) = server
+                .request("POST", "sys/scheduled-exports", body.as_object().cloned(), Some(&token), None)
+                .unwrap();
+            assert_eq!(status, 400, "create with path {bad:?} must be 400: {resp:?}");
+        }
+
+        // Create a valid schedule, then try to update it to an empty path.
+        let good = create_schedule(&server, &token, "good-dest", "/tmp/bv-dest-valid");
+        let body = json!({
+            "name": "good-dest",
+            "cron": "0 0 3 * * *",
+            "format": "json",
+            "scope": { "kind": "full", "include": [] },
+            "destination": { "kind": "local_path", "path": "" },
+            "password_ref": null,
+            "allow_plaintext": true,
+            "enabled": true,
+        });
+        let (status, resp) = server
+            .request("PUT", &format!("sys/scheduled-exports/{good}"), body.as_object().cloned(), Some(&token), None)
+            .unwrap();
+        assert_eq!(status, 400, "update to empty path must be 400: {resp:?}");
     }
 }

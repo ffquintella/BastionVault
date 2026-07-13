@@ -94,6 +94,7 @@ pub async fn scheduled_exports_create(
 ) -> CmdResult<Schedule> {
     use std::str::FromStr;
     cron::Schedule::from_str(&input.cron).map_err(|_| "invalid cron expression")?;
+    input.destination.validate().map_err(CommandError::from)?;
 
     if is_remote(&state).await {
         let body = body_of(&input)?;
@@ -137,6 +138,7 @@ pub async fn scheduled_exports_update(
 ) -> CmdResult<Schedule> {
     use std::str::FromStr;
     cron::Schedule::from_str(&input.cron).map_err(|_| "invalid cron expression")?;
+    input.destination.validate().map_err(CommandError::from)?;
 
     if is_remote(&state).await {
         let body = body_of(&input)?;

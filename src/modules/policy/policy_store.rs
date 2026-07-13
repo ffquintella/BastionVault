@@ -1943,7 +1943,7 @@ fn looks_like_kv_path(req_path: &str) -> bool {
 /// record, path shape we don't recognize). `scope_passes` treats an
 /// empty `asset_owner` as "no owner match", so a resolution miss can
 /// only narrow access for owner-scoped rules.
-async fn resolve_asset_owner(core: &Weak<Core>, req_path: &str) -> String {
+async fn resolve_asset_owner(core: &Weak<Core>, req_path: &str, ns_path: Option<&str>) -> String {
     let Some(core) = core.upgrade() else {
         return String::new();
     };
@@ -1964,7 +1964,12 @@ async fn resolve_asset_owner(core: &Weak<Core>, req_path: &str) -> String {
         }
     }
     if looks_like_kv_path(req_path) {
-        if let Ok(Some(rec)) = store.get_kv_owner(req_path).await {
+        // Key on the namespace-scoped canonical path so a child-namespace
+        // secret's owner (stamped under `<ns>/<mount>/<key>` by
+        // `post_route`) is found here. Falls back to the raw path for root.
+        let key = OwnerStore::canonicalize_kv_path_scoped(req_path, ns_path)
+            .unwrap_or_else(|| req_path.to_string());
+        if let Ok(Some(rec)) = store.get_kv_owner(&key).await {
             return rec.entity_id;
         }
     }
@@ -2040,8 +2045,13 @@ async fn resolve_target_shared_caps(
         }
     }
     if looks_like_kv_path(&req.path) {
+        // Shares are keyed on the namespace-scoped canonical path (see
+        // `create_share`), so scope the request path the same way before
+        // looking up the caller's shared capabilities.
+        let key = OwnerStore::canonicalize_kv_path_scoped(&req.path, req.namespace_path.as_deref())
+            .unwrap_or_else(|| req.path.clone());
         if let Ok(v) = store
-            .shared_capabilities(ShareTargetKind::KvSecret, &req.path, &caller_id)
+            .shared_capabilities(ShareTargetKind::KvSecret, &key, &caller_id)
             .await
         {
             merge(v);
@@ -2485,7 +2495,8 @@ impl AuthHandler for PolicyStore {
             // `scopes = ["owner"]` check. Same shape as asset_groups:
             // empty on any failure, which is fail-closed for
             // owner-scoped rules.
-            req.asset_owner = resolve_asset_owner(&self.core, &req.path).await;
+            req.asset_owner =
+                resolve_asset_owner(&self.core, &req.path, req.namespace_path.as_deref()).await;
             // Resolve any active `SecretShare` capabilities the caller
             // has on this target so `scopes = ["shared"]` rules can be
             // evaluated synchronously downstream. Empty when the
@@ -2588,6 +2599,7 @@ impl Handler for PolicyStore {
                         &caller_id,
                         store,
                         share_store.as_ref(),
+                        req.namespace_path.as_deref(),
                     )
                     .await;
                 }
@@ -2619,7 +2631,15 @@ impl Handler for PolicyStore {
             match req.operation {
                 Operation::Write => {
                     if looks_like_kv_path(&req.path) && !caller_id.is_empty() {
-                        let _ = store.record_kv_owner_if_absent(&req.path, &caller_id).await;
+                        // Stamp under the namespace-scoped canonical key so a
+                        // child-namespace secret's owner is stored where the
+                        // owner-read, share, and ACL paths look for it.
+                        let key = OwnerStore::canonicalize_kv_path_scoped(
+                            &req.path,
+                            req.namespace_path.as_deref(),
+                        )
+                        .unwrap_or_else(|| req.path.clone());
+                        let _ = store.record_kv_owner_if_absent(&key, &caller_id).await;
                     }
                     if let Some(name) = resource_name_from_path(&req.path) {
                         // Only stamp ownership on the metadata create
@@ -2649,7 +2669,12 @@ impl Handler for PolicyStore {
                 }
                 Operation::Delete => {
                     if looks_like_kv_path(&req.path) {
-                        let _ = store.forget_kv_owner(&req.path).await;
+                        let key = OwnerStore::canonicalize_kv_path_scoped(
+                            &req.path,
+                            req.namespace_path.as_deref(),
+                        )
+                        .unwrap_or_else(|| req.path.clone());
+                        let _ = store.forget_kv_owner(&key).await;
                     }
                     if let Some(name) = resource_name_from_path(&req.path) {
                         let trimmed = req.path.trim_start_matches('/');
@@ -2672,10 +2697,18 @@ impl Handler for PolicyStore {
                     // user that triggered the target delete.
                     if let Some(sshare) = self.share_store() {
                         if looks_like_kv_path(&req.path) {
+                            // Shares are keyed on the namespace-scoped canonical
+                            // path; scope before cascading so a child-namespace
+                            // secret's shares are actually found and revoked.
+                            let key = OwnerStore::canonicalize_kv_path_scoped(
+                                &req.path,
+                                req.namespace_path.as_deref(),
+                            )
+                            .unwrap_or_else(|| req.path.clone());
                             if let Err(e) = sshare
                                 .cascade_delete_target_audited(
                                     ShareTargetKind::KvSecret,
-                                    &req.path,
+                                    &key,
                                     &audit_actor,
                                 )
                                 .await
@@ -2805,7 +2838,14 @@ impl PolicyStore {
         }
 
         let asset_groups = resolve_asset_groups(&self.core, path).await;
-        let asset_owner = resolve_asset_owner(&self.core, path).await;
+        // `can_operate` is a cross-target authorization *preview* (e.g.
+        // asset-group member redaction) and does not carry the triggering
+        // request's namespace header, so owner resolution here is
+        // namespace-blind (root-scoped). For a child-namespace KV target this
+        // can only fail to resolve an owner, which fail-closes (narrows) the
+        // preview — never widens it. Namespace-aware previews are tracked as
+        // the asset-group follow-up.
+        let asset_owner = resolve_asset_owner(&self.core, path, None).await;
 
         let mut req = Request::default();
         req.path = path.to_string();
@@ -2903,6 +2943,7 @@ async fn filter_list_by_ownership(
     caller_entity_id: &str,
     store: &Arc<OwnerStore>,
     share_store: Option<&Arc<ShareStore>>,
+    ns_path: Option<&str>,
 ) {
     let Some(data) = response.data.as_mut() else { return };
     let Some(keys_val) = data.get_mut("keys") else { return };
@@ -2924,6 +2965,11 @@ async fn filter_list_by_ownership(
             continue;
         }
         let full = format!("{prefix}{k}");
+        // `full` is a rewritten request path in child namespaces; scope it
+        // to the canonical owner/share key so lookups hit the records
+        // stamped by `post_route` / `create_share`.
+        let scoped = OwnerStore::canonicalize_kv_path_scoped(&full, ns_path)
+            .unwrap_or_else(|| full.clone());
 
         if caller_entity_id.is_empty() {
             continue;
@@ -2934,7 +2980,7 @@ async fn filter_list_by_ownership(
         if want_owner {
             // Try both owner lookups: a key may be a KV secret or a
             // resource. Either match is sufficient.
-            if let Ok(Some(rec)) = store.get_kv_owner(&full).await {
+            if let Ok(Some(rec)) = store.get_kv_owner(&scoped).await {
                 if rec.entity_id == caller_entity_id {
                     included = true;
                 }
@@ -2953,7 +2999,7 @@ async fn filter_list_by_ownership(
         if !included && want_shared {
             if let Some(sstore) = share_store {
                 if let Ok(caps) = sstore
-                    .shared_capabilities(ShareTargetKind::KvSecret, &full, caller_entity_id)
+                    .shared_capabilities(ShareTargetKind::KvSecret, &scoped, caller_entity_id)
                     .await
                 {
                     if !caps.is_empty() {
