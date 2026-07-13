@@ -5415,6 +5415,62 @@ mod mod_system_tests {
         );
     }
 
+    /// Mounting/unmounting/listing via `sys/mounts` must target the *active
+    /// namespace*, never root. Regression for the header-forwarding gap in the
+    /// mount shims: engines enabled from a child namespace landed on root
+    /// ("already exists"), and an unmount from a child reached into root's
+    /// table (clearing its data).
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_sys_mounts_are_namespace_scoped() {
+        let mut server = TestHttpServer::new("test_sys_mounts_ns_scoped", true).await;
+        let root = server.root_token.clone();
+        server.url_prefix = server.url_prefix.trim_end_matches("/v1").to_string();
+
+        let (s, r) = server
+            .write("v1/sys/namespaces/tns", serde_json::json!({}).as_object().cloned(), Some(&root))
+            .unwrap();
+        assert!((200..300).contains(&s), "ns create: {s} {r:?}");
+
+        // `pki` is not in the namespace seed set, so it's a clean probe: mount
+        // it into `tns` and it must appear THERE, not at root.
+        let (s, r) = server
+            .request_with_headers(
+                "POST",
+                "v1/sys/mounts/pki/",
+                serde_json::json!({ "type": "pki" }).as_object().cloned(),
+                Some(&root),
+                None,
+                &[("X-BastionVault-Namespace", "tns")],
+            )
+            .unwrap();
+        assert!((200..300).contains(&s), "namespaced mount must succeed: {s} {r:?}");
+
+        // Listed under the namespace...
+        let (s, r) = server
+            .request_with_headers(
+                "GET",
+                "v1/sys/mounts",
+                None,
+                Some(&root),
+                None,
+                &[("X-BastionVault-Namespace", "tns")],
+            )
+            .unwrap();
+        assert_eq!(s, 200, "namespaced list mounts: {r:?}");
+        assert!(
+            r.as_object().map(|m| m.contains_key("pki/")).unwrap_or(false),
+            "engine mounted with the namespace header must land in that namespace: {r:?}"
+        );
+
+        // ...but NOT at root (no cross-namespace leak).
+        let (s, r) = server.request_with_headers("GET", "v1/sys/mounts", None, Some(&root), None, &[]).unwrap();
+        assert_eq!(s, 200, "root list mounts: {r:?}");
+        assert!(
+            !r.as_object().map(|m| m.contains_key("pki/")).unwrap_or(false),
+            "namespaced mount must NOT appear in root's table (no cross-namespace leak): {r:?}"
+        );
+    }
+
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_system_internal_ui_mounts_path() {
         let mut test_http_server = TestHttpServer::new("test_system_internal_ui_mounts_path", true).await;

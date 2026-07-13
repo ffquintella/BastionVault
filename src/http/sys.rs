@@ -226,6 +226,8 @@ async fn sys_list_mounts_request_handler(
     let mut r = request_auth(&req);
     r.path = "sys/mounts".to_string();
     r.operation = Operation::Read;
+    // List the active namespace's mounts, not root's.
+    copy_namespace_header(&req, &mut r);
 
     handle_request(core, &mut r).await
 }
@@ -724,6 +726,10 @@ async fn sys_mount_request_handler(
     r.path = "sys/mounts/".to_owned() + mount_path.as_str();
     r.operation = Operation::Write;
     r.body = Some(payload);
+    // Mount into the active namespace, not root. Without this every engine
+    // enabled from a child namespace landed on root ("already exists"), and the
+    // namespace never got its mount.
+    copy_namespace_header(&req, &mut r);
 
     handle_request(core, &mut r).await
 }
@@ -741,6 +747,9 @@ async fn sys_unmount_request_handler(
     let mut r = request_auth(&req);
     r.path = "sys/mounts/".to_owned() + mount_path.as_str();
     r.operation = Operation::Delete;
+    // Unmount from the active namespace, not root — a child-namespace unmount
+    // must never reach into root's mount table (and clear its data).
+    copy_namespace_header(&req, &mut r);
 
     handle_request(core, &mut r).await
 }

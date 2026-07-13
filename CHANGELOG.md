@@ -45,6 +45,20 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.28.4] - 2026-07-13
+
+### Fixed
+
+- **`sys/mounts` mount / unmount / list now target the active namespace.** The
+  HTTP shims for `POST`/`DELETE`/`GET sys/mounts` did not forward the
+  `X-BastionVault-Namespace` header, so enabling an engine while scoped to a
+  child namespace actually mounted it at **root** (surfacing as
+  `HTTP 500: Mount path already exists`), listing showed root's table, and — most
+  dangerously — an unmount issued from a child namespace reached into **root's**
+  mount table and cleared that engine's data. The shims now forward the header;
+  the underlying handlers were already namespace-aware. Same header-forwarding
+  class as the earlier `ui/mounts` and `dashboard/summary` fixes.
+
 ## [0.28.3] - 2026-07-13
 
 ### Added
