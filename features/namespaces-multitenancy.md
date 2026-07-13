@@ -224,6 +224,20 @@ notion of "alice belongs to engineering," so isolation depends entirely on every
 namespace having no useful policies for unexpected principals — a weak, implicit
 guarantee.
 
+> **Assignment governs authorization, not only login.** In addition to gating
+> *where a credential may authenticate*, an explicit assignment record widens
+> *request-time operability*: `token_binding::token_operable_resolved` (used by
+> `enforce_request_token_binding` and `sys/capabilities-self`) treats a
+> principal **explicitly assigned** a namespace — or an ancestor of it — as
+> operable there from **any** session, even a token bound to a different
+> (e.g. root) namespace. This lets an admin assigned `dti/esi` read and write it
+> without a separate login into that namespace. The widening is deliberately
+> **explicit-only**: the login-time "no record ⇒ unrestricted" convenience is
+> *not* applied to authorization, so a principal with no assignment keeps the
+> strict binding verdict and an absent record can never promote a bound token
+> into a cross-tenant superuser. The lookup is live (not a login snapshot), so
+> revoking an assignment takes effect on the next request.
+
 #### Design decisions
 
 These were settled explicitly before implementation:
@@ -383,7 +397,7 @@ Land the data model and the routing path. No identity/policy/audit scoping yet �
 
 | File | Purpose | Status |
 |---|---|---|
-| `src/modules/namespace/token_binding.rs` | Namespace-bound tokens; `child_visible` flag; enforcement in `Core::handle_request`; create-time binding via header; root bypass; per-login binding across userpass/FIDO2/approle with `child_visible` from the namespace's `child_visible_default`; shared `token_operable` verdict reused by `sys/capabilities-self`. | ✅ Done |
+| `src/modules/namespace/token_binding.rs` | Namespace-bound tokens; `child_visible` flag; enforcement in `Core::handle_request`; create-time binding via header; root bypass; per-login binding across userpass/FIDO2/approle with `child_visible` from the namespace's `child_visible_default`; shared `token_operable` verdict, plus `token_operable_resolved` (assignment-aware widening) reused by both `enforce_request_token_binding` and `sys/capabilities-self`. | ✅ Done |
 | `{{namespace.path}}` / `{{namespace.id}}` policy templates (`src/modules/policy/policy_store.rs`) | Namespace-aware ACL templating. | ✅ Done |
 | `namespace` field on audit entries (`src/audit/entry.rs`) | Per-tenant audit attribution. | ✅ Done |
 | `src/modules/namespace/policy_scope.rs` — cross-namespace path refusal (write-time guard, wired into policy write) | Refuses policies referencing another namespace's paths. | ✅ Done |

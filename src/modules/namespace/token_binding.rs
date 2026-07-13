@@ -66,6 +66,67 @@ pub fn token_operable(auth: &crate::logical::Auth, request_ns_path: &str) -> boo
     token_may_operate(&token_ns_path, child_visible, request_ns_path)
 }
 
+/// Metadata key holding the auth mount a token was minted by (`"userpass/"`,
+/// `"approle/"`, …). Stamped by every login backend; mirrored here so the
+/// request-time assignment lookup keys off the exact same `(mount, name)` the
+/// login handed to [`super::ns_assignment::enforce_login_assignment`].
+pub const MOUNT_PATH_META: &str = "mount_path";
+
+/// Recover the `(mount, principal_name)` an assignment record is keyed by from a
+/// token's metadata. `userpass`/FIDO2 stamp the principal under `username`;
+/// `approle` stamps it under `role_name`; both stamp the mount under
+/// [`MOUNT_PATH_META`]. `None` when the token lacks these keys (a legacy or
+/// non-principal token), in which case the caller keeps the strict binding
+/// verdict rather than widening access.
+fn assignment_principal(meta: &HashMap<String, String>) -> Option<(String, String)> {
+    let mount = meta.get(MOUNT_PATH_META)?.clone();
+    let name = meta.get("username").or_else(|| meta.get("role_name"))?.clone();
+    Some((mount, name))
+}
+
+/// Request-time operability verdict that also honors the principal's
+/// operator-authored **namespace assignment**.
+///
+/// The pure [`token_operable`] verdict (root bypass, same-namespace, or a
+/// child-visible token reaching a descendant) is evaluated first — it needs no
+/// storage, so the common case stays a cheap in-memory check. Only when that
+/// denies do we consult the principal's assignment record: an admin
+/// **explicitly assigned** a namespace (or an ancestor of it) may operate there
+/// from any session, so the assignment governs *authorization*, not merely
+/// where the credential may authenticate.
+///
+/// This widens access **only on an explicit record**. The login-time
+/// "no record ⇒ unrestricted" convenience is deliberately NOT applied here: a
+/// token with no assignment keeps the strict binding verdict, so an absent
+/// record can never promote a bound token into a cross-tenant superuser. The
+/// lookup is **live** (not a login-time snapshot), so granting or revoking an
+/// assignment takes effect on the next request without re-minting the token,
+/// and it **fails closed** on any store error.
+#[maybe_async::maybe_async]
+pub async fn token_operable_resolved(
+    core: &crate::core::Core,
+    auth: &crate::logical::Auth,
+    request_ns_path: &str,
+) -> bool {
+    if token_operable(auth, request_ns_path) {
+        return true;
+    }
+    let Some((mount, name)) = assignment_principal(&auth.metadata) else {
+        return false;
+    };
+    let Ok(store) = super::ns_assignment::NsAssignmentStore::new(core) else {
+        return false;
+    };
+    match store.get(&mount, &name).await {
+        Ok(Some(assignment)) => {
+            super::ns_assignment::namespace_allowed(&assignment.namespaces, request_ns_path)
+        }
+        // No record (unrestricted for *login*) or a read error: no explicit
+        // cross-namespace grant, so keep the strict binding verdict.
+        _ => false,
+    }
+}
+
 /// Extract `(namespace_path, child_visible)` from a token/auth metadata map.
 /// Defaults to root + not-child-visible when the keys are absent (legacy
 /// tokens), which preserves pre-namespace behaviour.
@@ -164,7 +225,7 @@ pub async fn enforce_request_token_binding(
     // `router::rewrite_request_for_namespace`, so resolve the target namespace
     // directly from it.
     let resolved = store.resolve_request(None, &req.path).await?;
-    if token_operable(auth, &resolved.namespace.path) {
+    if token_operable_resolved(core, auth, &resolved.namespace.path).await {
         Ok(())
     } else {
         Err(crate::errors::RvError::ErrPermissionDenied)
@@ -271,6 +332,57 @@ mod tests {
         stamp_binding(&mut rootcv.metadata, "", "u5", true);
         assert!(token_operable(&rootcv, "dti"));
         assert!(token_operable(&rootcv, "dti/esi"));
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_token_operable_resolved_honors_assignment() {
+        use crate::logical::Auth;
+        use crate::modules::namespace::ns_assignment::NsAssignmentStore;
+        use crate::modules::namespace::store::NamespaceQuotas;
+        use crate::modules::namespace::{NamespaceModule, NAMESPACE_MODULE_NAME};
+        use crate::test_utils::new_unseal_test_bastion_vault;
+
+        let (_bvault, core, _root) =
+            new_unseal_test_bastion_vault("test_token_operable_resolved").await;
+        let ns_store = core
+            .module_manager
+            .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+            .and_then(|m| m.store())
+            .unwrap();
+        ns_store.create("dti", NamespaceQuotas::default(), false).await.unwrap();
+        ns_store.create("dti/esi", NamespaceQuotas::default(), false).await.unwrap();
+
+        // A root-bound, non-child-visible userpass admin — exactly felipe's
+        // session. Metadata mirrors what the login backend stamps.
+        let mut felipe = Auth { policies: vec!["administrator".into()], ..Default::default() };
+        stamp_binding(&mut felipe.metadata, "", "root-uuid", false);
+        felipe.metadata.insert(MOUNT_PATH_META.into(), "userpass/".into());
+        felipe.metadata.insert("username".into(), "felipe".into());
+
+        // No assignment record yet: binding alone governs. Root-bound ⇒ operable
+        // at root itself, but NOT in any descendant (absence must never widen a
+        // bound token).
+        assert!(token_operable_resolved(&core, &felipe, "").await);
+        assert!(!token_operable_resolved(&core, &felipe, "dti").await);
+        assert!(!token_operable_resolved(&core, &felipe, "dti/esi").await);
+
+        // Assign felipe → dti/esi. Now the descendant is operable, but a
+        // non-assigned sibling/parent stays denied.
+        let store = NsAssignmentStore::new(&core).unwrap();
+        store
+            .set(&ns_store, "userpass/", "felipe", vec!["dti/esi".into()])
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(token_operable_resolved(&core, &felipe, "dti/esi").await);
+        assert!(token_operable_resolved(&core, &felipe, "dti/esi/sub").await);
+        // `dti` is the *parent* of the assigned namespace, not covered.
+        assert!(!token_operable_resolved(&core, &felipe, "dti").await);
+
+        // A principal with no identifying metadata never widens.
+        let mut anon = Auth { policies: vec!["administrator".into()], ..Default::default() };
+        stamp_binding(&mut anon.metadata, "", "root-uuid", false);
+        assert!(!token_operable_resolved(&core, &anon, "dti/esi").await);
     }
 
     #[test]

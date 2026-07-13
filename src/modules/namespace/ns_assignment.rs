@@ -21,9 +21,14 @@
 //! - **Empty list is normalized to no record** ([`NsAssignmentStore::set`]), so
 //!   "unrestricted" has exactly one representation.
 //!
-//! This restricts *authentication* (where a credential may bind), not
-//! *authorization* within a namespace — a bound token still needs policies in
-//! that namespace to do anything.
+//! This gates *authentication* (where a credential may bind) at login. An
+//! explicit assignment additionally widens *request-time operability*: a
+//! principal assigned a namespace (or an ancestor of it) may operate there from
+//! any session — see [`super::token_binding::token_operable_resolved`], which
+//! consults these records after the pure binding verdict. Widening is
+//! explicit-only (the "no record ⇒ unrestricted" login convenience is not
+//! applied to authorization). Either way a bound token still needs policies in
+//! the target namespace to actually do anything.
 //!
 //! ## Storage layout (barrier-root, alongside the namespace registry)
 //!

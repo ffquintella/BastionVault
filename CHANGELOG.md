@@ -45,6 +45,24 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.28.1] - 2026-07-13
+
+### Changed
+
+- **Namespace assignment now governs authorization, not only login.** A
+  principal's allowed-namespaces (`sys/identity/ns-assignment`) previously
+  restricted *where a credential may authenticate*; a token minted at a root
+  login still could not read or write a child namespace it was assigned unless
+  it was `child_visible`. Request-time operability (`token_operable_resolved`)
+  now additionally consults the principal's assignment: an admin **explicitly
+  assigned** a namespace (or an ancestor of it) may operate there from any
+  session. Widening happens **only on an explicit record** — a token with no
+  assignment keeps the strict namespace-binding verdict, so absence never
+  promotes a bound token into a cross-tenant superuser. The lookup is live, so
+  granting/revoking an assignment takes effect on the next request without
+  re-minting the token. Fixes the GUI "Read-only here" banner appearing for
+  operators who *are* assigned the active namespace.
+
 ## [0.28.0] - 2026-07-10
 
 ### Fixed

@@ -2608,7 +2608,10 @@ impl SystemBackend {
             .map(|(_, path)| path);
         let operable = match active_ns.as_deref() {
             Some(ns_path) => {
-                crate::modules::namespace::token_binding::token_operable(&auth, ns_path)
+                crate::modules::namespace::token_binding::token_operable_resolved(
+                    &self.core, &auth, ns_path,
+                )
+                .await
             }
             None => true,
         };
