@@ -186,7 +186,11 @@ impl MountsRouter {
             let view = BarrierView::new(self.barrier.clone(), &barrier_path);
             let path = format!("{}{}", self.router_prefix, &entry.path);
 
-            self.router.mount(backend, &path, mount_entry.clone(), view)?;
+            // Idempotent: a namespace's router may be set up more than once
+            // (the shared trie outlives the per-namespace `MountsRouter` cache,
+            // and two concurrent `ensure_router` calls can race on first
+            // access). Re-mounting the exact same prefix must not error.
+            self.router.mount_idempotent(backend, &path, mount_entry.clone(), view)?;
 
             if entry.tainted {
                 self.router.taint(&entry.path)?;

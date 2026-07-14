@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.28.8] - 2026-07-14
+
+### Fixed
+
+- **"HTTP 500: Router mount conflict" when opening a namespace's Mounts page** (`src/router.rs`, `src/mount.rs`, `src/modules/namespace/mount_registry.rs`) -- a child namespace's `MountsRouter` is built lazily by `NamespaceMountRegistry::ensure_router` and cached in a `DashMap`, but the check-then-insert was not atomic and `MountsRouter::setup` re-mounted every persisted entry into the *shared* router trie via `Router::mount`, which hard-errors (`ErrRouterMountConflict`) on an already-present prefix. The GUI fires `list_mounts` + `list_auth_methods` concurrently on every namespace page load (`MountsPage.tsx` `Promise.all`); both route through `ensure_router`, so the request that lost the cache race re-ran `setup()` over the trie the winner had already populated and returned 500 -- and because the failed call's mount list came back empty, the Default Engines tab showed every engine as "disabled". `setup` now uses a new idempotent `Router::mount_idempotent` (a re-mount of the *exact* same prefix is a no-op under the trie write lock; a genuine ancestor collision still conflicts), and `ensure_router` caches atomically via `DashMap::entry().or_insert_with()`. Root-namespace mounting is unchanged. Regression: `test_ensure_router_setup_is_idempotent_over_shared_trie`.
+
 ## [0.28.7] - 2026-07-13
 
 ### Fixed

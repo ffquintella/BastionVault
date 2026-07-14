@@ -47,11 +47,48 @@ impl Router {
         mount_entry: Arc<RwLock<MountEntry>>,
         view: BarrierView,
     ) -> Result<(), RvError> {
+        self.mount_inner(backend, prefix, mount_entry, view, false)
+    }
+
+    /// Like [`Router::mount`], but treats re-mounting the *exact* same prefix
+    /// as a no-op instead of a conflict. A nested mount (an ancestor prefix
+    /// already present at a *different* key) is still rejected.
+    ///
+    /// This is what per-namespace router (re)initialisation
+    /// ([`crate::mount::MountsRouter::setup`]) needs: the shared router trie
+    /// outlives the per-namespace [`crate::mount::MountsRouter`] cache, and a
+    /// namespace's `setup` may run more than once (e.g. two concurrent lazy
+    /// `ensure_router` calls racing on the first request to a namespace). The
+    /// check-and-insert happens under the single write lock, so it is atomic
+    /// against a competing `mount`/`mount_idempotent` for the same prefix.
+    pub fn mount_idempotent(
+        &self,
+        backend: Arc<dyn Backend>,
+        prefix: &str,
+        mount_entry: Arc<RwLock<MountEntry>>,
+        view: BarrierView,
+    ) -> Result<(), RvError> {
+        self.mount_inner(backend, prefix, mount_entry, view, true)
+    }
+
+    fn mount_inner(
+        &self,
+        backend: Arc<dyn Backend>,
+        prefix: &str,
+        mount_entry: Arc<RwLock<MountEntry>>,
+        view: BarrierView,
+        idempotent: bool,
+    ) -> Result<(), RvError> {
         log::debug!("mount, prefix: {prefix}");
         let mut root = self.root.write()?;
 
-        // Check if this is a nested mount
-        if let Some(_existing) = root.get_ancestor(prefix) {
+        // Check if this is a nested mount. An existing ancestor at the *exact*
+        // same key is only tolerated for idempotent (re)mounts; any other
+        // ancestor is always a genuine conflict.
+        if let Some(existing) = root.get_ancestor(prefix) {
+            if idempotent && existing.key().map(String::as_str) == Some(prefix) {
+                return Ok(());
+            }
             return Err(RvError::ErrRouterMountConflict);
         }
 

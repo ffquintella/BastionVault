@@ -391,6 +391,98 @@ mod tests {
         assert!(store.delete("tenant-a", registry.mount_count(&a_uuid)).await.is_err());
     }
 
+    /// Regression for "HTTP 500: Router mount conflict" when acting on a
+    /// namespace whose mounts are already present in the shared router trie
+    /// but whose per-namespace `MountsRouter` is no longer cached.
+    ///
+    /// The GUI fires `list_mounts` + `list_auth_methods` concurrently on every
+    /// namespace page load; both route through `ensure_router`, whose
+    /// check-then-insert let the loser re-run `setup()` against a trie the
+    /// winner had already populated, and `Router::mount` hard-errored on the
+    /// duplicate. `forget()` reproduces the same desync deterministically: it
+    /// drops the cache (via `unload` = `MountTable::clear`) but leaves the
+    /// trie and the persisted table intact, so the next `ensure_router` rebuilds
+    /// and re-runs `setup()` over already-mounted prefixes. That second setup
+    /// must be a no-op, not a 500.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_ensure_router_setup_is_idempotent_over_shared_trie() {
+        use crate::logical::{Operation, Request};
+        use std::collections::HashMap;
+
+        let (_bvault, core, root) =
+            new_unseal_test_bastion_vault("test_ns_ensure_router_idempotent").await;
+
+        async fn ns_req(
+            core: &Arc<Core>,
+            token: &str,
+            op: Operation,
+            path: &str,
+            ns: &str,
+            body: Option<serde_json::Map<String, serde_json::Value>>,
+        ) -> Result<Option<crate::logical::Response>, RvError> {
+            let mut req = Request::new(path);
+            req.operation = op;
+            req.client_token = token.to_string();
+            req.body = body;
+            let mut h = HashMap::new();
+            h.insert("x-bastionvault-namespace".to_string(), ns.to_string());
+            req.headers = Some(h);
+            core.handle_request(&mut req).await
+        }
+
+        let store = store_of(&core);
+        store.create("tenant-x", NamespaceQuotas::default(), false).await.unwrap();
+
+        // Mount an engine in the namespace: `ensure_router` builds + caches the
+        // router and mounts `tenant-x/secret/` into the shared trie.
+        ns_req(
+            &core,
+            &root,
+            Operation::Write,
+            "sys/mounts/secret/",
+            "tenant-x",
+            json!({ "type": "kv-v2" }).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+
+        let registry = core
+            .module_manager
+            .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+            .unwrap()
+            .registry
+            .clone();
+        let uuid = store.get_by_path("tenant-x").await.unwrap().unwrap().uuid;
+
+        // Evict the cached router while leaving the trie (and persisted table)
+        // populated — the desync that concurrent first-touch requests produce.
+        registry.forget(&uuid);
+
+        // The next `ensure_router` rebuilds and re-runs `setup()` over the
+        // already-mounted `tenant-x/secret/`. Pre-fix this returned
+        // `ErrRouterMountConflict`; it must now succeed and still see the mount.
+        let mounts = registry
+            .list_mounts(&core, &uuid, "tenant-x")
+            .await
+            .expect("re-setup over a populated trie must not conflict");
+        assert!(
+            mounts.iter().any(|(p, _, _)| p == "secret/"),
+            "rebuilt namespace router must still expose secret/, got {mounts:?}"
+        );
+
+        // And a fresh mount alongside it must still work (guarded path).
+        ns_req(
+            &core,
+            &root,
+            Operation::Write,
+            "sys/mounts/resources/",
+            "tenant-x",
+            json!({ "type": "resource" }).as_object().cloned(),
+        )
+        .await
+        .expect("mounting a new engine after re-setup must succeed");
+    }
+
     /// End-to-end regression for the "secret shows as unowned in a
     /// non-root namespace" bug. A KV secret created through the namespace
     /// header must be reported as *owned* by the `identity/owner/kv`

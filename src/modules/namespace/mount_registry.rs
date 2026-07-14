@@ -116,8 +116,18 @@ impl NamespaceMountRegistry {
 
         mounts_router.setup(core.clone())?;
 
-        self.routers.insert(ns_uuid.to_string(), mounts_router.clone());
-        Ok(mounts_router)
+        // Cache atomically. Two concurrent first-touch requests to the same
+        // namespace can both reach here (the `get` above is a check-then-act);
+        // `entry(..).or_insert` makes exactly one router win the cache slot.
+        // Both built routers are equivalent (same persisted table, same shared
+        // trie), and `setup` above is idempotent, so the loser is simply
+        // dropped rather than clobbering the winner mid-flight.
+        let cached = self
+            .routers
+            .entry(ns_uuid.to_string())
+            .or_insert_with(|| mounts_router.clone())
+            .clone();
+        Ok(cached)
     }
 
     /// Mount a backend inside a namespace. Ensures the namespace's router
