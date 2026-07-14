@@ -7,6 +7,7 @@ import {
   Input,
   MaskedValue,
   Breadcrumb,
+  CopyablePath,
   EmptyState,
   EntityLabel,
   EntityPicker,
@@ -26,6 +27,7 @@ import type { OwnerInfo, ShareEntry } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 import { useAuthStore } from "../stores/authStore";
+import { useNamespaceStore } from "../stores/namespaceStore";
 import { useAssetGroupMap, canonicalizeSecretPath } from "../hooks/useAssetGroupMap";
 
 type KvMount = { path: string; mount_type: string };
@@ -77,6 +79,30 @@ export function SecretsPage() {
   const [kvMounts, setKvMounts] = useState<KvMount[] | null>(null);
 
   const assetGroups = useAssetGroupMap();
+  // Active namespace ("" at root) — prepended to the ACL path so the copied
+  // value is directly usable in a namespace-scoped policy (namespace policies
+  // must reference namespace-prefixed paths; see policy_scope.rs).
+  const activeNamespace = useNamespaceStore((s) => s.active);
+
+  // Full namespace-qualified ACL path for the selected secret, in the form a
+  // policy `path "..."` stanza expects. KV-v2 inserts the `data/` infix after
+  // the mount; KV-v1 has no infix. Returns "" when nothing usable is selected.
+  const policyPath = useMemo(() => {
+    if (!selectedKey || selectedKey.endsWith("/")) return "";
+    const mount = mountBase.replace(/\/+$/, "");
+    if (!mount) return "";
+    const logical = (currentPath + selectedKey).replace(/^\/+/, "");
+    const rel = logical.startsWith(mount + "/")
+      ? logical.slice(mount.length + 1)
+      : logical === mount
+        ? ""
+        : logical;
+    const infix = mountType === "kv-v2" ? "data/" : "";
+    const acl = `${mount}/${infix}${rel}`;
+    const ns = activeNamespace.replace(/^\/+|\/+$/g, "");
+    return ns ? `${ns}/${acl}` : acl;
+  }, [selectedKey, mountBase, currentPath, mountType, activeNamespace]);
+
   // Stack of group filters applied as an AND chain. Empty means "no
   // filter, show every group with secrets under the current prefix".
   // Each entry deeper drills further into the faceted intersection.
@@ -769,6 +795,12 @@ export function SecretsPage() {
                         })}
                       </tbody>
                     </table>
+                    {policyPath && (
+                      <CopyablePath
+                        path={policyPath}
+                        hint="Full namespace-qualified path — paste into a policy path stanza."
+                      />
+                    )}
                     <div className="flex gap-2 pt-2">
                       <Button size="sm" onClick={startEdit}>
                         Edit
@@ -851,7 +883,16 @@ export function SecretsPage() {
           {shareTarget && (
             <SecretSharingPanel
               fullPath={canonicalizeSecretPath(currentPath + shareTarget)}
-              displayPath={currentPath + shareTarget}
+              displayPath={(() => {
+                // Display-only: prepend the active namespace so it's clear
+                // which tenant this owner/share record lives under. The API
+                // still receives the mount-relative `fullPath` — the backend
+                // re-prepends the namespace when keying the owner record
+                // (`canonicalize_kv_path_scoped` → `<ns>/<mount>/<key>`).
+                const rel = currentPath + shareTarget;
+                const ns = activeNamespace.replace(/^\/+|\/+$/g, "");
+                return ns ? `${ns}/${rel}` : rel;
+              })()}
               onClose={() => setShareTarget(null)}
             />
           )}

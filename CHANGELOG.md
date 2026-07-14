@@ -45,6 +45,18 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.28.9] - 2026-07-14
+
+### Added
+
+- **Copy the full, namespace-qualified policy path from a secret, resource, or file detail view** (`gui/src/components/ui/CopyablePath.tsx`, `gui/src/routes/SecretsPage.tsx`, `gui/src/routes/ResourcesPage.tsx`, `gui/src/routes/FilesPage.tsx`) -- each detail view now shows a copyable ACL path assembled in the exact form a policy `path "..."` stanza expects, with the active namespace prepended (namespace-scoped policies must reference namespace-prefixed paths -- see `src/modules/namespace/policy_scope.rs`). The path uses each engine's real mount form: KV-v2 secrets get the `data/` infix (`<ns>/secret/data/<key>`), KV-v1 omit it, resources use `<ns>/resources/resources/<name>`, and files use `<ns>/files/files/<id>`; at root the namespace prefix is dropped. New shared `CopyablePath` UI component. Tests: `gui/src/test/copyablePath.test.tsx` (9).
+
+### Fixed
+
+- **Share modal showed a namespace secret's path without its namespace** (`gui/src/routes/SecretsPage.tsx`) -- the "Share" dialog's "Secret path" line rendered the mount-relative path (`secret/github/rustion`) even inside a child namespace, obscuring which tenant the owner/share record belongs to. It now prepends the active namespace for display (`dti/esi/secret/github/rustion`), matching the owner-store canonical key `<ns>/<mount>/<key>`. Display-only: the API still receives the mount-relative path and the backend re-prepends the namespace (`canonicalize_kv_path_scoped`).
+
+- **Claiming ownership of a namespace secret over HTTP had no effect (badge stayed "unowned"; retry returned `409 already owned`)** (`src/http/sys.rs`) -- the `sys/kv-owner/claim` and `sys/kv-owner/transfer` actix shims were the only namespace-scoped `sys/` HTTP handlers that never called `copy_namespace_header`, so the `X-BastionVault-Namespace` selector the remote GUI sends was dropped before the logical request reached `rewrite_request_for_namespace`. The claim/transfer therefore ran **root-scoped** (`req.namespace_path = None`) and keyed the owner record under the root path (`secret/github/rustion`), while the owner **read** (`identity/owner/kv`, routed through the `/v1/` catch-all that *does* copy the header) keyed under the namespace-scoped path (`<ns>/secret/github/rustion`). Net effect from a child namespace: the first "Claim ownership" reported success but stamped the wrong (root) key, the namespace-scoped badge kept showing "unowned", and a second click returned `409 path is already owned by entity_id=<caller>` against the root record the first claim had just written. Both shims now copy the namespace header, matching the other `sys/` shims and the embedded path (which was never affected — it sets the header directly on the core request). Completes the sys-shim namespace-header audit line behind 0.28.2--0.28.7.
+
 ## [0.28.8] - 2026-07-14
 
 ### Fixed

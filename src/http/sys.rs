@@ -551,6 +551,11 @@ async fn sys_kv_owner_transfer_request_handler(
     r.path = "sys/kv-owner/transfer".to_string();
     r.operation = Operation::Write;
     r.body = Some(payload);
+    // KV owner records are namespace-scoped (`canonicalize_kv_path_scoped`
+    // keys them under `req.namespace_path`). Without copying the selector the
+    // transfer resolves root-scoped and reassigns the wrong (or a nonexistent)
+    // record when performed from a child namespace.
+    copy_namespace_header(&req, &mut r);
     handle_request(core, &mut r).await
 }
 
@@ -574,6 +579,12 @@ async fn sys_kv_owner_claim_request_handler(
     r.path = "sys/kv-owner/claim".to_string();
     r.operation = Operation::Write;
     r.body = Some(payload);
+    // KV owner records are namespace-scoped (`canonicalize_kv_path_scoped`
+    // keys them under `req.namespace_path`). Without copying the selector a
+    // claim from a child namespace stamps the *root* owner key, so the
+    // namespace-scoped owner read still reports the path as unowned and a
+    // retry 409s against the root record the first claim just wrote.
+    copy_namespace_header(&req, &mut r);
     handle_request(core, &mut r).await
 }
 

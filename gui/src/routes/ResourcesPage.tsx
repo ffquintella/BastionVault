@@ -10,6 +10,7 @@ import {
   Textarea,
   Badge,
   Breadcrumb,
+  CopyablePath,
   Tabs,
   Table,
   Modal,
@@ -62,6 +63,7 @@ import type { EffectiveLoginClass } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 import { useAuthStore } from "../stores/authStore";
+import { useNamespaceStore } from "../stores/namespaceStore";
 import { useAssetGroupMap } from "../hooks/useAssetGroupMap";
 import { useCanWriteResource } from "../hooks/useCanWriteResource";
 import { RustionPolicyTierEditor } from "../components/RustionPolicyTierEditor";
@@ -201,6 +203,7 @@ function pushRecent(name: string): string[] {
 
 export function ResourcesPage() {
   const { toast } = useToast();
+  const activeNamespace = useNamespaceStore((s) => s.active);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
@@ -585,6 +588,15 @@ export function ResourcesPage() {
             <h1 className="text-2xl font-bold">{String(resourceInfo.name)}</h1>
             <ResourceTypeIcon typeDef={typeDef} withLabel size={18} />
           </div>
+
+          <CopyablePath
+            path={(() => {
+              const acl = `resources/resources/${String(resourceInfo.name)}`;
+              const ns = activeNamespace.replace(/^\/+|\/+$/g, "");
+              return ns ? `${ns}/${acl}` : acl;
+            })()}
+            hint="Full namespace-qualified path — paste into a policy path stanza."
+          />
 
           <Card>
             <Tabs

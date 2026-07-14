@@ -7,12 +7,14 @@ import {
   Table,
   Modal,
   ConfirmModal,
+  CopyablePath,
   Tabs,
   useToast,
 } from "../components/ui";
 import type { FileMeta, FileSyncTarget, FileVersionInfo } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
+import { useNamespaceStore } from "../stores/namespaceStore";
 import { TargetPicker } from "../components/ui/TargetPicker";
 
 function fmtBytes(n: number): string {
@@ -614,12 +616,18 @@ function VersionsTab({
 }
 
 function InfoTab({ meta, onEdit }: { meta: FileMeta; onEdit: () => void }) {
+  const activeNamespace = useNamespaceStore((s) => s.active);
   const Row = ({ k, v }: { k: string; v: string }) => (
     <div className="flex gap-4 text-sm py-1">
       <span className="w-32 text-[var(--color-text-muted)]">{k}</span>
       <span className="font-mono break-all">{v || "—"}</span>
     </div>
   );
+  const policyPath = (() => {
+    const acl = `files/files/${meta.id}`;
+    const ns = activeNamespace.replace(/^\/+|\/+$/g, "");
+    return ns ? `${ns}/${acl}` : acl;
+  })();
   return (
     <div className="flex flex-col gap-1">
       <div className="flex justify-end">
@@ -642,6 +650,12 @@ function InfoTab({ meta, onEdit }: { meta: FileMeta; onEdit: () => void }) {
         k="updated_at"
         v={meta.updated_at ? new Date(meta.updated_at).toLocaleString() : ""}
       />
+      <div className="pt-2">
+        <CopyablePath
+          path={policyPath}
+          hint="Full namespace-qualified path — paste into a policy path stanza."
+        />
+      </div>
     </div>
   );
 }
