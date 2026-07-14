@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.28.11] - 2026-07-14
+
+### Changed
+
+- **Relabel AppID "roles" as "IDs" throughout the AppID page** (`gui/src/routes/AppRolePage.tsx`) -- the list panel ("IDs"), create button ("Create ID"), detail header ("ID: <name>"), edit/delete modals, empty states, machine-binding copy, and toasts now use "ID" instead of "Role", matching the "AppID" auth-method branding. Kept distinct from the "App ID" credential field (the identifier value) and the "Secret IDs" tab. Underlying AppRole commands/types are unchanged.
+
 ## [0.28.10] - 2026-07-14
 
 ### Added

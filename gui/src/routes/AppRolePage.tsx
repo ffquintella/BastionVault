@@ -122,7 +122,7 @@ export function AppRolePage() {
       await api.writeAppRole(newName, newBindSecretId, newPolicies.join(","), 0, "", "", "");
       // Persist the namespace login-restriction (empty ⇒ unrestricted).
       await api.setNsAssignment("approle/", newName, newNamespaces);
-      toast("success", `Role ${newName} created`);
+      toast("success", `ID ${newName} created`);
       setShowCreate(false);
       setNewName("");
       setNewPolicies([]);
@@ -142,7 +142,7 @@ export function AppRolePage() {
     if (!deleteTarget) return;
     try {
       await api.deleteAppRole(deleteTarget);
-      toast("success", `Role ${deleteTarget} deleted`);
+      toast("success", `ID ${deleteTarget} deleted`);
       if (selected === deleteTarget) {
         setSelected(null);
         setRoleInfo(null);
@@ -168,7 +168,7 @@ export function AppRolePage() {
           <h1 className="text-2xl font-bold">AppID</h1>
           {mountEnabled && (
             <Button size="sm" onClick={() => setShowCreate(true)}>
-              Create Role
+              Create ID
             </Button>
           )}
         </div>
@@ -177,7 +177,7 @@ export function AppRolePage() {
           <Card>
             <EmptyState
               title="AppID auth method not enabled"
-              description="The AppID auth backend must be mounted before you can create roles."
+              description="The AppID auth backend must be mounted before you can create IDs."
               action={
                 <Button onClick={handleEnableMount} disabled={enabling}>
                   {enabling ? "Enabling..." : "Enable AppID"}
@@ -189,12 +189,12 @@ export function AppRolePage() {
 
         {mountEnabled && (
         <div className="flex gap-4">
-          {/* Role list */}
-          <Card className="w-56 shrink-0" title="Roles">
+          {/* ID list */}
+          <Card className="w-56 shrink-0" title="IDs">
             {loading ? (
               <p className="text-sm text-[var(--color-text-muted)]">Loading...</p>
             ) : roles.length === 0 ? (
-              <EmptyState title="No roles" />
+              <EmptyState title="No IDs" />
             ) : (
               <div className="space-y-0.5 -mx-1">
                 {roles.map((name) => (
@@ -221,7 +221,7 @@ export function AppRolePage() {
             )}
           </Card>
 
-          {/* Role detail */}
+          {/* ID detail */}
           <div className="flex-1 space-y-4">
             {selected && roleInfo ? (
               <RoleDetail
@@ -237,8 +237,8 @@ export function AppRolePage() {
             ) : (
               <Card>
                 <EmptyState
-                  title="No role selected"
-                  description="Select a role from the list to view details"
+                  title="No ID selected"
+                  description="Select an ID from the list to view details"
                 />
               </Card>
             )}
@@ -246,11 +246,11 @@ export function AppRolePage() {
         </div>
         )}
 
-        {/* Create role modal */}
+        {/* Create ID modal */}
         <Modal
           open={showCreate}
           onClose={() => setShowCreate(false)}
-          title="Create AppID Role"
+          title="Create AppID"
           actions={
             <>
               <Button variant="ghost" onClick={() => setShowCreate(false)}>
@@ -264,7 +264,7 @@ export function AppRolePage() {
         >
           <div className="space-y-3">
             <Input
-              label="Role Name"
+              label="ID Name"
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
               placeholder="my-app"
@@ -319,7 +319,7 @@ export function AppRolePage() {
                 </div>
                 <p className="text-xs text-[var(--color-text-muted)] mt-1.5">
                   {newNamespaces.length === 0
-                    ? "No restriction — this role may log in to any namespace."
+                    ? "No restriction — this ID may log in to any namespace."
                     : `Login restricted to: ${newNamespaces.map((n) => n || "root").join(", ")} (and descendants).`}
                 </p>
               </div>
@@ -331,8 +331,8 @@ export function AppRolePage() {
           open={deleteTarget !== null}
           onClose={() => setDeleteTarget(null)}
           onConfirm={handleDelete}
-          title="Delete Role"
-          message={`Are you sure you want to delete role "${deleteTarget}"? All associated secret IDs will be invalidated.`}
+          title="Delete ID"
+          message={`Are you sure you want to delete ID "${deleteTarget}"? All associated secret IDs will be invalidated.`}
           confirmLabel="Delete"
         />
       </div>
@@ -371,12 +371,12 @@ function RoleDetail({
     <>
       {noMachines && (
         <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-yellow-400 text-sm">
-          This role has no bound machines. AppID logins require a FerroGate machine token bound to
-          the role — until a machine is bound under the <strong>Machines</strong> tab, no client can
-          authenticate with this role.
+          This ID has no bound machines. AppID logins require a FerroGate machine token bound to
+          the ID — until a machine is bound under the <strong>Machines</strong> tab, no client can
+          authenticate with this ID.
         </div>
       )}
-      <Card title={`Role: ${roleInfo.name}`}>
+      <Card title={`ID: ${roleInfo.name}`}>
         <Tabs
           tabs={[
             { id: "overview", label: "Overview" },
@@ -553,7 +553,7 @@ function EditRoleModal({
         tokenMaxTtl.trim(),
       );
       await api.setNsAssignment("approle/", roleInfo.name, namespaces);
-      toast("success", `Role ${roleInfo.name} updated`);
+      toast("success", `ID ${roleInfo.name} updated`);
       onSaved();
     } catch (e: unknown) {
       toast("error", extractError(e));
@@ -566,7 +566,7 @@ function EditRoleModal({
     <Modal
       open={open}
       onClose={onClose}
-      title={`Edit Role: ${roleInfo.name}`}
+      title={`Edit ID: ${roleInfo.name}`}
       actions={
         <>
           <Button variant="ghost" onClick={onClose}>
@@ -701,7 +701,7 @@ function MachinesPanel({ roleInfo, onRefresh, toast }: MachinesPanelProps) {
       .filter((s) => s.length > 0);
     try {
       await api.addRoleMachine(roleInfo.name, pickMachineId, "", environments);
-      toast("success", "Machine bound to role");
+      toast("success", "Machine bound to ID");
       setShowAdd(false);
       onRefresh();
     } catch (e: unknown) {
@@ -777,14 +777,14 @@ function MachinesPanel({ roleInfo, onRefresh, toast }: MachinesPanelProps) {
           columns={columns}
           data={roleInfo.bound_machines}
           rowKey={(m) => m.machine_id}
-          emptyMessage="No machines bound. This role cannot authenticate until a machine is bound."
+          emptyMessage="No machines bound. This ID cannot authenticate until a machine is bound."
         />
       </Card>
 
       <Modal
         open={showAdd}
         onClose={() => setShowAdd(false)}
-        title="Bind Machine to Role"
+        title="Bind Machine to ID"
         actions={
           <>
             <Button variant="ghost" onClick={() => setShowAdd(false)}>
@@ -826,7 +826,7 @@ function MachinesPanel({ roleInfo, onRefresh, toast }: MachinesPanelProps) {
             placeholder="prod, staging, prod-*  (empty = all environments)"
           />
           <p className="text-xs text-[var(--color-text-muted)]">
-            Leave empty to let this machine access all environments for this role. Wildcards like{" "}
+            Leave empty to let this machine access all environments for this ID. Wildcards like{" "}
             <code>prod-*</code> are supported.
           </p>
         </div>
@@ -837,7 +837,7 @@ function MachinesPanel({ roleInfo, onRefresh, toast }: MachinesPanelProps) {
         onClose={() => setRemoveTarget(null)}
         onConfirm={handleRemove}
         title="Remove Machine Binding"
-        message="Remove this machine from the role? Clients using it will no longer be able to authenticate with this role."
+        message="Remove this machine from the ID? Clients using it will no longer be able to authenticate with this ID."
         confirmLabel="Remove"
       />
     </>
@@ -965,7 +965,7 @@ function SecretIdPanel({ roleName, onCopy, toast }: SecretIdPanelProps) {
             columns={columns}
             data={accessors}
             rowKey={(a) => a}
-            emptyMessage="No secret IDs generated for this role"
+            emptyMessage="No secret IDs generated for this ID"
           />
         )}
       </Card>
