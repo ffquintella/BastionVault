@@ -1320,8 +1320,43 @@ export interface PkiGenerateKeyResult {
 
 export interface PkiImportKeyRequest {
   mount: string;
-  private_key: string;
+  /** PEM private key. Optional when `pkcs12_b64` is supplied. */
+  private_key?: string;
   name?: string;
+  /** Base64 PKCS#12 / PFX container. When set, the private key is
+   *  unwrapped locally and used instead of `private_key`; certs in the
+   *  container are ignored (this path only grabs the key). */
+  pkcs12_b64?: string;
+  /** PKCS#12 passphrase. Empty string allowed. Ignored without a container. */
+  passphrase?: string;
+}
+
+/** Format of a certificate-import file for the Certificates tab. */
+export type PkiCertImportFormat = "pem" | "pkcs7" | "pkcs12";
+
+export interface PkiImportCertsFileRequest {
+  mount: string;
+  format: PkiCertImportFormat;
+  /** Base64 of the raw file bytes. */
+  data_b64: string;
+  /** PKCS#12 passphrase. Empty string allowed. Ignored for pem/pkcs7. */
+  passphrase?: string;
+  source?: string;
+}
+
+export interface PkiImportedCertEntry {
+  serial_number: string;
+  common_name: string;
+  imported: boolean;
+  already_present: boolean;
+  error: string | null;
+}
+
+export interface PkiImportCertsFileResult {
+  imported: number;
+  skipped: number;
+  failed: number;
+  entries: PkiImportedCertEntry[];
 }
 
 // ── Phase L3 — issuer chain ───────────────────────────────────────

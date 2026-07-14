@@ -45,7 +45,14 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
-## [0.28.12] - 2026-07-14
+## [0.28.13] - 2026-07-14
+
+### Added
+
+#### PKI GUI — file-based key & certificate import
+
+- **Import a managed key from a PKCS#12 file** (`gui`, PKI → Keys → Import) -- the "Import managed key" modal now has a **PEM / PKCS#12** toggle. Choosing PKCS#12 opens a file picker for a `.p12` / `.pfx` container and a passphrase field; the container is unwrapped locally inside the Tauri process (the passphrase never leaves the machine), only the private key is grabbed (normalised to PKCS#8) and imported, and any certificates in the container are ignored. Previously the only way to import a key was pasting PEM text.
+- **Import certificates from PEM / PKCS#7 / PKCS#12 files** (`gui`, PKI → Certificates → Import) -- a new **Import** button opens a modal with a PEM / PKCS#7 (`.p7b`/`.p7c`) / PKCS#12 (`.p12`/`.pfx`) toggle and a file picker (PEM may also be pasted). Every certificate found in the file is indexed independently into the orphan-cert index (`certs/import`); multi-cert bundles report a per-certificate outcome (imported / already-present / failed). No private key is stored on this path. New Tauri command `pki_import_certs_file`; the PKCS#12 unwrap is shared with the CA-import path, and PKCS#7 is parsed with the same `cms` crate the export path uses.
 
 ### Changed
 

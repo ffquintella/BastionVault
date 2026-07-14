@@ -90,6 +90,8 @@ import type {
   PkiChainPreview,
   PkiImportCertRequest,
   PkiImportCertResult,
+  PkiImportCertsFileRequest,
+  PkiImportCertsFileResult,
   PkiRoleConfig,
   PkiIssueRequest,
   PkiIssueResult,
@@ -2057,6 +2059,11 @@ export const pkiReadCert = (mount: string, serial: string) =>
   invoke<PkiCertRecord>("pki_read_cert", { mount, serial });
 export const pkiImportCert = (request: PkiImportCertRequest) =>
   invoke<PkiImportCertResult>("pki_import_cert", { request });
+/** Import one or more certs from a PEM / PKCS#7 / PKCS#12 file into the
+ *  orphan-cert index. Multi-cert files are indexed cert-by-cert; the
+ *  result carries a per-cert outcome. No private key is stored. */
+export const pkiImportCertsFile = (request: PkiImportCertsFileRequest) =>
+  invoke<PkiImportCertsFileResult>("pki_import_certs_file", { request });
 export const pkiRevokeCert = (mount: string, serial: string) =>
   invoke<PkiRevokeResult>("pki_revoke_cert", { mount, serial });
 export const pkiDeleteCert = (mount: string, serial: string, force = false) =>

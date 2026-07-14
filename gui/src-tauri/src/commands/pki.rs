@@ -704,6 +704,60 @@ pub struct PkiImportCaPkcs12Request {
     pub issuer_name: Option<String>,
 }
 
+/// Locally unwrap a PKCS#12 / PFX container into PEM blocks. The
+/// passphrase never leaves this process. Returns the (optional) private
+/// key normalised to PKCS#8 PEM, plus every certificate found — the
+/// private-key chain's certs first (leaf then chain), followed by any
+/// standalone certificate entries (trust anchors). DER duplicates are
+/// de-duplicated so a cert that appears in both the key chain and as a
+/// standalone bag is only emitted once.
+///
+/// `Relaxed` import policy matches the pre-0.3 behaviour: take whatever
+/// the container holds even when key/cert linking metadata is imperfect
+/// (xca and Windows exports are routinely sloppy here). `Strict` would
+/// silently drop such entries.
+fn unwrap_pkcs12(der: &[u8], passphrase: &str) -> Result<(Option<String>, Vec<String>), String> {
+    use p12_keystore::{KeyStore, KeyStoreEntry, Pkcs12ImportPolicy};
+    use pem::Pem;
+    use std::collections::HashSet;
+
+    let keystore = KeyStore::from_pkcs12(der, passphrase, Pkcs12ImportPolicy::Relaxed)
+        .map_err(|e| format!("passphrase rejected or container malformed: {e}"))?;
+
+    let mut key_pem: Option<String> = None;
+    let mut cert_pems: Vec<String> = Vec::new();
+    let mut seen: HashSet<Vec<u8>> = HashSet::new();
+
+    // Prefer the linked private-key chain first so its leaf cert lands
+    // ahead of any standalone/trust certs. p12-keystore normalises the
+    // private key to PKCS#8 DER regardless of the inner key type
+    // (RSA / EC / Ed25519), which is exactly the shape the server's
+    // `keys/import` / `config/ca` splitter expects behind a
+    // `PRIVATE KEY` header.
+    if let Some((_alias, chain)) = keystore.private_key_chain() {
+        key_pem = Some(pem::encode(&Pem::new(
+            "PRIVATE KEY",
+            chain.key().as_der().to_vec(),
+        )));
+        for c in chain.certs() {
+            if seen.insert(c.as_der().to_vec()) {
+                cert_pems.push(pem::encode(&Pem::new("CERTIFICATE", c.as_der().to_vec())));
+            }
+        }
+    }
+    for (_alias, entry) in keystore.entries() {
+        if let KeyStoreEntry::Certificate(cert) = entry {
+            if seen.insert(cert.as_der().to_vec()) {
+                cert_pems.push(pem::encode(&Pem::new(
+                    "CERTIFICATE",
+                    cert.as_der().to_vec(),
+                )));
+            }
+        }
+    }
+    Ok((key_pem, cert_pems))
+}
+
 #[tauri::command]
 pub async fn pki_import_ca_pkcs12(
     state: State<'_, AppState>,
@@ -711,48 +765,24 @@ pub async fn pki_import_ca_pkcs12(
 ) -> CmdResult<PkiCaImportResult> {
     use base64::engine::general_purpose::STANDARD as B64;
     use base64::Engine;
-    use p12_keystore::{KeyStore, Pkcs12ImportPolicy};
-    use pem::Pem;
 
     let der = B64
         .decode(request.pkcs12_b64.trim())
         .map_err(|e| format!("pki_import_ca_pkcs12: base64 decode failed: {e}"))?;
-    // `Relaxed` matches the pre-0.3 import behavior: take whatever the
-    // container holds even when key/cert linking metadata is imperfect
-    // (xca and Windows exports are routinely sloppy here). `Strict`
-    // would silently drop such entries.
-    let keystore = KeyStore::from_pkcs12(&der, &request.passphrase, Pkcs12ImportPolicy::Relaxed)
-        .map_err(|e| {
-            format!("pki_import_ca_pkcs12: passphrase rejected or container malformed: {e}")
-        })?;
-    let (_alias, chain_entry) = keystore
-        .private_key_chain()
-        .ok_or("pki_import_ca_pkcs12: container has no private key entry")?;
-
-    let chain = chain_entry.certs();
-    let leaf = chain
-        .first()
-        .ok_or("pki_import_ca_pkcs12: container has no certificate")?;
-
-    // p12-keystore normalises the private key to PKCS#8 DER regardless
-    // of the inner key type (RSA / EC / Ed25519), which is exactly the
-    // shape the server's `pki/config/ca` `pem_bundle` splitter expects
-    // behind a `PRIVATE KEY` header.
-    let cert_pem = pem::encode(&Pem::new("CERTIFICATE", leaf.as_der().to_vec()));
-    let key_pem = pem::encode(&Pem::new("PRIVATE KEY", chain_entry.key().as_der().to_vec()));
-
-    // Concat in any order — `split_pem_bundle` recognises both blocks
-    // by tag. Append intermediate / root certs (if any) so an
-    // intermediate-bundled-with-its-root .p12 still imports cleanly.
-    let mut bundle = String::new();
-    bundle.push_str(&cert_pem);
-    if !cert_pem.ends_with('\n') {
-        bundle.push('\n');
+    let (key_pem, cert_pems) =
+        unwrap_pkcs12(&der, &request.passphrase).map_err(|e| format!("pki_import_ca_pkcs12: {e}"))?;
+    let key_pem = key_pem.ok_or("pki_import_ca_pkcs12: container has no private key entry")?;
+    if cert_pems.is_empty() {
+        return Err("pki_import_ca_pkcs12: container has no certificate".into());
     }
-    for ca in chain.iter().skip(1) {
-        let s = pem::encode(&Pem::new("CERTIFICATE", ca.as_der().to_vec()));
-        bundle.push_str(&s);
-        if !s.ends_with('\n') {
+
+    // Concat in any order — `split_pem_bundle` recognises both blocks by
+    // tag. `cert_pems` is leaf-then-chain, so an intermediate bundled
+    // with its root still imports cleanly. The key goes last.
+    let mut bundle = String::new();
+    for c in &cert_pems {
+        bundle.push_str(c);
+        if !c.ends_with('\n') {
             bundle.push('\n');
         }
     }
@@ -1585,6 +1615,240 @@ pub async fn pki_import_cert(
     })
 }
 
+#[derive(Deserialize)]
+pub struct PkiImportCertsFileRequest {
+    pub mount: String,
+    /// Container encoding: `pem` | `pkcs7` | `pkcs12`. Anything else is
+    /// rejected before any network call.
+    pub format: String,
+    /// Base64 of the raw file bytes exactly as read from disk.
+    pub data_b64: String,
+    /// PKCS#12 passphrase. Empty string is allowed. Ignored for
+    /// `pem` / `pkcs7`, which don't carry an encryption layer here.
+    #[serde(default)]
+    pub passphrase: String,
+    /// Provenance label recorded on each imported cert (defaults to the
+    /// container format when empty).
+    #[serde(default)]
+    pub source: String,
+}
+
+/// One certificate's outcome from a multi-cert file import.
+#[derive(Serialize)]
+pub struct PkiImportedCertEntry {
+    pub serial_number: String,
+    pub common_name: String,
+    /// True when the cert was newly indexed. False when it was already
+    /// present (`already indexed`) or failed — see `error`.
+    pub imported: bool,
+    /// True specifically for the "already indexed" case, so the GUI can
+    /// count it as skipped rather than failed.
+    pub already_present: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct PkiImportCertsFileResult {
+    pub imported: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub entries: Vec<PkiImportedCertEntry>,
+}
+
+/// Extract certificate PEM blocks from a PEM / PKCS#7 / PKCS#12 file.
+/// Every returned string is a normalised `-----BEGIN CERTIFICATE-----`
+/// block. The passphrase is only consulted for PKCS#12.
+fn extract_cert_pems(
+    format: &str,
+    bytes: &[u8],
+    passphrase: &str,
+) -> Result<Vec<String>, String> {
+    use pem::Pem;
+
+    match format.to_ascii_lowercase().as_str() {
+        "pem" => {
+            // A PEM file may bundle several certs (and unrelated blocks
+            // like keys). Keep only CERTIFICATE blocks; re-encode each so
+            // the output is canonical regardless of the input's wrapping.
+            let text = std::str::from_utf8(bytes)
+                .map_err(|_| "PEM file is not valid UTF-8".to_string())?;
+            let blocks = pem::parse_many(text)
+                .map_err(|e| format!("PEM parse failed: {e}"))?;
+            let certs: Vec<String> = blocks
+                .into_iter()
+                .filter(|p| p.tag() == "CERTIFICATE")
+                .map(|p| pem::encode(&Pem::new("CERTIFICATE", p.contents().to_vec())))
+                .collect();
+            if certs.is_empty() {
+                return Err("no CERTIFICATE blocks found in PEM file".into());
+            }
+            Ok(certs)
+        }
+        "pkcs7" | "p7b" | "p7c" => extract_pkcs7_cert_pems(bytes),
+        "pkcs12" | "p12" | "pfx" => {
+            let (_key, cert_pems) = unwrap_pkcs12(bytes, passphrase)?;
+            if cert_pems.is_empty() {
+                return Err("PKCS#12 container has no certificate".into());
+            }
+            Ok(cert_pems)
+        }
+        other => Err(format!(
+            "unknown format `{other}` (accepted: pem, pkcs7, pkcs12)"
+        )),
+    }
+}
+
+/// Pull every certificate out of a certs-only PKCS#7 `SignedData`
+/// envelope. Accepts either raw DER or PEM-armored (`-----BEGIN PKCS7`)
+/// input — the shape `pki_export_cert format=pkcs7` produces and what
+/// OpenSSL / macOS / Windows tooling emits for `.p7b`.
+fn extract_pkcs7_cert_pems(bytes: &[u8]) -> Result<Vec<String>, String> {
+    use cms::cert::CertificateChoices;
+    use cms::content_info::ContentInfo;
+    use cms::signed_data::SignedData;
+    use pem::Pem;
+    use x509_cert::der::{Decode, Encode};
+
+    // Unwrap PEM armor if present; otherwise treat the bytes as DER.
+    let der: Vec<u8> = match std::str::from_utf8(bytes) {
+        Ok(text) if text.contains("BEGIN PKCS7") || text.contains("BEGIN PKCS #7") => {
+            pem::parse(text.trim())
+                .map_err(|e| format!("PKCS#7 PEM parse failed: {e}"))?
+                .contents()
+                .to_vec()
+        }
+        _ => bytes.to_vec(),
+    };
+
+    let ci = ContentInfo::from_der(&der)
+        .map_err(|e| format!("PKCS#7 ContentInfo decode failed: {e}"))?;
+    // id-signedData = 1.2.840.113549.1.7.2. A certs-only .p7b is always
+    // SignedData; reject anything else with a clear message.
+    if ci.content_type.to_string() != "1.2.840.113549.1.7.2" {
+        return Err(format!(
+            "PKCS#7 is not SignedData (content type {})",
+            ci.content_type
+        ));
+    }
+    let signed: SignedData = ci
+        .content
+        .decode_as()
+        .map_err(|e| format!("PKCS#7 SignedData decode failed: {e}"))?;
+    let cert_set = signed
+        .certificates
+        .ok_or("PKCS#7 SignedData carries no certificates")?;
+
+    let mut out = Vec::new();
+    for choice in cert_set.0.iter() {
+        if let CertificateChoices::Certificate(cert) = choice {
+            let der = cert
+                .to_der()
+                .map_err(|e| format!("PKCS#7 certificate re-encode failed: {e}"))?;
+            out.push(pem::encode(&Pem::new("CERTIFICATE", der)));
+        }
+    }
+    if out.is_empty() {
+        return Err("PKCS#7 SignedData has no X.509 certificates".into());
+    }
+    Ok(out)
+}
+
+/// Import one or more certificates from a PEM / PKCS#7 / PKCS#12 file
+/// into the orphan-cert index (`pki/certs/import`). Each cert is indexed
+/// independently; a per-cert failure (or an already-indexed serial) is
+/// recorded in the result rather than aborting the whole batch. No
+/// private key is stored on this path — use the Keys tab's PKCS#12
+/// import to grab a key.
+#[tauri::command]
+pub async fn pki_import_certs_file(
+    state: State<'_, AppState>,
+    request: PkiImportCertsFileRequest,
+) -> CmdResult<PkiImportCertsFileResult> {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
+
+    let bytes = B64
+        .decode(request.data_b64.trim())
+        .map_err(|e| format!("pki_import_certs_file: base64 decode failed: {e}"))?;
+    let cert_pems = extract_cert_pems(&request.format, &bytes, &request.passphrase)
+        .map_err(|e| format!("pki_import_certs_file: {e}"))?;
+
+    let source = if request.source.trim().is_empty() {
+        format!("{}-import", request.format.to_ascii_lowercase())
+    } else {
+        request.source.trim().to_string()
+    };
+    let mount = mount_prefix(&request.mount);
+
+    let mut entries = Vec::with_capacity(cert_pems.len());
+    let (mut imported, mut skipped, mut failed) = (0usize, 0usize, 0usize);
+
+    for pem_str in &cert_pems {
+        // Best-effort CN for display; a parse miss just leaves it blank.
+        let common_name = pem::parse(pem_str.trim())
+            .ok()
+            .and_then(|p| chain_node_from_der(p.contents()))
+            .map(|n| n.common_name)
+            .unwrap_or_default();
+
+        let mut body = Map::new();
+        body.insert("certificate".into(), json!(pem_str));
+        body.insert("source".into(), json!(source));
+        match make_request(
+            &state,
+            Operation::Write,
+            format!("{mount}/certs/import"),
+            Some(body),
+        )
+        .await
+        {
+            Ok(resp) => {
+                let map = data_to_map(resp);
+                imported += 1;
+                entries.push(PkiImportedCertEntry {
+                    serial_number: val_str(&map, "serial_number"),
+                    common_name,
+                    imported: true,
+                    already_present: false,
+                    error: None,
+                });
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                // An "already indexed" serial is a skip, not a failure —
+                // re-importing a bundle that overlaps existing certs is a
+                // normal operation.
+                if msg.to_ascii_lowercase().contains("already indexed") {
+                    skipped += 1;
+                    entries.push(PkiImportedCertEntry {
+                        serial_number: String::new(),
+                        common_name,
+                        imported: false,
+                        already_present: true,
+                        error: None,
+                    });
+                } else {
+                    failed += 1;
+                    entries.push(PkiImportedCertEntry {
+                        serial_number: String::new(),
+                        common_name,
+                        imported: false,
+                        already_present: false,
+                        error: Some(msg),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(PkiImportCertsFileResult {
+        imported,
+        skipped,
+        failed,
+        entries,
+    })
+}
+
 #[derive(Serialize)]
 pub struct PkiRevokeResult {
     pub revocation_time: u64,
@@ -2103,9 +2367,22 @@ pub async fn pki_generate_key(
 #[derive(Deserialize)]
 pub struct PkiImportKeyRequest {
     pub mount: String,
+    /// PEM-encoded private key. Optional when a `pkcs12_b64` container is
+    /// supplied — the key is then unwrapped from the container instead.
+    #[serde(default)]
     pub private_key: String,
     #[serde(default)]
     pub name: String,
+    /// Optional base64 PKCS#12 / PFX container. When present, the private
+    /// key is unwrapped locally (the passphrase never leaves this
+    /// process) and used in place of `private_key`; any certificates in
+    /// the container are ignored — this path only grabs the key.
+    #[serde(default)]
+    pub pkcs12_b64: String,
+    /// PKCS#12 passphrase. Empty string is allowed for password-less
+    /// containers. Ignored unless `pkcs12_b64` is set.
+    #[serde(default)]
+    pub passphrase: String,
 }
 
 #[tauri::command]
@@ -2113,9 +2390,26 @@ pub async fn pki_import_key(
     state: State<'_, AppState>,
     request: PkiImportKeyRequest,
 ) -> CmdResult<PkiGenerateKeyResult> {
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
+
+    let private_key = if !request.pkcs12_b64.trim().is_empty() {
+        let der = B64
+            .decode(request.pkcs12_b64.trim())
+            .map_err(|e| format!("pki_import_key: base64 decode failed: {e}"))?;
+        let (key_pem, _certs) =
+            unwrap_pkcs12(&der, &request.passphrase).map_err(|e| format!("pki_import_key: {e}"))?;
+        key_pem.ok_or("pki_import_key: PKCS#12 container has no private key entry")?
+    } else {
+        request.private_key.clone()
+    };
+    if private_key.trim().is_empty() {
+        return Err("pki_import_key: no private key provided".into());
+    }
+
     let mount = mount_prefix(&request.mount);
     let mut body = Map::new();
-    body.insert("private_key".into(), json!(request.private_key));
+    body.insert("private_key".into(), json!(private_key));
     if !request.name.is_empty() {
         body.insert("name".into(), json!(request.name));
     }
@@ -2203,4 +2497,187 @@ pub async fn pki_read_issuer_chain(
 #[allow(dead_code)]
 fn _unused_imports() {
     let _: HashMap<(), ()> = HashMap::new();
+}
+
+#[cfg(test)]
+mod tests {
+    //! Coverage for the client-side container parsers on the PKI import
+    //! path (`unwrap_pkcs12`, `extract_pkcs7_cert_pems`,
+    //! `extract_cert_pems`). These are pure functions — no vault call —
+    //! so we exercise the DER/ASN.1 handling directly, including
+    //! malformed-input rejection. Fixtures are generated in-test with
+    //! `rcgen` so no binary blobs live in the repo.
+
+    use super::*;
+
+    /// A self-signed cert plus its PKCS#8 private key, both DER.
+    struct Fixture {
+        cert_der: Vec<u8>,
+        cert_pem: String,
+        key_pkcs8_der: Vec<u8>,
+    }
+
+    fn make_cert(cn: &str) -> Fixture {
+        let ck = rcgen::generate_simple_self_signed(vec![cn.to_string()]).unwrap();
+        Fixture {
+            cert_der: ck.cert.der().to_vec(),
+            cert_pem: ck.cert.pem(),
+            key_pkcs8_der: ck.signing_key.serialize_der(),
+        }
+    }
+
+    /// Build a certs-only PKCS#7 `SignedData` `ContentInfo`, mirroring
+    /// the shape the server's export path produces. Returns DER.
+    fn make_pkcs7_der(certs: &[&[u8]]) -> Vec<u8> {
+        use cms::cert::CertificateChoices;
+        use cms::content_info::ContentInfo;
+        use cms::content_info::CmsVersion;
+        use cms::signed_data::{
+            CertificateSet, EncapsulatedContentInfo, SignedData, SignerInfos,
+        };
+        use cms::revocation::RevocationInfoChoices;
+        use x509_cert::der::{asn1::SetOfVec, Any, Decode, Encode};
+        use x509_cert::Certificate as X509Cert;
+
+        let mut set: CertificateSet = CertificateSet(SetOfVec::new());
+        for der in certs {
+            let c = X509Cert::from_der(der).unwrap();
+            set.0.insert(CertificateChoices::Certificate(c)).unwrap();
+        }
+        let signed = SignedData {
+            version: CmsVersion::V1,
+            digest_algorithms: SetOfVec::new(),
+            encap_content_info: EncapsulatedContentInfo {
+                econtent_type: "1.2.840.113549.1.7.1".parse().unwrap(),
+                econtent: None,
+            },
+            certificates: Some(set),
+            crls: Some(RevocationInfoChoices(Default::default())),
+            signer_infos: SignerInfos(SetOfVec::new()),
+        };
+        let inner = signed.to_der().unwrap();
+        let ci = ContentInfo {
+            content_type: "1.2.840.113549.1.7.2".parse().unwrap(),
+            content: Any::from_der(&inner).unwrap(),
+        };
+        ci.to_der().unwrap()
+    }
+
+    /// Build a PKCS#12 container holding the fixture's key + cert.
+    fn make_pkcs12(fx: &Fixture, extra_certs: &[&[u8]], passphrase: &str) -> Vec<u8> {
+        use p12_keystore::{
+            Certificate as P12Cert, KeyStore, KeyStoreEntry, PrivateKey, PrivateKeyChain,
+        };
+
+        let mut store = KeyStore::new();
+        let key = PrivateKey::from_der(&fx.key_pkcs8_der).unwrap();
+        let leaf = P12Cert::from_der(&fx.cert_der).unwrap();
+        let chain = PrivateKeyChain::new(vec![0u8; 20], key, vec![leaf]);
+        store.add_entry("leaf", KeyStoreEntry::PrivateKeyChain(chain));
+        for (i, der) in extra_certs.iter().enumerate() {
+            let c = P12Cert::from_der(der).unwrap();
+            store.add_entry(&format!("ca{i}"), KeyStoreEntry::Certificate(c));
+        }
+        store.writer(passphrase).write().unwrap()
+    }
+
+    fn cert_count(pem: &str) -> usize {
+        pem::parse_many(pem)
+            .unwrap()
+            .iter()
+            .filter(|p| p.tag() == "CERTIFICATE")
+            .count()
+    }
+
+    #[test]
+    fn extract_pem_single_cert() {
+        let fx = make_cert("pem-single.example");
+        let out = extract_cert_pems("pem", fx.cert_pem.as_bytes(), "").unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(cert_count(&out[0]), 1);
+    }
+
+    #[test]
+    fn extract_pem_bundle_multiple_and_ignores_key() {
+        let a = make_cert("pem-a.example");
+        let b = make_cert("pem-b.example");
+        // A bundle with two certs and a private key block interleaved.
+        let key_pem = pem::encode(&pem::Pem::new("PRIVATE KEY", a.key_pkcs8_der.clone()));
+        let bundle = format!("{}{}{}", a.cert_pem, key_pem, b.cert_pem);
+        let out = extract_cert_pems("pem", bundle.as_bytes(), "").unwrap();
+        // Both certs extracted; the key block dropped.
+        assert_eq!(out.len(), 2);
+        for c in &out {
+            assert_eq!(cert_count(c), 1);
+            assert!(c.contains("BEGIN CERTIFICATE"));
+        }
+    }
+
+    #[test]
+    fn extract_pem_rejects_keys_only() {
+        let fx = make_cert("keys-only.example");
+        let key_pem = pem::encode(&pem::Pem::new("PRIVATE KEY", fx.key_pkcs8_der));
+        let err = extract_cert_pems("pem", key_pem.as_bytes(), "").unwrap_err();
+        assert!(err.contains("no CERTIFICATE"), "got: {err}");
+    }
+
+    #[test]
+    fn extract_unknown_format_rejected() {
+        let err = extract_cert_pems("jks", b"whatever", "").unwrap_err();
+        assert!(err.contains("unknown format"), "got: {err}");
+    }
+
+    #[test]
+    fn extract_pkcs7_der_and_pem_roundtrip() {
+        let a = make_cert("p7-a.example");
+        let b = make_cert("p7-b.example");
+        let der = make_pkcs7_der(&[&a.cert_der, &b.cert_der]);
+
+        // DER input.
+        let out = extract_cert_pems("pkcs7", &der, "").unwrap();
+        assert_eq!(out.len(), 2);
+
+        // PEM-armored input (what a `.p7b` usually is).
+        let armored = pem::encode(&pem::Pem::new("PKCS7", der.clone()));
+        let out2 = extract_cert_pems("pkcs7", armored.as_bytes(), "").unwrap();
+        assert_eq!(out2.len(), 2);
+    }
+
+    #[test]
+    fn extract_pkcs7_rejects_garbage() {
+        let err = extract_cert_pems("pkcs7", b"not der at all", "").unwrap_err();
+        assert!(err.contains("ContentInfo decode"), "got: {err}");
+    }
+
+    #[test]
+    fn unwrap_pkcs12_returns_key_and_all_certs() {
+        let leaf = make_cert("p12-leaf.example");
+        let ca = make_cert("p12-ca.example");
+        let der = make_pkcs12(&leaf, &[&ca.cert_der], "s3cret");
+
+        let (key, certs) = unwrap_pkcs12(&der, "s3cret").unwrap();
+        assert!(key.unwrap().contains("BEGIN PRIVATE KEY"));
+        // Leaf (from the key chain) + the standalone CA cert.
+        assert_eq!(certs.len(), 2);
+        for c in &certs {
+            assert!(c.contains("BEGIN CERTIFICATE"));
+        }
+    }
+
+    #[test]
+    fn unwrap_pkcs12_wrong_passphrase_rejected() {
+        let fx = make_cert("p12-badpw.example");
+        let der = make_pkcs12(&fx, &[], "correct");
+        let err = unwrap_pkcs12(&der, "wrong").unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn extract_pkcs12_via_format_dispatch() {
+        let fx = make_cert("p12-dispatch.example");
+        let der = make_pkcs12(&fx, &[], "pw");
+        let out = extract_cert_pems("pkcs12", &der, "pw").unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("BEGIN CERTIFICATE"));
+    }
 }

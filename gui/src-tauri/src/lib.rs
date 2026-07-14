@@ -435,6 +435,7 @@ pub fn run() {
             commands::pki::pki_list_certs,
             commands::pki::pki_read_cert,
             commands::pki::pki_import_cert,
+            commands::pki::pki_import_certs_file,
             commands::pki::pki_revoke_cert,
             commands::pki::pki_delete_cert,
             commands::pki::pki_read_ca,

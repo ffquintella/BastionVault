@@ -28,11 +28,26 @@ import type {
   PkiChainPreview,
   PkiCaImportResult,
   PkiImportedCert,
+  PkiCertImportFormat,
 } from "../lib/types";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 import { useAuthStore } from "../stores/authStore";
 import { SUPER_ADMIN } from "../lib/access";
+
+/** Read a picked File into a base64 string. Chunked so large containers
+ *  (>~50 KB) don't blow the call-stack limit when fanning the byte array
+ *  into `String.fromCharCode` in one shot. Shared by the PKCS#12 key
+ *  import and the PEM/PKCS#7/PKCS#12 cert import. */
+async function fileToBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
 
 // Full-admin policy names carry `*`/sudo everywhere, so PKI administration is
 // implied without a capability round-trip. `pki-admin` is deliberately NOT in
@@ -2216,20 +2231,59 @@ function ImportKeyModal({
   onImported: () => void;
 }) {
   const { toast } = useToast();
+  const [mode, setMode] = useState<"pem" | "pkcs12">("pem");
   const [name, setName] = useState("");
   const [pem, setPem] = useState("");
+  const [pkcs12Name, setPkcs12Name] = useState("");
+  const [pkcs12B64, setPkcs12B64] = useState("");
+  const [passphrase, setPassphrase] = useState("");
   const [busy, setBusy] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  function reset() {
+    setMode("pem");
+    setName("");
+    setPem("");
+    setPkcs12Name("");
+    setPkcs12B64("");
+    setPassphrase("");
+  }
+
+  function handleClose() {
+    reset();
+    onClose();
+  }
+
+  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setPkcs12Name(file.name);
+    setPkcs12B64(await fileToBase64(file));
+  }
+
+  const canSubmit =
+    !busy && (mode === "pem" ? pem.trim().length > 0 : pkcs12B64.length > 0);
 
   async function submit() {
-    if (!pem.trim()) return;
+    if (!canSubmit) return;
     setBusy(true);
     try {
-      const r = await api.pkiImportKey({
-        mount,
-        private_key: pem.trim(),
-        name: name.trim() || undefined,
-      });
+      const r = await api.pkiImportKey(
+        mode === "pem"
+          ? {
+              mount,
+              private_key: pem.trim(),
+              name: name.trim() || undefined,
+            }
+          : {
+              mount,
+              pkcs12_b64: pkcs12B64,
+              passphrase,
+              name: name.trim() || undefined,
+            },
+      );
       toast("success", `Key ${r.key_id} imported`);
+      handleClose();
       onImported();
     } catch (e) {
       toast("error", extractError(e));
@@ -2239,29 +2293,111 @@ function ImportKeyModal({
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Import managed key" size="lg">
+    <Modal
+      open={open}
+      onClose={handleClose}
+      title="Import managed key"
+      size="lg"
+      actions={
+        <>
+          <Button variant="ghost" onClick={handleClose}>
+            Cancel
+          </Button>
+          <Button onClick={submit} disabled={!canSubmit}>
+            {busy ? "Importing…" : "Import"}
+          </Button>
+        </>
+      }
+    >
       <div className="space-y-3">
+        <div className="flex items-center gap-2 text-sm">
+          <button
+            type="button"
+            className={`px-3 py-1.5 rounded-lg border ${
+              mode === "pem"
+                ? "border-[var(--color-primary)] text-[var(--color-primary)]"
+                : "border-[var(--color-border)] text-[var(--color-text-muted)]"
+            }`}
+            onClick={() => setMode("pem")}
+          >
+            PEM
+          </button>
+          <button
+            type="button"
+            className={`px-3 py-1.5 rounded-lg border ${
+              mode === "pkcs12"
+                ? "border-[var(--color-primary)] text-[var(--color-primary)]"
+                : "border-[var(--color-border)] text-[var(--color-text-muted)]"
+            }`}
+            onClick={() => setMode("pkcs12")}
+          >
+            PKCS#12 (.p12 / .pfx)
+          </button>
+        </div>
+
         <Input
           label="Name (optional)"
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="svc-key"
         />
-        <Textarea
-          label="Private key (PEM)"
-          value={pem}
-          onChange={(e) => setPem(e.target.value)}
-          rows={12}
-          placeholder="-----BEGIN PRIVATE KEY-----"
-        />
-      </div>
-      <div className="mt-4 flex justify-end gap-2">
-        <Button variant="ghost" onClick={onClose}>
-          Cancel
-        </Button>
-        <Button onClick={submit} disabled={busy || !pem.trim()}>
-          {busy ? "Importing…" : "Import"}
-        </Button>
+
+        {mode === "pem" ? (
+          <Textarea
+            label="Private key (PEM)"
+            value={pem}
+            onChange={(e) => setPem(e.target.value)}
+            rows={12}
+            placeholder="-----BEGIN PRIVATE KEY-----"
+          />
+        ) : (
+          <>
+            <div className="space-y-1">
+              <label className="text-xs text-[var(--color-text-muted)]">
+                PKCS#12 file
+              </label>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".p12,.pfx,application/x-pkcs12"
+                onChange={onFile}
+                className="hidden"
+              />
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="px-3 py-1.5 rounded-lg border border-[var(--color-border)] text-sm hover:border-[var(--color-primary)] hover:text-[var(--color-primary)]"
+                >
+                  {pkcs12Name ? "Choose a different file" : "Choose file…"}
+                </button>
+                {pkcs12Name ? (
+                  <code className="text-xs text-[var(--color-text-muted)] truncate min-w-0">
+                    {pkcs12Name}
+                  </code>
+                ) : (
+                  <span className="text-xs text-[var(--color-text-muted)]">
+                    No file selected
+                  </span>
+                )}
+              </div>
+            </div>
+            <Input
+              label="Passphrase"
+              type="password"
+              value={passphrase}
+              onChange={(e) => setPassphrase(e.target.value)}
+              placeholder="Leave blank for password-less containers"
+            />
+            <p className="text-xs text-[var(--color-text-muted)]">
+              The container is unwrapped locally inside the Tauri process —
+              the passphrase is not sent over the network. Only the private
+              key is imported (as unencrypted PKCS#8, sealed by the mount's
+              barrier); any certificates in the file are ignored here. To
+              index those, use the Certificates tab's Import.
+            </p>
+          </>
+        )}
       </div>
     </Modal>
   );
@@ -2447,6 +2583,215 @@ function PemBlock({
 
 // ── Certificates Tab ──────────────────────────────────────────────
 
+/** Import externally-issued certificates into the orphan-cert index from
+ *  a PEM bundle, a PKCS#7 (`.p7b` / `.p7c`) chain, or a PKCS#12
+ *  (`.p12` / `.pfx`) container. All three may hold more than one cert;
+ *  each is indexed independently and a per-cert summary is shown on
+ *  completion. No private key is stored — a PKCS#12's key is ignored
+ *  here (use the Keys tab to grab it). */
+function ImportCertModal({
+  open,
+  mount,
+  onClose,
+  onImported,
+}: {
+  open: boolean;
+  mount: string;
+  onClose: () => void;
+  onImported: () => void;
+}) {
+  const { toast } = useToast();
+  const [format, setFormat] = useState<PkiCertImportFormat>("pem");
+  const [pem, setPem] = useState("");
+  const [fileName, setFileName] = useState("");
+  const [fileB64, setFileB64] = useState("");
+  const [passphrase, setPassphrase] = useState("");
+  const [busy, setBusy] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  function reset() {
+    setFormat("pem");
+    setPem("");
+    setFileName("");
+    setFileB64("");
+    setPassphrase("");
+  }
+
+  function handleClose() {
+    reset();
+    onClose();
+  }
+
+  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setFileName(file.name);
+    setFileB64(await fileToBase64(file));
+  }
+
+  // PEM can be pasted directly; PKCS#7/#12 need a file. (A pasted PEM is
+  // encoded to base64 at submit time so the backend sees one shape.)
+  const canSubmit =
+    !busy &&
+    (format === "pem" ? pem.trim().length > 0 || fileB64.length > 0 : fileB64.length > 0);
+
+  async function submit() {
+    if (!canSubmit) return;
+    setBusy(true);
+    try {
+      const data_b64 =
+        format === "pem" && fileB64.length === 0 ? btoa(pem) : fileB64;
+      const r = await api.pkiImportCertsFile({
+        mount,
+        format,
+        data_b64,
+        passphrase: format === "pkcs12" ? passphrase : undefined,
+      });
+      const parts: string[] = [];
+      if (r.imported) parts.push(`${r.imported} imported`);
+      if (r.skipped) parts.push(`${r.skipped} already present`);
+      if (r.failed) parts.push(`${r.failed} failed`);
+      const summary = parts.length ? parts.join(", ") : "nothing to import";
+      if (r.failed > 0) {
+        const firstErr = r.entries.find((e) => e.error)?.error;
+        toast(
+          r.imported > 0 ? "success" : "error",
+          `${summary}${firstErr ? ` — ${firstErr}` : ""}`,
+        );
+      } else {
+        toast("success", summary);
+      }
+      handleClose();
+      onImported();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const fileAccept =
+    format === "pkcs7"
+      ? ".p7b,.p7c,.p7,application/x-pkcs7-certificates"
+      : format === "pkcs12"
+        ? ".p12,.pfx,application/x-pkcs12"
+        : ".pem,.crt,.cer,application/x-pem-file";
+
+  return (
+    <Modal
+      open={open}
+      onClose={handleClose}
+      title="Import certificates"
+      size="lg"
+      actions={
+        <>
+          <Button variant="ghost" onClick={handleClose}>
+            Cancel
+          </Button>
+          <Button onClick={submit} disabled={!canSubmit}>
+            {busy ? "Importing…" : "Import"}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <div className="flex items-center gap-2 text-sm">
+          {(
+            [
+              { id: "pem", label: "PEM" },
+              { id: "pkcs7", label: "PKCS#7 (.p7b)" },
+              { id: "pkcs12", label: "PKCS#12 (.p12 / .pfx)" },
+            ] as { id: PkiCertImportFormat; label: string }[]
+          ).map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              className={`px-3 py-1.5 rounded-lg border ${
+                format === t.id
+                  ? "border-[var(--color-primary)] text-[var(--color-primary)]"
+                  : "border-[var(--color-border)] text-[var(--color-text-muted)]"
+              }`}
+              onClick={() => {
+                setFormat(t.id);
+                // Clear the file when switching so a stale .p12 can't be
+                // submitted as if it were PEM.
+                setFileName("");
+                setFileB64("");
+              }}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="space-y-1">
+          <label className="text-xs text-[var(--color-text-muted)]">
+            {format === "pem"
+              ? "Certificate file (optional if pasting below)"
+              : "Certificate file"}
+          </label>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept={fileAccept}
+            onChange={onFile}
+            className="hidden"
+          />
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="px-3 py-1.5 rounded-lg border border-[var(--color-border)] text-sm hover:border-[var(--color-primary)] hover:text-[var(--color-primary)]"
+            >
+              {fileName ? "Choose a different file" : "Choose file…"}
+            </button>
+            {fileName ? (
+              <code className="text-xs text-[var(--color-text-muted)] truncate min-w-0">
+                {fileName}
+              </code>
+            ) : (
+              <span className="text-xs text-[var(--color-text-muted)]">
+                No file selected
+              </span>
+            )}
+          </div>
+        </div>
+
+        {format === "pem" && (
+          <Textarea
+            label="…or paste PEM"
+            value={pem}
+            onChange={(e) => setPem(e.target.value)}
+            rows={10}
+            placeholder={"-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----"}
+            disabled={fileB64.length > 0}
+          />
+        )}
+
+        {format === "pkcs12" && (
+          <Input
+            label="Passphrase"
+            type="password"
+            value={passphrase}
+            onChange={(e) => setPassphrase(e.target.value)}
+            placeholder="Leave blank for password-less containers"
+          />
+        )}
+
+        <p className="text-xs text-[var(--color-text-muted)]">
+          Certificates are added to the orphan-cert index (
+          <code>certs/import</code>) — they're listed here without being
+          treated as issuers (no key, no CRL participation). Files may hold
+          more than one certificate; each is indexed independently.
+          {format === "pkcs12"
+            ? " The container is unwrapped locally; the passphrase is not sent over the network, and its private key is not stored."
+            : ""}
+        </p>
+      </div>
+    </Modal>
+  );
+}
+
 interface CertSummary {
   serial: string;
   common_name: string;
@@ -2628,6 +2973,7 @@ function CertsTab({ mount }: { mount: string }) {
     kind: "cert";
     id: string;
   } | null>(null);
+  const [showImport, setShowImport] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -2786,6 +3132,9 @@ function CertsTab({ mount }: { mount: string }) {
             placeholder="Filter…"
             className="w-48"
           />
+          <Button variant="ghost" onClick={() => setShowImport(true)}>
+            Import
+          </Button>
           <Button variant="ghost" onClick={refresh}>
             Refresh
           </Button>
@@ -2795,6 +3144,15 @@ function CertsTab({ mount }: { mount: string }) {
         </>
       }
     >
+      <ImportCertModal
+        open={showImport}
+        mount={mount}
+        onClose={() => setShowImport(false)}
+        onImported={() => {
+          setShowImport(false);
+          void refresh();
+        }}
+      />
       {summaries.length === 0 && !loading ? (
         <EmptyState
           title="No certificates issued yet"

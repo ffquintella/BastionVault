@@ -1,6 +1,6 @@
 [package]
 name = "bastion-vault-gui"
-version = "0.28.12"
+version = "0.28.13"
 edition = "2021"
 description = "BastionVault Desktop GUI"
 
@@ -140,6 +140,12 @@ p12-keystore = { version = "0.3", features = ["pbes1"] }
 # the PKCS#12 import flow hands back to the server's `pem_bundle`
 # splitter. Mirrors the `pem` pin the host crate uses.
 pem = "3.0"
+# Used by `commands/pki.rs::pki_import_certs_file` to parse certs-only
+# PKCS#7 (`.p7b` / `.p7c`) `SignedData` envelopes on the cert-import
+# path. Mirrors the `cms` pin the host crate uses for PKCS#7 *export*
+# (`src/modules/pki/export.rs`), so import and export share one vetted
+# ASN.1 parser rather than a bespoke DER walker.
+cms = { version = "0.2", default-features = false, features = ["alloc", "pem", "std"] }
 # Plugin Extensibility v1 / Phase 4: form-hook sandbox.
 # Runs operator-trusted, plugin-supplied WASM bytes inside the Tauri
 # backend with the same fuel + memory limits the server's plugin
@@ -198,6 +204,10 @@ mcp_local_dev = ["dep:tauri-plugin-mcp-bridge"]
 # without dragging the wasmtime `wat` feature into the runtime
 # build (which would balloon the GUI binary).
 wat = "1"
+# Generates self-signed cert + key fixtures for the PKI cert/key
+# import parser tests (`commands/pki.rs`). Test-only; matches the
+# workspace `rcgen` pin so no extra version lands in the lockfile.
+rcgen = { version = "0.14", features = ["x509-parser"] }
 # ABI-parity guard: the testkit's `bvx` conformance module is
 # instantiated against the *real* `plugin_apps` linker so a drift
 # between the testkit mock and this runtime fails CI (Phase 6).
