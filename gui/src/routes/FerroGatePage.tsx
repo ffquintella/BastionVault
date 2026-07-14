@@ -21,6 +21,7 @@ import type { FerroGateConfig, FerroGateMachine, FerroGateLoginResult } from "..
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 import { useMiaEnvStore } from "../stores/miaEnvStore";
+import { useNamespaceStore } from "../stores/namespaceStore";
 
 const MOUNT = "ferrogate/";
 
@@ -69,6 +70,14 @@ export function FerroGatePage() {
   const [loading, setLoading] = useState(true);
   const [mountEnabled, setMountEnabled] = useState(true);
   const { toast } = useToast();
+  // FerroGate is a global, non-namespace-aware backend and its admin paths
+  // are root paths. In a child namespace the request carries that namespace
+  // header, which the server rejects with "cannot access root path…" — the
+  // sidebar hides the link there (see `rootOnly` in Layout), but a deep link
+  // or a stale route can still land here, so short-circuit with an
+  // explanatory panel instead of firing the request and popping a raw error.
+  const activeNamespace = useNamespaceStore((s) => s.active);
+  const isRootNamespace = activeNamespace === "";
 
   const [approveTarget, setApproveTarget] = useState<FerroGateMachine | null>(null);
   const [approveEditing, setApproveEditing] = useState(false);
@@ -176,8 +185,13 @@ export function FerroGatePage() {
   }, [seedSelectedEnv]);
 
   useEffect(() => {
+    // Skip the load (and its inevitable root-path error) outside root.
+    if (!isRootNamespace) {
+      setLoading(false);
+      return;
+    }
     void load();
-  }, [load]);
+  }, [load, isRootNamespace]);
 
   async function enableMount() {
     try {
@@ -286,7 +300,14 @@ export function FerroGatePage() {
           </Button>
         </div>
 
-        {!mountEnabled ? (
+        {!isRootNamespace ? (
+          <Card>
+            <EmptyState
+              title="FerroGate is managed at the root namespace"
+              description={`Machine identities are global and not scoped to a namespace. Switch to the root namespace to administer FerroGate (currently in "${activeNamespace}").`}
+            />
+          </Card>
+        ) : !mountEnabled ? (
           <Card>
             <EmptyState
               title="FerroGate auth method not enabled"

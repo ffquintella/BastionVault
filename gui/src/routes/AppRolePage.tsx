@@ -227,6 +227,9 @@ export function AppRolePage() {
               <RoleDetail
                 roleInfo={roleInfo}
                 roleId={roleId}
+                availablePolicies={availablePolicies}
+                policiesListable={policiesListable}
+                availableNamespaces={availableNamespaces}
                 onCopy={copyToClipboard}
                 onRefresh={() => selectRole(roleInfo.name)}
                 toast={toast}
@@ -342,13 +345,26 @@ export function AppRolePage() {
 interface RoleDetailProps {
   roleInfo: AppRoleInfo;
   roleId: string;
+  availablePolicies: string[];
+  policiesListable: boolean;
+  availableNamespaces: string[];
   onCopy: (text: string, label: string) => void;
   onRefresh: () => void;
   toast: (type: "success" | "error" | "info", message: string) => void;
 }
 
-function RoleDetail({ roleInfo, roleId, onCopy, onRefresh, toast }: RoleDetailProps) {
+function RoleDetail({
+  roleInfo,
+  roleId,
+  availablePolicies,
+  policiesListable,
+  availableNamespaces,
+  onCopy,
+  onRefresh,
+  toast,
+}: RoleDetailProps) {
   const [tab, setTab] = useState("overview");
+  const [showEdit, setShowEdit] = useState(false);
   const noMachines = roleInfo.bound_machines.length === 0;
 
   return (
@@ -373,12 +389,19 @@ function RoleDetail({ roleInfo, roleId, onCopy, onRefresh, toast }: RoleDetailPr
       </Card>
 
       {tab === "overview" && (
-        <Card>
+        <Card
+          title="Overview"
+          actions={
+            <Button size="sm" variant="secondary" onClick={() => setShowEdit(true)}>
+              Edit
+            </Button>
+          }
+        >
           <div className="space-y-4">
-            {/* Role ID */}
+            {/* App ID */}
             <div>
               <label className="block text-xs font-medium text-[var(--color-text-muted)] mb-1">
-                Role ID
+                App ID
               </label>
               <div className="flex items-center gap-2">
                 <code className="flex-1 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg px-3 py-2 text-sm font-mono truncate">
@@ -387,7 +410,7 @@ function RoleDetail({ roleInfo, roleId, onCopy, onRefresh, toast }: RoleDetailPr
                 <Button
                   variant="secondary"
                   size="sm"
-                  onClick={() => onCopy(roleId, "Role ID")}
+                  onClick={() => onCopy(roleId, "App ID")}
                 >
                   Copy
                 </Button>
@@ -444,7 +467,200 @@ function RoleDetail({ roleInfo, roleId, onCopy, onRefresh, toast }: RoleDetailPr
       {tab === "secret-ids" && (
         <SecretIdPanel roleName={roleInfo.name} onCopy={onCopy} toast={toast} />
       )}
+
+      <EditRoleModal
+        open={showEdit}
+        roleInfo={roleInfo}
+        availablePolicies={availablePolicies}
+        policiesListable={policiesListable}
+        availableNamespaces={availableNamespaces}
+        onClose={() => setShowEdit(false)}
+        onSaved={() => {
+          setShowEdit(false);
+          onRefresh();
+        }}
+        toast={toast}
+      />
     </>
+  );
+}
+
+// ── Edit Role Modal ────────────────────────────────────────────────
+
+// The AppRole write is an upsert, so editing reuses the same write path as
+// create — we just pre-fill from the current config. TTLs come back from the
+// server as seconds; render them as a `<n>s` string the operator can rewrite
+// (empty ⇒ system default), and 0-uses ⇒ unlimited.
+interface EditRoleModalProps {
+  open: boolean;
+  roleInfo: AppRoleInfo;
+  availablePolicies: string[];
+  policiesListable: boolean;
+  availableNamespaces: string[];
+  onClose: () => void;
+  onSaved: () => void;
+  toast: (type: "success" | "error" | "info", message: string) => void;
+}
+
+function EditRoleModal({
+  open,
+  roleInfo,
+  availablePolicies,
+  policiesListable,
+  availableNamespaces,
+  onClose,
+  onSaved,
+  toast,
+}: EditRoleModalProps) {
+  const secondsToField = (n: number) => (n === 0 ? "" : `${n}s`);
+
+  const [policies, setPolicies] = useState<string[]>(roleInfo.token_policies);
+  const [bindSecretId, setBindSecretId] = useState(roleInfo.bind_secret_id);
+  const [secretIdNumUses, setSecretIdNumUses] = useState(String(roleInfo.secret_id_num_uses));
+  const [secretIdTtl, setSecretIdTtl] = useState(secondsToField(roleInfo.secret_id_ttl));
+  const [tokenTtl, setTokenTtl] = useState(secondsToField(roleInfo.token_ttl));
+  const [tokenMaxTtl, setTokenMaxTtl] = useState(secondsToField(roleInfo.token_max_ttl));
+  const [namespaces, setNamespaces] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
+
+  // Re-seed the form each time it opens for a role, and pull the current
+  // namespace login-restriction (empty ⇒ unrestricted).
+  useEffect(() => {
+    if (!open) return;
+    setPolicies(roleInfo.token_policies);
+    setBindSecretId(roleInfo.bind_secret_id);
+    setSecretIdNumUses(String(roleInfo.secret_id_num_uses));
+    setSecretIdTtl(secondsToField(roleInfo.secret_id_ttl));
+    setTokenTtl(secondsToField(roleInfo.token_ttl));
+    setTokenMaxTtl(secondsToField(roleInfo.token_max_ttl));
+    api
+      .getNsAssignment("approle/", roleInfo.name)
+      .then((r) => setNamespaces(r.namespaces))
+      .catch(() => setNamespaces([]));
+  }, [open, roleInfo]);
+
+  async function handleSave() {
+    setSaving(true);
+    try {
+      const numUses = parseInt(secretIdNumUses, 10);
+      await api.writeAppRole(
+        roleInfo.name,
+        bindSecretId,
+        policies.join(","),
+        Number.isNaN(numUses) ? 0 : numUses,
+        secretIdTtl.trim(),
+        tokenTtl.trim(),
+        tokenMaxTtl.trim(),
+      );
+      await api.setNsAssignment("approle/", roleInfo.name, namespaces);
+      toast("success", `Role ${roleInfo.name} updated`);
+      onSaved();
+    } catch (e: unknown) {
+      toast("error", extractError(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={`Edit Role: ${roleInfo.name}`}
+      actions={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button onClick={handleSave} disabled={saving}>
+            {saving ? "Saving..." : "Save"}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <PolicySelect
+          label="Token Policies"
+          selected={policies}
+          options={availablePolicies}
+          onChange={setPolicies}
+          fallbackFreeText={!policiesListable}
+          placeholder="type to search policies…"
+          helpText="Only existing policies can be selected"
+        />
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={bindSecretId}
+            onChange={(e) => setBindSecretId(e.target.checked)}
+            className="rounded"
+          />
+          <span className="text-[var(--color-text-muted)]">Require Secret ID for login</span>
+        </label>
+        <div className="grid grid-cols-2 gap-3">
+          <Input
+            label="Secret ID Uses (0 = unlimited)"
+            type="number"
+            value={secretIdNumUses}
+            onChange={(e) => setSecretIdNumUses(e.target.value)}
+            placeholder="0"
+          />
+          <Input
+            label="Secret ID TTL (empty = default)"
+            value={secretIdTtl}
+            onChange={(e) => setSecretIdTtl(e.target.value)}
+            placeholder="24h"
+          />
+          <Input
+            label="Token TTL (empty = default)"
+            value={tokenTtl}
+            onChange={(e) => setTokenTtl(e.target.value)}
+            placeholder="1h"
+          />
+          <Input
+            label="Token Max TTL (empty = default)"
+            value={tokenMaxTtl}
+            onChange={(e) => setTokenMaxTtl(e.target.value)}
+            placeholder="24h"
+          />
+        </div>
+        {availableNamespaces.length > 0 && (
+          <div>
+            <label className="block text-sm text-[var(--color-text-muted)] mb-1">
+              Allowed namespaces
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {["", ...availableNamespaces].map((ns) => {
+                const sel = namespaces.includes(ns);
+                return (
+                  <button
+                    key={ns || "__root__"}
+                    type="button"
+                    onClick={() =>
+                      setNamespaces((prev) =>
+                        prev.includes(ns) ? prev.filter((p) => p !== ns) : [...prev, ns],
+                      )
+                    }
+                    className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
+                      sel
+                        ? "bg-[var(--color-primary)] border-[var(--color-primary)] text-white"
+                        : "bg-[var(--color-bg)] border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-text-muted)]"
+                    }`}
+                  >
+                    {ns === "" ? "root" : ns}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-xs text-[var(--color-text-muted)] mt-1.5">
+              {namespaces.length === 0
+                ? "No restriction — this role may log in to any namespace."
+                : `Login restricted to: ${namespaces.map((n) => n || "root").join(", ")} (and descendants).`}
+            </p>
+          </div>
+        )}
+      </div>
+    </Modal>
   );
 }
 

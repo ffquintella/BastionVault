@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useVaultStore } from "../stores/vaultStore";
 import { useAuthStore } from "../stores/authStore";
+import { useNamespaceStore } from "../stores/namespaceStore";
 import { StatusBadge } from "./StatusBadge";
 import { BackupModal } from "./BackupModal";
 import { NamespaceSwitcher } from "./NamespaceSwitcher";
@@ -38,6 +39,16 @@ type NavItem = {
    * corresponding mount don't see broken menu items.
    */
   requiresMountType?: string;
+  /**
+   * Hide this item unless the active namespace is root (the empty
+   * string). Use for features whose backend is global / not
+   * namespace-aware and whose admin paths are registered as root
+   * paths — FerroGate is the canonical case. Attempting to reach
+   * them from a child namespace attaches that namespace header to a
+   * root-path request, which the server rejects ("cannot access root
+   * path…"), so surfacing the link there is misleading.
+   */
+  rootOnly?: boolean;
 };
 
 // `SUPER_ADMIN` and the admin-policy set now live in `lib/access` so the
@@ -110,7 +121,7 @@ const userNav: NavItem[] = [
 const adminNav: NavItem[] = [
   { path: "/users", label: "Users" },
   { path: "/approle", label: "AppID" },
-  { path: "/ferrogate", label: "Machines (FerroGate)" },
+  { path: "/ferrogate", label: "Machines (FerroGate)", rootOnly: true },
   { path: "/groups", label: "Identity Groups" },
   { path: "/asset-groups", label: "Asset Groups" },
   { path: "/policies", label: "Policies" },
@@ -153,6 +164,8 @@ export function Layout({ children }: LayoutProps) {
   const reset = useVaultStore((s) => s.reset);
   const isAdmin = isAdminUser(policies);
   const policySet = new Set(policies);
+  // Active namespace ("" = root). Drives the `rootOnly` nav gate below.
+  const activeNamespace = useNamespaceStore((s) => s.active);
 
   // Plugin Extensibility v1: pull the active-surface bundle once
   // per authenticated session so plugin-contributed menus appear
@@ -264,6 +277,10 @@ export function Layout({ children }: LayoutProps) {
     if (item.requiresMountType) {
       if (!mountTypeMatches(item.requiresMountType, mountTypes)) return false;
     }
+    // Root-only items (global, non-namespace-aware backends) hide in any
+    // child namespace — their root paths can't be reached with a
+    // child-namespace header attached.
+    if (item.rootOnly && activeNamespace !== "") return false;
     return true;
   }
 

@@ -45,6 +45,20 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.28.10] - 2026-07-14
+
+### Added
+
+- **Edit existing AppID roles from the GUI** (`gui/src/routes/AppRolePage.tsx`) -- the AppID role detail's Overview tab now has an **Edit** button that opens a modal pre-filled with the role's current config (token policies, "require Secret ID", Secret ID uses/TTL, token TTL/max-TTL, and the namespace login-restriction). Saving reuses the upsert `write_approle` command plus `set_ns_assignment`, so operators can adjust a role in place instead of deleting and recreating it. TTLs round-trip as `<n>s` strings (empty ⇒ system default) and 0-uses ⇒ unlimited.
+
+### Changed
+
+- **Rename the AppID credential label from "Role ID" to "App ID"** (`gui/src/routes/AppRolePage.tsx`) -- the identity credential on the AppID role detail (and its copy-to-clipboard toast) is now labelled "App ID", matching the "AppID" branding of the auth method instead of the underlying AppRole "Role ID" term.
+
+### Fixed
+
+- **"Machines (FerroGate)" showed a misleading "not enabled" empty state (and a raw `HTTP 500: cannot access root path in unauthenticated request` toast) inside a child namespace** (`gui/src/components/Layout.tsx`, `gui/src/routes/FerroGatePage.tsx`) -- FerroGate is a global, non-namespace-aware auth backend whose admin paths (`config`, `register`, `machines`, `machines/*`) are registered as **root paths** (`src/modules/credential/ferrogate/mod.rs`). The GUI attaches the active-namespace header to every request, so from a child namespace `ferrogate_list_machines` (List on the root path `auth/ferrogate/machines`) was rejected by the root-path gate in `src/modules/policy/policy_store.rs` whenever the session token lacked `root_privs` in that namespace (the switcher sets the namespace header but does not re-authenticate). `FerroGatePage` treated *any* list error as "mount missing" and rendered "FerroGate auth method not enabled". Two fixes: (1) a reusable `rootOnly` `NavItem` flag hides the sidebar link outside the root namespace; (2) `FerroGatePage` short-circuits with an explanatory "managed at the root namespace" panel (and skips the doomed root-path request) when reached directly from a child namespace. Tests: `gui/src/test/ferrogate.test.tsx` (+1).
+
 ## [0.28.9] - 2026-07-14
 
 ### Added

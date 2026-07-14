@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { ToastProvider } from "../components/ui/Toast";
 import { useAuthStore } from "../stores/authStore";
+import { useNamespaceStore } from "../stores/namespaceStore";
 
 const mockInvoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({
@@ -52,6 +53,9 @@ describe("FerroGatePage", () => {
   beforeEach(() => {
     mockInvoke.mockReset();
     useAuthStore.setState({ token: "t", policies: ["root"], isAuthenticated: true });
+    // Default to the root namespace — FerroGate's admin paths are root
+    // paths, so the page only loads there. Individual tests override this.
+    useNamespaceStore.setState({ active: "", namespaces: [], loaded: true });
     mockInvoke.mockImplementation((cmd: string) => {
       switch (cmd) {
         case "ferrogate_list_machines":
@@ -92,6 +96,24 @@ describe("FerroGatePage", () => {
     });
     expect(screen.getByRole("button", { name: /^approve$/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^reject$/i })).toBeInTheDocument();
+  });
+
+  it("hides machine admin in a child namespace and never calls the root-path list", async () => {
+    useNamespaceStore.setState({ active: "dti/esi", namespaces: ["dti", "dti/esi"], loaded: true });
+
+    const { FerroGatePage } = await import("../routes/FerroGatePage");
+    renderWithProviders(<FerroGatePage />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/managed at the root namespace/i)).toBeInTheDocument();
+    });
+    // The current namespace is named so the operator knows where they are.
+    expect(screen.getByText(/dti\/esi/)).toBeInTheDocument();
+    // Crucially, the page must NOT fire the root-path list (which would
+    // 500 with "cannot access root path…" in a child namespace).
+    expect(mockInvoke).not.toHaveBeenCalledWith("ferrogate_list_machines");
+    // And it must not fall back to the misleading "not enabled" empty state.
+    expect(screen.queryByText(/not enabled/i)).not.toBeInTheDocument();
   });
 
   it("surfaces a MIA refusal as a human-readable toast, not the raw opcode", async () => {
