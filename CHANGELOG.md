@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.28.12] - 2026-07-14
+
+### Changed
+
+- **AppID login docs now cover machine tokens and namespaces** (`docs/authentication.md`) -- the AppID (AppRole) login section previously showed only `role_id`/`secret_id`, omitting the `machine_token` field required when the FerroGate machine-identity gate is on and the `X-BastionVault-Namespace` header required for a namespace-scoped role. A client built from the old example authenticated against the root namespace and got `403 Permission denied` despite valid credentials, because a namespace-restricted role's policy and secret are invisible at root. The section now documents the machine-token step, the namespace header (with a path-prefix alternative), and the order in which the login validates credentials → machine binding → namespace assignment.
+
 ## [0.28.11] - 2026-07-14
 
 ### Changed

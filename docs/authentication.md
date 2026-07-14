@@ -129,6 +129,53 @@ curl --request POST \
   https://127.0.0.1:8200/v1/auth/approle/login
 ~~~
 
+#### Machine identity (FerroGate)
+
+When the server's machine-identity gate is enabled (the default), every AppID
+login must also present a **FerroGate machine token** whose machine is bound to
+the role under the **Machines** tab. Obtain the machine token from the local MIA
+(see [FerroGate machine auth](ferrogate-machine-auth.md)) and pass it as
+`machine_token`:
+
+~~~bash
+curl --request POST \
+  --data '{"role_id": "xxxx-xxxx", "secret_id": "yyyy-yyyy", "machine_token": "zzzz"}' \
+  https://127.0.0.1:8200/v1/auth/approle/login
+~~~
+
+The login validates `role_id` and `secret_id` first (a wrong value returns
+`400`), then checks the machine binding and namespace assignment. A role with a
+correct `role_id`/`secret_id` that still returns `403 Permission denied` is
+failing one of these later checks — most often the namespace (below).
+
+#### Namespace-scoped roles
+
+A role restricted to a namespace (via its namespace assignment) may **only** be
+used from that namespace. Both the login and every subsequent request must carry
+the `X-BastionVault-Namespace` header naming the namespace; request paths stay
+mount-relative. A login sent without it targets the root namespace and is
+rejected with `403 Permission denied`, even when every credential is valid — the
+named policy and the secret both live inside the namespace and are invisible at
+root.
+
+~~~bash
+# Login into namespace "dti/esi"
+curl --request POST \
+  -H "X-BastionVault-Namespace: dti/esi" \
+  --data '{"role_id": "xxxx-xxxx", "secret_id": "yyyy-yyyy", "machine_token": "zzzz"}' \
+  https://127.0.0.1:8200/v1/auth/approle/login
+
+# Read a secret using the issued token, still scoped to the namespace
+curl -H "X-BastionVault-Namespace: dti/esi" \
+     -H "X-Vault-Token: <issued-token>" \
+     https://127.0.0.1:8200/v1/secret/data/github/rustion
+~~~
+
+> A namespace can also be selected by prefixing the request path
+> (`dti/esi/secret/data/github/rustion`) instead of sending the header — but do
+> not combine the two forms in one request; a path prefix together with the
+> header is refused.
+
 ### AppID Options
 
 | Option | Description |
