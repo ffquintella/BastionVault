@@ -45,6 +45,14 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.28.14] - 2026-07-15
+
+### Added
+
+#### PKI GUI — renew a certificate
+
+- **Renew a certificate from the Certificates tab** (`gui`, PKI → Certificates) -- selecting an engine-issued certificate now shows a **Renew** action in its detail panel. It opens a modal pre-filled from the selected cert's parsed subject (Common Name), DNS/IP SANs, and originating issuer, and asks the operator to confirm which role to re-issue under — the cert store records only the resulting PEM, not the role or requested TTL that first minted a serial, so the role must be chosen. Submitting re-issues a fresh certificate (new keypair unless a managed key is pinned) via the existing `pki/issue/<role>` path; the new certificate, chain, and one-time private key stay visible until the operator closes the modal. An optional toggle revokes the superseded serial only after the renewal succeeds, so a failed re-issue never leaves the operator without a valid certificate. Orphan (externally-imported) certs have no role/issuer on this mount and are not offered a Renew action. GUI-only — composes existing Tauri commands, no new server route. (`gui/src/routes/PkiPage.tsx`, `features/pki-secret-engine.md`)
+
 ## [0.28.13] - 2026-07-14
 
 ### Added

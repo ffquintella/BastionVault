@@ -2581,6 +2581,271 @@ function PemBlock({
   );
 }
 
+/** Renew a certificate by re-issuing a fresh one with the same subject
+ *  and SANs. The cert store keeps no record of which role (or requested
+ *  TTL) originally minted a serial — only the resulting PEM — so renewal
+ *  is a re-issue the operator confirms a role for, pre-filled from the
+ *  selected cert's parsed CN / DNS SANs / IP SANs and defaulting the
+ *  issuer to whoever signed the original. This mirrors how the
+ *  cert-lifecycle module renews a managed target (dispatch
+ *  `pki/issue/<role>` with the same subject), kept GUI-side so no new
+ *  server route is introduced. A fresh keypair is generated unless the
+ *  operator pins a managed key (requires `role.allow_key_reuse`).
+ *
+ *  The new private key is returned by the engine exactly once, so the
+ *  result stays visible in the modal until the operator closes it —
+ *  never auto-dismissed on success. Optionally revokes the old serial
+ *  after a successful renewal. */
+function RenewCertModal({
+  open,
+  mount,
+  serial,
+  cert,
+  onClose,
+  onRenewed,
+}: {
+  open: boolean;
+  mount: string;
+  serial: string;
+  cert: PkiCertRecord | null;
+  onClose: () => void;
+  onRenewed: () => void;
+}) {
+  const { toast } = useToast();
+  const [roles, setRoles] = useState<string[]>([]);
+  const [rolesLoaded, setRolesLoaded] = useState(false);
+  const [role, setRole] = useState("");
+  const [commonName, setCommonName] = useState("");
+  const [altNames, setAltNames] = useState("");
+  const [ipSans, setIpSans] = useState("");
+  const [ttl, setTtl] = useState("");
+  const [issuerRef, setIssuerRef] = useState("");
+  const [keyRef, setKeyRef] = useState("");
+  const [revokeOld, setRevokeOld] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<PkiIssueResult | null>(null);
+
+  // Load the mount's roles when the modal opens.
+  useEffect(() => {
+    if (!open) return;
+    setRolesLoaded(false);
+    api
+      .pkiListRoles(mount)
+      .then((list) => {
+        setRoles(list);
+        setRole((r) => r || list[0] || "");
+      })
+      .catch((e) => toast("error", extractError(e)))
+      .finally(() => setRolesLoaded(true));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, mount]);
+
+  // Pre-fill subject / SANs / issuer each time the modal opens for a
+  // (possibly different) serial, and clear any prior renewal result.
+  useEffect(() => {
+    if (!open || !cert) return;
+    setCommonName(cert.common_name || "");
+    setAltNames((cert.san_dns ?? []).join(", "));
+    setIpSans((cert.san_ip ?? []).join(", "));
+    setIssuerRef(cert.issuer_id || "");
+    setTtl("");
+    setKeyRef("");
+    setRevokeOld(false);
+    setResult(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, serial]);
+
+  function copy(text: string, label: string) {
+    navigator.clipboard.writeText(text).then(
+      () => toast("success", `${label} copied`),
+      () => toast("error", `Failed to copy ${label}`),
+    );
+  }
+
+  async function submit() {
+    if (!role || !commonName.trim()) return;
+    setBusy(true);
+    try {
+      const r = await api.pkiIssueCert({
+        mount,
+        role,
+        common_name: commonName.trim(),
+        alt_names: altNames.trim() || undefined,
+        ip_sans: ipSans.trim() || undefined,
+        ttl: ttl.trim() || undefined,
+        issuer_ref: issuerRef.trim() || undefined,
+        key_ref: keyRef.trim() || undefined,
+      });
+      setResult(r);
+      // Revoke the superseded cert only after the renewal succeeded, so a
+      // failed re-issue never leaves the operator without a valid cert. A
+      // revoke failure is surfaced but does not undo the renewal.
+      let revokedNote = "";
+      if (revokeOld && serial) {
+        try {
+          await api.pkiRevokeCert(mount, serial);
+          revokedNote = `; old ${serial} revoked`;
+        } catch (e) {
+          toast("error", `Renewed, but revoking the old cert failed: ${extractError(e)}`);
+        }
+      }
+      toast("success", `Renewed — new serial ${r.serial_number}${revokedNote}`);
+      onRenewed();
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const canSubmit = !busy && !!role && !!commonName.trim();
+
+  if (open && rolesLoaded && roles.length === 0) {
+    return (
+      <Modal
+        open={open}
+        onClose={onClose}
+        title="Renew certificate"
+        size="md"
+        actions={
+          <Button variant="ghost" onClick={onClose}>
+            Close
+          </Button>
+        }
+      >
+        <EmptyState
+          title="No roles configured"
+          description="Renewal re-issues under a role. Create a role on the Roles tab first."
+        />
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="Renew certificate"
+      size="lg"
+      actions={
+        result ? (
+          <Button variant="ghost" onClick={onClose}>
+            Close
+          </Button>
+        ) : (
+          <>
+            <Button variant="ghost" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button onClick={submit} disabled={!canSubmit}>
+              {busy ? "Renewing…" : "Renew"}
+            </Button>
+          </>
+        )
+      }
+    >
+      <div className="space-y-3">
+        <p className="text-xs text-[var(--color-text-muted)]">
+          Renewing re-issues a new certificate with the same subject and SANs.
+          The cert store doesn't record which role first issued{" "}
+          {serial ? <code className="break-all">{serial}</code> : "this serial"},
+          so confirm the role below. A fresh private key is generated unless you
+          pin a managed key.
+        </p>
+
+        <div className="grid grid-cols-2 gap-3">
+          <Select
+            label="Role"
+            value={role}
+            onChange={(e) => setRole(e.target.value)}
+            options={roles.map((r) => ({ value: r, label: r }))}
+            disabled={!!result}
+          />
+          <Input
+            label="Common Name"
+            value={commonName}
+            onChange={(e) => setCommonName(e.target.value)}
+            placeholder="api.example.com"
+            disabled={!!result}
+          />
+          <Input
+            label="DNS / IP SANs (comma-separated)"
+            value={altNames}
+            onChange={(e) => setAltNames(e.target.value)}
+            className="col-span-2"
+            disabled={!!result}
+          />
+          <Input
+            label="Extra IP SANs (comma-separated)"
+            value={ipSans}
+            onChange={(e) => setIpSans(e.target.value)}
+            disabled={!!result}
+          />
+          <Input
+            label="TTL (optional)"
+            value={ttl}
+            onChange={(e) => setTtl(e.target.value)}
+            placeholder="role default"
+            disabled={!!result}
+          />
+          <Input
+            label="Issuer (optional)"
+            value={issuerRef}
+            onChange={(e) => setIssuerRef(e.target.value)}
+            placeholder="default | uuid"
+            disabled={!!result}
+          />
+          <Input
+            label="Pin managed key (optional, requires role.allow_key_reuse)"
+            value={keyRef}
+            onChange={(e) => setKeyRef(e.target.value)}
+            placeholder="key-name | uuid"
+            disabled={!!result}
+          />
+        </div>
+
+        {!result && !!serial && (
+          <Toggle
+            label="revoke_old_certificate_after_renewal"
+            checked={revokeOld}
+            onChange={setRevokeOld}
+          />
+        )}
+
+        {result && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 flex-wrap">
+              <Badge label="renewed" variant="success" />
+              <code className="text-sm break-all">{result.serial_number}</code>
+              <span className="text-xs text-[var(--color-text-muted)]">
+                issuer {result.issuer_id}
+              </span>
+            </div>
+            <p className="text-xs text-[var(--color-warning)]">
+              The private key is shown only once — copy it before closing.
+            </p>
+            <PemBlock
+              label="Certificate"
+              value={result.certificate}
+              onCopy={() => copy(result.certificate, "certificate")}
+            />
+            <PemBlock
+              label="Private key (PKCS#8)"
+              value={result.private_key}
+              onCopy={() => copy(result.private_key, "private key")}
+            />
+            <PemBlock
+              label="Issuing CA"
+              value={result.issuing_ca}
+              onCopy={() => copy(result.issuing_ca, "issuing CA")}
+            />
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 // ── Certificates Tab ──────────────────────────────────────────────
 
 /** Import externally-issued certificates into the orphan-cert index from
@@ -2821,6 +3086,7 @@ function CertDetail({
   onDelete,
   onCopyPem,
   onExport,
+  onRenew,
 }: {
   serial: string;
   cert: PkiCertRecord;
@@ -2830,6 +3096,9 @@ function CertDetail({
   onDelete: () => void;
   onCopyPem: () => void;
   onExport: () => void;
+  /** Present only when this cert can be renewed (engine-issued, not an
+   *  orphan import — renewal re-issues under one of this mount's roles). */
+  onRenew?: () => void;
 }) {
   const expired = cert.not_after > 0 && cert.not_after * 1000 < Date.now();
   const emitterText = issuerName
@@ -2935,6 +3204,11 @@ function CertDetail({
         onCopy={onCopyPem}
       />
       <div className="flex items-center gap-2 flex-wrap">
+        {onRenew && (
+          <Button variant="ghost" onClick={onRenew}>
+            Renew
+          </Button>
+        )}
         <Button variant="ghost" onClick={onExport}>
           Export
         </Button>
@@ -2965,6 +3239,7 @@ function CertsTab({ mount }: { mount: string }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [cert, setCert] = useState<PkiCertRecord | null>(null);
   const [revokeTarget, setRevokeTarget] = useState<string | null>(null);
+  const [renewTarget, setRenewTarget] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<{
     serial: string;
     active: boolean;
@@ -3331,6 +3606,9 @@ function CertsTab({ mount }: { mount: string }) {
                   : "";
               })()}
               onRevoke={() => setRevokeTarget(selected)}
+              onRenew={
+                cert.is_orphaned ? undefined : () => setRenewTarget(selected)
+              }
               onDelete={() =>
                 setDeleteTarget({
                   serial: selected,
@@ -3383,6 +3661,14 @@ function CertsTab({ mount }: { mount: string }) {
         mount={mount}
         target={exportTarget?.id ?? ""}
         onClose={() => setExportTarget(null)}
+      />
+      <RenewCertModal
+        open={!!renewTarget}
+        mount={mount}
+        serial={renewTarget ?? ""}
+        cert={renewTarget && selected === renewTarget ? cert : null}
+        onClose={() => setRenewTarget(null)}
+        onRenewed={() => void refresh()}
       />
     </Card>
   );
