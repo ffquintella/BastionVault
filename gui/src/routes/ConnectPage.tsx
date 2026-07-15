@@ -12,6 +12,7 @@ import {
 import { useVaultStore } from "../stores/vaultStore";
 import { useAuthStore } from "../stores/authStore";
 import { useMiaEnvStore } from "../stores/miaEnvStore";
+import { useNamespaceStore } from "../stores/namespaceStore";
 import type { RemoteProfile, FerroGateEnrolment } from "../lib/types";
 import type { VaultProfile, VaultSpec } from "../lib/api";
 import * as api from "../lib/api";
@@ -517,6 +518,9 @@ export function ConnectPage() {
         // Forget any MIA-environment selection from the previous deployment so
         // the one we're switching to re-seeds from its own advertised value.
         useMiaEnvStore.getState().reset();
+        // Forget the active namespace too — it belongs to the deployment we're
+        // leaving; the new one re-seeds from its own namespace list.
+        useNamespaceStore.getState().reset();
       }
 
       switch (profile.spec.kind) {

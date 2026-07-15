@@ -648,3 +648,117 @@ async fn test_associate_key_with_certificate() {
     // Silence the unused warning without asserting on the other key.
     let _ = other_key_id;
 }
+
+/// Orphan reconciliation — an *imported* cert (`is_orphaned = true`) must
+/// lose the orphan flag once a matching managed key is associated, and
+/// regain it when the key is cleared (it still has no issuer link). This is
+/// the behavior behind the GUI "orphan" badge.
+#[maybe_async::test(
+    feature = "sync_handler",
+    async(all(not(feature = "sync_handler")), tokio::test)
+)]
+async fn test_orphan_flag_reconciled_by_key_association() {
+    let (bvault, dir, token) = boot_with_root().await;
+    defer!(let _ = fs::remove_dir_all(&dir););
+    let core = bvault.core.load();
+
+    // Mint a real cert + its private key on a *second* PKI mount, so we
+    // have importable material whose serial won't collide with anything on
+    // the first mount.
+    write(&core, &token, "sys/mounts/pki2/", json!({"type": "pki"}).as_object().unwrap().clone())
+        .await
+        .expect("mount pki2");
+    write(
+        &core,
+        &token,
+        "pki2/root/generate/internal",
+        json!({"common_name": "Src Root", "key_type": "ec", "ttl": "8760h"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .await
+    .expect("pki2 root");
+    write(
+        &core,
+        &token,
+        "pki2/roles/leaf",
+        json!({"ttl": "24h", "key_type": "ec", "allow_any_name": true, "server_flag": true})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .await
+    .expect("pki2 role");
+    let issued = write_ok(
+        &core,
+        &token,
+        "pki2/issue/leaf",
+        json!({"common_name": "orphan.example.com", "ttl": "24h"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .await;
+    let cert_pem = issued["certificate"].as_str().unwrap().to_string();
+    let key_pem = issued["private_key"].as_str().unwrap().to_string();
+
+    // Import the cert into the first mount → stored as an orphan.
+    let imported = write_ok(
+        &core,
+        &token,
+        "pki/certs/import",
+        json!({"certificate": cert_pem, "source": "pkcs12-import"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .await;
+    let serial = imported["serial_number"].as_str().unwrap().to_string();
+    assert_eq!(
+        imported["is_orphaned"], json!(true),
+        "a freshly imported cert must be orphaned"
+    );
+
+    // Import the matching key on the first mount.
+    let match_key = write_ok(
+        &core,
+        &token,
+        "pki/keys/import",
+        json!({"private_key": key_pem, "name": "orphan-match"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .await;
+    let match_key_id = match_key["key_id"].as_str().unwrap().to_string();
+
+    // Associate the key → orphan flag must clear.
+    write_ok(
+        &core,
+        &token,
+        &format!("pki/cert/{serial}/key"),
+        json!({"key_ref": "orphan-match"}).as_object().unwrap().clone(),
+    )
+    .await;
+    let after_assoc = read(&core, &token, &format!("pki/cert/{serial}")).await;
+    assert_eq!(after_assoc["key_id"].as_str().unwrap(), match_key_id);
+    assert!(
+        after_assoc.get("is_orphaned").is_none(),
+        "associating a key must clear the orphan flag, got {after_assoc:?}"
+    );
+
+    // Clear the key → the cert has no issuer link, so it is an orphan again.
+    delete_req(&core, &token, &format!("pki/cert/{serial}/key"))
+        .await
+        .expect("clear association");
+    let after_clear = read(&core, &token, &format!("pki/cert/{serial}")).await;
+    assert!(
+        after_clear.get("key_id").is_none(),
+        "clearing must drop the key binding"
+    );
+    assert_eq!(
+        after_clear["is_orphaned"], json!(true),
+        "clearing the key on an issuer-less cert must restore the orphan flag"
+    );
+}

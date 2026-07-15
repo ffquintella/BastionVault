@@ -160,10 +160,16 @@ pub async fn rewrite_request_for_namespace(core: &Core, req: &mut Request) -> Re
 
     // Deployment-level backends are addressed at the root mount and scope
     // themselves by the namespace *header* (not by path rewriting): `sys/`
-    // (incl. policy + audit + namespace CRUD), `auth/` logins, and the
-    // `identity/` backend (per-namespace entities/groups via the header). Their
-    // handlers read the header directly, so leave the path untouched — rewriting
-    // would misroute them into the namespace's logical mount table.
+    // (incl. policy + audit + namespace CRUD), `auth/` logins, the `identity/`
+    // backend (per-namespace entities/groups via the header), and the global
+    // `rustion/` bastion-fleet mount (targets, master cert, recordings, policy).
+    // Rustion is a single deployment-global fleet that lives only in the root
+    // mount table — it is never mounted per-namespace — so rewriting a namespaced
+    // request into `<ns>/rustion/...` misses that mount and 404s
+    // (`Router mount not found`). Leaving it header-scoped lets its handlers
+    // resolve against the global mount and apply their own per-namespace scoping
+    // (the recordings list filters to the namespace's resources). Their handlers
+    // read the header directly, so leave the path untouched.
     //
     // We still resolve the namespace and record it on the request so
     // header-scoped handlers (notably the `identity/owner/*` and
@@ -173,7 +179,8 @@ pub async fn rewrite_request_for_namespace(core: &Core, req: &mut Request) -> Re
     // hard-failing, preserving the previous early-return behavior.
     let header_scoped = req.path.starts_with("sys/")
         || req.path.starts_with("auth/")
-        || req.path.starts_with("identity/");
+        || req.path.starts_with("identity/")
+        || req.path.starts_with("rustion/");
     if header_scoped {
         if let Some(ns) = store.get_by_path(&ns_path).await? {
             if !ns.is_root() {

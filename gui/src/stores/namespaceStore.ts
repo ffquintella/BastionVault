@@ -45,6 +45,15 @@ interface NamespaceState {
   refresh: () => Promise<void>;
   /** Set the backend session's active namespace and mirror it locally. */
   setActive: (path: string) => Promise<void>;
+  /**
+   * Wipe all namespace state — in-memory and the `localStorage` mirror —
+   * back to a cold-start default. Called on a deliberate sign-out / vault
+   * switch so the next login starts at root instead of inheriting the
+   * previous session's active namespace. Without this the module-level
+   * store (which survives client-side navigation) keeps showing the old
+   * namespace and `ensureLoaded` short-circuits on the stale `loaded`.
+   */
+  reset: () => void;
 }
 
 /**
@@ -60,23 +69,31 @@ export const useNamespaceStore = create<NamespaceState>((set, get) => ({
   loaded: false,
 
   refresh: async () => {
+    // Fetch list + active independently so one failing doesn't blank the
+    // other. Crucially, a *failed* list fetch (null) must NOT be treated as
+    // an *empty* list ([]) — the latter is a real "single-tenant, no child
+    // namespaces" answer we cache, the former would wrongly wipe a good
+    // cached list and hide the switcher until the next app restart.
+    const list = await api
+      .listNamespaces()
+      .then((r) => r.namespaces)
+      .catch(() => null);
+    const current = await api.getActiveNamespace().catch(() => null);
+
+    set((s) => ({
+      namespaces: list ?? s.namespaces,
+      active: current ?? s.active,
+      loaded: true,
+    }));
+
     try {
-      const [list, current] = await Promise.all([
-        api.listNamespaces().catch(() => ({ namespaces: [] as string[] })),
-        api.getActiveNamespace().catch(() => ""),
-      ]);
-      set({ namespaces: list.namespaces, active: current, loaded: true });
-      try {
-        localStorage.setItem(LIST_KEY, JSON.stringify(list.namespaces));
+      if (list) localStorage.setItem(LIST_KEY, JSON.stringify(list));
+      if (current !== null) {
         if (current) localStorage.setItem(ACTIVE_KEY, current);
         else localStorage.removeItem(ACTIVE_KEY);
-      } catch {
-        /* storage unavailable — in-memory state still holds */
       }
     } catch {
-      // Namespaces unavailable (e.g. minimal build). Mark loaded so we
-      // stop retrying; the switcher hides gracefully on empty state.
-      set({ loaded: true });
+      /* storage unavailable — in-memory state still holds */
     }
   },
 
@@ -93,6 +110,16 @@ export const useNamespaceStore = create<NamespaceState>((set, get) => ({
       else localStorage.removeItem(ACTIVE_KEY);
     } catch {
       /* storage unavailable — in-memory state still holds */
+    }
+  },
+
+  reset: () => {
+    set({ namespaces: [], active: "", loaded: false });
+    try {
+      localStorage.removeItem(ACTIVE_KEY);
+      localStorage.removeItem(LIST_KEY);
+    } catch {
+      /* storage unavailable — in-memory reset still holds */
     }
   },
 }));

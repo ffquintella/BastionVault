@@ -2139,13 +2139,120 @@ impl RustionBackendInner {
     pub async fn handle_recordings_list(
         &self,
         _b: &dyn Backend,
-        _req: &mut Request,
+        req: &mut Request,
     ) -> Result<Option<Response>, RvError> {
         let recordings = self.resolve_recordings_store()?;
         let ids = recordings.list_ids().await?;
+
+        // Namespace scoping. The `rustion/` mount is deployment-global and its
+        // recordings index is a single flat store, but a recording is produced
+        // against a session target host. In a non-root namespace we surface only
+        // the recordings whose `target_host` matches a resource (hostname/IP)
+        // that namespace owns, so operators see the recordings relevant to their
+        // namespace's assets. The root/global namespace (no namespace header)
+        // sees every recording; a recording whose host matches no namespace
+        // resource therefore remains visible only at root.
+        let ids = match self.namespace_resource_hosts(req).await? {
+            None => ids,
+            Some(hosts) => {
+                let mut kept = Vec::with_capacity(ids.len());
+                for id in ids {
+                    if let Some(entry) = recordings.get(&id).await? {
+                        let host = entry.target_host.trim().to_lowercase();
+                        // Match on the full host or the host portion before any
+                        // `:port` suffix, so `db01:22` still matches resource `db01`.
+                        let bare = host.split(':').next().unwrap_or(host.as_str());
+                        if hosts.contains(host.as_str()) || hosts.contains(bare) {
+                            kept.push(id);
+                        }
+                    }
+                }
+                kept
+            }
+        };
+
         let mut data = Map::new();
         data.insert("recordings".into(), Value::Array(ids.into_iter().map(Value::String).collect()));
         Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// Resolve the set of resource hosts (`hostname` + `ip_address`, lowercased)
+    /// defined in the request's active namespace `resources/` mount.
+    ///
+    /// Returns `None` when the request carries no namespace header or targets the
+    /// root/global namespace — the caller then applies no per-namespace filtering
+    /// (root sees every recording). Returns `Some(set)` for a non-root namespace;
+    /// an empty set means the namespace owns no matching resources, so no
+    /// recordings are surfaced there.
+    async fn namespace_resource_hosts(
+        &self,
+        req: &Request,
+    ) -> Result<Option<std::collections::HashSet<String>>, RvError> {
+        use crate::modules::namespace::router::{namespace_header_from_map, namespace_logical_prefix};
+        use crate::modules::namespace::{NamespaceModule, NAMESPACE_MODULE_NAME};
+
+        let Some(raw) = namespace_header_from_map(req.headers.as_ref()) else {
+            return Ok(None);
+        };
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Ok(None);
+        }
+
+        let Some(ns_module) =
+            self.core.module_manager.get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+        else {
+            return Ok(None);
+        };
+        let Some(store) = ns_module.store() else {
+            return Ok(None);
+        };
+        let Some(ns) = store.get_by_path(raw).await? else {
+            // Unknown namespace header → it can own no resources.
+            return Ok(Some(std::collections::HashSet::new()));
+        };
+        if ns.is_root() {
+            return Ok(None); // root/global sees everything
+        }
+
+        // `rustion/` is header-scoped, so the request pipeline did NOT wire the
+        // namespace's mount router for us — ensure it, then find its resources
+        // mount and read the resource metadata directly from that mount's view.
+        let router = ns_module.registry.ensure_router(&self.core, &ns.uuid, &ns.path).await?;
+        let mount_uuid = {
+            let entries = router.mounts.entries.read()?;
+            match entries.get("resources/") {
+                Some(entry) => Some(entry.read()?.uuid.clone()),
+                None => None,
+            }
+        };
+        let Some(mount_uuid) = mount_uuid else {
+            // Namespace has no resources mount → owns no hosts.
+            return Ok(Some(std::collections::HashSet::new()));
+        };
+
+        // The resource mount stores each record under `meta/<name>`. Parse the
+        // host fields directly out of the JSON rather than deserializing the full
+        // `ResourceEntry` — the persisted metadata omits absent fields (e.g.
+        // `name`, which is carried by the key), so a strict struct decode fails.
+        let prefix = format!("{}{}/", namespace_logical_prefix(&ns.uuid), mount_uuid);
+        let view = crate::storage::barrier_view::BarrierView::new(self.core.barrier.clone(), &prefix);
+
+        let mut hosts = std::collections::HashSet::new();
+        for entry in view.get_entries("meta/").await? {
+            let Ok(meta) = serde_json::from_slice::<serde_json::Value>(&entry.value) else {
+                continue;
+            };
+            for field in ["hostname", "ip_address"] {
+                if let Some(host) = meta.get(field).and_then(|v| v.as_str()) {
+                    let host = host.trim().to_lowercase();
+                    if !host.is_empty() {
+                        hosts.insert(host);
+                    }
+                }
+            }
+        }
+        Ok(Some(hosts))
     }
 
     pub async fn handle_recording_read(
@@ -3270,5 +3377,124 @@ mod connect_only_tests {
         // No-connect caller is denied at the gate before any resolution.
         let noconn_open = open_v2(&noconn);
         assert_eq!(noconn_open, 403, "no-connect must be denied at the connect gate");
+    }
+}
+
+#[cfg(test)]
+mod recordings_namespace_scope_tests {
+    use std::collections::HashMap;
+
+    use serde_json::json;
+
+    use super::recordings::RecordingEntry;
+    use super::RustionModule;
+    use crate::logical::{Operation, Request};
+    use crate::test_utils::new_unseal_test_bastion_vault;
+
+    fn rec(id: &str, host: &str) -> RecordingEntry {
+        let now = chrono::Utc::now();
+        RecordingEntry {
+            recording_id: id.to_string(),
+            session_id: format!("sess_{id}"),
+            authority: "test".into(),
+            format: "asciicast".into(),
+            sha256: String::new(),
+            size_bytes: 0,
+            started_at: now,
+            finished_at: now,
+            target_host: host.to_string(),
+            target_user: "deploy".into(),
+            correlation_id: String::new(),
+            bastion_id: "rt_test".into(),
+            received_at: now,
+            delivery_mode: "webhook".into(),
+        }
+    }
+
+    fn ids_of(resp: &Option<crate::logical::Response>) -> Vec<String> {
+        resp.as_ref()
+            .and_then(|r| r.data.as_ref())
+            .and_then(|d| d.get("recordings"))
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    }
+
+    /// The `rustion/recordings` list is deployment-global at root but, in a
+    /// non-root namespace, is scoped to recordings whose `target_host` matches a
+    /// resource (hostname or IP) that namespace owns. A recording matching no
+    /// namespace resource stays visible only at root. This also guards the
+    /// routing fix: `rustion/*` is header-scoped, so a namespaced request reaches
+    /// the handler instead of 404-ing with "Router mount not found".
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_recordings_list_scoped_to_namespace_resources() {
+        let (_bvault, core, root) =
+            new_unseal_test_bastion_vault("test_recordings_ns_scope").await;
+
+        let call = |op: Operation,
+                    path: &str,
+                    ns: &str,
+                    body: Option<serde_json::Map<String, serde_json::Value>>| {
+            let core = core.clone();
+            let token = root.clone();
+            let path = path.to_string();
+            let ns = ns.to_string();
+            async move {
+                let mut req = Request::new(&path);
+                req.operation = op;
+                req.client_token = token;
+                req.body = body;
+                let mut h = HashMap::new();
+                if !ns.is_empty() {
+                    h.insert("x-bastionvault-namespace".to_string(), ns);
+                }
+                req.headers = Some(h);
+                core.handle_request(&mut req).await
+            }
+        };
+
+        // Create a child namespace — this seeds a `resources/` mount.
+        call(Operation::Write, "sys/namespaces/team-alpha", "", json!({}).as_object().cloned())
+            .await
+            .expect("create namespace");
+
+        // Register a resource in team-alpha (hostname `web01.corp`, IP `10.1.2.3`).
+        call(
+            Operation::Write,
+            "resources/resources/web01",
+            "team-alpha",
+            json!({ "type": "server", "hostname": "web01.corp", "ip_address": "10.1.2.3" })
+                .as_object()
+                .cloned(),
+        )
+        .await
+        .expect("create resource in namespace");
+
+        // Seed the global recordings index: two hosts belong to team-alpha's
+        // resource (by hostname and by IP), one belongs to no namespace resource.
+        let module = core.module_manager.get_module::<RustionModule>("rustion").unwrap();
+        let store = module.recordings_store().expect("recordings store initialized");
+        store.put(&rec("rec_host", "web01.corp")).await.unwrap();
+        store.put(&rec("rec_ip", "10.1.2.3")).await.unwrap();
+        store.put(&rec("rec_other", "db99.other")).await.unwrap();
+
+        // Root (no namespace header) sees every recording.
+        let root_ids = ids_of(&call(Operation::Read, "rustion/recordings", "", None).await.unwrap());
+        assert!(root_ids.contains(&"rec_host".to_string()), "root sees host match");
+        assert!(root_ids.contains(&"rec_ip".to_string()), "root sees ip match");
+        assert!(
+            root_ids.contains(&"rec_other".to_string()),
+            "root must still see the recording matching no namespace resource"
+        );
+
+        // team-alpha sees only recordings matching its resources.
+        let ns_ids =
+            ids_of(&call(Operation::Read, "rustion/recordings", "team-alpha", None).await.unwrap());
+        assert!(ns_ids.contains(&"rec_host".to_string()), "namespace sees hostname match");
+        assert!(ns_ids.contains(&"rec_ip".to_string()), "namespace sees ip match");
+        assert!(
+            !ns_ids.contains(&"rec_other".to_string()),
+            "namespace must not see a recording matching none of its resources"
+        );
     }
 }

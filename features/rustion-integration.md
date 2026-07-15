@@ -30,6 +30,7 @@ Net result: operators get the same one-click Connect UX as today, but every sess
 - BastionVault has [audit logging](audit-logging.md) (HMAC-chained file device). Pointer events to remote recordings slot into the existing pipeline.
 - Rustion (`/Users/felipe/Dev/Rustion`) is its own server with its own user / target / role YAML store, its own auth (password + Argon2id, certificate, SAML, FIDO2, TOTP), and its own admin TUI. It does **not** today expose a control-plane API for "create me a session for this credential, signed by an external trust anchor." That control plane is the new surface this feature adds — symmetric work in both repos.
 - There is no integration today; the two products are co-developed by the same author but ship independently.
+- **Namespace-scoped recordings.** The `rustion/` mount is a single deployment-global fleet (targets + recordings live only in the root mount table), so it is header-scoped in the namespace router — a namespaced request resolves against the global mount instead of 404-ing. The `rustion/recordings` list applies per-namespace scoping in the handler: in a non-root namespace it returns only recordings whose `target_host` matches a resource (hostname/IP) in that namespace's `resources/` mount; root sees all, and recordings matching no namespace resource stay visible only at root.
 
 ## Scope
 

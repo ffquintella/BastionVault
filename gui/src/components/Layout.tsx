@@ -168,6 +168,7 @@ export function Layout({ children }: LayoutProps) {
   const clearAuth = useAuthStore((s) => s.clearAuth);
   const clearSessions = useAuthStore((s) => s.clearSessions);
   const reset = useVaultStore((s) => s.reset);
+  const resetNamespaces = useNamespaceStore((s) => s.reset);
   const isAdmin = isAdminUser(policies);
   const policySet = new Set(policies);
   // Active namespace ("" = root). Drives the `rootOnly` nav gate below.
@@ -335,6 +336,9 @@ export function Layout({ children }: LayoutProps) {
     // silently log back in as the user who just signed out.
     clearSessions();
     reset();
+    // Drop the active-namespace context so the next login starts at root
+    // instead of inheriting the namespace this session was signed out from.
+    resetNamespaces();
     navigate("/connect");
   }
 

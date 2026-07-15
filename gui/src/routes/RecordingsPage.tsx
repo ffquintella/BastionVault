@@ -43,9 +43,16 @@ import {
   type RustionRecordingEntry,
   type RustionTargetSummary,
 } from "../lib/rustion";
+import { useNamespaceStore } from "../stores/namespaceStore";
 
 export function RecordingsPage() {
   const toast = useToast();
+  // Recordings are a deployment-global index, but the server scopes the list
+  // to the active namespace: in a child namespace it returns only recordings
+  // whose target host matches a resource that namespace owns. Root sees all.
+  const activeNamespace = useNamespaceStore((s) => s.active);
+  const inNamespace =
+    activeNamespace.trim() !== "" && activeNamespace.trim() !== "root";
   const [loading, setLoading] = useState(true);
   const [entries, setEntries] = useState<RustionRecordingEntry[]>([]);
   const [search, setSearch] = useState("");
@@ -167,6 +174,13 @@ export function RecordingsPage() {
             deliveries land here automatically; the 24h fallback poller and the
             manual pull below cover the edge cases.
           </p>
+          {inNamespace && (
+            <p className="text-xs text-[var(--color-text-muted)] mt-1">
+              Scoped to <span className="font-mono">{activeNamespace}</span> —
+              showing recordings whose target host matches a resource in this
+              namespace. Switch to the root namespace to see every recording.
+            </p>
+          )}
         </div>
 
         <Card className="p-4">
@@ -274,7 +288,9 @@ export function RecordingsPage() {
               }
               description={
                 entries.length === 0
-                  ? "Once an enrolled bastion finishes a session, its recording.ready webhook will land here."
+                  ? inNamespace
+                    ? `No recordings match a resource in ${activeNamespace}. Recordings appear here once a session targets one of this namespace's resources; switch to the root namespace to see every recording.`
+                    : "Once an enrolled bastion finishes a session, its recording.ready webhook will land here."
                   : "Adjust the filters above to widen the view."
               }
             />

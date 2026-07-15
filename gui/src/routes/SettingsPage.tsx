@@ -4,6 +4,7 @@ import { Layout } from "../components/Layout";
 import { Button, Card, Badge, Input, Select, Modal, ConfirmModal, Tabs, useToast, ResourceTypeIcon, RESOURCE_TYPE_ICON_CATALOG } from "../components/ui";
 import { useVaultStore } from "../stores/vaultStore";
 import { useAuthStore } from "../stores/authStore";
+import { useNamespaceStore } from "../stores/namespaceStore";
 import { usePasswordPolicyStore } from "../stores/passwordPolicyStore";
 import type {
   Fido2Config,
@@ -45,6 +46,7 @@ export function SettingsPage() {
   const clearAuth = useAuthStore((s) => s.clearAuth);
   const clearSessions = useAuthStore((s) => s.clearSessions);
   const reset = useVaultStore((s) => s.reset);
+  const resetNamespaces = useNamespaceStore((s) => s.reset);
   const status = useVaultStore((s) => s.status);
   const setStatus = useVaultStore((s) => s.setStatus);
   const [sealing, setSealing] = useState(false);
@@ -411,6 +413,7 @@ export function SettingsPage() {
     clearAuth();
     clearSessions();
     reset();
+    resetNamespaces();
     navigate("/connect");
   }
 
@@ -426,6 +429,7 @@ export function SettingsPage() {
     clearAuth();
     clearSessions();
     reset();
+    resetNamespaces();
     navigate("/connect");
   }
 

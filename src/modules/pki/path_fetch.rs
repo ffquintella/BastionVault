@@ -199,14 +199,22 @@ impl PkiBackendInner {
 
         // Re-point the binding. Dropping the old cert-ref first keeps the
         // per-key reference set (which gates `DELETE pki/key/<id>`) exact.
-        // A no-op when the same key is re-associated.
         let old = record.key_id.clone();
-        if old != entry.id {
-            if !old.is_empty() {
-                super::keys::remove_cert_ref(req, &old, &serial_hex).await?;
-            }
-            record.key_id = entry.id.clone();
+        let rebind = old != entry.id;
+        if rebind && !old.is_empty() {
+            super::keys::remove_cert_ref(req, &old, &serial_hex).await?;
+        }
+        record.key_id = entry.id.clone();
+        // A cert with a managed key bound is no longer an orphan. Clearing
+        // the flag unconditionally also repairs records that were bound
+        // before this reconciliation existed, so re-associating the same
+        // key fixes a stale "orphan" badge without changing the binding.
+        let was_orphan = record.is_orphaned;
+        record.is_orphaned = false;
+        if rebind || was_orphan {
             storage::put_json(req, &cert_key, &record).await?;
+        }
+        if rebind {
             super::keys::add_cert_ref(req, &entry.id, &serial_hex).await?;
         }
 
@@ -235,6 +243,10 @@ impl PkiBackendInner {
         if !record.key_id.is_empty() {
             let old = record.key_id.clone();
             record.key_id = String::new();
+            // With no key bound and no issuer link, the cert is once again
+            // an orphan (the imported case). Engine-issued certs keep their
+            // `issuer_id`, so clearing their key leaves them non-orphan.
+            record.is_orphaned = record.issuer_id.is_empty();
             storage::put_json(req, &cert_key, &record).await?;
             super::keys::remove_cert_ref(req, &old, &serial_hex).await?;
         }

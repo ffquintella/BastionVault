@@ -264,6 +264,12 @@ pub async fn logout(app: tauri::AppHandle, state: State<'_, AppState>) -> CmdRes
         .await;
     }
     *state.token.lock().await = None;
+    // Reset the session's active namespace to root. It is otherwise sticky
+    // for the whole process lifetime (only the switcher ever changes it), so
+    // without this a sign-out inside a child namespace leaves the header in
+    // place: the next login silently lands back in that namespace, and the
+    // only recovery is a full app restart (which drops the AppState).
+    *state.active_namespace.lock().await = None;
     // Extensibility v2: drop app-module instances + their windows.
     crate::plugin_apps::teardown_all(&app, &state).await;
     Ok(())

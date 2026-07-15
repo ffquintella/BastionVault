@@ -45,6 +45,18 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.30.1] - 2026-07-15
+
+### Added
+
+- **Recordings scoped to a namespace's resources** (`src/modules/rustion/mod.rs`, `gui/src/routes/RecordingsPage.tsx`) -- in a non-root namespace the `rustion/recordings` list now returns only the recordings whose session `target_host` matches a resource (hostname or IP) that namespace owns; the root/global namespace still sees every recording, and a recording matching no namespace resource remains visible only at root. The recordings handler resolves the namespace's `resources/` mount and joins on host. The GUI Recordings page shows a "Scoped to <namespace>" hint and a namespace-aware empty state. See [features/rustion-integration.md](features/rustion-integration.md).
+
+### Fixed
+
+- **Recordings & bastions 404'd inside any child namespace** (`src/modules/namespace/router.rs`) -- the deployment-global `rustion/` mount is not registered per-namespace, so with a namespace active the router rewrote `rustion/recordings` (and `rustion/targets`) to `<ns>/rustion/...` and returned `HTTP 404: Router mount not found`, breaking the Recordings page (and every other Rustion admin surface) outside root. `rustion/` is now header-scoped like `sys/`/`auth/`/`identity/`: the path is left unrewritten so it resolves against the global mount, and handlers apply their own per-namespace scoping.
+- **Active namespace survived sign-out (stuck inside a namespace after re-login)** (`gui/src-tauri/src/commands/auth.rs`, `gui/src/stores/namespaceStore.ts`, `gui/src/components/Layout.tsx`, `gui/src/routes/SettingsPage.tsx`, `gui/src/routes/ConnectPage.tsx`) -- signing out from a child namespace left the backend's `active_namespace` header and the frontend namespace store pointing at that namespace, so the next login silently landed back inside it; switching to root then cached an empty namespace list and hid the switcher, recoverable only by restarting the app. `logout` now resets `active_namespace` to root, all deliberate sign-out / vault-switch paths call a new `namespaceStore.reset()`, and `refresh()` no longer treats a failed list fetch as an empty list (which was clobbering the cached list). Adds namespaceStore regression tests.
+- **PKI cert stays "orphan" after key association** (`src/modules/pki/path_fetch.rs`) -- `set_cert_key` now clears `is_orphaned` when a managed key is bound, and `clear_cert_key` restores it only when the cert still has no `issuer_id` (imported case). The orphan flag was previously frozen at import time and never reconciled with the key binding, so associating a key left the "orphan" badge showing. Re-associating a key also repairs records bound before this fix.
+
 ## [0.30.0] - 2026-07-15
 
 ### Added
