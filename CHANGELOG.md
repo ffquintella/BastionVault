@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.30.2] - 2026-07-15
+
+### Added
+
+- **PKI remembers the last-selected mount per namespace** (`gui/src/routes/PkiPage.tsx`) -- the PKI page now persists which mount was selected, keyed by the active namespace, so navigating away and back (or returning to a namespace later) re-selects that mount instead of always defaulting to the first one. The remembered mount is validated against the current mount list before selection, falling back to the first mount if it no longer exists; the picker, mount-enable, and unmount-fallback all update the stored value.
+
 ## [0.30.1] - 2026-07-15
 
 ### Added

@@ -33,7 +33,46 @@ import type {
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 import { useAuthStore } from "../stores/authStore";
+import { useNamespaceStore } from "../stores/namespaceStore";
 import { SUPER_ADMIN } from "../lib/access";
+
+// Remember the last-selected PKI mount per namespace so returning to the page
+// (or switching back to a namespace) re-selects it instead of defaulting to the
+// first mount. Keyed by the active namespace — mounts are namespace-scoped, so
+// a `pki/` in one namespace is unrelated to a `pki/` in another. Root/empty
+// namespace uses a stable "" key.
+const LAST_MOUNT_KEY = "bv.pki.lastMount";
+
+function readLastMount(namespace: string): string {
+  try {
+    const raw = localStorage.getItem(LAST_MOUNT_KEY);
+    if (!raw) return "";
+    const map = JSON.parse(raw);
+    const v = map?.[namespace];
+    return typeof v === "string" ? v : "";
+  } catch {
+    return "";
+  }
+}
+
+function writeLastMount(namespace: string, mount: string): void {
+  try {
+    const raw = localStorage.getItem(LAST_MOUNT_KEY);
+    let map: Record<string, string> = {};
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") map = parsed;
+    }
+    if (mount) {
+      map[namespace] = mount;
+    } else {
+      delete map[namespace];
+    }
+    localStorage.setItem(LAST_MOUNT_KEY, JSON.stringify(map));
+  } catch {
+    /* storage unavailable — selection still holds in-memory this session */
+  }
+}
 
 /** Read a picked File into a base64 string. Chunked so large containers
  *  (>~50 KB) don't blow the call-stack limit when fanning the byte array
@@ -213,6 +252,7 @@ function extractCn(dn: string): string {
 
 export function PkiPage() {
   const { toast } = useToast();
+  const namespace = useNamespaceStore((s) => s.active);
   const [mounts, setMounts] = useState<PkiMountInfo[]>([]);
   const [activeMount, setActiveMount] = useState<string>("");
   // Per-mount admin gates the in-mount surfaces (Keys/Tidy tabs, issuer/role/
@@ -262,17 +302,30 @@ export function PkiPage() {
       const list = await api.pkiListMounts();
       setMounts(list);
       if (list.length > 0 && !activeMount) {
-        setActiveMount(list[0].path.replace(/\/$/, ""));
+        const paths = list.map((m) => m.path.replace(/\/$/, ""));
+        // Re-select the mount last used in this namespace if it still exists,
+        // otherwise fall back to the first mount.
+        const remembered = readLastMount(namespace);
+        setActiveMount(
+          remembered && paths.includes(remembered) ? remembered : paths[0],
+        );
       }
     } catch (e) {
       toast("error", extractError(e));
     }
-  }, [activeMount, toast]);
+  }, [activeMount, namespace, toast]);
 
   useEffect(() => {
     refreshMounts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Persist the current selection per namespace so navigating away and back
+  // (or returning to this namespace later) restores it. Covers every setter —
+  // the picker, mount-enable, and unmount fallback.
+  useEffect(() => {
+    if (activeMount) writeLastMount(namespace, activeMount);
+  }, [activeMount, namespace]);
 
   async function handleEnableMount() {
     if (!newMountPath.trim()) return;
