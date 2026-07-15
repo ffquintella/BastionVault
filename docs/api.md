@@ -627,9 +627,16 @@ Request body:
 
 ~~~json
 {
-  "password": "my-password"
+  "password": "my-password",
+  "totp_code": "123456"
 }
 ~~~
+
+`totp_code` is required only when TOTP MFA is enabled globally
+(`config/mfa`) **and** for this user (`totp_mfa_enabled`). A disabled account,
+a locked-out account, or a missing/invalid TOTP code is rejected with a
+generic error and no `auth` block. A failed TOTP code counts toward the
+lockout threshold just like a bad password.
 
 Response includes an `auth` block with the client token:
 
@@ -655,14 +662,37 @@ POST /v1/auth/{mount}/users/{username}
 ~~~json
 {
   "password": "new-password",
-  "policies": "default,admin"
+  "policies": "default,admin",
+  "disabled": false,
+  "totp_mfa_enabled": true,
+  "totp_key": "alice-mfa",
+  "totp_mount": "totp/"
 }
 ~~~
+
+Account-security fields (all optional; a field omitted from the request is
+left unchanged):
+
+- `disabled` — when `true`, all authentication for this user is refused.
+- `totp_mfa_enabled` — require a TOTP second factor (a `totp_key` must be set).
+- `totp_key` — TOTP key name to validate against.
+- `totp_mount` — TOTP engine mount (default: the global `config/mfa`
+  `default_mount`, i.e. `totp/`).
 
 **Read a user**
 
 ~~~
 GET /v1/auth/{mount}/users/{username}
+~~~
+
+The response includes `disabled`, `totp_mfa_enabled`, `totp_mount`,
+`totp_key`, `failed_login_count`, and a computed `locked` boolean.
+`password_hash` and FIDO2 credential material are never returned.
+
+**Unlock a user** (clear a lockout + reset the failed-attempt counter)
+
+~~~
+POST /v1/auth/{mount}/users/{username}/unlock
 ~~~
 
 **Delete a user**
@@ -676,6 +706,43 @@ DELETE /v1/auth/{mount}/users/{username}
 ~~~
 LIST /v1/auth/{mount}/users
 ~~~
+
+### Userpass Account Security Configuration
+
+**Account lockout** (temporary lock after repeated failed passwords):
+
+~~~
+GET  /v1/auth/{mount}/config/lockout
+POST /v1/auth/{mount}/config/lockout
+~~~
+
+~~~json
+{
+  "enabled": true,
+  "max_failed_attempts": 5,
+  "lockout_duration_secs": 900
+}
+~~~
+
+Enabled by default. `max_failed_attempts: 0` disables locking even when
+`enabled`.
+
+**TOTP MFA** (global master switch + default engine mount):
+
+~~~
+GET  /v1/auth/{mount}/config/mfa
+POST /v1/auth/{mount}/config/mfa
+~~~
+
+~~~json
+{
+  "enabled": false,
+  "default_mount": "totp/"
+}
+~~~
+
+Opt-in (`enabled: false` by default). When off, per-user `totp_mfa_enabled`
+flags are not enforced.
 
 ### AppID Login
 

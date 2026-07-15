@@ -1,6 +1,10 @@
 use std::{collections::HashMap, sync::Arc};
 
-use super::{UserPassBackend, UserPassBackendInner};
+use super::{
+    path_config::{LockoutConfig, TotpMfaConfig},
+    path_users::UserEntry,
+    UserPassBackend, UserPassBackendInner,
+};
 use crate::{
     context::Context,
     core::Core,
@@ -72,12 +76,17 @@ impl UserPassBackend {
                     field_type: FieldType::SecretStr,
                     required: true,
                     description: "Password for this user."
+                },
+                "totp_code": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "TOTP second-factor code (required only when TOTP MFA is enabled for this user)."
                 }
             },
             operations: [
                 {op: Operation::Write, handler: userpass_backend_ref.login}
             ],
-            help: r#"This endpoint authenticates using a username and password."#
+            help: r#"This endpoint authenticates using a username and password (and a TOTP code when MFA is enabled)."#
         });
 
         path
@@ -159,6 +168,13 @@ impl UserPassBackendInner {
 
         let mut user = user.unwrap();
 
+        // Admin enable/disable switch: a disabled account authenticates by
+        // no method (password or FIDO2), whatever the supplied credentials.
+        if user.disabled {
+            log::warn!(target: "security", "userpass login refused: account '{username}' is disabled");
+            return Ok(Some(Response::error_response("account is disabled")));
+        }
+
         // Block password login when FIDO2 is enabled for this user
         if user.fido2_enabled {
             let resp = Response::error_response(
@@ -167,11 +183,61 @@ impl UserPassBackendInner {
             return Ok(Some(resp));
         }
 
+        // Temporary lockout. Refuse while a lock is in force; clear a lock
+        // that has already elapsed (plus its counter) before checking the
+        // password so the account becomes usable again on this attempt.
+        let lockout = self.get_lockout_config(req).await?;
+        let now = super::path_users::now_secs();
+        if user.locked_until > now {
+            let retry = user.locked_until - now;
+            log::warn!(target: "security", "userpass login refused: account '{username}' locked for {retry}s");
+            return Ok(Some(Response::error_response(&format!(
+                "account temporarily locked; try again in {retry} seconds"
+            ))));
+        }
+        if user.locked_until != 0 {
+            user.locked_until = 0;
+            user.failed_login_count = 0;
+            self.set_user(req, &username, &user).await?;
+        }
+
         let check = self.verify_password_hash(password, &user.password_hash)?;
         if !check {
             log::warn!(target: "security", "userpass login failed: bad password for '{username}'");
+            self.record_failed_attempt(req, &username, &mut user, &lockout).await?;
             let resp = Response::error_response(err_info);
             return Ok(Some(resp));
+        }
+
+        // Second factor. When TOTP MFA is enabled globally *and* for this
+        // user, a valid code is mandatory. Fails closed: a missing engine,
+        // missing key, or wrong/absent code refuses the login. A failed
+        // code feeds the same lockout counter as a bad password so a
+        // brute-force of the second factor is throttled too.
+        let mfa = self.get_mfa_config(req).await?;
+        if mfa.enabled && user.totp_mfa_enabled {
+            let code = req
+                .get_data("totp_code")
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.trim().to_string()))
+                .unwrap_or_default();
+            if code.is_empty() {
+                self.record_failed_attempt(req, &username, &mut user, &lockout).await?;
+                return Ok(Some(Response::error_response("a TOTP code is required for this account")));
+            }
+            let ok = self.verify_totp_mfa(&user, &mfa, &code).await?;
+            if !ok {
+                log::warn!(target: "security", "userpass login failed: bad TOTP code for '{username}'");
+                self.record_failed_attempt(req, &username, &mut user, &lockout).await?;
+                return Ok(Some(Response::error_response("invalid TOTP code")));
+            }
+        }
+
+        // Success: reset the failed-attempt counter / lock if either is set.
+        if user.failed_login_count != 0 || user.locked_until != 0 {
+            user.failed_login_count = 0;
+            user.locked_until = 0;
+            self.set_user(req, &username, &user).await?;
         }
 
         // Multi-tenancy: bind this session to the namespace named by the
@@ -270,6 +336,104 @@ impl UserPassBackendInner {
         let resp = Response { auth: Some(auth), ..Response::default() };
 
         Ok(Some(resp))
+    }
+
+    /// Increment the failed-attempt counter and, once the lockout policy's
+    /// threshold is reached, stamp a lock expiry (and reset the counter so a
+    /// post-unlock streak starts fresh). Persists the user. No-op when
+    /// lockout is disabled, so `failed_login_count` stays at 0 there.
+    async fn record_failed_attempt(
+        &self,
+        req: &mut Request,
+        username: &str,
+        user: &mut UserEntry,
+        lockout: &LockoutConfig,
+    ) -> Result<(), RvError> {
+        if !lockout.enabled {
+            return Ok(());
+        }
+        user.failed_login_count = user.failed_login_count.saturating_add(1);
+        if lockout.should_lock(user.failed_login_count) {
+            let dur = lockout.lockout_duration_secs.max(1) as i64;
+            user.locked_until = super::path_users::now_secs() + dur;
+            user.failed_login_count = 0;
+            log::warn!(
+                target: "security",
+                "userpass account '{username}' locked for {dur}s after repeated failed attempts"
+            );
+        }
+        self.set_user(req, username, user).await
+    }
+
+    /// Validate a submitted TOTP `code` against the key this user is bound
+    /// to in the TOTP secret engine. The engine is a sibling mount, so we
+    /// read its key policy through the router's barrier view for that mount
+    /// and run the RFC 6238 check locally, reusing the engine's own crypto
+    /// primitives. Fails closed: an unmounted engine, a missing/unreadable
+    /// key, or a malformed policy is an error (login refused), never a
+    /// silent bypass. Mirrors the cross-mount read pattern used by AppRole's
+    /// FerroGate machine lookup.
+    ///
+    /// Note: replay protection (the engine's `used/` index) is intentionally
+    /// not consulted here — that index lives under the TOTP engine's own
+    /// contract and writing into it from userpass would couple the two
+    /// backends' storage layouts. A TOTP code is single-use within its short
+    /// period and is combined with the password, so the residual replay
+    /// window is one validity period.
+    async fn verify_totp_mfa(
+        &self,
+        user: &UserEntry,
+        mfa: &TotpMfaConfig,
+        code: &str,
+    ) -> Result<bool, RvError> {
+        use crate::{
+            modules::totp::{
+                crypto::{ct_eq, hotp, step_for},
+                policy::KeyPolicy,
+            },
+            storage::Storage,
+        };
+
+        if user.totp_key.trim().is_empty() {
+            return Err(RvError::ErrResponse(
+                "TOTP MFA is enabled for this account but no TOTP key is bound".to_string(),
+            ));
+        }
+        let mount = if user.totp_mount.trim().is_empty() {
+            mfa.default_mount.clone()
+        } else {
+            let m = user.totp_mount.trim().to_string();
+            if m.ends_with('/') { m } else { format!("{m}/") }
+        };
+
+        let Some(view) = self.core.router.matching_view(&mount)? else {
+            return Err(RvError::ErrResponse(format!(
+                "TOTP MFA misconfigured: no secret engine mounted at `{mount}`"
+            )));
+        };
+        let Some(entry) = view.get(&format!("key/{}", user.totp_key)).await? else {
+            return Err(RvError::ErrResponse(format!(
+                "TOTP MFA misconfigured: key `{}` not found in `{mount}`",
+                user.totp_key
+            )));
+        };
+        let policy: KeyPolicy = serde_json::from_slice(&entry.value)?;
+
+        let now = super::path_users::now_secs().max(0) as u64;
+        let centre = step_for(now, policy.period);
+        for off in 0..=policy.skew as i64 {
+            for sign in if off == 0 { &[0i64][..] } else { &[-1i64, 1][..] } {
+                let step = centre as i64 + sign * off;
+                if step < 0 {
+                    continue;
+                }
+                let expect = hotp(&policy.key, step as u64, policy.algorithm, policy.digits);
+                if ct_eq(&expect, code) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     pub async fn login_renew(&self, _backend: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {

@@ -8,11 +8,11 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 
 | State | Count |
 |---|---|
-| Done | 51 |
+| Done | 52 |
 | Partial | 1 |
 | Todo | 9 |
 | Removed | 1 |
-| **Total tracked features** | **61** |
+| **Total tracked features** | **62** |
 
 Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-and-distribution.md)) — sequenced into four release waves; Waves 1 + 2 shipped (with Linux GUI bundler caveat), Wave 3 next.
 
@@ -96,6 +96,7 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | `[x]` Done | Auth: Token | Vault-shape token store. |
 | `[x]` Done | Auth: AppID (Vault AppRole-compatible, API type `approle`) | RoleID + SecretID. **Unreleased** adds mandatory FerroGate machine binding (per-role machine allowlist, server gate `auth/approle/config { require_machine }` default-on) + per-environment scoping of secret IDs and machine bindings (glob/wildcard), enforced force-env-and-restrict by the KV v2 engine. [spec](features/approle-machine-env.md). |
 | `[x]` Done | Auth: Userpass | Argon2 password hashing. |
+| `[x]` Done | Auth: UserPass Account Security | [spec](features/userpass-account-security.md) — temporary account lockout after N failed passwords (configurable via `config/lockout`, on by default), admin enable/disable switch per user, and TOTP multi-factor (global master switch `config/mfa` + per-user `totp_mfa_enabled`, validated against the TOTP secret engine, fail-closed). Adds `users/<name>/unlock`, `totp_code` on login, GUI Account Security panel + per-user controls + status badges, CLI `totp_code`. |
 | `[x]` Done | Auth: Certificate | mTLS client-cert auth. |
 | `[x]` Done | Auth: OIDC | [spec](features/oidc-auth.md) — server module + GUI lifecycle, PKCE / nonce / JWKS. |
 | `[x]` Done | Auth: SAML 2.0 | [spec](features/saml-auth.md) — pure-Rust SP-initiated SSO, no libxml2 / xmlsec. |

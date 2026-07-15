@@ -33,9 +33,16 @@ impl LoginHandler for UsesPassCliHandler {
             password = value;
         }
 
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "password": password,
         });
+        // Forward an optional TOTP second factor when the caller supplies it
+        // (required only for users with MFA enabled).
+        if let Some(code) = data.get("totp_code").and_then(|v| v.as_str()) {
+            if !code.is_empty() {
+                payload["totp_code"] = Value::String(code.to_string());
+            }
+        }
 
         let mut mount = data["mount"].as_str().unwrap_or("");
         if mount.is_empty() {
@@ -69,7 +76,10 @@ password=<string>
     Password to use for authentication. If not provided, the CLI will prompt for this on stdin.
 
 username=<string>
-    Username to use for authentication."#;
+    Username to use for authentication.
+
+totp_code=<string>
+    TOTP second-factor code. Required only for users with MFA enabled."#;
         help.trim().to_string()
     }
 }

@@ -17,6 +17,33 @@ pub struct UserListResult {
 pub struct UserInfo {
     pub username: String,
     pub policies: Vec<String>,
+    /// Admin enable/disable switch.
+    pub disabled: bool,
+    /// Whether the account is currently locked out (server-computed).
+    pub locked: bool,
+    /// Consecutive failed password attempts since the last success/unlock.
+    pub failed_login_count: u64,
+    /// Whether a TOTP second factor is required for this user.
+    pub totp_mfa_enabled: bool,
+    /// TOTP engine mount bound for MFA (empty = global default).
+    pub totp_mount: String,
+    /// TOTP key name bound for MFA.
+    pub totp_key: String,
+}
+
+/// Mount-level lockout policy (mirrors `config/lockout`).
+#[derive(Serialize, serde::Deserialize)]
+pub struct LockoutConfigDto {
+    pub enabled: bool,
+    pub max_failed_attempts: u64,
+    pub lockout_duration_secs: u64,
+}
+
+/// Mount-level TOTP MFA policy (mirrors `config/mfa`).
+#[derive(Serialize, serde::Deserialize)]
+pub struct MfaConfigDto {
+    pub enabled: bool,
+    pub default_mount: String,
 }
 
 #[tauri::command]
@@ -75,9 +102,26 @@ pub async fn get_user(
                     _ => vec![],
                 })
                 .unwrap_or_default();
+            let data = r.data.as_ref();
+            let get_bool = |k: &str| {
+                data.and_then(|d| d.get(k)).and_then(|v| v.as_bool()).unwrap_or(false)
+            };
+            let get_str = |k: &str| {
+                data.and_then(|d| d.get(k)).and_then(|v| v.as_str()).unwrap_or("").to_string()
+            };
+            let failed_login_count = data
+                .and_then(|d| d.get("failed_login_count"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             Ok(UserInfo {
                 username,
                 policies,
+                disabled: get_bool("disabled"),
+                locked: get_bool("locked"),
+                failed_login_count,
+                totp_mfa_enabled: get_bool("totp_mfa_enabled"),
+                totp_mount: get_str("totp_mount"),
+                totp_key: get_str("totp_key"),
             })
         }
         None => Err("User not found".into()),
@@ -104,12 +148,19 @@ pub async fn create_user(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn update_user(
     state: State<'_, AppState>,
     mount_path: String,
     username: String,
     password: String,
     policies: String,
+    // Account-state and MFA fields. `None` leaves the stored value untouched
+    // so an unrelated update (e.g. a policy change) never resets a flag.
+    disabled: Option<bool>,
+    totp_mfa_enabled: Option<bool>,
+    totp_mount: Option<String>,
+    totp_key: Option<String>,
 ) -> CmdResult<()> {
     let path = format!("auth/{mount_path}users/{username}");
     let mut body = Map::new();
@@ -117,7 +168,88 @@ pub async fn update_user(
         body.insert("password".to_string(), Value::String(password));
     }
     body.insert("policies".to_string(), Value::String(policies));
+    if let Some(v) = disabled {
+        body.insert("disabled".to_string(), Value::Bool(v));
+    }
+    if let Some(v) = totp_mfa_enabled {
+        body.insert("totp_mfa_enabled".to_string(), Value::Bool(v));
+    }
+    if let Some(v) = totp_mount {
+        body.insert("totp_mount".to_string(), Value::String(v));
+    }
+    if let Some(v) = totp_key {
+        body.insert("totp_key".to_string(), Value::String(v));
+    }
 
+    make_request(&state, Operation::Write, path, Some(body)).await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn unlock_user(
+    state: State<'_, AppState>,
+    mount_path: String,
+    username: String,
+) -> CmdResult<()> {
+    let path = format!("auth/{mount_path}users/{username}/unlock");
+    make_request(&state, Operation::Write, path, Some(Map::new())).await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_lockout_config(
+    state: State<'_, AppState>,
+    mount_path: String,
+) -> CmdResult<LockoutConfigDto> {
+    let path = format!("auth/{mount_path}config/lockout");
+    let resp = make_request(&state, Operation::Read, path, None).await?;
+    let data = resp.and_then(|r| r.data).map(Value::Object).unwrap_or(Value::Null);
+    Ok(serde_json::from_value(data)
+        .unwrap_or(LockoutConfigDto { enabled: true, max_failed_attempts: 5, lockout_duration_secs: 900 }))
+}
+
+#[tauri::command]
+pub async fn set_lockout_config(
+    state: State<'_, AppState>,
+    mount_path: String,
+    enabled: bool,
+    max_failed_attempts: u64,
+    lockout_duration_secs: u64,
+) -> CmdResult<()> {
+    let path = format!("auth/{mount_path}config/lockout");
+    let mut body = Map::new();
+    body.insert("enabled".to_string(), Value::Bool(enabled));
+    body.insert("max_failed_attempts".to_string(), Value::Number(max_failed_attempts.into()));
+    body.insert("lockout_duration_secs".to_string(), Value::Number(lockout_duration_secs.into()));
+    make_request(&state, Operation::Write, path, Some(body)).await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_mfa_config(
+    state: State<'_, AppState>,
+    mount_path: String,
+) -> CmdResult<MfaConfigDto> {
+    let path = format!("auth/{mount_path}config/mfa");
+    let resp = make_request(&state, Operation::Read, path, None).await?;
+    let data = resp.and_then(|r| r.data).map(Value::Object).unwrap_or(Value::Null);
+    Ok(serde_json::from_value(data)
+        .unwrap_or(MfaConfigDto { enabled: false, default_mount: "totp/".to_string() }))
+}
+
+#[tauri::command]
+pub async fn set_mfa_config(
+    state: State<'_, AppState>,
+    mount_path: String,
+    enabled: bool,
+    default_mount: String,
+) -> CmdResult<()> {
+    let path = format!("auth/{mount_path}config/mfa");
+    let mut body = Map::new();
+    body.insert("enabled".to_string(), Value::Bool(enabled));
+    if !default_mount.is_empty() {
+        body.insert("default_mount".to_string(), Value::String(default_mount));
+    }
     make_request(&state, Operation::Write, path, Some(body)).await?;
     Ok(())
 }

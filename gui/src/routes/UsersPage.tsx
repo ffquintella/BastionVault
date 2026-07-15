@@ -56,6 +56,22 @@ export function UsersPage() {
   // FIDO2 state for the edit modal
   const [editFido2Keys, setEditFido2Keys] = useState(0);
   const [editFido2Enabled, setEditFido2Enabled] = useState(false);
+
+  // Account-state + TOTP MFA state for the edit modal
+  const [editDisabled, setEditDisabled] = useState(false);
+  const [editLocked, setEditLocked] = useState(false);
+  const [editFailedCount, setEditFailedCount] = useState(0);
+  const [editTotpMfaEnabled, setEditTotpMfaEnabled] = useState(false);
+  const [editTotpMount, setEditTotpMount] = useState("");
+  const [editTotpKey, setEditTotpKey] = useState("");
+
+  // Mount-level account-security config (lockout + TOTP MFA).
+  const [lockoutEnabled, setLockoutEnabled] = useState(true);
+  const [lockoutMaxAttempts, setLockoutMaxAttempts] = useState(5);
+  const [lockoutDurationSecs, setLockoutDurationSecs] = useState(900);
+  const [mfaEnabled, setMfaEnabled] = useState(false);
+  const [mfaDefaultMount, setMfaDefaultMount] = useState("totp/");
+  const [savingSecurity, setSavingSecurity] = useState(false);
   const [registering, setRegistering] = useState(false);
   const [fido2Status, setFido2Status] = useState<string | null>(null);
   const [showDeleteKeys, setShowDeleteKeys] = useState(false);
@@ -68,6 +84,10 @@ export function UsersPage() {
 
   // Per-user FIDO2 key counts for the list display
   const [userFido2Info, setUserFido2Info] = useState<Record<string, number>>({});
+  // Per-user status flags for the list display (disabled / locked / MFA).
+  const [userFlags, setUserFlags] = useState<
+    Record<string, { disabled: boolean; locked: boolean; mfa: boolean }>
+  >({});
 
   // Minimum-password-composition policy.
   const passwordPolicy = usePasswordPolicyStore((s) => s.policy);
@@ -156,7 +176,54 @@ export function UsersPage() {
     } catch (e) {
       toast("error", `Could not list auth methods: ${extractError(e)}`);
     }
-    await Promise.all([loadUsers(), loadPolicies(), loadNamespaces()]);
+    await Promise.all([loadUsers(), loadPolicies(), loadNamespaces(), loadSecurityConfig()]);
+  }
+
+  async function loadSecurityConfig() {
+    try {
+      const [lockout, mfa] = await Promise.all([
+        api.getLockoutConfig(mountPath),
+        api.getMfaConfig(mountPath),
+      ]);
+      setLockoutEnabled(lockout.enabled);
+      setLockoutMaxAttempts(lockout.max_failed_attempts);
+      setLockoutDurationSecs(lockout.lockout_duration_secs);
+      setMfaEnabled(mfa.enabled);
+      setMfaDefaultMount(mfa.default_mount || "totp/");
+    } catch {
+      /* Non-admin tokens may lack read on config/*; leave defaults. */
+    }
+  }
+
+  async function handleSaveSecurity() {
+    setSavingSecurity(true);
+    try {
+      await api.setLockoutConfig(
+        mountPath,
+        lockoutEnabled,
+        lockoutMaxAttempts,
+        lockoutDurationSecs,
+      );
+      await api.setMfaConfig(mountPath, mfaEnabled, mfaDefaultMount);
+      toast("success", "Account security settings saved");
+    } catch (e) {
+      toast("error", extractError(e));
+    } finally {
+      setSavingSecurity(false);
+    }
+  }
+
+  async function handleUnlock() {
+    if (!editUser) return;
+    try {
+      await api.unlockUser(mountPath, editUser);
+      toast("success", `User ${editUser} unlocked`);
+      setEditLocked(false);
+      setEditFailedCount(0);
+      loadUsers();
+    } catch (e) {
+      toast("error", extractError(e));
+    }
   }
 
   async function loadUsers() {
@@ -164,17 +231,23 @@ export function UsersPage() {
     try {
       const result = await api.listUsers(mountPath);
       setUsers(result.users);
-      // Load FIDO2 info for each user
+      // Load FIDO2 info and status flags for each user.
       const info: Record<string, number> = {};
+      const flags: Record<string, { disabled: boolean; locked: boolean; mfa: boolean }> = {};
       await Promise.all(
         result.users.map(async (u) => {
           try {
             const cred = await api.fido2ListCredentials(u);
             if (cred) info[u] = cred.registered_keys;
           } catch { /* */ }
+          try {
+            const ui = await api.getUser(mountPath, u);
+            flags[u] = { disabled: ui.disabled, locked: ui.locked, mfa: ui.totp_mfa_enabled };
+          } catch { /* */ }
         }),
       );
       setUserFido2Info(info);
+      setUserFlags(flags);
     } catch {
       setUsers([]);
     } finally {
@@ -254,9 +327,20 @@ export function UsersPage() {
         return;
       }
     }
+    // A user with a TOTP second factor must have a key bound, or the backend
+    // rejects the write. Block client-side with a clear message.
+    if (editTotpMfaEnabled && !editTotpKey.trim()) {
+      toast("error", "Enter a TOTP key name to require MFA for this user.");
+      return;
+    }
     try {
       const policies = formSelectedPolicies.join(",");
-      await api.updateUser(mountPath, editUser, formPassword, policies);
+      await api.updateUser(mountPath, editUser, formPassword, policies, {
+        disabled: editDisabled,
+        totpMfaEnabled: editTotpMfaEnabled,
+        totpMount: editTotpMount,
+        totpKey: editTotpKey,
+      });
       // Persist the namespace login-restriction (empty ⇒ clears it).
       await api.setNsAssignment(mountPath, editUser, formSelectedNamespaces);
       // Persist the per-OS default resource accounts (all-empty ⇒ clears them).
@@ -326,6 +410,12 @@ export function UsersPage() {
       setFormDefaultAccountClearWinPw(false);
       setEditFido2Keys(fido2Info?.registered_keys ?? 0);
       setEditFido2Enabled(fido2Info?.fido2_enabled ?? false);
+      setEditDisabled(info.disabled);
+      setEditLocked(info.locked);
+      setEditFailedCount(info.failed_login_count);
+      setEditTotpMfaEnabled(info.totp_mfa_enabled);
+      setEditTotpMount(info.totp_mount);
+      setEditTotpKey(info.totp_key);
       await Promise.all([loadPolicies(), loadNamespaces()]);
     } catch (e: unknown) {
       toast("error", extractError(e));
@@ -351,6 +441,12 @@ export function UsersPage() {
     setFormDefaultAccountClearWinPw(false);
     setEditFido2Keys(0);
     setEditFido2Enabled(false);
+    setEditDisabled(false);
+    setEditLocked(false);
+    setEditFailedCount(0);
+    setEditTotpMfaEnabled(false);
+    setEditTotpMount("");
+    setEditTotpKey("");
   }
 
   async function handleRegisterKey() {
@@ -477,6 +573,9 @@ export function UsersPage() {
           {(userFido2Info[user] ?? 0) > 0 && (
             <Badge label={`${userFido2Info[user]} key${userFido2Info[user] > 1 ? "s" : ""}`} variant="info" />
           )}
+          {userFlags[user]?.disabled && <Badge label="Disabled" variant="error" />}
+          {userFlags[user]?.locked && <Badge label="Locked" variant="warning" />}
+          {userFlags[user]?.mfa && <Badge label="MFA" variant="success" />}
         </span>
       ),
     },
@@ -523,6 +622,72 @@ export function UsersPage() {
           ) : (
             <Table columns={columns} data={users} rowKey={(u) => u} />
           )}
+        </Card>
+
+        {/* Mount-level account-security policy (lockout + TOTP MFA). */}
+        <Card>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-lg font-semibold">Account Security</h2>
+            <Button size="sm" onClick={handleSaveSecurity} loading={savingSecurity}>
+              Save
+            </Button>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Lockout */}
+            <div className="space-y-3">
+              <label className="flex items-center gap-2 text-sm font-medium">
+                <input
+                  type="checkbox"
+                  checked={lockoutEnabled}
+                  onChange={(e) => setLockoutEnabled(e.target.checked)}
+                />
+                Temporary account lockout
+              </label>
+              <p className="text-xs text-[var(--color-text-muted)]">
+                Lock an account after too many consecutive failed password attempts.
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <Input
+                  label="Max failed attempts"
+                  type="number"
+                  min={0}
+                  value={String(lockoutMaxAttempts)}
+                  onChange={(e) => setLockoutMaxAttempts(Number(e.target.value) || 0)}
+                  disabled={!lockoutEnabled}
+                />
+                <Input
+                  label="Lockout duration (seconds)"
+                  type="number"
+                  min={0}
+                  value={String(lockoutDurationSecs)}
+                  onChange={(e) => setLockoutDurationSecs(Number(e.target.value) || 0)}
+                  disabled={!lockoutEnabled}
+                />
+              </div>
+            </div>
+            {/* TOTP MFA */}
+            <div className="space-y-3">
+              <label className="flex items-center gap-2 text-sm font-medium">
+                <input
+                  type="checkbox"
+                  checked={mfaEnabled}
+                  onChange={(e) => setMfaEnabled(e.target.checked)}
+                />
+                TOTP multi-factor authentication
+              </label>
+              <p className="text-xs text-[var(--color-text-muted)]">
+                Master switch. When on, users with MFA enabled must present a TOTP code
+                at login. When off, TOTP is not required for anyone.
+              </p>
+              <Input
+                label="Default TOTP engine mount"
+                value={mfaDefaultMount}
+                onChange={(e) => setMfaDefaultMount(e.target.value)}
+                placeholder="totp/"
+                disabled={!mfaEnabled}
+              />
+            </div>
+          </div>
         </Card>
 
         {/* Create user modal */}
@@ -606,6 +771,80 @@ export function UsersPage() {
             )}
             <PolicySelector />
             <NamespaceSelector />
+
+            {/* Account status: enable/disable + lockout. */}
+            <div className="pt-3 border-t border-[var(--color-border)]">
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-sm font-medium text-[var(--color-text)]">Account Status</label>
+                <div className="flex items-center gap-2">
+                  {editDisabled && <Badge label="Disabled" variant="error" />}
+                  {editLocked && <Badge label="Locked" variant="warning" />}
+                </div>
+              </div>
+              <label className="flex items-center gap-2 text-sm text-[var(--color-text)]">
+                <input
+                  type="checkbox"
+                  checked={editDisabled}
+                  onChange={(e) => setEditDisabled(e.target.checked)}
+                />
+                Disable this account (blocks all login, password and FIDO2)
+              </label>
+              <div className="mt-2 flex items-center gap-3">
+                <p className="text-xs text-[var(--color-text-muted)]">
+                  {editLocked
+                    ? "Account is temporarily locked after repeated failed password attempts."
+                    : `Failed attempts since last success: ${editFailedCount}.`}
+                </p>
+                {editLocked && (
+                  <Button size="sm" variant="ghost" onClick={handleUnlock}>
+                    Unlock now
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            {/* TOTP multi-factor authentication (per-user). */}
+            <div className="pt-3 border-t border-[var(--color-border)]">
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-sm font-medium text-[var(--color-text)]">
+                  TOTP Multi-Factor
+                </label>
+                {editTotpMfaEnabled && !mfaEnabled && (
+                  <Badge label="MFA off globally" variant="warning" />
+                )}
+              </div>
+              <label className="flex items-center gap-2 text-sm text-[var(--color-text)]">
+                <input
+                  type="checkbox"
+                  checked={editTotpMfaEnabled}
+                  onChange={(e) => setEditTotpMfaEnabled(e.target.checked)}
+                />
+                Require a TOTP code for this user
+              </label>
+              {editTotpMfaEnabled && (
+                <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <Input
+                    label="TOTP key name"
+                    value={editTotpKey}
+                    onChange={(e) => setEditTotpKey(e.target.value)}
+                    placeholder="e.g. alice-mfa"
+                  />
+                  <Input
+                    label={`TOTP engine mount (default ${mfaDefaultMount})`}
+                    value={editTotpMount}
+                    onChange={(e) => setEditTotpMount(e.target.value)}
+                    placeholder={mfaDefaultMount}
+                  />
+                </div>
+              )}
+              <p className="text-xs text-[var(--color-text-muted)] mt-1.5">
+                Create the key in the TOTP secret engine and enroll it in the user's
+                authenticator app.{" "}
+                {mfaEnabled
+                  ? "MFA is enabled globally, so this takes effect at next login."
+                  : "MFA is disabled globally — enable it under Account Security below for this to apply."}
+              </p>
+            </div>
 
             {/* Default Resource Account section (Resource Connect). */}
             <div className="pt-3 border-t border-[var(--color-border)]">

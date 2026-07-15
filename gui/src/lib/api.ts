@@ -13,6 +13,8 @@ import type {
   SecretListResult,
   UserListResult,
   UserInfo,
+  LockoutConfig,
+  MfaConfig,
   PolicyListResult,
   PolicyContent,
   PolicyHistoryResult,
@@ -445,10 +447,52 @@ export const getUser = (mountPath: string, username: string) =>
   invoke<UserInfo>("get_user", { mountPath, username });
 export const createUser = (mountPath: string, username: string, password: string, policies: string) =>
   invoke<void>("create_user", { mountPath, username, password, policies });
-export const updateUser = (mountPath: string, username: string, password: string, policies: string) =>
-  invoke<void>("update_user", { mountPath, username, password, policies });
+export const updateUser = (
+  mountPath: string,
+  username: string,
+  password: string,
+  policies: string,
+  opts?: {
+    disabled?: boolean;
+    totpMfaEnabled?: boolean;
+    totpMount?: string;
+    totpKey?: string;
+  },
+) =>
+  invoke<void>("update_user", {
+    mountPath,
+    username,
+    password,
+    policies,
+    disabled: opts?.disabled ?? null,
+    totpMfaEnabled: opts?.totpMfaEnabled ?? null,
+    totpMount: opts?.totpMount ?? null,
+    totpKey: opts?.totpKey ?? null,
+  });
 export const deleteUser = (mountPath: string, username: string) =>
   invoke<void>("delete_user", { mountPath, username });
+export const unlockUser = (mountPath: string, username: string) =>
+  invoke<void>("unlock_user", { mountPath, username });
+
+// Account-security config (userpass mount-level)
+export const getLockoutConfig = (mountPath: string) =>
+  invoke<LockoutConfig>("get_lockout_config", { mountPath });
+export const setLockoutConfig = (
+  mountPath: string,
+  enabled: boolean,
+  maxFailedAttempts: number,
+  lockoutDurationSecs: number,
+) =>
+  invoke<void>("set_lockout_config", {
+    mountPath,
+    enabled,
+    maxFailedAttempts,
+    lockoutDurationSecs,
+  });
+export const getMfaConfig = (mountPath: string) =>
+  invoke<MfaConfig>("get_mfa_config", { mountPath });
+export const setMfaConfig = (mountPath: string, enabled: boolean, defaultMount: string) =>
+  invoke<void>("set_mfa_config", { mountPath, enabled, defaultMount });
 
 // Policies
 export const listPolicies = () => invoke<PolicyListResult>("list_policies");

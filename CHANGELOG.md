@@ -45,6 +45,39 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-07-15
+
+### Added
+
+#### UserPass account security: lockout, enable/disable, TOTP MFA
+
+- Add temporary account lockout: after a configurable number of consecutive
+  failed password attempts a userpass account is locked for a configurable
+  duration. Configure via `auth/userpass/config/lockout`
+  (`enabled`, `max_failed_attempts`, `lockout_duration_secs`). Enabled by
+  default (5 attempts / 15-minute lock). (features/userpass-account-security.md)
+- Add an admin enable/disable switch per user (`disabled` field on
+  `auth/userpass/users/<name>`). A disabled account is refused all
+  authentication (password and FIDO2) regardless of valid credentials.
+- Add TOTP multi-factor authentication for userpass logins. A global master
+  switch (`auth/userpass/config/mfa`, default off) gates whether the per-user
+  `totp_mfa_enabled` flag is enforced; enrolled users must present a
+  `totp_code` at login, validated against a key in the TOTP secret engine
+  (`totp_mount` / `totp_key`, default mount `totp/`). Fails closed if the
+  bound engine or key cannot be resolved.
+- Add `POST auth/userpass/users/<name>/unlock` to clear a lockout and reset
+  the failed-attempt counter.
+- GUI: Users page gains an Account Security panel (lockout + MFA policy),
+  per-user Disable / TOTP-MFA controls, an Unlock action, and status badges
+  (Disabled / Locked / MFA) in the user list.
+- CLI: `bvault login -method=userpass` accepts `totp_code=<code>`.
+
+### Security
+
+- UserPass logins now resist password brute-forcing out of the box via
+  temporary lockout, and support a TOTP second factor. A failed TOTP code
+  feeds the same lockout counter as a bad password.
+
 ## [0.29.0] - 2026-07-15
 
 ### Added

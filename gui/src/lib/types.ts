@@ -241,6 +241,23 @@ export interface UserListResult {
 export interface UserInfo {
   username: string;
   policies: string[];
+  disabled: boolean;
+  locked: boolean;
+  failed_login_count: number;
+  totp_mfa_enabled: boolean;
+  totp_mount: string;
+  totp_key: string;
+}
+
+export interface LockoutConfig {
+  enabled: boolean;
+  max_failed_attempts: number;
+  lockout_duration_secs: number;
+}
+
+export interface MfaConfig {
+  enabled: boolean;
+  default_mount: string;
 }
 
 // Namespaces (multi-tenancy)

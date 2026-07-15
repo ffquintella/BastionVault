@@ -11,6 +11,7 @@ use crate::{
 };
 
 pub mod cli;
+pub mod path_config;
 pub mod path_fido2_config;
 pub mod path_fido2_credentials;
 pub mod path_fido2_login;
@@ -20,11 +21,15 @@ pub mod path_users;
 
 static USERPASS_BACKEND_HELP: &str = r#"
 The "userpass" credential provider allows authentication using a combination of
-a username and password. No additional factors are supported.
+a username and password, optionally reinforced with a TOTP second factor.
 
 The username/password combination is configured using the "users/" endpoints by
-a user with root access. Authentication is then done by supplying the two fields
-for "login".
+a user with root access. Authentication is then done by supplying the username
+and password (plus a "totp_code" when MFA is enabled) for "login".
+
+Accounts can be enabled/disabled by an admin, temporarily locked out after
+repeated failed password attempts (see "config/lockout"), and required to
+present a TOTP code (see "config/mfa" and the per-user "totp_mfa_enabled" flag).
 "#;
 
 pub struct UserPassModule {
@@ -59,6 +64,9 @@ impl UserPassBackend {
         backend.paths.push(Arc::new(self.users_path()));
         backend.paths.push(Arc::new(self.user_list_path()));
         backend.paths.push(Arc::new(self.user_password_path()));
+        backend.paths.push(Arc::new(self.user_unlock_path()));
+        backend.paths.push(Arc::new(self.lockout_config_path()));
+        backend.paths.push(Arc::new(self.mfa_config_path()));
         backend.paths.push(Arc::new(self.login_path()));
         // FIDO2 paths
         backend.paths.push(Arc::new(self.fido2_config_path()));
@@ -126,7 +134,8 @@ mod test {
         core::Core,
         logical::{Operation, Request, Response},
         test_utils::{
-            new_unseal_test_bastion_vault, test_delete_api, test_mount_auth_api, test_read_api, test_write_api,
+            new_unseal_test_bastion_vault, test_delete_api, test_mount_api, test_mount_auth_api, test_read_api,
+            test_write_api,
         },
     };
 
@@ -240,5 +249,112 @@ mod test {
         let resp = test_read_api(&core, &test_client_token, "auth/token/lookup-self", true).await;
         println!("read auth/token/lookup-self resp: {:?}", resp);
         assert!(resp.unwrap().is_some());
+    }
+
+    #[maybe_async::maybe_async]
+    async fn login_error(core: &Core, path: &str, username: &str, password: &str) -> Option<String> {
+        let mut req = Request::new(format!("auth/{path}/login/{username}").as_str());
+        req.operation = Operation::Write;
+        req.body = json!({ "password": password }).as_object().cloned();
+        let resp = core.handle_request(&mut req).await.unwrap().unwrap();
+        // A rejected login carries no auth block and surfaces the reason in data.error.
+        assert!(resp.auth.is_none(), "expected rejection, got a token");
+        resp.data.as_ref().and_then(|d| d.get("error")).and_then(|v| v.as_str()).map(String::from)
+    }
+
+    /// Feature: admin enable/disable switch and temporary account lockout.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_disable_and_lockout() {
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_disable_and_lockout").await;
+        test_mount_auth_api(&core, &root_token, "userpass", "pass").await;
+        test_write_user(&core, &root_token, "pass", "alice", "correct-horse", 0).await;
+
+        // Tighten the lockout policy: lock after 3 failures.
+        let cfg = json!({ "enabled": true, "max_failed_attempts": 3, "lockout_duration_secs": 600 })
+            .as_object()
+            .cloned();
+        assert!(test_write_api(&core, &root_token, "auth/pass/config/lockout", true, cfg).await.is_ok());
+
+        // Disabled account refuses even the correct password.
+        let disable = json!({ "disabled": true }).as_object().cloned();
+        assert!(test_write_api(&core, &root_token, "auth/pass/users/alice", true, disable).await.is_ok());
+        assert_eq!(login_error(&core, "pass", "alice", "correct-horse").await.as_deref(), Some("account is disabled"));
+
+        // Re-enable and confirm the correct password works again.
+        let enable = json!({ "disabled": false }).as_object().cloned();
+        assert!(test_write_api(&core, &root_token, "auth/pass/users/alice", true, enable).await.is_ok());
+        let _ = test_login(&core, "pass", "alice", "correct-horse", true).await;
+
+        // Three bad passwords trip the lock; the correct password is then
+        // refused with the lockout message (proving lock precedes password check).
+        for _ in 0..3 {
+            assert_eq!(login_error(&core, "pass", "alice", "wrong").await.as_deref(), Some("invalid username or password"));
+        }
+        let locked = login_error(&core, "pass", "alice", "correct-horse").await.unwrap();
+        assert!(locked.contains("temporarily locked"), "expected lockout message, got: {locked}");
+
+        // Admin unlock clears it; the correct password works immediately.
+        assert!(test_write_api(&core, &root_token, "auth/pass/users/alice/unlock", true, None).await.is_ok());
+        let _ = test_login(&core, "pass", "alice", "correct-horse", true).await;
+
+        // read_user exposes the computed `locked` flag as false post-unlock.
+        let info = test_read_api(&core, &root_token, "auth/pass/users/alice", true).await.unwrap().unwrap();
+        assert_eq!(info.data.unwrap().get("locked").and_then(|v| v.as_bool()), Some(false));
+    }
+
+    /// Feature: TOTP as a second factor, gated by the global MFA switch.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_totp_mfa_login() {
+        use crate::modules::totp::{crypto, policy::Algorithm};
+
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_totp_mfa_login").await;
+        test_mount_auth_api(&core, &root_token, "userpass", "pass").await;
+        test_mount_api(&core, &root_token, "totp", "totp").await;
+        test_write_user(&core, &root_token, "pass", "bob", "pw-bob-123", 0).await;
+
+        // Import a provider-mode TOTP key with a known seed so the test can
+        // compute a valid code with the same primitives the login path uses.
+        let seed: Vec<u8> = (0u8..20).collect();
+        let b32 = crypto::otpauth::encode_secret(&seed);
+        let key_body = json!({
+            "generate": false, "key": b32, "digits": 6, "period": 30, "algorithm": "SHA1",
+            "issuer": "BastionVault", "account_name": "bob"
+        })
+        .as_object()
+        .cloned();
+        assert!(test_write_api(&core, &root_token, "totp/keys/bobkey", true, key_body).await.is_ok());
+
+        // Bind MFA to the user.
+        let mfa_user = json!({ "totp_mfa_enabled": true, "totp_key": "bobkey" }).as_object().cloned();
+        assert!(test_write_api(&core, &root_token, "auth/pass/users/bob", true, mfa_user).await.is_ok());
+
+        // MFA is still globally OFF: password-only login must succeed.
+        let _ = test_login(&core, "pass", "bob", "pw-bob-123", true).await;
+
+        // Turn MFA on globally.
+        let mfa_cfg = json!({ "enabled": true }).as_object().cloned();
+        assert!(test_write_api(&core, &root_token, "auth/pass/config/mfa", true, mfa_cfg).await.is_ok());
+
+        // Password-only now fails (code required).
+        let need = login_error(&core, "pass", "bob", "pw-bob-123").await.unwrap();
+        assert!(need.contains("TOTP code is required"), "got: {need}");
+
+        // Wrong code fails.
+        {
+            let mut req = Request::new("auth/pass/login/bob");
+            req.operation = Operation::Write;
+            req.body = json!({ "password": "pw-bob-123", "totp_code": "000000" }).as_object().cloned();
+            let resp = core.handle_request(&mut req).await.unwrap().unwrap();
+            assert!(resp.auth.is_none());
+        }
+
+        // Correct current code succeeds.
+        let now = super::path_users::now_secs() as u64;
+        let code = crypto::totp(&seed, now, Algorithm::Sha1, 6, 30);
+        let mut req = Request::new("auth/pass/login/bob");
+        req.operation = Operation::Write;
+        req.body = json!({ "password": "pw-bob-123", "totp_code": code }).as_object().cloned();
+        let resp = core.handle_request(&mut req).await.unwrap().unwrap();
+        assert!(resp.auth.is_some(), "valid TOTP code should mint a token");
     }
 }

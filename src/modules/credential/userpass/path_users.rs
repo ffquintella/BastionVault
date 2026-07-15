@@ -40,6 +40,35 @@ pub struct UserEntry {
     /// Serialized FIDO2 passkey credentials (JSON-encoded Vec<Passkey>).
     #[serde(default)]
     pub credentials_json: String,
+
+    /// Admin enable/disable switch. When true, every authentication for
+    /// this principal (password and FIDO2) is refused regardless of
+    /// otherwise-valid credentials. Set by an operator via `write_user`.
+    #[serde(default)]
+    pub disabled: bool,
+    /// Consecutive failed password attempts since the last success or the
+    /// last admin unlock. Only tracked while lockout is enabled (see
+    /// [`super::path_config::LockoutConfig`]).
+    #[serde(default)]
+    pub failed_login_count: u32,
+    /// Unix-epoch seconds until which password login is refused due to too
+    /// many failures. `0` means not locked. Cleared automatically on the
+    /// first attempt after it elapses, or by an admin unlock.
+    #[serde(default)]
+    pub locked_until: i64,
+    /// When true, a valid TOTP code is required as a second factor after
+    /// the password check — but only while TOTP MFA is enabled globally
+    /// (see [`super::path_config::TotpMfaConfig`]). Validated against
+    /// `totp_mount`/`totp_key`.
+    #[serde(default)]
+    pub totp_mfa_enabled: bool,
+    /// TOTP secret-engine mount this user's MFA validates against. Empty
+    /// falls back to the global default mount (`totp/`).
+    #[serde(default)]
+    pub totp_mount: String,
+    /// TOTP key name within `totp_mount` bound to this user for MFA.
+    #[serde(default)]
+    pub totp_key: String,
 }
 
 impl UserEntry {
@@ -92,6 +121,26 @@ impl UserPassBackend {
                     field_type: FieldType::Int,
                     default: 0,
                     description: "TTL for this user."
+                },
+                "disabled": {
+                    field_type: FieldType::Bool,
+                    required: false,
+                    description: "When true, all authentication for this user is refused."
+                },
+                "totp_mfa_enabled": {
+                    field_type: FieldType::Bool,
+                    required: false,
+                    description: "Require a TOTP second factor for this user (enforced only while TOTP MFA is enabled globally)."
+                },
+                "totp_mount": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "TOTP secret-engine mount to validate this user's MFA against. Empty uses the global default."
+                },
+                "totp_key": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "TOTP key name (within totp_mount) bound to this user for MFA."
                 }
             },
             operations: [
@@ -123,6 +172,27 @@ then the next renew will cause the lease to expire.
                 {op: Operation::List, handler: userpass_backend_ref.list_user}
             ],
             help: r#"This endpoint allows you to list users"#
+        });
+
+        path
+    }
+
+    pub fn user_unlock_path(&self) -> Path {
+        let userpass_backend_ref = self.inner.clone();
+
+        let path = new_path!({
+            pattern: r"users/(?P<username>\w[\w-]+\w)/unlock$",
+            fields: {
+                "username": {
+                    field_type: FieldType::Str,
+                    required: true,
+                    description: "Username of the user to unlock."
+                }
+            },
+            operations: [
+                {op: Operation::Write, handler: userpass_backend_ref.unlock_user}
+            ],
+            help: r#"This endpoint clears a temporary lockout and resets the failed-attempt counter for a user."#
         });
 
         path
@@ -207,6 +277,12 @@ impl UserPassBackendInner {
         // Add computed field: number of registered FIDO2 keys
         let registered_keys = user_entry.get_passkeys().map(|v| v.len()).unwrap_or(0);
         data.insert("registered_keys".to_string(), serde_json::Value::Number(registered_keys.into()));
+        // Add computed field: whether the account is *currently* locked out
+        // (as opposed to `locked_until`, which is a raw timestamp). Lets the
+        // admin GUI show a lock badge and an Unlock action without doing the
+        // clock comparison itself.
+        let locked = user_entry.locked_until > now_secs();
+        data.insert("locked".to_string(), serde_json::Value::Bool(locked));
 
         user_entry.populate_token_data(data);
 
@@ -256,6 +332,30 @@ impl UserPassBackendInner {
         let max_ttl = max_ttl_value.as_u64().ok_or(RvError::ErrRequestFieldInvalid)?;
         if max_ttl > 0 {
             user_entry.max_ttl = Duration::from_secs(max_ttl);
+        }
+
+        // Account-state and MFA fields. Each is only touched when present in
+        // the request so a partial update (e.g. a policy change) does not
+        // silently reset an unrelated flag.
+        if let Ok(v) = req.get_data("disabled") {
+            user_entry.disabled = v.as_bool_ex().ok_or(RvError::ErrRequestFieldInvalid)?;
+        }
+        if let Ok(v) = req.get_data("totp_mfa_enabled") {
+            user_entry.totp_mfa_enabled = v.as_bool_ex().ok_or(RvError::ErrRequestFieldInvalid)?;
+        }
+        if let Ok(v) = req.get_data("totp_mount") {
+            user_entry.totp_mount = v.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        }
+        if let Ok(v) = req.get_data("totp_key") {
+            user_entry.totp_key = v.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        }
+        // Refuse an incoherent MFA configuration up front rather than
+        // failing closed at every login: if MFA is on for this user, a key
+        // name must be bound.
+        if user_entry.totp_mfa_enabled && user_entry.totp_key.trim().is_empty() {
+            return Err(RvError::ErrResponse(
+                "totp_key is required when totp_mfa_enabled is true".to_string(),
+            ));
         }
 
         let old_token_policies = user_entry.token_policies.clone();
@@ -402,6 +502,30 @@ impl UserPassBackendInner {
         Ok(None)
     }
 
+    /// Clear a temporary lockout for a user and reset the failed-attempt
+    /// counter. Idempotent: unlocking a not-locked user is a no-op success.
+    pub async fn unlock_user(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let username_value = req.get_data("username")?;
+        let username = username_value.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_lowercase();
+
+        let entry = self.get_user(req, &username).await?;
+        let Some(mut user_entry) = entry else {
+            return Err(RvError::ErrResponse(format!("user {username} does not exist")));
+        };
+
+        user_entry.locked_until = 0;
+        user_entry.failed_login_count = 0;
+        self.set_user(req, &username, &user_entry).await?;
+
+        record_user_audit(&self.core, req, "unlock", &username, "").await;
+
+        Ok(None)
+    }
+
     pub fn gen_password_hash(&self, password: &str) -> Result<String, RvError> {
         let pwd_hash = bcrypt::hash(password, bcrypt::DEFAULT_COST)?;
         Ok(pwd_hash)
@@ -411,6 +535,16 @@ impl UserPassBackendInner {
         let result = bcrypt::verify(password, password_hash)?;
         Ok(result)
     }
+}
+
+/// Current Unix-epoch seconds. Lockout timestamps are coarse (minutes),
+/// so a monotonic clock is unnecessary; a pre-epoch clock (impossible in
+/// practice) degrades to `0`, which reads as "not locked" — fail-open on
+/// the *display* side only, never on enforcement (enforcement compares
+/// against the same clock).
+pub(crate) fn now_secs() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 /// Best-effort append to the UserAuditStore. Reuses the helper
