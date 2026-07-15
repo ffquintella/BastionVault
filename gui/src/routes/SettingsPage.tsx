@@ -23,6 +23,7 @@ import { CloudStorageCard } from "../components/CloudStorageCard";
 import { UnsealModal } from "../components/UnsealModal";
 import { RustionBastionsTab } from "../components/RustionBastionsTab";
 import { RustionPolicyPanel } from "../components/RustionPolicyPanel";
+import { DosProtectionPanel } from "../components/DosProtectionPanel";
 import * as api from "../lib/api";
 import { extractError } from "../lib/error";
 
@@ -58,6 +59,7 @@ export function SettingsPage() {
   const SETTINGS_TABS = [
     { id: "general",  label: "General" },
     { id: "security", label: "Security" },
+    { id: "abuse", label: "Abuse Protection" },
     { id: "identity", label: "Identity" },
     { id: "resources", label: "Resources" },
     { id: "rustion", label: "Rustion" },
@@ -1031,6 +1033,12 @@ export function SettingsPage() {
         {/* Cloud Storage Targets — OAuth connect flow. Phase 7 of
             features/cloud-storage-backend.md. */}
         <CloudStorageCard />
+        </>)}
+
+        {activeTab === "abuse" && (<>
+        {/* IP-based DoS / request-abuse protection. See
+            features/dos-abuse-protection.md. */}
+        <DosProtectionPanel />
         </>)}
 
         {activeTab === "rustion" && (<>

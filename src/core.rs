@@ -148,6 +148,13 @@ pub struct Core {
     /// `hsm "..."` config block at server startup), `init` wraps the KEK under
     /// the HSM and [`Core::auto_unseal`] recovers it without operator shares.
     pub seal_provider_swap: std::sync::RwLock<Option<Arc<dyn SealProvider>>>,
+    /// Process-local IP-based DoS / request-abuse guard. Consulted by the HTTP
+    /// middleware on every request (see [`crate::dos::middleware`]). Its
+    /// thresholds and manual bans are loaded from the system view at
+    /// `post_unseal` ([`Core::load_dos_state`]); live counters and auto-bans
+    /// are ephemeral per node. Always present; enforcement is a no-op until
+    /// configured/enabled.
+    pub dos_guard: Arc<crate::dos::DosGuard>,
 }
 
 impl Default for CoreState {
@@ -189,6 +196,7 @@ impl Default for Core {
             approle_require_machine: Arc::new(AtomicBool::new(true)),
             stats: Arc::new(crate::stats::DashboardStats::default()),
             seal_provider_swap: std::sync::RwLock::new(None),
+            dos_guard: Arc::new(crate::dos::DosGuard::new(crate::dos::DosConfig::default())),
         }
     }
 }
@@ -439,6 +447,72 @@ impl Core {
         };
         self.approle_require_machine.store(required, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Load persisted DoS-protection state (thresholds + manual bans) from the
+    /// system view into the in-memory guard. Called once at `post_unseal` and
+    /// again on each periodic refresh (see the server's sweep task) so a manual
+    /// ban applied on one HA node converges on the others. Best-effort: a read
+    /// or decode failure leaves the guard on its current (seeded) config rather
+    /// than blocking unseal.
+    pub async fn load_dos_state(&self) -> Result<(), RvError> {
+        let store = crate::dos::DosStore::new(self)?;
+        match store.get_stored().await? {
+            // A persisted value wins over the startup `[dos]` seed.
+            Some(state) => {
+                self.dos_guard.set_config(state.config);
+                self.dos_guard.load_manual_bans(&state.manual_bans);
+            }
+            // Fresh install: keep the guard's seeded (or default) config and
+            // persist it once, so the stored value is stable from here on.
+            None => {
+                store.put_config(&self.dos_guard.config()).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reload only the manual-ban set and sweep expired in-memory state. Called
+    /// on the periodic refresh timer; cheaper than a full `load_dos_state` and
+    /// never touches the live thresholds an operator may have just changed.
+    pub async fn refresh_dos_bans(&self) -> Result<(), RvError> {
+        let store = crate::dos::DosStore::new(self)?;
+        let state = store.get().await?;
+        self.dos_guard.load_manual_bans(&state.manual_bans);
+        self.dos_guard.sweep();
+        Ok(())
+    }
+
+    /// Persist new DoS thresholds and update the in-memory guard atomically
+    /// from the operator's point of view (storage first, then memory).
+    pub async fn set_dos_config(&self, config: crate::dos::DosConfig) -> Result<(), RvError> {
+        let store = crate::dos::DosStore::new(self)?;
+        store.put_config(&config).await?;
+        self.dos_guard.set_config(config);
+        Ok(())
+    }
+
+    /// Apply a manual ban: persist it, then enforce it in the local guard.
+    pub async fn dos_manual_ban(
+        &self,
+        ip: std::net::IpAddr,
+        ttl_secs: u64,
+        reason: &str,
+    ) -> Result<(), RvError> {
+        let until_unix = self.dos_guard.manual_ban(ip, ttl_secs, reason);
+        let store = crate::dos::DosStore::new(self)?;
+        store
+            .add_manual_ban(crate::dos::ManualBan { ip, until_unix, reason: reason.to_string() })
+            .await
+    }
+
+    /// Lift any ban on `ip`: remove it from the local guard and drop any
+    /// persisted manual record. Returns whether an in-memory ban existed.
+    pub async fn dos_unban(&self, ip: std::net::IpAddr) -> Result<bool, RvError> {
+        let existed = self.dos_guard.unban(ip);
+        let store = crate::dos::DosStore::new(self)?;
+        store.remove_manual_ban(ip).await?;
+        Ok(existed)
     }
 
     pub fn get_logical_backend(&self, logical_type: &str) -> Result<Arc<LogicalBackendNewFunc>, RvError> {
@@ -829,6 +903,13 @@ impl Core {
         // Load the AppRole mandatory-machine gate (defaults to true/mandatory).
         if let Err(e) = self.load_approle_require_machine().await {
             log::warn!("failed to load approle require_machine flag: {e}");
+        }
+
+        // Load persisted DoS-protection thresholds + manual bans into the
+        // in-memory guard. Best-effort: a failure leaves the guard on its
+        // seeded config rather than blocking unseal.
+        if let Err(e) = self.load_dos_state().await {
+            log::warn!("failed to load DoS-protection state: {e}");
         }
 
         if let Some(mounts_monitor) = self.mounts_monitor.load().as_ref() {

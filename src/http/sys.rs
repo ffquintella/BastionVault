@@ -477,6 +477,67 @@ async fn sys_ns_assignment_path_request_handler(
     handle_request(core, &mut r).await
 }
 
+/// GET / POST|PUT `/sys/dos/config` — read or update the IP-based
+/// DoS-protection thresholds. HTTP shim over the sys-backend logical route
+/// `dos/config`.
+async fn sys_dos_config_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/dos/config".to_string();
+    copy_namespace_header(&req, &mut r);
+    match *req.method() {
+        actix_web::http::Method::POST | actix_web::http::Method::PUT => {
+            r.operation = Operation::Write;
+            if !body.is_empty() {
+                r.body = Some(serde_json::from_slice(&body)?);
+                body.clear();
+            }
+        }
+        _ => r.operation = Operation::Read,
+    }
+    handle_request(core, &mut r).await
+}
+
+/// GET `/sys/dos/stats` — live per-IP request statistics and active bans. HTTP
+/// shim over the sys-backend logical route `dos/stats`.
+async fn sys_dos_stats_request_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = "sys/dos/stats".to_string();
+    r.operation = Operation::Read;
+    copy_namespace_header(&req, &mut r);
+    handle_request(core, &mut r).await
+}
+
+/// POST|PUT / DELETE `/sys/dos/bans/{ip}` — manually ban or unban a client IP.
+/// HTTP shim over the sys-backend logical route `dos/bans/{ip}`.
+async fn sys_dos_ban_request_handler(
+    req: HttpRequest,
+    mut body: web::Bytes,
+    path: web::Path<String>,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let mut r = request_auth(&req);
+    r.path = format!("sys/dos/bans/{}", path.into_inner());
+    copy_namespace_header(&req, &mut r);
+    match *req.method() {
+        actix_web::http::Method::DELETE => r.operation = Operation::Delete,
+        _ => {
+            r.operation = Operation::Write;
+            if !body.is_empty() {
+                r.body = Some(serde_json::from_slice(&body)?);
+                body.clear();
+            }
+        }
+    }
+    handle_request(core, &mut r).await
+}
+
 /// LIST `/v2/sys/identity/default-account` — list principals that have default
 /// resource accounts. HTTP shim over the sys-backend logical route
 /// `identity/default-account`. v2-only (new forward-going route).
@@ -3424,6 +3485,23 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
                 .route(web::post().to(sys_ns_assignment_path_request_handler))
                 .route(web::put().to(sys_ns_assignment_path_request_handler))
                 .route(web::delete().to(sys_ns_assignment_path_request_handler)),
+        )
+        // IP-based DoS / request-abuse protection. Same embedded-vs-HTTP
+        // shimming rationale as the routes above: without an explicit shim the
+        // sys scope 404s before the logical catch-all. Canonical form is
+        // `v2/sys/dos/*`; the v1 mirror is incidental (shared builder).
+        .service(
+            web::resource("/dos/config")
+                .route(web::get().to(sys_dos_config_request_handler))
+                .route(web::post().to(sys_dos_config_request_handler))
+                .route(web::put().to(sys_dos_config_request_handler)),
+        )
+        .service(web::resource("/dos/stats").route(web::get().to(sys_dos_stats_request_handler)))
+        .service(
+            web::resource("/dos/bans/{ip:.*}")
+                .route(web::post().to(sys_dos_ban_request_handler))
+                .route(web::put().to(sys_dos_ban_request_handler))
+                .route(web::delete().to(sys_dos_ban_request_handler)),
         )
         // Owner self-claim and admin transfer routes. These have always
         // been registered on the sys backend's logical route table, but

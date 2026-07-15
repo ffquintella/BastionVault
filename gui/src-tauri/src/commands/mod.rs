@@ -104,6 +104,7 @@ pub mod plugin_surface;
 pub mod scheduled_exports;
 pub mod policies;
 pub mod namespaces;
+pub mod dos;
 pub mod resources;
 pub mod rustion;
 pub mod secrets;

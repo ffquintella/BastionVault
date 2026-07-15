@@ -340,6 +340,11 @@ pub fn run() {
             commands::namespaces::get_ns_assignment,
             commands::namespaces::set_ns_assignment,
             commands::namespaces::delete_ns_assignment,
+            commands::dos::get_dos_config,
+            commands::dos::set_dos_config,
+            commands::dos::get_dos_stats,
+            commands::dos::ban_ip,
+            commands::dos::unban_ip,
             // Resources
             commands::resources::resource_types_read,
             commands::resources::resource_types_write,

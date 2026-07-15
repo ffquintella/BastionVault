@@ -60,6 +60,7 @@ pub mod cache;
 pub mod cli;
 pub mod context;
 pub mod core;
+pub mod dos;
 pub mod errors;
 pub mod handler;
 pub mod hsm;
@@ -143,6 +144,11 @@ impl BastionVault {
             core.mount_entry_hmac_level = conf.mount_entry_hmac_level;
             core.mounts_monitor_interval = conf.mounts_monitor_interval;
             core.cache_config = conf.cache.clone();
+            // Seed the DoS guard from the optional `dos { ... }` config block.
+            // The barrier-persisted value (if any) overrides this at unseal.
+            if let Some(dos) = conf.dos.clone() {
+                core.dos_guard.set_config(dos);
+            }
         }
 
         let core = core.wrap();

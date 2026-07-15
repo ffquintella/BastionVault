@@ -45,6 +45,20 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-07-15
+
+### Added
+
+#### IP-based DoS / request-abuse protection
+
+- **Protect the HTTP server against request-flooding from a single IP** (`src/dos/`, GUI: Settings → **Abuse Protection**). A configurable per-client-IP guard counts requests over a sliding window and temporarily bans any IP that exceeds the ceiling, with a **stricter sub-limit for authentication/login paths** (brute-force defense). Bans return `429 Too Many Requests` with a `Retry-After` header. Health, seal-status, and metrics endpoints are always exempt so monitoring and load balancers are never banned. The client IP is resolved through the existing trusted-proxy chain (`BASTIONVAULT_TRUSTED_PROXIES`), so deployments behind a reverse proxy key on the real client, not the proxy. Enforcement is in-memory per node; thresholds and **manual** bans persist to the encrypted barrier (survive restart, replicate across HA) and converge across nodes on a periodic refresh. Every limit uses `0` to disable that rule. (`features/dos-abuse-protection.md`)
+- **New GUI "Abuse Protection" panel** (`gui/src/components/DosProtectionPanel.tsx`) — edit the thresholds, watch live per-IP request statistics and active bans (5s poll), and manually ban or unban a client IP. New Tauri commands `get_dos_config` / `set_dos_config` / `get_dos_stats` / `ban_ip` / `unban_ip`.
+- **New routes** `v2/sys/dos/config` (Read/Write), `v2/sys/dos/stats` (Read), and `v2/sys/dos/bans/{ip}` (Write = ban, Delete = unban), all root-scoped. Optional startup `dos { ... }` config block seeds the initial thresholds. (`src/modules/system/mod.rs`, `src/http/sys.rs`, `docs/docs/api.md`)
+
+### Security
+
+- **Add a first line of defense against volumetric request abuse and login brute-forcing.** The DoS guard fails open on internal errors (a broken guard never locks out all traffic) but fails closed on an active ban, audits the transition into an automatic ban (once per ban, not per blocked request), and never logs request bodies or tokens.
+
 ## [0.28.15] - 2026-07-15
 
 ### Added

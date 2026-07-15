@@ -523,6 +523,30 @@ Attaching a static SSH credential (`private_key` / `password`) to a
 brokered resource returns `409 brokered_resource_no_static_credential`.
 CLI: `bvault ssh-broker policy {get,set}`.
 
+### DoS / Abuse Protection
+
+IP-based request-abuse guard. Requests are counted per client IP over a sliding
+window; an IP that exceeds `max_requests` (or the stricter `auth_max_requests`
+on login paths) is temporarily banned for `ban_secs` and receives
+`429 Too Many Requests` with a `Retry-After` header. Health, seal-status, and
+metrics endpoints are exempt. The client IP honors `BASTIONVAULT_TRUSTED_PROXIES`
+/ `X-Forwarded-For`. Thresholds and manual bans persist (HA-replicated);
+enforcement is in-memory per node. All routes are root-gated. Any threshold set
+to `0` disables that rule. See
+[`features/dos-abuse-protection.md`](../features/dos-abuse-protection.md).
+
+~~~
+GET       /v2/sys/dos/config          # read thresholds
+POST|PUT  /v2/sys/dos/config          # update thresholds (partial; only supplied keys change)
+GET       /v2/sys/dos/stats           # live per-IP stats + active bans (this node)
+POST|PUT  /v2/sys/dos/bans/{ip}       # manually ban an IP  { "ttl_secs": 3600, "reason": "..." }
+DELETE    /v2/sys/dos/bans/{ip}       # unban an IP
+~~~
+
+Config fields: `enabled` (bool), `window_secs`, `max_requests`,
+`auth_max_requests`, `ban_secs`, `refresh_secs`. An optional startup
+`dos { ... }` config block seeds the initial values.
+
 ## Secret Operations
 
 All secret operations go through logical paths mounted by secrets engines.

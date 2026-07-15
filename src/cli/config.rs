@@ -113,6 +113,13 @@ pub struct Config {
     /// classic operator-driven Shamir unseal. See `features/hsm-support.md`.
     #[serde(default)]
     pub hsm: HashMap<String, crate::hsm::HsmConfigBlock>,
+    /// Optional `dos { ... }` block seeding the IP-based DoS-protection
+    /// thresholds on first unseal. Once an operator edits the thresholds
+    /// through `v2/sys/dos/config`, the barrier-persisted value takes
+    /// precedence on every subsequent unseal. Absent ⇒ built-in secure
+    /// defaults ([`crate::dos::DosConfig::default`]).
+    #[serde(default)]
+    pub dos: Option<crate::dos::DosConfig>,
 }
 
 #[derive(Debug, Copy, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -353,6 +360,10 @@ impl Config {
 
         if !other.plugin_runtime_dir.is_empty() {
             self.plugin_runtime_dir = other.plugin_runtime_dir;
+        }
+
+        if other.dos.is_some() {
+            self.dos = other.dos;
         }
 
         self.cache.merge(other.cache);

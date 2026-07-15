@@ -173,6 +173,11 @@ impl SystemBackend {
         let sys_backend_defacct_read = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_defacct_write = self.self_ptr.upgrade().unwrap().clone();
         let sys_backend_defacct_delete = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_dos_config_read = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_dos_config_write = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_dos_stats = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_dos_ban = self.self_ptr.upgrade().unwrap().clone();
+        let sys_backend_dos_unban = self.self_ptr.upgrade().unwrap().clone();
 
         let backend = new_logical_backend!({
             paths: [
@@ -906,6 +911,82 @@ impl SystemBackend {
                     help: "Read, set, or clear a principal's allowed namespaces."
                 },
                 {
+                    // IP-based DoS / request-abuse protection thresholds.
+                    // Root-scoped: a single process-wide configuration.
+                    pattern: "dos/config$",
+                    fields: {
+                        "enabled": {
+                            field_type: FieldType::Bool,
+                            required: false,
+                            description: "Master switch for the DoS guard."
+                        },
+                        "window_secs": {
+                            field_type: FieldType::Int,
+                            required: false,
+                            description: "Length of the per-IP counting window in seconds."
+                        },
+                        "max_requests": {
+                            field_type: FieldType::Int,
+                            required: false,
+                            description: "Max requests per IP per window before a ban (0 disables)."
+                        },
+                        "auth_max_requests": {
+                            field_type: FieldType::Int,
+                            required: false,
+                            description: "Stricter per-window ceiling for auth/login paths (0 disables)."
+                        },
+                        "ban_secs": {
+                            field_type: FieldType::Int,
+                            required: false,
+                            description: "Automatic ban duration in seconds (0 = never auto-ban)."
+                        },
+                        "refresh_secs": {
+                            field_type: FieldType::Int,
+                            required: false,
+                            description: "How often each node reloads manual bans and sweeps expired state."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Read,  handler: sys_backend_dos_config_read.handle_dos_config_read},
+                        {op: Operation::Write, handler: sys_backend_dos_config_write.handle_dos_config_write}
+                    ],
+                    help: "Read or update the IP-based DoS-protection thresholds."
+                },
+                {
+                    // Live per-IP usage statistics and active bans (per node).
+                    pattern: "dos/stats$",
+                    operations: [
+                        {op: Operation::Read, handler: sys_backend_dos_stats.handle_dos_stats_read}
+                    ],
+                    help: "Read live per-IP request statistics and active bans."
+                },
+                {
+                    // Manually ban (Write) or unban (Delete) a single client IP.
+                    pattern: r"dos/bans/(?P<ip>.+)$",
+                    fields: {
+                        "ip": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Client IP address to ban or unban."
+                        },
+                        "ttl_secs": {
+                            field_type: FieldType::Int,
+                            required: false,
+                            description: "Ban duration in seconds (Write only). Defaults to the configured ban_secs."
+                        },
+                        "reason": {
+                            field_type: FieldType::Str,
+                            required: false,
+                            description: "Free-text reason recorded with the ban (Write only)."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write,  handler: sys_backend_dos_ban.handle_dos_ban_write},
+                        {op: Operation::Delete, handler: sys_backend_dos_unban.handle_dos_unban_delete}
+                    ],
+                    help: "Manually ban or unban a client IP."
+                },
+                {
                     // Per-principal default resource accounts (Resource Connect).
                     // List every principal that has default accounts on record.
                     // Root-scoped: operator-authored, independent of the
@@ -978,7 +1059,7 @@ impl SystemBackend {
             // a `default-account/*` entry would swallow `default-account/self`.
             // Admin reads/writes are gated by policy on the explicit
             // mount/name paths instead.
-            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "seal", "raw/*", "revoke-prefix/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*", "namespace-links", "namespace-links/*", "identity/ns-assignment", "identity/ns-assignment/*"],
+            root_paths: ["mounts/*", "auth/*", "remount", "policy", "policy/*", "audit", "audit/*", "seal", "raw/*", "revoke-prefix/*", "cache/flush", "owner/backfill", "sso/settings", "namespaces", "namespaces/*", "namespace-links", "namespace-links/*", "identity/ns-assignment", "identity/ns-assignment/*", "dos/config", "dos/stats", "dos/bans/*"],
             unauth_paths: ["internal/ui/mounts", "internal/ui/mounts/*", "init", "seal-status", "unseal", "sso/providers"],
             help: SYSTEM_BACKEND_HELP,
         });
@@ -3550,6 +3631,119 @@ impl SystemBackend {
         let name = req.get_data_as_str("name")?;
         store.delete(&mount, &name).await?;
         Ok(None)
+    }
+
+    // ─── DoS / IP request-abuse protection ──────────────────────────────
+
+    fn dos_config_response(cfg: &crate::dos::DosConfig) -> Response {
+        Response::data_response(
+            json!({
+                "enabled": cfg.enabled,
+                "window_secs": cfg.window_secs,
+                "max_requests": cfg.max_requests,
+                "auth_max_requests": cfg.auth_max_requests,
+                "ban_secs": cfg.ban_secs,
+                "refresh_secs": cfg.refresh_secs,
+            })
+            .as_object()
+            .cloned(),
+        )
+    }
+
+    pub async fn handle_dos_config_read(
+        &self,
+        _backend: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        Ok(Some(Self::dos_config_response(&self.core.dos_guard.config())))
+    }
+
+    pub async fn handle_dos_config_write(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        // Partial update: start from the live config and overlay only the
+        // fields the operator supplied.
+        let mut cfg = self.core.dos_guard.config();
+        if let Some(v) = req.get_data("enabled").ok().and_then(|v| v.as_bool()) {
+            cfg.enabled = v;
+        }
+        if let Some(v) = req.get_data("window_secs").ok().and_then(|v| v.as_u64()) {
+            cfg.window_secs = v;
+        }
+        if let Some(v) = req.get_data("max_requests").ok().and_then(|v| v.as_u64()) {
+            cfg.max_requests = v;
+        }
+        if let Some(v) = req.get_data("auth_max_requests").ok().and_then(|v| v.as_u64()) {
+            cfg.auth_max_requests = v;
+        }
+        if let Some(v) = req.get_data("ban_secs").ok().and_then(|v| v.as_u64()) {
+            cfg.ban_secs = v;
+        }
+        if let Some(v) = req.get_data("refresh_secs").ok().and_then(|v| v.as_u64()) {
+            cfg.refresh_secs = v;
+        }
+        self.core.set_dos_config(cfg).await?;
+        // Echo the effective (sanitized) config so the GUI reflects any clamps.
+        Ok(Some(Self::dos_config_response(&self.core.dos_guard.config())))
+    }
+
+    pub async fn handle_dos_stats_read(
+        &self,
+        _backend: &dyn Backend,
+        _req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let stats = self.core.dos_guard.stats();
+        let data = serde_json::to_value(&stats)
+            .map_err(|e| bv_error_string!(&format!("encode dos stats: {e}")))?
+            .as_object()
+            .cloned();
+        Ok(Some(Response::data_response(data)))
+    }
+
+    pub async fn handle_dos_ban_write(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let ip_str = req.get_data_as_str("ip")?;
+        let ip: std::net::IpAddr = ip_str
+            .parse()
+            .map_err(|_| bv_error_response_status!(400, &format!("invalid IP address: {ip_str}")))?;
+        // Default the TTL to the configured ban duration, or 300s if auto-ban
+        // is disabled (ban_secs == 0) so a manual ban still has an effect.
+        let cfg_ban = self.core.dos_guard.config().ban_secs;
+        let ttl = req
+            .get_data("ttl_secs")
+            .ok()
+            .and_then(|v| v.as_u64())
+            .filter(|&t| t > 0)
+            .unwrap_or(if cfg_ban > 0 { cfg_ban } else { 300 });
+        let reason = req
+            .get_data_as_str("reason")
+            .unwrap_or_else(|_| "manually banned by operator".to_string());
+        self.core.dos_manual_ban(ip, ttl, &reason).await?;
+        Ok(Some(Response::data_response(
+            json!({ "ip": ip_str, "banned": true, "ttl_secs": ttl, "reason": reason })
+                .as_object()
+                .cloned(),
+        )))
+    }
+
+    pub async fn handle_dos_unban_delete(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let ip_str = req.get_data_as_str("ip")?;
+        let ip: std::net::IpAddr = ip_str
+            .parse()
+            .map_err(|_| bv_error_response_status!(400, &format!("invalid IP address: {ip_str}")))?;
+        let existed = self.core.dos_unban(ip).await?;
+        Ok(Some(Response::data_response(
+            json!({ "ip": ip_str, "unbanned": existed }).as_object().cloned(),
+        )))
     }
 
     fn resolve_default_account_store(

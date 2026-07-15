@@ -513,6 +513,42 @@ export const setNsAssignment = (mount: string, name: string, namespaces: string[
 export const deleteNsAssignment = (mount: string, name: string) =>
   invoke<void>("delete_ns_assignment", { mount, name });
 
+/** IP-based DoS / request-abuse protection (`v2/sys/dos/*`).
+ *  Thresholds use 0 to mean "this rule disabled". */
+export interface DosConfig {
+  enabled: boolean;
+  window_secs: number;
+  max_requests: number;
+  auth_max_requests: number;
+  ban_secs: number;
+  refresh_secs: number;
+}
+export interface DosIpUsage {
+  ip: string;
+  requests: number;
+  auth_requests: number;
+  window_secs: number;
+}
+export interface DosBanRecord {
+  ip: string;
+  kind: "auto" | "manual";
+  reason: string;
+  expires_in_secs: number;
+  until_unix: number | null;
+}
+export interface DosStats {
+  config: DosConfig;
+  tracked: DosIpUsage[];
+  bans: DosBanRecord[];
+}
+export const getDosConfig = () => invoke<DosConfig>("get_dos_config");
+export const setDosConfig = (config: Partial<DosConfig>) =>
+  invoke<DosConfig>("set_dos_config", { config });
+export const getDosStats = () => invoke<DosStats>("get_dos_stats");
+export const banIp = (ip: string, ttlSecs?: number, reason?: string) =>
+  invoke<unknown>("ban_ip", { ip, ttlSecs, reason });
+export const unbanIp = (ip: string) => invoke<unknown>("unban_ip", { ip });
+
 /** Per-principal default resource accounts (Resource Connect). Each field is
  *  the OS login name the operator uses on that OS family's targets; an empty
  *  string means "unconfigured" for that family. Consumed only by connection

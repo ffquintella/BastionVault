@@ -8,11 +8,11 @@ The post-quantum crypto migration is complete. The default build uses a PQ-first
 
 | State | Count |
 |---|---|
-| Done | 50 |
+| Done | 51 |
 | Partial | 1 |
 | Todo | 9 |
 | Removed | 1 |
-| **Total tracked features** | **60** |
+| **Total tracked features** | **61** |
 
 Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-and-distribution.md)) — sequenced into four release waves; Waves 1 + 2 shipped (with Linux GUI bundler caveat), Wave 3 next.
 
@@ -87,6 +87,7 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 | Status | Feature | Notes |
 |---|---|---|
 | `[x]` Done | TLS & mTLS (Rustls-based) | PQ-friendly hybrid suites (X25519MLKEM768) supported. |
+| `[x]` Done | IP-based DoS / request-abuse protection | [spec](features/dos-abuse-protection.md) — per-client-IP sliding-window request guard with temporary auto-bans and a stricter auth-path sub-limit (brute-force defense); trusted-proxy-aware IP resolution; health/seal/metrics exempt. Thresholds + manual bans persist to the barrier (HA-replicated); enforcement is in-memory per node. Routes `v2/sys/dos/{config,stats,bans/{ip}}`; GUI Settings → **Abuse Protection** panel (live stats, threshold editor, manual ban/unban). |
 
 ### Authentication
 

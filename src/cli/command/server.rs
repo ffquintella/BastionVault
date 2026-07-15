@@ -21,6 +21,7 @@ use sysexits::ExitCode;
 
 use crate::{
     cli::{command, config, config::TlsVersion},
+    dos::middleware::dos_middleware,
     errors::RvError,
     http,
     metrics::{manager::MetricsManager, middleware::metrics_midleware},
@@ -318,8 +319,18 @@ impl Server {
         }
         let trusted_proxies = web::Data::new(trusted_proxies);
 
+        // Clone for the background DoS sweep task (see below); the original
+        // `core` is moved into the per-worker `App` factory closure.
+        let dos_sweep_core = core.clone();
+
         let mut http_server = HttpServer::new(move || {
             App::new()
+                // IP-based DoS guard. Registered first so it wraps the whole
+                // stack; a banned IP is rejected before routing. It reads the
+                // guard from the `Arc<Core>` app data below. Ordering relative
+                // to Logger/metrics is not correctness-critical — the guard
+                // short-circuits regardless of layer position.
+                .wrap(from_fn(dos_middleware))
                 .wrap(middleware::Logger::default())
                 .wrap(from_fn(metrics_midleware))
                 .app_data(web::Data::new(core.clone()))
@@ -350,6 +361,19 @@ impl Server {
         server.block_on(async {
             tokio::spawn(async {
                 system_metrics.start_collecting().await;
+            });
+            // Periodic DoS-guard maintenance: reload persisted manual bans (so
+            // a ban applied on one HA node converges on the others) and sweep
+            // expired in-memory bans/windows. Cadence comes from the guard's
+            // `refresh_secs` (already clamped to a sane floor).
+            tokio::spawn(async move {
+                loop {
+                    let secs = dos_sweep_core.dos_guard.config().refresh_secs.max(1);
+                    tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+                    if let Err(e) = dos_sweep_core.refresh_dos_bans().await {
+                        log::debug!("DoS-guard refresh skipped: {e}");
+                    }
+                }
             });
             http_server.run().await
         })?;
