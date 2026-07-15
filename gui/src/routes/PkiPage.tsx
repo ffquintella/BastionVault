@@ -2592,6 +2592,12 @@ function PemBlock({
  *  server route is introduced. A fresh keypair is generated unless the
  *  operator pins a managed key (requires `role.allow_key_reuse`).
  *
+ *  Offered for any selected cert, including orphan (externally-imported)
+ *  ones — those carry no issuer on this mount, so the issuer field
+ *  defaults to empty (the mount's default issuer signs the renewal) and
+ *  the operator can override it. This is how an imported/expired cert is
+ *  turned into a fresh, valid cert with the same identity.
+ *
  *  The new private key is returned by the engine exactly once, so the
  *  result stays visible in the modal until the operator closes it —
  *  never auto-dismissed on success. Optionally revokes the old serial
@@ -2846,6 +2852,129 @@ function RenewCertModal({
   );
 }
 
+/** Associate a managed key with the selected certificate. Lists the
+ *  mount's managed keys for the operator to pick; the server verifies the
+ *  chosen key's public half matches the cert's SubjectPublicKeyInfo and
+ *  rejects a mismatch, so a wrong or missing import binding is corrected
+ *  without ever storing a mismatched pair. */
+function AssociateKeyModal({
+  open,
+  mount,
+  serial,
+  currentKeyId,
+  onClose,
+  onDone,
+}: {
+  open: boolean;
+  mount: string;
+  serial: string;
+  currentKeyId: string;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const { toast } = useToast();
+  const [keys, setKeys] = useState<PkiManagedKey[]>([]);
+  const [keyRef, setKeyRef] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setLoading(true);
+    setKeyRef("");
+    (async () => {
+      try {
+        const refs = await api.pkiListKeys(mount);
+        const entries = await Promise.all(
+          refs.map((r) => api.pkiReadKey(mount, r).catch(() => null)),
+        );
+        const list = entries.filter((k): k is PkiManagedKey => !!k);
+        setKeys(list);
+        // Default to the first key that isn't already bound here.
+        const firstOther = list.find((k) => k.key_id !== currentKeyId) ?? list[0];
+        if (firstOther) setKeyRef(firstOther.key_id);
+      } catch (e) {
+        toast("error", extractError(e));
+      } finally {
+        setLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, mount]);
+
+  async function submit() {
+    if (!keyRef) return;
+    setBusy(true);
+    try {
+      await api.pkiAssociateKey(mount, serial, keyRef);
+      toast("success", "Key associated with certificate");
+      onDone();
+      onClose();
+    } catch (e) {
+      // The most common failure is a public-key mismatch — surface the
+      // server's message verbatim so the operator knows the key is wrong.
+      toast("error", extractError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const noKeys = !loading && keys.length === 0;
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="Associate a managed key"
+      size="md"
+      actions={
+        <>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button onClick={submit} disabled={busy || loading || !keyRef}>
+            {busy ? "Associating…" : "Associate"}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <p className="text-xs text-[var(--color-text-muted)]">
+          Bind the managed key whose private half matches{" "}
+          {serial ? <code className="break-all">{serial}</code> : "this certificate"}.
+          The server verifies the key's public key equals the certificate's
+          SubjectPublicKeyInfo and rejects a mismatch, so only the correct key
+          can be attached.
+          {currentKeyId && (
+            <>
+              {" "}This replaces the current binding (
+              <code className="break-all">{currentKeyId}</code>).
+            </>
+          )}
+        </p>
+
+        {noKeys ? (
+          <EmptyState
+            title="No managed keys on this mount"
+            description="Import the certificate's private key on the Keys tab first (PEM or PKCS#12), then associate it here."
+          />
+        ) : (
+          <Select
+            label="Managed key"
+            value={keyRef}
+            onChange={(e) => setKeyRef(e.target.value)}
+            disabled={loading}
+            options={keys.map((k) => ({
+              value: k.key_id,
+              label: `${k.name || "(unnamed)"} · ${k.key_type}${k.key_bits ? `-${k.key_bits}` : ""} · ${k.key_id.slice(0, 8)}…`,
+            }))}
+          />
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 // ── Certificates Tab ──────────────────────────────────────────────
 
 /** Import externally-issued certificates into the orphan-cert index from
@@ -3087,6 +3216,8 @@ function CertDetail({
   onCopyPem,
   onExport,
   onRenew,
+  onAssociateKey,
+  onClearKey,
 }: {
   serial: string;
   cert: PkiCertRecord;
@@ -3096,9 +3227,16 @@ function CertDetail({
   onDelete: () => void;
   onCopyPem: () => void;
   onExport: () => void;
-  /** Present only when this cert can be renewed (engine-issued, not an
-   *  orphan import — renewal re-issues under one of this mount's roles). */
+  /** Renew re-issues a fresh cert with the same subject/SANs under one of
+   *  this mount's roles. Offered for any cert (including orphan imports):
+   *  the operator confirms the role and issuer, so an imported cert can be
+   *  reissued as a valid cert signed by this mount's CA. */
   onRenew?: () => void;
+  /** Open the associate-key modal to bind (or re-point) the managed key
+   *  backing this cert. Offered for any cert. */
+  onAssociateKey?: () => void;
+  /** Clear the current managed-key binding. Only wired when one exists. */
+  onClearKey?: () => void;
 }) {
   const expired = cert.not_after > 0 && cert.not_after * 1000 < Date.now();
   const emitterText = issuerName
@@ -3150,6 +3288,25 @@ function CertDetail({
           value={cert.source ? `orphan (${cert.source})` : "orphan"}
         />
       )}
+
+      <div className="space-y-1">
+        <div className="text-xs text-[var(--color-text-muted)]">Managed key</div>
+        {cert.key_id ? (
+          <div
+            className="flex items-center gap-1 min-w-0 text-sm"
+            title={cert.key_id}
+          >
+            <span aria-hidden>🔑</span>
+            <span className="truncate">
+              {cert.key_name || cert.key_id}
+            </span>
+          </div>
+        ) : (
+          <div className="text-sm text-[var(--color-text-muted)]">
+            none associated
+          </div>
+        )}
+      </div>
 
       {(cert.key_usages?.length ?? 0) > 0 && (
         <div className="space-y-1">
@@ -3209,6 +3366,16 @@ function CertDetail({
             Renew
           </Button>
         )}
+        {onAssociateKey && (
+          <Button variant="ghost" onClick={onAssociateKey}>
+            {cert.key_id ? "Change key" : "Associate key"}
+          </Button>
+        )}
+        {cert.key_id && onClearKey && (
+          <Button variant="ghost" onClick={onClearKey}>
+            Clear key
+          </Button>
+        )}
         <Button variant="ghost" onClick={onExport}>
           Export
         </Button>
@@ -3240,6 +3407,8 @@ function CertsTab({ mount }: { mount: string }) {
   const [cert, setCert] = useState<PkiCertRecord | null>(null);
   const [revokeTarget, setRevokeTarget] = useState<string | null>(null);
   const [renewTarget, setRenewTarget] = useState<string | null>(null);
+  const [associateTarget, setAssociateTarget] = useState<string | null>(null);
+  const [clearKeyTarget, setClearKeyTarget] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<{
     serial: string;
     active: boolean;
@@ -3333,6 +3502,19 @@ function CertsTab({ mount }: { mount: string }) {
       toast("success", `Certificate ${revokeTarget} revoked`);
       setRevokeTarget(null);
       if (selected === revokeTarget) await selectSerial(revokeTarget);
+      await refresh();
+    } catch (e) {
+      toast("error", extractError(e));
+    }
+  }
+
+  async function handleClearKey() {
+    if (!clearKeyTarget) return;
+    try {
+      await api.pkiClearCertKey(mount, clearKeyTarget);
+      toast("success", `Key binding cleared for ${clearKeyTarget}`);
+      setClearKeyTarget(null);
+      if (selected === clearKeyTarget) await selectSerial(clearKeyTarget);
       await refresh();
     } catch (e) {
       toast("error", extractError(e));
@@ -3606,9 +3788,9 @@ function CertsTab({ mount }: { mount: string }) {
                   : "";
               })()}
               onRevoke={() => setRevokeTarget(selected)}
-              onRenew={
-                cert.is_orphaned ? undefined : () => setRenewTarget(selected)
-              }
+              onRenew={() => setRenewTarget(selected)}
+              onAssociateKey={() => setAssociateTarget(selected)}
+              onClearKey={() => setClearKeyTarget(selected)}
               onDelete={() =>
                 setDeleteTarget({
                   serial: selected,
@@ -3669,6 +3851,29 @@ function CertsTab({ mount }: { mount: string }) {
         cert={renewTarget && selected === renewTarget ? cert : null}
         onClose={() => setRenewTarget(null)}
         onRenewed={() => void refresh()}
+      />
+      <AssociateKeyModal
+        open={!!associateTarget}
+        mount={mount}
+        serial={associateTarget ?? ""}
+        currentKeyId={
+          associateTarget && selected === associateTarget ? cert?.key_id ?? "" : ""
+        }
+        onClose={() => setAssociateTarget(null)}
+        onDone={async () => {
+          if (associateTarget && selected === associateTarget)
+            await selectSerial(associateTarget);
+          await refresh();
+        }}
+      />
+      <ConfirmModal
+        open={!!clearKeyTarget}
+        onClose={() => setClearKeyTarget(null)}
+        onConfirm={handleClearKey}
+        title="Clear key association?"
+        message={`Unbind the managed key from ${clearKeyTarget}? The key stays in the key store; only the cert→key link is removed.`}
+        confirmLabel="Clear"
+        variant="danger"
       />
     </Card>
   );

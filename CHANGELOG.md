@@ -45,6 +45,19 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.28.15] - 2026-07-15
+
+### Added
+
+#### PKI — associate a managed key with a certificate
+
+- **Bind (or correct) the managed key backing a certificate** (`gui`, PKI → Certificates; server: `src/modules/pki/path_fetch.rs`) -- imported certs and imported keys arrive unlinked: `pki/certs/import` records a cert with no key binding, and the PKCS#12 key-grab imports a key without attaching it to any cert. A cert's detail panel now shows its **Managed key** binding and offers **Associate key** / **Change key** / **Clear key**. Associating opens a picker of the mount's managed keys; the server verifies the chosen key's public half equals the certificate's SubjectPublicKeyInfo and **rejects a mismatch**, so only the correct key can be attached and a wrong/missing binding can be fixed after the fact. Binding a key lets the export-with-private-key and key-reuse-on-renewal paths work. New logical route `pki/cert/<serial>/key` (Write = associate, Delete = clear) with per-key reference-count upkeep so a bound key can't be force-deleted while referenced; `pki/cert/<serial>` now also returns `key_id`/`key_name`. New Tauri commands `pki_associate_key` / `pki_clear_cert_key`. (`gui/src/routes/PkiPage.tsx`, `tests/test_pki_cert_key_lifecycle.rs`, `features/pki-secret-engine.md`)
+
+### Fixed
+
+- **Settings link 404-stormed inside a child namespace** (`gui`) -- the **Settings** sidebar entry stayed visible when a non-root namespace was active, but the page is entirely global/server-level config (FIDO2, YubiKey failsafe, SSO, password policy, resource types, Rustion bastions + master cert, cloud storage, seal/unseal). Its Rustion and cloud-storage panels call root-registered routes; with a child-namespace header attached those return "Router mount not found", so opening Settings from a namespace (e.g. `dti/esi`) produced a cascade of 404 error toasts. Settings is now marked `rootOnly` — same treatment as FerroGate — so the link hides outside the root namespace and reappears on switching back. (`gui/src/components/Layout.tsx`)
+- **PKI GUI renewal was hidden for imported certs** (`gui`, PKI → Certificates) -- the **Renew** action added in 0.28.14 was gated to engine-issued certs and never appeared for orphan (externally-imported) certificates, so a store made up entirely of imported certs (e.g. a PKCS#12 import) had no renew interface at all. Renew is now offered for any selected certificate; for an orphan the issuer field defaults to empty (the mount's default issuer signs the renewal) and can be overridden, turning an imported/expired cert into a fresh, valid cert with the same subject and SANs. (Note: the re-issue path mints an end-entity cert, so renewing a CA/intermediate this way does not reproduce a CA cert — use the intermediate-CA flow for that.) (`gui/src/routes/PkiPage.tsx`, `features/pki-secret-engine.md`)
+
 ## [0.28.14] - 2026-07-15
 
 ### Added

@@ -1398,6 +1398,14 @@ pub struct PkiCertRecord {
     pub key_usages: Vec<String>,
     #[serde(default)]
     pub ext_key_usages: Vec<String>,
+    /// UUID of the managed key bound to this cert, when one is
+    /// associated. Empty for imported/unbound certs. Set/cleared via
+    /// `pki_associate_key` / `pki_clear_cert_key`.
+    #[serde(default)]
+    pub key_id: String,
+    /// Friendly name of the bound managed key, when it has one.
+    #[serde(default)]
+    pub key_name: String,
 }
 
 #[derive(Default)]
@@ -1572,7 +1580,38 @@ pub async fn pki_read_cert(
         san_uri: extras.san_uri,
         key_usages: extras.key_usages,
         ext_key_usages: extras.ext_key_usages,
+        key_id: val_str(&map, "key_id"),
+        key_name: val_str(&map, "key_name"),
     })
+}
+
+/// Associate a managed key with a stored certificate (or re-point a wrong
+/// binding). The server verifies the key's public half matches the
+/// certificate's SubjectPublicKeyInfo and rejects a mismatch.
+#[tauri::command]
+pub async fn pki_associate_key(
+    state: State<'_, AppState>,
+    mount: String,
+    serial: String,
+    key_ref: String,
+) -> CmdResult<()> {
+    let mount = mount_prefix(&mount);
+    let mut body = Map::new();
+    body.insert("key_ref".into(), json!(key_ref));
+    make_request(&state, Operation::Write, format!("{mount}/cert/{serial}/key"), Some(body)).await?;
+    Ok(())
+}
+
+/// Clear the managed-key binding on a certificate.
+#[tauri::command]
+pub async fn pki_clear_cert_key(
+    state: State<'_, AppState>,
+    mount: String,
+    serial: String,
+) -> CmdResult<()> {
+    let mount = mount_prefix(&mount);
+    make_request(&state, Operation::Delete, format!("{mount}/cert/{serial}/key"), None).await?;
+    Ok(())
 }
 
 #[derive(Deserialize)]

@@ -1401,6 +1401,12 @@ export interface PkiCertRecord {
    *  `serverAuth`, …). Empty when the cert omits the extension. */
   key_usages?: string[];
   ext_key_usages?: string[];
+  /** UUID of the managed key bound to this cert, when one is
+   *  associated. Empty for imported/unbound certs. Set/cleared via
+   *  `pkiAssociateKey` / `pkiClearCertKey`. */
+  key_id?: string;
+  /** Friendly name of the bound managed key, when it has one. */
+  key_name?: string;
 }
 
 export interface PkiImportCaPkcs12Request {

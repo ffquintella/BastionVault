@@ -2066,6 +2066,14 @@ export const pkiImportCertsFile = (request: PkiImportCertsFileRequest) =>
   invoke<PkiImportCertsFileResult>("pki_import_certs_file", { request });
 export const pkiRevokeCert = (mount: string, serial: string) =>
   invoke<PkiRevokeResult>("pki_revoke_cert", { mount, serial });
+/** Associate a managed key with a certificate (or re-point a wrong
+ *  binding). The server verifies the key's public half matches the
+ *  cert's SubjectPublicKeyInfo and rejects a mismatch. */
+export const pkiAssociateKey = (mount: string, serial: string, keyRef: string) =>
+  invoke<void>("pki_associate_key", { mount, serial, keyRef });
+/** Clear the managed-key binding on a certificate. */
+export const pkiClearCertKey = (mount: string, serial: string) =>
+  invoke<void>("pki_clear_cert_key", { mount, serial });
 export const pkiDeleteCert = (mount: string, serial: string, force = false) =>
   invoke<void>("pki_delete_cert", { mount, serial, force });
 export const pkiReadCa = (mount: string) => invoke<PkiCaResult>("pki_read_ca", { mount });

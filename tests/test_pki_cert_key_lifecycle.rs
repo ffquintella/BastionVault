@@ -526,3 +526,125 @@ async fn test_cert_crud_without_key_ref() {
         "deleted cert must be gone"
     );
 }
+
+/// Associate a managed key with a certificate whose record started with
+/// no binding (the `pki/certs/import` / PKCS#12-key-grab gap), correcting
+/// it after the fact. Proves:
+///
+/// - a cert issued without `key_ref` records an empty `key_id`;
+/// - `WRITE pki/cert/<serial>/key {key_ref}` binds the key when its
+///   public half matches the cert's SubjectPublicKeyInfo, and `read_cert`
+///   then surfaces the `key_id`;
+/// - binding a *non-matching* key is rejected (verify-and-reject);
+/// - `DELETE pki/cert/<serial>/key` clears the binding, freeing the key
+///   for deletion.
+#[maybe_async::test(
+    feature = "sync_handler",
+    async(all(not(feature = "sync_handler")), tokio::test)
+)]
+async fn test_associate_key_with_certificate() {
+    let (bvault, dir, token) = boot_with_root().await;
+    defer!(let _ = fs::remove_dir_all(&dir););
+    let core = bvault.core.load();
+
+    // Issue a leaf without key_ref → cert stored with an empty key_id and
+    // its (unmanaged) private key returned once.
+    let issued = write_ok(
+        &core,
+        &token,
+        "pki/issue/leaf",
+        json!({"common_name": "assoc.example.com", "ttl": "24h"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .await;
+    let serial = issued["serial_number"].as_str().unwrap().to_string();
+    let leaf_key_pem = issued["private_key"].as_str().unwrap().to_string();
+
+    let before = read(&core, &token, &format!("pki/cert/{serial}")).await;
+    assert!(
+        before.get("key_id").is_none(),
+        "freshly issued (no key_ref) cert must have no key binding"
+    );
+
+    // Import the leaf's own private key as a managed key → this is the
+    // key that actually matches the cert.
+    let match_key = write_ok(
+        &core,
+        &token,
+        "pki/keys/import",
+        json!({"private_key": leaf_key_pem, "name": "assoc-match"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .await;
+    let match_key_id = match_key["key_id"].as_str().unwrap().to_string();
+
+    // A different key that does NOT match the cert.
+    let other_key = write_ok(
+        &core,
+        &token,
+        "pki/keys/generate/internal",
+        json!({"key_type": "ec", "name": "assoc-other"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .await;
+    let other_key_id = other_key["key_id"].as_str().unwrap().to_string();
+
+    // Mismatch is rejected — nothing is bound.
+    let bad = write(
+        &core,
+        &token,
+        &format!("pki/cert/{serial}/key"),
+        json!({"key_ref": other_key_id}).as_object().unwrap().clone(),
+    )
+    .await;
+    assert!(bad.is_err(), "binding a non-matching key must be rejected: {bad:?}");
+    assert!(
+        read(&core, &token, &format!("pki/cert/{serial}"))
+            .await
+            .get("key_id")
+            .is_none(),
+        "a rejected association must not have written a binding"
+    );
+
+    // Matching key binds and is surfaced on read (by name, since imported
+    // with one).
+    let ok = write_ok(
+        &core,
+        &token,
+        &format!("pki/cert/{serial}/key"),
+        json!({"key_ref": "assoc-match"}).as_object().unwrap().clone(),
+    )
+    .await;
+    assert_eq!(ok["key_id"].as_str().unwrap(), match_key_id);
+    let after = read(&core, &token, &format!("pki/cert/{serial}")).await;
+    assert_eq!(after["key_id"].as_str().unwrap(), match_key_id);
+    assert_eq!(after["key_name"], "assoc-match");
+
+    // The bound key can't be force-deleted while it references the cert;
+    // clearing the association frees it.
+    let blocked = delete_req(&core, &token, &format!("pki/key/{match_key_id}")).await;
+    assert!(blocked.is_err(), "bound key must not delete while referenced: {blocked:?}");
+
+    delete_req(&core, &token, &format!("pki/cert/{serial}/key"))
+        .await
+        .expect("clear association");
+    assert!(
+        read(&core, &token, &format!("pki/cert/{serial}"))
+            .await
+            .get("key_id")
+            .is_none(),
+        "cleared association must drop the key binding"
+    );
+    delete_req(&core, &token, &format!("pki/key/{match_key_id}"))
+        .await
+        .expect("key deletable once association cleared");
+
+    // Silence the unused warning without asserting on the other key.
+    let _ = other_key_id;
+}

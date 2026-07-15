@@ -92,6 +92,7 @@ impl PkiBackend {
             self.tidy_status_path(),
             self.config_auto_tidy_path(),
             self.fetch_cert_path(),
+            self.cert_key_path(),
             self.fetch_ca_path(),
             self.fetch_ca_chain_path(),
             self.list_certs_path(),

@@ -133,7 +133,13 @@ const adminNav: NavItem[] = [
   { path: "/rustion-sessions", label: "Live Sessions" },
   { path: "/plugins", label: "Plugins" },
   { path: "/exchange", label: "Import / Export" },
-  { path: "/settings", label: "Settings" },
+  // Settings is entirely global / server-level config (FIDO2, SSO,
+  // password policy, resource types, Rustion bastions + master cert,
+  // seal/unseal). None of it is namespace-aware, and the Rustion /
+  // cloud-storage panels call root-registered routes that reject a
+  // child-namespace header ("Router mount not found" 404 storm). Same
+  // rationale as FerroGate — hide the link outside the root namespace.
+  { path: "/settings", label: "Settings", rootOnly: true },
 ];
 
 // Match a NavItem's `requiresMountType` against the live mount table.

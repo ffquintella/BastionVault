@@ -160,6 +160,35 @@ describe("PKI certificate renewal", () => {
     expect(mockInvoke.mock.calls.some((c) => c[0] === "pki_revoke_cert")).toBe(false);
   });
 
+  it("offers Renew for orphan (externally-imported) certs too", async () => {
+    // The whole point of renewal for many operators is reissuing an
+    // imported/expired cert, so the action must not be gated on origin.
+    mockInvoke.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case "plugins_list":
+          return Promise.resolve([]);
+        case "pki_list_mounts":
+          return Promise.resolve([{ path: "pki/", mount_type: "pki" }]);
+        case "pki_list_issuers":
+          return Promise.resolve({ issuers: [] });
+        case "pki_list_certs":
+          return Promise.resolve([SERIAL]);
+        case "pki_read_cert":
+          return Promise.resolve({ ...CERT, is_orphaned: true, source: "pkcs12-import", issuer_id: "" });
+        case "pki_list_roles":
+          return Promise.resolve(["web-server"]);
+        default:
+          return Promise.resolve(null);
+      }
+    });
+
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "Certificates" }));
+    await user.click(await screen.findByText(SERIAL));
+    expect(await screen.findByRole("button", { name: "Renew" })).toBeTruthy();
+  });
+
   it("revokes the old serial when the toggle is enabled", async () => {
     const user = userEvent.setup();
     const dialog = await openRenewModal(user);
