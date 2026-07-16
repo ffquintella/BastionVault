@@ -172,6 +172,29 @@ pub struct SsoCallbackHints {
     pub mode: String,
     pub suggested: Vec<String>,
     pub notes: Vec<String>,
+    /// Per-node callback URLs + live availability for a clustered
+    /// remote deployment. Empty for embedded/loopback logins and for
+    /// single-node (discovery-disabled / literal-URL) profiles — the
+    /// `suggested` list carries those.
+    #[serde(default)]
+    pub nodes: Vec<SsoCallbackNode>,
+    /// One currently-available node's callback URL — the node a login
+    /// started right now would complete on. `None` when nothing is
+    /// reachable (the register-all `suggested`/`nodes` set still holds).
+    #[serde(default)]
+    pub selected: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct SsoCallbackNode {
+    /// Full callback URL to register with the IdP.
+    pub url: String,
+    /// `scheme://host:port` the callback hangs off — a short label.
+    pub host: String,
+    pub available: bool,
+    /// `leader` / `follower` / `sealed` / `uninitialized` / `unreachable`.
+    pub state: String,
+    pub rtt_ms: u32,
 }
 
 // ── Commands ───────────────────────────────────────────────────────
@@ -303,43 +326,118 @@ pub async fn sso_admin_callback_hints(
                 "Desktop OIDC logins bind a random loopback port each run — register `http://127.0.0.1` (any port) with your IdP as a native-app / loopback redirect URI (RFC 8252).".into(),
                 "Azure AD calls this a \"Mobile and desktop applications\" redirect; Okta calls it \"Native app\"; Google Cloud lists it under \"Desktop app\".".into(),
             ],
+            nodes: Vec::new(),
+            selected: None,
         }),
         ("oidc", VaultMode::Remote) => {
+            let nodes = callback_nodes(&state, &mount).await;
+            if nodes.len() > 1 {
+                let suggested: Vec<String> = nodes.iter().map(|n| n.url.clone()).collect();
+                let selected = nodes.iter().find(|n| n.available).map(|n| n.url.clone());
+                let reachable = nodes.iter().filter(|n| n.available).count();
+                let mut notes = vec![format!(
+                    "Clustered deployment: {} node(s) resolved via SRV, {reachable} reachable now. Register EVERY URL above with your IdP as an allowed redirect URI — a login completes on whichever node is available, so any of them may be used (no load balancer required).",
+                    nodes.len()
+                )];
+                notes.push(match &selected {
+                    Some(sel) => format!("A login started now would complete on {sel}."),
+                    None => "No node is reachable right now; the URLs above are still the correct set to register.".into(),
+                });
+                notes.push(
+                    "The vault exposes the callback at the v1 path for Vault-API compatibility.".into(),
+                );
+                Ok(SsoCallbackHints { mode: "remote".into(), suggested, notes, nodes, selected })
+            } else {
+                let selected = nodes.iter().find(|n| n.available).map(|n| n.url.clone());
+                let stable = nodes
+                    .first()
+                    .map(|n| n.url.clone())
+                    .unwrap_or_else(|| format!("{remote_base}/v1/auth/{mount}/callback"));
+                Ok(SsoCallbackHints {
+                    mode: "remote".into(),
+                    suggested: vec![stable],
+                    notes: vec![
+                        "Register the URL above with your IdP. The vault exposes the callback at the v1 path for Vault-API compatibility.".into(),
+                    ],
+                    nodes,
+                    selected,
+                })
+            }
+        }
+        ("saml", VaultMode::Remote) => {
+            let nodes = callback_nodes(&state, &mount).await;
+            if nodes.len() > 1 {
+                let suggested: Vec<String> = nodes.iter().map(|n| n.url.clone()).collect();
+                let selected = nodes.iter().find(|n| n.available).map(|n| n.url.clone());
+                let reachable = nodes.iter().filter(|n| n.available).count();
+                let notes = vec![
+                    format!(
+                        "Clustered deployment: {} node(s) resolved via SRV, {reachable} reachable now.",
+                        nodes.len()
+                    ),
+                    "SAML IdPs POST the signed assertion to a fixed Assertion Consumer Service (ACS) URL. Register every URL above as an ACS endpoint (SP metadata supports several, chosen by index) and set the `acs_url` field to the node the IdP should prefer.".into(),
+                ];
+                Ok(SsoCallbackHints { mode: "remote".into(), suggested, notes, nodes, selected })
+            } else {
+                let selected = nodes.iter().find(|n| n.available).map(|n| n.url.clone());
+                let stable = nodes
+                    .first()
+                    .map(|n| n.url.clone())
+                    .unwrap_or_else(|| format!("{remote_base}/v1/auth/{mount}/callback"));
+                Ok(SsoCallbackHints {
+                    mode: "remote".into(),
+                    suggested: vec![stable],
+                    notes: vec![
+                        "SAML IdPs POST the signed assertion to a fixed Assertion Consumer Service (ACS) URL. The value above is what you paste into the IdP's SP configuration AND into the `acs_url` field here.".into(),
+                    ],
+                    nodes,
+                    selected,
+                })
+            }
+        }
+        ("saml", VaultMode::Embedded) => {
+            // SAML terminates server-side, not at a loopback listener,
+            // so an embedded desktop vault has no useful ACS URL.
             let stable = format!("{remote_base}/v1/auth/{mount}/callback");
             Ok(SsoCallbackHints {
-                mode: "remote".into(),
+                mode: "embedded".into(),
                 suggested: vec![stable],
                 notes: vec![
-                    "Register the URL above with your IdP. The vault exposes the callback at the v1 path for Vault-API compatibility.".into(),
-                ],
-            })
-        }
-        ("saml", _) => {
-            // SAML's Assertion Consumer Service URL has to be stable
-            // — the IdP POSTs signed assertions there. Desktop mode
-            // has no useful alternative because the flow terminates
-            // server-side, not at a loopback listener.
-            let stable = format!("{remote_base}/v1/auth/{mount}/callback");
-            let mut notes = vec![
-                "SAML IdPs POST the signed assertion to a fixed Assertion Consumer Service (ACS) URL. The value above is what you paste into the IdP's SP configuration AND into the `acs_url` field here.".into(),
-            ];
-            if matches!(mode, VaultMode::Embedded) {
-                notes.push(
+                    "SAML IdPs POST the signed assertion to a fixed Assertion Consumer Service (ACS) URL. The value above is what you paste into the IdP's SP configuration AND into the `acs_url` field here.".into(),
                     "This is an embedded (desktop) vault; SAML typically requires a publicly-reachable ACS URL. For production SAML use a remote BastionVault deployment.".into(),
-                );
-            }
-            Ok(SsoCallbackHints {
-                mode: if matches!(mode, VaultMode::Embedded) {
-                    "embedded"
-                } else {
-                    "remote"
-                }
-                .into(),
-                suggested: vec![stable],
-                notes,
+                ],
+                nodes: Vec::new(),
+                selected: None,
             })
         }
         (other, _) => Err(format!("sso: unknown kind `{other}`").into()),
+    }
+}
+
+/// Resolve + health-probe every node of the connected cluster and turn
+/// each into a per-node callback URL. Returns an empty vec when not in
+/// remote mode, when there's no remote profile, or when discovery
+/// fails — callers fall back to the single-URL hint in those cases.
+async fn callback_nodes(state: &State<'_, AppState>, mount: &str) -> Vec<SsoCallbackNode> {
+    let profile = match &*state.mode.lock().await {
+        VaultMode::Remote => state.remote_profile.lock().await.clone(),
+        VaultMode::Embedded => None,
+    };
+    let Some(profile) = profile else {
+        return Vec::new();
+    };
+    match crate::commands::connection::cluster_node_health(&profile).await {
+        Ok(nodes) => nodes
+            .into_iter()
+            .map(|n| SsoCallbackNode {
+                url: format!("{}/v1/auth/{mount}/callback", n.url),
+                host: n.url,
+                available: n.available,
+                state: n.state,
+                rtt_ms: n.rtt_ms,
+            })
+            .collect(),
+        Err(_) => Vec::new(),
     }
 }
 

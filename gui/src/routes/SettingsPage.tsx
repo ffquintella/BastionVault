@@ -18,6 +18,7 @@ import type {
   SsoAdminProvider,
   SsoAdminInput,
   SsoCallbackHints,
+  SsoCallbackNode,
 } from "../lib/api";
 import { DEFAULT_RESOURCE_TYPES, mergeTypeConfig } from "../lib/resourceTypes";
 import { CloudStorageCard } from "../components/CloudStorageCard";
@@ -1492,11 +1493,25 @@ function SsoProviderModal({
     }
   }, [kind, isEdit]);
 
+  // Debounced — in remote mode this resolves SRV records and probes
+  // every cluster node's /sys/health, so we don't want a lookup storm
+  // on every keystroke in the mount-path field.
   useEffect(() => {
-    api
-      .ssoAdminCallbackHints(mount.trim() || kind, kind)
-      .then(setHints)
-      .catch(() => setHints(null));
+    let cancelled = false;
+    const t = setTimeout(() => {
+      api
+        .ssoAdminCallbackHints(mount.trim() || kind, kind)
+        .then((h) => {
+          if (!cancelled) setHints(h);
+        })
+        .catch(() => {
+          if (!cancelled) setHints(null);
+        });
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
   }, [mount, kind]);
 
   function splitList(raw: string): string[] {
@@ -1807,29 +1822,83 @@ function SsoProviderModal({
           </h3>
           {hints && (
             <div className="p-3 rounded-lg bg-[var(--color-bg)] border border-[var(--color-border)] space-y-2">
-              <div className="flex items-center gap-2 text-xs">
-                <Badge
-                  label={hints.mode === "embedded" ? "Desktop" : "Remote"}
-                  variant="info"
-                />
-                <span className="text-[var(--color-text-muted)]">
-                  Register this with your IdP:
-                </span>
-              </div>
-              {hints.suggested.map((s) => (
-                <div key={s} className="flex items-center gap-2">
-                  <code className="flex-1 text-xs font-mono bg-[var(--color-surface)] px-2 py-1 rounded border border-[var(--color-border)] truncate">
-                    {s}
-                  </code>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => handleCopy(s)}
-                  >
-                    Copy
-                  </Button>
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2">
+                  <Badge
+                    label={hints.mode === "embedded" ? "Desktop" : "Remote"}
+                    variant="info"
+                  />
+                  <span className="text-[var(--color-text-muted)]">
+                    {hints.nodes && hints.nodes.length > 1
+                      ? `Register all ${hints.nodes.length} node URLs with your IdP:`
+                      : "Register this with your IdP:"}
+                  </span>
                 </div>
-              ))}
+                {hints.nodes && hints.nodes.length > 1 && (
+                  <div className="flex items-center gap-1 shrink-0">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => handleCopy(hints.suggested.join("\n"))}
+                    >
+                      Copy all
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() =>
+                        setAllowedRedirectUris(hints.suggested.join("\n"))
+                      }
+                    >
+                      Use all
+                    </Button>
+                  </div>
+                )}
+              </div>
+              {hints.nodes && hints.nodes.length > 1
+                ? hints.nodes.map((n: SsoCallbackNode) => (
+                    <div key={n.url} className="flex items-center gap-2">
+                      <span
+                        className={`inline-block w-2 h-2 rounded-full shrink-0 ${
+                          n.available
+                            ? "bg-green-500"
+                            : "bg-[var(--color-text-muted)]"
+                        }`}
+                        title={
+                          n.available
+                            ? `${n.state} · ${n.rtt_ms} ms`
+                            : n.state
+                        }
+                      />
+                      <code className="flex-1 min-w-0 text-xs font-mono bg-[var(--color-surface)] px-2 py-1 rounded border border-[var(--color-border)] truncate">
+                        {n.url}
+                      </code>
+                      {hints.selected === n.url && (
+                        <Badge label="active" variant="success" />
+                      )}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => handleCopy(n.url)}
+                      >
+                        Copy
+                      </Button>
+                    </div>
+                  ))
+                : hints.suggested.map((s) => (
+                    <div key={s} className="flex items-center gap-2">
+                      <code className="flex-1 min-w-0 text-xs font-mono bg-[var(--color-surface)] px-2 py-1 rounded border border-[var(--color-border)] truncate">
+                        {s}
+                      </code>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => handleCopy(s)}
+                      >
+                        Copy
+                      </Button>
+                    </div>
+                  ))}
               {hints.notes.map((n, i) => (
                 <p key={i} className="text-xs text-[var(--color-text-muted)]">
                   {n}

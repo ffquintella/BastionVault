@@ -1323,10 +1323,27 @@ export interface SsoAdminInputSaml extends SsoAdminInputBase {
 
 export type SsoAdminInput = SsoAdminInputOidc | SsoAdminInputSaml;
 
+export interface SsoCallbackNode {
+  /** Full callback URL to register with the IdP. */
+  url: string;
+  /** `scheme://host:port` the callback hangs off — a short label. */
+  host: string;
+  available: boolean;
+  /** leader | follower | sealed | uninitialized | unreachable */
+  state: string;
+  rtt_ms: number;
+}
+
 export interface SsoCallbackHints {
   mode: string;
   suggested: string[];
   notes: string[];
+  /** Per-node callback URLs + availability for a clustered remote
+   *  deployment. Empty for embedded/loopback and single-node profiles. */
+  nodes?: SsoCallbackNode[];
+  /** One available node's callback URL — the node a login started now
+   *  would complete on. `null` when nothing is reachable. */
+  selected?: string | null;
 }
 
 export const ssoAdminList = () => invoke<SsoAdminProvider[]>("sso_admin_list");

@@ -95,6 +95,14 @@ Follows the same Module/Backend pattern as `userpass` and `approle`.
 
 The `login_renew` handler reloads the role to verify it still exists and policies haven't changed. If the role was deleted or policies differ, renewal fails.
 
+### Redirect-URI hints (GUI, cluster-aware)
+
+The Add/Edit SSO Provider dialog surfaces the callback URL(s) to register with the IdP via the `sso_admin_callback_hints` Tauri command:
+
+- **Embedded (desktop) OIDC** — RFC 8252 loopback (`http://127.0.0.1/callback`, any port); the GUI binds a random loopback port per login and never uses a server-side callback.
+- **Remote, single node** (discovery disabled or literal-URL profile) — one stable `https://<node>/v1/auth/<mount>/callback`.
+- **Remote, clustered** — resolves the cluster's SRV records and probes each node's `/v1/sys/health` (reusing `bv_client::discovery::resolve` → `health::probe_all`), then returns **every** per-node callback URL (`nodes[]`) with live availability plus the `selected` node a login started now would complete on. All URLs must be registered with the IdP; because the OIDC transaction state (nonce/PKCE verifier/`redirect_uri`) is persisted through the replicated store (`req.storage_put` → Hiqlite Raft), any available node completes the callback — no load balancer required. The dialog renders availability dots, an "active" badge on the selected node, and "Copy all" / "Use all" affordances. The hint fetch is debounced (400 ms) because it performs DNS + health I/O.
+
 ## Implementation Phases
 
 ### Phase 1: Scaffolding

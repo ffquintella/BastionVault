@@ -45,6 +45,14 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.31.1] - 2026-07-16
+
+### Changed
+
+#### SSO callback-URL hints are cluster-aware
+
+- **The "Allowed Redirect URIs" hint in the Add/Edit SSO Provider dialog now enumerates every cluster node instead of guessing from the connection address** (`gui/src-tauri/src/commands/sso_admin.rs`, `gui/src-tauri/src/commands/connection.rs`, `gui/src/routes/SettingsPage.tsx`). Previously the OIDC/SAML callback hint was derived from the GUI's own client connection address (e.g. an SRV/service base like `esi.fgv.br`), which is not necessarily a browser-reachable callback endpoint. For a remote deployment the hint now resolves the cluster's SRV records and probes each node's `/v1/sys/health` (reusing the client's `discovery::resolve` → `health::probe_all` pipeline), then lists **all** per-node callback URLs so the operator can register every one with the IdP, marks each node's live availability (leader/follower/sealed/unreachable), and highlights the one node a login started now would complete on. Because the OIDC transaction state (nonce/PKCE verifier/redirect_uri) is persisted through the replicated store, any available node can complete the callback — so no load balancer is required. New `cluster_node_health` helper (never hard-fails when no node is healthy), extended `SsoCallbackHints` with `nodes[]` + `selected`, and a "Copy all" / "Use all" affordance in the dialog. Single-node (discovery-disabled / literal-URL) and embedded/loopback logins keep their existing single-URL hint. The hint fetch is debounced (400 ms) since it now performs DNS + health I/O.
+
 ## [0.31.0] - 2026-07-16
 
 ### Added

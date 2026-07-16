@@ -262,6 +262,94 @@ async fn cluster_target_urls(profile: &RemoteProfile) -> CmdResult<Vec<String>> 
     Ok(urls)
 }
 
+/// Per-node availability snapshot, used by the SSO callback-URL hints.
+///
+/// Unlike [`resolve_remote_address`], this never hard-fails when no
+/// node is healthy: the SSO admin surface wants the *complete* node
+/// list (every node's callback URL has to be registered with the IdP)
+/// plus a per-node availability flag, so an all-sealed or briefly
+/// unreachable cluster still yields rows. Availability is probed the
+/// same way discovery does it — a `GET /v1/sys/health` per node — so
+/// "available" here means "would accept a callback right now".
+#[derive(Serialize, Clone)]
+pub(crate) struct ClusterNodeHealth {
+    /// `scheme://host:port` — the base a callback URL hangs off.
+    pub url: String,
+    pub target: String,
+    pub port: u16,
+    pub available: bool,
+    /// Friendly node state: `leader` / `follower` / `sealed` /
+    /// `uninitialized` / `unreachable`.
+    pub state: String,
+    pub rtt_ms: u32,
+}
+
+/// Resolve every node of the connected cluster (via SRV when the
+/// profile is a bare cluster name) and probe each one's health. Returns
+/// one row per node in SRV-priority order, healthy or not.
+pub(crate) async fn cluster_node_health(
+    profile: &RemoteProfile,
+) -> CmdResult<Vec<ClusterNodeHealth>> {
+    use bv_client::{
+        discovery::{self, SystemResolver},
+        health::{self, NodeState},
+    };
+
+    let tls = build_bv_tls(profile)?;
+
+    let mut discovery_cfg = DiscoveryConfig::default();
+    if let Some(svc) = profile
+        .discovery_srv_service
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        discovery_cfg.srv_service = svc.to_string();
+    }
+
+    let resolver = SystemResolver::new();
+    let resolved = discovery::resolve(&profile.address, &discovery_cfg, &resolver)
+        .await
+        .map_err(|e| CommandError::from(format!("Cluster discovery failed: {e}")))?;
+    let candidates = resolved.into_candidates();
+    if candidates.is_empty() {
+        return Err(CommandError::from(format!(
+            "No nodes found for `{}`",
+            profile.address
+        )));
+    }
+
+    let mut health_cfg = HealthConfig::default();
+    if let Some(ms) = profile.health_probe_timeout_ms {
+        if ms > 0 {
+            health_cfg.probe_timeout = Duration::from_millis(ms.into());
+        }
+    }
+
+    let probes = health::probe_all(&candidates, &health_cfg, tls.as_ref()).await;
+    let nodes = probes
+        .into_iter()
+        .map(|p| {
+            let state = match &p.state {
+                NodeState::ActiveLeader => "leader",
+                NodeState::Follower => "follower",
+                NodeState::Sealed => "sealed",
+                NodeState::Uninitialized => "uninitialized",
+                NodeState::Unreachable(_) => "unreachable",
+            }
+            .to_string();
+            ClusterNodeHealth {
+                available: p.state.is_healthy(),
+                url: p.candidate.url(),
+                target: p.candidate.target.clone(),
+                port: p.candidate.port,
+                state,
+                rtt_ms: p.rtt_ms,
+            }
+        })
+        .collect();
+    Ok(nodes)
+}
+
 /// Build a fresh legacy `Client` aimed at a single node URL, attaching
 /// TLS when the scheme calls for it. One client per node is how the
 /// CLI fans seal/unseal out — `Client` is immutable once built, so a
