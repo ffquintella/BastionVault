@@ -445,8 +445,15 @@ export const listUsers = (mountPath: string) =>
   invoke<UserListResult>("list_users", { mountPath });
 export const getUser = (mountPath: string, username: string) =>
   invoke<UserInfo>("get_user", { mountPath, username });
-export const createUser = (mountPath: string, username: string, password: string, policies: string) =>
-  invoke<void>("create_user", { mountPath, username, password, policies });
+export const createUser = (
+  mountPath: string,
+  username: string,
+  password: string,
+  policies: string,
+  email = "",
+  phone = "",
+) =>
+  invoke<void>("create_user", { mountPath, username, password, policies, email, phone });
 export const updateUser = (
   mountPath: string,
   username: string,
@@ -457,6 +464,8 @@ export const updateUser = (
     totpMfaEnabled?: boolean;
     totpMount?: string;
     totpKey?: string;
+    email?: string;
+    phone?: string;
   },
 ) =>
   invoke<void>("update_user", {
@@ -468,6 +477,8 @@ export const updateUser = (
     totpMfaEnabled: opts?.totpMfaEnabled ?? null,
     totpMount: opts?.totpMount ?? null,
     totpKey: opts?.totpKey ?? null,
+    email: opts?.email ?? null,
+    phone: opts?.phone ?? null,
   });
 export const deleteUser = (mountPath: string, username: string) =>
   invoke<void>("delete_user", { mountPath, username });

@@ -247,6 +247,8 @@ export interface UserInfo {
   totp_mfa_enabled: boolean;
   totp_mount: string;
   totp_key: string;
+  email: string;
+  phone: string;
 }
 
 export interface LockoutConfig {

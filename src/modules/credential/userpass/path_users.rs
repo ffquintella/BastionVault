@@ -69,6 +69,16 @@ pub struct UserEntry {
     /// TOTP key name within `totp_mount` bound to this user for MFA.
     #[serde(default)]
     pub totp_key: String,
+
+    /// Optional contact email for this principal. Purely informational — it
+    /// is never used for authentication, notification, or account recovery.
+    /// Surfaced to admins so a user can be reached out-of-band if needed.
+    #[serde(default)]
+    pub email: String,
+    /// Optional contact phone number for this principal. Same purpose and
+    /// caveats as `email`: informational only, never an auth factor.
+    #[serde(default)]
+    pub phone: String,
 }
 
 impl UserEntry {
@@ -141,6 +151,16 @@ impl UserPassBackend {
                     field_type: FieldType::Str,
                     required: false,
                     description: "TOTP key name (within totp_mount) bound to this user for MFA."
+                },
+                "email": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "Optional contact email. Informational only; never used for authentication or recovery."
+                },
+                "phone": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "Optional contact phone number. Informational only; never used for authentication or recovery."
                 }
             },
             operations: [
@@ -348,6 +368,18 @@ impl UserPassBackendInner {
         }
         if let Ok(v) = req.get_data("totp_key") {
             user_entry.totp_key = v.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.to_string();
+        }
+        // Optional contact fields. Only touched when present so a partial
+        // update never wipes them. Stored trimmed; empty means "not set".
+        if let Ok(v) = req.get_data("email") {
+            let email = v.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.trim().to_string();
+            if !email.is_empty() && !is_plausible_email(&email) {
+                return Err(RvError::ErrResponse("email is not a valid address".to_string()));
+            }
+            user_entry.email = email;
+        }
+        if let Ok(v) = req.get_data("phone") {
+            user_entry.phone = v.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.trim().to_string();
         }
         // Refuse an incoherent MFA configuration up front rather than
         // failing closed at every login: if MFA is on for this user, a key
@@ -582,4 +614,55 @@ async fn record_user_audit(
         details: details.to_string(),
     };
     let _ = store.append(entry).await;
+}
+
+/// Permissive contact-email sanity check: exactly one `@`, a non-empty local
+/// part, and a domain part that contains a dot but does not start or end with
+/// one. This is deliberately *not* an RFC 5322 grammar — strict validators
+/// reject many real addresses. The goal is only to catch obvious typos before
+/// storing what is purely informational contact metadata.
+fn is_plausible_email(s: &str) -> bool {
+    let mut parts = s.split('@');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(local), Some(domain), None) => {
+            !local.is_empty()
+                && domain.contains('.')
+                && !domain.starts_with('.')
+                && !domain.ends_with('.')
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_plausible_email;
+
+    #[test]
+    fn plausible_emails_accepted() {
+        for e in [
+            "felipe.quintella@fgv.br",
+            "a@b.co",
+            "user+tag@sub.example.com",
+            "USER@EXAMPLE.ORG",
+        ] {
+            assert!(is_plausible_email(e), "expected {e} to be accepted");
+        }
+    }
+
+    #[test]
+    fn implausible_emails_rejected() {
+        for e in [
+            "",
+            "plainaddress",
+            "@example.com",
+            "user@",
+            "user@localhost",
+            "user@.com",
+            "user@example.",
+            "a@b@c.com",
+        ] {
+            assert!(!is_plausible_email(e), "expected {e} to be rejected");
+        }
+    }
 }

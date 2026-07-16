@@ -29,6 +29,10 @@ pub struct UserInfo {
     pub totp_mount: String,
     /// TOTP key name bound for MFA.
     pub totp_key: String,
+    /// Optional contact email (informational only; empty = not set).
+    pub email: String,
+    /// Optional contact phone number (informational only; empty = not set).
+    pub phone: String,
 }
 
 /// Mount-level lockout policy (mirrors `config/lockout`).
@@ -122,6 +126,8 @@ pub async fn get_user(
                 totp_mfa_enabled: get_bool("totp_mfa_enabled"),
                 totp_mount: get_str("totp_mount"),
                 totp_key: get_str("totp_key"),
+                email: get_str("email"),
+                phone: get_str("phone"),
             })
         }
         None => Err("User not found".into()),
@@ -135,12 +141,20 @@ pub async fn create_user(
     username: String,
     password: String,
     policies: String,
+    email: String,
+    phone: String,
 ) -> CmdResult<()> {
     let path = format!("auth/{mount_path}users/{username}");
     let mut body = Map::new();
     body.insert("password".to_string(), Value::String(password));
     if !policies.is_empty() {
         body.insert("policies".to_string(), Value::String(policies));
+    }
+    if !email.is_empty() {
+        body.insert("email".to_string(), Value::String(email));
+    }
+    if !phone.is_empty() {
+        body.insert("phone".to_string(), Value::String(phone));
     }
 
     make_request(&state, Operation::Write, path, Some(body)).await?;
@@ -161,6 +175,8 @@ pub async fn update_user(
     totp_mfa_enabled: Option<bool>,
     totp_mount: Option<String>,
     totp_key: Option<String>,
+    email: Option<String>,
+    phone: Option<String>,
 ) -> CmdResult<()> {
     let path = format!("auth/{mount_path}users/{username}");
     let mut body = Map::new();
@@ -179,6 +195,12 @@ pub async fn update_user(
     }
     if let Some(v) = totp_key {
         body.insert("totp_key".to_string(), Value::String(v));
+    }
+    if let Some(v) = email {
+        body.insert("email".to_string(), Value::String(v));
+    }
+    if let Some(v) = phone {
+        body.insert("phone".to_string(), Value::String(v));
     }
 
     make_request(&state, Operation::Write, path, Some(body)).await?;

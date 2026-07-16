@@ -45,6 +45,14 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-07-16
+
+### Added
+
+#### UserPass contact fields
+
+- **Optional email and phone number per UserPass account** (`src/modules/credential/userpass/path_users.rs`, `features/userpass-account-security.md`) -- user accounts can now store a contact email and phone number so an operator can reach a user out-of-band if needed. Both fields are purely informational: they are never used for authentication, notifications, or account recovery. The email is validated with a permissive sanity check (single `@`, non-empty local part, dotted domain) to catch obvious typos while accepting real-world addresses; the phone number is stored as entered (trimmed). Both fields are optional and default to empty, so existing stored accounts deserialize unchanged. Editable from the Users admin page (`gui/src/routes/UsersPage.tsx`) in both the Create User and Edit User dialogs; exposed on the `email`/`phone` request fields of `auth/<mount>/users/<name>` and the `create_user`/`update_user`/`get_user` Tauri commands.
+
 ## [0.30.2] - 2026-07-15
 
 ### Added

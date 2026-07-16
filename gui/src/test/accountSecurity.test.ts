@@ -24,6 +24,8 @@ describe("account-security API wrappers", () => {
       totpMfaEnabled: null,
       totpMount: null,
       totpKey: null,
+      email: null,
+      phone: null,
     });
   });
 
@@ -33,6 +35,8 @@ describe("account-security API wrappers", () => {
       totpMfaEnabled: true,
       totpMount: "totp/",
       totpKey: "bob-mfa",
+      email: "bob@example.com",
+      phone: "+55 21 91234-5678",
     });
     expect(mockInvoke).toHaveBeenCalledWith("update_user", {
       mountPath: "userpass/",
@@ -43,6 +47,8 @@ describe("account-security API wrappers", () => {
       totpMfaEnabled: true,
       totpMount: "totp/",
       totpKey: "bob-mfa",
+      email: "bob@example.com",
+      phone: "+55 21 91234-5678",
     });
   });
 

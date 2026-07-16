@@ -38,6 +38,9 @@ export function UsersPage() {
   // Form state
   const [formUsername, setFormUsername] = useState("");
   const [formPassword, setFormPassword] = useState("");
+  // Optional contact fields (informational only; never used for auth/recovery).
+  const [formEmail, setFormEmail] = useState("");
+  const [formPhone, setFormPhone] = useState("");
   const [formSelectedPolicies, setFormSelectedPolicies] = useState<string[]>([]);
   // Allowed namespaces (login-restriction). Empty ⇒ unrestricted (any namespace).
   const [formSelectedNamespaces, setFormSelectedNamespaces] = useState<string[]>([]);
@@ -298,7 +301,14 @@ export function UsersPage() {
     }
     try {
       const policies = formSelectedPolicies.join(",");
-      await api.createUser(mountPath, formUsername, formPassword, policies);
+      await api.createUser(
+        mountPath,
+        formUsername,
+        formPassword,
+        policies,
+        formEmail.trim(),
+        formPhone.trim(),
+      );
       // Persist the namespace login-restriction (empty ⇒ unrestricted).
       await api.setNsAssignment(mountPath, formUsername, formSelectedNamespaces);
       toast("success", `User ${formUsername} created`);
@@ -340,6 +350,8 @@ export function UsersPage() {
         totpMfaEnabled: editTotpMfaEnabled,
         totpMount: editTotpMount,
         totpKey: editTotpKey,
+        email: formEmail.trim(),
+        phone: formPhone.trim(),
       });
       // Persist the namespace login-restriction (empty ⇒ clears it).
       await api.setNsAssignment(mountPath, editUser, formSelectedNamespaces);
@@ -400,6 +412,8 @@ export function UsersPage() {
       ]);
       setEditUser(username);
       setFormPassword("");
+      setFormEmail(info.email);
+      setFormPhone(info.phone);
       setFormSelectedPolicies(info.policies);
       setFormSelectedNamespaces(assignment.namespaces);
       setFormDefaultAccountLinux(defaultAccount.linux);
@@ -431,6 +445,8 @@ export function UsersPage() {
   function resetForm() {
     setFormUsername("");
     setFormPassword("");
+    setFormEmail("");
+    setFormPhone("");
     setFormSelectedPolicies([]);
     setFormSelectedNamespaces([]);
     setFormDefaultAccountLinux("");
@@ -724,6 +740,22 @@ export function UsersPage() {
             />
             <PolicySelector />
             <NamespaceSelector />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Input
+                label="Email (optional)"
+                type="email"
+                value={formEmail}
+                onChange={(e) => setFormEmail(e.target.value)}
+                placeholder="e.g. user@example.com"
+              />
+              <Input
+                label="Phone (optional)"
+                type="tel"
+                value={formPhone}
+                onChange={(e) => setFormPhone(e.target.value)}
+                placeholder="e.g. +55 21 91234-5678"
+              />
+            </div>
           </div>
         </Modal>
 
@@ -771,6 +803,33 @@ export function UsersPage() {
             )}
             <PolicySelector />
             <NamespaceSelector />
+
+            {/* Contact information (informational only; never used for auth). */}
+            <div className="pt-3 border-t border-[var(--color-border)]">
+              <label className="text-sm font-medium text-[var(--color-text)]">
+                Contact Information
+              </label>
+              <p className="text-xs text-[var(--color-text-muted)] mt-1 mb-2">
+                Optional. Used only so an admin can reach this user out-of-band.
+                Never used for authentication, notifications, or account recovery.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <Input
+                  label="Email"
+                  type="email"
+                  value={formEmail}
+                  onChange={(e) => setFormEmail(e.target.value)}
+                  placeholder="e.g. user@example.com"
+                />
+                <Input
+                  label="Phone"
+                  type="tel"
+                  value={formPhone}
+                  onChange={(e) => setFormPhone(e.target.value)}
+                  placeholder="e.g. +55 21 91234-5678"
+                />
+              </div>
+            </div>
 
             {/* Account status: enable/disable + lockout. */}
             <div className="pt-3 border-t border-[var(--color-border)]">

@@ -34,7 +34,7 @@ transparently.
 
 | Key | Type | Purpose |
 |---|---|---|
-| `user/<name>` | `UserEntry` | Gains `disabled`, `failed_login_count`, `locked_until`, `totp_mfa_enabled`, `totp_mount`, `totp_key`. |
+| `user/<name>` | `UserEntry` | Gains `disabled`, `failed_login_count`, `locked_until`, `totp_mfa_enabled`, `totp_mount`, `totp_key`, and the informational contact fields `email`, `phone`. |
 | `lockout_config` | `LockoutConfig` | `enabled`, `max_failed_attempts`, `lockout_duration_secs`. |
 | `mfa_config` | `TotpMfaConfig` | `enabled`, `default_mount`. |
 
@@ -45,7 +45,7 @@ transparently.
 | Read/Write | `config/lockout` | Lockout policy. |
 | Read/Write | `config/mfa` | Global TOTP MFA switch + default engine mount. |
 | Write | `users/<name>/unlock` | Clear a lockout and reset the failed counter. |
-| Write | `users/<name>` | Now also accepts `disabled`, `totp_mfa_enabled`, `totp_mount`, `totp_key`. |
+| Write | `users/<name>` | Now also accepts `disabled`, `totp_mfa_enabled`, `totp_mount`, `totp_key`, and the informational `email`/`phone` contact fields. |
 | Write | `login/<name>` | Now also accepts `totp_code`. |
 
 Read on `users/<name>` exposes a computed `locked` boolean (current-time
@@ -79,6 +79,24 @@ intentionally **not** consulted from userpass to avoid coupling the two
 backends' storage layouts; the residual replay window is one TOTP period and the
 code is always combined with the password.
 
+### Contact fields (email / phone)
+
+`UserEntry` carries an optional `email` and `phone` so an operator can reach a
+principal out-of-band (offboarding notice, incident follow-up). These are
+**purely informational** and are never consumed by any code path:
+
+- not an authentication factor,
+- not used for notifications, magic links, or password/account recovery,
+- not part of any TOTP/FIDO2 enrollment.
+
+`write_user` only touches each field when it is present in the request, so a
+partial update (e.g. a policy change) never clears them. The email is validated
+with a permissive sanity check (`is_plausible_email`: single `@`, non-empty
+local part, dotted domain that does not start/end with a dot) purely to catch
+typos; the phone is stored as entered after trimming. Both are surfaced on
+`read_user` (they are not stripped like `password_hash`/`credentials_json`) and
+editable from the Users admin page's Create and Edit dialogs.
+
 ## Defaults / operational notes
 
 - **Lockout is enabled by default** (5 attempts / 900 s). Operators can widen,
@@ -101,6 +119,7 @@ TOTP-MFA controls, Unlock action, list status badges), Tauri commands, and
 |---|---|
 | Backend: enable/disable + lockout + unlock | Done |
 | Backend: TOTP MFA (global switch + per-user, fail-closed) | Done |
+| Backend: informational `email`/`phone` contact fields | Done |
 | GUI: user controls + Account Security panel | Done |
 | CLI: `totp_code` on login | Done |
 | Tests (Rust unit + GUI api) | Done |
