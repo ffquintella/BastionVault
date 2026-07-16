@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.31.2] - 2026-07-16
+
+### Fixed
+
+- **Container image build fails under rootless podman with `setgroups (22: Invalid argument)`** (`deploy/container/Containerfile`). The Debian builder stage's `apt-get` runs its download methods as the unprivileged `_apt` sandbox user (uid 65534), dropping privileges via `setgroups()`/`setegid()`. In a nested user namespace — e.g. a rootless-podman CI runner — that syscall is blocked, so every fetch aborted with an HTTP 400 and the build died at the first `apt-get update`. The builder now disables the apt sandbox (`APT::Sandbox::User "root"` via `/etc/apt/apt.conf.d/99-no-sandbox`) before installing the cross-toolchain; running the fetch as root inside the already-unprivileged build container is safe and is the standard workaround for this environment. The Wolfi runtime stage uses `apk` and is unaffected.
+
 ## [0.31.1] - 2026-07-16
 
 ### Changed

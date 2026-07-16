@@ -55,7 +55,15 @@ ARG BVAULT_FEATURES="hsm_mock,hsm_yubihsm2"
 #     `ldd` can't run on it).
 #   - gcc-x86-64-linux-gnu / gcc-aarch64-linux-gnu: cross linkers and
 #     C compilers for cc-rs build scripts.
-RUN apt-get update \
+# APT::Sandbox::User "root" disables apt's privilege-drop to the `_apt`
+# sandbox user (uid 65534). Under rootless podman in a nested user
+# namespace (e.g. a rootless-podman CI runner) the setgroups/setegid
+# that drop triggers is blocked, so every download method dies with
+# "setgroups (22: Invalid argument)" / HTTP 400. Running the fetch as
+# root inside the already-unprivileged build container is safe and is
+# the standard workaround for this environment.
+RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/99-no-sandbox \
+ && apt-get update \
  && apt-get install -y --no-install-recommends \
         binutils \
         ca-certificates \
