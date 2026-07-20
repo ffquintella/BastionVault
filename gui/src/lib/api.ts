@@ -769,6 +769,10 @@ export const ferrogateWriteConfig = (cfg: {
   requireUserToken: boolean;
   requireMachineIdentity: boolean;
   miaEnvironment: string;
+  selfEnrollEnabled: boolean;
+  selfEnrollAllowlist: string;
+  selfEnrollBlocklist: string;
+  selfEnrollRateLimitPerMin: number;
 }) =>
   invoke<void>("ferrogate_write_config", {
     trustDomain: cfg.trustDomain,
@@ -786,6 +790,10 @@ export const ferrogateWriteConfig = (cfg: {
     requireUserToken: cfg.requireUserToken,
     requireMachineIdentity: cfg.requireMachineIdentity,
     miaEnvironment: cfg.miaEnvironment,
+    selfEnrollEnabled: cfg.selfEnrollEnabled,
+    selfEnrollAllowlist: cfg.selfEnrollAllowlist,
+    selfEnrollBlocklist: cfg.selfEnrollBlocklist,
+    selfEnrollRateLimitPerMin: cfg.selfEnrollRateLimitPerMin,
   });
 export const ferrogateListMachines = () => invoke<FerroGateMachine[]>("ferrogate_list_machines");
 export const ferrogateApprove = (id: string, policies: string, ttlSeconds: number, comment: string) =>

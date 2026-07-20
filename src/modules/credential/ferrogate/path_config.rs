@@ -121,6 +121,26 @@ impl FerroGateBackend {
                     field_type: FieldType::Str,
                     required: false,
                     description: "MIA environment selector for this deployment (clients read mia-<env>.toml). Advertised via auth/ferrogate/requirement; empty = the default mia.toml."
+                },
+                "self_enroll_enabled": {
+                    field_type: FieldType::Bool,
+                    required: false,
+                    description: "Enable the unauthenticated machine self-enrolment endpoint (auth/<mount>/enroll). Off by default. Self-enrolment only records a pending machine for admin approval; it never mints a token."
+                },
+                "self_enroll_allowlist": {
+                    field_type: FieldType::CommaStringSlice,
+                    required: false,
+                    description: "Callers permitted to self-enrol. Each entry matches the source IP (when it parses as an IP/CIDR) or the claimed spiffe_id (exact, or prefix ending in '*') / machine id. Non-empty = only matching callers; empty = any caller."
+                },
+                "self_enroll_blocklist": {
+                    field_type: FieldType::CommaStringSlice,
+                    required: false,
+                    description: "Callers refused self-enrolment (matched like self_enroll_allowlist). A block-list match always wins over the allow-list."
+                },
+                "self_enroll_rate_limit_per_min": {
+                    field_type: FieldType::Int,
+                    required: false,
+                    description: "Per-source-IP self-enrolment attempts per minute (0 = unlimited)."
                 }
             },
             operations: [
@@ -252,6 +272,18 @@ impl FerroGateBackendInner {
                 return Ok(Some(Response::error_response("mia_environment is not a valid environment name")));
             }
             config.mia_environment = env;
+        }
+        if let Ok(v) = req.get_data("self_enroll_enabled") {
+            config.self_enroll_enabled = v.as_bool_ex().ok_or(RvError::ErrRequestFieldInvalid)?;
+        }
+        if let Ok(v) = req.get_data("self_enroll_allowlist") {
+            config.self_enroll_allowlist = v.as_comma_string_slice().ok_or(RvError::ErrRequestFieldInvalid)?;
+        }
+        if let Ok(v) = req.get_data("self_enroll_blocklist") {
+            config.self_enroll_blocklist = v.as_comma_string_slice().ok_or(RvError::ErrRequestFieldInvalid)?;
+        }
+        if let Ok(v) = req.get_data("self_enroll_rate_limit_per_min") {
+            config.self_enroll_rate_limit_per_min = v.as_int().ok_or(RvError::ErrRequestFieldInvalid)?.max(0) as u32;
         }
 
         self.set_config(req, &config).await?;

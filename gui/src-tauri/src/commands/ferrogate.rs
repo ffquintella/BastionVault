@@ -54,6 +54,19 @@ pub struct FerroGateConfig {
     /// the default `mia.toml`.
     #[serde(default)]
     pub mia_environment: String,
+    /// Enable the unauthenticated machine self-enrolment endpoint. Off by
+    /// default; self-enrolment only records a pending machine for approval.
+    #[serde(default)]
+    pub self_enroll_enabled: bool,
+    /// Callers permitted to self-enrol (source IP/CIDR or claimed identity).
+    #[serde(default)]
+    pub self_enroll_allowlist: Vec<String>,
+    /// Callers refused self-enrolment; a block-list match wins over the allow-list.
+    #[serde(default)]
+    pub self_enroll_blocklist: Vec<String>,
+    /// Per-source-IP self-enrolment attempts per minute (0 = unlimited).
+    #[serde(default)]
+    pub self_enroll_rate_limit_per_min: u32,
 }
 
 /// A machine enrolment summary as listed by the admin endpoint.
@@ -89,6 +102,10 @@ pub struct FerroGateMachine {
     pub reject_reason: String,
     #[serde(default)]
     pub comment: String,
+    /// True when the record came from the unauthenticated self-enrolment
+    /// endpoint rather than an admin `register` or an attested `login`.
+    #[serde(default)]
+    pub self_enrolled: bool,
 }
 
 /// The server's machine-identity requirement, as advertised by the
@@ -157,6 +174,10 @@ pub async fn ferrogate_write_config(
     require_user_token: bool,
     require_machine_identity: bool,
     mia_environment: String,
+    self_enroll_enabled: bool,
+    self_enroll_allowlist: String,
+    self_enroll_blocklist: String,
+    self_enroll_rate_limit_per_min: i64,
 ) -> CmdResult<()> {
     let mut body = Map::new();
     body.insert("trust_domain".into(), Value::String(trust_domain));
@@ -176,6 +197,13 @@ pub async fn ferrogate_write_config(
     body.insert("require_user_token".into(), Value::Bool(require_user_token));
     body.insert("require_machine_identity".into(), Value::Bool(require_machine_identity));
     body.insert("mia_environment".into(), Value::String(mia_environment));
+    body.insert("self_enroll_enabled".into(), Value::Bool(self_enroll_enabled));
+    body.insert("self_enroll_allowlist".into(), Value::String(self_enroll_allowlist));
+    body.insert("self_enroll_blocklist".into(), Value::String(self_enroll_blocklist));
+    body.insert(
+        "self_enroll_rate_limit_per_min".into(),
+        Value::Number(self_enroll_rate_limit_per_min.max(0).into()),
+    );
 
     make_request(&state, Operation::Write, "auth/ferrogate/config".into(), Some(body)).await?;
     Ok(())

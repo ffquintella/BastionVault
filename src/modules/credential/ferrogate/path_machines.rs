@@ -68,6 +68,32 @@ fn summarize(id: &str, m: &MachineEntry) -> Value {
         "last_login_ip": m.last_login_ip,
         "reject_reason": m.reject_reason,
         "comment": m.comment,
+        "self_enrolled": m.self_enrolled,
+    })
+}
+
+/// Whether a caller matches any entry in an allow/block list. Each entry is
+/// classified once: an entry that parses as an IP or CIDR is matched against
+/// the request source `ip`; any other entry is matched against the caller's
+/// claimed `spiffe_id` (exact, or as a prefix when it ends with `*`) or the
+/// derived 64-hex `machine_id`. Self-asserted identity is untrusted, so these
+/// lists are a coarse filter on top of the admin-approval gate — the source-IP
+/// rules are the harder-to-spoof half.
+fn enroll_list_matches(list: &[String], ip: &str, spiffe_id: &str, machine_id: &str) -> bool {
+    list.iter().any(|raw| {
+        let entry = raw.trim();
+        if entry.is_empty() {
+            return false;
+        }
+        // An IP or CIDR entry only ever matches the source IP.
+        if let Ok(net) = entry.parse::<ipnetwork::IpNetwork>() {
+            return ip.parse::<std::net::IpAddr>().map(|addr| net.contains(addr)).unwrap_or(false);
+        }
+        // Otherwise it is an identity rule.
+        if let Some(prefix) = entry.strip_suffix('*') {
+            return !spiffe_id.is_empty() && spiffe_id.starts_with(prefix);
+        }
+        entry == spiffe_id || entry == machine_id
     })
 }
 
@@ -92,6 +118,29 @@ impl FerroGateBackend {
                 {op: Operation::Write, handler: r.register_machine}
             ],
             help: r#"Admin pre-registration of a machine by SPIFFE ID (creates a pending record)."#
+        })
+    }
+
+    pub fn enroll_path(&self) -> Path {
+        let r = self.inner.clone();
+        new_path!({
+            pattern: r"enroll$",
+            fields: {
+                "spiffe_id": {
+                    field_type: FieldType::Str,
+                    required: true,
+                    description: "SPIFFE ID this machine is requesting to register, e.g. spiffe://ferrogate.prod/host/<uuid>."
+                },
+                "comment": {
+                    field_type: FieldType::Str,
+                    required: false,
+                    description: "Optional free-text note shown to the approving administrator."
+                }
+            },
+            operations: [
+                {op: Operation::Write, handler: r.enroll_machine}
+            ],
+            help: r#"Unauthenticated machine self-enrolment: request that this SPIFFE ID be registered (creates a pending record awaiting administrator approval). Never mints a token. Disabled unless the mount's self_enroll_enabled is set."#
         })
     }
 
@@ -305,6 +354,89 @@ impl FerroGateBackendInner {
             ..Default::default()
         };
         self.set_machine(req, &id, &m).await?;
+
+        let mut data = Map::new();
+        data.insert("id".to_string(), Value::String(id));
+        data.insert("spiffe_id".to_string(), Value::String(spiffe_id));
+        data.insert("status".to_string(), Value::String(status::PENDING.to_string()));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// Unauthenticated machine self-enrolment. A machine asks to register its
+    /// own (self-asserted) SPIFFE ID; on success a `pending` record is created
+    /// for an administrator to approve. This endpoint NEVER mints a token and
+    /// never grants access — real authentication still requires the attested
+    /// `login` flow, so a spoofed SPIFFE ID here is harmless on its own. The
+    /// endpoint is refused entirely unless `self_enroll_enabled` is set, and is
+    /// gated by an allow-list / block-list and a per-source-IP rate limit to
+    /// keep the pending queue from being flooded.
+    pub async fn enroll_machine(&self, _b: &dyn Backend, req: &mut Request) -> Result<Option<Response>, RvError> {
+        let config = self.get_config(req).await?;
+        if !config.self_enroll_enabled {
+            return Ok(Some(Response::error_response(
+                "self_enroll_disabled: machine self-registration is not enabled on this mount",
+            )));
+        }
+
+        let spiffe_id =
+            req.get_data("spiffe_id")?.as_str().ok_or(RvError::ErrRequestFieldInvalid)?.trim().to_string();
+        if !spiffe_id.starts_with("spiffe://") {
+            return Ok(Some(Response::error_response("spiffe_id must be a spiffe:// URI")));
+        }
+        let ip = Self::source_ip(req);
+        let id = machine_id(&spiffe_id);
+
+        // Per-source-IP rate limit first — the cheapest flood defence, applied
+        // before any storage access.
+        if !self.enroll_rate_ok(&ip, config.self_enroll_rate_limit_per_min) {
+            log::warn!(target: "security", "ferrogate self-enroll rate-limited ip={ip}");
+            ferrogate_metrics().record_denied(DenyReason::RateLimited);
+            return Ok(Some(Response::error_response(
+                "rate_limited: too many enrolment requests, retry shortly",
+            )));
+        }
+
+        // Block-list wins over the allow-list; a non-empty allow-list then
+        // requires an explicit match.
+        let blocked = enroll_list_matches(&config.self_enroll_blocklist, &ip, &spiffe_id, &id);
+        let allowed = config.self_enroll_allowlist.is_empty()
+            || enroll_list_matches(&config.self_enroll_allowlist, &ip, &spiffe_id, &id);
+        if blocked || !allowed {
+            log::warn!(
+                target: "security",
+                "ferrogate self-enroll denied ip={ip} spiffe_id={spiffe_id} blocked={blocked}"
+            );
+            ferrogate_metrics().record_denied(DenyReason::SelfEnrollDenied);
+            return Ok(Some(Response::error_response(
+                "self_enroll_denied: this caller is not permitted to self-enrol",
+            )));
+        }
+
+        // Idempotent and non-destructive: an existing record (pending, approved,
+        // rejected, or revoked) is returned unchanged — an unauthenticated
+        // caller can never reset or downgrade an administrator's decision.
+        if let Some(existing) = self.get_machine(req, &id).await? {
+            let mut data = Map::new();
+            data.insert("id".to_string(), Value::String(id));
+            data.insert("spiffe_id".to_string(), Value::String(existing.spiffe_id));
+            data.insert("status".to_string(), Value::String(existing.status));
+            return Ok(Some(Response::data_response(Some(data))));
+        }
+
+        let comment =
+            req.get_data("comment").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        let m = MachineEntry {
+            spiffe_id: spiffe_id.clone(),
+            status: status::PENDING.to_string(),
+            first_seen_at: now_unix(),
+            last_login_ip: ip.clone(),
+            self_enrolled: true,
+            comment,
+            ..Default::default()
+        };
+        self.set_machine(req, &id, &m).await?;
+        log::info!(target: "audit", "ferrogate.machine.self_enrolled spiffe_id={spiffe_id} ip={ip}");
+        ferrogate_metrics().record_pending();
 
         let mut data = Map::new();
         data.insert("id".to_string(), Value::String(id));
@@ -530,6 +662,23 @@ impl FerroGateBackendInner {
         }
         let window = now_unix() / 60;
         let mut entry = self.login_attempts.entry(ip.to_string()).or_insert((window, 0));
+        if entry.0 != window {
+            *entry = (window, 0);
+        }
+        entry.1 += 1;
+        entry.1 <= limit
+    }
+
+    /// Per-source-IP fixed-window rate check for self-enrolment, using the
+    /// dedicated `enroll_attempts` map so it does not share a budget with
+    /// `login`. Returns `true` if within `limit` for the current minute
+    /// (`limit == 0` = unlimited).
+    fn enroll_rate_ok(&self, ip: &str, limit: u32) -> bool {
+        if limit == 0 || ip.is_empty() {
+            return true;
+        }
+        let window = now_unix() / 60;
+        let mut entry = self.enroll_attempts.entry(ip.to_string()).or_insert((window, 0));
         if entry.0 != window {
             *entry = (window, 0);
         }

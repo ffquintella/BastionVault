@@ -221,6 +221,21 @@ as its own crate so it stays cleanly separable) that depends only on FerroGate's
   root exempt, machine-bound accepted, `requirement` endpoint unauthenticated, flag round-trip). Operators can
   toggle it without curl via `bvault operator ferrogate require-machine-identity [on|off]` (no argument prints
   the current value); the server admin GUI exposes the same as a "Require machine identity (all sessions)" toggle.
+- **Phase 9 shipped — unauthenticated machine self-enrolment.** A new unauthenticated path
+  `POST auth/ferrogate/enroll` lets an arbitrary machine request registration of its own (self-asserted)
+  SPIFFE ID. It only records a `pending` `MachineEntry` (flagged `self_enrolled`) for an administrator to
+  approve via the existing approve/reject/revoke flow — it **never mints a token or grants access**; real
+  authentication still requires the attested `login` flow, so a spoofed SPIFFE ID is inert on its own. An
+  existing record is returned unchanged (an unauthenticated caller can never reset/downgrade an admin
+  decision). Gated by four `auth/ferrogate/config` fields: `self_enroll_enabled` (master switch, off by
+  default), `self_enroll_allowlist` / `self_enroll_blocklist` (block-list wins; each entry matches the source
+  IP for IP/CIDR entries or the claimed `spiffe_id` — exact or `*`-prefix — / machine id otherwise), and
+  `self_enroll_rate_limit_per_min` (per-source-IP limiter, default 5, using a dedicated counter map). Surfaced
+  in the GUI FerroGate Config tab (enable toggle + allow/block-list editors + rate-limit field) with a
+  **self-enrolled** badge on queue rows; `bvault ferrogate enroll` CLI (reads the SPIFFE ID from the local MIA
+  when `--spiffe-id` is omitted); `self_enroll_denied` metric reason. Covered by four lib tests
+  (`test_ferrogate_self_enroll_*`: lifecycle→approve→attested-login, disabled-by-default, allow/block lists,
+  rate limit).
 - **Fix — GUI DPoP audience derives from the server.** Both the connect-flow machine gate (`ConnectPage.tsx`
   `runMachineGate`) **and** the combined machine+user user-login step (`LoginPage.tsx` `finalizeLogin`)
   previously signed the DPoP proof with `profile.address` (the vault server URL), assuming
@@ -527,6 +542,7 @@ operator on attested host                     server
 | 5 ✅ | **Client CLI** | **Done (Unix).** `bvault ferrogate login|status|whoami` driving the MIA helper socket (CBOR framing mirrored from `mia::helper::proto`) + DPoP proof construction; `ferrogate_mia_unavailable` when the MIA is absent. DPoP proof proven against `ferro-child-verify::verify_dpop_proof`; CBOR wire round-trip test. Windows named-pipe deferred. |
 | 6 ✅ | **Admin GUI page** | **Done.** `Machines (FerroGate)` admin page (route `/ferrogate`, sidebar nav) with Pending / Approved / History / Config tabs; approve/reject/revoke modals; enable-mount empty state; `AUTH_TYPES` entry. Seven Tauri commands (`ferrogate_read_config`/`write_config`/`list_machines`/`approve`/`reject`/`revoke`/`delete_machine`) + api.ts wrappers + types. Two vitest tests. |
 | 7 ✅ | **Direct-SVID mode + hardening + docs** | **Done.** Opt-in `accept_svid` via `verify_unrevoked` (CRL-enforced, fail-closed); per-source-IP `login` rate limit; Prometheus counters (`bvault_ferrogate_login_total` / `_login_denied_total{reason}` / `_pending_total` / `_approved_total`); operator + threat-model guide at `docs/ferrogate-machine-auth.md`. Test covers the `accept_svid` gate + CRL-enforced SVID approve→mint. |
+| 9 ✅ | **Unauthenticated machine self-enrolment** | **Done.** `POST auth/ferrogate/enroll` (unauth) records a `pending`, `self_enrolled` machine on a self-asserted SPIFFE ID for admin approval — never mints a token; existing records are returned unchanged. Gated by `self_enroll_enabled` + allow/block lists (source IP/CIDR or claimed id, block-list wins) + per-source-IP `self_enroll_rate_limit_per_min`. GUI Config toggle/list editors + queue badge; `bvault ferrogate enroll` CLI; `self_enroll_denied` metric reason. Four lib tests. |
 
 ## Open questions
 

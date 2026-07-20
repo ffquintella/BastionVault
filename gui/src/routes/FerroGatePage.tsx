@@ -46,6 +46,15 @@ function statusBadge(status: string) {
   return <Badge variant={variant} label={status} />;
 }
 
+/** Normalise a newline/comma-separated list into a trimmed CSV string. */
+function toCsv(raw: string): string {
+  return raw
+    .split(/[\n,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .join(",");
+}
+
 /**
  * Build the option list for the MIA-environment combobox: a blank
  * `(default)` entry (the default `mia.toml`), every `mia-<env>.toml`
@@ -258,8 +267,15 @@ export function FerroGatePage() {
     header: "Machine (SPIFFE ID)",
     render: (m: FerroGateMachine) => (
       <div className="min-w-0">
-        <div className="truncate font-medium" title={m.spiffe_id}>
-          {m.spiffe_id || "(unknown)"}
+        <div className="flex items-center gap-2">
+          <span className="truncate font-medium" title={m.spiffe_id}>
+            {m.spiffe_id || "(unknown)"}
+          </span>
+          {m.self_enrolled ? (
+            <span title="Requested via the unauthenticated self-enrolment endpoint">
+              <Badge variant="info" label="self-enrolled" />
+            </span>
+          ) : null}
         </div>
         <div className="truncate font-mono text-xs text-[var(--color-text-muted)]" title={m.id}>
           {m.id.slice(0, 16)}…
@@ -816,6 +832,14 @@ function ConfigPanel({
   const [bootstrapPolicies, setBootstrapPolicies] = useState<string[]>(config.bootstrap_policies || []);
   const [requireUserToken, setRequireUserToken] = useState(config.require_user_token);
   const [requireMachineIdentity, setRequireMachineIdentity] = useState(config.require_machine_identity);
+  // Unauthenticated machine self-enrolment. Lists are edited as free text (one
+  // entry per line or comma-separated) and normalised to CSV on save.
+  const [selfEnrollEnabled, setSelfEnrollEnabled] = useState(config.self_enroll_enabled);
+  const [selfEnrollAllowlist, setSelfEnrollAllowlist] = useState((config.self_enroll_allowlist || []).join("\n"));
+  const [selfEnrollBlocklist, setSelfEnrollBlocklist] = useState((config.self_enroll_blocklist || []).join("\n"));
+  const [selfEnrollRateLimit, setSelfEnrollRateLimit] = useState(
+    String(config.self_enroll_rate_limit_per_min ?? 5),
+  );
   // MIA environment this deployment belongs to (blank ⇒ the default mia.toml)
   // is page-level shared state (`environment`/`setEnvironment` props): picking
   // it picks which mia-<env>.toml the autofill reads AND is advertised to
@@ -893,6 +917,10 @@ function ConfigPanel({
         requireUserToken,
         requireMachineIdentity,
         miaEnvironment: environment.trim(),
+        selfEnrollEnabled,
+        selfEnrollAllowlist: toCsv(selfEnrollAllowlist),
+        selfEnrollBlocklist: toCsv(selfEnrollBlocklist),
+        selfEnrollRateLimitPerMin: Math.max(0, parseInt(selfEnrollRateLimit, 10) || 0),
       });
       toast("success", "Configuration saved");
       await onSaved();
@@ -967,6 +995,54 @@ function ConfigPanel({
           </label>
         </div>
       </div>
+
+      <div className="mt-4 rounded-md border border-[var(--color-border)] p-3">
+        <label className="flex items-center gap-2 text-sm font-medium" title="Exposes an unauthenticated endpoint (auth/<mount>/enroll) where a machine can request to register its own SPIFFE id. It only creates a pending record for you to approve — it never mints a token. The machine still authenticates through the normal attested login flow.">
+          <input type="checkbox" checked={selfEnrollEnabled} onChange={(e) => setSelfEnrollEnabled(e.target.checked)} />
+          Allow machine self-enrolment requests (unauthenticated)
+        </label>
+        <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+          A machine can request registration of its own machine id; it stays pending until you approve it here.
+          Self-enrolment never grants access on its own.
+        </p>
+        <div className="mt-3 grid grid-cols-2 gap-3">
+          <div className="col-span-2">
+            <Textarea
+              label="Allow-list (one per line or comma-separated)"
+              value={selfEnrollAllowlist}
+              onChange={(e) => setSelfEnrollAllowlist(e.target.value)}
+              rows={3}
+              disabled={!selfEnrollEnabled}
+              placeholder={"10.0.0.0/24\nspiffe://ferrogate.prod/host/*"}
+            />
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+              Source IP/CIDR or claimed spiffe_id (exact, or prefix ending in *). Empty = allow any caller.
+            </p>
+          </div>
+          <div className="col-span-2">
+            <Textarea
+              label="Block-list (one per line or comma-separated)"
+              value={selfEnrollBlocklist}
+              onChange={(e) => setSelfEnrollBlocklist(e.target.value)}
+              rows={3}
+              disabled={!selfEnrollEnabled}
+              placeholder={"203.0.113.66\nspiffe://ferrogate.prod/host/retired-*"}
+            />
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+              A block-list match always wins over the allow-list.
+            </p>
+          </div>
+          <Input
+            label="Rate limit (requests/min per source IP, 0 = unlimited)"
+            type="number"
+            min={0}
+            value={selfEnrollRateLimit}
+            onChange={(e) => setSelfEnrollRateLimit(e.target.value)}
+            disabled={!selfEnrollEnabled}
+          />
+        </div>
+      </div>
+
       <div className="mt-4 flex flex-wrap items-end justify-between gap-3">
         <div className="flex items-end gap-2">
           <div className="w-56">

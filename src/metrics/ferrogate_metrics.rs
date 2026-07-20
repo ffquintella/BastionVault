@@ -39,6 +39,8 @@ pub enum DenyReason {
     Revoked,
     /// Per-source-IP rate limit hit.
     RateLimited,
+    /// Self-enrolment refused by the allow-list / block-list gate.
+    SelfEnrollDenied,
 }
 
 impl EncodeLabelValue for DenyReason {
@@ -50,6 +52,7 @@ impl EncodeLabelValue for DenyReason {
             DenyReason::Rejected => writer.write_str("rejected"),
             DenyReason::Revoked => writer.write_str("revoked"),
             DenyReason::RateLimited => writer.write_str("rate_limited"),
+            DenyReason::SelfEnrollDenied => writer.write_str("self_enroll_denied"),
         }
     }
 }

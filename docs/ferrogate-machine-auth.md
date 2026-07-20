@@ -48,6 +48,10 @@ Configure the trust anchor (root/sudo-gated) at `auth/ferrogate/config`:
 | `require_user_token` | Require a `user_token` on every machine login and mint the **intersection** of machine and user policies (combined machine+user auth). Default `false`. |
 | `mia_environment` | MIA environment selector this deployment belongs to (e.g. `hml`): clients read `mia-<env>.toml` instead of the default `mia.toml` when dialing their local MIA for this server. Advertised on the unauthenticated `requirement` endpoint so the GUI's connect-time machine gate and combined-login binding pick the right MIA automatically. Empty = default environment. |
 | `require_machine_identity` | **Server-enforced:** every authenticated request to this server must present a machine-bound token (or a root token); plain user/token/approle sessions are rejected at the token layer. Clients discover this via the unauthenticated `auth/ferrogate/requirement` endpoint and cannot bypass it. Independent of `require_user_token` — set both for full combined enforcement. Default `false`. |
+| `self_enroll_enabled` | Enable the **unauthenticated** machine self-enrolment endpoint `auth/ferrogate/enroll`. Off by default. A self-enrolment only records a `pending` machine for you to approve — it never mints a token or grants access. Pre-approving a self-asserted (untrusted) SPIFFE ID is harmless on its own: real access still requires the machine to attest through `login`. |
+| `self_enroll_allowlist` | Callers permitted to self-enrol. Each entry matches the **source IP** (when it parses as an IP/CIDR) or the **claimed identity** — the `spiffe_id` (exact, or a prefix ending in `*`) or the 64-hex machine id. Non-empty = only matching callers may enrol; empty = any caller (still subject to the block-list and rate limit). |
+| `self_enroll_blocklist` | Callers refused self-enrolment, matched exactly like `self_enroll_allowlist`. A block-list match **always wins** over the allow-list. |
+| `self_enroll_rate_limit_per_min` | Per-source-IP self-enrolment requests/min (`0` = unlimited; default `5`). Blunts flooding of the pending queue through the unauthenticated endpoint. |
 
 > **Before enabling `require_machine_identity`:** make sure the trust anchor is configured and at least
 > one machine is approved (and the admin host's MIA is reachable), or only a **root** token will be able
@@ -81,6 +85,13 @@ bvault ferrogate whoami
 bvault ferrogate token --format json --audience https://vault.example.com
 bvault ferrogate token --field client_token     # bare token, pipe-friendly
 
+# Self-enrolment (unauthenticated): request that this machine be registered.
+# Creates a PENDING record for an admin to approve; never returns a token.
+# Requires self_enroll_enabled on the mount. --spiffe-id is read from the
+# local MIA when omitted.
+bvault ferrogate enroll --spiffe-id spiffe://ferrogate.prod/host/abc
+bvault ferrogate enroll                          # derive the id from the local MIA
+
 # Admin (GUI: Machines (FerroGate); or CLI — run against the server with a root token):
 bvault operator ferrogate list --status pending
 bvault operator ferrogate approve <handle|spiffe-id> --policies default,reader
@@ -100,8 +111,69 @@ bvault operator ferrogate require-machine-identity off      # disable
   / `rejected` / `revoked` / `rate_limited`), `bvault_ferrogate_pending_total`,
   `bvault_ferrogate_approved_total`.
 - **Audit log** (`audit` target): `ferrogate.machine.first_seen`,
-  `.bootstrap_approved`, `.approved`, `.login`. Denials log to the `security`
-  target. Tokens and DPoP proofs are never logged.
+  `.bootstrap_approved`, `.approved`, `.login`, `.self_enrolled`. Denials log to
+  the `security` target. Tokens and DPoP proofs are never logged.
+
+## Machine self-enrolment (unauthenticated)
+
+When `self_enroll_enabled` is set, the mount exposes an **unauthenticated**
+endpoint `POST auth/ferrogate/enroll` where an arbitrary machine can request
+registration of its own (self-asserted) SPIFFE ID:
+
+```bash
+curl -X POST https://vault.example.com/v2/auth/ferrogate/enroll \
+  -d '{"spiffe_id":"spiffe://ferrogate.prod/host/abc","comment":"new CI runner"}'
+# → {"data":{"id":"<handle>","spiffe_id":"...","status":"pending"}}
+```
+
+The request only records a `pending` machine (badged **self-enrolled** in the
+GUI queue) for an administrator to approve with the normal
+`approve`/`reject`/`revoke` flow. It **never mints a token and grants no
+access** — the machine still authenticates through the attested `login` flow,
+so a spoofed SPIFFE ID here is inert on its own. The endpoint is guarded by:
+
+- the `self_enroll_enabled` master switch (off by default);
+- the `self_enroll_allowlist` / `self_enroll_blocklist` (block-list wins),
+  matching the source IP (IP/CIDR entries) or the claimed identity; and
+- the per-source-IP `self_enroll_rate_limit_per_min` limiter.
+
+An existing record is returned unchanged — an unauthenticated caller can never
+reset or downgrade an administrator's decision.
+
+### End-to-end workflow
+
+The self-enrolment path lets a brand-new machine put itself in front of an
+administrator **without** first being pre-registered, while keeping approval a
+deliberate, human-gated step. The full identification flow:
+
+1. **Operator enables the feature.** On `auth/ferrogate/config`, set
+   `self_enroll_enabled = true` (GUI: *Machines (FerroGate)* → **Config** →
+   "Allow machine self-enrolment requests"). Optionally scope who may ask with
+   `self_enroll_allowlist` / `self_enroll_blocklist` and tune
+   `self_enroll_rate_limit_per_min`. Leave it off to keep the endpoint closed.
+2. **Machine requests registration.** The machine calls the unauthenticated
+   endpoint with the SPIFFE ID it claims — either directly (`curl … /enroll`) or
+   via `bvault ferrogate enroll` (which reads the SPIFFE ID from the local MIA
+   when `--spiffe-id` is omitted). The server applies the rate limit and
+   allow/block lists, then records a `pending`, `self_enrolled` machine and
+   returns `{ id, spiffe_id, status: "pending" }`. No token is issued.
+3. **Administrator reviews the queue.** The request appears in the **Pending**
+   tab (or `bvault operator ferrogate list --status pending`) tagged
+   **self-enrolled** so it is distinguishable from admin-registered and
+   attested-first-seen machines. The comment the machine supplied is shown to
+   help the operator decide.
+4. **Administrator approves (or rejects).** Approving attaches the machine's
+   policies + TTL exactly as for any other enrolment
+   (`bvault operator ferrogate approve <handle> --policies …`, or the GUI
+   approve modal). Rejecting/revoking is unchanged.
+5. **Machine authenticates.** The now-approved machine performs the normal
+   attested login (`bvault ferrogate login`, presenting a DPoP-bound child token
+   that verifies against the trust anchor). Because approval and attestation are
+   both required, a self-asserted SPIFFE ID that a machine cannot actually attest
+   as grants nothing even after an accidental approval.
+6. **Client can poll.** Between steps 2 and 5 the machine can check its state
+   with `bvault ferrogate status` (attested) or by re-calling `enroll`, which
+   returns the current `status` without changing it.
 
 ## Threat model — what this does and doesn't protect
 
@@ -117,7 +189,11 @@ bvault operator ferrogate require-machine-identity off      # disable
   composite-signed CRL via `verify_unrevoked` (stale CRL fails closed).
 - **Unauthorized-but-genuine machines** — a real attested machine still cannot
   use the vault until an admin approves its SPIFFE ID.
-- **Pending-queue flooding** — per-source-IP login rate limit.
+- **Pending-queue flooding** — per-source-IP rate limits on both `login` and the
+  unauthenticated `enroll` endpoint, plus the enrol allow/block lists.
+- **Self-enrolment abuse** — the unauthenticated `enroll` endpoint only creates a
+  `pending` record; it mints no token, so a self-asserted SPIFFE ID grants
+  nothing until an admin approves it *and* the machine can attest as that ID.
 
 **Does NOT protect against**
 

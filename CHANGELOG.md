@@ -45,6 +45,34 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-07-20
+
+### Added
+
+#### FerroGate machine self-enrolment
+
+- Add an **unauthenticated** machine self-enrolment endpoint,
+  `POST auth/ferrogate/enroll`, letting an arbitrary machine request
+  registration of its own (self-asserted) SPIFFE ID. The request only records a
+  `pending` machine for an administrator to approve through the existing
+  approve/reject/revoke flow — it **never mints a token or grants access**; the
+  machine still authenticates through the attested `login` flow, so a spoofed
+  SPIFFE ID is inert on its own. An existing record is returned unchanged, so an
+  unauthenticated caller can never reset or downgrade an admin decision.
+  (`docs/ferrogate-machine-auth.md`, `features/machine-authentication.md`)
+- Add mount config on `auth/ferrogate/config` to govern the feature:
+  `self_enroll_enabled` (master switch, **off by default**),
+  `self_enroll_allowlist` / `self_enroll_blocklist` (block-list wins; each entry
+  matches the source IP for IP/CIDR entries or the claimed `spiffe_id` — exact or
+  `*`-prefix — / machine id otherwise), and `self_enroll_rate_limit_per_min`
+  (per-source-IP limiter, default `5`) to blunt pending-queue flooding.
+- Surface the feature in the GUI FerroGate page (enable toggle, allow/block-list
+  editors, rate-limit field) and badge self-requested machines as
+  **self-enrolled** in the approval queue. Add the `bvault ferrogate enroll`
+  CLI command (reads the SPIFFE ID from the local MIA when `--spiffe-id` is
+  omitted) and a `self_enroll_denied` reason on the `bvault_ferrogate_login_denied_total`
+  metric.
+
 ## [0.31.2] - 2026-07-16
 
 ### Fixed

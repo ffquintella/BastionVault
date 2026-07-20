@@ -59,6 +59,8 @@ pub enum Commands {
     Login(Login),
     /// Mint a machine token and print it as structured output (for apps; never persisted).
     Token(Token),
+    /// Request self-enrolment of this machine (unauthenticated; awaits admin approval).
+    Enroll(Enroll),
     /// Report this machine's enrolment status.
     Status(Status),
     /// Print this host's SPIFFE id (local; no server call).
@@ -114,6 +116,7 @@ impl Ferrogate {
         match cmd {
             Commands::Login(c) => c.execute(),
             Commands::Token(c) => c.execute(),
+            Commands::Enroll(c) => c.execute(),
             Commands::Status(c) => c.execute(),
             Commands::Whoami(c) => c.execute(),
             Commands::Autoconfig(c) => c.execute(),
@@ -296,6 +299,97 @@ impl CommandExecutor for Token {
         }
 
         self.output.print_data(&Value::Object(Map::from_iter([("data".to_string(), Value::Object(out))])), self.output.field.as_deref())
+    }
+}
+
+// ── enroll ───────────────────────────────────────────────────────────────
+
+#[derive(Parser, Deref)]
+#[command(
+    about = "Request self-enrolment of this machine (unauthenticated)",
+    long_about = r#"Ask a BastionVault server to register this machine's SPIFFE id.
+
+Calls the mount's UNAUTHENTICATED self-enrolment endpoint
+(auth/<mount>/enroll). It only creates a *pending* record for an administrator
+to approve — it never returns a token and grants no access on its own. After an
+administrator approves it, authenticate normally with `bvault ferrogate login`.
+
+The endpoint must be enabled on the mount (`self_enroll_enabled`) and the caller
+must satisfy its allow-list / block-list and per-source-IP rate limit.
+
+    $ bvault ferrogate enroll --spiffe-id spiffe://ferrogate.prod/host/abc
+    $ bvault ferrogate enroll            # read the id from the local MIA"#
+)]
+pub struct Enroll {
+    /// SPIFFE id to register. When omitted, it is read from the local MIA (a
+    /// throwaway token is minted just to read its `iss` claim).
+    #[arg(long)]
+    spiffe_id: Option<String>,
+
+    /// Optional note shown to the approving administrator.
+    #[arg(long)]
+    comment: Option<String>,
+
+    /// MIA helper socket path. Used only when `--spiffe-id` is omitted.
+    #[arg(long)]
+    socket: Option<String>,
+
+    /// MIA environment selector (`mia-<env>.toml`). Used only when
+    /// `--spiffe-id` is omitted; ignored when `--socket` is given.
+    #[arg(long)]
+    environment: Option<String>,
+
+    /// Mount path of the ferrogate auth method.
+    #[arg(long, default_value = "ferrogate")]
+    mount: String,
+
+    #[deref]
+    #[command(flatten, next_help_heading = "HTTP Options")]
+    http_options: command::HttpOptions,
+
+    #[command(flatten, next_help_heading = "Output Options")]
+    output: command::OutputOptions,
+}
+
+impl CommandExecutor for Enroll {
+    fn main(&self) -> Result<(), RvError> {
+        let spiffe_id = match &self.spiffe_id {
+            Some(s) => s.trim().to_string(),
+            None => {
+                // Derive the identity from the local MIA: mint a throwaway
+                // token purely to read its `iss` (SPIFFE id). No server call.
+                let socket = resolve_socket(self.socket.as_deref(), self.environment.as_deref())?;
+                let dpop = DpopKey::generate();
+                let child =
+                    ferrogate_mia::request_child_token(&socket, "urn:bvault:ferrogate:enroll", &dpop.jkt(), 60)
+                        .map_err(|e| bv_error_string!(e))?;
+                ferrogate_mia::jws_claim_str(&child.jws, "iss").ok_or_else(|| {
+                    bv_error_string!("could not read SPIFFE id from the local MIA; pass --spiffe-id".to_string())
+                })?
+            }
+        };
+
+        let mut body = Map::new();
+        body.insert("spiffe_id".into(), Value::String(spiffe_id));
+        if let Some(c) = self.comment.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+            body.insert("comment".into(), Value::String(c.to_string()));
+        }
+
+        let client = self.client()?;
+        let path = format!("auth/{}/enroll", self.mount.trim_matches('/'));
+        let resp = client.logical().write(&path, Some(body))?;
+
+        // A gate refusal (disabled, allow/block-list, rate limit) comes back as
+        // {"error": "..."} in the data envelope — surface it as a command error.
+        if let Some(data) = resp.response_data.as_ref().and_then(|d| d.get("data")) {
+            if let Some(err) = data.get("error").and_then(|e| e.as_str()) {
+                return Err(bv_error_string!(err.to_string()));
+            }
+            self.output.print_value(data, true)?;
+        } else {
+            resp.print_debug_info();
+        }
+        Ok(())
     }
 }
 

@@ -730,6 +730,26 @@ export interface FerroGateConfig {
    * via `ferrogateRequirement()`; empty = the default `mia.toml`.
    */
   mia_environment: string;
+  /**
+   * Enable the unauthenticated machine self-enrolment endpoint
+   * (`auth/<mount>/enroll`). Off by default. A self-enrolment only records a
+   * `pending` machine for an administrator to approve — it never mints a
+   * token; the machine still authenticates through the attested login flow.
+   */
+  self_enroll_enabled: boolean;
+  /**
+   * Callers permitted to self-enrol. Each entry matches the source IP (when it
+   * parses as an IP/CIDR) or the claimed `spiffe_id` (exact, or prefix ending
+   * in `*`) / machine id. Non-empty = only matching callers; empty = any.
+   */
+  self_enroll_allowlist: string[];
+  /**
+   * Callers refused self-enrolment (matched like `self_enroll_allowlist`). A
+   * block-list match always wins over the allow-list.
+   */
+  self_enroll_blocklist: string[];
+  /** Per-source-IP self-enrolment attempts per minute (0 = unlimited). */
+  self_enroll_rate_limit_per_min: number;
 }
 
 /**
@@ -761,6 +781,12 @@ export interface FerroGateMachine {
   last_login_ip: string;
   reject_reason: string;
   comment: string;
+  /**
+   * True when this record was created by the unauthenticated self-enrolment
+   * endpoint (a machine requesting its own registration) rather than by an
+   * admin `register` call or an attested `login` first-sighting.
+   */
+  self_enrolled?: boolean;
 }
 
 // Result of a MIA self-bootstrap / machine-login attempt.

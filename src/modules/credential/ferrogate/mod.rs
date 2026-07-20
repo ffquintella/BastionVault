@@ -171,6 +171,34 @@ pub struct FerroGateConfig {
     /// the default environment (`mia.toml`).
     #[serde(default)]
     pub mia_environment: String,
+    /// Enable the unauthenticated machine self-enrolment endpoint
+    /// (`auth/<mount>/enroll`). When `false` (the default) the endpoint refuses
+    /// every request. Self-enrolment only records a `pending` machine for an
+    /// administrator to approve — it NEVER mints a token or grants access; a
+    /// machine still authenticates through the attested `login` flow. Pre-
+    /// approving a self-enrolled (self-asserted, therefore untrusted) SPIFFE ID
+    /// grants nothing unless that machine can also attest as the same identity.
+    #[serde(default)]
+    pub self_enroll_enabled: bool,
+    /// Allow-list gating which callers may self-enrol. Each entry is matched
+    /// against BOTH the request source IP and the caller's claimed identity: an
+    /// entry that parses as an IP or CIDR matches the source IP; any other entry
+    /// matches the claimed `spiffe_id` (exact, or as a prefix when it ends with
+    /// `*`) or the 64-hex machine id. When the list is non-empty a caller must
+    /// match at least one entry; an empty list admits any caller (still subject
+    /// to `self_enroll_blocklist` and the rate limit).
+    #[serde(default)]
+    pub self_enroll_allowlist: Vec<String>,
+    /// Block-list of callers refused self-enrolment, matched exactly as
+    /// `self_enroll_allowlist`. A block-list match always wins over the
+    /// allow-list.
+    #[serde(default)]
+    pub self_enroll_blocklist: Vec<String>,
+    /// Per-source-IP self-enrolment rate limit (requests per minute);
+    /// `0` = unlimited. Defaults to a low value to blunt pending-queue flooding
+    /// of the unauthenticated endpoint.
+    #[serde(default = "default_self_enroll_rate")]
+    pub self_enroll_rate_limit_per_min: u32,
 }
 
 fn default_clock_leeway() -> i64 {
@@ -191,6 +219,10 @@ fn default_jwks_refresh() -> i64 {
 
 fn default_login_rate() -> u32 {
     10
+}
+
+fn default_self_enroll_rate() -> u32 {
+    5
 }
 
 impl Default for FerroGateConfig {
@@ -215,6 +247,10 @@ impl Default for FerroGateConfig {
             require_user_token: false,
             require_machine_identity: false,
             mia_environment: String::new(),
+            self_enroll_enabled: false,
+            self_enroll_allowlist: Vec::new(),
+            self_enroll_blocklist: Vec::new(),
+            self_enroll_rate_limit_per_min: default_self_enroll_rate(),
         }
     }
 }
@@ -273,6 +309,12 @@ pub struct MachineEntry {
     /// Free-text note recorded at registration / approval.
     #[serde(default)]
     pub comment: String,
+    /// True when this record was created by the unauthenticated self-enrolment
+    /// endpoint (a machine requesting its own registration) rather than by an
+    /// administrator `register` call or an attested `login` first-sighting.
+    /// Lets operators tell self-requested pending machines apart in the queue.
+    #[serde(default)]
+    pub self_enrolled: bool,
 }
 
 /// Stable, path-safe handle for a SPIFFE ID (BLAKE3 hex). Used as the storage
@@ -297,6 +339,9 @@ pub struct FerroGateBackendInner {
     pub jwks_cache: ArcSwapOption<CachedJwks>,
     /// Per-source-IP login counters keyed by `ip` → `(minute_window, count)`.
     pub login_attempts: dashmap::DashMap<String, (i64, u32)>,
+    /// Per-source-IP self-enrolment counters, kept separate from `login_attempts`
+    /// so the two unauthenticated endpoints do not share a rate budget.
+    pub enroll_attempts: dashmap::DashMap<String, (i64, u32)>,
 }
 
 #[derive(Deref)]
@@ -312,13 +357,14 @@ impl FerroGateBackend {
                 core,
                 jwks_cache: ArcSwapOption::empty(),
                 login_attempts: dashmap::DashMap::new(),
+                enroll_attempts: dashmap::DashMap::new(),
             }),
         }
     }
 
     pub fn new_backend(&self) -> LogicalBackend {
         let mut backend = new_logical_backend!({
-            unauth_paths: ["login", "status", "requirement"],
+            unauth_paths: ["login", "status", "requirement", "enroll"],
             root_paths: ["config", "register", "machines", "machines/*"],
             help: FERROGATE_BACKEND_HELP,
         });
@@ -326,6 +372,7 @@ impl FerroGateBackend {
         backend.paths.push(Arc::new(self.config_path()));
         backend.paths.push(Arc::new(self.requirement_path()));
         backend.paths.push(Arc::new(self.register_path()));
+        backend.paths.push(Arc::new(self.enroll_path()));
         backend.paths.push(Arc::new(self.machines_list_path()));
         backend.paths.push(Arc::new(self.machine_path()));
         backend.paths.push(Arc::new(self.machine_approve_path()));
@@ -990,5 +1037,168 @@ mod test {
         req.body = json!({ "token": "x" }).as_object().cloned();
         let resp = core.handle_request(&mut req).await;
         assert!(resp.is_err() || matches!(resp, Ok(Some(Response { auth: None, .. }))));
+    }
+
+    // ── self-enrolment (unauthenticated) ───────────────────────────────────
+
+    /// POST an unauthenticated self-enrolment request from source `ip`.
+    #[maybe_async::maybe_async]
+    async fn do_enroll(core: &Core, spiffe_id: &str, ip: &str) -> Response {
+        let mut req = Request::new("auth/ferrogate/enroll");
+        req.operation = Operation::Write;
+        let mut body = serde_json::Map::new();
+        body.insert("spiffe_id".to_string(), json!(spiffe_id));
+        req.body = Some(body);
+        if !ip.is_empty() {
+            req.connection = Some(crate::logical::connection::Connection {
+                peer_addr: ip.to_string(),
+                ..Default::default()
+            });
+        }
+        core.handle_request(&mut req).await.unwrap().expect("enroll response")
+    }
+
+    fn enroll_error(resp: &Response) -> String {
+        resp.data.as_ref().and_then(|d| d.get("error")).and_then(|e| e.as_str()).unwrap_or_default().to_string()
+    }
+
+    /// End-to-end: a machine self-enrols (pending), an admin approves it, and
+    /// the machine then authenticates through the normal attested `login` flow.
+    /// Self-enrol never mints a token; re-enrolling never downgrades the record.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_ferrogate_self_enroll_lifecycle() {
+        let (_bvault, core, root_token) = new_unseal_test_bastion_vault("test_ferrogate_self_enroll_lifecycle").await;
+        test_mount_auth_api(&core, &root_token, "ferrogate", "ferrogate").await;
+
+        let (sk, pk) = CompositeSecretKey::generate().unwrap();
+        let kid = "host-enroll-1";
+        let aud = "https://vault.example.com";
+        let iss = "spiffe://ferrogate.test/host/enroll";
+        let now = now_secs();
+        let ed_sk = SigningKey::from_bytes(&[3u8; 32]);
+        let (proof, jkt) = mint_dpop(&ed_sk, "POST", aud, now);
+        let jws = mint_child(&sk, kid, iss, aud, &jkt, now, now + 3600);
+
+        let cfg = json!({
+            "trust_domain": "ferrogate.test",
+            "expected_audience": aud,
+            "jwks_source": "static_jwks",
+            "static_jwks": jwks_json(kid, &pk),
+            "self_enroll_enabled": true,
+        })
+        .as_object()
+        .cloned();
+        test_write_api(&core, &root_token, "auth/ferrogate/config", true, cfg).await.unwrap();
+
+        // Self-enrol → pending, flagged self_enrolled.
+        let r = do_enroll(&core, iss, "203.0.113.9").await;
+        let data = r.data.unwrap();
+        assert_eq!(data["status"], status::PENDING);
+        assert_eq!(data["spiffe_id"], iss);
+        let id = machine_id(iss);
+        assert_eq!(data["id"], id);
+
+        let show = test_read_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}"), true)
+            .await
+            .unwrap()
+            .unwrap();
+        let sd = show.data.unwrap();
+        assert_eq!(sd["status"], status::PENDING);
+        assert_eq!(sd["self_enrolled"], true);
+
+        // Still pending → attested login is denied.
+        let r = do_login(&core, &jws, Some(&proof)).await.unwrap();
+        assert!(r.auth.is_none(), "a pending self-enrolled machine must not authenticate");
+
+        // Admin approves; the pre-approved machine now authenticates via login.
+        let appr = json!({ "policies": "default", "ttl_seconds": 600 }).as_object().cloned();
+        test_write_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}/approve"), true, appr)
+            .await
+            .unwrap();
+        let r = do_login(&core, &jws, Some(&proof)).await.unwrap();
+        let auth = r.auth.expect("approved self-enrolled machine mints a token");
+        assert!(auth.policies.contains(&"default".to_string()));
+
+        // Re-enrol is idempotent and never downgrades the approved record.
+        let r = do_enroll(&core, iss, "203.0.113.9").await;
+        assert_eq!(r.data.unwrap()["status"], status::APPROVED);
+    }
+
+    /// Self-enrolment is refused (and records nothing) unless the mount opts in.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_ferrogate_self_enroll_disabled_by_default() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_ferrogate_self_enroll_disabled_by_default").await;
+        test_mount_auth_api(&core, &root_token, "ferrogate", "ferrogate").await;
+
+        let iss = "spiffe://ferrogate.test/host/nope";
+        let r = do_enroll(&core, iss, "10.0.0.1").await;
+        assert!(enroll_error(&r).starts_with("self_enroll_disabled"), "got: {}", enroll_error(&r));
+
+        // Nothing was persisted.
+        let id = machine_id(iss);
+        let show = test_read_api(&core, &root_token, &format!("auth/ferrogate/machines/{id}"), true).await.unwrap();
+        assert!(show.is_none(), "a disabled endpoint must not create a record");
+    }
+
+    /// Allow-list / block-list gating: a block-list match wins over the
+    /// allow-list, and a non-empty allow-list rejects unmatched callers. Rules
+    /// match either the source IP (IP/CIDR entries) or the claimed identity.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_ferrogate_self_enroll_allow_block_lists() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_ferrogate_self_enroll_allow_block_lists").await;
+        test_mount_auth_api(&core, &root_token, "ferrogate", "ferrogate").await;
+
+        let cfg = json!({
+            "self_enroll_enabled": true,
+            "self_enroll_allowlist": "10.0.0.0/24,spiffe://ferrogate.test/host/good",
+            "self_enroll_blocklist": "203.0.113.66,spiffe://ferrogate.test/host/bad*",
+        })
+        .as_object()
+        .cloned();
+        test_write_api(&core, &root_token, "auth/ferrogate/config", true, cfg).await.unwrap();
+
+        // Blocked by source IP even though the id would otherwise be allowed.
+        let r = do_enroll(&core, "spiffe://ferrogate.test/host/good", "203.0.113.66").await;
+        assert!(enroll_error(&r).starts_with("self_enroll_denied"), "IP block: {}", enroll_error(&r));
+
+        // Block-list (id prefix) wins over an allow-listed IP.
+        let r = do_enroll(&core, "spiffe://ferrogate.test/host/badactor", "10.0.0.5").await;
+        assert!(enroll_error(&r).starts_with("self_enroll_denied"), "id block wins: {}", enroll_error(&r));
+
+        // Allowed by CIDR.
+        let r = do_enroll(&core, "spiffe://ferrogate.test/host/viacidr", "10.0.0.5").await;
+        assert_eq!(r.data.unwrap()["status"], status::PENDING);
+
+        // Allowed by exact id from an out-of-range IP.
+        let r = do_enroll(&core, "spiffe://ferrogate.test/host/good", "198.51.100.1").await;
+        assert_eq!(r.data.unwrap()["status"], status::PENDING);
+
+        // Non-empty allow-list rejects an unmatched caller.
+        let r = do_enroll(&core, "spiffe://ferrogate.test/host/other", "198.51.100.1").await;
+        assert!(enroll_error(&r).starts_with("self_enroll_denied"), "not allow-listed: {}", enroll_error(&r));
+    }
+
+    /// The per-source-IP rate limit blunts pending-queue flooding; a different
+    /// IP keeps its own budget.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_ferrogate_self_enroll_rate_limit() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_ferrogate_self_enroll_rate_limit").await;
+        test_mount_auth_api(&core, &root_token, "ferrogate", "ferrogate").await;
+
+        let cfg = json!({ "self_enroll_enabled": true, "self_enroll_rate_limit_per_min": 2 }).as_object().cloned();
+        test_write_api(&core, &root_token, "auth/ferrogate/config", true, cfg).await.unwrap();
+
+        let ip = "192.0.2.7";
+        assert_eq!(do_enroll(&core, "spiffe://ferrogate.test/host/r1", ip).await.data.unwrap()["status"], status::PENDING);
+        assert_eq!(do_enroll(&core, "spiffe://ferrogate.test/host/r2", ip).await.data.unwrap()["status"], status::PENDING);
+        let r = do_enroll(&core, "spiffe://ferrogate.test/host/r3", ip).await;
+        assert!(enroll_error(&r).starts_with("rate_limited"), "3rd from same IP: {}", enroll_error(&r));
+
+        // A different source IP has its own budget.
+        let r = do_enroll(&core, "spiffe://ferrogate.test/host/r4", "192.0.2.8").await;
+        assert_eq!(r.data.unwrap()["status"], status::PENDING);
     }
 }
