@@ -17,13 +17,40 @@ interface Props {
   toast: (kind: "success" | "error" | "info", msg: string) => void;
 }
 
+/** Outcome of the live value comparison for a case with an expected value. */
+interface ValueCheck {
+  /** True when the live value equalled `expect_value`. */
+  ok?: boolean;
+  /** The live value found for `expect_key` (undefined when the key is absent). */
+  actual?: string;
+  /** Set when the value could not be read/compared (not an error state per se). */
+  error?: string;
+}
+
 interface Row extends PolicyTestCase {
   /** Authoritative verdict from the last Run, if any. */
   verdict?: PolicyTestResultRow;
+  /** Live value-assertion outcome from the last Run, if any. */
+  valueCheck?: ValueCheck;
 }
 
 function emptyRow(): Row {
   return { path: "", capability: "read", expect: "allow" };
+}
+
+/**
+ * Map a KV v2 policy path (`<mount>/data/<secret>`) to the (mount, path)
+ * pair `read_secret` expects. The GUI's `read_secret` re-inserts the `data/`
+ * infix via `adjust_kv_path`, so we hand it the mount (with the trailing
+ * slash it strips) and the mount-prefixed logical path *without* the infix —
+ * exactly what the Secrets page passes. Returns null for any other shape
+ * (metadata paths, non-KV mounts), where a value assertion is meaningless.
+ */
+function policyPathToKvRead(policyPath: string): { mount: string; path: string } | null {
+  const m = policyPath.match(/^([^/]+)\/data\/(.+)$/);
+  if (!m) return null;
+  const mount = m[1];
+  return { mount: `${mount}/`, path: `${mount}/${m[2]}` };
 }
 
 /**
@@ -48,7 +75,7 @@ export function PolicyValidatorPanel({ name, hcl, savedCases, onSavedCasesChange
   const parseErrors = parsed.ok ? [] : parsed.errors;
 
   function update(i: number, patch: Partial<Row>) {
-    setRows(rows.map((r, idx) => (idx === i ? { ...r, ...patch, verdict: undefined } : r)));
+    setRows(rows.map((r, idx) => (idx === i ? { ...r, ...patch, verdict: undefined, valueCheck: undefined } : r)));
   }
   function addRow() {
     setRows([...rows, emptyRow()]);
@@ -64,7 +91,7 @@ export function PolicyValidatorPanel({ name, hcl, savedCases, onSavedCasesChange
     try {
       const res = await api.policyTest(
         hcl,
-        cases.map((c) => ({ path: c.path, capability: c.capability })),
+        cases.map((c) => ({ path: c.path, capability: c.capability, env: c.env?.trim() || undefined })),
       );
       if (!res.parse_ok) {
         toast("error", `Policy does not parse: ${res.errors[0] ?? "syntax error"}`);
@@ -72,10 +99,35 @@ export function PolicyValidatorPanel({ name, hcl, savedCases, onSavedCasesChange
       }
       // Map verdicts back onto the rows by index of the filtered set.
       let k = 0;
+      const verdicts = rows.map((r) => (r.path.trim() ? res.results[k++] : undefined));
+
+      // For cases asserting a value, read the live secret and compare. Only
+      // meaningful when the case expects `allow` and the policy did allow it.
+      const valueChecks = await Promise.all(
+        rows.map(async (r, i): Promise<ValueCheck | undefined> => {
+          const v = verdicts[i];
+          if (!v || !r.expect_value?.length) return undefined;
+          if (r.expect !== "allow") return { error: "needs expect = allow" };
+          if (!v.allowed) return { error: "denied — cannot read value" };
+          const kv = policyPathToKvRead(r.path.trim());
+          if (!kv) return { error: "not a kv-v2 data path" };
+          const key = r.expect_key?.trim();
+          if (!key) return { error: "no key specified" };
+          try {
+            const secret = await api.readSecret(kv.path, kv.mount, "kv-v2", r.env?.trim() || undefined);
+            const raw = secret.data?.[key];
+            const actual = raw == null ? undefined : String(raw);
+            return { ok: actual === r.expect_value, actual };
+          } catch (e: unknown) {
+            return { error: extractError(e) };
+          }
+        }),
+      );
+
       setRows(
-        rows.map((r) => {
-          if (!r.path.trim()) return { ...r, verdict: undefined };
-          return { ...r, verdict: res.results[k++] };
+        rows.map((r, i) => {
+          if (!r.path.trim()) return { ...r, verdict: undefined, valueCheck: undefined };
+          return { ...r, verdict: verdicts[i], valueCheck: valueChecks[i] };
         }),
       );
     } catch (e: unknown) {
@@ -90,7 +142,15 @@ export function PolicyValidatorPanel({ name, hcl, savedCases, onSavedCasesChange
     try {
       const cases: PolicyTestCase[] = rows
         .filter((r) => r.path.trim())
-        .map((r) => ({ path: r.path.trim(), capability: r.capability, expect: r.expect, note: r.note }));
+        .map((r) => ({
+          path: r.path.trim(),
+          capability: r.capability,
+          expect: r.expect,
+          note: r.note,
+          env: r.env?.trim() || undefined,
+          expect_key: r.expect_key?.trim() || undefined,
+          expect_value: r.expect_value || undefined,
+        }));
       await api.writePolicyTests(name, cases);
       onSavedCasesChange(cases);
       toast("success", `Saved ${cases.length} test case${cases.length === 1 ? "" : "s"}`);
@@ -159,55 +219,90 @@ export function PolicyValidatorPanel({ name, hcl, savedCases, onSavedCasesChange
       >
         <p className="mb-3 text-xs text-[var(--color-text-muted)]">
           Each case asserts the policy should <em>allow</em> or <em>deny</em> a capability on a path. Run evaluates them
-          against the authoritative backend matcher and shows the rule that decided each verdict. Saved cases gate every
-          future save.
+          against the authoritative backend matcher and shows the rule that decided each verdict. An optional{" "}
+          <strong>Environment</strong> is fed to the matcher as the <code>env</code> request parameter, so a rule that
+          restricts environments (<code>required_parameters</code>/<code>allowed_parameters</code>) is actually
+          exercised. Set an <strong>expected value</strong> to additionally read the live secret and check the value
+          matches — this runs at <em>Run</em> time only and does not gate saves. Saved cases gate every future save on
+          their allow/deny verdict.
         </p>
-        <div className="space-y-2">
+        <div className="space-y-3">
           {rows.map((r, i) => (
-            <div key={i} className="grid grid-cols-12 items-end gap-2">
-              <div className="col-span-4 min-w-0">
-                <Input
-                  label={i === 0 ? "Path" : undefined}
-                  value={r.path}
-                  onChange={(e) => update(i, { path: e.target.value })}
-                  placeholder="secret/data/team/x"
-                />
-              </div>
-              <div className="col-span-2">
-                <Select
-                  label={i === 0 ? "Capability" : undefined}
-                  value={r.capability}
-                  onChange={(e) => update(i, { capability: e.target.value })}
-                  options={CAPABILITIES.map((c) => ({ value: c, label: c }))}
-                />
-              </div>
-              <div className="col-span-2">
-                <Select
-                  label={i === 0 ? "Expect" : undefined}
-                  value={r.expect}
-                  onChange={(e) => update(i, { expect: e.target.value as "allow" | "deny" })}
-                  options={[
-                    { value: "allow", label: "allow" },
-                    { value: "deny", label: "deny" },
-                  ]}
-                />
-              </div>
-              <div className="col-span-3 min-w-0">
-                {r.verdict ? (
-                  <VerdictCell row={r} />
-                ) : (
+            <div
+              key={i}
+              className="space-y-2 rounded-md border border-[var(--color-border)] p-2"
+            >
+              <div className="grid grid-cols-12 items-end gap-2">
+                <div className="col-span-5 min-w-0">
                   <Input
-                    label={i === 0 ? "Note" : undefined}
-                    value={r.note ?? ""}
-                    onChange={(e) => update(i, { note: e.target.value })}
+                    label={i === 0 ? "Path" : undefined}
+                    value={r.path}
+                    onChange={(e) => update(i, { path: e.target.value })}
+                    placeholder="secret/data/team/x"
+                  />
+                </div>
+                <div className="col-span-2">
+                  <Select
+                    label={i === 0 ? "Capability" : undefined}
+                    value={r.capability}
+                    onChange={(e) => update(i, { capability: e.target.value })}
+                    options={CAPABILITIES.map((c) => ({ value: c, label: c }))}
+                  />
+                </div>
+                <div className="col-span-2 min-w-0">
+                  <Input
+                    label={i === 0 ? "Environment" : undefined}
+                    value={r.env ?? ""}
+                    onChange={(e) => update(i, { env: e.target.value })}
+                    placeholder="base"
+                  />
+                </div>
+                <div className="col-span-2">
+                  <Select
+                    label={i === 0 ? "Expect" : undefined}
+                    value={r.expect}
+                    onChange={(e) => update(i, { expect: e.target.value as "allow" | "deny" })}
+                    options={[
+                      { value: "allow", label: "allow" },
+                      { value: "deny", label: "deny" },
+                    ]}
+                  />
+                </div>
+                <div className="col-span-1 flex justify-end">
+                  <Button size="sm" variant="ghost" onClick={() => removeRow(i)} title="Remove case">
+                    ✕
+                  </Button>
+                </div>
+              </div>
+              <div className="grid grid-cols-12 items-end gap-2">
+                <div className="col-span-3 min-w-0">
+                  <Input
+                    label={i === 0 ? "Expect value: key" : undefined}
+                    value={r.expect_key ?? ""}
+                    onChange={(e) => update(i, { expect_key: e.target.value })}
                     placeholder="optional"
                   />
-                )}
-              </div>
-              <div className="col-span-1">
-                <Button size="sm" variant="ghost" onClick={() => removeRow(i)} title="Remove">
-                  ✕
-                </Button>
+                </div>
+                <div className="col-span-4 min-w-0">
+                  <Input
+                    label={i === 0 ? "= value" : undefined}
+                    value={r.expect_value ?? ""}
+                    onChange={(e) => update(i, { expect_value: e.target.value })}
+                    placeholder="expected value"
+                  />
+                </div>
+                <div className="col-span-5 min-w-0">
+                  {r.verdict ? (
+                    <VerdictCell row={r} />
+                  ) : (
+                    <Input
+                      label={i === 0 ? "Note" : undefined}
+                      value={r.note ?? ""}
+                      onChange={(e) => update(i, { note: e.target.value })}
+                      placeholder="optional"
+                    />
+                  )}
+                </div>
               </div>
             </div>
           ))}
@@ -233,21 +328,38 @@ export function PolicyValidatorPanel({ name, hcl, savedCases, onSavedCasesChange
 function verdictPasses(r: Row): boolean {
   if (!r.verdict) return false;
   const expectedAllow = r.expect === "allow";
-  return r.verdict.allowed === expectedAllow;
+  if (r.verdict.allowed !== expectedAllow) return false;
+  // A value assertion, when set, must also hold. An unresolvable check
+  // (error) fails the case so it can't silently pass.
+  if (r.expect_value?.length) return r.valueCheck?.ok === true;
+  return true;
 }
 
 function VerdictCell({ row }: { row: Row }) {
   const v = row.verdict!;
   const pass = verdictPasses(row);
+  const vc = row.valueCheck;
   return (
     <div className="flex flex-col gap-0.5 text-xs">
       <div className="flex items-center gap-1.5">
         <Badge variant={pass ? "success" : "error"} label={pass ? "pass" : "fail"} />
         <span className={v.allowed ? "text-green-400" : "text-red-400"}>{v.allowed ? "allowed" : "denied"}</span>
+        {row.env?.trim() ? (
+          <span className="text-[var(--color-text-muted)]">env={row.env.trim()}</span>
+        ) : null}
       </div>
       <span className="truncate text-[var(--color-text-muted)]" title={v.matched_path ?? "no rule matched"}>
         {v.matched_path ? `${v.match_kind}: ${v.matched_path}` : "no rule matched"}
       </span>
+      {vc ? (
+        <span className={vc.error ? "text-yellow-400" : vc.ok ? "text-green-400" : "text-red-400"}>
+          {vc.error
+            ? `value: ${vc.error}`
+            : vc.ok
+              ? "value matches"
+              : `value mismatch (got ${vc.actual ?? "∅"})`}
+        </span>
+      ) : null}
     </div>
   );
 }

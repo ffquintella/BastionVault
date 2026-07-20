@@ -63,7 +63,9 @@ pub async fn connect_remote(
         resolve_remote_address(&profile, tls_for_bv.as_ref()).await?;
 
     // Legacy `Client`: point it at the chosen URL.
-    let mut client_builder = Client::new().with_addr(&effective_address);
+    let mut client_builder = Client::new()
+        .with_addr(&effective_address)
+        .with_system_proxy(profile.use_system_proxy);
     if effective_address.starts_with("https://") {
         client_builder = client_builder.with_tls_config(build_legacy_tls(&profile)?);
     }
@@ -87,6 +89,7 @@ pub async fn connect_remote(
         .with_address(&effective_address)
         .with_api_version(2)
         .with_cluster_discovery(false)
+        .with_system_proxy(profile.use_system_proxy)
         .with_health_config(health_cfg);
     // Hand the discovered cluster topology to the pinned backend so it
     // can fail read-only requests over to another healthy node mid-
@@ -136,6 +139,7 @@ async fn resolve_remote_address(
     };
 
     let mut health_cfg = HealthConfig::default();
+    health_cfg.use_system_proxy = profile.use_system_proxy;
     if let Some(ms) = profile.health_probe_timeout_ms {
         if ms > 0 {
             health_cfg.probe_timeout = Duration::from_millis(ms.into());
@@ -319,6 +323,7 @@ pub(crate) async fn cluster_node_health(
     }
 
     let mut health_cfg = HealthConfig::default();
+    health_cfg.use_system_proxy = profile.use_system_proxy;
     if let Some(ms) = profile.health_probe_timeout_ms {
         if ms > 0 {
             health_cfg.probe_timeout = Duration::from_millis(ms.into());
@@ -355,7 +360,9 @@ pub(crate) async fn cluster_node_health(
 /// CLI fans seal/unseal out — `Client` is immutable once built, so a
 /// per-node target means a per-node client.
 fn client_for_node(profile: &RemoteProfile, url: &str) -> CmdResult<Client> {
-    let mut builder = Client::new().with_addr(url);
+    let mut builder = Client::new()
+        .with_addr(url)
+        .with_system_proxy(profile.use_system_proxy);
     if url.starts_with("https://") {
         builder = builder.with_tls_config(build_legacy_tls(profile)?);
     }
@@ -569,6 +576,7 @@ pub async fn cluster_discover(profile: RemoteProfile) -> CmdResult<ClusterDiagno
         discovery_cfg.srv_service = svc.to_string();
     }
     let mut health_cfg = HealthConfig::default();
+    health_cfg.use_system_proxy = profile.use_system_proxy;
     if let Some(ms) = profile.health_probe_timeout_ms.filter(|m| *m > 0) {
         health_cfg.probe_timeout = Duration::from_millis(ms.into());
     }

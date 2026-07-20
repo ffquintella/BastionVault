@@ -126,6 +126,31 @@ See the [roadmap](../roadmaps/policy-builder-validator.md) for full phase notes 
 - **TS (`vitest`)** — round-trip property test (HCL → blocks → HCL is stable for a corpus of real policies including `administrator`, `default`, `totp-admin`), lint detection cases, and parity spot-checks where the client preview must agree with the backend verdict.
 - **e2e** — author a policy in the builder, save, confirm the stored HCL parses server-side and that saved test cases gate a regressive edit.
 
+## Effectivity test cases: environment + value assertions
+
+Beyond the base `(path, capability, expect)` assertion, a case carries three
+optional fields (persisted on `PolicyTestCase`, omitted when empty):
+
+- **`env`** — fed to the dry-run matcher as the `env` request parameter. This
+  is the one place the dry-run leaves its bitmap-only mode: when `env` is set,
+  `handle_policy_test` routes the case through
+  `ACL::explain_capability_with_params`, which maps the capability to a real
+  `Operation` and runs the production matcher with `check_only = false` — the
+  only path that evaluates the governing rule's `required_parameters` /
+  `allowed_parameters` / `denied_parameters` (i.e. the visual builder's
+  "Restrict to environments"). An empty/absent `env` is byte-for-byte the old
+  bitmap-only dry-run, so env-less cases and the **regression gate keep their
+  existing behavior**; the gate feeds each saved case's `env` when present so
+  gating stays consistent with what an operator tested.
+- **`expect_key` / `expect_value`** — a value assertion. At **Run** time the
+  GUI reads the live secret at the case's `<mount>/data/<path>` in the chosen
+  `env` and the case passes only if the allow verdict holds **and** the live
+  value equals `expect_value`. This is a Run-time convenience check that reads
+  live state; it is deliberately **not** enforced by the save-time regression
+  gate (which must not couple a policy save to mutable secret contents). Value
+  assertions only apply to `read` on a KV v2 data path; other paths report
+  "not a kv-v2 data path".
+
 ## Out of scope (deferred follow-ups)
 
 - Monaco/CodeMirror syntax highlighting for the source tab.

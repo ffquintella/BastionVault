@@ -82,6 +82,14 @@ export interface RemoteProfile {
    * default `mia.toml`.
    */
   mia_environment?: string;
+  /**
+   * When `true`, outbound HTTP(S) connections to this server honour the
+   * system-configured proxy (the `ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY`
+   * environment variables). When `false`/unset (the default) the proxy is
+   * explicitly bypassed even if those variables are set, so a stray OS/shell
+   * proxy never silently reroutes vault traffic.
+   */
+  use_system_proxy?: boolean;
 }
 
 export interface RemoteStatus {
@@ -332,6 +340,9 @@ export type PolicyCapability =
 export interface PolicyTestCaseInput {
   path: string;
   capability: string;
+  /** Optional environment, fed to the matcher as the `env` request param so
+   *  the rule's env restriction (required/allowed_parameters) is evaluated. */
+  env?: string;
 }
 
 /** How the rule that decided a verdict related to the evaluated path. */
@@ -371,6 +382,13 @@ export interface PolicyTestCase {
   expect: "allow" | "deny";
   /** Optional human description. */
   note?: string;
+  /** Optional environment fed to the dry-run as the `env` request param. */
+  env?: string;
+  /** Value assertion: the secret key whose live value to compare. */
+  expect_key?: string;
+  /** Value assertion: the expected value of `expect_key`. Checked at Run
+   *  time via a live read; not enforced by the save-time regression gate. */
+  expect_value?: string;
 }
 
 // Resources

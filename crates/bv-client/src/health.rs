@@ -134,6 +134,11 @@ pub struct HealthConfig {
     /// Maximum concurrent probes. Real clusters are small so the
     /// default just runs everything in parallel.
     pub parallelism: u8,
+    /// When `true`, discovery health probes honour the system proxy (the
+    /// `ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` environment variables ureq
+    /// reads by default). When `false` (the default) the proxy is explicitly
+    /// cleared so probes take the same path as the data-plane client.
+    pub use_system_proxy: bool,
 }
 
 impl Default for HealthConfig {
@@ -141,6 +146,7 @@ impl Default for HealthConfig {
         Self {
             probe_timeout: Duration::from_millis(1500),
             parallelism: 4,
+            use_system_proxy: false,
         }
     }
 }
@@ -156,7 +162,7 @@ pub async fn probe_all(
     cfg: &HealthConfig,
     tls: Option<&ClientTlsConfig>,
 ) -> Vec<ProbeResult> {
-    let agent = build_probe_agent(cfg.probe_timeout, tls);
+    let agent = build_probe_agent(cfg.probe_timeout, tls, cfg.use_system_proxy);
     let parallelism = cfg.parallelism.max(1) as usize;
 
     let mut handles: Vec<tokio::task::JoinHandle<(usize, ProbeResult)>> =
@@ -196,13 +202,22 @@ pub async fn probe_all(
     results.into_iter().map(|(_, r)| r).collect()
 }
 
-fn build_probe_agent(timeout: Duration, tls: Option<&ClientTlsConfig>) -> Agent {
+fn build_probe_agent(
+    timeout: Duration,
+    tls: Option<&ClientTlsConfig>,
+    use_system_proxy: bool,
+) -> Agent {
     let mut cfg = ureq::Agent::config_builder()
         .timeout_connect(Some(timeout))
         .timeout_global(Some(timeout))
         .http_status_as_error(false);
     if let Some(t) = tls {
         cfg = cfg.tls_config(t.tls_config.clone());
+    }
+    // ureq picks up the system proxy from the environment by default; clear
+    // it unless opted in so probes match the data-plane client's routing.
+    if !use_system_proxy {
+        cfg = cfg.proxy(None);
     }
     cfg.build().new_agent()
 }

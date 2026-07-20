@@ -174,6 +174,11 @@ export function ConnectPage() {
   // type a literal URL (skipped automatically) or untick this for
   // diagnostics against one HA node.
   const [clusterDiscovery, setClusterDiscovery] = useState(true);
+  // Use the system-configured proxy (ALL_PROXY / HTTPS_PROXY / HTTP_PROXY)
+  // for outbound connections. Off by default so a stray OS/shell proxy
+  // never silently reroutes vault traffic; opt in for corp environments
+  // where the vault is only reachable through the system proxy.
+  const [useSystemProxy, setUseSystemProxy] = useState(false);
   // MIA environment pinned to this server profile. "" = use the env the
   // server advertises (falling back to the default mia.toml). Selecting one
   // here re-targets which `mia-<env>.toml` socket the connect-time machine
@@ -839,6 +844,7 @@ export function ConnectPage() {
       setTlsSkipVerify(p.tls_skip_verify ?? false);
       setCaCertPath(p.ca_cert_path ?? "");
       setClusterDiscovery(p.cluster_discovery ?? true);
+      setUseSystemProxy(p.use_system_proxy ?? false);
       setRemoteMiaEnv(p.mia_environment ?? "");
     } else if (profile.spec.kind === "local") {
       const s = profile.spec as { storage_kind: string; data_dir?: string | null };
@@ -994,6 +1000,7 @@ export function ConnectPage() {
           tls_skip_verify: tlsSkipVerify,
           ca_cert_path: caCertPath || undefined,
           cluster_discovery: clusterDiscovery,
+          use_system_proxy: useSystemProxy,
           mia_environment: remoteMiaEnv.trim() || undefined,
         };
         spec = { kind: "remote", profile };
@@ -1599,6 +1606,25 @@ export function ConnectPage() {
                   Skip TLS certificate verification (insecure)
                 </span>
               </label>
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={useSystemProxy}
+                  onChange={(e) => setUseSystemProxy(e.target.checked)}
+                  className="rounded"
+                />
+                <span className="text-[var(--color-text-muted)]">
+                  Use system-configured proxy for HTTP connections
+                </span>
+              </label>
+              <p className="-mt-1 text-xs text-[var(--color-text-muted)]">
+                Off by default. When on, outbound connections honour the
+                system proxy (<span className="font-mono">HTTPS_PROXY</span> /{" "}
+                <span className="font-mono">HTTP_PROXY</span> /{" "}
+                <span className="font-mono">ALL_PROXY</span>); when off, any
+                such proxy is bypassed so vault traffic is never silently
+                rerouted.
+              </p>
               <Input
                 label="CA Certificate Path"
                 value={caCertPath}

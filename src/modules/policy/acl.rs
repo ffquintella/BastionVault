@@ -689,6 +689,73 @@ impl ACL {
         CapabilityExplain { allowed, matched_path, match_kind, denied_by_deny, is_root: false }
     }
 
+    /// Parameter-aware stateless dry-run. Like [`ACL::explain_capability`],
+    /// but the caller supplies request parameters (e.g. `env`) so the
+    /// matcher evaluates the governing rule's `required_parameters` /
+    /// `allowed_parameters` / `denied_parameters` — the constraints the
+    /// visual builder's "Restrict to environments" writes into the HCL.
+    ///
+    /// When `params` is empty this is *exactly* [`ACL::explain_capability`]
+    /// (bitmap-only, `check_only = true`), so env-less cases and the
+    /// save-time regression gate keep their existing behavior verbatim.
+    /// When params are present the capability is mapped to a concrete
+    /// request [`Operation`] and the production matcher runs with
+    /// `check_only = false` — the only path that exercises the parameter
+    /// maps in [`Permissions::check`]. Production only consults those maps
+    /// for Read/Write operations, so a capability that maps to neither
+    /// (sudo/deny/patch/…) falls back to the bitmap verdict.
+    pub fn explain_capability_with_params(
+        &self,
+        path: &str,
+        capability: Capability,
+        params: &serde_json::Map<String, serde_json::Value>,
+    ) -> CapabilityExplain {
+        if params.is_empty() {
+            return self.explain_capability(path, capability);
+        }
+
+        let op = match capability {
+            Capability::Read => Operation::Read,
+            Capability::List => Operation::List,
+            Capability::Create | Capability::Update => Operation::Write,
+            Capability::Delete => Operation::Delete,
+            // No request operation to carry the params on; the parameter
+            // maps would be ignored anyway, so keep the bitmap verdict.
+            _ => return self.explain_capability(path, capability),
+        };
+
+        let path = ensure_no_leading_slash(path);
+        let req = Request {
+            operation: op,
+            path: path.clone(),
+            data: Some(params.clone()),
+            ..Default::default()
+        };
+
+        let result = self.allow_operation(&req, false).unwrap_or_default();
+
+        if result.is_root {
+            return CapabilityExplain {
+                allowed: true,
+                is_root: true,
+                matched_path: Some("*".to_string()),
+                match_kind: MatchKind::Prefix,
+                denied_by_deny: false,
+            };
+        }
+
+        let denied_by_deny = result.capabilities_bitmap & Capability::Deny.to_bits() != 0;
+        let (matched_path, match_kind) = self.locate_match(&path);
+
+        CapabilityExplain {
+            allowed: result.allowed && !denied_by_deny,
+            matched_path,
+            match_kind,
+            denied_by_deny,
+            is_root: false,
+        }
+    }
+
     /// Best-effort identification of the rule that governs `path`, used
     /// only for the advisory `matched_path` / `match_kind` fields of the
     /// dry-run. Mirrors the production precedence — exact beats the winner
@@ -2403,5 +2470,54 @@ path "kv/deny" {
         assert!(ex.allowed);
         assert!(ex.is_root);
         assert!(!ex.denied_by_deny);
+    }
+
+    #[test]
+    fn test_explain_capability_with_params_env_restriction() {
+        // A rule restricting reads to specific environments, exactly as the
+        // visual builder's "Restrict to environments" emits it.
+        let policy = create_test_policy(
+            "env",
+            r#"
+            path "secret/data/team/*" {
+                capabilities = ["read"]
+                required_parameters = ["env"]
+                allowed_parameters = {
+                    "env" = ["develop", "staging"]
+                }
+            }
+            path "secret/data/open/*" {
+                capabilities = ["read"]
+            }
+            "#,
+        );
+        let acl = ACL::new(&[Arc::new(policy)]).unwrap();
+
+        let with_env = |e: &str| {
+            let mut p = Map::new();
+            p.insert("env".into(), Value::String(e.into()));
+            p
+        };
+
+        // An allowed environment passes the parameter check.
+        let ex = acl.explain_capability_with_params("secret/data/team/x", Capability::Read, &with_env("develop"));
+        assert!(ex.allowed, "develop is in allowed_parameters.env");
+        assert!(!ex.denied_by_deny);
+        assert_eq!(ex.match_kind, MatchKind::Prefix);
+
+        // An environment outside the allow-list is denied by the param check.
+        let ex = acl.explain_capability_with_params("secret/data/team/x", Capability::Read, &with_env("prod"));
+        assert!(!ex.allowed, "prod is not in allowed_parameters.env");
+        assert!(!ex.denied_by_deny);
+
+        // Empty params delegate to the bitmap-only path: the capability is
+        // granted and required_parameters is NOT enforced (documented dry-run
+        // limitation preserved for env-less cases and the regression gate).
+        let ex = acl.explain_capability_with_params("secret/data/team/x", Capability::Read, &Map::new());
+        assert!(ex.allowed);
+
+        // A rule with no parameter constraints is unaffected by a stray env.
+        let ex = acl.explain_capability_with_params("secret/data/open/y", Capability::Read, &with_env("prod"));
+        assert!(ex.allowed);
     }
 }

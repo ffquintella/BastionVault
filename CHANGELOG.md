@@ -45,6 +45,41 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-07-20
+
+### Added
+
+#### Remote server — optional system-proxy support
+
+- Add a **"Use system-configured proxy for HTTP connections"** toggle to the
+  Add/Edit Server dialog (default **off**). When on, outbound connections to
+  that server honour the system proxy (`HTTPS_PROXY` / `HTTP_PROXY` /
+  `ALL_PROXY`); when off, any such environment proxy is explicitly bypassed so
+  vault traffic is never silently rerouted. Persisted per profile as
+  `RemoteProfile.use_system_proxy` (`#[serde(default)]`, so existing preference
+  files load unchanged). Threaded through the legacy `Client`
+  (`with_system_proxy`), the bv-client `RemoteBackend` builder
+  (`with_system_proxy`), and the discovery health probes
+  (`HealthConfig.use_system_proxy`) so the connect, node-health, and
+  cluster-discover paths all route consistently.
+
+#### Policy Validate & test — environment parameter + value assertions
+
+- Add an optional **Environment** to each effectivity test case. It is fed to
+  the dry-run matcher as the `env` request parameter, so a rule that restricts
+  environments (`required_parameters` / `allowed_parameters.env` — what the
+  visual builder's "Restrict to environments" emits) is now actually exercised.
+  Env-less cases and the save-time regression gate keep the existing
+  bitmap-only behavior verbatim. New `ACL::explain_capability_with_params`
+  (`src/modules/policy/acl.rs`); `sys/policies/acl/test` reads a per-case `env`.
+- Add an optional **value assertion** to each case (`expect_key` = `expect_value`).
+  At Run time the GUI reads the live secret at the case path in the chosen
+  environment and the case passes only if the allow verdict holds **and** the
+  live value matches. This is a Run-time check only — it does not gate saves.
+- Persist `env`, `expect_key`, `expect_value` on saved test cases
+  (`PolicyTestCase`); all are omitted when empty so existing saved cases stay
+  byte-stable. (`features/policy-builder-validator.md`)
+
 ## [0.32.0] - 2026-07-20
 
 ### Added

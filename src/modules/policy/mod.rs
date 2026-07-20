@@ -312,14 +312,23 @@ impl PolicyModule {
 
         // Cases parse independently of the policy so the GUI can still
         // render rows when the draft fails to parse.
-        let cases: Vec<(String, String)> = match req.get_data("cases") {
+        // The optional `env` is fed to the matcher as a request parameter so
+        // the governing rule's env restriction (`required_parameters` /
+        // `allowed_parameters.env`) is actually evaluated. Empty/absent env
+        // preserves the bitmap-only dry-run.
+        let cases: Vec<(String, String, Option<String>)> = match req.get_data("cases") {
             Ok(Value::Array(arr)) => arr
                 .iter()
                 .filter_map(|v| {
                     let o = v.as_object()?;
                     let path = o.get("path")?.as_str()?.to_string();
                     let cap = o.get("capability")?.as_str()?.to_string();
-                    Some((path, cap))
+                    let env = o
+                        .get("env")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string());
+                    Some((path, cap, env))
                 })
                 .collect(),
             _ => Vec::new(),
@@ -353,13 +362,20 @@ impl PolicyModule {
         let acl = ACL::new(&[Arc::new(policy)])?;
 
         let mut results = Vec::with_capacity(cases.len());
-        for (path, cap_str) in &cases {
+        for (path, cap_str, env) in &cases {
             let mut row = Map::new();
             row.insert("path".into(), Value::String(path.clone()));
             row.insert("capability".into(), Value::String(cap_str.clone()));
             match Capability::from_str(cap_str) {
                 Ok(cap) => {
-                    let ex = acl.explain_capability(path, cap);
+                    let ex = match env {
+                        Some(e) => {
+                            let mut params = Map::new();
+                            params.insert("env".into(), Value::String(e.clone()));
+                            acl.explain_capability_with_params(path, cap, &params)
+                        }
+                        None => acl.explain_capability(path, cap),
+                    };
                     row.insert("allowed".into(), Value::Bool(ex.allowed));
                     row.insert("denied_by_deny".into(), Value::Bool(ex.denied_by_deny));
                     row.insert("match_kind".into(), Value::String(ex.match_kind.as_str().into()));
@@ -406,6 +422,9 @@ impl PolicyModule {
                     m.insert("capability".into(), Value::String(c.capability.clone()));
                     m.insert("expect".into(), Value::String(c.expect.clone()));
                     m.insert("note".into(), Value::String(c.note.clone()));
+                    m.insert("env".into(), Value::String(c.env.clone()));
+                    m.insert("expect_key".into(), Value::String(c.expect_key.clone()));
+                    m.insert("expect_value".into(), Value::String(c.expect_value.clone()));
                     Value::Object(m)
                 })
                 .collect(),
@@ -443,7 +462,10 @@ impl PolicyModule {
                         .unwrap_or("allow")
                         .to_string();
                     let note = o.get("note").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    Some(PolicyTestCase { path, capability, expect, note })
+                    let env = o.get("env").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let expect_key = o.get("expect_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let expect_value = o.get("expect_value").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    Some(PolicyTestCase { path, capability, expect, note, env, expect_key, expect_value })
                 })
                 .collect(),
             _ => Vec::new(),

@@ -158,6 +158,10 @@ pub async fn list_policy_history(
 pub struct PolicyTestCaseInput {
     pub path: String,
     pub capability: String,
+    /// Optional environment, forwarded as the `env` request parameter so the
+    /// dry-run exercises the rule's env restriction.
+    #[serde(default)]
+    pub env: Option<String>,
 }
 
 /// Per-case verdict from the stateless dry-run endpoint.
@@ -207,6 +211,9 @@ pub async fn policy_test(
             let mut m = Map::new();
             m.insert("path".to_string(), Value::String(c.path));
             m.insert("capability".to_string(), Value::String(c.capability));
+            if let Some(env) = c.env.filter(|s| !s.is_empty()) {
+                m.insert("env".to_string(), Value::String(env));
+            }
             Value::Object(m)
         })
         .collect();
@@ -235,6 +242,15 @@ pub struct PolicyTestCase {
     pub expect: String,
     #[serde(default)]
     pub note: String,
+    /// Environment fed to the dry-run matcher as the `env` request param.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub env: String,
+    /// Value assertion: secret key to compare (checked live at Run time).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub expect_key: String,
+    /// Value assertion: expected value of `expect_key`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub expect_value: String,
 }
 
 /// Read the saved effectivity test cases attached to a policy (empty when

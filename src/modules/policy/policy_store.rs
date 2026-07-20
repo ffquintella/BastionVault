@@ -911,6 +911,17 @@ pub struct PolicyTestCase {
     pub expect: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    /// Optional environment fed to the matcher as the `env` request param,
+    /// so the rule's env restriction is exercised. Empty = bitmap-only.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub env: String,
+    /// Optional value assertion: the secret key to compare. Checked live at
+    /// Run time by the GUI, not by the save-time regression gate.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub expect_key: String,
+    /// Optional value assertion: the expected value of `expect_key`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub expect_value: String,
 }
 
 /// The main policy store structure.

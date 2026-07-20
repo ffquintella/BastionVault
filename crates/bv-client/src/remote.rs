@@ -59,6 +59,7 @@ mod builder_tests {
             .with_health_config(HealthConfig {
                 probe_timeout: std::time::Duration::from_millis(200),
                 parallelism: 2,
+                ..Default::default()
             })
             .build_with_discovery_using(&resolver)
             .await;
@@ -177,6 +178,12 @@ pub struct RemoteBackendBuilder {
     /// path, which discovers once and pins the node) or populated
     /// automatically by [`Self::build_with_discovery_using`].
     failover_candidates: Option<Vec<SrvCandidate>>,
+    /// When `Some(true)`, honour the system proxy (the `ALL_PROXY` /
+    /// `HTTPS_PROXY` / `HTTP_PROXY` environment variables ureq reads by
+    /// default). When `Some(false)` / `None` (the default) the proxy is
+    /// explicitly cleared in `build()` so a stray environment proxy never
+    /// silently reroutes traffic.
+    use_system_proxy: Option<bool>,
 }
 
 impl RemoteBackendBuilder {
@@ -239,6 +246,13 @@ impl RemoteBackendBuilder {
     /// engages when two or more candidates are supplied.
     pub fn with_failover_candidates(mut self, candidates: Vec<SrvCandidate>) -> Self {
         self.failover_candidates = Some(candidates);
+        self
+    }
+
+    /// Enable or disable honouring the system proxy for the built backend.
+    /// Defaults to disabled — see [`RemoteBackendBuilder::use_system_proxy`].
+    pub fn with_system_proxy(mut self, enabled: bool) -> Self {
+        self.use_system_proxy = Some(enabled);
         self
     }
 
@@ -332,6 +346,13 @@ impl RemoteBackendBuilder {
 
         if let Some(tls) = &self.tls {
             config_builder = config_builder.tls_config(tls.tls_config.clone());
+        }
+
+        // ureq picks up the system proxy from the environment by default;
+        // clear it unless the caller opted in so vault traffic isn't
+        // silently rerouted through a stray `HTTP(S)_PROXY`.
+        if !self.use_system_proxy.unwrap_or(false) {
+            config_builder = config_builder.proxy(None);
         }
 
         let agent = config_builder.build().new_agent();

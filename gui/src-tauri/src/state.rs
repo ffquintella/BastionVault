@@ -92,6 +92,14 @@ pub struct RemoteProfile {
     /// Optional/defaulted so old preference files load cleanly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mia_environment: Option<String>,
+    /// When `true`, outbound HTTP(S) connections to this server honour the
+    /// system-configured proxy (the `ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY`
+    /// environment variables ureq reads). When `false` (the default) the
+    /// proxy is explicitly bypassed even if those variables are set, so a
+    /// stray shell/OS proxy never silently reroutes vault traffic. Optional/
+    /// defaulted so old preference files load cleanly.
+    #[serde(default)]
+    pub use_system_proxy: bool,
 }
 
 fn default_cluster_discovery() -> bool {

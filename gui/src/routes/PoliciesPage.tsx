@@ -124,7 +124,7 @@ export function PoliciesPage() {
     if (savedCases.length === 0) return { failed: 0, total: 0 };
     const res = await api.policyTest(
       policyContent,
-      savedCases.map((c) => ({ path: c.path, capability: c.capability })),
+      savedCases.map((c) => ({ path: c.path, capability: c.capability, env: c.env?.trim() || undefined })),
     );
     if (!res.parse_ok) return { failed: savedCases.length, total: savedCases.length };
     let failed = 0;

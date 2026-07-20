@@ -52,6 +52,11 @@ pub struct Client {
     /// a different IP (e.g. 127.0.0.1). Wired up by
     /// `HttpOptions::client_at` when `--tls-server-name` is provided.
     pub override_socket_addr: Option<SocketAddr>,
+    /// When `true`, honour the system proxy (the `ALL_PROXY`/`HTTPS_PROXY`/
+    /// `HTTP_PROXY` environment variables ureq reads by default). When
+    /// `false` (the default) the proxy is explicitly cleared in `build()`
+    /// so a stray environment proxy never silently reroutes traffic.
+    pub use_system_proxy: bool,
 }
 
 /// One-shot resolver that returns the same socket address for any URI it
@@ -194,6 +199,13 @@ impl Client {
         self
     }
 
+    /// Enable or disable honouring the system proxy for this client. See
+    /// [`Client::use_system_proxy`].
+    pub fn with_system_proxy(mut self, enabled: bool) -> Self {
+        self.use_system_proxy = enabled;
+        self
+    }
+
     pub fn api_prefix(&self) -> &str {
         match self.api_version {
             2 => "/v2",
@@ -215,6 +227,13 @@ impl Client {
 
         if let Some(tls_config) = &self.tls_config {
             config_builder = config_builder.tls_config(tls_config.tls_config.clone());
+        }
+
+        // ureq picks up the system proxy from the environment by default;
+        // clear it unless the operator opted in so vault traffic isn't
+        // silently rerouted through a stray `HTTP(S)_PROXY`.
+        if !self.use_system_proxy {
+            config_builder = config_builder.proxy(None);
         }
 
         let config = config_builder.build();
