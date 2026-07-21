@@ -13,7 +13,11 @@ import { useVaultStore } from "../stores/vaultStore";
 import { useAuthStore } from "../stores/authStore";
 import { useMiaEnvStore } from "../stores/miaEnvStore";
 import { useNamespaceStore } from "../stores/namespaceStore";
-import type { RemoteProfile, FerroGateEnrolment } from "../lib/types";
+import type {
+  RemoteProfile,
+  FerroGateEnrolment,
+  ProxyTestResult,
+} from "../lib/types";
 import type { VaultProfile, VaultSpec } from "../lib/api";
 import * as api from "../lib/api";
 import { extractError, isVaultSealed } from "../lib/error";
@@ -174,11 +178,18 @@ export function ConnectPage() {
   // type a literal URL (skipped automatically) or untick this for
   // diagnostics against one HA node.
   const [clusterDiscovery, setClusterDiscovery] = useState(true);
-  // Use the system-configured proxy (ALL_PROXY / HTTPS_PROXY / HTTP_PROXY)
-  // for outbound connections. Off by default so a stray OS/shell proxy
-  // never silently reroutes vault traffic; opt in for corp environments
-  // where the vault is only reachable through the system proxy.
+  // Use the system-configured proxy for outbound connections: the OS
+  // proxy (macOS System Settings, Windows proxy, GNOME) or the
+  // ALL_PROXY / HTTPS_PROXY / HTTP_PROXY env vars (which take precedence).
+  // Off by default so a stray OS/shell proxy never silently reroutes vault
+  // traffic; opt in for corp environments where the vault is only
+  // reachable through the system proxy.
   const [useSystemProxy, setUseSystemProxy] = useState(false);
+  // "Test proxy" button state: probes the server through the resolved
+  // system proxy without saving the profile or mutating connection state.
+  const [proxyTest, setProxyTest] = useState<ProxyTestResult | null>(null);
+  const [proxyTesting, setProxyTesting] = useState(false);
+  const [proxyTestError, setProxyTestError] = useState<string | null>(null);
   // MIA environment pinned to this server profile. "" = use the env the
   // server advertises (falling back to the default mia.toml). Selecting one
   // here re-targets which `mia-<env>.toml` socket the connect-time machine
@@ -785,6 +796,9 @@ export function ConnectPage() {
     setAddKind(kind);
     setEditingId(null);
     setError(null);
+    setProxyTest(null);
+    setProxyTesting(false);
+    setProxyTestError(null);
     setRemoteMiaEnv("");
     setCloudCredsReady(false);
     setS3AccessKeyId("");
@@ -971,6 +985,33 @@ export function ConnectPage() {
       setError(extractError(e));
     } finally {
       setCloudAction(null);
+    }
+  }
+
+  async function handleTestProxy() {
+    if (!remoteAddr.trim()) {
+      setProxyTest(null);
+      setProxyTestError("Enter a server address first");
+      return;
+    }
+    setProxyTesting(true);
+    setProxyTest(null);
+    setProxyTestError(null);
+    try {
+      const profile: RemoteProfile = {
+        name: newName.trim() || "proxy-test",
+        address: remoteAddr.trim(),
+        tls_skip_verify: tlsSkipVerify,
+        ca_cert_path: caCertPath || undefined,
+        cluster_discovery: clusterDiscovery,
+        use_system_proxy: true,
+        mia_environment: remoteMiaEnv.trim() || undefined,
+      };
+      setProxyTest(await api.testSystemProxy(profile));
+    } catch (e) {
+      setProxyTestError(String(e));
+    } finally {
+      setProxyTesting(false);
     }
   }
 
@@ -1619,12 +1660,58 @@ export function ConnectPage() {
               </label>
               <p className="-mt-1 text-xs text-[var(--color-text-muted)]">
                 Off by default. When on, outbound connections honour the
-                system proxy (<span className="font-mono">HTTPS_PROXY</span> /{" "}
+                OS proxy — macOS System Settings, the Windows proxy, GNOME
+                settings, or the{" "}
+                <span className="font-mono">HTTPS_PROXY</span> /{" "}
                 <span className="font-mono">HTTP_PROXY</span> /{" "}
-                <span className="font-mono">ALL_PROXY</span>); when off, any
-                such proxy is bypassed so vault traffic is never silently
-                rerouted.
+                <span className="font-mono">ALL_PROXY</span> environment
+                variables (which take precedence). When off, any such proxy
+                is bypassed so vault traffic is never silently rerouted.
               </p>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  loading={proxyTesting}
+                  onClick={handleTestProxy}
+                >
+                  Test proxy
+                </Button>
+                <span className="text-xs text-[var(--color-text-muted)]">
+                  Probes the server through the resolved system proxy.
+                </span>
+              </div>
+              {proxyTestError && (
+                <p className="-mt-1 text-xs text-red-400">{proxyTestError}</p>
+              )}
+              {proxyTest && (
+                <div
+                  className={`-mt-1 rounded border px-3 py-2 text-xs ${
+                    proxyTest.reachable
+                      ? "border-green-500/30 bg-green-500/10 text-green-400"
+                      : "border-red-500/30 bg-red-500/10 text-red-400"
+                  }`}
+                >
+                  <div className="font-medium">
+                    {proxyTest.reachable
+                      ? `Reachable in ${proxyTest.latency_ms} ms`
+                      : "Not reachable"}
+                  </div>
+                  <div className="mt-1 text-[var(--color-text-muted)]">
+                    Proxy: {proxyTest.source}
+                    {proxyTest.proxy_uri ? (
+                      <>
+                        {" "}
+                        (<span className="font-mono">{proxyTest.proxy_uri}</span>)
+                      </>
+                    ) : null}
+                  </div>
+                  <div className="text-[var(--color-text-muted)] break-all">
+                    {proxyTest.message}
+                  </div>
+                </div>
+              )}
               <Input
                 label="CA Certificate Path"
                 value={caCertPath}

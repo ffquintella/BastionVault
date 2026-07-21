@@ -134,10 +134,12 @@ pub struct HealthConfig {
     /// Maximum concurrent probes. Real clusters are small so the
     /// default just runs everything in parallel.
     pub parallelism: u8,
-    /// When `true`, discovery health probes honour the system proxy (the
-    /// `ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` environment variables ureq
-    /// reads by default). When `false` (the default) the proxy is explicitly
-    /// cleared so probes take the same path as the data-plane client.
+    /// When `true`, discovery health probes honour the system proxy — the
+    /// OS proxy (macOS System Settings, the Windows registry, GNOME)
+    /// resolved via [`crate::sysproxy`], or the `ALL_PROXY` / `HTTPS_PROXY`
+    /// / `HTTP_PROXY` environment variables, which take precedence. When
+    /// `false` (the default) the proxy is explicitly cleared so probes take
+    /// the same path as the data-plane client.
     pub use_system_proxy: bool,
 }
 
@@ -214,10 +216,17 @@ fn build_probe_agent(
     if let Some(t) = tls {
         cfg = cfg.tls_config(t.tls_config.clone());
     }
-    // ureq picks up the system proxy from the environment by default; clear
-    // it unless opted in so probes match the data-plane client's routing.
+    // ureq picks up the system proxy from the environment (and the Windows
+    // registry) by default; clear it unless opted in so probes match the
+    // data-plane client's routing. When opted in, also resolve the OS-level
+    // proxy ureq can't read on its own (macOS System Settings, GNOME).
     if !use_system_proxy {
         cfg = cfg.proxy(None);
+    } else if let Some(uri) = crate::sysproxy::system_proxy_uri() {
+        match ureq::Proxy::new(&uri) {
+            Ok(p) => cfg = cfg.proxy(Some(p)),
+            Err(e) => log::warn!("ignoring unparseable system proxy '{uri}': {e}"),
+        }
     }
     cfg.build().new_agent()
 }

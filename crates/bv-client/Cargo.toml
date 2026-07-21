@@ -12,7 +12,10 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-ureq = { version = "3.3", features = ["json"] }
+# `socks-proxy` lets a SOCKS proxy from the system settings actually
+# connect; `win-system-proxy` reads the WinINET registry so the
+# "use system proxy" toggle honours Windows' proxy on that platform.
+ureq = { version = "3.3", features = ["json", "socks-proxy", "win-system-proxy"] }
 rustls = { version = "0.23.37", features = ["aws_lc_rs"] }
 # `rt` for `spawn_blocking` (keeps the sync ureq call off the async
 # executor) and `sync` for the async mutex that serializes in-session

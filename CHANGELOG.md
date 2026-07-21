@@ -45,6 +45,34 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.33.1] - 2026-07-21
+
+### Added
+
+- **"Test proxy" button** in the Add/Edit Server dialog. Probes the target
+  server's `/v1/sys/health` through the resolved system proxy (forcing the
+  proxy path on regardless of the toggle) without saving the profile or
+  touching connection state, and reports the proxy source (env var / system
+  settings / direct), the resolved proxy URI, reachability, and latency. New
+  `test_system_proxy` Tauri command + `bv_client::sysproxy::describe_system_proxy`
+  helper.
+
+### Fixed
+
+- **System-proxy toggle now honours the OS proxy, not just env vars.** The
+  "Use system-configured proxy for HTTP connections" toggle previously only
+  worked when `ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY` were exported in the
+  process environment — the underlying `ureq` client cannot read the macOS
+  *System Settings → Network → Proxies* pane at all, so a GUI-launched app (or
+  any macOS user who set the proxy only in System Settings) saw the toggle do
+  nothing. New `bv_client::sysproxy` helper resolves the OS proxy on macOS
+  (`scutil --proxy`), Windows (WinINET registry via ureq's `win-system-proxy`
+  feature), and Linux/GNOME (`gsettings`), preferring the secure-web/HTTPS
+  proxy and falling back to HTTP then SOCKS. Environment variables still take
+  precedence when set. Enabled ureq's `socks-proxy` feature so a SOCKS system
+  proxy actually connects. Applied consistently across the legacy `Client`,
+  the bv-client `RemoteBackend`, and the discovery health probes.
+
 ## [0.33.0] - 2026-07-20
 
 ### Added

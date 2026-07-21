@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.33.0"
+version = "0.33.1"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -115,7 +115,7 @@ quick-xml = { version = "0.41" }
 keyring = { version = "4", optional = true }
 bcrypt = "0.19"
 url = "2.5"
-ureq = { version = "3.3", features = ["json"] }
+ureq = { version = "3.3", features = ["json", "socks-proxy", "win-system-proxy"] }
 # DNS resolver for ACME DNS-01 validator. Sync API; no rustls/aws-lc
 # duplication (uses tokio internally only when the async API is used —
 # we exclusively use the blocking `Resolver` so no extra runtime is

@@ -84,10 +84,12 @@ export interface RemoteProfile {
   mia_environment?: string;
   /**
    * When `true`, outbound HTTP(S) connections to this server honour the
-   * system-configured proxy (the `ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY`
-   * environment variables). When `false`/unset (the default) the proxy is
-   * explicitly bypassed even if those variables are set, so a stray OS/shell
-   * proxy never silently reroutes vault traffic.
+   * system-configured proxy: the OS proxy (macOS System Settings, the
+   * Windows proxy, or GNOME settings) or the `ALL_PROXY` / `HTTPS_PROXY` /
+   * `HTTP_PROXY` environment variables, which take precedence. When
+   * `false`/unset (the default) the proxy is explicitly bypassed even if
+   * one is configured, so a stray OS/shell proxy never silently reroutes
+   * vault traffic.
    */
   use_system_proxy?: boolean;
 }
@@ -130,6 +132,21 @@ export interface ClusterDiagnostics {
   cluster_label: string;
   chosen: SelectedNode | null;
   candidates: ProbeRow[];
+}
+
+export interface ProxyTestResult {
+  /** Where the proxy setting was resolved from (env var / system settings / none). */
+  source: string;
+  /** The resolved proxy URI, or null for a direct connection. */
+  proxy_uri: string | null;
+  /** The server URL actually dialled (after discovery resolution). */
+  effective_address: string;
+  /** Whether the server responded through this proxy path. */
+  reachable: boolean;
+  /** Round-trip time of the health probe, in milliseconds. */
+  latency_ms: number;
+  /** Human-readable outcome (error detail when unreachable). */
+  message: string;
 }
 
 export interface Preferences {

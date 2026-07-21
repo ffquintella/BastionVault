@@ -73,6 +73,7 @@ import type {
   RemoteStatus,
   SelectedNode,
   ClusterDiagnostics,
+  ProxyTestResult,
   PasswordPolicy,
   PkiMountInfo,
   PkiIssuerListResult,
@@ -160,6 +161,8 @@ export const getSelectedNode = () =>
   invoke<SelectedNode | null>("get_selected_node");
 export const clusterDiscover = (profile: RemoteProfile) =>
   invoke<ClusterDiagnostics>("cluster_discover", { profile });
+export const testSystemProxy = (profile: RemoteProfile) =>
+  invoke<ProxyTestResult>("test_system_proxy", { profile });
 export const getRemoteStatus = () => invoke<RemoteStatus>("get_remote_status");
 export const loadPreferences = () => invoke<Preferences>("load_preferences");
 export const savePreferences = (mode: VaultMode, remoteProfile?: RemoteProfile) =>

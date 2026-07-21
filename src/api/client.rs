@@ -229,11 +229,18 @@ impl Client {
             config_builder = config_builder.tls_config(tls_config.tls_config.clone());
         }
 
-        // ureq picks up the system proxy from the environment by default;
-        // clear it unless the operator opted in so vault traffic isn't
-        // silently rerouted through a stray `HTTP(S)_PROXY`.
+        // ureq picks up the system proxy from the environment (and the
+        // Windows registry) by default; clear it unless the operator
+        // opted in so vault traffic isn't silently rerouted through a
+        // stray `HTTP(S)_PROXY`. When opted in, also resolve the OS-level
+        // proxy ureq can't read on its own (macOS System Settings, GNOME).
         if !self.use_system_proxy {
             config_builder = config_builder.proxy(None);
+        } else if let Some(uri) = bv_client::sysproxy::system_proxy_uri() {
+            match ureq::Proxy::new(&uri) {
+                Ok(p) => config_builder = config_builder.proxy(Some(p)),
+                Err(e) => log::warn!("ignoring unparseable system proxy '{uri}': {e}"),
+            }
         }
 
         let config = config_builder.build();

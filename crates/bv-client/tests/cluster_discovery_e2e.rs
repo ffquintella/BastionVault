@@ -177,6 +177,7 @@ fn health_cfg() -> HealthConfig {
         // doesn't slow the suite down.
         probe_timeout: Duration::from_millis(800),
         parallelism: 4,
+        use_system_proxy: false,
     }
 }
 

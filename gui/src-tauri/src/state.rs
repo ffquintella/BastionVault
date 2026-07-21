@@ -93,11 +93,13 @@ pub struct RemoteProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mia_environment: Option<String>,
     /// When `true`, outbound HTTP(S) connections to this server honour the
-    /// system-configured proxy (the `ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY`
-    /// environment variables ureq reads). When `false` (the default) the
-    /// proxy is explicitly bypassed even if those variables are set, so a
-    /// stray shell/OS proxy never silently reroutes vault traffic. Optional/
-    /// defaulted so old preference files load cleanly.
+    /// system-configured proxy: the OS proxy (macOS System Settings, the
+    /// Windows registry, or GNOME settings) or the `ALL_PROXY` /
+    /// `HTTPS_PROXY` / `HTTP_PROXY` environment variables, which take
+    /// precedence. When `false` (the default) the proxy is explicitly
+    /// bypassed even if one is configured, so a stray shell/OS proxy never
+    /// silently reroutes vault traffic. Optional/defaulted so old
+    /// preference files load cleanly.
     #[serde(default)]
     pub use_system_proxy: bool,
 }

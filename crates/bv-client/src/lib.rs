@@ -17,6 +17,7 @@ pub mod error;
 pub mod health;
 pub mod remote;
 pub mod surface;
+pub mod sysproxy;
 pub mod tls;
 pub mod types;
 

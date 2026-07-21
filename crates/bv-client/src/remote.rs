@@ -178,11 +178,13 @@ pub struct RemoteBackendBuilder {
     /// path, which discovers once and pins the node) or populated
     /// automatically by [`Self::build_with_discovery_using`].
     failover_candidates: Option<Vec<SrvCandidate>>,
-    /// When `Some(true)`, honour the system proxy (the `ALL_PROXY` /
-    /// `HTTPS_PROXY` / `HTTP_PROXY` environment variables ureq reads by
-    /// default). When `Some(false)` / `None` (the default) the proxy is
-    /// explicitly cleared in `build()` so a stray environment proxy never
-    /// silently reroutes traffic.
+    /// When `Some(true)`, honour the system proxy — the OS proxy (macOS
+    /// System Settings, the Windows registry, GNOME) resolved via
+    /// [`crate::sysproxy`], or the `ALL_PROXY` / `HTTPS_PROXY` /
+    /// `HTTP_PROXY` environment variables, which take precedence. When
+    /// `Some(false)` / `None` (the default) the proxy is explicitly
+    /// cleared in `build()` so a stray proxy never silently reroutes
+    /// traffic.
     use_system_proxy: Option<bool>,
 }
 
@@ -348,11 +350,18 @@ impl RemoteBackendBuilder {
             config_builder = config_builder.tls_config(tls.tls_config.clone());
         }
 
-        // ureq picks up the system proxy from the environment by default;
-        // clear it unless the caller opted in so vault traffic isn't
-        // silently rerouted through a stray `HTTP(S)_PROXY`.
+        // ureq picks up the system proxy from the environment (and the
+        // Windows registry) by default; clear it unless the caller opted
+        // in so vault traffic isn't silently rerouted through a stray
+        // `HTTP(S)_PROXY`. When opted in, also resolve the OS-level proxy
+        // ureq can't read on its own (macOS System Settings, GNOME).
         if !self.use_system_proxy.unwrap_or(false) {
             config_builder = config_builder.proxy(None);
+        } else if let Some(uri) = crate::sysproxy::system_proxy_uri() {
+            match ureq::Proxy::new(&uri) {
+                Ok(p) => config_builder = config_builder.proxy(Some(p)),
+                Err(e) => log::warn!("ignoring unparseable system proxy '{uri}': {e}"),
+            }
         }
 
         let agent = config_builder.build().new_agent();

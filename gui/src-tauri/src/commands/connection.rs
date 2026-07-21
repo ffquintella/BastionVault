@@ -1,4 +1,8 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use bastion_vault::api::{client::TLSConfigBuilder, Client};
 use bv_client::{
@@ -115,6 +119,76 @@ pub async fn connect_remote(
     *state.vault.lock().await = None;
 
     Ok(())
+}
+
+/// Result of the connect dialog's "Test proxy" button.
+#[derive(Serialize)]
+pub struct ProxyTestResult {
+    /// Where the proxy setting was resolved from (env var / system
+    /// settings / none).
+    pub source: String,
+    /// The resolved proxy URI, or `None` for a direct connection.
+    pub proxy_uri: Option<String>,
+    /// The server URL actually dialled (after discovery resolution).
+    pub effective_address: String,
+    /// Whether the server responded through this proxy path.
+    pub reachable: bool,
+    /// Round-trip time of the health probe, in milliseconds.
+    pub latency_ms: u64,
+    /// Human-readable outcome (error detail when unreachable).
+    pub message: String,
+}
+
+/// Probe the configured server through the *system proxy*, so the
+/// operator can confirm the "Use system-configured proxy" toggle
+/// actually reaches the vault before saving the profile.
+///
+/// Always forces the system-proxy path on (regardless of the profile's
+/// stored toggle) since that is precisely what this button tests, and
+/// never mutates connection state.
+#[tauri::command]
+pub async fn test_system_proxy(profile: RemoteProfile) -> CmdResult<ProxyTestResult> {
+    let (source, proxy_uri) = bv_client::sysproxy::describe_system_proxy();
+
+    // Resolve the operator-typed address the same way connect_remote
+    // does (may run SRV discovery for a cluster name).
+    let tls_for_bv = build_bv_tls(&profile)?;
+    let (effective_address, _selected, _candidates, _health_cfg) =
+        resolve_remote_address(&profile, tls_for_bv.as_ref()).await?;
+
+    let mut client_builder = Client::new()
+        .with_addr(&effective_address)
+        .with_system_proxy(true);
+    if effective_address.starts_with("https://") {
+        client_builder = client_builder.with_tls_config(build_legacy_tls(&profile)?);
+    }
+    let client = client_builder.build();
+
+    // ureq's health() is a blocking call; keep it off the async executor.
+    let addr_for_probe = effective_address.clone();
+    let started = Instant::now();
+    let outcome = tokio::task::spawn_blocking(move || client.sys().health())
+        .await
+        .map_err(|e| CommandError::from(format!("proxy test task failed: {e}")))?;
+    let latency_ms = started.elapsed().as_millis() as u64;
+
+    let (reachable, message) = match outcome {
+        Ok(h) if h.response_status != 0 => (
+            true,
+            format!("Reached {addr_for_probe} (HTTP {})", h.response_status),
+        ),
+        Ok(_) => (false, "No response from server".to_string()),
+        Err(e) => (false, format!("Connection failed: {e}")),
+    };
+
+    Ok(ProxyTestResult {
+        source,
+        proxy_uri,
+        effective_address,
+        reachable,
+        latency_ms,
+        message,
+    })
 }
 
 /// Run cluster discovery for `profile` and return everything the
