@@ -214,6 +214,24 @@ impl AuditBroker {
         !self.devices.lock().unwrap().is_empty()
     }
 
+    /// Distinct local filesystem paths that enabled file devices append
+    /// to. The access-audit reconciler tails these to surface successful
+    /// requests on the unified Audit page. Order is deterministic
+    /// (sorted + deduped) so a caller can pair each path with a stable
+    /// cursor sidecar.
+    pub fn file_source_paths(&self) -> Vec<std::path::PathBuf> {
+        let mut paths: Vec<std::path::PathBuf> = self
+            .devices
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|d| d.device.source_path())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
     /// Snapshot of the devices visible from `namespace`: that namespace's own
     /// devices, plus the root superuser mirror device(s) when enabled (every
     /// namespace is shown the mirror so tenants know their stream is shadowed).

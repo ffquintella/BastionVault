@@ -1,6 +1,8 @@
 //! The system module is mainly used to configure BastionVault itself. For instance, the 'mount/'
 //! path is provided here to support mounting new modules in BastionVault via RESTful HTTP request.
 
+pub mod access_audit_reconciler;
+pub mod access_audit_store;
 pub mod denial_audit_store;
 
 use std::{
@@ -1733,8 +1735,8 @@ impl SystemBackend {
         let skey = since_key.as_deref();
 
         #[cfg(not(feature = "sync_handler"))]
-        let groups: [Vec<AuditEventBuilder>; 10] = {
-            let (policy, idgroups, assets, shares, users, files, logins, ssh_ca, ssh_sign, denials) = tokio::join!(
+        let groups: [Vec<AuditEventBuilder>; 11] = {
+            let (policy, idgroups, assets, shares, users, files, logins, ssh_ca, ssh_sign, denials, access) = tokio::join!(
                 self.collect_policy_events(cutoff),
                 self.collect_identity_group_events(cutoff),
                 self.collect_asset_group_events(cutoff),
@@ -1745,15 +1747,16 @@ impl SystemBackend {
                 self.collect_ssh_ca_events(skey),
                 self.collect_ssh_sign_events(skey),
                 self.collect_denial_events(skey),
+                self.collect_access_events(skey),
             );
-            [policy, idgroups, assets, shares, users, files, logins, ssh_ca, ssh_sign, denials]
+            [policy, idgroups, assets, shares, users, files, logins, ssh_ca, ssh_sign, denials, access]
         };
 
         // The sync handler build cannot use `tokio::join!`; run the
         // sources sequentially (these maybe-async methods resolve to
         // plain calls under `is_sync`).
         #[cfg(feature = "sync_handler")]
-        let groups: [Vec<AuditEventBuilder>; 10] = [
+        let groups: [Vec<AuditEventBuilder>; 11] = [
             self.collect_policy_events(cutoff),
             self.collect_identity_group_events(cutoff),
             self.collect_asset_group_events(cutoff),
@@ -1764,6 +1767,7 @@ impl SystemBackend {
             self.collect_ssh_ca_events(skey),
             self.collect_ssh_sign_events(skey),
             self.collect_denial_events(skey),
+            self.collect_access_events(skey),
         ];
 
         groups.into_iter().flatten().collect()
@@ -2061,6 +2065,53 @@ impl SystemBackend {
                         user: e.user,
                         op: "denied".into(),
                         category: "request".into(),
+                        target: e.path,
+                        changed_fields: fields,
+                        summary: String::new(),
+                    });
+                }
+            }
+        }
+        events
+    }
+
+    /// Successful data-plane requests, reconciled from each node's local
+    /// `audit.log` into the replicated access store (see
+    /// [`crate::modules::system::access_audit_reconciler`]). This is the
+    /// success-side counterpart to `collect_denial_events`: it is why a
+    /// *successful* `secret/…` read now appears on the Audit page, not
+    /// only a denied one. `op` carries the operation (`read`/`write`/…)
+    /// so the GUI can colour it distinctly from a denial.
+    async fn collect_access_events(&self, since_key: Option<&str>) -> Vec<AuditEventBuilder> {
+        let mut events = Vec::new();
+        if let Ok(store) =
+            crate::modules::system::access_audit_store::AccessAuditStore::from_core(&self.core)
+        {
+            let res = match since_key {
+                Some(k) => store.list_since(k).await,
+                None => store.list_all().await,
+            };
+            if let Ok(entries) = res {
+                for e in entries {
+                    let mut fields = Vec::new();
+                    if !e.operation.is_empty() {
+                        fields.push(format!("op={}", e.operation));
+                    }
+                    if !e.remote_addr.is_empty() {
+                        fields.push(format!("from={}", e.remote_addr));
+                    }
+                    if !e.namespace.is_empty() {
+                        fields.push(format!("ns={}", e.namespace));
+                    }
+                    events.push(AuditEventBuilder {
+                        ts: e.ts,
+                        user: e.user,
+                        op: if e.operation.is_empty() {
+                            "read".into()
+                        } else {
+                            e.operation
+                        },
+                        category: "access".into(),
                         target: e.path,
                         changed_fields: fields,
                         summary: String::new(),

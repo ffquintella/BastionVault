@@ -209,4 +209,8 @@ impl AuditDevice for FileAuditDevice {
         state.size = size;
         Ok(())
     }
+
+    fn source_path(&self) -> Option<std::path::PathBuf> {
+        Some(self.path.clone())
+    }
 }

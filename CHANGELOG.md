@@ -45,6 +45,36 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-07-21
+
+### Added
+
+#### Successful-access audit trail on the Audit page
+
+- **Successful data-plane requests now appear on the admin Audit page.**
+  Previously a *denied* `secret/…` read showed up while a *successful* one
+  did not: the page aggregates replicated system-view stores, but successful
+  requests were recorded only to each node's local `audit.log` file device,
+  which the page never read. Successful reads/writes/lists (and other
+  non-login successes) now surface alongside logins and denials, coloured as
+  an "Access" category. (`features/audit-logging.md`)
+- **New replicated access store** (`src/modules/system/access_audit_store.rs`) —
+  the success-side counterpart to the denial store, at `sys/access-audit/`.
+  Entries are keyed by `(timestamp-nanos, digest-of-raw-line)` so ingest is
+  idempotent (a re-scan overwrites rather than duplicates) and chronologically
+  range-scannable.
+- **New cluster-aware reconciler** (`src/modules/system/access_audit_reconciler.rs`) —
+  a per-node background job (60s tick, self-skips when sealed) that tails the
+  node's own local `audit.log` and ingests successful lines into the
+  replicated store. Each node reconciles only its own file; because the store
+  is Hiqlite-replicated and keys are globally unique, the Audit page shows
+  every cluster member's access regardless of which node serves the GUI. A
+  node-local cursor sidecar (`<log>.reconcile-cursor`) tracks progress and one
+  level of log rotation is drained on detection. Operators can disable ingest
+  cluster-wide via the replicated `access-audit-cfg/config` flag.
+- Audit page gains an "Access" category and `read`/`write`/`list` operation
+  filters (`gui/src/routes/AuditPage.tsx`).
+
 ## [0.33.1] - 2026-07-21
 
 ### Added

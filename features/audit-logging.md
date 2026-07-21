@@ -128,6 +128,42 @@ restart — verified live against the HML cluster (2026-07-07),
 where denials on one node were invisible to a dashboard read
 served by the other.
 
+**Successful requests (shipped)** — the success-side counterpart to
+the denial store. A denied `secret/…` read surfaced on the Audit
+page, but a *successful* one did not: successful requests are
+recorded by the broker only to each node's **local** `audit.log`
+file device, which the aggregated page never reads (it reads
+replicated system-view stores). Two pieces close the gap:
+
+- `src/modules/system/access_audit_store.rs` — a replicated
+  system-view store at `sys/access-audit/`, keyed by
+  `<20-digit-nanos>-<16-hex-digest>` where the digest is the SHA-256
+  of the raw audit line. The digest suffix makes ingest **idempotent**
+  (re-reading a line lands on the same key and overwrites, never
+  duplicates) and disambiguates same-nanosecond events; the nanos
+  prefix keeps `list_since` range scans and chronological sort. It
+  copies only non-secret header fields (ts, user, path, operation,
+  peer, namespace) — never body or response data.
+- `src/modules/system/access_audit_reconciler.rs` — a per-node
+  background task (60s tick, self-skips when sealed) that tails the
+  node's own local `audit.log` (discovered via
+  `AuditBroker::file_source_paths`) and ingests successful,
+  non-`/login` response lines into the store. `sys/audit/events` (the
+  page's own read) is excluded to avoid a self-referential poll loop.
+  Progress is a node-local cursor sidecar (`<log>.reconcile-cursor`);
+  one level of rotation is drained on detection. Because ingest is
+  idempotent, a lost cursor only causes a harmless re-scan.
+
+  **Cluster model:** every node reconciles only its own local file
+  into the replicated store, so the Audit page shows every member's
+  successful access regardless of which node serves the GUI — no
+  leader election or cross-node locking, since idempotent
+  cluster-unique keys make the union self-deduplicating. Operators
+  can disable ingest cluster-wide via `access-audit-cfg/config`.
+  Events render under the `access` category, op = the operation
+  (`read`/`write`/`list`/…). Aggregated by `collect_access_events`
+  in `src/modules/system/mod.rs`.
+
 **Dashboard counters read from these stores (shipped)** — the same
 per-node/not-replicated defect affected the dashboard summary
 itself, not just the Audit page. `handle_dashboard_summary`

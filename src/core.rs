@@ -1032,6 +1032,21 @@ impl Core {
             let _ = crate::modules::files::scheduler::start_files_sync_scheduler(core_arc);
         }
 
+        // Boot the access-audit reconciler. Each node tails its own
+        // local `audit.log` and ingests successful requests into the
+        // replicated access store, so a successful `secret/…` read shows
+        // on the unified Audit page (previously only *denied* requests
+        // did). Cluster-safe by construction: per-node local tailing +
+        // idempotent digest-keyed writes into the replicated store, so
+        // the union of every node's ingest is what the page reads and
+        // re-scans never duplicate. Ticks every 60s; self-skips when
+        // sealed or when an operator disables it via config.
+        if let Some(core_arc) = self.self_ptr.upgrade() {
+            let _ = crate::modules::system::access_audit_reconciler::start_access_audit_reconciler(
+                core_arc,
+            );
+        }
+
         // Boot the cert-lifecycle renewal scheduler (Phase L6). Same
         // single-process posture as the schedulers above. Each
         // cert-lifecycle mount opts in via

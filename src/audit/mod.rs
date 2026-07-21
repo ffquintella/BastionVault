@@ -56,6 +56,14 @@ pub trait AuditDevice: Send + Sync {
     /// Reload device-internal resources (e.g., reopen file handles
     /// after logrotate).
     async fn reload(&self) -> Result<(), RvError>;
+
+    /// Local filesystem path this device appends to, when it is a
+    /// file-backed device. `None` for devices with no on-disk file
+    /// (syslog/socket/HTTP in later phases). Used by the access-audit
+    /// reconciler to discover which local log(s) to tail.
+    fn source_path(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 /// Opaque handle to a registered device. Just the broker-assigned
