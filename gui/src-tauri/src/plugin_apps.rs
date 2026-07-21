@@ -182,6 +182,8 @@ pub enum WindowOp {
         handle: u32,
         payload: String,
     },
+    /// Focus/open the in-app notification center (`bvx.notify_open`).
+    NotifyOpen,
 }
 
 #[derive(Debug, Deserialize)]
@@ -530,7 +532,105 @@ fn register_bvx_imports(linker: &mut Linker<AppCtx>) -> Result<(), AppModuleErro
         )
         .map_err(map_err)?;
 
+    // ABI minor 2: notifications. `bvx.notify_send` / `bvx.notify_list`
+    // ride the user's session token straight to `v2/notifications/*`, so
+    // the server ACL pipeline is the authority (a plugin can only spend
+    // permissions the user already has, and only ever reads the user's
+    // own inbox). `bvx.notify_open` records intent to focus the in-app
+    // notification center, applied host-side after the call.
+    linker
+        .func_wrap_async(
+            "bvx",
+            "notify_send",
+            |mut caller: Caller<'_, AppCtx>, args: (i32, i32, i32, i32)| {
+                let (req_ptr, req_len, out_ptr, out_max) = args;
+                Box::new(async move {
+                    notify_send_impl(&mut caller, req_ptr, req_len, out_ptr, out_max).await
+                })
+            },
+        )
+        .map_err(map_err)?;
+    linker
+        .func_wrap_async(
+            "bvx",
+            "notify_list",
+            |mut caller: Caller<'_, AppCtx>, args: (i32, i32, i32, i32)| {
+                let (_rp, _rl, out_ptr, out_max) = args;
+                Box::new(async move { notify_list_impl(&mut caller, out_ptr, out_max).await })
+            },
+        )
+        .map_err(map_err)?;
+    linker
+        .func_wrap("bvx", "notify_open", |mut caller: Caller<'_, AppCtx>| -> i32 {
+            caller.data_mut().window_ops.push(WindowOp::NotifyOpen);
+            0
+        })
+        .map_err(map_err)?;
+
     Ok(())
+}
+
+// ── bvx notifications (ABI minor 2) ──────────────────────────────────
+
+async fn notify_send_impl(
+    caller: &mut Caller<'_, AppCtx>,
+    req_ptr: i32,
+    req_len: i32,
+    out_ptr: i32,
+    out_max: i32,
+) -> i32 {
+    let Some(backend) = caller.data().backend.clone() else {
+        return RC_INTERNAL;
+    };
+    let Some(bytes) = read_bytes(caller, req_ptr, req_len) else {
+        return RC_INTERNAL;
+    };
+    let Ok(data) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes)
+    else {
+        return RC_INTERNAL;
+    };
+    let token = caller.data().token.clone();
+    let namespace = caller.data().namespace.clone();
+    let resp = backend
+        .handle_with_namespace(
+            Operation::Write,
+            "notifications/send",
+            Some(data),
+            &token,
+            namespace.as_deref(),
+        )
+        .await;
+    let out = match resp {
+        Ok(Some(r)) => serde_json::json!({ "data": r.data }),
+        Ok(None) => serde_json::json!({ "data": null }),
+        Err(e) => serde_json::json!({ "error": e.to_string() }),
+    };
+    let out_bytes = serde_json::to_vec(&out).unwrap_or_default();
+    write_to_buffer(caller, &out_bytes, out_ptr, out_max)
+}
+
+async fn notify_list_impl(caller: &mut Caller<'_, AppCtx>, out_ptr: i32, out_max: i32) -> i32 {
+    let Some(backend) = caller.data().backend.clone() else {
+        return RC_INTERNAL;
+    };
+    let token = caller.data().token.clone();
+    let namespace = caller.data().namespace.clone();
+    let resp = backend
+        .handle_with_namespace(
+            Operation::Read,
+            "notifications/inbox",
+            None,
+            &token,
+            namespace.as_deref(),
+        )
+        .await;
+    let out = match resp {
+        Ok(Some(r)) => serde_json::json!({ "data": r.data }),
+        Ok(None) => serde_json::json!({ "data": null }),
+        Err(e) => serde_json::json!({ "error": e.to_string() }),
+    };
+    let out_bytes = serde_json::to_vec(&out).unwrap_or_default();
+    write_to_buffer(caller, &out_bytes, out_ptr, out_max)
 }
 
 // ── bvx.api_request (Phase 4) ────────────────────────────────────────
@@ -1016,6 +1116,11 @@ fn apply_window_ops<R: Runtime>(app: &AppHandle<R>, plugin: &str, ops: Vec<Windo
                 // Per-handle event name scopes the payload to the window
                 // that subscribed (mirrors the SSH/RDP session pattern).
                 let _ = app.emit(&format!("plugin-window-data-{handle}"), payload);
+            }
+            WindowOp::NotifyOpen => {
+                // The frontend listens for this and opens the bell's
+                // notification center (or navigates to /notifications).
+                let _ = app.emit("notification-center-open", ());
             }
         }
     }

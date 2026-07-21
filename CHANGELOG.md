@@ -45,6 +45,48 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-07-21
+
+### Added
+
+#### Notifications — in-app notification system + plugin extensibility
+
+- **In-app notification system** (`src/modules/notifications/`, feature
+  `features/notifications.md`). Send notifications to a **single user**, a
+  **user group**, or **all users**, delivered to a per-user inbox and
+  surfaced in the GUI by a header **bell + notification center** (unread
+  badge, mark-read / mark-all-read, dismiss, click-through action links).
+  New `notifications/` logical backend reached over `v2/notifications/*`
+  (send, inbox, unread-count, read, read-all, dismiss, channels,
+  channels test, sent, config). Own-inbox access is granted to every
+  token via the `default` / `namespace-self` policy and scoped server-side
+  by `entity_id`; broadcasting is admin-gated.
+- **Plugins can send notifications** — capability-gated host imports
+  `bv.notify_send` / `bv.notify_list` / `bv.notify_get` (server, gated by
+  new `capabilities.notify_emit` / `notify_read`) and
+  `bvx.notify_send` / `bvx.notify_list` / `bvx.notify_open` +
+  `bvx_notify_event` (client app modules, `capabilities.app.notify`).
+  Plugin sends are audited (never the body) and per-plugin rate-limited.
+- **Plugins can add notification channels** — a plugin declares
+  `capabilities.notification_channels` (email / SMS / Slack / Teams /
+  WhatsApp / webhook / …); the core delivery engine routes each channel
+  to the plugin via a `notify_deliver` invoke envelope. Host plugin ABI
+  bumps to minor 2 (`abi_version = "1.2"`); all manifest fields are
+  additive with `skip_serializing_if` so existing signed plugins keep
+  verifying, and every new capability participates in the widening guard.
+- **Email notification channel plugin** (`plugins-ext/bastion-plugin-email`)
+  — process runtime, provides the `email` channel over a **generic SMTP
+  server** (STARTTLS / TLS / none, optional SMTP AUTH, via `lettre`) or
+  **Office 365** (OAuth2 client-credentials + Microsoft Graph `sendMail`,
+  via `reqwest`). SMTP / O365 credentials are stored as barrier-encrypted
+  secrets and never echoed back.
+- **SDK / testkit** — `bastion-plugin-sdk` grows `Host::notify_*` and
+  `AppHost::notify_*` / `AppModule::notify_event`; `host_test` mocks
+  capture sent notifications.
+- **GUI** — `NotificationsAdminPage` (`/notifications`), `NotificationBell`
+  + notification center, `notificationsStore`, and
+  `commands/notifications.rs` Tauri commands.
+
 ## [0.34.0] - 2026-07-21
 
 ### Added

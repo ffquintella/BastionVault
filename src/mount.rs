@@ -86,6 +86,15 @@ lazy_static! {
             table: MOUNT_TABLE_TYPE.to_string(),
             tainted: false,
             uuid: generate_uuid(),
+            path: "notifications/".to_string(),
+            logical_type: "notifications".to_string(),
+            description: "in-app notifications, targeting, and delivery channels".to_string(),
+            ..Default::default()
+        },
+        MountEntry {
+            table: MOUNT_TABLE_TYPE.to_string(),
+            tainted: false,
+            uuid: generate_uuid(),
             path: "sys/".to_string(),
             logical_type: "system".to_string(),
             description: "system endpoints used for control, policy and debugging".to_string(),

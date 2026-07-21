@@ -51,7 +51,7 @@ use serde_json::{json, Value};
 use super::config::ConfigStore;
 use super::manifest::{PluginManifest, RuntimeKind};
 use super::process_runtime::ProcessRuntime;
-use super::runtime::{InvokeOutcome, WasmRuntime};
+use super::runtime::{InvokeOutcome, InvokeOutput, WasmRuntime};
 use super::{PluginCatalog, PluginRecord};
 use crate::context::Context;
 use crate::core::Core;
@@ -364,6 +364,94 @@ impl PluginLogicalBackend {
     #[allow(dead_code)]
     pub fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+/// Invoke a registered plugin's **active version** with a raw JSON input
+/// envelope and return the plugin's raw [`InvokeOutput`].
+///
+/// This is the non-mount invocation path used by the notification
+/// channel dispatcher ([`crate::modules::notifications`]): a plugin that
+/// *provides* a notification channel is not necessarily mounted, so
+/// delivery loads the catalog record + operator config directly and
+/// selects the runtime exactly the way the mount dispatch above does.
+/// Honours the quarantine marker and the per-plugin reload lock so a
+/// channel delivery can't race a hot reload or hit a deleted plugin.
+///
+/// The caller owns interpreting the response bytes (the notification
+/// dispatcher expects a `{"delivered":[…],"failed":[…]}` object).
+pub async fn invoke_active_plugin(
+    core: Arc<Core>,
+    plugin_name: &str,
+    input: &[u8],
+) -> Result<InvokeOutput, RvError> {
+    let storage = core.barrier.as_storage();
+
+    if let Ok(Some(rec)) = super::quarantine::lookup(storage, plugin_name).await {
+        return Err(RvError::ErrOther(::anyhow::anyhow!(
+            "plugin `{}` is quarantined (deleted at unix-secs {}; last active version `{}`)",
+            plugin_name,
+            rec.quarantined_at_unix_secs,
+            rec.last_active_version,
+        )));
+    }
+
+    let _invoke_guard = super::reload_lock::acquire_invoke(plugin_name).await;
+
+    let catalog = PluginCatalog::new();
+    let record: PluginRecord = catalog.get(storage, plugin_name).await?.ok_or_else(|| {
+        RvError::ErrOther(::anyhow::anyhow!(
+            "plugin {plugin_name} is not registered"
+        ))
+    })?;
+    let manifest = record.manifest;
+    let binary = record.binary;
+
+    let config = ConfigStore::new()
+        .get(storage, plugin_name)
+        .await
+        .unwrap_or_default();
+
+    match manifest.runtime {
+        RuntimeKind::Wasm => {
+            let runtime = WasmRuntime::new()
+                .map_err(|e| RvError::ErrOther(::anyhow::anyhow!("wasm runtime: {e:?}")))?;
+            runtime
+                .invoke_with_config(&manifest, &binary, input, Some(core.clone()), config)
+                .await
+                .map_err(|e| {
+                    RvError::ErrOther(::anyhow::anyhow!(
+                        "plugin {plugin_name} (wasm) invoke failed: {e:?}"
+                    ))
+                })
+        }
+        RuntimeKind::Process => {
+            if manifest.capabilities.long_lived {
+                super::process_supervisor::invoke_with_config(
+                    &manifest,
+                    &binary,
+                    input,
+                    Some(core.clone()),
+                    config,
+                )
+                .await
+                .map_err(|e| {
+                    RvError::ErrOther(::anyhow::anyhow!(
+                        "plugin {plugin_name} (process, long-lived) invoke failed: {e:?}"
+                    ))
+                })
+            } else {
+                let runtime = ProcessRuntime::new();
+                runtime
+                    .invoke_with_config(&manifest, &binary, input, Some(core.clone()), config)
+                    .await
+                    .map_err(|e| {
+                        RvError::ErrOther(::anyhow::anyhow!(
+                            "plugin {plugin_name} (process) invoke failed: {e:?}"
+                        ))
+                    })
+            }
+        }
     }
 }
 

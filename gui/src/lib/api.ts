@@ -2465,3 +2465,103 @@ export const ldapCheckIn = (mount: string, set: string, account?: string) =>
   invoke<void>("ldap_check_in", { mount, set, account });
 export const ldapLibraryStatus = (mount: string, set: string) =>
   invoke<LdapLibraryStatus>("ldap_library_status", { mount, set });
+
+// ── Notifications ─────────────────────────────────────────────────────
+// In-app notification system + plugin channels. See features/notifications.md.
+
+export type NotificationSeverity = "info" | "success" | "warning" | "critical";
+
+export interface NotificationItem {
+  id: string;
+  title: string;
+  body: string;
+  severity: NotificationSeverity;
+  /** "system" | "user:<entity>" | "plugin:<name>" */
+  source: string;
+  action_url?: string | null;
+  created_at: string;
+  namespace?: string;
+  /** Per-recipient fields (present on inbox reads). */
+  delivered_at?: string;
+  read?: boolean;
+  read_at?: string;
+  /** Admin "sent" view only. */
+  recipient_count?: number;
+  channels?: string[];
+}
+
+export interface NotificationChannelInfo {
+  /** "in-app" or "<plugin>:<channel>". */
+  id: string;
+  name: string;
+  /** "in-app" | "email" | "sms" | "slack" | "teams" | "whatsapp" | "webhook" | "other" */
+  kind: string;
+  description: string;
+  /** "builtin" | "plugin:<name>" */
+  provider: string;
+  enabled: boolean;
+}
+
+export type NotificationTargetInput =
+  | { kind: "all_users" }
+  | { kind: "user"; entity_id: string }
+  | { kind: "username"; name: string }
+  | { kind: "group"; group_kind: string; name: string };
+
+export interface NotificationSendResult {
+  id: string;
+  recipient_count: number;
+  channel_results?: {
+    channel: string;
+    delivered: number;
+    failed: number;
+    error?: string | null;
+  }[];
+}
+
+export interface NotificationConfig {
+  inbox_cap: number;
+  plugin_rate_per_min: number;
+}
+
+export const notificationsInbox = () =>
+  invoke<NotificationItem[]>("notifications_inbox");
+export const notificationsUnreadCount = () =>
+  invoke<number>("notifications_unread_count");
+export const notificationsMarkRead = (id: string) =>
+  invoke<void>("notifications_mark_read", { id });
+export const notificationsMarkAllRead = () =>
+  invoke<number>("notifications_mark_all_read");
+export const notificationsDismiss = (id: string) =>
+  invoke<void>("notifications_dismiss", { id });
+export const notificationsSend = (
+  title: string,
+  body: string,
+  severity: NotificationSeverity,
+  target: NotificationTargetInput,
+  channels: string[],
+  actionUrl?: string,
+) =>
+  invoke<NotificationSendResult>("notifications_send", {
+    title,
+    body,
+    severity,
+    target,
+    channels,
+    actionUrl,
+  });
+export const notificationsChannels = () =>
+  invoke<NotificationChannelInfo[]>("notifications_channels");
+export const notificationsChannelTest = (channel: string, to: string) =>
+  invoke<{ channel: string; delivered: number; failed: number; error?: string | null }>(
+    "notifications_channel_test",
+    { channel, to },
+  );
+export const notificationsSent = () =>
+  invoke<NotificationItem[]>("notifications_sent");
+export const notificationsConfigGet = () =>
+  invoke<NotificationConfig>("notifications_config_get");
+export const notificationsConfigPut = (
+  inboxCap?: number,
+  pluginRatePerMin?: number,
+) => invoke<void>("notifications_config_put", { inboxCap, pluginRatePerMin });

@@ -160,6 +160,13 @@ struct PluginCtx {
     /// Manifest `capabilities.app.net.https_only` — governs the
     /// cleartext-`http` exception in `net_gate`.
     net_https_only: bool,
+    /// ABI minor 2 (notifications): may the plugin raise notifications
+    /// via `bv.notify_send`? Gated from `capabilities.notify_emit`.
+    notify_emit: bool,
+    /// ABI minor 2: may the plugin read the notifications it authored
+    /// via `bv.notify_list` / `bv.notify_get`? Gated from
+    /// `capabilities.notify_read`.
+    notify_read: bool,
 }
 
 impl PluginCtx {
@@ -295,6 +302,8 @@ impl WasmRuntime {
                 .collect(),
             net_hosts,
             net_https_only,
+            notify_emit: manifest.capabilities.notify_emit,
+            notify_read: manifest.capabilities.notify_read,
         };
 
         let mut store: Store<PluginCtx> = Store::new(self.cache.engine(), ctx);
@@ -628,6 +637,43 @@ fn register_host_imports(
             |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32)| {
                 let (rp, rl, op, om) = args;
                 Box::new(async move { net_http_impl(&mut caller, rp, rl, op, om).await })
+            },
+        )
+        .map_err(|e| RuntimeError::Engine(e.to_string()))?;
+
+    // ABI minor 2: notifications. `bv.notify_send` raises a notification
+    // (gated by `notify_emit`, rate-limited + audited by the service).
+    // `bv.notify_list` / `bv.notify_get` read back the plugin's *own*
+    // authored notifications (gated by `notify_read`) — never a user's
+    // inbox. All three use the standard (in_ptr, in_len, out_ptr,
+    // out_max) buffer-retry convention.
+    linker
+        .func_wrap_async(
+            "bv",
+            "notify_send",
+            |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32)| {
+                let (rp, rl, op, om) = args;
+                Box::new(async move { notify_send_impl(&mut caller, rp, rl, op, om).await })
+            },
+        )
+        .map_err(|e| RuntimeError::Engine(e.to_string()))?;
+    linker
+        .func_wrap_async(
+            "bv",
+            "notify_list",
+            |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32)| {
+                let (rp, rl, op, om) = args;
+                Box::new(async move { notify_list_impl(&mut caller, rp, rl, op, om).await })
+            },
+        )
+        .map_err(|e| RuntimeError::Engine(e.to_string()))?;
+    linker
+        .func_wrap_async(
+            "bv",
+            "notify_get",
+            |mut caller: Caller<'_, PluginCtx>, args: (i32, i32, i32, i32)| {
+                let (rp, rl, op, om) = args;
+                Box::new(async move { notify_get_impl(&mut caller, rp, rl, op, om).await })
             },
         )
         .map_err(|e| RuntimeError::Engine(e.to_string()))?;
@@ -1044,6 +1090,145 @@ async fn audit_emit_impl(
     )
     .await;
     0
+}
+
+/// Input shape for `bv.notify_send` — a subset of a full `Notification`
+/// (the host stamps id / created_at / source / namespace).
+#[derive(serde::Deserialize)]
+struct PluginNotifyInput {
+    title: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    severity: Option<String>,
+    target: crate::modules::notifications::NotificationTarget,
+    #[serde(default)]
+    channels: Vec<String>,
+    #[serde(default)]
+    action_url: Option<String>,
+    #[serde(default)]
+    metadata: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Resolve the live notification service + the calling plugin's name.
+/// Returns `None` when the service is unavailable (sealed / not wired).
+fn plugin_notify_service(
+    caller: &Caller<'_, PluginCtx>,
+) -> Option<(Arc<crate::modules::notifications::NotificationService>, String)> {
+    let core = caller.data().core.clone()?;
+    let service = core
+        .module_manager
+        .get_module::<crate::modules::notifications::NotificationsModule>("notifications")
+        .and_then(|m| m.service())?;
+    Some((service, caller.data().plugin_name.clone()))
+}
+
+async fn notify_send_impl(
+    caller: &mut Caller<'_, PluginCtx>,
+    req_ptr: i32,
+    req_len: i32,
+    out_ptr: i32,
+    out_max: i32,
+) -> i32 {
+    if !caller.data().notify_emit {
+        return STORAGE_FORBIDDEN;
+    }
+    let payload = match read_bytes(caller, req_ptr, req_len) {
+        Some(b) => b,
+        None => return STORAGE_INTERNAL_ERROR,
+    };
+    let input: PluginNotifyInput = match serde_json::from_slice(&payload) {
+        Ok(v) => v,
+        Err(_) => return STORAGE_INTERNAL_ERROR,
+    };
+    let Some((service, plugin_name)) = plugin_notify_service(caller) else {
+        return STORAGE_FORBIDDEN;
+    };
+
+    use crate::modules::notifications::{Notification, Severity};
+    let notif = Notification {
+        id: String::new(),
+        title: input.title,
+        body: input.body,
+        severity: input.severity.as_deref().map(Severity::parse).unwrap_or_default(),
+        // Overwritten by the service to `plugin:<name>` — a plugin can
+        // never forge a system/admin source.
+        source: String::new(),
+        target: input.target,
+        channels: input.channels,
+        action_url: input.action_url,
+        created_at: String::new(),
+        namespace: String::new(),
+        metadata: input.metadata,
+        recipient_count: 0,
+    };
+
+    match service.send_from_plugin(&plugin_name, notif, "").await {
+        Ok(outcome) => {
+            let body = serde_json::json!({
+                "id": outcome.id,
+                "recipient_count": outcome.recipient_count,
+            });
+            let bytes = serde_json::to_vec(&body).unwrap_or_default();
+            write_to_buffer(caller, &bytes, out_ptr, out_max)
+        }
+        Err(_) => STORAGE_INTERNAL_ERROR,
+    }
+}
+
+async fn notify_list_impl(
+    caller: &mut Caller<'_, PluginCtx>,
+    _req_ptr: i32,
+    _req_len: i32,
+    out_ptr: i32,
+    out_max: i32,
+) -> i32 {
+    if !caller.data().notify_read {
+        return STORAGE_FORBIDDEN;
+    }
+    let Some((service, plugin_name)) = plugin_notify_service(caller) else {
+        return STORAGE_FORBIDDEN;
+    };
+    match service.list_authored_by_plugin(&plugin_name, "").await {
+        Ok(list) => {
+            let bytes = serde_json::to_vec(&serde_json::json!({ "notifications": list }))
+                .unwrap_or_default();
+            write_to_buffer(caller, &bytes, out_ptr, out_max)
+        }
+        Err(_) => STORAGE_INTERNAL_ERROR,
+    }
+}
+
+async fn notify_get_impl(
+    caller: &mut Caller<'_, PluginCtx>,
+    req_ptr: i32,
+    req_len: i32,
+    out_ptr: i32,
+    out_max: i32,
+) -> i32 {
+    if !caller.data().notify_read {
+        return STORAGE_FORBIDDEN;
+    }
+    let raw = match read_string(caller, req_ptr, req_len) {
+        Some(s) => s,
+        None => return STORAGE_INTERNAL_ERROR,
+    };
+    // Accept a raw id or a `{"id": "..."}` envelope.
+    let id = serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|v| v.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()))
+        .unwrap_or_else(|| raw.trim().trim_matches('"').to_string());
+    let Some((service, plugin_name)) = plugin_notify_service(caller) else {
+        return STORAGE_FORBIDDEN;
+    };
+    match service.get_authored_by_plugin(&plugin_name, "", &id).await {
+        Ok(Some(n)) => {
+            let bytes = serde_json::to_vec(&n).unwrap_or_default();
+            write_to_buffer(caller, &bytes, out_ptr, out_max)
+        }
+        Ok(None) => STORAGE_NOT_FOUND,
+        Err(_) => STORAGE_INTERNAL_ERROR,
+    }
 }
 
 /// Resolve a plugin-supplied key into the absolute barrier key + the

@@ -137,6 +137,21 @@ pub struct WindowEvent {
     pub kind: String,
 }
 
+/// A notification event delivered to `bvx_notify_event` (ABI minor 2).
+/// Fired when a notification arrives in, or is read from, the current
+/// user's inbox so a plugin can react (e.g. refresh a window it drives).
+#[derive(Debug, Clone, Deserialize)]
+pub struct NotifyEvent {
+    /// e.g. `"received"` or `"read"`.
+    pub kind: String,
+    /// Notification id the event concerns, when applicable.
+    #[serde(default)]
+    pub id: String,
+    /// Current unread count after this event.
+    #[serde(default)]
+    pub unread: u64,
+}
+
 /// Network-specific error for [`AppHost::http`], extending [`HostError`]
 /// with the two grant-related refusals.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,6 +259,28 @@ impl AppHost {
         let out = buffer_retry_net(|buf| app_bindings::net_http(&json, buf))?;
         serde_json::from_slice(&out).map_err(|_| NetError::Host(HostError::Internal))
     }
+
+    /// Raise a notification through the user's session (ABI minor 2).
+    /// `payload` is the same JSON shape as `bv.notify_send`
+    /// (`{title, body?, severity?, target, channels?, action_url?}`);
+    /// it rides the user's token so the server ACL is authoritative.
+    /// Requires `capabilities.app.notify`.
+    pub fn notify_send(&self, payload: &[u8]) -> Result<Vec<u8>, HostError> {
+        buffer_retry(|buf| app_bindings::notify_send(payload, buf))
+    }
+
+    /// Read the current user's own notification inbox as JSON
+    /// (`{"notifications": [...]}`). Requires `capabilities.app.notify`
+    /// with `read = true`.
+    pub fn notify_list(&self) -> Result<Vec<u8>, HostError> {
+        buffer_retry(|buf| app_bindings::notify_list(&[], buf))
+    }
+
+    /// Open (focus) the in-app notification center. Requires
+    /// `capabilities.app.notify` with `windows = true`.
+    pub fn notify_open(&self) -> Result<(), HostError> {
+        rc_to_unit(app_bindings::notify_open())
+    }
 }
 
 fn rc_to_unit(rc: i32) -> Result<(), HostError> {
@@ -332,12 +369,17 @@ pub trait AppModule {
     fn tick(_now_ms: i64, _host: &AppHost) -> i32 {
         0
     }
+    /// A notification arrived in / was read from the user's inbox
+    /// (ABI minor 2). Requires `capabilities.app.notify.windows`.
+    fn notify_event(_ev: &NotifyEvent, _host: &AppHost) -> i32 {
+        0
+    }
 }
 
 #[doc(hidden)]
 pub mod app_abi {
     //! Glue the [`app_module!`] macro routes the `bvx_*` exports into.
-    use super::{AppContext, AppHost, AppModule, MenuClick, WindowEvent};
+    use super::{AppContext, AppHost, AppModule, MenuClick, NotifyEvent, WindowEvent};
 
     unsafe fn input<'a>(ptr: i32, len: i32) -> &'a [u8] {
         if ptr <= 0 || len <= 0 {
@@ -380,6 +422,15 @@ pub mod app_abi {
 
     pub fn tick<M: AppModule>(now_ms: i64) -> i32 {
         M::tick(now_ms, &AppHost::new())
+    }
+
+    /// # Safety
+    /// See [`init`].
+    pub unsafe fn notify_event<M: AppModule>(ptr: i32, len: i32) -> i32 {
+        match serde_json::from_slice::<NotifyEvent>(input(ptr, len)) {
+            Ok(ev) => M::notify_event(&ev, &AppHost::new()),
+            Err(_) => -4,
+        }
     }
 }
 
@@ -442,6 +493,12 @@ macro_rules! app_module {
         pub extern "C" fn bvx_tick(now_ms: i64) -> i32 {
             $crate::app::app_abi::tick::<$m>(now_ms)
         }
+
+        #[cfg(all(target_arch = "wasm32", not(feature = "host_test")))]
+        #[no_mangle]
+        pub extern "C" fn bvx_notify_event(ptr: i32, len: i32) -> i32 {
+            unsafe { $crate::app::app_abi::notify_event::<$m>(ptr, len) }
+        }
     };
 }
 
@@ -462,6 +519,9 @@ mod app_bindings {
             pub fn window_emit(handle: i32, ptr: i32, len: i32) -> i32;
             pub fn api_request(req_ptr: i32, req_len: i32, out_ptr: i32, out_max: i32) -> i32;
             pub fn net_http(req_ptr: i32, req_len: i32, out_ptr: i32, out_max: i32) -> i32;
+            pub fn notify_send(req_ptr: i32, req_len: i32, out_ptr: i32, out_max: i32) -> i32;
+            pub fn notify_list(req_ptr: i32, req_len: i32, out_ptr: i32, out_max: i32) -> i32;
+            pub fn notify_open() -> i32;
         }
     }
 
@@ -509,6 +569,29 @@ mod app_bindings {
             )
         }
     }
+    pub fn notify_send(req: &[u8], out: &mut [u8]) -> i32 {
+        unsafe {
+            raw::notify_send(
+                req.as_ptr() as i32,
+                req.len() as i32,
+                out.as_mut_ptr() as i32,
+                out.len() as i32,
+            )
+        }
+    }
+    pub fn notify_list(req: &[u8], out: &mut [u8]) -> i32 {
+        unsafe {
+            raw::notify_list(
+                req.as_ptr() as i32,
+                req.len() as i32,
+                out.as_mut_ptr() as i32,
+                out.len() as i32,
+            )
+        }
+    }
+    pub fn notify_open() -> i32 {
+        unsafe { raw::notify_open() }
+    }
 }
 
 #[cfg(any(not(target_arch = "wasm32"), feature = "host_test"))]
@@ -534,6 +617,8 @@ mod app_bindings {
         pub net_script: Option<Vec<Result<Vec<u8>, i32>>>,
         pub log_lines: Option<Vec<(i32, Vec<u8>)>>,
         pub now_ms: Option<i64>,
+        pub notifications: Option<Vec<Vec<u8>>>,
+        pub notify_opens: u32,
     }
 
     impl AppState {
@@ -549,6 +634,8 @@ mod app_bindings {
                 net_script: None,
                 log_lines: None,
                 now_ms: None,
+                notifications: None,
+                notify_opens: 0,
             }
         }
     }
@@ -625,6 +712,18 @@ mod app_bindings {
             None => super::NET_NOT_GRANTED,
         }
     }
+    pub fn notify_send(req: &[u8], out: &mut [u8]) -> i32 {
+        let mut s = STATE.lock().unwrap();
+        s.notifications.get_or_insert_with(Vec::new).push(req.to_vec());
+        write_out(br#"{"id":"test-notification","recipient_count":0}"#, out)
+    }
+    pub fn notify_list(_req: &[u8], out: &mut [u8]) -> i32 {
+        write_out(br#"{"notifications":[]}"#, out)
+    }
+    pub fn notify_open() -> i32 {
+        STATE.lock().unwrap().notify_opens += 1;
+        0
+    }
 }
 
 /// Test helpers for app-module authors (available under `host_test`).
@@ -677,6 +776,16 @@ pub mod test_support {
             .net_script
             .get_or_insert_with(Vec::new)
             .push(Err(code));
+    }
+
+    /// The `bvx.notify_send` payloads the module raised, in call order.
+    pub fn notifications_sent() -> Vec<Vec<u8>> {
+        STATE.lock().unwrap().notifications.clone().unwrap_or_default()
+    }
+
+    /// How many times the module called `bvx.notify_open`.
+    pub fn notify_opens() -> u32 {
+        STATE.lock().unwrap().notify_opens
     }
 
     /// The dynamic menus the module upserted, keyed by id (raw JSON).

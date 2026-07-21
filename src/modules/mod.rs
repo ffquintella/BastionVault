@@ -19,6 +19,7 @@ pub mod kv;
 pub mod kv_v2;
 pub mod ldap;
 pub mod namespace;
+pub mod notifications;
 pub mod pki;
 pub mod policy;
 pub mod resource;

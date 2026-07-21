@@ -30,6 +30,7 @@ import { SshPage } from "./routes/SshPage";
 import { TotpPage } from "./routes/TotpPage";
 import { LdapPage } from "./routes/LdapPage";
 import { PluginsPage } from "./routes/PluginsPage";
+import { NotificationsAdminPage } from "./routes/NotificationsAdminPage";
 import { SurfaceRouter } from "./components/surface/SurfaceRouter";
 import { SessionSshWindow } from "./routes/SessionSshWindow";
 import { SessionRdpWindow } from "./routes/SessionRdpWindow";
@@ -166,6 +167,10 @@ export default function App() {
             <Route
               path="/plugins"
               element={<ProtectedRoute><PluginsPage /></ProtectedRoute>}
+            />
+            <Route
+              path="/notifications"
+              element={<ProtectedRoute><NotificationsAdminPage /></ProtectedRoute>}
             />
             {/* Plugin Extensibility v1: dynamic plugin pages.
                 The splat pattern lets a plugin contribute multiple

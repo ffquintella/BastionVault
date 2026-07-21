@@ -138,6 +138,61 @@ pub struct Capabilities {
     /// its own signed bytes.
     #[serde(default, skip_serializing_if = "AppCapabilities::is_default")]
     pub app: AppCapabilities,
+
+    /// Notifications: may the plugin raise notifications via the
+    /// `bv.notify_send` host import? Gated per-call host-side. Requires
+    /// `abi_version` minor >= 2 (`"1.2"`). `skip_serializing_if` keeps
+    /// the field out of an existing v1 plugin's canonical signing
+    /// message, so **already-signed plugins keep verifying**.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub notify_emit: bool,
+    /// Notifications: may the plugin read back the notifications it
+    /// authored via `bv.notify_list` / `bv.notify_get`? Scoped
+    /// host-side to `source = plugin:<name>` — a plugin can never read
+    /// another user's inbox. Requires `abi_version` minor >= 2.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub notify_read: bool,
+    /// Notifications: the delivery channels this plugin provides (email
+    /// / slack / sms / teams / …). The core notification service routes
+    /// a `notify_deliver` envelope to the plugin for each declared
+    /// channel. Empty (default) means the plugin provides no channels.
+    /// Requires `abi_version` minor >= 2.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notification_channels: Vec<ChannelDecl>,
+}
+
+/// One notification-delivery channel a plugin provides. Declared in the
+/// manifest and pinned at registration; participates in the capability-
+/// widening guard so a plugin cannot silently gain channels on update.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChannelDecl {
+    /// Stable channel id, unique within the plugin. The core service
+    /// routes `notify_deliver` by `(plugin, id)` and the GUI references
+    /// the channel by it. Must be a valid identifier (no whitespace,
+    /// no slashes).
+    pub id: String,
+    /// Human-readable channel name shown in the GUI channel list.
+    pub name: String,
+    /// Transport family. Informational and drives the GUI icon.
+    #[serde(default)]
+    pub kind: ChannelKind,
+    /// Optional operator-facing description.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+}
+
+/// Transport family for a plugin-provided [`ChannelDecl`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelKind {
+    Email,
+    Sms,
+    Slack,
+    Teams,
+    Whatsapp,
+    Webhook,
+    #[default]
+    Other,
 }
 
 /// Extensibility v2: the app-module capability surface. Requesting a
@@ -164,6 +219,25 @@ pub struct AppCapabilities {
     /// registration but only usable after an admin grant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub net: Option<NetCapabilities>,
+    /// Notifications (app-module): access to the in-app notification
+    /// system from the client app module. `None` (default) means no
+    /// access. Requires `abi_version` minor >= 2 (`"1.2"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<NotifyAppCap>,
+}
+
+/// App-module notification capability. Requesting `read` enables
+/// `bvx.notify_list` (the caller's own inbox); `windows` enables
+/// `bvx.notify_open` + the `bvx_notify_event` callback so a plugin can
+/// open and drive the notification-center window.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotifyAppCap {
+    /// Enables `bvx.notify_list` — read the current user's inbox.
+    #[serde(default)]
+    pub read: bool,
+    /// Enables `bvx.notify_open` and the `bvx_notify_event` export.
+    #[serde(default)]
+    pub windows: bool,
 }
 
 impl AppCapabilities {
@@ -175,6 +249,7 @@ impl AppCapabilities {
             || self.windows.max_open > 0
             || !self.api_paths.is_empty()
             || self.net.is_some()
+            || self.notify.is_some()
     }
 
     /// `true` when this is the default (no-op) app block — used as the
@@ -214,6 +289,15 @@ pub const MAX_PLUGIN_WINDOWS: u32 = 4;
 
 fn default_true() -> bool {
     true
+}
+
+/// `skip_serializing_if` predicate for additive `bool` capability
+/// fields: a `false` (default) field is omitted from the canonical
+/// signing message so already-signed plugins keep verifying. Only a
+/// plugin that actually turns the capability on changes its own signed
+/// bytes.
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Top-level manifest. Stored barrier-encrypted alongside the WASM bytes.
@@ -316,11 +400,15 @@ fn default_abi_version() -> String {
 /// `(major, ≤ HOST_ABI_MINOR)` are accepted; cross-major mismatches
 /// are refused with a compatibility-matrix link in the error.
 pub const HOST_ABI_MAJOR: u32 = 1;
-/// Bumped to `1` for Extensibility v2 (app extensions): the additive
-/// `bvx.*` host surface. Plugins that declare `capabilities.app` target
-/// `abi_version = "1.1"`; older hosts (minor 0) refuse them cleanly via
-/// [`check_abi_compatibility`] — the intended downgrade behavior.
-pub const HOST_ABI_MINOR: u32 = 1;
+/// Minor `1` added the Extensibility v2 (app extensions) `bvx.*` host
+/// surface; plugins that declare `capabilities.app` target
+/// `abi_version = "1.1"`. Minor `2` adds the notification surface — the
+/// `bv.notify_*` host imports, plugin-provided `notification_channels`,
+/// and the `capabilities.app.notify` app-module access; those plugins
+/// target `abi_version = "1.2"`. Older hosts refuse a newer minor
+/// cleanly via [`check_abi_compatibility`] — the intended downgrade
+/// behavior.
+pub const HOST_ABI_MINOR: u32 = 2;
 
 /// Phase 5.4 — parse `"major.minor"` from a manifest. Returns
 /// `Err(_)` for any non-numeric or missing component so a typo'd
@@ -425,6 +513,47 @@ impl PluginManifest {
             }
         }
         self.validate_app_capabilities()?;
+        self.validate_notify_capabilities()?;
+        Ok(())
+    }
+
+    /// Static invariants on the notification capabilities
+    /// (`notify_emit`, `notify_read`, `notification_channels`, and
+    /// `capabilities.app.notify`). Any declared notification capability
+    /// requires the v2 ABI minor (`"1.2"`) so an older host refuses the
+    /// plugin cleanly. Channel ids must be unique valid identifiers.
+    fn validate_notify_capabilities(&self) -> Result<(), &'static str> {
+        let caps = &self.capabilities;
+        let declared = caps.notify_emit
+            || caps.notify_read
+            || !caps.notification_channels.is_empty()
+            || caps.app.notify.is_some();
+        if !declared {
+            return Ok(());
+        }
+        let (_maj, min) =
+            parse_abi(&self.abi_version).map_err(|_| "abi_version must be MAJOR.MINOR")?;
+        if min < 2 {
+            return Err(
+                "notification capabilities require abi_version minor >= 2 (\"1.2\")",
+            );
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for c in &caps.notification_channels {
+            if c.id.trim().is_empty()
+                || c.id.contains(char::is_whitespace)
+                || c.id.contains('/')
+                || c.id.contains("..")
+            {
+                return Err("notification_channels entry has invalid id");
+            }
+            if !ids.insert(c.id.clone()) {
+                return Err("notification_channels entries must have unique ids");
+            }
+            if c.name.trim().is_empty() {
+                return Err("notification_channels entry name is required");
+            }
+        }
         Ok(())
     }
 
@@ -566,6 +695,50 @@ mod tests {
     #[test]
     fn validates_well_formed_manifest() {
         assert!(fixture().validate().is_ok());
+    }
+
+    #[test]
+    fn notify_capabilities_require_abi_1_2() {
+        let mut m = fixture();
+        m.capabilities.notify_emit = true;
+        // abi 1.0 is too old for the notification surface.
+        assert!(m.validate().is_err());
+        m.abi_version = "1.2".to_string();
+        assert!(m.validate().is_ok());
+    }
+
+    #[test]
+    fn notification_channels_require_unique_ids() {
+        let mut m = fixture();
+        m.abi_version = "1.2".to_string();
+        m.capabilities.notification_channels = vec![
+            ChannelDecl {
+                id: "email".into(),
+                name: "Email".into(),
+                kind: ChannelKind::Email,
+                description: String::new(),
+            },
+            ChannelDecl {
+                id: "email".into(),
+                name: "Email 2".into(),
+                kind: ChannelKind::Email,
+                description: String::new(),
+            },
+        ];
+        assert!(m.validate().is_err());
+        m.capabilities.notification_channels[1].id = "email2".into();
+        assert!(m.validate().is_ok());
+    }
+
+    #[test]
+    fn notify_capability_omitted_from_signing_message_when_off() {
+        // A v1 plugin (notify off) must not gain notify fields in its
+        // canonical serialisation — otherwise existing signatures break.
+        let m = fixture();
+        let v = serde_json::to_value(&m.capabilities).unwrap();
+        assert!(v.get("notify_emit").is_none());
+        assert!(v.get("notify_read").is_none());
+        assert!(v.get("notification_channels").is_none());
     }
 
     #[test]
@@ -793,6 +966,7 @@ mod tests {
                 hosts: vec!["hooks.example.com".to_string(), "*.status.example.net".to_string()],
                 https_only: true,
             }),
+            notify: None,
         };
         m
     }

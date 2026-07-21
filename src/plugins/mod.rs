@@ -39,7 +39,9 @@ pub mod verifier;
 
 pub use catalog::{PluginCatalog, PluginRecord, PLUGIN_PREFIX};
 pub use config::ConfigStore;
-pub use logical_backend::{factory_for as plugin_logical_backend_factory, PluginLogicalBackend};
+pub use logical_backend::{
+    factory_for as plugin_logical_backend_factory, invoke_active_plugin, PluginLogicalBackend,
+};
 pub use manifest::{ConfigField, ConfigFieldKind, PluginManifest, RuntimeKind};
 pub use module_cache::ModuleCache;
 pub use process_runtime::{

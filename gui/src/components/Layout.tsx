@@ -12,6 +12,8 @@ import { AboutModal } from "./AboutModal";
 import * as api from "../lib/api";
 import { PluginMenuSlot } from "./PluginMenuSlot";
 import { usePluginSurfacesStore } from "../stores/pluginSurfacesStore";
+import { NotificationBell } from "./NotificationBell";
+import { useNotificationsStore } from "../stores/notificationsStore";
 import { listen } from "@tauri-apps/api/event";
 import { useToast } from "./ui/Toast";
 import { SUPER_ADMIN, isAdminUser } from "../lib/access";
@@ -132,6 +134,7 @@ const adminNav: NavItem[] = [
   { path: "/recordings", label: "Recordings" },
   { path: "/rustion-sessions", label: "Live Sessions" },
   { path: "/plugins", label: "Plugins" },
+  { path: "/notifications", label: "Notifications" },
   { path: "/exchange", label: "Import / Export" },
   // Settings is entirely global / server-level config (FIDO2, SSO,
   // password policy, resource types, Rustion bastions + master cert,
@@ -236,6 +239,42 @@ export function Layout({ children }: LayoutProps) {
     );
     clearLastUpdate();
   }, [lastUpdate, clearLastUpdate, toast]);
+
+  // Notifications: clear the store on sign-out (stops the poll loop).
+  const clearNotifications = useNotificationsStore((s) => s.clear);
+  useEffect(() => {
+    if (!isAuthenticated) clearNotifications();
+  }, [isAuthenticated, clearNotifications]);
+
+  // Notifications: plugin app modules can push a `notification-received`
+  // nudge (refresh the badge) or `notification-center-open` (focus the
+  // bell dropdown). The bell itself owns the poll loop + first load.
+  const refreshUnread = useNotificationsStore((s) => s.refreshUnread);
+  const setCenterOpen = useNotificationsStore((s) => s.setCenterOpen);
+  useEffect(() => {
+    let cancelled = false;
+    const unlistenRecv = listen("notification-received", () => {
+      if (!cancelled) void refreshUnread();
+    });
+    const unlistenOpen = listen("notification-center-open", () => {
+      if (!cancelled) setCenterOpen(true);
+    });
+    return () => {
+      cancelled = true;
+      void unlistenRecv.then((u) => u());
+      void unlistenOpen.then((u) => u());
+    };
+  }, [refreshUnread, setCenterOpen]);
+
+  // Notifications: toast once when a newly-arrived notification is seen
+  // by the poll loop (the store flips `lastArrival` back to null).
+  const lastArrival = useNotificationsStore((s) => s.lastArrival);
+  const clearLastArrival = useNotificationsStore((s) => s.clearLastArrival);
+  useEffect(() => {
+    if (!lastArrival) return;
+    toast("info", lastArrival.title);
+    clearLastArrival();
+  }, [lastArrival, clearLastArrival, toast]);
 
   // Load the live mount-type set so per-item `requiresMountType`
   // gates work. We only ever need the set of types, not the full
@@ -394,8 +433,13 @@ export function Layout({ children }: LayoutProps) {
       {/* Sidebar */}
       <aside className="w-56 bg-[var(--color-surface)] border-r border-[var(--color-border)] flex flex-col">
         <div className="p-4 border-b border-[var(--color-border)]">
-          <h1 className="text-lg font-bold">BastionVault</h1>
-          <p className="text-xs text-[var(--color-text-muted)]">{subtitle}</p>
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <h1 className="text-lg font-bold">BastionVault</h1>
+              <p className="text-xs text-[var(--color-text-muted)]">{subtitle}</p>
+            </div>
+            <NotificationBell />
+          </div>
           <NamespaceSwitcher />
         </div>
 

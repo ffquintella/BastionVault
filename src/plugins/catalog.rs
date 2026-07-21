@@ -378,6 +378,45 @@ impl PluginCatalog {
                 }
             }
         }
+
+        // ABI minor 2 (notifications): notify_emit / notify_read /
+        // notification_channels / app.notify are capabilities and
+        // participate in the widening guard. Turning a family on, gaining
+        // a channel, or gaining app-notify read/windows requires
+        // DELETE + re-register (which audits the change).
+        if !p.notify_emit && n.notify_emit {
+            return Err(RvError::ErrString(
+                "capability widening: notify_emit cannot be enabled on re-register; DELETE + re-register"
+                    .into(),
+            ));
+        }
+        if !p.notify_read && n.notify_read {
+            return Err(RvError::ErrString(
+                "capability widening: notify_read cannot be enabled on re-register; DELETE + re-register"
+                    .into(),
+            ));
+        }
+        let prev_channels: std::collections::BTreeSet<&String> =
+            p.notification_channels.iter().map(|c| &c.id).collect();
+        for c in &n.notification_channels {
+            if !prev_channels.contains(&c.id) {
+                return Err(RvError::ErrString(format!(
+                    "capability widening: notification_channels gained `{}`; DELETE + re-register",
+                    c.id,
+                )));
+            }
+        }
+        let prev_notify = pa.notify.unwrap_or_default();
+        if let Some(new_notify) = na.notify {
+            if (new_notify.read && !prev_notify.read)
+                || (new_notify.windows && !prev_notify.windows)
+            {
+                return Err(RvError::ErrString(
+                    "capability widening: app.notify gained read/windows; DELETE + re-register"
+                        .into(),
+                ));
+            }
+        }
         Ok(())
     }
 

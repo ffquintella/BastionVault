@@ -136,6 +136,21 @@ path "identity/sharing/for-me" {
   capabilities = ["read", "list"]
 }
 
+# Allow a token to read and manage its own in-app notification inbox
+# (list, unread-count, mark-read, mark-all-read, dismiss). The
+# notifications backend scopes every inbox operation to the calling
+# token's entity_id, so this only ever exposes the caller's own
+# notifications. Sending / broadcasting (`notifications/send`), the
+# channel + sent + config admin views are deliberately NOT here -- they
+# require an admin policy, which is how the ACL enforces who may raise a
+# notification.
+path "notifications/inbox" {
+  capabilities = ["read", "list"]
+}
+path "notifications/inbox/*" {
+  capabilities = ["read", "update", "delete"]
+}
+
 
 # Allow a token to look up its resultant ACL from all policies. This is useful
 # for UIs. It is an internal path because the format may change at any time
@@ -287,6 +302,10 @@ path "sys/internal/ui/resultant-acl"  { capabilities = ["read"] }
 # --- Caller-introspecting identity lookups (only ever return the caller) ---
 path "identity/entity/self"   { capabilities = ["read"] }
 path "identity/sharing/for-me" { capabilities = ["read", "list"] }
+
+# --- Own notification inbox (scoped to the caller's entity_id server-side) ---
+path "notifications/inbox"   { capabilities = ["read", "list"] }
+path "notifications/inbox/*" { capabilities = ["read", "update", "delete"] }
 
 # --- Lease self-service (requires knowing the lease id up front) ---
 path "sys/renew"          { capabilities = ["update"] }

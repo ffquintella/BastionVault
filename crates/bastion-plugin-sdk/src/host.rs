@@ -147,6 +147,32 @@ impl Host {
         }
     }
 
+    /// Raise a notification (ABI minor 2). `payload` is a JSON object
+    /// `{title, body?, severity?, target, channels?, action_url?,
+    /// metadata?}`; the host stamps id/created_at and forces
+    /// `source = "plugin:<name>"`. Returns the response JSON
+    /// (`{"id": "...", "recipient_count": n}`). Capability-gated by
+    /// `manifest.capabilities.notify_emit`; the host also rate-limits
+    /// plugin sends.
+    pub fn notify_send(&self, payload: &[u8]) -> Result<Vec<u8>, HostError> {
+        buffer_retry(|buf| bindings::notify_send(payload, buf))
+    }
+
+    /// List the notifications this plugin authored (ABI minor 2).
+    /// Returns JSON `{"notifications": [...]}`. A plugin can only ever
+    /// read its own notifications, never a user's inbox.
+    /// Capability-gated by `manifest.capabilities.notify_read`.
+    pub fn notify_list(&self) -> Result<Vec<u8>, HostError> {
+        buffer_retry(|buf| bindings::notify_list(&[], buf))
+    }
+
+    /// Read one notification this plugin authored, by id (ABI minor 2).
+    /// Returns the notification JSON, or [`HostError::NotFound`].
+    /// Capability-gated by `manifest.capabilities.notify_read`.
+    pub fn notify_get(&self, id: &str) -> Result<Vec<u8>, HostError> {
+        buffer_retry(|buf| bindings::notify_get(id.as_bytes(), buf))
+    }
+
     /// Host wall-clock as milliseconds since the Unix epoch. Always
     /// available; not capability-gated. Useful for TOTP step counters,
     /// expiration checks, timestamping. Returns 0 only if the host's
@@ -197,6 +223,27 @@ impl Host {
     }
 }
 
+/// Shared growing-buffer retry for host imports that return bytes via
+/// the `(…, out_ptr, out_max) -> i32` convention: `>= 0` is the byte
+/// count written, `-3` means the buffer was too small (retry, doubling
+/// up to 1 MiB), any other negative is a [`HostError`].
+fn buffer_retry<F: FnMut(&mut [u8]) -> i32>(mut call: F) -> Result<Vec<u8>, HostError> {
+    let mut cap = 1024usize;
+    loop {
+        let mut buf = alloc::vec![0u8; cap];
+        let rc = call(&mut buf);
+        if rc >= 0 {
+            buf.truncate(rc as usize);
+            return Ok(buf);
+        }
+        if rc == -3 && cap < 1024 * 1024 {
+            cap *= 2;
+            continue;
+        }
+        return Err(HostError::from(rc));
+    }
+}
+
 // ── Bindings ────────────────────────────────────────────────────────────────
 
 #[cfg(all(target_arch = "wasm32", not(feature = "host_test")))]
@@ -218,6 +265,42 @@ mod bindings {
             pub fn audit_emit(payload_ptr: i32, payload_len: i32) -> i32;
             pub fn now_unix_ms() -> i64;
             pub fn config_get(key_ptr: i32, key_len: i32, out_ptr: i32, out_max: i32) -> i32;
+            pub fn notify_send(req_ptr: i32, req_len: i32, out_ptr: i32, out_max: i32) -> i32;
+            pub fn notify_list(req_ptr: i32, req_len: i32, out_ptr: i32, out_max: i32) -> i32;
+            pub fn notify_get(req_ptr: i32, req_len: i32, out_ptr: i32, out_max: i32) -> i32;
+        }
+    }
+
+    pub fn notify_send(req: &[u8], out: &mut [u8]) -> i32 {
+        unsafe {
+            raw::notify_send(
+                req.as_ptr() as i32,
+                req.len() as i32,
+                out.as_mut_ptr() as i32,
+                out.len() as i32,
+            )
+        }
+    }
+
+    pub fn notify_list(req: &[u8], out: &mut [u8]) -> i32 {
+        unsafe {
+            raw::notify_list(
+                req.as_ptr() as i32,
+                req.len() as i32,
+                out.as_mut_ptr() as i32,
+                out.len() as i32,
+            )
+        }
+    }
+
+    pub fn notify_get(req: &[u8], out: &mut [u8]) -> i32 {
+        unsafe {
+            raw::notify_get(
+                req.as_ptr() as i32,
+                req.len() as i32,
+                out.as_mut_ptr() as i32,
+                out.len() as i32,
+            )
         }
     }
 
@@ -314,6 +397,8 @@ mod bindings {
         /// `host.config_get("key")`; tests pre-populate with
         /// `test_support::set_config(key, value)`.
         config: Option<BTreeMap<String, String>>,
+        /// `bv.notify_send` payloads captured during the invocation.
+        notifications: Option<Vec<Vec<u8>>>,
     }
 
     impl TestState {
@@ -325,6 +410,7 @@ mod bindings {
                 audit_events: None,
                 mock_now_ms: None,
                 config: None,
+                notifications: None,
             }
         }
 
@@ -338,6 +424,10 @@ mod bindings {
 
         fn audit_events_mut(&mut self) -> &mut Vec<Vec<u8>> {
             self.audit_events.get_or_insert_with(Vec::new)
+        }
+
+        fn notifications_mut(&mut self) -> &mut Vec<Vec<u8>> {
+            self.notifications.get_or_insert_with(Vec::new)
         }
     }
 
@@ -446,6 +536,28 @@ mod bindings {
         v.len() as i32
     }
 
+    fn write_out(bytes: &[u8], out: &mut [u8]) -> i32 {
+        if bytes.len() > out.len() {
+            return -3;
+        }
+        out[..bytes.len()].copy_from_slice(bytes);
+        bytes.len() as i32
+    }
+
+    pub fn notify_send(req: &[u8], out: &mut [u8]) -> i32 {
+        let mut s = STATE.lock().unwrap();
+        s.notifications_mut().push(req.to_vec());
+        write_out(br#"{"id":"test-notification","recipient_count":0}"#, out)
+    }
+
+    pub fn notify_list(_req: &[u8], out: &mut [u8]) -> i32 {
+        write_out(br#"{"notifications":[]}"#, out)
+    }
+
+    pub fn notify_get(_req: &[u8], _out: &mut [u8]) -> i32 {
+        -1 // NotFound — the mock keeps no canonical store to read back.
+    }
+
     /// Test helpers — exposed via `bastion_plugin_sdk::test_support`
     /// when the `host_test` feature is on. Compiled only under that
     /// feature: without it the parent `host` module is private, so
@@ -463,6 +575,14 @@ mod bindings {
             s.audit_events = None;
             s.mock_now_ms = None;
             s.config = None;
+            s.notifications = None;
+        }
+
+        /// The `bv.notify_send` payloads the plugin raised during the
+        /// current test, in call order.
+        pub fn notifications_sent() -> Vec<Vec<u8>> {
+            let s = STATE.lock().unwrap();
+            s.notifications.clone().unwrap_or_default()
         }
 
         /// Pre-populate the config map a plugin will see via

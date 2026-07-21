@@ -18,9 +18,10 @@ use crate::{
     modules::{
         cert_lifecycle::CertLifecycleModule, files::FilesModule, identity::IdentityModule,
         kv::KvModule, kv_v2::KvV2Module, ldap::LdapModule, namespace::NamespaceModule,
-        pki::PkiModule, resource::ResourceModule, resource_group::ResourceGroupModule,
-        rustion::RustionModule, ssh::SshModule, ssh_broker::SshBrokerModule,
-        system::SystemModule, totp::TotpModule, transit::TransitModule, Module,
+        notifications::NotificationsModule, pki::PkiModule, resource::ResourceModule,
+        resource_group::ResourceGroupModule, rustion::RustionModule, ssh::SshModule,
+        ssh_broker::SshBrokerModule, system::SystemModule, totp::TotpModule,
+        transit::TransitModule, Module,
     },
 };
 
@@ -42,6 +43,7 @@ impl ModuleManager {
             Arc::new(ResourceModule::new(core.clone())),
             Arc::new(FilesModule::new(core.clone())),
             Arc::new(IdentityModule::new(core.clone())),
+            Arc::new(NotificationsModule::new(core.clone())),
             Arc::new(ResourceGroupModule::new(core.clone())),
             Arc::new(RustionModule::new(core.clone())),
             Arc::new(SshModule::new(core.clone())),
