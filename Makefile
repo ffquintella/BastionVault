@@ -71,19 +71,29 @@ export PATH := $(RUSTUP_CARGO_BIN):$(PATH)
 # semver-exempt escape hatch — scoped here to make-driven local dev
 # builds only, and trivially reversible.
 #
+# Applied as a *per-target* variable (not a global export) to the
+# host-native main-workspace dev targets listed in FAST_BUILD_TARGETS.
+# It deliberately does NOT leak into the plugin builds, because:
+#   * `cross` (used for the Linux plugin targets) forwards RUSTFLAGS
+#     into the container but NOT RUSTC_BOOTSTRAP, so `-Z threads`
+#     would hit a plain stable rustc there and fail hard; and
+#   * the signed/distributable plugin artefacts must not carry an
+#     ad-hoc host RUSTFLAGS that changes their output.
+#
 # Tune or disable from the command line:
 #   make build RUSTC_THREADS=6   # use 6 threads instead of 8
 #   make build RUSTC_THREADS=0   # off — plain stable behaviour
 #
-# Windows is intentionally excluded: exporting RUSTFLAGS here would
+# Windows is intentionally excluded: setting RUSTFLAGS here would
 # override (not merge with) the `/PDBPAGESIZE:8192` linker flag that
 # .cargo/config.toml sets for the *-pc-windows-msvc targets, bringing
 # back the GUI link failure `LNK1318` that flag exists to prevent.
+FAST_BUILD_TARGETS := build run-dev run-dev-gui run-dev-gui-hiqlite run-dev-gui-only bootstrap
 ifneq ($(OS),Windows_NT)
 RUSTC_THREADS ?= 8
 ifneq ($(RUSTC_THREADS),0)
-export RUSTC_BOOTSTRAP := 1
-export RUSTFLAGS := $(strip $(RUSTFLAGS) -Z threads=$(RUSTC_THREADS))
+$(FAST_BUILD_TARGETS): export RUSTC_BOOTSTRAP := 1
+$(FAST_BUILD_TARGETS): export RUSTFLAGS := $(strip $(RUSTFLAGS) -Z threads=$(RUSTC_THREADS))
 endif
 endif
 

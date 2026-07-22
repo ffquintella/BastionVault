@@ -69,9 +69,13 @@ EXAMPLE ENTRY:
   while keeping panic backtraces with source locations.
 - Faster dev builds: the Makefile now enables rustc's parallel front-end
   (`-Z threads`, via `RUSTC_BOOTSTRAP` so no nightly toolchain is needed)
-  for make-driven builds on non-Windows hosts. Tune with `RUSTC_THREADS=N`
-  or disable with `RUSTC_THREADS=0`. Windows is excluded to preserve the
-  MSVC `/PDBPAGESIZE` linker flag from `.cargo/config.toml`.
+  for the host-native main-workspace dev targets (`build`, `run-dev`,
+  `run-dev-gui*`, `bootstrap`) on non-Windows hosts. Tune with
+  `RUSTC_THREADS=N` or disable with `RUSTC_THREADS=0`. Scoped per-target so
+  it never leaks into the `cross`/wasm plugin builds (which don't forward
+  `RUSTC_BOOTSTRAP` and must keep reproducible signed output). Windows is
+  excluded to preserve the MSVC `/PDBPAGESIZE` linker flag from
+  `.cargo/config.toml`.
 
 ## [0.35.6] - 2026-07-22
 
