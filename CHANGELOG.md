@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.35.5] - 2026-07-22
+
+### Fixed
+
+- **Embedded GUI process-runtime plugins stage into an app-scoped directory.** Registering a `process`-runtime plugin in the desktop GUI failed with `create plugin runtime dir /var/lib/bvault/plugin-run: Permission denied (os error 13)` because the embedded vault never told the `bastion_vault` process runtime where to stage executables, leaving it on the crate's server deployment fallback (`/var/lib/bvault/plugin-run`) that a sandboxed app cannot create. The GUI now points the runtime dir at `~/.bastion_vault_gui/plugin-run` (a sibling of the vault data dirs, resolved via the new `embedded::plugin_runtime_dir()` / `app_root()` helpers) at startup through `plugins::set_plugin_runtime_dir`. The `BV_PLUGIN_RUNTIME_DIR` env var still overrides it for operators who want a specific location.
+
 ## [0.35.4] - 2026-07-22
 
 ### Changed

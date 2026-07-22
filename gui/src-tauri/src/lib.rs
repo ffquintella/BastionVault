@@ -149,6 +149,21 @@ pub fn run() {
             // HTTP server's own `record_start_now()` is a no-op for
             // the GUI path because there's no HTTP listener.
             bastion_vault::server_info::record_start_now();
+
+            // Point the process-plugin runtime at an app-scoped,
+            // user-writable staging directory. Without this the
+            // `bastion_vault` crate falls back to a server deployment
+            // path (`/var/lib/bvault/plugin-run`) that a desktop app
+            // cannot create, so registering a `process`-runtime plugin
+            // fails with EACCES. `set_plugin_runtime_dir` records the
+            // first non-empty value and the `BV_PLUGIN_RUNTIME_DIR`
+            // env var still takes precedence, so an operator override
+            // is preserved. Best-effort: a failure here just leaves
+            // the crate default in place.
+            match embedded::plugin_runtime_dir() {
+                Ok(dir) => bastion_vault::plugins::set_plugin_runtime_dir(dir),
+                Err(e) => eprintln!("embedded: could not resolve plugin runtime dir: {e}"),
+            }
             #[cfg(target_os = "windows")]
             {
                 use tauri::Manager;

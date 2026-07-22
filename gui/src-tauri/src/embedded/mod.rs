@@ -49,19 +49,44 @@ pub fn data_dir() -> Result<std::path::PathBuf, CommandError> {
     data_dir_for(storage_kind())
 }
 
+/// Application-scoped root under the user's data-local directory that
+/// holds everything the embedded vault owns (per-backend data dirs,
+/// plugin staging, etc.). Lives inside the user's home, so it is
+/// always writable and on an exec-allowed filesystem — unlike the
+/// server's `/var/lib/bvault` default, which needs root to create.
+pub fn app_root() -> Result<std::path::PathBuf, CommandError> {
+    let base = dirs::data_local_dir()
+        .or_else(dirs::home_dir)
+        .ok_or("Cannot determine home directory")?;
+    Ok(base.join(".bastion_vault_gui"))
+}
+
 /// Kind-parameterized variant used when the current vault profile
 /// overrides `storage_kind` independently of the env var (the
 /// Add Local Vault form's "Storage engine" select). Same layout as
 /// `data_dir`, different discriminant.
 pub fn data_dir_for(kind: StorageKind) -> Result<std::path::PathBuf, CommandError> {
-    let base = dirs::data_local_dir()
-        .or_else(dirs::home_dir)
-        .ok_or("Cannot determine home directory")?;
-    let root = base.join(".bastion_vault_gui");
+    let root = app_root()?;
     Ok(match kind {
         StorageKind::File => root.join("data"),
         StorageKind::Hiqlite => root.join("data-hiqlite"),
     })
+}
+
+/// Directory the process-plugin runtime stages plugin executables in
+/// before spawning them. Kept a sibling of the per-backend data dirs
+/// under [`app_root`] so it is writable without elevated privileges
+/// and independent of the selected storage backend (staging is
+/// ephemeral and does not belong inside a vault's data tree).
+///
+/// The `bastion_vault` crate's own fallback for this is a server
+/// deployment path (`/var/lib/bvault/plugin-run`) that a sandboxed
+/// desktop app cannot create; pointing it here at startup is what
+/// makes process-runtime plugin registration work out of the box in
+/// embedded mode. The `BV_PLUGIN_RUNTIME_DIR` env var still overrides
+/// this for operators who want a specific location.
+pub fn plugin_runtime_dir() -> Result<std::path::PathBuf, CommandError> {
+    Ok(app_root()?.join("plugin-run"))
 }
 
 /// Build a storage backend. If preferences hold a `cloud_storage`
