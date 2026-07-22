@@ -57,6 +57,36 @@ RUSTUP_CARGO_BIN ?= $(HOME)/.cargo/bin
 endif
 export PATH := $(RUSTUP_CARGO_BIN):$(PATH)
 
+# ── Dev build speed: parallel rustc front-end ─────────────────────
+#
+# rustc's parallel front-end (`-Z threads=N`) splits a crate's
+# analysis (parsing, macro expansion, type-checking) across threads.
+# On this workspace — 1200+ crates, and a handful of huge serial
+# bottleneck crates (the main lib, the Tauri GUI, hiqlite) — it
+# meaningfully shortens the tail of every build on a multi-core host.
+#
+# The flag is nightly-gated, but the parallel front-end is compiled
+# into the *stable* compiler too; `RUSTC_BOOTSTRAP=1` unlocks it
+# without installing a separate nightly toolchain. This is a
+# semver-exempt escape hatch — scoped here to make-driven local dev
+# builds only, and trivially reversible.
+#
+# Tune or disable from the command line:
+#   make build RUSTC_THREADS=6   # use 6 threads instead of 8
+#   make build RUSTC_THREADS=0   # off — plain stable behaviour
+#
+# Windows is intentionally excluded: exporting RUSTFLAGS here would
+# override (not merge with) the `/PDBPAGESIZE:8192` linker flag that
+# .cargo/config.toml sets for the *-pc-windows-msvc targets, bringing
+# back the GUI link failure `LNK1318` that flag exists to prevent.
+ifneq ($(OS),Windows_NT)
+RUSTC_THREADS ?= 8
+ifneq ($(RUSTC_THREADS),0)
+export RUSTC_BOOTSTRAP := 1
+export RUSTFLAGS := $(strip $(RUSTFLAGS) -Z threads=$(RUSTC_THREADS))
+endif
+endif
+
 .PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi gui-macos-pkg gui-packages sign-packages
 
 # Number of rustc incremental sessions to keep per crate. Anything

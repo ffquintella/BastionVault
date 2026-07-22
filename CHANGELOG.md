@@ -50,6 +50,11 @@ EXAMPLE ENTRY:
   debug info with `split-debuginfo = "unpacked"` (plus `debug = false` for
   build scripts/proc-macros). Cuts link time and `target/` size on macOS
   while keeping panic backtraces with source locations.
+- Faster dev builds: the Makefile now enables rustc's parallel front-end
+  (`-Z threads`, via `RUSTC_BOOTSTRAP` so no nightly toolchain is needed)
+  for make-driven builds on non-Windows hosts. Tune with `RUSTC_THREADS=N`
+  or disable with `RUSTC_THREADS=0`. Windows is excluded to preserve the
+  MSVC `/PDBPAGESIZE` linker flag from `.cargo/config.toml`.
 
 ## [0.35.6] - 2026-07-22
 
