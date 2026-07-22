@@ -158,9 +158,21 @@ pub async fn verify(
     if pk_obj.verify(&message, &sig_arr, &[]) {
         Ok(())
     } else {
+        // The publisher name *is* on the allowlist (we found `pk_hex`
+        // above) but the signature does not verify against its key. The
+        // overwhelmingly common cause is a name/key mismatch at signing
+        // time: the bundle was signed with a seed whose public half is
+        // registered under a *different* publisher name (i.e. the wrong
+        // `--signing-key-name`), so point the operator straight at it
+        // rather than leaving them to suspect a corrupt binary.
         Err(RvError::ErrString(format!(
-            "plugin `{}` signature verification failed against publisher `{}`",
-            manifest.name, manifest.signing_key
+            "plugin `{}` signature verification failed against publisher `{}`: \
+             the publisher is on the allowlist, but its registered public key does not \
+             match this signature. The bundle was most likely signed with a different key, \
+             or under the wrong `--signing-key-name` (the name must match the publisher whose \
+             .pub key was registered). Re-sign with the matching key/name, or register the \
+             correct public key for `{}`.",
+            manifest.name, manifest.signing_key, manifest.signing_key
         )))
     }
 }

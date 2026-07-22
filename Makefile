@@ -942,12 +942,17 @@ win-bootstrap: ## Install Windows build deps (Perl, NASM, Node) via winget and a
 PLUGINS_DIR := plugins-ext
 PLUGINS_WASM_TARGET := wasm32-wasip1
 PLUGINS_OUT := $(PLUGINS_DIR)/dist
-# Where the dev signing key lives. The seed file is the secret half;
-# the .pub file is what you register on the host as the publisher's
-# allowlist entry. Override on the command line for CI / production
-# (e.g. `make plugins-pack PLUGINS_SIGNING_KEY=keys/release`).
-PLUGINS_SIGNING_KEY ?= $(PLUGINS_OUT)/dev-signing-key
-PLUGINS_SIGNING_KEY_NAME ?= bastionvault-dev
+# Where the signing key lives. The seed file is the secret half; the
+# .pub file is what you register on the host as the publisher's
+# allowlist entry. The default key + publisher name MUST agree: the
+# host verifies a bundle's signature against the allowlist entry named
+# by `PLUGINS_SIGNING_KEY_NAME`, so signing with a seed whose public
+# half is registered under a *different* name fails verification with
+# "signature verification failed against publisher <name>". Override
+# both together on the command line for CI / production
+# (e.g. `make plugins-sign PLUGINS_SIGNING_KEY=keys/release PLUGINS_SIGNING_KEY_NAME=acme-release`).
+PLUGINS_SIGNING_KEY ?= $(PLUGINS_OUT)/hml-signing-key
+PLUGINS_SIGNING_KEY_NAME ?= bastionvault-hml
 
 # Target triple for the process-runtime plugins. Defaults to
 # x86_64-unknown-linux-gnu (amd64 Linux) because that is what the

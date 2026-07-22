@@ -45,6 +45,16 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.35.3] - 2026-07-22
+
+### Changed
+
+- **Plugin signing defaults now match the shipped key.** `make plugins-sign` defaulted to `PLUGINS_SIGNING_KEY_NAME = bastionvault-dev` while the seed in `plugins-ext/dist/` was actually the `bastionvault-hml` publisher's key, so every bundle was labelled with a publisher name that didn't match its signature — registration failed with "signature verification failed against publisher `bastionvault-dev`". Renamed the key material to `hml-signing-key.{seed,pub}` and set the Makefile defaults to `hml-signing-key` / `bastionvault-hml` (both still overridable via `?=`), with a comment noting the key and publisher name must agree.
+
+### Fixed
+
+- **Clearer plugin signature-verification error.** When the named publisher *is* on the allowlist but the signature doesn't verify against its registered key, the verifier now explains the likely cause — a bundle signed with a different key or under the wrong `--signing-key-name` — instead of the bare "signature verification failed against publisher `<name>`" (`src/plugins/verifier.rs`).
+
 ## [0.35.2] - 2026-07-22
 
 ### Fixed
