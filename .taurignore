@@ -52,3 +52,9 @@ gui/dist/
 # set. (Repo .md embedded via include_str! is only README.md under `doc`
 # cfg in the IronRDP/third_party submodules, which are ignored anyway.)
 **/*.md
+
+# Build orchestration — the Makefile drives cargo/tauri from the outside
+# and is never an input to the compiled binary, so editing it must not
+# trigger a GUI rebuild (and cancel an in-flight release/signing step).
+Makefile
+**/Makefile
