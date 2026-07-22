@@ -45,7 +45,11 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
-## [0.35.5] - 2026-07-22
+## [0.35.6] - 2026-07-22
+
+### Added
+
+- **Clone resource from the Resources page** (`gui/src/routes/ResourcesPage.tsx`, `gui/src/components/ui/ContextMenu.tsx`) -- right-clicking a resource card opens a context menu (Open / Connect / Clone / Delete). **Clone** reads the source's full metadata, renames it to `<name> copy` (deduped to `<name> copy 2`, `… 3`, … when a copy already exists), resets the lifecycle fields, and writes it as a new resource. Because `write_resource` is an upsert, the new name is probed against `read_resource` first so a clone never overwrites an existing resource. Secrets and files (separate stores) are not copied -- only the resource record. Adds a reusable `ContextMenu` UI primitive (viewport-clamped, closes on outside click / Escape / scroll).
 
 ### Fixed
 

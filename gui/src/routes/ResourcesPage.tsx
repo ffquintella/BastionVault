@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback, type MouseEvent as ReactMouseEvent } from "react";
 import { Link } from "react-router-dom";
 import { Layout } from "../components/Layout";
 import {
@@ -23,12 +23,15 @@ import {
   SecretHistoryPanel,
   ResourceHistoryPanel,
   ResourceTypeIcon,
+  ContextMenu,
+  type ContextMenuItem,
   pairsFromData,
   dataFromPairs,
   type SecretPair,
   type SecretHistoryVersion,
   useToast,
 } from "../components/ui";
+import { Copy, ExternalLink, Plug, Trash2 } from "lucide-react";
 import type {
   ResourceMetadata,
   ResourceTypeConfig,
@@ -102,6 +105,7 @@ function ResourceCard({
   onSelect,
   onConnect,
   onPickGroup,
+  onContextMenu,
 }: {
   meta: api.ResourceCardEntry;
   typeConfig: ResourceTypeConfig;
@@ -109,6 +113,7 @@ function ResourceCard({
   onSelect: (name: string) => void;
   onConnect: (name: string) => void;
   onPickGroup: (group: string) => void;
+  onContextMenu: (ev: ReactMouseEvent, meta: api.ResourceCardEntry) => void;
 }) {
   // The card-shaped projection from the search endpoint omits
   // `os_type` and `connection_profiles`. The card-level Connect
@@ -124,6 +129,7 @@ function ResourceCard({
   return (
     <button
       onClick={() => onSelect(meta.name)}
+      onContextMenu={(ev) => onContextMenu(ev, meta)}
       className="p-4 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-xl text-left hover:border-[var(--color-primary)] transition-colors"
     >
       <div className="flex items-center gap-2 mb-2">
@@ -210,6 +216,13 @@ export function ResourcesPage() {
   const [resourceInfo, setResourceInfo] = useState<ResourceMetadata | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  // Right-click context menu anchor. Null when closed.
+  const [cardMenu, setCardMenu] = useState<
+    { x: number; y: number; entry: api.ResourceCardEntry } | null
+  >(null);
+  // Name of the resource currently being cloned (drives a toast + guards
+  // against a double-fire while the read/write round-trip is in flight).
+  const [cloning, setCloning] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<
     "info" | "secrets" | "files" | "connection" | "sharing" | "history"
   >("info");
@@ -545,6 +558,59 @@ export function ResourcesPage() {
     }
   }
 
+  // Probe candidate names until one is free. `write_resource` is an
+  // upsert (it silently overwrites an existing name), so a clone must
+  // never target a name that already exists — a successful `readResource`
+  // means "taken", a throw means "free". Server-side names are trimmed +
+  // lowercased, so we generate lowercase candidates to compare like-for-like.
+  async function findFreeCloneName(base: string): Promise<string> {
+    for (let i = 1; i <= 100; i++) {
+      const candidate = i === 1 ? base : `${base} ${i}`;
+      const taken = await api
+        .readResource(candidate)
+        .then(() => true)
+        .catch(() => false);
+      if (!taken) return candidate;
+    }
+    // 100 copies deep — vanishingly unlikely; fall back to a distinct name
+    // rather than risk overwriting.
+    return `${base} ${Date.now()}`;
+  }
+
+  // Clone: read the source's full metadata (the card projection omits most
+  // fields), rename to "<name> copy" (deduped), reset lifecycle/session
+  // fields, and write it as a new resource. Secrets and files live in
+  // separate stores and are NOT copied — only the resource record itself.
+  async function cloneResource(name: string) {
+    setCloning(name);
+    try {
+      const src = await api.readResource(name);
+      const srcName = String(src.name ?? name).trim().toLowerCase();
+      const newName = await findFreeCloneName(`${srcName} copy`);
+      const clone: ResourceMetadata = {
+        ...(src as ResourceMetadata),
+        name: newName,
+        // Server stamps these on write; don't inherit the source's.
+        created_at: "",
+        updated_at: "",
+      };
+      // Session history belongs to the original, not the copy.
+      delete (clone as Record<string, unknown>).recent_sessions;
+      await api.writeResource(newName, clone);
+      toast("success", `Cloned "${name}" → "${newName}"`);
+      void fetchPage(true);
+    } catch (e: unknown) {
+      toast("error", `Clone failed: ${extractError(e)}`);
+    } finally {
+      setCloning(null);
+    }
+  }
+
+  function openCardMenu(ev: ReactMouseEvent, entry: api.ResourceCardEntry) {
+    ev.preventDefault();
+    setCardMenu({ x: ev.clientX, y: ev.clientY, entry });
+  }
+
   // IntersectionObserver-driven pagination: when the sentinel at the
   // end of the grid scrolls into view, request the next page.
   const sentinelRef = useRef<HTMLDivElement | null>(null);
@@ -763,6 +829,7 @@ export function ResourcesPage() {
                       onSelect={selectResource}
                       onConnect={connectResource}
                       onPickGroup={(g) => setFilterGroup((cur) => (cur === g ? "" : g))}
+                      onContextMenu={openCardMenu}
                     />
                   ))}
                 </div>
@@ -779,6 +846,7 @@ export function ResourcesPage() {
                   onSelect={selectResource}
                   onConnect={connectResource}
                   onPickGroup={(g) => setFilterGroup((cur) => (cur === g ? "" : g))}
+                  onContextMenu={openCardMenu}
                 />
               ))}
             </div>
@@ -795,6 +863,47 @@ export function ResourcesPage() {
             )}
           </>
         )}
+
+        {cardMenu && (() => {
+          const entry = cardMenu.entry;
+          const td = getTypeDef(typeConfig, entry.type);
+          const canConnect =
+            String(entry.type || "") === "server" && td.connect?.enabled !== false;
+          const items: ContextMenuItem[] = [
+            {
+              label: "Open",
+              icon: <ExternalLink size={14} />,
+              onSelect: () => void selectResource(entry.name),
+            },
+            ...(canConnect
+              ? [{
+                  label: "Connect",
+                  icon: <Plug size={14} />,
+                  onSelect: () => void connectResource(entry.name),
+                }]
+              : []),
+            {
+              label: cloning === entry.name ? "Cloning…" : "Clone",
+              icon: <Copy size={14} />,
+              disabled: cloning !== null,
+              onSelect: () => void cloneResource(entry.name),
+            },
+            {
+              label: "Delete",
+              icon: <Trash2 size={14} />,
+              variant: "danger",
+              onSelect: () => setDeleteTarget(entry.name),
+            },
+          ];
+          return (
+            <ContextMenu
+              x={cardMenu.x}
+              y={cardMenu.y}
+              items={items}
+              onClose={() => setCardMenu(null)}
+            />
+          );
+        })()}
 
         <CreateResourceModal open={showCreate} onClose={() => setShowCreate(false)}
           typeConfig={typeConfig}

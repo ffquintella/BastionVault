@@ -23,6 +23,7 @@ export { Select } from "./Select";
 export { PolicySelect, unknownPolicies } from "./PolicySelect";
 export { Card } from "./Card";
 export { Modal, ConfirmModal } from "./Modal";
+export { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 export { CollapsibleSection } from "./CollapsibleSection";
 export { Table } from "./Table";
 export { Badge } from "./Badge";
