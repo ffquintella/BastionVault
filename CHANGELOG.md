@@ -45,6 +45,15 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.36.1] - 2026-07-22
+
+### Added
+- **Rename in the resource card right-click menu** — the context menu on a
+  resource card (Resources list) now offers **Rename** alongside Open /
+  Connect / Clone / Delete, opening the same validated rename modal as the
+  detail Info tab. Previously rename was reachable only from the Info tab
+  (`gui/src/routes/ResourcesPage.tsx`).
+
 ## [0.36.0] - 2026-07-22
 
 ### Added

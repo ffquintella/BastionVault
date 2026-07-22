@@ -31,7 +31,7 @@ import {
   type SecretHistoryVersion,
   useToast,
 } from "../components/ui";
-import { Copy, ExternalLink, Plug, Trash2 } from "lucide-react";
+import { Copy, ExternalLink, Pencil, Plug, Trash2 } from "lucide-react";
 import type {
   ResourceMetadata,
   ResourceTypeConfig,
@@ -216,6 +216,7 @@ export function ResourcesPage() {
   const [resourceInfo, setResourceInfo] = useState<ResourceMetadata | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [renameTarget, setRenameTarget] = useState<string | null>(null);
   // Right-click context menu anchor. Null when closed.
   const [cardMenu, setCardMenu] = useState<
     { x: number; y: number; entry: api.ResourceCardEntry } | null
@@ -888,6 +889,11 @@ export function ResourcesPage() {
                 }]
               : []),
             {
+              label: "Rename",
+              icon: <Pencil size={14} />,
+              onSelect: () => setRenameTarget(entry.name),
+            },
+            {
               label: cloning === entry.name ? "Cloning…" : "Clone",
               icon: <Copy size={14} />,
               disabled: cloning !== null,
@@ -918,6 +924,20 @@ export function ResourcesPage() {
         <ConfirmModal open={deleteTarget !== null} onClose={() => setDeleteTarget(null)}
           onConfirm={handleDelete} title="Delete Resource"
           message={`Delete "${deleteTarget}" and all its secrets?`} confirmLabel="Delete" />
+
+        {renameTarget !== null && (
+          <RenameResourceModal
+            currentName={renameTarget}
+            onClose={() => setRenameTarget(null)}
+            onRenamed={(newName) => {
+              setRenameTarget(null);
+              setRecent(pushRecent(newName));
+              void fetchPage(true);
+              if (selected === renameTarget) void selectResource(newName);
+            }}
+            toast={toast}
+          />
+        )}
       </div>
     </Layout>
   );
