@@ -299,7 +299,18 @@ fn parse_ingestable(line: &str) -> Option<AccessAuditEntry> {
         return None;
     }
     let path = entry.request.path.as_str();
-    if path.contains("/login") || path == "sys/audit/events" {
+    // Skip auth-backend logins (already covered by the login-audit
+    // store; ingesting them would double-list every login) and the
+    // Audit page's own read (self-referential feedback loop).
+    //
+    // Match a `login` path *segment* under an `auth/` mount rather than
+    // a raw substring: a plain `contains("/login")` would also drop a
+    // secret whose own path embeds it — e.g. `secret/data/login` or
+    // `secret/data/app/login-config` — so those legitimate reads would
+    // silently never reach the Audit page.
+    let is_auth_login =
+        path.starts_with("auth/") && path.split('/').any(|seg| seg == "login");
+    if is_auth_login || path == "sys/audit/events" {
         return None;
     }
 
@@ -388,6 +399,29 @@ mod tests {
             parse_ingestable(&line).is_none(),
             "logins are covered by the login store"
         );
+    }
+
+    #[test]
+    fn ingests_secret_whose_path_embeds_login() {
+        // A `contains("/login")` filter would wrongly drop these; the
+        // segment-precise check keeps them.
+        for p in [
+            "secret/data/login",
+            "secret/data/app/login-config",
+            "secret/data/logins",
+        ] {
+            let line = response_line(p, "read", "felipe", "");
+            assert!(
+                parse_ingestable(&line).is_some(),
+                "secret path {p} should be ingested"
+            );
+        }
+    }
+
+    #[test]
+    fn skips_approle_login_without_username_segment() {
+        let line = response_line("auth/approle/login", "write", "app", "");
+        assert!(parse_ingestable(&line).is_none());
     }
 
     #[test]

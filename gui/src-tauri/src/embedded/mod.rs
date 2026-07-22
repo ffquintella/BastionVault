@@ -415,6 +415,103 @@ pub struct InitOutcome {
     pub vault: Arc<BastionVault>,
 }
 
+/// Resolve the local path the embedded vault's `audit.log` should live
+/// at. Mirrors [`build_backend`]'s effective-dir logic for Local /
+/// Hiqlite profiles so the audit stream sits beside the vault's own
+/// data. Cloud profiles have no local data directory, so their audit
+/// log lands in a per-vault local logs directory instead (the file
+/// device is always node-local — it is what the access-audit reconciler
+/// tails).
+fn resolve_audit_log_path() -> Result<std::path::PathBuf, CommandError> {
+    if let Ok(prefs) = preferences::load() {
+        if let Some(profile) = prefs.default_profile() {
+            match &profile.spec {
+                preferences::VaultSpec::Local { data_dir, storage_kind: sk } => {
+                    let kind = match sk.as_str() {
+                        "hiqlite" => StorageKind::Hiqlite,
+                        _ => StorageKind::File,
+                    };
+                    let dir = match data_dir.as_ref().filter(|s| !s.is_empty()) {
+                        Some(custom) => std::path::PathBuf::from(custom),
+                        None => data_dir_for(kind)?,
+                    };
+                    return Ok(dir.join("audit.log"));
+                }
+                preferences::VaultSpec::Cloud { .. } => {
+                    let base = dirs::data_local_dir()
+                        .or_else(dirs::home_dir)
+                        .ok_or("Cannot determine home directory")?;
+                    return Ok(base
+                        .join(".bastion_vault_gui")
+                        .join("logs")
+                        .join(current_vault_id())
+                        .join("audit.log"));
+                }
+                preferences::VaultSpec::Remote { .. } => {}
+            }
+        }
+    }
+    Ok(data_dir()?.join("audit.log"))
+}
+
+/// Ensure a file audit device is enabled so successful `secret/…` and
+/// `resources/…` reads land in `audit.log` — the local stream the
+/// access-audit reconciler tails to populate the unified Audit page.
+///
+/// The CLI server gets this for free: `logging::init` sets
+/// `DEFAULT_AUDIT_PATH`, and `Core::post_unseal` auto-registers a file
+/// device from it on first boot. The embedded GUI never calls
+/// `logging::init`, so that path stayed unset and no device was ever
+/// registered — leaving the success emit gate (`broker.has_devices()`)
+/// false and the reconciler with no file to tail. Only *denied*
+/// requests (which write straight to a replicated store) reached the
+/// page. This closes that gap for embedded mode.
+///
+/// Idempotent: skips when the broker already has a device — devices are
+/// persisted to the barrier and re-hydrated on every re-open, so this
+/// only enables once per vault.
+async fn ensure_default_audit_device(vault: &BastionVault) -> Result<(), CommandError> {
+    let core = vault.core.load();
+    let Some(broker) = core.audit_broker.load_full() else {
+        // No broker installed (e.g. empty HMAC key). Nothing to attach.
+        return Ok(());
+    };
+    if broker.has_devices() {
+        return Ok(());
+    }
+
+    let path = resolve_audit_log_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut opts = HashMap::new();
+    opts.insert("file_path".to_string(), path.to_string_lossy().into_owned());
+    opts.insert(
+        "rotate_size_bytes".to_string(),
+        bastion_vault::logging::DEFAULT_ROTATE_SIZE_BYTES.to_string(),
+    );
+    opts.insert(
+        "rotate_keep".to_string(),
+        bastion_vault::logging::DEFAULT_ROTATE_KEEP.to_string(),
+    );
+
+    let cfg = bastion_vault::audit::AuditDeviceConfig {
+        path: "file/".to_string(),
+        device_type: "file".to_string(),
+        description: "embedded default file audit device".to_string(),
+        options: opts,
+        ..Default::default()
+    };
+
+    broker.enable_device(cfg).await.map_err(CommandError::from)?;
+    eprintln!(
+        "embedded: enabled default file audit device at {}",
+        path.display()
+    );
+    Ok(())
+}
+
 /// Create a new embedded vault, initialize it, and store keys in the OS
 /// keychain. Returns the unsealed vault *and* the root token so the Tauri
 /// command can put the vault into app state without a separate open.
@@ -450,6 +547,13 @@ pub async fn init_embedded() -> Result<InitOutcome, CommandError> {
     // Create default policies and enable auth methods.
     create_default_policies(&vault, &root_token).await?;
     enable_default_auth_methods(&vault, &root_token).await?;
+
+    // Turn on the audit trail so successful secret/resource reads reach
+    // the Audit page (not just denials). Non-fatal on failure — a vault
+    // without an audit device is still fully usable.
+    if let Err(e) = ensure_default_audit_device(&vault).await {
+        eprintln!("embedded: could not enable default audit device: {e}");
+    }
 
     Ok(InitOutcome {
         root_token,
@@ -609,7 +713,14 @@ pub async fn open_embedded() -> Result<Arc<BastionVault>, CommandError> {
 
     vault.unseal(&[&unseal_key]).await.map_err(CommandError::from)?;
 
-    Ok(Arc::new(vault))
+    // Back-fill the audit device for vaults created before this was
+    // wired in. Idempotent: skips when one is already persisted.
+    let vault = Arc::new(vault);
+    if let Err(e) = ensure_default_audit_device(&vault).await {
+        eprintln!("embedded: could not enable default audit device: {e}");
+    }
+
+    Ok(vault)
 }
 
 /// Seal the vault. Only used by the embedded-vault seal command path —

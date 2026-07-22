@@ -45,6 +45,13 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.35.1] - 2026-07-22
+
+### Fixed
+
+- **Audit page: successful secret/resource reads now recorded in embedded/desktop mode.** The access-audit reconciler tails the local `audit.log`, but the embedded GUI never calls `logging::init`, so the `post_unseal` auto-enable of a default file audit device never fired — no device meant no `audit.log`, so successful `secret/…` and `resources/…` reads were never captured (only *denials* and *logins*, which write to replicated stores directly, appeared). The embedded vault now enables a default file audit device on init and back-fills it on open for existing vaults.
+- **Access-audit reconciler no longer drops secrets whose path embeds `login`.** The login-skip filter used a raw `contains("/login")`, which also excluded legitimate reads such as `secret/data/login` or `secret/data/app/login-config`. It now matches a `login` path segment under an `auth/` mount.
+
 ## [0.35.0] - 2026-07-21
 
 ### Added
