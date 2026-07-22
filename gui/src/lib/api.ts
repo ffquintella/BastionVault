@@ -1649,6 +1649,40 @@ export interface PluginManifest {
   signature?: string;
   /** Publisher identifier the signature was made with; must match the host allowlist. */
   signing_key?: string;
+  /**
+   * Extensibility v1: reference to the plugin's `surface.json` (menus /
+   * pages / forms), when it ships one. Present on parsed bundles;
+   * forwarded to the host at registration.
+   */
+  surface?: PluginSurfaceRef;
+  /**
+   * Extensibility v1/v2: client-side assets the plugin ships. Today the
+   * relevant kind is `"app-module"` — the app-module WASM re-declared so
+   * the host can content-address and serve it to the Tauri runtime. Its
+   * `sha256`/`size` are stamped to match the embedded binary.
+   */
+  client_assets?: PluginClientAsset[];
+}
+
+/** Extensibility v1: pointer to a plugin's `surface.json`. */
+export interface PluginSurfaceRef {
+  schema_version: number;
+  sha256: string;
+  size: number;
+}
+
+/** Extensibility v1/v2: one declared client-side asset. */
+export interface PluginClientAsset {
+  name: string;
+  kind: string;
+  sha256: string;
+  size: number;
+}
+
+/** One uploaded client asset: declared name + base64 bytes. */
+export interface PluginRegisterAsset {
+  name: string;
+  bytes_b64: string;
 }
 
 export interface PluginInvokeResult {
@@ -1681,9 +1715,19 @@ export const pluginsSetPublishers = (publishers: Record<string, string>) =>
 export const pluginsGet = (name: string) =>
   invoke<PluginManifest | null>("plugins_get", { name });
 
-export const pluginsRegister = (manifest: PluginManifest, binaryB64: string) =>
+export const pluginsRegister = (
+  manifest: PluginManifest,
+  binaryB64: string,
+  clientAssetsB64: PluginRegisterAsset[] = [],
+  surfaceB64?: string,
+) =>
   invoke<PluginManifest>("plugins_register", {
-    input: { manifest, binary_b64: binaryB64 },
+    input: {
+      manifest,
+      binary_b64: binaryB64,
+      client_assets_b64: clientAssetsB64,
+      surface_b64: surfaceB64 ?? null,
+    },
   });
 
 export const pluginsDelete = (name: string) =>

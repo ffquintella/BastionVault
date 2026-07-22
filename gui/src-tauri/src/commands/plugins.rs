@@ -319,6 +319,27 @@ pub struct PluginRegisterInput {
     /// Base64 of the WASM binary. The frontend reads the `.wasm` file
     /// the operator picked, base64-encodes, and ships the payload here.
     pub binary_b64: String,
+    /// Extensibility v1: base64 of the plugin's `surface.json`, when the
+    /// manifest declares a surface. `None` for plugins without one.
+    #[serde(default)]
+    pub surface_b64: Option<String>,
+    /// Extensibility v1/v2: base64 client assets the frontend extracted
+    /// from the bundle. An app-module plugin re-declares its embedded
+    /// WASM as a `client_assets` entry, so the frontend forwards that
+    /// binary here under the declared asset name; without it the host
+    /// rejects registration ("manifest declares client asset … but no
+    /// matching upload was provided").
+    #[serde(default)]
+    pub client_assets_b64: Vec<PluginRegisterAsset>,
+}
+
+/// One uploaded client asset: the declared `name` plus its base64 bytes.
+/// Field names match the HTTP register endpoint's shape so the remote
+/// path can forward the payload verbatim.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct PluginRegisterAsset {
+    pub name: String,
+    pub bytes_b64: String,
 }
 
 #[tauri::command]
@@ -327,17 +348,19 @@ pub async fn plugins_register(
     input: PluginRegisterInput,
 ) -> CmdResult<PluginManifest> {
     if is_remote(&state).await {
-        // The HTTP register endpoint takes manifest + binary_b64 in the
-        // same shape the Tauri command does, so we just forward the
-        // payload as-is. base64 validation happens server-side; we
-        // sanity-check decodability locally for parity with the
-        // embedded path's pre-flight error.
+        // The HTTP register endpoint takes manifest + binary_b64 (+ the
+        // optional surface / client assets) in the same shape the Tauri
+        // command does, so we just forward the payload as-is. base64
+        // validation happens server-side; we sanity-check decodability
+        // locally for parity with the embedded path's pre-flight error.
         base64::engine::general_purpose::STANDARD
             .decode(input.binary_b64.as_bytes())
             .map_err(|_| "binary_b64 not valid base64")?;
         let body = json!({
             "manifest": input.manifest,
             "binary_b64": input.binary_b64,
+            "surface_b64": input.surface_b64,
+            "client_assets_b64": input.client_assets_b64,
         })
         .as_object()
         .cloned();
@@ -392,6 +415,76 @@ pub async fn plugins_register(
     .await;
 
     outcome?;
+
+    // Extensibility v1/v2: persist the surface + client assets the
+    // frontend extracted from the bundle, mirroring the HTTP register
+    // handler in `src/http/sys.rs`. `put_surface` / `put_asset`
+    // re-verify each hash against the manifest declaration, so a
+    // tampered upload fails here rather than landing a half-bad plugin.
+    let storage = core_arc.barrier.as_storage();
+    if let (Some(surface_b64), Some(surface_ref)) =
+        (input.surface_b64.as_ref(), input.manifest.surface.as_ref())
+    {
+        let surface_bytes = base64::engine::general_purpose::STANDARD
+            .decode(surface_b64.as_bytes())
+            .map_err(|_| "surface_b64 not valid base64")?;
+        catalog
+            .put_surface(
+                storage,
+                &input.manifest.name,
+                &input.manifest.version,
+                &surface_bytes,
+                &surface_ref.sha256,
+            )
+            .await?;
+    } else if input.manifest.surface.is_some() {
+        return Err("manifest declares a surface but request omitted `surface_b64`".into());
+    }
+    // Every declared asset must have a matching upload (the app-module
+    // WASM is declared here and supplied as the binary bytes).
+    for declared in &input.manifest.client_assets {
+        if !input
+            .client_assets_b64
+            .iter()
+            .any(|u| u.name == declared.name)
+        {
+            return Err(format!(
+                "manifest declares client asset `{}` but no matching upload was provided",
+                declared.name
+            )
+            .into());
+        }
+    }
+    for asset in &input.client_assets_b64 {
+        let aref = input
+            .manifest
+            .client_assets
+            .iter()
+            .find(|a| a.name == asset.name)
+            .ok_or_else(|| format!("uploaded asset `{}` not declared in manifest", asset.name))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(asset.bytes_b64.as_bytes())
+            .map_err(|_| "asset bytes_b64 not valid base64")?;
+        if bytes.len() as u64 != aref.size {
+            return Err(format!(
+                "asset `{}` size {} does not match declared {}",
+                asset.name,
+                bytes.len(),
+                aref.size
+            )
+            .into());
+        }
+        catalog
+            .put_asset(
+                storage,
+                &input.manifest.name,
+                &input.manifest.version,
+                &bytes,
+                &aref.sha256,
+            )
+            .await?;
+    }
+
     Ok(input.manifest)
 }
 

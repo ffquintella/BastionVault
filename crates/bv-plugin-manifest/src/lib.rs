@@ -452,6 +452,21 @@ pub fn check_abi_compatibility(plugin_abi: &str) -> Result<(), String> {
 }
 
 impl PluginManifest {
+    /// Signal: does this plugin's runtime stage an executable on disk,
+    /// and therefore need a writable, exec-allowed runtime directory
+    /// provisioned before it can be invoked?
+    ///
+    /// True for [`RuntimeKind::Process`] (the host writes the plugin
+    /// binary into `plugin_runtime_dir` and `execve`s it); false for the
+    /// in-process wasm runtime, which needs no on-disk staging. The host
+    /// uses this at registration to create the directory eagerly (see
+    /// `bastion_vault::plugins::process_runtime::ensure_runtime_dir`), so
+    /// a mis-permissioned or `noexec` path fails loudly at register time
+    /// instead of silently at first invoke.
+    pub fn needs_runtime_dir(&self) -> bool {
+        matches!(self.runtime, RuntimeKind::Process)
+    }
+
     /// Validate static invariants. Does not touch storage.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.name.trim().is_empty() {
@@ -778,6 +793,15 @@ mod tests {
         let mut m = fixture();
         m.runtime = RuntimeKind::Process;
         assert!(m.validate().is_ok());
+    }
+
+    #[test]
+    fn needs_runtime_dir_only_for_process_runtime() {
+        let mut m = fixture();
+        m.runtime = RuntimeKind::Wasm;
+        assert!(!m.needs_runtime_dir(), "wasm needs no on-disk staging");
+        m.runtime = RuntimeKind::Process;
+        assert!(m.needs_runtime_dir(), "process runtime stages an executable");
     }
 
     #[test]

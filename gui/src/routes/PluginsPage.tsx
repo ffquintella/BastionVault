@@ -671,7 +671,27 @@ function RegisterModal({
       let bin = "";
       for (let i = 0; i < fileBytes.length; i++) bin += String.fromCharCode(fileBytes[i]);
       const binaryB64 = btoa(bin);
-      await api.pluginsRegister(manifest, binaryB64);
+      // Extensibility v2: an app-module plugin re-declares its embedded
+      // WASM as a `client_assets` entry (kind "app-module"). The asset
+      // bytes ARE the binary we just read — the pack tool stamped the
+      // entry's sha256/size to match — so forward the same base64 under
+      // the declared asset name. Without this the host rejects
+      // registration ("manifest declares client asset … but no matching
+      // upload was provided"). Other asset kinds aren't carried in the
+      // v1 `.bvplugin` container, so a bundle can't supply them yet.
+      const clientAssets: api.PluginRegisterAsset[] = [];
+      for (const asset of manifest.client_assets ?? []) {
+        if (asset.kind === "app-module") {
+          clientAssets.push({ name: asset.name, bytes_b64: binaryB64 });
+        } else {
+          toast(
+            "error",
+            `Bundle declares client asset "${asset.name}" (kind "${asset.kind}"), which this build can't extract from a .bvplugin. Register it with the CLI instead.`,
+          );
+          return;
+        }
+      }
+      await api.pluginsRegister(manifest, binaryB64, clientAssets);
       toast("success", `Registered "${manifest.name}".`);
       onRegistered();
     } catch (e) {

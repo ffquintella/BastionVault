@@ -206,6 +206,23 @@ impl PluginCatalog {
                 Self::check_capability_widening(&prev, manifest)?;
             }
         }
+        // If the plugin's runtime stages an executable on disk (the
+        // process runtime), provision its runtime directory now — at
+        // registration — so a mis-permissioned or `noexec`
+        // `plugin_runtime_dir` fails here with a clear, actionable error
+        // instead of silently at first invoke (e.g. a channel "Test"
+        // returning a bare EACCES). Done before any storage write so a
+        // failed provision leaves nothing half-registered.
+        if manifest.needs_runtime_dir() {
+            super::process_runtime::ensure_runtime_dir().map_err(|e| {
+                RvError::ErrString(format!(
+                    "cannot register process-runtime plugin `{}`: {e}; point \
+                     plugin_runtime_dir (or the BV_PLUGIN_RUNTIME_DIR env var) at a \
+                     writable, exec-allowed directory the server can create",
+                    manifest.name,
+                ))
+            })?;
+        }
         // Write binary first so a half-failed registration doesn't
         // leave a manifest pointing at nothing.
         storage
@@ -1017,6 +1034,27 @@ mod tests {
         let bin = b"v1".to_vec();
         cat.put(&s, &manifest_with("p", "0.1.0", &bin), &bin).await.unwrap();
         assert!(cat.delete_version(&s, "p", "0.1.0").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn process_runtime_plugin_registration_provisions_runtime_dir() {
+        // A process-runtime plugin signals it needs on-disk staging, so
+        // `put` provisions the runtime directory at registration. With no
+        // `BV_PLUGIN_RUNTIME_DIR` override / config value set, the runtime
+        // dir resolves to the OS temp dir (which exists), so provisioning
+        // succeeds and the plugin round-trips — proving the hook runs
+        // without breaking process-runtime registration.
+        let s = MemStorage::default();
+        enable_unsigned(&s).await;
+        let cat = PluginCatalog::new();
+        let bin = b"process-plugin-bytes".to_vec();
+        let mut m = manifest_with("proc-p", "0.1.0", &bin);
+        m.runtime = RuntimeKind::Process;
+        assert!(m.needs_runtime_dir());
+        cat.put(&s, &m, &bin).await.unwrap();
+        let r = cat.get(&s, "proc-p").await.unwrap().unwrap();
+        assert_eq!(r.manifest.version, "0.1.0");
+        assert!(crate::plugins::plugin_runtime_dir().exists());
     }
 
     #[tokio::test]

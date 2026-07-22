@@ -575,17 +575,31 @@ pub fn plugin_runtime_dir() -> PathBuf {
     std::env::temp_dir()
 }
 
-pub(super) fn write_temp_executable(name: &str, binary: &[u8]) -> Result<std::path::PathBuf, ProcessRuntimeError> {
-    use std::io::Write;
-    let mut path = plugin_runtime_dir();
-    // Ensure the directory exists. Cheap when it already does; lets
-    // operators name a path and have the server create it on first use.
+/// Provision the plugin runtime directory: resolve it via
+/// [`plugin_runtime_dir`] and `create_dir_all` it. Returns the resolved
+/// path. Cheap when the directory already exists; lets operators name a
+/// path and have the server create it.
+///
+/// Called both by [`write_temp_executable`] on the invoke path and by the
+/// catalog at *registration* for plugins whose manifest signals it needs
+/// on-disk staging (see [`bv_plugin_manifest::PluginManifest::needs_runtime_dir`]).
+/// Provisioning at registration makes a mis-permissioned or `noexec`
+/// runtime dir surface with a clear error at register time rather than
+/// silently at first invoke.
+pub fn ensure_runtime_dir() -> Result<PathBuf, ProcessRuntimeError> {
+    let path = plugin_runtime_dir();
     if let Err(e) = std::fs::create_dir_all(&path) {
         return Err(ProcessRuntimeError::TempFile(format!(
             "create plugin runtime dir {}: {e}",
             path.display()
         )));
     }
+    Ok(path)
+}
+
+pub(super) fn write_temp_executable(name: &str, binary: &[u8]) -> Result<std::path::PathBuf, ProcessRuntimeError> {
+    use std::io::Write;
+    let mut path = ensure_runtime_dir()?;
     let stem = name
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })

@@ -45,8 +45,8 @@ pub use logical_backend::{
 pub use manifest::{ConfigField, ConfigFieldKind, PluginManifest, RuntimeKind};
 pub use module_cache::ModuleCache;
 pub use process_runtime::{
-    plugin_runtime_dir, set_plugin_runtime_dir, ProcessRuntime, ProcessRuntimeError,
-    DEFAULT_INVOKE_TIMEOUT,
+    ensure_runtime_dir, plugin_runtime_dir, set_plugin_runtime_dir, ProcessRuntime,
+    ProcessRuntimeError, DEFAULT_INVOKE_TIMEOUT,
 };
 pub use runtime::{InvokeOutput, InvokeOutcome, RuntimeError, WasmRuntime, DEFAULT_FUEL, DEFAULT_MEMORY_BYTES};
 

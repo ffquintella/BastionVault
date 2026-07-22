@@ -45,6 +45,16 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.35.4] - 2026-07-22
+
+### Changed
+
+- **Process-runtime plugins provision their runtime directory at registration.** A plugin whose runtime stages an executable on disk (the process runtime) now has its `plugin_runtime_dir` created when the plugin is *registered* (`PluginCatalog::put`), driven by the new `PluginManifest::needs_runtime_dir()` signal and the extracted `plugins::process_runtime::ensure_runtime_dir()` helper. A mis-permissioned or `noexec` directory therefore fails loudly at register time with an actionable message ("point plugin_runtime_dir (or BV_PLUGIN_RUNTIME_DIR) at a writable, exec-allowed directory the server can create") instead of silently at first invoke — previously surfacing only as a bare `create plugin runtime dir …: Permission denied (os error 13)` on a channel/plugin **Test**. The invoke path (`write_temp_executable`) now reuses the same helper, so both paths share one directory-provisioning point.
+
+### Fixed
+
+- **GUI plugin registration now uploads app-module client assets.** Registering an app-module `.bvplugin` (e.g. `webhook-notify`) failed with "manifest declares client asset `<name>` but no matching upload was provided": the signed manifest was forwarded verbatim *with* its `client_assets` declaration, but the Register modal only ever sent `manifest` + `binary_b64`, never the assets. An app-module re-declares its embedded WASM as a `kind = "app-module"` client asset (sha256/size stamped by `bv-plugin-pack` to match the binary), so the modal now forwards those same bytes under the declared asset name. Wired the surface + `client_assets_b64` through `api.pluginsRegister`, the `plugins_register` Tauri command (both remote-forward and embedded-store paths, mirroring the HTTP register handler), and `PluginsPage`. Non-`app-module` asset kinds aren't carried in the v1 bundle container, so the modal now reports that clearly instead of letting the host emit the generic error.
+
 ## [0.35.3] - 2026-07-22
 
 ### Changed
