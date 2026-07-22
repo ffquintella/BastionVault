@@ -45,6 +45,12 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Changed
+- Faster dev builds: added a `[profile.dev]` that emits `line-tables-only`
+  debug info with `split-debuginfo = "unpacked"` (plus `debug = false` for
+  build scripts/proc-macros). Cuts link time and `target/` size on macOS
+  while keeping panic backtraces with source locations.
+
 ## [0.35.6] - 2026-07-22
 
 ### Added

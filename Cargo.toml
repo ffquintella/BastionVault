@@ -607,6 +607,34 @@ harness = false
 path = "tests/cucumber_hiqlite.rs"
 
 
+# ── Dev build speed ────────────────────────────────────────────────
+#
+# The default dev profile emits *full* DWARF debug info for every
+# crate. On this workspace (1200+ deps, Tauri + wry + webview + the PQ
+# crypto stack + hiqlite) that debug info dominates both link time and
+# `target/` size — a debug `target/` routinely passes 70 GB, most of
+# it in `incremental/` and `deps/`.
+#
+#   * `debug = "line-tables-only"` keeps file/line info (so panic
+#     backtraces still name the source location) but drops variable
+#     and type debug info. Cuts the debug info the linker has to
+#     process roughly in half; step-through debugging in lldb still
+#     works, just with fewer local variables resolved.
+#   * `split-debuginfo = "unpacked"` leaves debug info in the per-crate
+#     `.o` files instead of collecting it into a monolithic dSYM on
+#     every link — the single biggest link-time win on macOS.
+#   * `build-override` strips debug info from build scripts and
+#     proc-macro crates, which are never debugged interactively.
+#
+# Run `make prune` to reclaim the existing `target/*/incremental` cache
+# after switching profiles.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+[profile.dev.build-override]
+debug = false
+
 [patch.crates-io]
 # russh 0.61 / sspi 0.21 rc-pin alignment (see the russh dependency comment).
 # Published sspi 0.21.0 exact-pins `rsa =0.10.0-rc.17` + `ed25519-dalek
