@@ -1,0 +1,44 @@
+# Ignore patterns for `tauri dev`'s file watcher — REPO-ROOT scope.
+#
+# Why this file lives here (and not only in gui/src-tauri/):
+#
+# The Tauri GUI crate (`gui/src-tauri`) declares a path dependency on
+# the repo-root crate (`bastion_vault = { path = "../.." }`), so Tauri
+# adds the **repo root** to its watch folders and recurses the whole
+# tree. Tauri roots each `.taurignore` it finds at that file's OWN
+# parent directory, so `gui/src-tauri/.taurignore` only governs files
+# under `gui/src-tauri/` — its `plugins-ext/` / `IronRDP/` lines never
+# matched the repo-root dirs of the same name. (repo-root `target/` is
+# silenced by Tauri's built-in ignore list, which is why it looked like
+# the gui file was working.)
+#
+# This root-level file is the one that actually stops writes under
+# `plugins-ext/` (e.g. `make plugins` dropping bundles into
+# `plugins-ext/dist/`) from waking the watcher and rebuilding the GUI.
+
+# OS / editor cruft
+.DS_Store
+**/.DS_Store
+*.swp
+*.swo
+*~
+
+# Build artefacts (host + every nested workspace)
+target/
+**/target/
+
+# Isolated target dir for the `bv-plugin-pack` packer/signer
+# (see PLUGINS_PACK_TARGET_DIR in the Makefile).
+target-plugin-pack/
+
+# Reference-plugins submodule — a separate cargo workspace we depend on
+# as built artefacts (uploaded at runtime), never as live source. Its
+# source edits and `dist/` build outputs must not rebuild the GUI.
+plugins-ext/
+
+# IronRDP git submodule — path/git dep, not live source.
+IronRDP/
+
+# Generated docs / dist trees
+docs/_build/
+gui/dist/
