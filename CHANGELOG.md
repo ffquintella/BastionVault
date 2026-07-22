@@ -45,6 +45,13 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.35.2] - 2026-07-22
+
+### Fixed
+
+- **`make plugins-sign` now builds and signs the notification plugins.** The plugin build/pack/sign targets were a hardcoded list of four plugins (`totp`, `postgres`, `xca`, `pmp`); the v0.35.0 `bastion-plugin-email` (process) and `bastion-plugin-webhook-notify` (WASM app-module) crates were never wired in, so they were silently skipped. Added both to `plugins-wasm`, `plugins-process`, `plugins-pack`, `plugins-sign`, and `PLUGIN_NAMES`.
+- **`bv-plugin-pack` stamps app-module `client_assets`.** The packer only stamped the top-level `sha256`/`size`, leaving an app-module plugin's `[[client_assets]]` entry at its placeholder zeros — so the module would fail its content-address hash check on load. The single embedded WASM (which *is* the app-module) now stamps any `kind = "app-module"` asset before the signing pass, so the signature covers the real hash. Added a mismatch guard and a unit test.
+
 ## [0.35.1] - 2026-07-22
 
 ### Fixed

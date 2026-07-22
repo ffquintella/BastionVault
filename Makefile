@@ -1042,9 +1042,13 @@ plugins-pack-build: ## Build the bv-plugin-pack helper that produces .bvplugin b
 plugins-wasm: plugins-init plugins-target ## Compile the WASM reference plugins (release)
 	@echo "==> building bastion-plugin-totp ($(PLUGINS_WASM_TARGET))"
 	cd $(PLUGINS_DIR) && cargo build --release --target $(PLUGINS_WASM_TARGET) -p bastion-plugin-totp
+	@echo "==> building bastion-plugin-webhook-notify ($(PLUGINS_WASM_TARGET))"
+	cd $(PLUGINS_DIR) && cargo build --release --target $(PLUGINS_WASM_TARGET) -p bastion-plugin-webhook-notify
 	@mkdir -p $(PLUGINS_OUT)
 	@cp $(PLUGINS_DIR)/target/$(PLUGINS_WASM_TARGET)/release/bastion_plugin_totp.wasm $(PLUGINS_OUT)/ 2>/dev/null \
 		|| cp $(PLUGINS_DIR)/target/$(PLUGINS_WASM_TARGET)/release/bastion-plugin-totp.wasm $(PLUGINS_OUT)/
+	@cp $(PLUGINS_DIR)/target/$(PLUGINS_WASM_TARGET)/release/bastion_plugin_webhook_notify.wasm $(PLUGINS_OUT)/ 2>/dev/null \
+		|| cp $(PLUGINS_DIR)/target/$(PLUGINS_WASM_TARGET)/release/bastion-plugin-webhook-notify.wasm $(PLUGINS_OUT)/
 	@echo ""
 	@echo "==> WASM plugins ready in $(PLUGINS_OUT)/"
 	@ls -lh $(PLUGINS_OUT)/*.wasm 2>/dev/null || true
@@ -1075,6 +1079,16 @@ plugins-pack: plugins-wasm plugins-process plugins-pack-build ## Pack each plugi
 		--manifest $(PLUGINS_DIR)/bastion-plugin-pmp/plugin.toml \
 		--binary   $(PLUGINS_OUT)/bastion-plugin-pmp$(_exe) \
 		--out      $(PLUGINS_OUT)/bastion-plugin-pmp.bvplugin
+	@echo "==> packing bastion-plugin-email (process) into .bvplugin"
+	./target/release/bv-plugin-pack$(_host_exe) \
+		--manifest $(PLUGINS_DIR)/bastion-plugin-email/plugin.toml \
+		--binary   $(PLUGINS_OUT)/bastion-plugin-email$(_exe) \
+		--out      $(PLUGINS_OUT)/bastion-plugin-email.bvplugin
+	@echo "==> packing bastion-plugin-webhook-notify (wasm app-module) into .bvplugin"
+	./target/release/bv-plugin-pack$(_host_exe) \
+		--manifest $(PLUGINS_DIR)/bastion-plugin-webhook-notify/plugin.toml \
+		--binary   $(PLUGINS_OUT)/bastion_plugin_webhook_notify.wasm \
+		--out      $(PLUGINS_OUT)/bastion-plugin-webhook-notify.bvplugin
 	@echo ""
 	@echo "==> Bundles ready in $(PLUGINS_OUT)/"
 	@ls -lh $(PLUGINS_OUT)/*.bvplugin 2>/dev/null || true
@@ -1126,6 +1140,20 @@ plugins-sign: plugins-wasm plugins-process plugins-pack-build ## Repack each plu
 		--out               $(PLUGINS_OUT)/bastion-plugin-pmp.bvplugin \
 		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
 		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
+	@echo "==> signing bastion-plugin-email (process)"
+	./target/release/bv-plugin-pack$(_host_exe) \
+		--manifest          $(PLUGINS_DIR)/bastion-plugin-email/plugin.toml \
+		--binary            $(PLUGINS_OUT)/bastion-plugin-email$(_exe) \
+		--out               $(PLUGINS_OUT)/bastion-plugin-email.bvplugin \
+		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
+		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
+	@echo "==> signing bastion-plugin-webhook-notify (wasm app-module)"
+	./target/release/bv-plugin-pack$(_host_exe) \
+		--manifest          $(PLUGINS_DIR)/bastion-plugin-webhook-notify/plugin.toml \
+		--binary            $(PLUGINS_OUT)/bastion_plugin_webhook_notify.wasm \
+		--out               $(PLUGINS_OUT)/bastion-plugin-webhook-notify.bvplugin \
+		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
+		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
 	@echo ""
 	@echo "==> Signed bundles ready in $(PLUGINS_OUT)/"
 	@echo "    Publisher pubkey to register on the host: $(PLUGINS_SIGNING_KEY).pub"
@@ -1156,13 +1184,16 @@ plugins-process: plugins-init plugins-process-target ## Compile the process-runt
 	cd $(PLUGINS_DIR) && $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-xca
 	@echo "==> building bastion-plugin-pmp ($(if $(PLUGINS_PROCESS_TARGET),$(PLUGINS_PROCESS_TARGET),native)) via $(PLUGINS_CARGO)"
 	cd $(PLUGINS_DIR) && $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-pmp
+	@echo "==> building bastion-plugin-email ($(if $(PLUGINS_PROCESS_TARGET),$(PLUGINS_PROCESS_TARGET),native)) via $(PLUGINS_CARGO)"
+	cd $(PLUGINS_DIR) && $(PLUGINS_CARGO) build --release $(_target_arg) -p bastion-plugin-email
 	@mkdir -p $(PLUGINS_OUT)
 	@cp $(PLUGINS_DIR)/$(_target_dir)/bastion-plugin-postgres$(_exe) $(PLUGINS_OUT)/
 	@cp $(PLUGINS_DIR)/$(_target_dir)/bastion-plugin-xca$(_exe)      $(PLUGINS_OUT)/
 	@cp $(PLUGINS_DIR)/$(_target_dir)/bastion-plugin-pmp$(_exe)      $(PLUGINS_OUT)/
+	@cp $(PLUGINS_DIR)/$(_target_dir)/bastion-plugin-email$(_exe)    $(PLUGINS_OUT)/
 	@echo ""
 	@echo "==> Process plugins ready in $(PLUGINS_OUT)/"
-	@ls -lh $(PLUGINS_OUT)/bastion-plugin-postgres* $(PLUGINS_OUT)/bastion-plugin-xca* $(PLUGINS_OUT)/bastion-plugin-pmp* 2>/dev/null || true
+	@ls -lh $(PLUGINS_OUT)/bastion-plugin-postgres* $(PLUGINS_OUT)/bastion-plugin-xca* $(PLUGINS_OUT)/bastion-plugin-pmp* $(PLUGINS_OUT)/bastion-plugin-email* 2>/dev/null || true
 
 plugins: plugins-pack plugins-process ## Build every reference plugin (WASM + .bvplugin bundle + process). Cross-compile with PLUGINS_PROCESS_TARGET=<triple>
 	@echo ""
@@ -1184,7 +1215,7 @@ plugins: plugins-pack plugins-process ## Build every reference plugin (WASM + .b
 # Override the bump kind on the command line: `make plugin-bump type=minor`
 # (defaults to patch). Each plugin's current version is read from its own
 # Cargo.toml so plugins that have drifted out of lockstep stay independent.
-PLUGIN_NAMES := bastion-plugin-totp bastion-plugin-postgres bastion-plugin-xca bastion-plugin-pmp
+PLUGIN_NAMES := bastion-plugin-totp bastion-plugin-postgres bastion-plugin-xca bastion-plugin-pmp bastion-plugin-email bastion-plugin-webhook-notify
 type ?= patch
 
 plugin-bump: ## Bump plugin versions across plugins-ext (type=major|minor|patch, default patch)

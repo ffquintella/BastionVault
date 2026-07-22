@@ -149,6 +149,36 @@ fn run(args: PackArgs) -> Result<(), Box<dyn std::error::Error>> {
     manifest.sha256 = sha256;
     manifest.size = binary.len() as u64;
 
+    // Extensibility v2: an app-module plugin ships its WASM as *the*
+    // embedded binary, and the manifest re-declares that same module as
+    // a `client_assets` entry (kind = "app-module") so the catalog can
+    // content-address and serve it to the Tauri runtime. Stamp that
+    // entry from the binary we just hashed — otherwise the bundle would
+    // ship the placeholder zeros the author left in `plugin.toml` and
+    // the module would fail its hash check on load. Runs before signing
+    // so `signing_message` covers the real hash/size.
+    let bin_sha = manifest.sha256.clone();
+    let bin_len = binary.len() as u64;
+    for asset in manifest.client_assets.iter_mut() {
+        if asset.kind != "app-module" {
+            continue;
+        }
+        if !asset.sha256.is_empty()
+            && !is_placeholder_sha(&asset.sha256)
+            && asset.sha256 != bin_sha
+        {
+            return Err(format!(
+                "client asset `{}` (app-module) sha256 ({}) does not match the binary's \
+                 actual sha256 ({}). Either fix the manifest or remove the field so the \
+                 packer fills it.",
+                asset.name, asset.sha256, bin_sha,
+            )
+            .into());
+        }
+        asset.sha256 = bin_sha.clone();
+        asset.size = bin_len;
+    }
+
     // Optional signing pass — runs *after* sha256/size are stamped so
     // the canonical message the host re-derives matches byte-for-byte.
     let seed = resolve_signing_seed(&args)?;
@@ -342,6 +372,66 @@ default = "6"
 
         let wasm = &bundle[12 + mlen..];
         assert_eq!(wasm, b"\x00asm\x01\x00\x00\x00");
+    }
+
+    #[test]
+    fn app_module_client_asset_is_stamped() {
+        let dir = tempdir();
+        let manifest_path = dir.join("plugin.toml");
+        let binary_path = dir.join("app.wasm");
+        let out_path = dir.join("app.bvplugin");
+
+        fs::write(
+            &manifest_path,
+            r#"
+name = "webhook-notify"
+version = "0.1.0"
+plugin_type = "app"
+runtime = "wasm"
+abi_version = "1.1"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size = 0
+description = "demo app-module"
+
+[capabilities]
+log_emit = true
+
+[[client_assets]]
+name = "webhook_notify_app.wasm"
+kind = "app-module"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size = 0
+"#,
+        )
+        .unwrap();
+        // 12 bytes of fake wasm so size is non-trivial.
+        fs::write(&binary_path, b"\x00asm\x01\x00\x00\x00\x00\x00\x00\x00").unwrap();
+
+        run(PackArgs {
+            manifest: manifest_path,
+            binary: binary_path,
+            out: Some(out_path.clone()),
+            signing_seed_hex: None,
+            signing_seed_file: None,
+            signing_key_name: None,
+        })
+        .unwrap();
+
+        let mut bundle = Vec::new();
+        fs::File::open(&out_path).unwrap().read_to_end(&mut bundle).unwrap();
+        let mlen = u32::from_le_bytes(bundle[8..12].try_into().unwrap()) as usize;
+        let parsed: PluginManifest =
+            serde_json::from_slice(&bundle[12..12 + mlen]).unwrap();
+
+        // The app-module client asset must be stamped to match the
+        // embedded binary, not left as the placeholder zeros.
+        assert_eq!(parsed.client_assets.len(), 1);
+        let asset = &parsed.client_assets[0];
+        assert_eq!(asset.kind, "app-module");
+        assert_eq!(asset.size, 12);
+        assert_ne!(asset.sha256, "0".repeat(64));
+        assert_eq!(asset.sha256, parsed.sha256);
+        assert_eq!(asset.size, parsed.size);
     }
 
     fn tempdir() -> PathBuf {
