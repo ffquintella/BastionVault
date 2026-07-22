@@ -45,6 +45,26 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.36.2] - 2026-07-22
+
+### Fixed
+- **SSH key and certificate credentials now route through the bastion under a
+  `rustion-required` policy.** The GUI SSH connect resolver
+  (`resolve_ssh_connect_route`) previously brokered only `ssh-password`
+  credentials and hard-refused private-key and certificate flows
+  ("only ssh-password credentials are supported through the bastion proxy
+  today … Refusing to dial direct"), even though the server-side
+  `rustion/session/open` handler already accepts `ssh-key` and `ssh-cert`
+  (`credential_kind` + base64 `credential_material`, plus the signed OpenSSH
+  cert text in `credential_cert`). A resource with a CA-mode SSH credential
+  (e.g. `ssh/role=…`) under `rustion-required` therefore could not connect. The
+  resolver now maps all three `SshCredential` variants onto the same wire
+  contract the server's own brokered-mint path uses — byte-identical key/cert
+  shapes (`to_openssh(LineEnding::LF)` private key + engine `signed_key`). A
+  passphrase-protected private key still fails closed (there is no passphrase
+  channel on the `session/open` wire) with a precise message, and falls back to
+  direct under `rustion-preferred` (`gui/src-tauri/src/commands/connect.rs`).
+
 ## [0.36.1] - 2026-07-22
 
 ### Added

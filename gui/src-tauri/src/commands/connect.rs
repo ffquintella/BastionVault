@@ -1499,26 +1499,55 @@ async fn resolve_ssh_connect_route(
         return Ok(ConnectRoute::Direct);
     }
 
-    // Today only ssh-password credentials flow through the bastion
-    // proxy (per the rustion-ssh e2e harness). Other kinds fail-closed
-    // under rustion-required to avoid a silent bypass; under
-    // rustion-preferred we log + fall back to direct.
-    let password = match credential {
-        SshCredential::Password(p) => p.to_string(),
-        _ => {
-            if effective.transport == "rustion-required" {
-                return Err(CommandError::from(
-                    "rustion-required policy: only ssh-password credentials are supported \
-                     through the bastion proxy today (private-key and certificate flows are \
-                     not yet wired). Refusing to dial direct."
-                        .to_string(),
-                ));
+    // SSH credentials brokered through the bastion, matching the
+    // server-side `session/open` contract (and the rustion-ssh e2e
+    // harness):
+    //   - ssh-password: material = password bytes
+    //   - ssh-key:      material = private-key PEM
+    //   - ssh-cert:     material = ephemeral private-key PEM, plus the
+    //                   signed OpenSSH certificate text in `credential_cert`
+    // The operator's own SSH client only ever presents the one-shot
+    // ticket — it never sees the target credential for any kind.
+    //
+    // An encrypted private key still can't be brokered: there's no
+    // passphrase field on the wire, so the bastion couldn't decrypt it.
+    // It fails closed under rustion-required to avoid a silent bypass;
+    // under rustion-preferred we log + fall back to direct, where the
+    // local dialler can prompt/decrypt.
+    struct BrokeredCred {
+        kind: &'static str,
+        /// Base64: password bytes (ssh-password) or private-key PEM
+        /// (ssh-key / ssh-cert).
+        material_b64: String,
+        /// Signed OpenSSH certificate text — ssh-cert only.
+        cert: Option<String>,
+    }
+    let encode = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+    let cred = match credential {
+        SshCredential::Password(p) => {
+            BrokeredCred { kind: "ssh-password", material_b64: encode(p.as_bytes()), cert: None }
+        }
+        SshCredential::PrivateKey { pem, passphrase } => {
+            if passphrase.is_some() {
+                if effective.transport == "rustion-required" {
+                    return Err(CommandError::from(
+                        "rustion-required policy: passphrase-protected SSH private keys can't be \
+                         brokered through the bastion (no passphrase channel on the wire). Use an \
+                         unencrypted key, an SSH certificate, or a password credential. Refusing \
+                         to dial direct."
+                            .to_string(),
+                    ));
+                }
+                log::warn!(
+                    "resource-connect/ssh: rustion-preferred but SSH key is passphrase-protected; \
+                     falling back to direct dial"
+                );
+                return Ok(ConnectRoute::Direct);
             }
-            log::warn!(
-                "resource-connect/ssh: rustion-preferred but credential kind \
-                 is not ssh-password; falling back to direct dial"
-            );
-            return Ok(ConnectRoute::Direct);
+            BrokeredCred { kind: "ssh-key", material_b64: encode(pem.as_bytes()), cert: None }
+        }
+        SshCredential::Cert { pem, cert_openssh } => {
+            BrokeredCred { kind: "ssh-cert", material_b64: encode(pem.as_bytes()), cert: Some(cert_openssh.clone()) }
         }
     };
 
@@ -1527,15 +1556,16 @@ async fn resolve_ssh_connect_route(
         profile.get("max_renewals").and_then(|v| v.as_u64()).and_then(|n| u8::try_from(n).ok()).unwrap_or(3);
     let recording = if effective.recording.is_empty() { "always".to_string() } else { effective.recording.clone() };
 
-    let credential_material_b64 = base64::engine::general_purpose::STANDARD.encode(password.as_bytes());
-
     let mut body = Map::new();
     body.insert("target_host".into(), Value::String(target_host.to_string()));
     body.insert("target_port".into(), Value::Number(target_port.into()));
     body.insert("target_protocol".into(), Value::String("ssh".to_string()));
-    body.insert("credential_kind".into(), Value::String("ssh-password".to_string()));
+    body.insert("credential_kind".into(), Value::String(cred.kind.to_string()));
     body.insert("credential_username".into(), Value::String(target_user.to_string()));
-    body.insert("credential_material".into(), Value::String(credential_material_b64));
+    body.insert("credential_material".into(), Value::String(cred.material_b64));
+    if let Some(cert) = cred.cert {
+        body.insert("credential_cert".into(), Value::String(cert));
+    }
     body.insert("ttl_secs".into(), Value::Number(ttl_secs.into()));
     body.insert("max_renewals".into(), Value::Number(max_renewals.into()));
     body.insert("recording".into(), Value::String(recording));
