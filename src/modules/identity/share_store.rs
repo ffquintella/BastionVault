@@ -515,6 +515,99 @@ impl ShareStore {
         Ok(out)
     }
 
+    /// Re-key every share on `old_path` (of `kind`) so it now targets
+    /// `new_path`, preserving the grantee, capabilities, expiry, and
+    /// grant metadata. Used when a share target is renamed — e.g. a
+    /// resource rename, where the resource name is baked into the
+    /// `target_hash` and every share record must be rewritten under the
+    /// new hash.
+    ///
+    /// Unlike a `set_share` + `delete_share` pair (which would log a
+    /// grant then a revoke), this emits a single `"rename"` history row
+    /// per share so the audit trail reflects a move rather than a loss
+    /// and re-grant of access. Returns the number of shares moved.
+    ///
+    /// Idempotent-ish: a `new_path` that canonicalizes to `old_path` is a
+    /// no-op. An invalid `new_path` is a hard error (the caller must not
+    /// silently drop shares).
+    pub async fn rename_target(
+        &self,
+        kind: ShareTargetKind,
+        old_path: &str,
+        new_path: &str,
+        actor_entity_id: &str,
+    ) -> Result<usize, RvError> {
+        let Some(old_canonical) = Self::canonicalize(kind, old_path) else {
+            return Ok(0);
+        };
+        let new_canonical = Self::canonicalize(kind, new_path)
+            .ok_or_else(|| bv_error_string!("invalid new share target_path"))?;
+        if old_canonical == new_canonical {
+            return Ok(0);
+        }
+
+        let old_hash = Self::target_hash(kind, &old_canonical);
+        let new_hash = Self::target_hash(kind, &new_canonical);
+        let shares = self.list_shares_for_target(kind, &old_canonical).await?;
+        let mut moved = 0usize;
+
+        for share in shares {
+            let grantee_kind =
+                ShareGranteeKind::parse(&share.grantee_kind).unwrap_or(ShareGranteeKind::Entity);
+            let grantee = share.grantee_entity_id.clone();
+
+            // Write the record + by-grantee pointer under the new target
+            // hash. Keep all other fields (grantee, caps, expiry, grant
+            // provenance) untouched.
+            let mut moved_share = share.clone();
+            moved_share.target_path = new_canonical.clone();
+            let new_primary_key = Self::primary_key(&new_hash, &grantee);
+            self.primary_view
+                .put(&StorageEntry {
+                    key: new_primary_key,
+                    value: serde_json::to_vec(&moved_share)?,
+                })
+                .await?;
+
+            let pointer = ShareByGranteePointer {
+                target_kind: moved_share.target_kind.clone(),
+                target_path: new_canonical.clone(),
+                grantee_kind: moved_share.grantee_kind.clone(),
+            };
+            let new_ptr_key = Self::by_grantee_key(grantee_kind, &grantee, &new_hash);
+            self.by_grantee_view
+                .put(&StorageEntry {
+                    key: new_ptr_key,
+                    value: serde_json::to_vec(&pointer)?,
+                })
+                .await?;
+
+            // Remove the old primary + pointer only after the new pair is
+            // durably written, so a mid-loop failure leaves a resolvable
+            // duplicate rather than an orphaned grantee.
+            let old_primary_key = Self::primary_key(&old_hash, &grantee);
+            self.primary_view.delete(&old_primary_key).await?;
+            let old_ptr_key = Self::by_grantee_key(grantee_kind, &grantee, &old_hash);
+            self.by_grantee_view.delete(&old_ptr_key).await?;
+
+            let hist = ShareHistoryEntry {
+                ts: Utc::now().to_rfc3339(),
+                actor_entity_id: actor_entity_id.to_string(),
+                op: "rename".to_string(),
+                target_kind: moved_share.target_kind.clone(),
+                target_path: new_canonical.clone(),
+                grantee_kind: moved_share.grantee_kind.clone(),
+                grantee_entity_id: grantee,
+                capabilities: moved_share.capabilities.clone(),
+                expires_at: moved_share.expires_at.clone(),
+            };
+            let _ = self.append_history(hist).await;
+            moved += 1;
+        }
+
+        Ok(moved)
+    }
+
     /// Return every target shared with `grantee` (entity grantee). The
     /// pointer carries the kind+path; caller can load the full record
     /// via `get_share`.

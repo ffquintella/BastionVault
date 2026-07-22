@@ -212,6 +212,59 @@ pub async fn delete_resource(
     Ok(())
 }
 
+/// Rename a resource, moving its identity and every piece of associated
+/// data to `new_name`. Two engine calls, orchestrated here because they
+/// live in separate mounts:
+///
+///   1. The resource engine's `resources/<old>/rename` migrates the
+///      metadata, change history, secrets (+ versions), asset-group
+///      membership, share grants, and ownership record. It returns the
+///      canonical (lowercased) new name.
+///   2. The files engine's `files/repoint-resource` re-points every file
+///      attached to the old name at the (canonical) new name.
+///
+/// Files are re-pointed with the *canonical* name returned by step 1 so
+/// the file's `resource` field matches the renamed resource's key. A
+/// failure in step 1 aborts before any file is touched; a failure in
+/// step 2 leaves the resource renamed but its files still pointing at the
+/// old name (surfaced to the caller as an error so it can be retried).
+///
+/// Returns the canonical new name.
+#[tauri::command]
+pub async fn rename_resource(
+    state: State<'_, AppState>,
+    old_name: String,
+    new_name: String,
+) -> CmdResult<String> {
+    let mut body = Map::new();
+    body.insert("new_name".to_string(), Value::String(new_name.clone()));
+    let path = format!("{RESOURCE_MOUNT}resources/{old_name}/rename");
+    let resp = make_request(&state, Operation::Write, path, Some(body)).await?;
+
+    // Prefer the canonical name the engine echoes back; fall back to a
+    // trimmed+lowercased form so a terse response still re-points files
+    // at the right key.
+    let canonical = resp
+        .and_then(|r| r.data)
+        .and_then(|d| d.get("name").and_then(|v| v.as_str()).map(String::from))
+        .unwrap_or_else(|| new_name.trim().to_ascii_lowercase());
+
+    let mut repoint = Map::new();
+    repoint.insert("old_resource".to_string(), Value::String(old_name));
+    repoint.insert("new_resource".to_string(), Value::String(canonical.clone()));
+    // The files engine is mounted at `files/` and its backend paths repeat
+    // the `files/` segment, so the full path is `files/files/...`.
+    make_request(
+        &state,
+        Operation::Write,
+        "files/files/repoint-resource".to_string(),
+        Some(repoint),
+    )
+    .await?;
+
+    Ok(canonical)
+}
+
 // ── Resource Secrets ───────────────────────────────────────────────
 
 #[tauri::command]

@@ -692,6 +692,11 @@ export const writeResource = (name: string, metadata: ResourceMetadata) =>
   invoke<void>("write_resource", { name, metadata });
 export const deleteResource = (name: string) =>
   invoke<void>("delete_resource", { name });
+/// Rename a resource, migrating metadata, history, secrets, shares, group
+/// membership, ownership, and attached files to the new name. Returns the
+/// canonical (trimmed + lowercased) new name.
+export const renameResource = (oldName: string, newName: string) =>
+  invoke<string>("rename_resource", { oldName, newName });
 export const listResourceSecrets = (name: string) =>
   invoke<ResourceSecretListResult>("list_resource_secrets", { name });
 export const readResourceSecret = (name: string, key: string) =>

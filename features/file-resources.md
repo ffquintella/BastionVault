@@ -48,6 +48,7 @@ Shipped in Phase 1 (`src/modules/files/mod.rs`):
   - `POST files/files/{id}` — replace content (and optionally metadata fields; omitted fields are preserved).
   - `DELETE files/files/{id}` — drop metadata + blob.
   - `GET files/files/{id}/history` — per-file change log (newest-first).
+  - `POST files/files/repoint-resource` — bulk-rewrite the `resource` field on every file matching `old_resource` (case-insensitive) to `new_resource`. Only metadata is touched — blobs, versions, and sync targets are untouched (files are keyed by UUID). Returns `{moved}`. Used by the resource-rename flow so a renamed resource keeps its attached files.
 - **32 MiB hard cap** (`MAX_FILE_BYTES`) on content size, enforced server-side before any bytes are persisted.
 - **SHA-256 over plaintext** stored in `FileEntry.sha256`. The content-read handler recomputes it and errors out on mismatch, so storage corruption or out-of-band writes produce a loud error instead of returning potentially-wrong bytes.
 - **Change history** (who / when / op / changed_fields — never content bytes). Content replacement surfaces as `"content"` in `changed_fields` so the timeline reflects content movement even when no metadata changed.

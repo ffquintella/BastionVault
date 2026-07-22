@@ -371,6 +371,43 @@ impl ResourceGroupStore {
         Ok(groups)
     }
 
+    /// Re-point every group membership from `old_name` to `new_name`
+    /// when a resource is renamed. Each group that listed the old name
+    /// now lists the new one; `set_group` keeps the reverse index in
+    /// sync (dropping `member-index/<old>` and adding
+    /// `member-index/<new>`). Returns the groups that were updated.
+    ///
+    /// A resource that belongs to no group is a no-op (empty vec). A
+    /// `new_name` that canonicalizes to `old_name` is also a no-op.
+    pub async fn rename_resource(
+        &self,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<Vec<String>, RvError> {
+        let Some(new_member) = Self::sanitize_member(new_name) else {
+            return Err(bv_error_string!("invalid new resource name"));
+        };
+        let old_target = old_name.trim().to_lowercase();
+        if new_member == old_target {
+            return Ok(Vec::new());
+        }
+
+        let groups = self.groups_for_resource(old_name).await?;
+        for g_name in &groups {
+            if let Some(mut g) = self.get_group(g_name).await? {
+                // Drop the old member and add the new one. `set_group`
+                // canonicalizes + dedups the member list and diffs it
+                // against the stored record to fix both directions of
+                // the reverse index, so this swap is sufficient.
+                g.members.retain(|m| m.trim().to_lowercase() != old_target);
+                g.members.push(new_member.clone());
+                g.updated_at = now_iso();
+                self.set_group(g).await?;
+            }
+        }
+        Ok(groups)
+    }
+
     /// List every group that currently contains `path` as a secret
     /// member. The lookup canonicalizes `path` the same way writes do,
     /// so callers may pass either the logical form (`secret/foo/bar`)

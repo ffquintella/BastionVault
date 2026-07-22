@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::{
-    bv_error_response_status,
+    bv_error_response_status, bv_error_string,
     context::Context,
     core::Core,
     errors::RvError,
@@ -207,6 +207,7 @@ impl ResourceBackend {
         let h_res_read = self.inner.clone();
         let h_res_write = self.inner.clone();
         let h_res_delete = self.inner.clone();
+        let h_res_rename = self.inner.clone();
         let h_res_list = self.inner.clone();
         let h_res_search = self.inner.clone();
         let h_res_hist = self.inner.clone();
@@ -261,6 +262,28 @@ impl ResourceBackend {
                         {op: Operation::Read, handler: h_res_hist.handle_resource_history}
                     ],
                     help: "Read the change history for a resource."
+                },
+                {
+                    // Rename a resource: move its identity (and all
+                    // associated data) to `new_name`. Write-only.
+                    pattern: r"resources/(?P<name>[^/]+)/rename$",
+                    fields: {
+                        "name": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Current resource name."
+                        },
+                        "new_name": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "New resource name."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_res_rename.handle_resource_rename}
+                    ],
+                    help: "Rename a resource, migrating metadata, history, secrets, \
+                           shares, group membership, and ownership to the new name."
                 },
                 {
                     // CRUD a single resource
@@ -829,6 +852,258 @@ impl ResourceBackendInner {
         Ok(None)
     }
 
+    /// Rename a resource, moving its identity and every piece of data
+    /// keyed by name to `new_name`. This is a multi-step migration across
+    /// several storage domains — there is no cross-backend transaction, so
+    /// the order is deliberately **write-new-then-delete-old**: a failure
+    /// partway through leaves a recoverable duplicate under the old name,
+    /// never a half-deleted resource.
+    ///
+    /// Migrated in this handler:
+    ///   - `meta/<name>` (this mount's view)
+    ///   - `secret/`, `smeta/`, `sver/` (this mount's view)
+    ///   - `hist/<name>/*` (copied forward; a `rename` entry is appended)
+    ///   - asset-group membership + reverse index (resource-group store)
+    ///   - explicit share grants (identity share store)
+    ///   - ownership record (identity owner store)
+    ///
+    /// File resources (`FileEntry.resource`) live in a separate mount and
+    /// are re-pointed by the caller via the files engine's
+    /// `files/repoint-resource` endpoint — they are NOT touched here.
+    ///
+    /// Policy documents that reference the old ACL path are intentionally
+    /// left untouched (they may use globs/templates that cannot be safely
+    /// rewritten); the operator is warned in the GUI to update them.
+    pub async fn handle_resource_rename(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let raw_old = req.get_data("name")?.as_str().unwrap_or("").to_string();
+        let old = resolve_resource_name(req, &raw_old).await?;
+
+        // Validate the target name. Names are the storage key *and* the
+        // ACL path segment, so reject anything that could escape the key
+        // space or collide with a sub-path.
+        let raw_new = req
+            .get_data("new_name")?
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if raw_new.is_empty() {
+            return Err(bv_error_string!("new_name is required"));
+        }
+        let new = raw_new.to_ascii_lowercase();
+        if new.contains('/') || new.contains("..") {
+            return Err(bv_error_string!(
+                "new_name must not contain '/' or '..'"
+            ));
+        }
+        if new == old {
+            return Err(bv_error_string!(
+                "new_name is the same as the current name"
+            ));
+        }
+
+        // Source must exist.
+        let old_meta_key = format!("{META_PREFIX}{old}");
+        let Some(old_entry) = req.storage_get(&old_meta_key).await? else {
+            return Err(bv_error_string!("resource not found"));
+        };
+
+        // Target must be free. Check the canonical key and a
+        // case-insensitive scan (mirrors `resolve_resource_name`) so a
+        // rename can never silently clobber a differently-cased record.
+        let new_meta_key = format!("{META_PREFIX}{new}");
+        if req.storage_get(&new_meta_key).await?.is_some() {
+            return Err(bv_error_string!(format!(
+                "a resource named '{new}' already exists"
+            )));
+        }
+        for k in req.storage_list(META_PREFIX).await? {
+            if k.eq_ignore_ascii_case(&new) {
+                return Err(bv_error_string!(format!(
+                    "a resource named '{new}' already exists"
+                )));
+            }
+        }
+
+        // ── 1. Metadata: write the new record (name + updated_at) ──────
+        let mut meta: Map<String, Value> =
+            serde_json::from_slice(&old_entry.value).unwrap_or_default();
+        meta.insert("name".to_string(), Value::String(new.clone()));
+        meta.insert(
+            "updated_at".to_string(),
+            Value::String(now_rfc3339()),
+        );
+        req.storage_put(&StorageEntry {
+            key: new_meta_key,
+            value: serde_json::to_vec(&meta)?,
+        })
+        .await?;
+
+        // ── 2. Secrets: current values, version index, version payloads ─
+        // Copy every key from the old prefix to the new, then delete the
+        // old copies. Mirrors the enumeration in `handle_resource_delete`.
+        let old_secret_prefix = format!("{SECRET_PREFIX}{old}/");
+        let new_secret_prefix = format!("{SECRET_PREFIX}{new}/");
+        for k in req.storage_list(&old_secret_prefix).await? {
+            if let Some(e) = req.storage_get(&format!("{old_secret_prefix}{k}")).await? {
+                req.storage_put(&StorageEntry {
+                    key: format!("{new_secret_prefix}{k}"),
+                    value: e.value,
+                })
+                .await?;
+            }
+        }
+
+        let old_smeta_prefix = format!("{SMETA_PREFIX}{old}/");
+        let new_smeta_prefix = format!("{SMETA_PREFIX}{new}/");
+        for k in req.storage_list(&old_smeta_prefix).await? {
+            if let Some(e) = req.storage_get(&format!("{old_smeta_prefix}{k}")).await? {
+                req.storage_put(&StorageEntry {
+                    key: format!("{new_smeta_prefix}{k}"),
+                    value: e.value,
+                })
+                .await?;
+            }
+        }
+
+        // The sver/ tree is two levels deep: <resource>/<key>/<version>.
+        let old_sver_prefix = format!("{SVER_PREFIX}{old}/");
+        let new_sver_prefix = format!("{SVER_PREFIX}{new}/");
+        for k in req.storage_list(&old_sver_prefix).await? {
+            let key_seg = k.trim_end_matches('/');
+            let old_sub = format!("{old_sver_prefix}{key_seg}/");
+            let new_sub = format!("{new_sver_prefix}{key_seg}/");
+            for v in req.storage_list(&old_sub).await? {
+                if let Some(e) = req.storage_get(&format!("{old_sub}{v}")).await? {
+                    req.storage_put(&StorageEntry {
+                        key: format!("{new_sub}{v}"),
+                        value: e.value,
+                    })
+                    .await?;
+                }
+            }
+        }
+
+        // ── 3. History: carry the timeline forward, then log the rename ─
+        let old_hist_prefix = format!("{HIST_PREFIX}{old}/");
+        let new_hist_prefix = format!("{HIST_PREFIX}{new}/");
+        for k in req.storage_list(&old_hist_prefix).await? {
+            if let Some(e) = req.storage_get(&format!("{old_hist_prefix}{k}")).await? {
+                req.storage_put(&StorageEntry {
+                    key: format!("{new_hist_prefix}{k}"),
+                    value: e.value,
+                })
+                .await?;
+            }
+        }
+        let hist = ResourceHistoryEntry {
+            ts: now_rfc3339(),
+            user: caller_username(req),
+            op: "rename".to_string(),
+            changed_fields: vec![format!("{old} -> {new}")],
+        };
+        req.storage_put(&StorageEntry {
+            key: format!("{new_hist_prefix}{}", hist_seq()),
+            value: serde_json::to_vec(&hist)?,
+        })
+        .await?;
+        log::info!(
+            target: "security",
+            "resource-rename: user={} old={} new={}",
+            caller_username(req),
+            old,
+            new
+        );
+
+        // ── 4. Cross-module references (best-effort, like delete) ──────
+        // Asset-group membership + reverse index.
+        if let Some(rg_module) = self
+            .core
+            .module_manager
+            .get_module::<ResourceGroupModule>("resource-group")
+        {
+            if let Some(rg_store) = rg_module.store() {
+                if let Err(e) = rg_store.rename_resource(&old, &new).await {
+                    log::warn!(
+                        "resource-group rename failed for '{old}' -> '{new}': {e}. \
+                         Use the resource-group/reindex endpoint to clean up.",
+                    );
+                }
+            }
+        }
+
+        // Shares + ownership (identity module, system view stores).
+        if let Some(identity) = self
+            .core
+            .module_manager
+            .get_module::<crate::modules::identity::IdentityModule>("identity")
+        {
+            let actor = crate::modules::identity::caller_audit_actor(req);
+            if let Some(share_store) = identity.share_store() {
+                if let Err(e) = share_store
+                    .rename_target(
+                        crate::modules::identity::share_store::ShareTargetKind::Resource,
+                        &old,
+                        &new,
+                        &actor,
+                    )
+                    .await
+                {
+                    log::warn!(
+                        "share rename failed for resource '{old}' -> '{new}': {e}",
+                    );
+                }
+            }
+            if let Some(owner_store) = identity.owner_store() {
+                match owner_store.get_resource_owner(&old).await {
+                    Ok(Some(rec)) if !rec.entity_id.is_empty() => {
+                        if let Err(e) =
+                            owner_store.set_resource_owner(&new, &rec.entity_id).await
+                        {
+                            log::warn!(
+                                "owner rename failed for resource '{old}' -> '{new}': {e}",
+                            );
+                        } else {
+                            let _ = owner_store.forget_resource_owner(&old).await;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => log::warn!(
+                        "owner lookup failed for resource '{old}' during rename: {e}",
+                    ),
+                }
+            }
+        }
+
+        // ── 5. Delete the old resource-mount keys (identity now moved) ──
+        req.storage_delete(&old_meta_key).await?;
+        for k in req.storage_list(&old_secret_prefix).await? {
+            req.storage_delete(&format!("{old_secret_prefix}{k}")).await?;
+        }
+        for k in req.storage_list(&old_smeta_prefix).await? {
+            req.storage_delete(&format!("{old_smeta_prefix}{k}")).await?;
+        }
+        for k in req.storage_list(&old_sver_prefix).await? {
+            let key_seg = k.trim_end_matches('/');
+            let old_sub = format!("{old_sver_prefix}{key_seg}/");
+            for v in req.storage_list(&old_sub).await? {
+                req.storage_delete(&format!("{old_sub}{v}")).await?;
+            }
+            let _ = req.storage_delete(&format!("{old_sver_prefix}{key_seg}")).await;
+        }
+        for k in req.storage_list(&old_hist_prefix).await? {
+            req.storage_delete(&format!("{old_hist_prefix}{k}")).await?;
+        }
+
+        let mut data = Map::new();
+        data.insert("name".to_string(), Value::String(new));
+        Ok(Some(Response::data_response(Some(data))))
+    }
+
     pub async fn handle_resource_history(
         &self,
         _backend: &dyn Backend,
@@ -1386,5 +1661,245 @@ mod brokered_enforcement_tests {
             )
             .unwrap();
         assert_eq!(st, 403, "relaxing a locked tier must be refused: {resp:?}");
+    }
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use crate::test_utils::{
+        new_unseal_test_bastion_vault, test_read_api, test_write_api,
+    };
+    use serde_json::json;
+
+    /// End-to-end proof that a rename moves the resource's identity and all
+    /// data reachable through the logical API: metadata, secret (+version),
+    /// change history, asset-group membership, and attached files. Shares
+    /// and ownership are covered by store-level tests in the identity module.
+    #[maybe_async::test(
+        feature = "sync_handler",
+        async(all(not(feature = "sync_handler")), tokio::test)
+    )]
+    async fn test_resource_rename_migrates_everything() {
+        let (_bvault, core, root) =
+            new_unseal_test_bastion_vault("test_resource_rename_migrates_everything").await;
+
+        // Metadata.
+        let _ = test_write_api(
+            &core,
+            &root,
+            "resources/resources/old01",
+            true,
+            json!({ "name": "old01", "type": "server", "hostname": "h.example" })
+                .as_object()
+                .cloned(),
+        )
+        .await;
+
+        // Secret (creates secret/, smeta/, sver/ entries).
+        let _ = test_write_api(
+            &core,
+            &root,
+            "resources/secrets/old01/login",
+            true,
+            json!({ "username": "u", "password": "p" }).as_object().cloned(),
+        )
+        .await;
+
+        // Asset-group membership.
+        let _ = test_write_api(
+            &core,
+            &root,
+            "resource-group/groups/alpha",
+            true,
+            json!({ "members": "old01" }).as_object().cloned(),
+        )
+        .await;
+
+        // A file attached to the resource ("hello" base64).
+        let create = test_write_api(
+            &core,
+            &root,
+            "files/files",
+            true,
+            json!({ "name": "key.pem", "resource": "old01", "content_base64": "aGVsbG8=" })
+                .as_object()
+                .cloned(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let file_id = create.data.unwrap()["id"].as_str().unwrap().to_string();
+
+        // ── Rename ──────────────────────────────────────────────────
+        let _ = test_write_api(
+            &core,
+            &root,
+            "resources/resources/old01/rename",
+            true,
+            json!({ "new_name": "new01" }).as_object().cloned(),
+        )
+        .await;
+        // Files live in a separate mount — re-point them explicitly, as
+        // the Tauri orchestrator does.
+        let _ = test_write_api(
+            &core,
+            &root,
+            "files/files/repoint-resource",
+            true,
+            json!({ "old_resource": "old01", "new_resource": "new01" })
+                .as_object()
+                .cloned(),
+        )
+        .await;
+
+        // Old metadata is gone (a missing read returns `Ok(None)`).
+        let gone = test_read_api(&core, &root, "resources/resources/old01", true)
+            .await
+            .unwrap();
+        assert!(gone.is_none(), "old metadata should be gone: {gone:?}");
+
+        // New metadata exists and carries the new name.
+        let resp = test_read_api(&core, &root, "resources/resources/new01", true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp.data.unwrap()["name"], json!("new01"));
+
+        // Secret moved to the new name.
+        let resp = test_read_api(&core, &root, "resources/secrets/new01/login", true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp.data.unwrap()["password"], json!("p"));
+        // ...and is gone under the old name (missing read → `Ok(None)`).
+        let gone = test_read_api(&core, &root, "resources/secrets/old01/login", true)
+            .await
+            .unwrap();
+        assert!(gone.is_none(), "old secret should be gone: {gone:?}");
+
+        // History carried forward, ending with the rename entry.
+        let resp = test_read_api(&core, &root, "resources/resources/new01/history", true)
+            .await
+            .unwrap()
+            .unwrap();
+        let entries = resp.data.unwrap()["entries"].as_array().cloned().unwrap();
+        let rename_entry = entries
+            .iter()
+            .find(|e| e["op"] == json!("rename"))
+            .unwrap_or_else(|| panic!("expected a rename history entry: {entries:?}"));
+        // Audit record: who (user), when (ts), what (old -> new).
+        assert!(
+            rename_entry["user"].as_str().map(|u| !u.is_empty()).unwrap_or(false),
+            "rename entry must record the actor: {rename_entry:?}"
+        );
+        assert!(
+            rename_entry["ts"].as_str().map(|t| !t.is_empty()).unwrap_or(false),
+            "rename entry must record a timestamp: {rename_entry:?}"
+        );
+        assert_eq!(
+            rename_entry["changed_fields"],
+            json!(["old01 -> new01"]),
+            "rename entry must record the old -> new change: {rename_entry:?}"
+        );
+
+        // Asset-group membership re-pointed.
+        let resp = test_read_api(&core, &root, "resource-group/by-resource/new01", true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp.data.unwrap()["groups"], json!(["alpha"]));
+        let resp = test_read_api(&core, &root, "resource-group/by-resource/old01", true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp.data.unwrap()["groups"], json!([] as [String; 0]));
+
+        // File re-pointed to the new resource name; blob untouched.
+        let resp = test_read_api(&core, &root, &format!("files/files/{file_id}"), true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp.data.unwrap()["resource"], json!("new01"));
+    }
+
+    /// Renaming onto an existing name must be refused so a rename can never
+    /// silently clobber another resource.
+    #[maybe_async::test(
+        feature = "sync_handler",
+        async(all(not(feature = "sync_handler")), tokio::test)
+    )]
+    async fn test_resource_rename_rejects_collision() {
+        let (_bvault, core, root) =
+            new_unseal_test_bastion_vault("test_resource_rename_rejects_collision").await;
+
+        for name in ["a01", "b01"] {
+            let _ = test_write_api(
+                &core,
+                &root,
+                &format!("resources/resources/{name}"),
+                true,
+                json!({ "name": name, "type": "server" }).as_object().cloned(),
+            )
+            .await;
+        }
+
+        // a01 -> b01 collides.
+        let _ = test_write_api(
+            &core,
+            &root,
+            "resources/resources/a01/rename",
+            false,
+            json!({ "new_name": "b01" }).as_object().cloned(),
+        )
+        .await;
+        // a01 still exists.
+        let _ = test_read_api(&core, &root, "resources/resources/a01", true).await;
+    }
+
+    /// An invalid or same-name target is refused.
+    #[maybe_async::test(
+        feature = "sync_handler",
+        async(all(not(feature = "sync_handler")), tokio::test)
+    )]
+    async fn test_resource_rename_rejects_invalid_and_noop() {
+        let (_bvault, core, root) =
+            new_unseal_test_bastion_vault("test_resource_rename_rejects_invalid_and_noop").await;
+
+        let _ = test_write_api(
+            &core,
+            &root,
+            "resources/resources/host01",
+            true,
+            json!({ "name": "host01", "type": "server" }).as_object().cloned(),
+        )
+        .await;
+
+        // Path-escaping name.
+        let _ = test_write_api(
+            &core,
+            &root,
+            "resources/resources/host01/rename",
+            false,
+            json!({ "new_name": "bad/name" }).as_object().cloned(),
+        )
+        .await;
+        // No-op (same canonical name).
+        let _ = test_write_api(
+            &core,
+            &root,
+            "resources/resources/host01/rename",
+            false,
+            json!({ "new_name": "HOST01" }).as_object().cloned(),
+        )
+        .await;
+        // Empty.
+        let _ = test_write_api(
+            &core,
+            &root,
+            "resources/resources/host01/rename",
+            false,
+            json!({ "new_name": "  " }).as_object().cloned(),
+        )
+        .await;
     }
 }

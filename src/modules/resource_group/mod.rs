@@ -1199,6 +1199,49 @@ mod resource_group_tests {
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_resource_group_rename_resource() {
+        let (_bvault, core, root_token) =
+            new_unseal_test_bastion_vault("test_resource_group_rename_resource").await;
+
+        // `old01` is a member of two groups; `keep01` sits alongside it in one.
+        let a = json!({ "members": "old01,keep01" }).as_object().cloned();
+        let _ = test_write_api(&core, &root_token, "resource-group/groups/alpha", true, a).await;
+        let b = json!({ "members": "old01" }).as_object().cloned();
+        let _ = test_write_api(&core, &root_token, "resource-group/groups/beta", true, b).await;
+
+        let store = core
+            .module_manager
+            .get_module::<ResourceGroupModule>("resource-group")
+            .and_then(|m| m.store())
+            .expect("resource-group store");
+
+        let groups = store.rename_resource("old01", "new01").await.unwrap();
+        assert_eq!(groups.len(), 2, "old01 belonged to two groups");
+
+        // Reverse index moved: new01 in both groups, old01 in none.
+        let resp = test_read_api(&core, &root_token, "resource-group/by-resource/new01", true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp.data.unwrap()["groups"], json!(["alpha", "beta"]));
+        let resp = test_read_api(&core, &root_token, "resource-group/by-resource/old01", true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp.data.unwrap()["groups"], json!([] as [String; 0]));
+
+        // The primary records list the new member; `keep01` is untouched.
+        let resp = test_read_api(&core, &root_token, "resource-group/groups/alpha", true)
+            .await
+            .unwrap()
+            .unwrap();
+        let members = resp.data.unwrap()["members"].as_array().cloned().unwrap();
+        assert!(members.contains(&json!("new01")));
+        assert!(members.contains(&json!("keep01")));
+        assert!(!members.contains(&json!("old01")));
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_resource_group_acl_groups_qualifier() {
         let (_bvault, core, root_token) =
             new_unseal_test_bastion_vault("test_resource_group_acl_groups_qualifier").await;

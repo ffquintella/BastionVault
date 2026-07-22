@@ -697,6 +697,11 @@ export function ResourcesPage() {
               typeDef={typeDef}
               onUpdate={() => selectResource(selected)}
               onDelete={() => setDeleteTarget(selected)}
+              onRenamed={(newName) => {
+                setRecent(pushRecent(newName));
+                void fetchPage(true);
+                void selectResource(newName);
+              }}
               toast={toast}
             />
           )}
@@ -920,14 +925,16 @@ export function ResourcesPage() {
 
 // ── Resource Info Card ─────────────────────────────────────────────
 
-function ResourceInfoCard({ resource, typeDef, onUpdate, onDelete, toast }: {
+function ResourceInfoCard({ resource, typeDef, onUpdate, onDelete, onRenamed, toast }: {
   resource: ResourceMetadata;
   typeDef: ResourceTypeDef;
   onUpdate: () => void;
   onDelete: () => void;
+  onRenamed: (newName: string) => void;
   toast: (type: "success" | "error" | "info", msg: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
+  const [renaming, setRenaming] = useState(false);
   const [form, setForm] = useState<Record<string, unknown>>({ ...resource });
   // Gate Edit/Delete on the caller's write access so a read-only viewer
   // (e.g. shared read) sees them disabled rather than clicking through
@@ -972,9 +979,18 @@ function ResourceInfoCard({ resource, typeDef, onUpdate, onDelete, toast }: {
       <Card actions={
         <div className="flex gap-2">
           <Button size="sm" variant="ghost" disabled={readOnly} title={readOnly ? readOnlyTitle : undefined} onClick={() => { setForm({ ...resource }); setEditing(true); }}>Edit</Button>
+          <Button size="sm" variant="ghost" disabled={readOnly} title={readOnly ? readOnlyTitle : undefined} onClick={() => setRenaming(true)}>Rename</Button>
           <Button size="sm" variant="danger" disabled={readOnly} title={readOnly ? readOnlyTitle : undefined} onClick={onDelete}>Delete</Button>
         </div>
       }>
+        {renaming && (
+          <RenameResourceModal
+            currentName={String(resource.name ?? "")}
+            onClose={() => setRenaming(false)}
+            onRenamed={(newName) => { setRenaming(false); onRenamed(newName); }}
+            toast={toast}
+          />
+        )}
         <div className="grid grid-cols-2 gap-4 text-sm">
           {typeDef.fields.map((f) => (
             <div key={f.key}>
@@ -1023,6 +1039,82 @@ function ResourceInfoCard({ resource, typeDef, onUpdate, onDelete, toast }: {
         <Textarea label="Notes" value={String(form.notes ?? "")} onChange={(e) => updateField("notes", e.target.value)} />
       </div>
     </Card>
+  );
+}
+
+// ── Rename Resource Modal ──────────────────────────────────────────
+
+function RenameResourceModal({ currentName, onClose, onRenamed, toast }: {
+  currentName: string;
+  onClose: () => void;
+  onRenamed: (newName: string) => void;
+  toast: (type: "success" | "error" | "info", msg: string) => void;
+}) {
+  // Names are canonicalized server-side (trimmed + lowercased), so
+  // compare against that form to decide whether the input is a real
+  // change and to probe for collisions.
+  const canonical = (s: string) => s.trim().toLowerCase();
+  const [value, setValue] = useState(currentName);
+  const [busy, setBusy] = useState(false);
+
+  const next = canonical(value);
+  const unchanged = next === canonical(currentName);
+  const invalid = next.length === 0 || next.includes("/") || next.includes("..");
+
+  async function handleRename() {
+    if (invalid || unchanged) return;
+    setBusy(true);
+    try {
+      // Guard against clobbering an existing resource. `write_resource`
+      // upserts, so the rename must target a free name — a successful
+      // read means "taken". Mirrors `findFreeCloneName`'s probe.
+      const taken = await api
+        .readResource(next)
+        .then(() => true)
+        .catch(() => false);
+      if (taken) {
+        toast("error", `A resource named "${next}" already exists.`);
+        setBusy(false);
+        return;
+      }
+      const newName = await api.renameResource(currentName, value);
+      toast("success", `Renamed to "${newName}".`);
+      toast(
+        "info",
+        "The resource's policy path changed. Update any policy stanzas " +
+          "that reference the old path.",
+      );
+      onRenamed(newName);
+    } catch (e: unknown) {
+      toast("error", `Rename failed: ${extractError(e)}`);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal open onClose={onClose} title={`Rename "${currentName}"`} size="sm"
+      actions={<>
+        <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
+        <Button onClick={handleRename} loading={busy} disabled={busy || invalid || unchanged}>Rename</Button>
+      </>}>
+      <div className="space-y-2">
+        <Input
+          label="New name"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="web-server-01"
+          hint="Lowercased on save. No '/' or '..'."
+        />
+        {invalid && value.trim().length > 0 && (
+          <p className="text-xs text-[var(--color-danger)]">Name can't contain '/' or '..'.</p>
+        )}
+        <p className="text-xs text-[var(--color-text-muted)]">
+          Renaming moves the resource's metadata, secrets, files, shares,
+          group membership, and history to the new name. The policy path
+          changes — update any policies that reference it.
+        </p>
+      </div>
+    </Modal>
   );
 }
 

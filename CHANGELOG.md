@@ -45,6 +45,32 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-07-22
+
+### Added
+#### Resource rename
+- **Rename a resource** from the GUI (Resources → open a resource → Info tab →
+  **Rename**). A resource's name is its identity — the storage key and the ACL
+  path — so renaming performs a true migration: metadata, change history,
+  secrets (and their version history), explicit share grants, asset-group
+  membership, ownership, and attached file resources are all moved to the new
+  name. New backend endpoints back the flow: `resources/<name>/rename` on the
+  resource engine and `files/repoint-resource` on the files engine, orchestrated
+  by the `rename_resource` Tauri command (`features/resources.md`,
+  `features/file-resources.md`).
+- **Audited:** every rename records who did it, when, and what changed — a
+  `rename` entry in the resource's change history (actor + timestamp +
+  `old -> new`, shown in the History tab with an amber badge), a per-file
+  `rename` entry plus an admin file-audit-log record for each re-pointed file,
+  a `rename` entry in the share audit trail for each moved grant, a
+  `security`-log line, and the standard signed audit-broker record for the
+  request itself.
+- **Caveat:** the rename changes the resource's policy path
+  (`.../resources/resources/<name>`). Policy stanzas that reference the old path
+  are **not** rewritten (they may use globs/templates); the GUI warns after a
+  successful rename so an admin can update them. The rename refuses to overwrite
+  an existing name (case-insensitive).
+
 ## [0.35.7] - 2026-07-22
 
 ### Fixed

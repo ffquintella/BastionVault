@@ -312,6 +312,8 @@ export function operationVariant(
       return "info";
     case "connect":
       return "success";
+    case "rename":
+      return "warning";
     case "delete":
       return "error";
     default:

@@ -1979,6 +1979,71 @@ mod identity_tests {
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_share_store_rename_target_repoints_resource_shares() {
+        let (_bvault, core, _root_token) =
+            new_unseal_test_bastion_vault("test_share_store_rename_target_repoints_resource_shares")
+                .await;
+        let store = ShareStore::new(&core).await.unwrap();
+
+        // Two grantees share the resource `old01`.
+        for grantee in ["ent-bob", "ent-carol"] {
+            store
+                .set_share(SecretShare {
+                    target_kind: "resource".into(),
+                    target_path: "old01".into(),
+                    grantee_kind: String::new(),
+                    grantee_entity_id: grantee.into(),
+                    granted_by_entity_id: "ent-alice".into(),
+                    capabilities: vec!["read".into()],
+                    granted_at: String::new(),
+                    expires_at: String::new(),
+                })
+                .await
+                .unwrap();
+        }
+
+        let moved = store
+            .rename_target(ShareTargetKind::Resource, "old01", "new01", "ent-admin")
+            .await
+            .unwrap();
+        assert_eq!(moved, 2);
+
+        // Both shares are now readable at the new name.
+        for grantee in ["ent-bob", "ent-carol"] {
+            let got = store
+                .get_share(ShareTargetKind::Resource, "new01", grantee)
+                .await
+                .unwrap();
+            assert!(got.is_some(), "share for {grantee} should move to new01");
+            // ...and gone at the old name.
+            let old = store
+                .get_share(ShareTargetKind::Resource, "old01", grantee)
+                .await
+                .unwrap();
+            assert!(old.is_none(), "share for {grantee} should not remain at old01");
+        }
+
+        // The by-target listing reflects the move.
+        let at_new = store
+            .list_shares_for_target(ShareTargetKind::Resource, "new01")
+            .await
+            .unwrap();
+        assert_eq!(at_new.len(), 2);
+        let at_old = store
+            .list_shares_for_target(ShareTargetKind::Resource, "old01")
+            .await
+            .unwrap();
+        assert!(at_old.is_empty());
+
+        // A no-op rename (same canonical name) moves nothing.
+        let moved = store
+            .rename_target(ShareTargetKind::Resource, "new01", "NEW01", "ent-admin")
+            .await
+            .unwrap();
+        assert_eq!(moved, 0);
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_share_store_rejects_invalid_inputs() {
         let (_bvault, core, _root_token) =
             new_unseal_test_bastion_vault("test_share_store_rejects_invalid_inputs").await;

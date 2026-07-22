@@ -75,7 +75,7 @@ Active initiative: **Packaging & Distribution** ([roadmap](roadmaps/packaging-an
 
 | Status | Feature | Notes |
 |---|---|---|
-| `[x]` Done | Resource Management (inventory + grouped secrets) | [spec](features/resources.md) — 14 Tauri commands, full GUI. |
+| `[x]` Done | Resource Management (inventory + grouped secrets) | [spec](features/resources.md) — 15 Tauri commands, full GUI. Includes **true rename** (`resources/<name>/rename` + `files/repoint-resource`): moves metadata, history, secrets+versions, shares, group membership, ownership, and attached files to the new name; warns that the policy path changed. |
 | `[x]` Done | File Resources (binary blobs + sync targets) | [spec](features/file-resources.md) — local-FS + SMB + SFTP + SCP + periodic re-sync + sync-on-write. |
 | `[x]` Done | First-class `firewall` / `switch` types + refined `database` | [spec](features/resource-types-firewall-switch-db.md) — three phases shipped; closed-enum DB engines, vendor / HA-role / layer / firmware fields. |
 | `[x]` Done | Resource Connect — in-app SSH / RDP for server resources | [spec](features/resource-connect.md) — Phases 1–7 incl. ⌘K palette, recently-connected list, Connect-policy on `ResourceTypeDef`. SSH × {Secret, LDAP, PKI, **SSH engine (CA + OTP)**}, RDP × {Secret, LDAP, PKI}. |
@@ -180,7 +180,7 @@ Each entry below has a dedicated spec / roadmap document with full phase notes.
 - [Hiqlite Default HA Storage](roadmaps/hiqlite-default-ha-storage.md) — 6 phases incl. cluster CLI, PQ TLS (X25519MLKEM768), HA fault-injection.
 - [Tauri GUI with FIDO2 / YubiKey Support](roadmaps/tauri-gui-fido2.md) — 9 phases, 55 Tauri commands, 49 frontend tests, 79 React modules, 10 pages.
 - [Caching](features/caching.md) — token cache + ciphertext-only secret cache + Prometheus metrics + `mlockall` / no-core-dump + sealed-flush + admin flush endpoint.
-- [Resource Management](features/resources.md) — dedicated `resource/` engine, per-resource metadata + secret grouping, history, version snapshots, configurable types, ownership / sharing / asset-group integration, 14 Tauri commands, full GUI.
+- [Resource Management](features/resources.md) — dedicated `resource/` engine, per-resource metadata + secret grouping, history, version snapshots, configurable types, ownership / sharing / asset-group integration, true rename (identity move across all keyed stores), 15 Tauri commands, full GUI.
 - [Per-User Scoping (Ownership & Sharing)](features/per-user-scoping.md) — 10 phases + migration backfill, `OwnerStore` + `ShareStore`, `scopes = ["owner", "shared"]`, policy templating, `/sharing` GUI page + per-resource Sharing tab.
 - [Identity Groups](features/identity-groups.md) — user + app groups, policy union for UserPass / AppID / FIDO2 logins, integration tests, GUI.
 - [Resource / Asset Groups](features/resource-groups.md) — 13 phases; collections of resources + KV paths, two reverse indexes, ACL `groups = [...]` qualifier, ownership + sharing + member redaction, GUI.

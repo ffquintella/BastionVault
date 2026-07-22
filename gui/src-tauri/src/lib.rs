@@ -385,6 +385,7 @@ pub fn run() {
             commands::resources::read_resource,
             commands::resources::write_resource,
             commands::resources::delete_resource,
+            commands::resources::rename_resource,
             commands::resources::list_resource_secrets,
             commands::resources::read_resource_secret,
             commands::resources::write_resource_secret,

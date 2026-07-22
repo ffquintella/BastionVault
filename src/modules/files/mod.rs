@@ -42,6 +42,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    bv_error_string,
     context::Context,
     core::Core,
     errors::RvError,
@@ -332,6 +333,7 @@ impl FilesBackend {
         let h_sync_delete = self.inner.clone();
         let h_sync_push = self.inner.clone();
         let h_sync_tick = self.inner.clone();
+        let h_repoint = self.inner.clone();
         let h_versions_list = self.inner.clone();
         let h_version_read = self.inner.clone();
         let h_version_content = self.inner.clone();
@@ -376,6 +378,30 @@ impl FilesBackend {
                         {op: Operation::Write, handler: h_create.handle_create}
                     ],
                     help: "List file ids, or create a new file."
+                },
+                {
+                    // Re-point every file attached to `old_resource` at
+                    // `new_resource`. Rewrites only the `resource`
+                    // metadata field — blobs and versions are untouched.
+                    // Registered before the `files/<id>` pattern so the
+                    // literal path is not captured as an id.
+                    pattern: "files/repoint-resource$",
+                    fields: {
+                        "old_resource": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "Current resource name attached to the files."
+                        },
+                        "new_resource": {
+                            field_type: FieldType::Str,
+                            required: true,
+                            description: "New resource name to attach the files to."
+                        }
+                    },
+                    operations: [
+                        {op: Operation::Write, handler: h_repoint.handle_repoint_resource}
+                    ],
+                    help: "Re-point files from one resource name to another (used on resource rename)."
                 },
                 {
                     // Content stream for a file. `GET` returns the
@@ -1052,6 +1078,88 @@ impl FilesBackendInner {
     ) -> Result<Option<Response>, RvError> {
         let keys = req.storage_list(META_PREFIX).await?;
         Ok(Some(Response::list_response(&keys)))
+    }
+
+    /// Re-point every file whose `resource` field matches `old_resource`
+    /// (case-insensitive) at `new_resource`. Only the `resource` field
+    /// and `updated_at` are rewritten — the blob, sha256, versions, and
+    /// sync targets are left exactly as they are (files are keyed by
+    /// UUID, which does not change). Used by the resource-rename flow so
+    /// a renamed resource keeps its attached files.
+    ///
+    /// Returns `{ "moved": <count> }`. A no-op (no matches, or old ==
+    /// new) returns `moved: 0` without error.
+    pub async fn handle_repoint_resource(
+        &self,
+        _backend: &dyn Backend,
+        req: &mut Request,
+    ) -> Result<Option<Response>, RvError> {
+        let old_resource = get_str(req, "old_resource");
+        let new_resource = get_str(req, "new_resource");
+        if old_resource.trim().is_empty() {
+            return Err(bv_error_string!("old_resource is required"));
+        }
+        if new_resource.trim().is_empty() {
+            return Err(bv_error_string!("new_resource is required"));
+        }
+
+        let mut moved = 0u64;
+        if !old_resource.eq_ignore_ascii_case(&new_resource) {
+            // Resolve the audit actor once — the admin file audit log
+            // records who re-pointed each file (parallel to create /
+            // update / delete / restore).
+            let audit_actor = crate::modules::identity::caller_audit_actor(req);
+            let ids = req.storage_list(META_PREFIX).await?;
+            for id in ids {
+                let Some(mut entry) = self.load_entry(req, &id).await? else {
+                    continue;
+                };
+                if !entry.resource.eq_ignore_ascii_case(&old_resource) {
+                    continue;
+                }
+                entry.resource = new_resource.clone();
+                entry.updated_at = now_rfc3339();
+                let meta_key = format!("{META_PREFIX}{id}");
+                req.storage_put(&StorageEntry {
+                    key: meta_key,
+                    value: serde_json::to_vec(&entry)?,
+                })
+                .await?;
+
+                // Operator-facing per-file timeline.
+                let hist = FileHistoryEntry {
+                    ts: now_rfc3339(),
+                    user: caller_username(req),
+                    op: "rename".to_string(),
+                    changed_fields: vec!["resource".to_string()],
+                };
+                let hist_key = format!("{HIST_PREFIX}{id}/{}", hist_seq());
+                req.storage_put(&StorageEntry {
+                    key: hist_key,
+                    value: serde_json::to_vec(&hist)?,
+                })
+                .await?;
+
+                // Admin audit log — who moved the file, when, and the
+                // old → new resource it moved between.
+                if let Some(core) = self.core.self_ptr.upgrade() {
+                    record_file_audit(
+                        &core,
+                        &audit_actor,
+                        "rename",
+                        &id,
+                        &entry.name,
+                        &format!("resource {old_resource} -> {new_resource}"),
+                    )
+                    .await;
+                }
+                moved += 1;
+            }
+        }
+
+        let mut data = Map::new();
+        data.insert("moved".to_string(), Value::from(moved));
+        Ok(Some(Response::data_response(Some(data))))
     }
 
     pub async fn handle_create(
@@ -2362,6 +2470,78 @@ mod integration_tests {
             )
             .unwrap();
         assert_eq!(decoded, content, "round-tripped bytes must match");
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_file_repoint_resource_moves_only_matching_files() {
+        let (_bv, core, root_token) =
+            new_unseal_test_bastion_vault("test_file_repoint_resource_moves_only_matching_files")
+                .await;
+
+        // Create two files on `old01` and one on an unrelated resource.
+        let mk = |name: &str, resource: &str, content: &[u8]| {
+            json!({
+                "name": name,
+                "resource": resource,
+                "content_base64": base64::engine::general_purpose::STANDARD.encode(content),
+            })
+            .as_object()
+            .cloned()
+        };
+        let content = b"secret-bytes";
+        let a = test_write_api(&core, &root_token, "files/files", true, mk("a.pem", "old01", content))
+            .await
+            .unwrap()
+            .unwrap();
+        let a_id = a.data.unwrap()["id"].as_str().unwrap().to_string();
+        let _ = test_write_api(&core, &root_token, "files/files", true, mk("b.pem", "old01", b"b"))
+            .await;
+        let c = test_write_api(&core, &root_token, "files/files", true, mk("c.pem", "other", b"c"))
+            .await
+            .unwrap()
+            .unwrap();
+        let c_id = c.data.unwrap()["id"].as_str().unwrap().to_string();
+
+        // Re-point old01 -> new01.
+        let resp = test_write_api(
+            &core,
+            &root_token,
+            "files/files/repoint-resource",
+            true,
+            json!({ "old_resource": "old01", "new_resource": "new01" })
+                .as_object()
+                .cloned(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(resp.data.unwrap()["moved"], json!(2));
+
+        // Matching files now report the new resource...
+        let read_meta = |id: &str| {
+            let mut req = crate::logical::Request::new(format!("files/files/{id}"));
+            req.operation = crate::logical::Operation::Read;
+            req.client_token = root_token.clone();
+            req
+        };
+        let mut req = read_meta(&a_id);
+        let meta = core.handle_request(&mut req).await.unwrap().unwrap().data.unwrap();
+        assert_eq!(meta.get("resource").and_then(|v| v.as_str()), Some("new01"));
+
+        // ...the unrelated file is untouched...
+        let mut req = read_meta(&c_id);
+        let meta = core.handle_request(&mut req).await.unwrap().unwrap().data.unwrap();
+        assert_eq!(meta.get("resource").and_then(|v| v.as_str()), Some("other"));
+
+        // ...and the blob content of a moved file is intact.
+        let mut req = crate::logical::Request::new(format!("files/files/{a_id}/content"));
+        req.operation = crate::logical::Operation::Read;
+        req.client_token = root_token.clone();
+        let cdata = core.handle_request(&mut req).await.unwrap().unwrap().data.unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(cdata.get("content_base64").and_then(|v| v.as_str()).unwrap())
+            .unwrap();
+        assert_eq!(decoded, content, "blob must survive a resource re-point");
     }
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
