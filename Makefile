@@ -942,6 +942,26 @@ win-bootstrap: ## Install Windows build deps (Perl, NASM, Node) via winget and a
 PLUGINS_DIR := plugins-ext
 PLUGINS_WASM_TARGET := wasm32-wasip1
 PLUGINS_OUT := $(PLUGINS_DIR)/dist
+
+# Dedicated target directory for the `bv-plugin-pack` signer/packer.
+#
+# `bv-plugin-pack` is a *root-workspace* member (crates/bv-plugin-pack),
+# so a plain `cargo build -p bv-plugin-pack` drops it into the shared
+# `./target` alongside the Tauri GUI (`gui/src-tauri`, also a root
+# member). The two builds resolve the workspace with different feature
+# unification and profiles, so alternating between `make plugins*` and
+# `tauri dev` makes cargo re-fingerprint shared dependencies and forces
+# a spurious GUI recompile. Building the packer into its own target dir
+# breaks that ping-pong: packing/signing/rebuilding plugins never
+# invalidates the GUI's cache. The reference plugins themselves already
+# build into the isolated `plugins-ext/target`, so this closes the last
+# path that leaked plugin work into the app's `./target`.
+#
+# Kept out of git (.gitignore) and the Tauri file watcher
+# (gui/src-tauri/.taurignore).
+PLUGINS_PACK_TARGET_DIR ?= target-plugin-pack
+_host_exe := $(if $(filter Windows_NT,$(OS)),.exe,)
+BV_PLUGIN_PACK := ./$(PLUGINS_PACK_TARGET_DIR)/release/bv-plugin-pack$(_host_exe)
 # Where the signing key lives. The seed file is the secret half; the
 # .pub file is what you register on the host as the publisher's
 # allowlist entry. The default key + publisher name MUST agree: the
@@ -1042,7 +1062,7 @@ plugins-process-target: ## Install the cross-compile target for process plugins 
 	fi
 
 plugins-pack-build: ## Build the bv-plugin-pack helper that produces .bvplugin bundles
-	cargo build --release -p bv-plugin-pack
+	CARGO_TARGET_DIR=$(PLUGINS_PACK_TARGET_DIR) cargo build --release -p bv-plugin-pack
 
 plugins-wasm: plugins-init plugins-target ## Compile the WASM reference plugins (release)
 	@echo "==> building bastion-plugin-totp ($(PLUGINS_WASM_TARGET))"
@@ -1060,37 +1080,37 @@ plugins-wasm: plugins-init plugins-target ## Compile the WASM reference plugins 
 
 plugins-pack: plugins-wasm plugins-process plugins-pack-build ## Pack each plugin (WASM or process) + its plugin.toml into a .bvplugin bundle
 	@# bv-plugin-pack always runs on the host, so its `.exe` suffix
-	@# follows the host OS, not PLUGINS_PROCESS_TARGET. The packed
-	@# binaries do follow the target — that's the whole point of
-	@# `_exe` (see top of this section).
-	$(eval _host_exe := $(if $(filter Windows_NT,$(OS)),.exe,))
+	@# (baked into $(BV_PLUGIN_PACK) via the global `_host_exe`) follows
+	@# the host OS, not PLUGINS_PROCESS_TARGET. The packed binaries do
+	@# follow the target — that's the whole point of `_exe` (see top of
+	@# this section).
 	@echo "==> packing bastion-plugin-totp (wasm) into .bvplugin"
-	./target/release/bv-plugin-pack$(_host_exe) \
+	$(BV_PLUGIN_PACK) \
 		--manifest $(PLUGINS_DIR)/bastion-plugin-totp/plugin.toml \
 		--binary   $(PLUGINS_OUT)/bastion_plugin_totp.wasm \
 		--out      $(PLUGINS_OUT)/bastion-plugin-totp.bvplugin
 	@echo "==> packing bastion-plugin-postgres (process) into .bvplugin"
-	./target/release/bv-plugin-pack$(_host_exe) \
+	$(BV_PLUGIN_PACK) \
 		--manifest $(PLUGINS_DIR)/bastion-plugin-postgres/plugin.toml \
 		--binary   $(PLUGINS_OUT)/bastion-plugin-postgres$(_exe) \
 		--out      $(PLUGINS_OUT)/bastion-plugin-postgres.bvplugin
 	@echo "==> packing bastion-plugin-xca (process) into .bvplugin"
-	./target/release/bv-plugin-pack$(_host_exe) \
+	$(BV_PLUGIN_PACK) \
 		--manifest $(PLUGINS_DIR)/bastion-plugin-xca/plugin.toml \
 		--binary   $(PLUGINS_OUT)/bastion-plugin-xca$(_exe) \
 		--out      $(PLUGINS_OUT)/bastion-plugin-xca.bvplugin
 	@echo "==> packing bastion-plugin-pmp (process) into .bvplugin"
-	./target/release/bv-plugin-pack$(_host_exe) \
+	$(BV_PLUGIN_PACK) \
 		--manifest $(PLUGINS_DIR)/bastion-plugin-pmp/plugin.toml \
 		--binary   $(PLUGINS_OUT)/bastion-plugin-pmp$(_exe) \
 		--out      $(PLUGINS_OUT)/bastion-plugin-pmp.bvplugin
 	@echo "==> packing bastion-plugin-email (process) into .bvplugin"
-	./target/release/bv-plugin-pack$(_host_exe) \
+	$(BV_PLUGIN_PACK) \
 		--manifest $(PLUGINS_DIR)/bastion-plugin-email/plugin.toml \
 		--binary   $(PLUGINS_OUT)/bastion-plugin-email$(_exe) \
 		--out      $(PLUGINS_OUT)/bastion-plugin-email.bvplugin
 	@echo "==> packing bastion-plugin-webhook-notify (wasm app-module) into .bvplugin"
-	./target/release/bv-plugin-pack$(_host_exe) \
+	$(BV_PLUGIN_PACK) \
 		--manifest $(PLUGINS_DIR)/bastion-plugin-webhook-notify/plugin.toml \
 		--binary   $(PLUGINS_OUT)/bastion_plugin_webhook_notify.wasm \
 		--out      $(PLUGINS_OUT)/bastion-plugin-webhook-notify.bvplugin
@@ -1105,7 +1125,7 @@ plugins-keygen: plugins-pack-build ## Mint a fresh ML-DSA-65 dev signing keypair
 		echo "    Delete it first if you really want a new key."; \
 		exit 1; \
 	fi
-	./target/release/bv-plugin-pack$(if $(filter Windows_NT,$(OS)),.exe,) \
+	$(BV_PLUGIN_PACK) \
 		keygen --out $(PLUGINS_SIGNING_KEY)
 	@echo ""
 	@echo "==> register $(PLUGINS_SIGNING_KEY).pub on the host as publisher"
@@ -1116,44 +1136,43 @@ plugins-sign: plugins-wasm plugins-process plugins-pack-build ## Repack each plu
 		echo "==> $(PLUGINS_SIGNING_KEY).seed missing — run \`make plugins-keygen\` first"; \
 		exit 1; \
 	fi
-	$(eval _host_exe := $(if $(filter Windows_NT,$(OS)),.exe,))
 	@echo "==> signing bastion-plugin-totp (wasm)"
-	./target/release/bv-plugin-pack$(_host_exe) \
+	$(BV_PLUGIN_PACK) \
 		--manifest          $(PLUGINS_DIR)/bastion-plugin-totp/plugin.toml \
 		--binary            $(PLUGINS_OUT)/bastion_plugin_totp.wasm \
 		--out               $(PLUGINS_OUT)/bastion-plugin-totp.bvplugin \
 		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
 		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
 	@echo "==> signing bastion-plugin-postgres (process)"
-	./target/release/bv-plugin-pack$(_host_exe) \
+	$(BV_PLUGIN_PACK) \
 		--manifest          $(PLUGINS_DIR)/bastion-plugin-postgres/plugin.toml \
 		--binary            $(PLUGINS_OUT)/bastion-plugin-postgres$(_exe) \
 		--out               $(PLUGINS_OUT)/bastion-plugin-postgres.bvplugin \
 		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
 		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
 	@echo "==> signing bastion-plugin-xca (process)"
-	./target/release/bv-plugin-pack$(_host_exe) \
+	$(BV_PLUGIN_PACK) \
 		--manifest          $(PLUGINS_DIR)/bastion-plugin-xca/plugin.toml \
 		--binary            $(PLUGINS_OUT)/bastion-plugin-xca$(_exe) \
 		--out               $(PLUGINS_OUT)/bastion-plugin-xca.bvplugin \
 		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
 		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
 	@echo "==> signing bastion-plugin-pmp (process)"
-	./target/release/bv-plugin-pack$(_host_exe) \
+	$(BV_PLUGIN_PACK) \
 		--manifest          $(PLUGINS_DIR)/bastion-plugin-pmp/plugin.toml \
 		--binary            $(PLUGINS_OUT)/bastion-plugin-pmp$(_exe) \
 		--out               $(PLUGINS_OUT)/bastion-plugin-pmp.bvplugin \
 		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
 		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
 	@echo "==> signing bastion-plugin-email (process)"
-	./target/release/bv-plugin-pack$(_host_exe) \
+	$(BV_PLUGIN_PACK) \
 		--manifest          $(PLUGINS_DIR)/bastion-plugin-email/plugin.toml \
 		--binary            $(PLUGINS_OUT)/bastion-plugin-email$(_exe) \
 		--out               $(PLUGINS_OUT)/bastion-plugin-email.bvplugin \
 		--signing-seed-file $(PLUGINS_SIGNING_KEY).seed \
 		--signing-key-name  $(PLUGINS_SIGNING_KEY_NAME)
 	@echo "==> signing bastion-plugin-webhook-notify (wasm app-module)"
-	./target/release/bv-plugin-pack$(_host_exe) \
+	$(BV_PLUGIN_PACK) \
 		--manifest          $(PLUGINS_DIR)/bastion-plugin-webhook-notify/plugin.toml \
 		--binary            $(PLUGINS_OUT)/bastion_plugin_webhook_notify.wasm \
 		--out               $(PLUGINS_OUT)/bastion-plugin-webhook-notify.bvplugin \
@@ -1238,7 +1257,7 @@ plugin-bump: ## Bump plugin versions across plugins-ext (type=major|minor|patch,
 	done
 
 plugins-clean: ## Remove plugins-ext build artefacts
-	@rm -rf $(PLUGINS_DIR)/target $(PLUGINS_OUT)
+	@rm -rf $(PLUGINS_DIR)/target $(PLUGINS_OUT) $(PLUGINS_PACK_TARGET_DIR)
 	@echo "plugins-clean complete."
 
 # Plugin unit-test infrastructure (features/plugin-testing.md).

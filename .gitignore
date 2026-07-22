@@ -20,6 +20,11 @@ Cargo.lock
 
 /target
 
+# Isolated target dir for the `bv-plugin-pack` packer/signer, kept out
+# of the shared ./target so plugin builds don't invalidate the GUI's
+# cache (see PLUGINS_PACK_TARGET_DIR in the Makefile).
+/target-plugin-pack
+
 # VIM temp file
 *.swp
 

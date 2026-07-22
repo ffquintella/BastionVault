@@ -21,6 +21,12 @@
 target/
 **/target/
 
+# Isolated target dir for the `bv-plugin-pack` packer/signer (see
+# PLUGINS_PACK_TARGET_DIR in the Makefile). Named `target-plugin-pack`
+# so it doesn't match `target/` above — list it explicitly so packing
+# or signing plugins never wakes the GUI watcher.
+target-plugin-pack/
+
 # Submodule + sibling workspaces — we depend on them as path/git deps,
 # not as live source.
 plugins-ext/
