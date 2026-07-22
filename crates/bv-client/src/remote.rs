@@ -14,8 +14,55 @@ use std::{
 
 use async_trait::async_trait;
 use http::Request;
+use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use serde_json::{Map, Value};
 use ureq::Agent;
+
+/// Characters that must be percent-encoded when embedding an arbitrary
+/// string (a resource name, secret key, …) into a URL path segment.
+/// Built from `CONTROLS` plus the ASCII characters that `http::Uri`
+/// rejects outright (notably the space that broke resource clone) or
+/// that carry structural meaning in a URL. `%` is encoded so a literal
+/// `%` in a name can't be mistaken for an escape; `/` is encoded so a
+/// name can never inject an extra path segment (defensive — `encode_path`
+/// splits on `/` first, so segments never contain one).
+const PATH_SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'\\')
+    .add(b'^')
+    .add(b'{')
+    .add(b'}')
+    .add(b'|')
+    .add(b'[')
+    .add(b']');
+
+/// Percent-encode each `/`-delimited segment of a URL path. The `/`
+/// separators are preserved as path structure; only the characters
+/// inside each segment are encoded. Leading/trailing slashes and empty
+/// segments are kept verbatim (so `/v1/sys/health` and `resources/`
+/// round-trip unchanged). The server's Actix path extractor
+/// percent-decodes, so the original bytes reach the route regex intact.
+/// The embedded backend never routes through here — it hands the raw
+/// logical path straight to `Core`, which is why names with spaces have
+/// always worked in embedded mode and must not be double-encoded.
+fn encode_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for (i, seg) in path.split('/').enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        out.extend(utf8_percent_encode(seg, PATH_SEGMENT));
+    }
+    out
+}
 
 use crate::{
     backend::Backend,
@@ -464,14 +511,15 @@ impl RemoteBackend {
     /// than re-reading the active address (which a racing request may
     /// already be swapping).
     fn build_url_with(&self, address: &str, path: &str) -> String {
+        let encoded = encode_path(path);
         if path.starts_with('/') {
-            format!("{}{}", address, path)
+            format!("{}{}", address, encoded)
         } else {
             format!(
                 "{}/{}/{}",
                 address,
                 self.api_prefix().trim_start_matches('/'),
-                path
+                encoded
             )
         }
     }
@@ -1005,6 +1053,33 @@ mod failover_tests {
         assert_eq!(
             be.build_url_with("https://node:5200", "/v1/sys/health"),
             "https://node:5200/v1/sys/health"
+        );
+    }
+
+    #[test]
+    fn build_url_percent_encodes_name_segments() {
+        let be = RemoteBackend::builder()
+            .with_address("https://a.example:5200")
+            .with_api_version(1)
+            .build();
+        // A resource name with a space (as produced by clone's
+        // "<name> copy") must be encoded, not passed raw — a raw space
+        // makes `http::Uri` reject the request ("invalid uri character").
+        assert_eq!(
+            be.build_url_with("https://node:5200", "resources/resources/web01 copy"),
+            "https://node:5200/v1/resources/resources/web01%20copy"
+        );
+        // `/` separators are preserved as structure; reserved characters
+        // inside a segment (here `#`) are encoded so they can't be read
+        // as a fragment delimiter.
+        assert_eq!(
+            be.build_url_with("https://node:5200", "resources/secrets/db 01/api#key"),
+            "https://node:5200/v1/resources/secrets/db%2001/api%23key"
+        );
+        // Trailing slash (list-style paths) survives unchanged.
+        assert_eq!(
+            be.build_url_with("https://node:5200", "resources/"),
+            "https://node:5200/v1/resources/"
         );
     }
 }

@@ -42,3 +42,13 @@ IronRDP/
 # Generated docs / dist trees
 docs/_build/
 gui/dist/
+
+# Tracking / documentation markdown — CHANGELOG.md, roadmap.md, agent.md,
+# features/*.md, roadmaps/*.md — is edited constantly as part of the
+# workflow (see agent.md's tracking rules) and never compiled into the
+# binary, so writes here must not wake the watcher and rebuild the GUI.
+# A stray rebuild mid-release also cancels the in-flight code-signing
+# step (the FIDO2/CTAP PIN prompt), so keep all markdown out of the watch
+# set. (Repo .md embedded via include_str! is only README.md under `doc`
+# cfg in the IronRDP/third_party submodules, which are ignored anyway.)
+**/*.md

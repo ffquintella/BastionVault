@@ -45,7 +45,24 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.35.7] - 2026-07-22
+
+### Fixed
+- **Clone (and any resource whose name contains a space or URL-reserved
+  character) failed against a remote server** with `Clone failed: http:
+  invalid uri character`. `RemoteBackend` interpolated the raw logical path
+  — including the generated `<name> copy` — straight into the request URL,
+  so `http::Uri` rejected the embedded space. `bv-client` now percent-encodes
+  each `/`-delimited path segment in `build_url_with` (`crates/bv-client/src/remote.rs`);
+  Actix percent-decodes on the server so names round-trip. The embedded
+  backend is unaffected — it hands the raw path to `Core` and never builds a
+  URI, so names with spaces already worked there.
+
 ### Changed
+- Tauri dev watcher now ignores all markdown (`**/*.md` in `.taurignore`).
+  Tracking docs (CHANGELOG, roadmap, features/*) are edited constantly and
+  never compiled in, so their writes no longer wake the watcher — which also
+  stops a stray mid-release rebuild from cancelling the code-signing PIN prompt.
 - Faster dev builds: added a `[profile.dev]` that emits `line-tables-only`
   debug info with `split-debuginfo = "unpacked"` (plus `debug = false` for
   build scripts/proc-macros). Cuts link time and `target/` size on macOS
