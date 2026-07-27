@@ -1404,18 +1404,24 @@ function BackupsModal({
                 directory is empty.
               </p>
               <p className="text-[var(--color-text-muted)]">
-                The files those runs wrote are gone from{" "}
-                <span className="font-mono">{dir}</span> on the vault host. The usual cause is a
-                destination that is not on persistent storage: if the vault runs in a container, a
-                path that is not a mounted volume lives in the container's ephemeral layer and is
-                discarded every time the container is recreated. The schedule itself survives
-                because it is stored in the vault.
+                Runs are recorded in the vault and replicated across the cluster;{" "}
+                <span className="font-mono">{dir}</span> is a plain directory on the single node
+                answering this request. Two things produce this mismatch:
               </p>
-              <p className="text-[var(--color-text-muted)]">
-                Mount a volume at the destination (the official image ships one at{" "}
-                <span className="font-mono">/var/lib/bvault/backups</span>) and point this schedule
-                there.
-              </p>
+              <ul className="text-[var(--color-text-muted)] list-disc pl-5 space-y-1">
+                <li>
+                  <strong>Another node holds the file.</strong> Every node runs the scheduler, but
+                  they share one set of run records, so a cron firing lands on whichever node gets
+                  there first — and only that node's filesystem has the file. Check the other nodes'
+                  destination directories, or connect this GUI to them.
+                </li>
+                <li>
+                  <strong>The destination is not persistent.</strong> In a container, a path that is
+                  not a mounted volume lives in the ephemeral writable layer and is discarded on
+                  every recreate. The official image ships a volume at{" "}
+                  <span className="font-mono">/var/lib/bvault/backups</span>.
+                </li>
+              </ul>
             </div>
           ) : (
             <p className="text-sm text-[var(--color-text-muted)]">

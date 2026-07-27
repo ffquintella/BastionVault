@@ -99,8 +99,9 @@ describe("Scheduled backups — missing backup files", () => {
     expect(
       await screen.findByText(/1 successful run on record, but this directory is empty/),
     ).toBeInTheDocument();
-    // The likely cause is named, because nothing in the logs points at it.
-    expect(screen.getByText(/ephemeral layer/)).toBeInTheDocument();
+    // Both causes are named, because nothing in the logs points at either.
+    expect(screen.getByText(/Another node holds the file/)).toBeInTheDocument();
+    expect(screen.getByText(/ephemeral writable layer/)).toBeInTheDocument();
     expect(screen.getByText("/var/lib/bvault/backups")).toBeInTheDocument();
     expect(screen.queryByText(/No backup files found/)).not.toBeInTheDocument();
   });

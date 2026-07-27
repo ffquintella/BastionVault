@@ -45,6 +45,26 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.37.3] - 2026-07-27
+
+### Fixed
+- **An empty Backups list on a cluster now names the node that has the files**
+  (`gui/src/routes/ExchangePage.tsx`, `features/scheduled-exports.md`) -- 0.37.2's
+  empty-state warning blamed only a non-persistent destination, which is the wrong
+  answer on a multi-node deployment. Scheduler leader gating is still deferred, so
+  every node runs its own tick loop while they all resume from the *same* Raft-replicated
+  run record: the first node to reach a cron instant writes the file and records the run,
+  the others then see nothing due, and `GET /v1/sys/scheduled-exports/{id}/backups` only
+  scans the filesystem of the node answering the request. The nightly backup therefore
+  lands on whichever node won that race, and the list appears to lose backups whenever
+  the operator reconnects elsewhere. Confirmed on a 2-node cluster (`segdc1vhm0003`/`0004`,
+  2026-07-27): node 2 fired the 03:00 catch-up at 16:34:07Z and wrote its file, node 1
+  started 27s later and found nothing due, and a listing against node 1 returned an empty
+  `files` array while node 2's directory held the backups. The modal now presents both
+  causes -- another node holds the file, or the destination is not persistent -- and the
+  feature spec documents the limitation with the interim workaround: point every schedule
+  at storage all nodes share (an NFS/CSI mount), so they read and write one directory.
+
 ## [0.37.2] - 2026-07-27
 
 ### Fixed
