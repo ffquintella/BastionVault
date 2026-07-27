@@ -45,6 +45,21 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.37.1] - 2026-07-27
+
+### Added
+- **`bvault exchange export --full` / `--all-namespaces`**
+  (`src/cli/command/exchange_export.rs`) -- the CLI could only ever send
+  `kind: "selective"`, so the whole-vault scopes were reachable from the GUI, the
+  HTTP API, and scheduled backups but not from a script. `--full` exports
+  everything the caller can read in the targeted namespace; `--all-namespaces`
+  exports every namespace, each tenant in its own bundle. Both are mutually
+  exclusive with `--scope` and with each other (enforced by clap), and a
+  selective export with no selectors now fails with a usable message
+  (`no scope selected: pass --scope, --full, or --all-namespaces`) before it
+  prompts for a password, instead of a bare "Request is invalid".
+  (`features/import-export-module.md`)
+
 ### Fixed
 - **`npm install` no longer rebuilds the GUI** (`.taurignore`) -- `tauri dev` watches
   the repo root (the GUI crate has a path dep on the root crate), and

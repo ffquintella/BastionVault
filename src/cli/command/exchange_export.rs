@@ -32,11 +32,24 @@ writes it to disk. Two output formats:
 Passwords are read from stdin (one line) or interactively if a TTY is
 attached. The CLI does not accept a `--password=` flag.
 
+Scope is either a list of --scope selectors or one of the whole-vault modes:
+
+  * --full             -- everything the caller can read in the namespace the
+                          request targets (the root namespace unless the token
+                          is bound elsewhere).
+
+  * --all-namespaces   -- the same sweep run once per namespace, each tenant
+                          packed into its own bundle inside the document. Root
+                          operation; restoring it needs each namespace to exist
+                          on the destination vault.
+
 Examples:
 
   $ bvault exchange export --scope kv:secret/myapp/ --output myapp.bvx
   $ bvault exchange export --scope kv:secret/team-a/ --scope kv:secret/team-b/ \
-      --comment "weekly snapshot" --output bundle.bvx"#
+      --comment "weekly snapshot" --output bundle.bvx
+  $ bvault exchange export --full --output vault-full-export.bvx
+  $ bvault exchange export --all-namespaces --output deployment.bvx"#
 )]
 pub struct ExchangeExport {
     #[deref]
@@ -49,6 +62,16 @@ pub struct ExchangeExport {
     /// "unresolved" warning if used.
     #[arg(long = "scope", value_name = "kv:<mount>/<path>", action = clap::ArgAction::Append)]
     scope: Vec<String>,
+
+    /// Export everything the caller can read in the targeted namespace,
+    /// instead of a hand-listed scope. Mutually exclusive with --scope.
+    #[arg(long, conflicts_with_all = ["scope", "all_namespaces"])]
+    full: bool,
+
+    /// Export everything in *every* namespace of the deployment (root
+    /// operation). Mutually exclusive with --scope and --full.
+    #[arg(long = "all-namespaces", conflicts_with = "scope")]
+    all_namespaces: bool,
 
     /// Output file path.
     #[arg(long, short)]
@@ -112,8 +135,19 @@ fn read_password_for_export(format: &str) -> Result<Option<String>, RvError> {
 impl CommandExecutor for ExchangeExport {
     #[inline]
     fn main(&self) -> Result<(), RvError> {
+        // Whole-vault modes carry no selectors; the resolver enumerates. A
+        // selective export with an empty list would produce an empty document,
+        // so refuse it rather than write one.
+        let kind = if self.all_namespaces {
+            "all_namespaces"
+        } else if self.full {
+            "full"
+        } else {
+            "selective"
+        };
         let include = parse_scope(&self.scope)?;
-        if include.is_empty() {
+        if kind == "selective" && include.is_empty() {
+            eprintln!("no scope selected: pass --scope, --full, or --all-namespaces");
             return Err(RvError::ErrRequestInvalid);
         }
 
@@ -123,7 +157,7 @@ impl CommandExecutor for ExchangeExport {
         body.insert("format".to_string(), json!(self.format));
         body.insert(
             "scope".to_string(),
-            json!({ "kind": "selective", "include": include }),
+            json!({ "kind": kind, "include": include }),
         );
         body.insert("allow_plaintext".to_string(), json!(self.allow_plaintext));
         if let Some(ref c) = self.comment {
