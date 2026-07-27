@@ -79,6 +79,31 @@ impl MountIndex {
         })
     }
 
+    /// Index for a **non-root** namespace: its mounts come from that
+    /// namespace's own [`MountsRouter`] (keyed by mount-relative path, e.g.
+    /// `secret/`), and its storage lives under `namespaces/<ns_uuid>/…`.
+    ///
+    /// [`MountsRouter`]: crate::mount::MountsRouter
+    pub fn from_namespace_router(
+        router: &Arc<crate::mount::MountsRouter>,
+        ns_uuid: &str,
+    ) -> Result<Self, RvError> {
+        let entries = router.mounts.entries.read().map_err(|_| RvError::ErrUnknown)?;
+        let mut by_type: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for (path, lock) in entries.iter() {
+            let me = lock.read().map_err(|_| RvError::ErrUnknown)?;
+            by_type
+                .entry(me.logical_type.clone())
+                .or_default()
+                .push((path.clone(), me.uuid.clone()));
+        }
+        Ok(Self {
+            by_type,
+            logical_prefix: crate::modules::namespace::router::namespace_logical_prefix(ns_uuid),
+            system_prefix: crate::modules::namespace::router::namespace_system_prefix(ns_uuid),
+        })
+    }
+
     pub fn empty() -> Self {
         Self::default()
     }
@@ -247,6 +272,11 @@ pub struct ImportResult {
     pub unchanged: u64,
     pub skipped: u64,
     pub renamed: u64,
+    /// Non-fatal problems that cost the import data — e.g. a namespace bundle
+    /// whose namespace does not exist on this vault. Surfaced to the operator
+    /// rather than silently dropped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl ImportResult {
@@ -283,6 +313,26 @@ pub async fn export_to_document(
     exporter: ExporterInfo,
     scope: ScopeSpec,
 ) -> Result<ExchangeDocument, RvError> {
+    let (items, warnings) = resolve_scope(storage, mounts, &scope).await?;
+    let mut doc = ExchangeDocument::new(exporter, scope, items);
+    doc.warnings = warnings;
+    Ok(doc)
+}
+
+/// Resolve one namespace's worth of items for `scope` against the barrier view
+/// `mounts` addresses. Shared by [`export_to_document`] (root / single
+/// namespace) and the all-namespaces exporter in
+/// [`crate::exchange::namespaces`], which calls it once per namespace with that
+/// namespace's own [`MountIndex`].
+///
+/// `ScopeKind::AllNamespaces` resolves exactly like `Full` here — the
+/// per-namespace fan-out is the caller's job; this function never crosses a
+/// namespace boundary.
+pub(crate) async fn resolve_scope(
+    storage: &dyn Storage,
+    mounts: &MountIndex,
+    scope: &ScopeSpec,
+) -> Result<(ExchangeItems, Vec<String>), RvError> {
     let mut items = ExchangeItems::default();
     let mut warnings: Vec<String> = Vec::new();
 
@@ -291,7 +341,7 @@ pub async fn export_to_document(
     // group — without the caller having to hand-list selectors. The
     // explicit `include` list is still honoured (normally empty for a
     // full export); the dedup pass below collapses any overlap.
-    if scope.kind == ScopeKind::Full {
+    if matches!(scope.kind, ScopeKind::Full | ScopeKind::AllNamespaces) {
         resolve_full(storage, mounts, &mut items, &mut warnings).await?;
     }
 
@@ -315,7 +365,13 @@ pub async fn export_to_document(
         }
     }
 
-    // Deterministic ordering for canonical JSON.
+    sort_and_dedup(&mut items);
+    Ok((items, warnings))
+}
+
+/// Deterministic ordering for canonical JSON, plus collapse of the overlap
+/// between a full sweep and any explicit selectors that named the same item.
+fn sort_and_dedup(items: &mut ExchangeItems) {
     items.kv.sort_by(|a, b| (a.mount.as_str(), a.path.as_str()).cmp(&(b.mount.as_str(), b.path.as_str())));
     items.resources.sort_by(|a, b| a.id.cmp(&b.id));
     items.files.sort_by(|a, b| a.id.cmp(&b.id));
@@ -326,10 +382,6 @@ pub async fn export_to_document(
     items.files.dedup_by(|a, b| a.id == b.id);
     items.asset_groups.dedup_by(|a, b| a.id == b.id);
     items.resource_groups.dedup_by(|a, b| a.id == b.id);
-
-    let mut doc = ExchangeDocument::new(exporter, scope, items);
-    doc.warnings = warnings;
-    Ok(doc)
 }
 
 #[derive(Copy, Clone)]
@@ -816,23 +868,66 @@ pub async fn import_from_document(
     document.validate_schema_tag().map_err(|_| RvError::ErrRequestInvalid)?;
 
     let mut result = ImportResult::default();
+    apply_items(storage, mounts, &document.items, policy, dry_run, "", &mut result).await?;
+
+    // Namespace bundles need each namespace's own `MountIndex` to resolve
+    // barrier keys, which this entry point does not have. Rather than write
+    // a tenant's data into the root namespace, refuse loudly — the
+    // namespace-aware path (`crate::exchange::namespaces::import_document`)
+    // is what handles an `all_namespaces` document.
+    for bundle in &document.items.namespaces {
+        result.warnings.push(format!(
+            "namespace {:?} skipped: this import path is root-scoped ({} item(s) not written)",
+            bundle.path,
+            bundle.items.local_len()
+        ));
+    }
+
+    Ok(result)
+}
+
+/// Apply one namespace's worth of items. `ns_label` is the namespace path used
+/// to qualify the human-readable `mount` shown in preview / audit output (`""`
+/// for the root namespace); it never affects the storage key, which comes
+/// entirely from `mounts`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_items(
+    storage: &dyn Storage,
+    mounts: &MountIndex,
+    items: &ExchangeItems,
+    policy: ConflictPolicy,
+    dry_run: bool,
+    ns_label: &str,
+    result: &mut ImportResult,
+) -> Result<(), RvError> {
+    // Preview / audit output shows `<namespace>/<mount>` for a tenant's items
+    // so two namespaces' identically-named mounts stay distinguishable. The
+    // storage key never goes through here — it comes from `mounts`.
+    let qualify = |mount: &str| -> String {
+        if ns_label.is_empty() {
+            mount.to_string()
+        } else {
+            format!("{ns_label}/{mount}")
+        }
+    };
 
     // KV items — resolved to the live kv backend's barrier key.
-    for kv in &document.items.kv {
+    for kv in &items.kv {
         let full_path = mounts.resolve_kv_key(&kv.mount, &kv.path);
         let new_bytes = json_value_to_storage_bytes(&kv.value)?;
         apply_entry(
-            storage, &full_path, new_bytes, policy, dry_run, &kv.mount, &kv.path, &mut result,
+            storage, &full_path, new_bytes, policy, dry_run, &qualify(&kv.mount), &kv.path, result,
         )
         .await?;
     }
 
     // Raw items — opaque barrier entries for non-KV engines.
-    for raw in &document.items.raw {
+    for raw in &items.raw {
         let full_path = mounts.resolve_raw_key(&raw.mount, &raw.path);
         let new_bytes = json_value_to_storage_bytes(&raw.value)?;
         apply_entry(
-            storage, &full_path, new_bytes, policy, dry_run, &raw.mount, &raw.path, &mut result,
+            storage, &full_path, new_bytes, policy, dry_run, &qualify(&raw.mount), &raw.path,
+            result,
         )
         .await?;
     }
@@ -843,7 +938,7 @@ pub async fn import_from_document(
         .mounts_of_type("resource")
         .first()
         .map(|(p, _)| p.clone());
-    for res in &document.items.resources {
+    for res in &items.resources {
         let mount_path = res
             .data
             .get("mount_path")
@@ -854,7 +949,7 @@ pub async fn import_from_document(
         for (rel, bytes) in flatten_resource_bundle(&res.id, &res.data)? {
             let full_path = mounts.resolve_raw_key(&mount_path, &rel);
             apply_entry(
-                storage, &full_path, bytes, policy, dry_run, &mount_path, &rel, &mut result,
+                storage, &full_path, bytes, policy, dry_run, &qualify(&mount_path), &rel, result,
             )
             .await?;
         }
@@ -866,12 +961,13 @@ pub async fn import_from_document(
         .first()
         .map(|(p, _)| p.clone())
         .unwrap_or_else(|| "files/".to_string());
-    for file in &document.items.files {
+    for file in &items.files {
         let meta_rel = format!("meta/{}", file.id);
         let meta_bytes = json_value_to_storage_bytes(&file.metadata)?;
         let full_path = mounts.resolve_raw_key(&files_mount, &meta_rel);
         apply_entry(
-            storage, &full_path, meta_bytes, policy, dry_run, &files_mount, &meta_rel, &mut result,
+            storage, &full_path, meta_bytes, policy, dry_run, &qualify(&files_mount), &meta_rel,
+            result,
         )
         .await?;
         if !file.content_b64.is_empty() {
@@ -882,7 +978,8 @@ pub async fn import_from_document(
             let blob_rel = format!("blob/{}", file.id);
             let full_path = mounts.resolve_raw_key(&files_mount, &blob_rel);
             apply_entry(
-                storage, &full_path, blob, policy, dry_run, &files_mount, &blob_rel, &mut result,
+                storage, &full_path, blob, policy, dry_run, &qualify(&files_mount), &blob_rel,
+                result,
             )
             .await?;
         }
@@ -890,25 +987,24 @@ pub async fn import_from_document(
 
     // Resource / asset groups — both kinds are `{id, data}` records that share
     // the one `sys/` group store, mirroring how `resolve_group` reads them.
-    let groups = document
-        .items
+    let groups = items
         .resource_groups
         .iter()
         .map(|g| (&g.id, &g.data))
-        .chain(document.items.asset_groups.iter().map(|g| (&g.id, &g.data)));
+        .chain(items.asset_groups.iter().map(|g| (&g.id, &g.data)));
     for (id, data) in groups {
         let canonical = id.trim().to_lowercase();
         let full_path = format!("{}resource-group/group/{canonical}", mounts.system_prefix());
         let bytes = json_value_to_storage_bytes(data)?;
         let display_path = format!("group/{canonical}");
         apply_entry(
-            storage, &full_path, bytes, policy, dry_run, "resource-group/", &display_path,
-            &mut result,
+            storage, &full_path, bytes, policy, dry_run, &qualify("resource-group/"),
+            &display_path, result,
         )
         .await?;
     }
 
-    Ok(result)
+    Ok(())
 }
 
 /// Classify a single destination key against the incoming bytes and, unless

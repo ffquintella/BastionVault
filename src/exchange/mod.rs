@@ -19,16 +19,19 @@
 pub mod canonical;
 pub mod envelope;
 pub mod kdf;
+pub mod namespaces;
 pub mod preview;
 pub mod schema;
 pub mod scope;
 pub mod verify;
 
 pub use envelope::{decrypt_bvx, encrypt_bvx, Envelope, EnvelopeError, MIN_PASSWORD_LEN};
+pub use namespaces::{export_all_namespaces, import_document as import_all_namespaces};
 pub use preview::{PreviewClassificationItem, PreviewStore, PreviewSummary};
 pub use schema::{
-    AssetGroupItem, ExchangeDocument, ExchangeItems, ExporterInfo, FileItem, KvItem, RawEntry,
-    ResourceGroupItem, ResourceItem, ScopeKind, ScopeSelector, ScopeSpec,
+    AssetGroupItem, ExchangeDocument, ExchangeItems, ExporterInfo, FileItem, KvItem,
+    NamespaceBundle, RawEntry, ResourceGroupItem, ResourceItem, ScopeKind, ScopeSelector,
+    ScopeSpec,
 };
 pub use scope::{
     export_to_document, import_from_document, ConflictPolicy, ImportAction, ImportClassification,

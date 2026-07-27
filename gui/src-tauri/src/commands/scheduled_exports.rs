@@ -517,11 +517,8 @@ pub async fn scheduled_exports_restore(
         // structured resources / files / groups) and resolves keys under the
         // re-rooted layout the write path uses.
         let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
-        let mounts = bastion_vault::exchange::scope::MountIndex::from_core(&core_arc)
-            .map_err(CommandError::from)?;
-        let classify = bastion_vault::exchange::scope::import_from_document(
-            core.barrier.as_storage(),
-            &mounts,
+        let classify = bastion_vault::exchange::import_all_namespaces(
+            &core_arc,
             &document,
             bastion_vault::exchange::ConflictPolicy::Skip,
             true, // dry_run
@@ -562,17 +559,9 @@ pub async fn scheduled_exports_restore(
     };
 
     let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
-    let mounts =
-        bastion_vault::exchange::scope::MountIndex::from_core(&core_arc).map_err(CommandError::from)?;
-    let result = bastion_vault::exchange::scope::import_from_document(
-        core.barrier.as_storage(),
-        &mounts,
-        &document,
-        policy,
-        false,
-    )
-    .await
-    .map_err(CommandError::from)?;
+    let result = bastion_vault::exchange::import_all_namespaces(&core_arc, &document, policy, false)
+        .await
+        .map_err(CommandError::from)?;
 
     drop(vault_guard);
     let owner = state.token.lock().await.clone().unwrap_or_default();

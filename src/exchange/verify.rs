@@ -64,7 +64,7 @@ pub struct VerifyReport {
     pub schema_ok: bool,
     pub schema_tag: String,
     pub exported_at: String,
-    /// `"full"` or `"selective"`.
+    /// `"full"`, `"selective"`, or `"all_namespaces"`.
     pub scope_kind: String,
     /// Envelope `created_at` (`.bvx` only).
     pub created_at: Option<String>,
@@ -123,7 +123,9 @@ pub fn verify_backup_bytes(bytes: &[u8], password: Option<&str>) -> Result<Verif
 
     let schema_ok = document.validate_schema_tag().is_ok();
 
-    let counts = ItemCounts {
+    // Namespace bundles count toward the same totals: an all-namespaces backup
+    // whose root namespace happens to be empty is not an empty backup.
+    let mut counts = ItemCounts {
         kv: document.items.kv.len() as u64,
         resources: document.items.resources.len() as u64,
         files: document.items.files.len() as u64,
@@ -131,12 +133,27 @@ pub fn verify_backup_bytes(bytes: &[u8], password: Option<&str>) -> Result<Verif
         resource_groups: document.items.resource_groups.len() as u64,
         raw: document.items.raw.len() as u64,
     };
+    for bundle in &document.items.namespaces {
+        counts.kv += bundle.items.kv.len() as u64;
+        counts.resources += bundle.items.resources.len() as u64;
+        counts.files += bundle.items.files.len() as u64;
+        counts.asset_groups += bundle.items.asset_groups.len() as u64;
+        counts.resource_groups += bundle.items.resource_groups.len() as u64;
+        counts.raw += bundle.items.raw.len() as u64;
+    }
+    let counts = counts;
     let total_items = counts.total();
 
     // File-blob content integrity: re-hash the bytes and compare against the
     // metadata recorded at export time.
     let mut file_issues = Vec::new();
-    for f in &document.items.files {
+    let all_files: Vec<&crate::exchange::FileItem> = document
+        .items
+        .files
+        .iter()
+        .chain(document.items.namespaces.iter().flat_map(|b| b.items.files.iter()))
+        .collect();
+    for f in &all_files {
         let name = f
             .metadata
             .get("name")
@@ -196,12 +213,13 @@ pub fn verify_backup_bytes(bytes: &[u8], password: Option<&str>) -> Result<Verif
         scope_kind: match document.scope.kind {
             crate::exchange::ScopeKind::Full => "full".to_string(),
             crate::exchange::ScopeKind::Selective => "selective".to_string(),
+            crate::exchange::ScopeKind::AllNamespaces => "all_namespaces".to_string(),
         },
         created_at,
         comment,
         counts,
         total_items,
-        files_checked: document.items.files.len() as u64,
+        files_checked: all_files.len() as u64,
         file_issues,
         warnings,
         ok,

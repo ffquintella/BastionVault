@@ -1385,8 +1385,13 @@ export const ssoAdminCallbackHints = (mount: string, kind: "oidc" | "saml") =>
 // XChaCha20-Poly1305 password-encrypted .bvx envelope. Distinct from the
 // operator-level BVBK backup. See `features/import-export-module.md`.
 
-/** `full` = everything the caller can read; `selective` = the listed selectors. */
-export type ExchangeScopeKind = "selective" | "full";
+/**
+ * `selective` = the listed selectors; `full` = everything the caller can read
+ * in the namespace the request targets; `all_namespaces` = that same full
+ * sweep run once per namespace, root-only, with each tenant packed into its
+ * own bundle inside the document.
+ */
+export type ExchangeScopeKind = "selective" | "full" | "all_namespaces";
 
 export interface ExchangeScopeSelector {
   type: "kv_path" | "resource" | "asset_group" | "resource_group";
@@ -1416,6 +1421,9 @@ export interface ExchangePreviewResult {
   identical: number;
   conflict: number;
   items: ExchangePreviewItem[];
+  /** Non-fatal problems — e.g. the file carries data for a namespace this
+   *  vault does not have, whose items will be skipped on apply. */
+  warnings?: string[];
 }
 
 export interface ExchangeApplyResult {
@@ -1423,13 +1431,15 @@ export interface ExchangeApplyResult {
   unchanged: number;
   skipped: number;
   renamed: number;
+  warnings?: string[];
 }
 
 /**
  * `scopeKind: "full"` exports everything the caller can read (every KV mount,
  * resource, file blob, group, and non-KV engine subtree) and ignores the
- * `include` list — no selectors needed. `"selective"` (default) exports only
- * the listed selectors.
+ * `include` list — no selectors needed. `"all_namespaces"` does the same for
+ * every namespace in the deployment, not just the one the session targets
+ * (root only). `"selective"` (default) exports only the listed selectors.
  */
 export const exchangeExport = (
   include: ExchangeScopeSelector[],
@@ -1497,7 +1507,7 @@ export type SchedulePasswordRef =
   | SchedulePasswordRefStaticSecret;
 
 export interface ScheduleScopeSpec {
-  kind: "selective" | "full";
+  kind: ExchangeScopeKind;
   include: ExchangeScopeSelector[];
 }
 

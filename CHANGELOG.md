@@ -45,6 +45,46 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-07-27
+
+### Added
+- **Export every namespace in one file** (`src/exchange/namespaces.rs`,
+  `src/exchange/schema.rs`, `gui/src/routes/ExchangePage.tsx`) -- the Export tab's
+  *What to export* selector gains **Everything, all namespaces (whole deployment)**
+  when the session is on the root namespace. Until now every export -- interactive,
+  HTTP, or scheduled -- resolved against the **root** mount index only, so a
+  `kind: "full"` export silently captured nothing from any child namespace: a
+  tenant's data lives under `namespaces/<uuid>/logical/…`, which the root index
+  never addresses. The new `scope.kind = "all_namespaces"` runs the same full sweep
+  once per namespace (via each namespace's own `MountsRouter`) and packs each tenant
+  into its own `items.namespaces[]` bundle, so two namespaces holding the same mount
+  path (`secret/`) no longer collide. Root items stay at the document's top level,
+  which keeps the file a strict superset of a `full` export. The import path is
+  namespace-aware to match: bundles are written through the matching namespace's
+  index, and a bundle for a namespace that does not exist on the destination is
+  **skipped with a warning** (surfaced in the Preview panel and in the apply
+  response) rather than being written into root. Available from the HTTP API
+  (`POST /v1/sys/exchange/export` with `scope.kind = "all_namespaces"`) and as a
+  scheduled-backup scope; the Scheduled-backups editor's full-vault checkbox is now
+  a three-way scope selector. (`features/import-export-module.md`)
+
+### Changed
+- **Import / restore now resolves namespaces on every path.** `sys/exchange/import`,
+  `import/preview`, `import/apply`, and the scheduled-backup restore all route
+  through `exchange::import_all_namespaces`, which returns per-item results plus a
+  new `warnings` list. Documents without namespace bundles behave exactly as before.
+- **`bvault exchange verify` counts bundled items.** A file whose data lives entirely
+  in namespace bundles previously reported zero items and failed the non-emptiness
+  check; embedded file blobs inside bundles are hash-verified too
+  (`src/exchange/verify.rs`).
+
+### Fixed
+- Nothing in the operator backup changed -- **BVBK already covers every namespace**
+  (it is a raw sweep of the physical backend from its root prefix, so it captures
+  `namespaces/<uuid>/…` subtrees, each tenant's mount table, and the namespace
+  registry). This is now pinned by a regression test so a future prefix-scoped
+  sweep cannot silently drop tenants from operator backups (`src/backup/create.rs`).
+
 ## [0.36.6] - 2026-07-27
 
 ### Added

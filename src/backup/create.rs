@@ -64,3 +64,107 @@ pub async fn create_backup(
 
     Ok(actually_copied)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use serde_json::json;
+
+    use crate::core::Core;
+    use crate::logical::{Operation, Request};
+    use crate::modules::namespace::{
+        router::namespace_logical_prefix, NamespaceModule, NamespaceQuotas, NAMESPACE_MODULE_NAME,
+    };
+    use crate::test_utils::new_unseal_test_bastion_vault;
+
+    use super::super::format;
+
+    async fn ns_req(
+        core: &Arc<Core>,
+        token: &str,
+        op: Operation,
+        path: &str,
+        ns: &str,
+        body: Option<serde_json::Map<String, serde_json::Value>>,
+    ) {
+        let mut req = Request::new(path);
+        req.operation = op;
+        req.client_token = token.to_string();
+        req.body = body;
+        if !ns.is_empty() {
+            let mut h = HashMap::new();
+            h.insert("x-bastionvault-namespace".to_string(), ns.to_string());
+            req.headers = Some(h);
+        }
+        core.handle_request(&mut req).await.unwrap();
+    }
+
+    /// The operator backup is a raw sweep of the *physical* backend from its
+    /// root prefix, so it must capture every namespace's subtree
+    /// (`namespaces/<uuid>/…`) and the namespace registry itself — not just the
+    /// root tenant. Guards against a future change scoping the sweep to a
+    /// prefix, which would silently drop every tenant from operator backups.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn backup_captures_every_namespace() {
+        let (_bvault, core, root) =
+            new_unseal_test_bastion_vault("test_backup_all_namespaces").await;
+
+        let store = core
+            .module_manager
+            .get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME)
+            .and_then(|m| m.store())
+            .expect("namespace store");
+        let tenant = store.create("tenant-a", NamespaceQuotas::default(), false).await.unwrap();
+
+        ns_req(
+            &core,
+            &root,
+            Operation::Write,
+            "sys/mounts/cubby/",
+            "tenant-a",
+            json!({ "type": "kv" }).as_object().cloned(),
+        )
+        .await;
+        ns_req(
+            &core,
+            &root,
+            Operation::Write,
+            "cubby/foo",
+            "tenant-a",
+            json!({ "v": "from-a" }).as_object().cloned(),
+        )
+        .await;
+
+        let hmac_key = core.barrier.derive_hmac_key().unwrap();
+        let mut out = Vec::new();
+        let copied =
+            super::create_backup(core.physical.as_ref(), &hmac_key, &mut out, false).await.unwrap();
+        assert!(copied > 0);
+
+        // Walk the frames and collect the keys the backup actually carries.
+        // The trailing 32 bytes are the HMAC, not a frame (see `restore_backup`).
+        let payload = &out[..out.len() - 32];
+        let mut cursor = std::io::Cursor::new(payload);
+        format::read_header(&mut cursor).unwrap();
+        let mut keys: Vec<String> = Vec::new();
+        while let Some((key, _value)) = format::read_entry_frame(&mut cursor).unwrap() {
+            keys.push(key);
+        }
+
+        let tenant_prefix = namespace_logical_prefix(&tenant.uuid);
+        assert!(
+            keys.iter().any(|k| k.starts_with(&tenant_prefix)),
+            "backup must contain the tenant's logical subtree {tenant_prefix}"
+        );
+        assert!(
+            keys.iter().any(|k| k.starts_with("namespaces/registry/")),
+            "backup must contain the namespace registry"
+        );
+        assert!(
+            keys.iter().any(|k| k.contains(&format!("namespaces/{}/core/mounts", tenant.uuid))),
+            "backup must contain the tenant's mount table"
+        );
+    }
+}

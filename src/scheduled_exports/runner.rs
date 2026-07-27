@@ -225,15 +225,23 @@ pub async fn run_once(
 ) -> Result<(u64, DestinationKind), RvError> {
     let storage = core.barrier.as_storage();
 
-    // 1. Build the bvx.v1 document.
-    let mounts = exchange::scope::MountIndex::from_core(core)?;
-    let document = exchange::scope::export_to_document(
-        storage,
-        &mounts,
-        exchange::ExporterInfo::default(),
-        sched.scope.clone(),
-    )
-    .await?;
+    // 1. Build the bvx.v1 document. An `all_namespaces` schedule fans out over
+    //    every tenant (each namespace's data lives under its own barrier
+    //    prefix, which the root mount index cannot reach); every other scope
+    //    resolves against the root namespace as before.
+    let document = if sched.scope.kind == exchange::ScopeKind::AllNamespaces {
+        exchange::export_all_namespaces(core, exchange::ExporterInfo::default(), sched.scope.clone())
+            .await?
+    } else {
+        let mounts = exchange::scope::MountIndex::from_core(core)?;
+        exchange::scope::export_to_document(
+            storage,
+            &mounts,
+            exchange::ExporterInfo::default(),
+            sched.scope.clone(),
+        )
+        .await?
+    };
     let inner_bytes = exchange::canonical::to_canonical_vec(&document)?;
 
     // 2. Wrap or pass through.

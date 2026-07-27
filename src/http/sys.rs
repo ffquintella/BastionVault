@@ -1501,17 +1501,23 @@ async fn sys_exchange_export_request_handler(
         let mut payload: ExchangeExportRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
 
-    // Build the bvx.v1 document by walking barrier-decrypted storage.
+    // Build the bvx.v1 document by walking barrier-decrypted storage. An
+    // `all_namespaces` scope fans out over every tenant's barrier prefix (see
+    // `crate::exchange::namespaces`); anything else stays root-scoped.
     let exporter = crate::exchange::ExporterInfo::default();
     let core_arc = core.get_ref().clone();
-    let mounts = crate::exchange::scope::MountIndex::from_core(&core_arc)?;
-    let document = crate::exchange::scope::export_to_document(
-        core.barrier.as_storage(),
-        &mounts,
-        exporter,
-        payload.scope.clone(),
-    )
-    .await?;
+    let document = if payload.scope.kind == crate::exchange::ScopeKind::AllNamespaces {
+        crate::exchange::export_all_namespaces(&core_arc, exporter, payload.scope.clone()).await?
+    } else {
+        let mounts = crate::exchange::scope::MountIndex::from_core(&core_arc)?;
+        crate::exchange::scope::export_to_document(
+            core.barrier.as_storage(),
+            &mounts,
+            exporter,
+            payload.scope.clone(),
+        )
+        .await?
+    };
 
     // Canonical JSON — sorted keys, no whitespace, deterministic across runs.
     let inner_bytes = crate::exchange::canonical::to_canonical_vec(&document)?;
@@ -1588,19 +1594,18 @@ struct ExchangeImportRequest {
 /// vault *without* writing anything. Returns `(new, identical, conflict,
 /// items)`. Shared by the import-preview handler and the scheduled-export
 /// restore dry-run path.
+#[allow(clippy::type_complexity)]
 async fn classify_exchange_items(
     core: &Arc<Core>,
     document: &crate::exchange::ExchangeDocument,
-) -> Result<(u64, u64, u64, Vec<crate::exchange::PreviewClassificationItem>), RvError> {
-    // Classify through the one engine (`import_from_document` in dry-run mode)
-    // so the preview agrees with the real write on *every* item type — KV, raw
-    // non-KV engines (pki / ssh / transit / …), and structured resources /
-    // files / groups — and resolves keys under the re-rooted layout the same
-    // way the write path does.
-    let mounts = crate::exchange::scope::MountIndex::from_core(core)?;
-    let result = crate::exchange::scope::import_from_document(
-        core.barrier.as_storage(),
-        &mounts,
+) -> Result<(u64, u64, u64, Vec<crate::exchange::PreviewClassificationItem>, Vec<String>), RvError> {
+    // Classify through the one engine (the namespace-aware importer in dry-run
+    // mode) so the preview agrees with the real write on *every* item type — KV,
+    // raw non-KV engines (pki / ssh / transit / …), structured resources /
+    // files / groups, and per-namespace bundles — and resolves keys under the
+    // re-rooted layout the same way the write path does.
+    let result = crate::exchange::import_all_namespaces(
+        core,
         document,
         crate::exchange::ConflictPolicy::Skip,
         true, // dry_run
@@ -1616,7 +1621,7 @@ async fn classify_exchange_items(
             classification: i.classification,
         })
         .collect();
-    Ok((new, identical, conflict, items))
+    Ok((new, identical, conflict, items, result.warnings))
 }
 
 /// `POST /v1/sys/exchange/import/preview` — decrypt + parse + classify.
@@ -1672,7 +1677,7 @@ async fn sys_exchange_import_preview_handler(
     document.validate_schema_tag().map_err(|_| RvError::ErrRequestInvalid)?;
 
     // Classify each item against the destination *without* writing.
-    let (new, identical, conflict, items) =
+    let (new, identical, conflict, items, warnings) =
         classify_exchange_items(core.get_ref(), &document).await?;
 
     // Owner binding: tokens are bound to the actor's display name; the
@@ -1689,6 +1694,7 @@ async fn sys_exchange_import_preview_handler(
             "identical": identical,
             "conflict": conflict,
             "items": items,
+            "warnings": warnings,
         }),
     ))
     })
@@ -1727,10 +1733,8 @@ async fn sys_exchange_import_apply_handler(
             .exchange_preview_store
             .consume(&payload.token, &owner_header)?;
 
-        let mounts = crate::exchange::scope::MountIndex::from_core(&core.get_ref().clone())?;
-        let result = crate::exchange::scope::import_from_document(
-            core.barrier.as_storage(),
-            &mounts,
+        let result = crate::exchange::import_all_namespaces(
+            &core.get_ref().clone(),
             &document,
             payload.conflict_policy,
             false,
@@ -1745,6 +1749,7 @@ async fn sys_exchange_import_apply_handler(
                 "skipped": result.skipped,
                 "renamed": result.renamed,
                 "items": result.items,
+                "warnings": result.warnings,
             }),
         ))
     })
@@ -3075,7 +3080,7 @@ async fn sys_scheduled_exports_restore_handler(
         document.validate_schema_tag().map_err(|_| RvError::ErrRequestInvalid)?;
 
         if payload.dry_run {
-            let (new, identical, conflict, items) =
+            let (new, identical, conflict, items, warnings) =
                 classify_exchange_items(core.get_ref(), &document).await?;
             return Ok(response_json_ok(
                 None,
@@ -3086,14 +3091,13 @@ async fn sys_scheduled_exports_restore_handler(
                     "identical": identical,
                     "conflict": conflict,
                     "items": items,
+                    "warnings": warnings,
                 }),
             ));
         }
 
-        let mounts = crate::exchange::scope::MountIndex::from_core(&core.get_ref().clone())?;
-        let import = crate::exchange::scope::import_from_document(
-            core.barrier.as_storage(),
-            &mounts,
+        let import = crate::exchange::import_all_namespaces(
+            &core.get_ref().clone(),
             &document,
             payload.conflict_policy,
             false,
@@ -3109,6 +3113,7 @@ async fn sys_scheduled_exports_restore_handler(
                 "skipped": import.skipped,
                 "renamed": import.renamed,
                 "items": import.items,
+                "warnings": import.warnings,
             }),
         ))
     })
@@ -3160,10 +3165,8 @@ async fn sys_exchange_import_request_handler(
         let document: crate::exchange::ExchangeDocument =
             serde_json::from_slice(&document_bytes).map_err(|_| RvError::ErrRequestInvalid)?;
 
-        let mounts = crate::exchange::scope::MountIndex::from_core(&core.get_ref().clone())?;
-        let result = crate::exchange::scope::import_from_document(
-            core.barrier.as_storage(),
-            &mounts,
+        let result = crate::exchange::import_all_namespaces(
+            &core.get_ref().clone(),
             &document,
             payload.conflict_policy,
             false,
@@ -3178,6 +3181,7 @@ async fn sys_exchange_import_request_handler(
                 "skipped": result.skipped,
                 "renamed": result.renamed,
                 "items": result.items,
+                "warnings": result.warnings,
             }),
         ))
     })

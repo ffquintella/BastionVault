@@ -72,8 +72,37 @@ function ExportTab({ toast }: { toast: ToastFn }) {
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirmFull, setConfirmFull] = useState(false);
+  // Exporting every tenant is a root-namespace operation: a session scoped
+  // into a child namespace may only export that namespace, so the option is
+  // hidden there rather than offered and refused.
+  const [atRoot, setAtRoot] = useState(false);
+  const [otherNamespaces, setOtherNamespaces] = useState<string[]>([]);
 
-  const isFull = scopeKind === "full";
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      try {
+        const active = await api.getActiveNamespace();
+        if (!live) return;
+        const isRoot = !active;
+        setAtRoot(isRoot);
+        if (!isRoot) return;
+        const list = await api.listNamespaces();
+        if (!live) return;
+        setOtherNamespaces((list.namespaces ?? []).filter(Boolean));
+      } catch {
+        // Namespaces are an optional deployment feature; if we cannot tell,
+        // fall back to the single-namespace UI.
+        if (live) setAtRoot(false);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const isFull = scopeKind === "full" || scopeKind === "all_namespaces";
+  const isAllNamespaces = scopeKind === "all_namespaces";
 
   /**
    * A full-vault export dumps every secret the caller can read into one
@@ -82,7 +111,7 @@ function ExportTab({ toast }: { toast: ToastFn }) {
    */
   function changeScopeKind(next: ExchangeScopeKind) {
     setScopeKind(next);
-    if (next === "full") {
+    if (next !== "selective") {
       setFormat("bvx");
       setAllowPlaintext(false);
     }
@@ -131,7 +160,11 @@ function ExportTab({ toast }: { toast: ToastFn }) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      const stem = isFull ? "vault-full-export" : "exchange";
+      const stem = isAllNamespaces
+        ? "vault-all-namespaces-export"
+        : isFull
+          ? "vault-full-export"
+          : "exchange";
       a.download = format === "bvx" ? `${stem}.bvx` : `${stem}.json`;
       document.body.appendChild(a);
       a.click();
@@ -160,21 +193,44 @@ function ExportTab({ toast }: { toast: ToastFn }) {
             options={[
               { value: "selective", label: "Selected scopes" },
               { value: "full", label: "Full vault (every secret in this namespace)" },
+              // Cross-tenant export is offered only from the root namespace.
+              ...(atRoot
+                ? [
+                    {
+                      value: "all_namespaces",
+                      label: "Everything, all namespaces (whole deployment)",
+                    },
+                  ]
+                : []),
             ]}
           />
           {isFull ? (
             <div className="rounded border border-[var(--color-warning)] bg-[var(--color-warning)]/10 p-3 text-xs space-y-1">
               <p className="font-medium text-[var(--color-warning)]">
-                Full export — the vault's entire data plane
+                {isAllNamespaces
+                  ? "All-namespaces export — every tenant's data plane"
+                  : "Full export — the vault's entire data plane"}
               </p>
               <p className="text-[var(--color-text-muted)]">
                 Captures every KV mount, resource, file blob, resource / asset group,
-                and other secret engine (PKI, SSH, transit, TOTP…) in this namespace.
+                and other secret engine (PKI, SSH, transit, TOTP…){" "}
+                {isAllNamespaces
+                  ? "in the root namespace and in every other namespace, each kept in its own bundle so identically-named mounts never collide."
+                  : "in this namespace."}{" "}
                 Contents are not filtered per-secret by policy, so treat the file as
                 holding everything. The control plane — mount table, seal config,
-                identities, and policies — is not included; use operator backup for
-                that.
+                identities, policies, and the namespace registry itself — is not
+                included; use operator backup for that.
               </p>
+              {isAllNamespaces && (
+                <p className="text-[var(--color-text-muted)]">
+                  {otherNamespaces.length > 0
+                    ? `Namespaces in scope: root + ${otherNamespaces.join(", ")}.`
+                    : "No child namespaces exist yet — this currently matches a full root export."}{" "}
+                  Restoring it needs each namespace to already exist on the destination
+                  vault; bundles for missing namespaces are reported and skipped.
+                </p>
+              )}
               <p className="text-[var(--color-text-muted)]">
                 Always written as a password-encrypted <code>.bvx</code> file. Store it
                 like you would the vault itself.
@@ -301,7 +357,11 @@ function ExportTab({ toast }: { toast: ToastFn }) {
             loading={busy}
             disabled={!isFull && scopes.length === 0}
           >
-            {isFull ? "Export full vault & download" : "Export & download"}
+            {isAllNamespaces
+              ? "Export all namespaces & download"
+              : isFull
+                ? "Export full vault & download"
+                : "Export & download"}
           </Button>
         </div>
       </div>
@@ -310,8 +370,12 @@ function ExportTab({ toast }: { toast: ToastFn }) {
         open={confirmFull}
         onClose={() => setConfirmFull(false)}
         onConfirm={handleExport}
-        title="Export the entire vault?"
-        message="The downloaded .bvx file will contain every secret, resource, file, and engine key in this namespace, encrypted with the password you entered. Anyone with the file and the password has all of it."
+        title={isAllNamespaces ? "Export every namespace?" : "Export the entire vault?"}
+        message={
+          isAllNamespaces
+            ? "The downloaded .bvx file will contain every secret, resource, file, and engine key of every namespace in this deployment, encrypted with the password you entered. Anyone with the file and the password has all of it."
+            : "The downloaded .bvx file will contain every secret, resource, file, and engine key in this namespace, encrypted with the password you entered. Anyone with the file and the password has all of it."
+        }
         confirmLabel="Export everything"
         loading={busy}
       />
@@ -510,6 +574,21 @@ function ImportTab({ toast }: { toast: ToastFn }) {
                 Token expires in {preview.expires_in_secs}s.
               </p>
             </div>
+
+            {/* Data the file carries that this vault cannot place — most often
+                a namespace bundle for a namespace that does not exist here. */}
+            {preview.warnings && preview.warnings.length > 0 && (
+              <div className="rounded-md border border-[var(--color-warning)] bg-[var(--color-warning)]/10 p-3 text-xs space-y-1">
+                <p className="font-medium text-[var(--color-warning)]">
+                  Some items will not be imported
+                </p>
+                <ul className="list-disc pl-4 text-[var(--color-text-muted)]">
+                  {preview.warnings.map((w, i) => (
+                    <li key={i}>{w}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
             <PreviewTable items={preview.items} />
 
@@ -782,7 +861,9 @@ function ScheduleEditorModal({
   const [destPath, setDestPath] = useState(
     schedule?.destination.kind === "local_path" ? schedule.destination.path : "",
   );
-  const [fullScope, setFullScope] = useState(schedule?.scope.kind === "full");
+  const [scheduleScopeKind, setScheduleScopeKind] = useState<ExchangeScopeKind>(
+    schedule?.scope.kind ?? "selective",
+  );
   const [scopes, setScopes] = useState<ExchangeScopeSelector[]>(
     schedule?.scope.include?.length
       ? schedule.scope.include
@@ -823,9 +904,10 @@ function ScheduleEditorModal({
         name,
         cron,
         format,
-        scope: fullScope
-          ? { kind: "full", include: [] }
-          : { kind: "selective", include: scopes },
+        scope:
+          scheduleScopeKind === "selective"
+            ? { kind: "selective", include: scopes }
+            : { kind: scheduleScopeKind, include: [] },
         destination: { kind: "local_path", path: destPath },
         password_ref:
           format === "bvx"
@@ -887,18 +969,25 @@ function ScheduleEditorModal({
 
         <div className="space-y-2">
           <p className="text-sm font-medium">Scope</p>
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={fullScope}
-              onChange={(e) => setFullScope(e.target.checked)}
-            />
-            Back up everything (full vault — all KV mounts, resources, files, and groups)
-          </label>
-          {fullScope ? (
+          <Select
+            label="What to back up"
+            value={scheduleScopeKind}
+            onChange={(e) => setScheduleScopeKind(e.target.value as ExchangeScopeKind)}
+            options={[
+              { value: "selective", label: "Selected scopes" },
+              { value: "full", label: "Full vault (this namespace)" },
+              {
+                value: "all_namespaces",
+                label: "Everything, all namespaces (whole deployment)",
+              },
+            ]}
+          />
+          {scheduleScopeKind !== "selective" ? (
             <p className="text-xs text-[var(--color-text-muted)]">
-              This schedule captures the entire vault as a portable export. Individual
-              scope selectors are ignored. Uncheck to pick specific paths instead.
+              {scheduleScopeKind === "all_namespaces"
+                ? "Each run captures every KV mount, resource, file, group, and secret engine in every namespace, each tenant in its own bundle. Individual scope selectors are ignored."
+                : "Each run captures the entire vault as a portable export. Individual scope selectors are ignored."}{" "}
+              Pick “Selected scopes” to back up specific paths instead.
             </p>
           ) : (
           <>

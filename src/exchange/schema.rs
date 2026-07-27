@@ -74,8 +74,13 @@ pub struct ScopeSpec {
 pub enum ScopeKind {
     /// Caller hand-picked the items.
     Selective,
-    /// Caller asked for everything they can read.
+    /// Caller asked for everything they can read **in the namespace the
+    /// request targets** (the root namespace for a root-scoped call).
     Full,
+    /// Caller asked for everything in *every* namespace of the deployment.
+    /// Root-only: the resulting document carries the root namespace's items
+    /// at the top level and one [`NamespaceBundle`] per child namespace.
+    AllNamespaces,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -113,6 +118,36 @@ pub struct ExchangeItems {
     /// `scope::read_raw_mount`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub raw: Vec<RawEntry>,
+    /// Per-namespace item sets, one bundle per **non-root** namespace, present
+    /// only in an `all_namespaces` export. The root namespace's items stay in
+    /// the fields above so a single-namespace document (every document written
+    /// before this field existed) parses and imports unchanged.
+    ///
+    /// Bundles never nest: a bundle's own `namespaces` list is always empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub namespaces: Vec<NamespaceBundle>,
+}
+
+impl ExchangeItems {
+    /// Items in this set, not counting nested namespace bundles.
+    pub fn local_len(&self) -> usize {
+        self.kv.len()
+            + self.resources.len()
+            + self.files.len()
+            + self.asset_groups.len()
+            + self.resource_groups.len()
+            + self.raw.len()
+    }
+}
+
+/// Everything exported from one non-root namespace. `path` is the canonical
+/// namespace path (`engineering`, `engineering/platform`) — no leading or
+/// trailing slash — which is what the importer resolves back to a namespace
+/// UUID and, from there, to that namespace's barrier prefix.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct NamespaceBundle {
+    pub path: String,
+    pub items: ExchangeItems,
 }
 
 /// A single KV entry. `value` is the parsed JSON body if the storage entry

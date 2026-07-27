@@ -50,6 +50,12 @@ describe("Exchange full-vault export", () => {
       if (cmd === "exchange_export") {
         return Promise.resolve({ file_b64: "aGk=", size_bytes: 2, format: "bvx" });
       }
+      // Root session with one child namespace, so the all-namespaces option
+      // is offered. Individual tests override this for a child session.
+      if (cmd === "get_active_namespace") return Promise.resolve("");
+      if (cmd === "list_namespaces") {
+        return Promise.resolve({ namespaces: ["engineering"] });
+      }
       // Schedules tab and any incidental lookups.
       return Promise.resolve([]);
     });
@@ -121,5 +127,61 @@ describe("Exchange full-vault export", () => {
         }),
       ),
     );
+  });
+
+  it("offers an all-namespaces export at the root namespace and sends it", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    const scopeSelect = await screen.findByLabelText("What to export");
+    await waitFor(() =>
+      expect(screen.getByRole("option", { name: /all namespaces/i })).toBeInTheDocument(),
+    );
+
+    await user.selectOptions(scopeSelect, "all_namespaces");
+    expect(
+      screen.getByText(/All-namespaces export — every tenant's data plane/),
+    ).toBeInTheDocument();
+    // The namespaces actually in scope are named, so the operator can see
+    // what the file will hold before producing it.
+    expect(screen.getByText(/root \+ engineering/)).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText(/^Password/), "correct-horse-battery");
+    await user.click(
+      screen.getByRole("button", { name: "Export all namespaces & download" }),
+    );
+    expect(mockInvoke).not.toHaveBeenCalledWith("exchange_export", expect.anything());
+    await user.click(screen.getByRole("button", { name: "Export everything" }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "exchange_export",
+        expect.objectContaining({
+          include: [],
+          scopeKind: "all_namespaces",
+          format: "bvx",
+        }),
+      ),
+    );
+  });
+
+  it("hides the all-namespaces option inside a child namespace", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_active_namespace") return Promise.resolve("engineering");
+      if (cmd === "exchange_export") {
+        return Promise.resolve({ file_b64: "aGk=", size_bytes: 2, format: "bvx" });
+      }
+      return Promise.resolve([]);
+    });
+    renderPage();
+
+    const scopeSelect = (await screen.findByLabelText(
+      "What to export",
+    )) as HTMLSelectElement;
+    // Give the namespace lookup a chance to resolve before asserting absence.
+    await waitFor(() => expect(scopeSelect.querySelectorAll("option")).toHaveLength(2));
+    expect(
+      screen.queryByRole("option", { name: /all namespaces/i }),
+    ).not.toBeInTheDocument();
   });
 });

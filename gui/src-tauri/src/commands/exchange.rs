@@ -48,6 +48,18 @@ async fn remote_data(
     Ok(resp.and_then(|r| r.data).unwrap_or_default())
 }
 
+/// Like [`parse_field`] but tolerates an absent / unparseable field, yielding
+/// the type's default. Used for fields a older server may not send back.
+fn parse_field_or_default<T: serde::de::DeserializeOwned + Default>(
+    data: &Map<String, Value>,
+    key: &str,
+) -> T {
+    data.get(key)
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
 fn parse_field<T: serde::de::DeserializeOwned>(
     data: &Map<String, Value>,
     key: &str,
@@ -72,11 +84,14 @@ pub struct ScopeSelectorInput {
 
 /// Build a `ScopeSpec` from the frontend's selector list.
 ///
-/// `scope_kind` is `"selective"` (default) or `"full"`. A `full` scope tells
-/// `export_to_document` to enumerate everything the actor can read — every KV
-/// mount, resource, file blob, group, and non-KV engine subtree — so the
-/// caller need not hand-list selectors. Any selectors supplied alongside
-/// `full` are still honoured; the resolver's dedup pass collapses the overlap.
+/// `scope_kind` is `"selective"` (default), `"full"`, or `"all_namespaces"`.
+/// A `full` scope tells `export_to_document` to enumerate everything the actor
+/// can read in the root namespace — every KV mount, resource, file blob,
+/// group, and non-KV engine subtree — so the caller need not hand-list
+/// selectors. `all_namespaces` runs that same sweep once per namespace and
+/// packs each tenant into its own bundle (see `exchange::namespaces`). Any
+/// selectors supplied alongside either is still honoured; the resolver's dedup
+/// pass collapses the overlap.
 fn parse_scope(
     include: &[ScopeSelectorInput],
     scope_kind: Option<&str>,
@@ -84,7 +99,12 @@ fn parse_scope(
     let kind = match scope_kind.unwrap_or("selective") {
         "selective" => exchange::ScopeKind::Selective,
         "full" => exchange::ScopeKind::Full,
-        _ => return Err("scopeKind must be \"selective\" or \"full\"".into()),
+        "all_namespaces" => exchange::ScopeKind::AllNamespaces,
+        _ => {
+            return Err(
+                "scopeKind must be \"selective\", \"full\", or \"all_namespaces\"".into(),
+            )
+        }
     };
     let mut out = Vec::with_capacity(include.len());
     for s in include {
@@ -214,15 +234,25 @@ async fn exchange_export_inner(
     allow_plaintext: bool,
     comment: Option<String>,
 ) -> CmdResult<ExchangeExportResult> {
-    let mounts = exchange::scope::MountIndex::from_core(core_arc).map_err(CommandError::from)?;
-    let document = exchange::scope::export_to_document(
-        core_arc.barrier.as_storage(),
-        &mounts,
-        exchange::ExporterInfo::default(),
-        scope,
-    )
-    .await
-    .map_err(CommandError::from)?;
+    // An `all_namespaces` export must reach every tenant's barrier prefix
+    // (`namespaces/<uuid>/logical/…`), which the root mount index cannot
+    // address — fan out through the namespace-aware exporter instead.
+    let document = if scope.kind == exchange::ScopeKind::AllNamespaces {
+        exchange::export_all_namespaces(core_arc, exchange::ExporterInfo::default(), scope)
+            .await
+            .map_err(CommandError::from)?
+    } else {
+        let mounts =
+            exchange::scope::MountIndex::from_core(core_arc).map_err(CommandError::from)?;
+        exchange::scope::export_to_document(
+            core_arc.barrier.as_storage(),
+            &mounts,
+            exchange::ExporterInfo::default(),
+            scope,
+        )
+        .await
+        .map_err(CommandError::from)?
+    };
 
     let inner_bytes =
         exchange::canonical::to_canonical_vec(&document).map_err(CommandError::from)?;
@@ -258,6 +288,10 @@ pub struct ExchangePreviewResult {
     pub identical: u64,
     pub conflict: u64,
     pub items: Vec<PreviewItem>,
+    /// Namespaces named by the file that this vault does not have, and other
+    /// non-fatal problems. Shown before the operator commits the import.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -310,6 +344,7 @@ pub async fn exchange_preview(
             identical: parse_field(&data, "identical")?,
             conflict: parse_field(&data, "conflict")?,
             items: parse_field(&data, "items")?,
+            warnings: parse_field_or_default(&data, "warnings"),
         });
     }
 
@@ -339,14 +374,13 @@ pub async fn exchange_preview(
 
     // Classify via the one engine in dry-run mode so the preview agrees with
     // the apply on every item type (KV, raw non-KV engines, structured
-    // resources / files / groups) and resolves keys under the re-rooted
-    // barrier layout — the old bare-`{mount}{path}` lookup missed re-rooted
-    // mounts and mislabelled everything `new`, and never saw non-KV items.
+    // resources / files / groups, per-namespace bundles) and resolves keys
+    // under the re-rooted barrier layout — the old bare-`{mount}{path}` lookup
+    // missed re-rooted mounts and mislabelled everything `new`, and never saw
+    // non-KV items.
     let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
-    let mounts = exchange::scope::MountIndex::from_core(&core_arc).map_err(CommandError::from)?;
-    let classify = exchange::scope::import_from_document(
-        core.barrier.as_storage(),
-        &mounts,
+    let classify = exchange::import_all_namespaces(
+        &core_arc,
         &document,
         exchange::ConflictPolicy::Skip,
         true, // dry_run
@@ -354,6 +388,7 @@ pub async fn exchange_preview(
     .await
     .map_err(CommandError::from)?;
     let (new, identical, conflict) = classify.classification_counts();
+    let warnings = classify.warnings.clone();
     let items: Vec<PreviewItem> = classify
         .items
         .iter()
@@ -400,6 +435,7 @@ pub async fn exchange_preview(
         identical,
         conflict,
         items,
+        warnings,
     })
 }
 
@@ -409,6 +445,10 @@ pub struct ExchangeApplyResult {
     pub unchanged: u64,
     pub skipped: u64,
     pub renamed: u64,
+    /// Non-fatal problems that cost the import data — e.g. the file carried a
+    /// namespace bundle for a namespace this vault does not have.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[tauri::command]
@@ -443,6 +483,7 @@ pub async fn exchange_apply(
             unchanged: parse_field(&data, "unchanged")?,
             skipped: parse_field(&data, "skipped")?,
             renamed: parse_field(&data, "renamed")?,
+            warnings: parse_field_or_default(&data, "warnings"),
         });
     }
 
@@ -457,16 +498,9 @@ pub async fn exchange_apply(
         .map_err(CommandError::from)?;
 
     let core_arc: std::sync::Arc<bastion_vault::core::Core> = std::sync::Arc::clone(&*core);
-    let mounts = exchange::scope::MountIndex::from_core(&core_arc).map_err(CommandError::from)?;
-    let result = exchange::scope::import_from_document(
-        core.barrier.as_storage(),
-        &mounts,
-        &document,
-        policy,
-        false,
-    )
-    .await
-    .map_err(CommandError::from)?;
+    let result = exchange::import_all_namespaces(&core_arc, &document, policy, false)
+        .await
+        .map_err(CommandError::from)?;
 
     drop(vault_guard);
     let mut audit_body = serde_json::Map::new();
@@ -493,6 +527,7 @@ pub async fn exchange_apply(
         unchanged: result.unchanged,
         skipped: result.skipped,
         renamed: result.renamed,
+        warnings: result.warnings,
     })
 }
 
