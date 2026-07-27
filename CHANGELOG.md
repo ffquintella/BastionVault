@@ -45,6 +45,16 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+- **`npm install` no longer rebuilds the GUI** (`.taurignore`) -- `tauri dev` watches
+  the repo root (the GUI crate has a path dep on the root crate), and
+  `gui/package-lock.json` is git-tracked, so rewriting it printed
+  `File package-lock.json changed. Rebuilding application...` and restarted the Rust
+  build. npm metadata is never an input to the Rust binary (Vite serves the frontend
+  in dev), so the root `.taurignore` now excludes `package-lock.json` and
+  `node_modules/` -- the latter explicitly, since the repo-root `node_modules/` is not
+  gitignored the way `gui/node_modules/` is.
+
 ## [0.37.0] - 2026-07-27
 
 ### Added

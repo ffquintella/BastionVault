@@ -53,6 +53,17 @@ gui/dist/
 # cfg in the IronRDP/third_party submodules, which are ignored anyway.)
 **/*.md
 
+# Frontend dependency trees / lockfiles. Vite serves the GUI frontend in
+# dev, so npm metadata is never an input to the Rust build: `npm install`
+# rewriting `gui/package-lock.json` must not rebuild (and, mid-release,
+# cancel the code-signing step). `gui/node_modules/` is covered by
+# gui/.gitignore, but the repo-root `node_modules/` is not gitignored, so
+# it needs an explicit entry here.
+package-lock.json
+**/package-lock.json
+node_modules/
+**/node_modules/
+
 # Build orchestration — the Makefile drives cargo/tauri from the outside
 # and is never an input to the compiled binary, so editing it must not
 # trigger a GUI rebuild (and cancel an in-flight release/signing step).
