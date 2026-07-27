@@ -23,6 +23,16 @@
 *.swo
 *~
 
+# Atomic-write scratch files. Editors and tools that write a file safely
+# create a sibling temp (`features/foo.md.tmp.<pid>.<hash>`), fsync it and
+# rename it over the target. The temp's name does NOT end in the real
+# extension, so extension rules like `**/*.md` below never match it and the
+# watcher rebuilds on documentation edits anyway.
+*.tmp
+**/*.tmp
+*.tmp.*
+**/*.tmp.*
+
 # Build artefacts (host + every nested workspace)
 target/
 **/target/

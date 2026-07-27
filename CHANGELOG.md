@@ -45,6 +45,17 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+### Fixed
+- **Editing documentation no longer rebuilds the GUI** (`.taurignore`) -- the existing
+  `**/*.md` rule only matched the final filename, but editors and tools that write
+  atomically create a sibling temp first (`features/scheduled-exports.md.tmp.<pid>.<hash>`)
+  and rename it over the target. That temp name does not end in `.md`, so every doc edit
+  still printed `File ... changed. Rebuilding application...` and restarted the Rust build
+  -- twice per save, once for the temp's creation and once for its removal -- which
+  mid-release also cancels the in-flight code-signing step (the FIDO2/CTAP PIN prompt).
+  The root `.taurignore` now excludes `*.tmp` and `*.tmp.*` at any depth, so the atomic
+  write is invisible to the watcher regardless of the real file's extension.
+
 ## [0.37.1] - 2026-07-27
 
 ### Added
