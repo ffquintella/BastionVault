@@ -180,6 +180,7 @@ one. `linux/arm/v7`, `linux/ppc64le`, `linux/s390x` are not in scope.
 podman run -d --name bastionvault \
   -p 8200:8200 \
   -v bv-data:/var/lib/bvault/data \
+  -v bv-backups:/var/lib/bvault/backups \
   -v ./config.hcl:/etc/bvault/config.hcl:ro,Z \
   ghcr.io/ffquintella/bastionvault:vX.Y.Z
 ```
@@ -288,11 +289,12 @@ without rebuilding the image.
 | Path | Purpose |
 |---|---|
 | `/var/lib/bvault/data` | Backend storage (Hiqlite SQLite + Raft logs, file backend dirs, audit chain). Required for any persistent run. |
+| `/var/lib/bvault/backups` | Default destination for scheduled backups (`features/scheduled-exports.md`). Declared as a volume and pre-created owned by UID 65532 so a fresh named volume is writable. Required for any run with scheduled backups enabled — a destination outside a mount lives in the container's ephemeral layer and is discarded on recreate. |
 | `/etc/bvault/config.hcl` | Operator-supplied config file. Read-only. |
 | `/etc/bvault/tls/` | TLS material (server cert + key + chain) for both API and Hiqlite cluster. Read-only. |
 | `/var/log/bvault/audit.log` | Optional audit-log mount when `audit` device is `file`. |
 
-All four are documented; only `/var/lib/bvault/data` and a config source
+All five are documented; only `/var/lib/bvault/data` and a config source
 are required.
 
 ### Health checks

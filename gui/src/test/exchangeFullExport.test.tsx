@@ -165,6 +165,39 @@ describe("Exchange full-vault export", () => {
     );
   });
 
+  it("names the version skew when the server rejects the all-namespaces scope", async () => {
+    // A server older than 0.37.0 does not know the `all_namespaces` enum
+    // value, so its deserializer refuses the whole body with a generic 400
+    // that says nothing about the scope.
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_active_namespace") return Promise.resolve("");
+      if (cmd === "list_namespaces") {
+        return Promise.resolve({ namespaces: ["engineering"] });
+      }
+      if (cmd === "exchange_export") {
+        return Promise.reject({ message: "HTTP 400: Request is invalid." });
+      }
+      return Promise.resolve([]);
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    const scopeSelect = await screen.findByLabelText("What to export");
+    await waitFor(() =>
+      expect(screen.getByRole("option", { name: /all namespaces/i })).toBeInTheDocument(),
+    );
+    await user.selectOptions(scopeSelect, "all_namespaces");
+    await user.type(screen.getByLabelText(/^Password/), "correct-horse-battery");
+    await user.click(
+      screen.getByRole("button", { name: "Export all namespaces & download" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Export everything" }));
+
+    expect(
+      await screen.findByText(/does not support the all-namespaces scope/i),
+    ).toBeInTheDocument();
+  });
+
   it("hides the all-namespaces option inside a child namespace", async () => {
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === "get_active_namespace") return Promise.resolve("engineering");

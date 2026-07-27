@@ -65,8 +65,13 @@ COPY --chmod=0755 scripts/rustion-master-bootstrap.sh /usr/local/bin/rustion-mas
 
 COPY deploy/container/config/config.hcl.sample /etc/bvault/config.hcl
 
+# Same pre-created, UID-owned mount points as the production image — see
+# deploy/container/Containerfile for why `backups/` is a volume.
+RUN mkdir -p /var/lib/bvault/data /var/lib/bvault/backups \
+ && chown -R 65532:65532 /var/lib/bvault
+
 USER 65532:65532
-VOLUME ["/var/lib/bvault/data"]
+VOLUME ["/var/lib/bvault/data", "/var/lib/bvault/backups"]
 WORKDIR /var/lib/bvault
 EXPOSE 8200
 

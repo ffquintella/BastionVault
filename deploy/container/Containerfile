@@ -173,13 +173,27 @@ COPY --chmod=0755 scripts/rustion-master-bootstrap.sh /usr/local/bin/rustion-mas
 # unmodified because the storage backend secrets are placeholder values.
 COPY deploy/container/config/config.hcl.sample /etc/bvault/config.hcl
 
+# Mount points, pre-created and owned by the runtime UID so a fresh named
+# volume inherits that ownership (a VOLUME path that does not exist in the
+# image is created root-owned by the engine, which UID 65532 then cannot
+# write).
+#   - data/    — storage backend (Hiqlite SQLite + Raft logs).
+#   - backups/ — default destination for scheduled backups. The scheduler
+#     writes `.bvx`/`.json` files straight to the server's filesystem, so a
+#     destination that is not a mounted volume lives in the container's
+#     ephemeral writable layer and every file is discarded when the container
+#     is recreated — the schedule survives (it is in the barrier store on the
+#     data volume) but its backup files do not.
+RUN mkdir -p /var/lib/bvault/data /var/lib/bvault/backups \
+ && chown -R 65532:65532 /var/lib/bvault
+
 # nonroot UID shipped by the Wolfi base.
 USER 65532:65532
 
-# Storage volume. The image expects the operator to mount real
+# Storage + backup volumes. The image expects the operator to mount real
 # persistent storage here; without it the container is a sealed-only
 # scratchpad whose data dies with the container.
-VOLUME ["/var/lib/bvault/data"]
+VOLUME ["/var/lib/bvault/data", "/var/lib/bvault/backups"]
 
 # Working directory anchored to the data volume so any relative paths
 # in operator-supplied configs resolve sensibly.

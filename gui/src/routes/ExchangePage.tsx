@@ -13,7 +13,23 @@ import type {
   BackupFile,
   RestoreResult,
 } from "../lib/api";
-import { extractError } from "../lib/error";
+import { extractError, isUnsupportedRequestShape } from "../lib/error";
+
+/**
+ * Error text for an export / schedule save, with a version-skew hint when
+ * the failure was the server refusing the request body for an
+ * `all_namespaces` scope.
+ *
+ * That scope landed in v0.37.0. An older server's deserializer rejects the
+ * unknown enum value and answers 400 for the *whole* body, which reads as
+ * "Request is invalid." with nothing pointing at the scope — the one field
+ * the operator just changed. Name it instead of making them guess.
+ */
+function scopeExportError(e: unknown, scopeKind: ExchangeScopeKind): string {
+  const msg = extractError(e);
+  if (scopeKind !== "all_namespaces" || !isUnsupportedRequestShape(e)) return msg;
+  return `${msg} — the connected server does not support the all-namespaces scope (added in BastionVault 0.37.0). Upgrade the server, or export each namespace from its own session.`;
+}
 
 /**
  * Exchange page: portable JSON / password-encrypted `.bvx` import + export.
@@ -172,7 +188,7 @@ function ExportTab({ toast }: { toast: ToastFn }) {
       URL.revokeObjectURL(url);
       toast("success", `Exported ${result.size_bytes} bytes.`);
     } catch (e) {
-      toast("error", extractError(e));
+      toast("error", scopeExportError(e, scopeKind));
     } finally {
       setBusy(false);
       // Best-effort: blank the input so the password isn't sitting in
@@ -927,7 +943,7 @@ function ScheduleEditorModal({
       toast("success", isEdit ? "Schedule updated." : "Schedule created.");
       onSaved();
     } catch (e) {
-      toast("error", extractError(e));
+      toast("error", scopeExportError(e, scheduleScopeKind));
     } finally {
       setBusy(false);
     }
@@ -1050,12 +1066,20 @@ function ScheduleEditorModal({
           )}
         </div>
 
-        <Input
-          label="Destination directory (local path)"
-          value={destPath}
-          onChange={(e) => setDestPath(e.target.value)}
-          placeholder="/var/backups/bvault/nightly"
-        />
+        <div>
+          <Input
+            label="Destination directory (local path)"
+            value={destPath}
+            onChange={(e) => setDestPath(e.target.value)}
+            placeholder="/var/lib/bvault/backups"
+          />
+          <p className="text-xs text-[var(--color-text-muted)] mt-1">
+            Resolved on the vault host, not on this machine. It must be on persistent storage — a
+            containerised vault discards anything written outside a mounted volume when the
+            container is recreated. The official image ships a volume at{" "}
+            <span className="font-mono">/var/lib/bvault/backups</span>.
+          </p>
+        </div>
 
         {format === "bvx" && (
           <div className="space-y-2">
@@ -1197,6 +1221,12 @@ function BackupsModal({
   const [dir, setDir] = useState("");
   const [files, setFiles] = useState<BackupFile[]>([]);
   const [restoring, setRestoring] = useState<BackupFile | null>(null);
+  // Successful runs on record. A run history that says "wrote N bytes" while
+  // the directory scan comes back empty is the fingerprint of a destination
+  // that is not persistent — most often a path inside a container's
+  // ephemeral writable layer, wiped on every recreate. Nothing errors at
+  // write time, so without this the modal just looks like "no backups yet".
+  const [succeededRuns, setSucceededRuns] = useState(0);
 
   // Restore-step state.
   const [password, setPassword] = useState("");
@@ -1211,6 +1241,14 @@ function BackupsModal({
       const result = await api.scheduledExportsBackupsList(schedule.id);
       setDir(result.dir);
       setFiles(result.files);
+      // Best-effort: the run history only annotates the empty state, so a
+      // failure here must not break the listing itself.
+      try {
+        const runs = await api.scheduledExportsRuns(schedule.id);
+        setSucceededRuns(runs.filter((r) => r.status === "success").length);
+      } catch {
+        setSucceededRuns(0);
+      }
     } catch (e) {
       toast("error", extractError(e));
     } finally {
@@ -1359,9 +1397,31 @@ function BackupsModal({
         ) : loading ? (
           <p className="text-sm text-[var(--color-text-muted)]">Loading...</p>
         ) : files.length === 0 ? (
-          <p className="text-sm text-[var(--color-text-muted)]">
-            No backup files found in this directory yet.
-          </p>
+          succeededRuns > 0 ? (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm space-y-2">
+              <p className="font-medium text-amber-400">
+                {succeededRuns} successful {succeededRuns === 1 ? "run" : "runs"} on record, but this
+                directory is empty.
+              </p>
+              <p className="text-[var(--color-text-muted)]">
+                The files those runs wrote are gone from{" "}
+                <span className="font-mono">{dir}</span> on the vault host. The usual cause is a
+                destination that is not on persistent storage: if the vault runs in a container, a
+                path that is not a mounted volume lives in the container's ephemeral layer and is
+                discarded every time the container is recreated. The schedule itself survives
+                because it is stored in the vault.
+              </p>
+              <p className="text-[var(--color-text-muted)]">
+                Mount a volume at the destination (the official image ships one at{" "}
+                <span className="font-mono">/var/lib/bvault/backups</span>) and point this schedule
+                there.
+              </p>
+            </div>
+          ) : (
+            <p className="text-sm text-[var(--color-text-muted)]">
+              No backup files found in this directory yet.
+            </p>
+          )
         ) : (
           <table className="w-full text-xs">
             <thead className="bg-[var(--color-bg)] text-[var(--color-text-muted)]">

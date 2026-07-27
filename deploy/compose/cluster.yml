@@ -60,6 +60,12 @@ services:
       - "8300:8300"
     volumes:
       - bv-1-data:/var/lib/bvault/data
+      # Scheduled-backup destination — must be a mounted volume, or the
+      # files land in the container's ephemeral layer and vanish on the
+      # next recreate. Leader gating for the scheduler is still deferred
+      # (features/scheduled-exports.md), so every node fires every
+      # schedule against its own destination: keep these per-node.
+      - bv-1-backups:/var/lib/bvault/backups
       - ./cluster/node1.hcl:/etc/bvault/config.hcl:ro,Z
       - ./cluster/tls:/etc/bvault/tls:ro,Z
     networks: [bv-cluster]
@@ -70,6 +76,7 @@ services:
     hostname: bv-2
     volumes:
       - bv-2-data:/var/lib/bvault/data
+      - bv-2-backups:/var/lib/bvault/backups
       - ./cluster/node2.hcl:/etc/bvault/config.hcl:ro,Z
       - ./cluster/tls:/etc/bvault/tls:ro,Z
     networks: [bv-cluster]
@@ -80,6 +87,7 @@ services:
     hostname: bv-3
     volumes:
       - bv-3-data:/var/lib/bvault/data
+      - bv-3-backups:/var/lib/bvault/backups
       - ./cluster/node3.hcl:/etc/bvault/config.hcl:ro,Z
       - ./cluster/tls:/etc/bvault/tls:ro,Z
     networks: [bv-cluster]
@@ -88,6 +96,9 @@ volumes:
   bv-1-data:
   bv-2-data:
   bv-3-data:
+  bv-1-backups:
+  bv-2-backups:
+  bv-3-backups:
 
 networks:
   bv-cluster:

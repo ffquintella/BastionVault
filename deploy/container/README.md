@@ -27,6 +27,7 @@ architecture line up with the project's secure-by-default posture.
 | `/usr/local/bin/bv-ssh-helper` | Helper used by the SSH secret engine. |
 | `/etc/bvault/config.hcl` | Inert sample config — **must** be overridden. |
 | `/var/lib/bvault/data` | Storage volume mount-point (Hiqlite SQLite + Raft logs by default). |
+| `/var/lib/bvault/backups` | Volume mount-point for scheduled-backup output. See [Scheduled backups](#scheduled-backups). |
 | `/etc/bvault/tls/` | TLS material mount-point (`server.crt`, `server.key`). |
 
 The runtime is `cgr.dev/chainguard/wolfi-base` — Chainguard's free,
@@ -54,6 +55,7 @@ TLS material are read-only.
 podman run -d --name bastionvault \
   -p 8200:8200 \
   -v bv-data:/var/lib/bvault/data \
+  -v bv-backups:/var/lib/bvault/backups \
   -v ./config.hcl:/etc/bvault/config.hcl:ro,Z \
   -v ./tls:/etc/bvault/tls:ro,Z \
   ghcr.io/ffquintella/bastionvault:vX.Y.Z
@@ -79,6 +81,40 @@ podman exec bastionvault bvault operator unseal <key-1>
 podman exec bastionvault bvault operator unseal <key-2>
 podman exec bastionvault bvault operator unseal <key-3>
 ```
+
+## Scheduled backups
+
+Scheduled backups (the *Scheduled backups* tab in the desktop GUI,
+`/v1/sys/scheduled-exports` over HTTP) write their `.bvx` / `.json` files
+to a **directory on the server's own filesystem** — the path in the
+schedule's `destination` is resolved inside the container, not on the
+machine running the GUI.
+
+That makes the destination path an operator decision with a sharp edge:
+any directory that is not a mounted volume lives in the container's
+ephemeral writable layer, so every backup file is discarded the moment
+the container is recreated (`compose down` + `up`, an image bump,
+`podman rm`). The schedule itself survives — it is barrier-encrypted
+state on the data volume — which is why the symptom is a schedule that is
+still there, still firing, with an empty **Backups** list after a
+restart. Nothing logs an error, because the write did succeed at the
+time.
+
+Point each schedule's destination at `/var/lib/bvault/backups` (declared
+as a volume by the image and mounted by both reference compose files), or
+mount your own path and use that. In production prefer a bind mount to
+off-box storage or a network/CSI volume — a backup that only exists on
+the vault's own host is not much of a backup.
+
+To verify a destination is really persistent:
+
+```sh
+podman volume ls
+podman inspect bastionvault --format '{{json .Mounts}}'
+```
+
+If the schedule's destination is not one of the listed mount
+destinations (or a subdirectory of one), it is not persistent.
 
 ## Health checks
 

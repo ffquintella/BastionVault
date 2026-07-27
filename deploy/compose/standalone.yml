@@ -24,6 +24,13 @@ services:
       - "8200:8200"
     volumes:
       - bv-data:/var/lib/bvault/data
+      # Scheduled-backup destination. The scheduler writes backup files to
+      # the server's own filesystem, so any destination directory that is
+      # not a mounted volume dies with the container: the schedule survives
+      # (barrier store, on bv-data) but its .bvx files are gone on the next
+      # `up`. Point every schedule's destination at /var/lib/bvault/backups
+      # (or add your own mount and use that path).
+      - bv-backups:/var/lib/bvault/backups
       - ./config.hcl:/etc/bvault/config.hcl:ro,Z
       - ./tls:/etc/bvault/tls:ro,Z
     # The runtime user is hard-coded to UID 65532 in the image.
@@ -37,3 +44,7 @@ volumes:
     # Operator-managed: rebind to a real path or a CSI volume in
     # production deployments. The named volume here is for quick
     # local trial only.
+  bv-backups:
+    # Scheduled-backup output. In production this wants to be a bind
+    # mount to off-box storage (or an NFS/CSI volume) — a backup that
+    # only exists on the same host as the vault is not much of a backup.

@@ -317,6 +317,17 @@ fn write_local(dir: &str, schedule_id: &str, format: &ExportFormat, bytes: &[u8]
         let _ = fs::remove_file(&tmp_path);
         RvError::ErrUnknown
     })?;
+    // Log the absolute path the run produced. The run record only carries the
+    // destination directory and a byte count, so without this there is no
+    // record of where a backup actually landed — the question that matters
+    // when a schedule keeps succeeding but the directory turns up empty
+    // (a destination that is not on persistent storage, e.g. a path inside a
+    // container's ephemeral writable layer).
+    log::info!(
+        "scheduled-exports: wrote {} ({} bytes)",
+        final_path.display(),
+        bytes.len()
+    );
     Ok(())
 }
 

@@ -1498,8 +1498,21 @@ async fn sys_exchange_export_request_handler(
     let audit = SysAuditCtx::new(&req, &body, &core);
 
     let result: Result<HttpResponse, RvError> = (async move {
-        let mut payload: ExchangeExportRequest =
-            serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
+        // Surface the parse error instead of collapsing it to a generic
+        // "Request is invalid." A newer client asking for a scope this
+        // build does not know (`kind: "all_namespaces"` against a server
+        // older than 0.37.0) fails exactly here, and the operator needs
+        // serde's "unknown variant" line to tell version skew apart from
+        // a malformed body.
+        let mut payload: ExchangeExportRequest = match serde_json::from_slice(&body) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(response_error(
+                    StatusCode::BAD_REQUEST,
+                    &format!("invalid export request body: {e}"),
+                ));
+            }
+        };
 
     // Build the bvx.v1 document by walking barrier-decrypted storage. An
     // `all_namespaces` scope fans out over every tenant's barrier prefix (see
@@ -1535,7 +1548,12 @@ async fn sys_exchange_export_request_handler(
             (inner_bytes, "json")
         }
         "bvx" => {
-            let password = payload.password.as_deref().ok_or(RvError::ErrRequestInvalid)?;
+            let Some(password) = payload.password.as_deref() else {
+                return Ok(response_error(
+                    StatusCode::BAD_REQUEST,
+                    "password required for format \"bvx\"",
+                ));
+            };
             let bytes = crate::exchange::encrypt_bvx(
                 &inner_bytes,
                 password,
@@ -4033,5 +4051,89 @@ mod scheduled_export_backup_tests {
             .request("PUT", &format!("sys/scheduled-exports/{good}"), body.as_object().cloned(), Some(&token), None)
             .unwrap();
         assert_eq!(status, 400, "update to empty path must be 400: {resp:?}");
+    }
+}
+
+#[cfg(test)]
+mod exchange_export_route_tests {
+    //! Coverage for the `/sys/exchange/export` request-body contract, driven
+    //! through the real actix pipeline.
+    //!
+    //! A rejected body used to answer with a bare `Request is invalid.`, which
+    //! is what a newer GUI asking for a scope this build does not know looks
+    //! like on the wire — indistinguishable from a genuinely malformed
+    //! request. These tests pin the descriptive replacements.
+
+    use serde_json::json;
+
+    use crate::test_utils::TestHttpServer;
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn unknown_scope_kind_names_the_variant() {
+        let mut server = TestHttpServer::new("test_exchange_export_bad_scope", true).await;
+        server.token = server.root_token.clone();
+        let token = server.root_token.clone();
+
+        // Stands in for a client built against a future release: this build
+        // has no `every_namespace` scope, so the body cannot deserialize.
+        let body = json!({
+            "format": "bvx",
+            "scope": { "kind": "every_namespace", "include": [] },
+            "password": "correct-horse-battery",
+        });
+        let (status, resp) = server
+            .request("POST", "sys/exchange/export", body.as_object().cloned(), Some(&token), None)
+            .unwrap();
+        assert_eq!(status, 400, "unknown scope kind must be 400: {resp:?}");
+        let msg = resp.to_string();
+        assert!(
+            msg.contains("invalid export request body") && msg.contains("every_namespace"),
+            "400 must name the offending value, not just 'Request is invalid.': {resp:?}"
+        );
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn bvx_without_password_says_so() {
+        let mut server = TestHttpServer::new("test_exchange_export_no_password", true).await;
+        server.token = server.root_token.clone();
+        let token = server.root_token.clone();
+
+        let body = json!({
+            "format": "bvx",
+            "scope": { "kind": "full", "include": [] },
+        });
+        let (status, resp) = server
+            .request("POST", "sys/exchange/export", body.as_object().cloned(), Some(&token), None)
+            .unwrap();
+        assert_eq!(status, 400, "missing password must be 400: {resp:?}");
+        assert!(
+            resp.to_string().contains("password required"),
+            "400 must name the missing password: {resp:?}"
+        );
+    }
+
+    /// The scope this release added must survive the round trip the GUI makes,
+    /// so a future skew failure can be attributed to the *server*, not the
+    /// request shape.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn all_namespaces_scope_is_accepted() {
+        let mut server = TestHttpServer::new("test_exchange_export_all_ns_http", true).await;
+        server.token = server.root_token.clone();
+        let token = server.root_token.clone();
+
+        let body = json!({
+            "format": "bvx",
+            "scope": { "kind": "all_namespaces", "include": [] },
+            "password": "correct-horse-battery",
+        });
+        let (status, resp) = server
+            .request("POST", "sys/exchange/export", body.as_object().cloned(), Some(&token), None)
+            .unwrap();
+        assert_eq!(status, 200, "all_namespaces export must be accepted: {resp:?}");
+        assert_eq!(resp["format"].as_str(), Some("bvx"));
+        assert!(
+            resp["size_bytes"].as_u64().unwrap_or(0) > 0,
+            "export must produce bytes: {resp:?}"
+        );
     }
 }

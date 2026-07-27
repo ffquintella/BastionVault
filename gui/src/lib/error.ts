@@ -36,6 +36,25 @@ export function isMountNotFound(e: unknown): boolean {
 }
 
 /**
+ * True when the server rejected the request *body* — HTTP 400 carrying
+ * either a serde parse error (`unknown variant`, `unknown field`) or the
+ * generic `Request is invalid.` older builds returned in its place.
+ *
+ * In practice this is version skew rather than a malformed request: the
+ * GUI named an enum value or field the connected server's build does not
+ * know, so its deserializer refused the whole body. Callers pair this
+ * with the feature they just asked for to add an "upgrade the server"
+ * hint instead of surfacing a dead-end 400.
+ */
+export function isUnsupportedRequestShape(e: unknown): boolean {
+  const msg = extractError(e);
+  return (
+    msg.includes("400") &&
+    (/request is invalid/i.test(msg) || /unknown (variant|field)/i.test(msg))
+  );
+}
+
+/**
  * True when the failure was caused by the vault being sealed — the
  * barrier is locked so no auth backend can mint a token. Surfaced on
  * the login page (e.g. `node \`<host>\` is unavailable: BastionVault is

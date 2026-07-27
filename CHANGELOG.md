@@ -45,7 +45,22 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.37.2] - 2026-07-27
+
 ### Fixed
+- **A rejected export request says what it rejected** (`src/http/sys.rs`,
+  `gui/src/lib/error.ts`, `gui/src/routes/ExchangePage.tsx`) -- `POST
+  /v1/sys/exchange/export` collapsed every unparseable body into `Request is
+  invalid.`, so a GUI on 0.37.x asking a pre-0.37.0 server for the new
+  `all_namespaces` scope got a bare `HTTP 400: Request is invalid.` with nothing
+  pointing at the scope -- the server's deserializer had refused the whole body
+  over one unknown enum value. The endpoint now answers with the parse error
+  (`invalid export request body: unknown variant \`all_namespaces\`, expected
+  ...`), and a missing `.bvx` password says `password required for format "bvx"`
+  instead of the same generic 400. The Export tab and the scheduled-backup
+  editor additionally name the likely cause -- an older server -- when a
+  whole-deployment scope is refused this way, so the operator does not have to
+  infer version skew from a 400.
 - **Editing documentation no longer rebuilds the GUI** (`.taurignore`) -- the existing
   `**/*.md` rule only matched the final filename, but editors and tools that write
   atomically create a sibling temp first (`features/scheduled-exports.md.tmp.<pid>.<hash>`)
@@ -55,6 +70,29 @@ EXAMPLE ENTRY:
   mid-release also cancels the in-flight code-signing step (the FIDO2/CTAP PIN prompt).
   The root `.taurignore` now excludes `*.tmp` and `*.tmp.*` at any depth, so the atomic
   write is invisible to the watcher regardless of the real file's extension.
+- **Scheduled backups no longer vanish when a container is recreated**
+  (`deploy/container/Containerfile{,.debug}`, `deploy/compose/{standalone,cluster}.yml`,
+  `deploy/container/README.md`, `gui/src/routes/ExchangePage.tsx`) -- the runner writes
+  its `.bvx`/`.json` files to a directory on the server's filesystem, and the official
+  image declared a volume only for `/var/lib/bvault/data`. A destination like `/backups`
+  therefore lived in the container's ephemeral writable layer: every file was discarded
+  on `compose down`/`up`, an image bump, or `podman rm`, while the schedule itself
+  survived (barrier state on the data volume) -- so the schedule kept firing and the
+  **Backups** modal came back empty with nothing logged, because each write had
+  succeeded at the time. The image now pre-creates and declares
+  `/var/lib/bvault/backups` (owned by UID 65532, so a fresh named volume inherits
+  writable ownership), both reference compose files mount it (per-node in the cluster
+  file, since scheduler leader gating is still deferred), and the operator README
+  documents the trap plus how to verify a destination is really persistent. In the GUI,
+  the schedule editor now states that the path resolves on the vault host and must be
+  persistent, and the Backups modal replaces "No backup files found in this directory
+  yet" with an explicit warning when the schedule has successful runs on record but the
+  directory scan is empty (3 new tests,
+  `gui/src/test/scheduledBackupsMissingFiles.test.tsx`). Each successful run now also
+  logs the absolute path it wrote (`scheduled-exports: wrote <path> (<n> bytes)`) —
+  previously the run record carried only the destination directory and a byte count, so
+  nothing recorded where a backup actually landed.
+  (`features/scheduled-exports.md`, `features/packaging-podman-server.md`)
 
 ## [0.37.1] - 2026-07-27
 

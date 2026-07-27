@@ -4,6 +4,7 @@ import {
   isMountNotFound,
   isNodeUnavailable,
   isPermissionDenied,
+  isUnsupportedRequestShape,
   isVaultSealed,
 } from "../lib/error";
 
@@ -62,6 +63,37 @@ describe("isVaultSealed", () => {
 
   it("does not match unrelated errors", () => {
     expect(isVaultSealed(new Error("HTTP 403: Permission denied"))).toBe(false);
+  });
+});
+
+describe("isUnsupportedRequestShape", () => {
+  it("matches the generic 400 an older server returns for an unknown scope", () => {
+    expect(
+      isUnsupportedRequestShape({ message: "HTTP 400: Request is invalid." }),
+    ).toBe(true);
+  });
+
+  it("matches a serde parse error from a 0.37.1+ server", () => {
+    expect(
+      isUnsupportedRequestShape({
+        message:
+          "HTTP 400: invalid export request body: unknown variant `all_namespaces`, expected `selective` or `full` at line 1 column 34",
+      }),
+    ).toBe(true);
+  });
+
+  it("does not match other 400s", () => {
+    expect(
+      isUnsupportedRequestShape({
+        message: 'HTTP 400: password required for format "bvx"',
+      }),
+    ).toBe(false);
+  });
+
+  it("does not match a plain 'invalid' message without a 400", () => {
+    expect(isUnsupportedRequestShape(new Error("Request is invalid."))).toBe(
+      false,
+    );
   });
 });
 
