@@ -93,6 +93,23 @@ impl Server {
             return Err(RvError::ErrConfigListenerNotFound);
         }
 
+        // Publish this node's dialable API address. Cluster peers stamp it
+        // into replicated metadata (scheduled-backup catalog) so another node
+        // can reach this one; the listener address is typically 0.0.0.0 and
+        // therefore useless for that. Unset `api_addr` simply means peers can
+        // see where a backup lives but cannot fetch it for the operator.
+        crate::server_info::record_api_addr(config.api_addr.as_str());
+        if let Some((_, l)) = config.listener.iter().next() {
+            crate::server_info::record_peer_ca_file(l.tls_publish_ca_path.as_str());
+        }
+        if config.api_addr.trim().is_empty() {
+            log::info!(
+                "api_addr is not set: this node cannot be dialled by cluster peers, so a \
+                 scheduled-backup restore run against another node will not be able to fetch \
+                 backups this node holds"
+            );
+        }
+
         // Stage process-plugin executables in the operator-configured
         // directory (if any). The default OS temp dir is often `noexec`
         // in hardened containers, which breaks process-runtime plugins.

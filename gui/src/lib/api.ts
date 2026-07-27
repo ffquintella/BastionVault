@@ -1574,10 +1574,23 @@ export interface BackupFile {
   /** RFC3339 last-modified timestamp, when the platform reports one. */
   modified: string | null;
   format: ScheduleFormat;
+  /**
+   * Cluster node holding the file, from the replicated backup catalog. Every
+   * node runs the scheduler but they share one set of run records, so a cron
+   * instant is claimed by whichever node reaches it first and only that node
+   * has the bytes. Empty/undefined on a single-node or embedded vault.
+   */
+  node_id?: number | null;
+  node_name?: string;
+  api_addr?: string | null;
+  /** File is on the answering node — restorable without a cross-node fetch. */
+  local?: boolean;
+  /** False when a catalog record's file has vanished from its owning node. */
+  present?: boolean;
 }
 
 export interface BackupListResult {
-  /** The resolved local destination directory that was scanned. */
+  /** The destination directory as resolved on the answering node. */
   dir: string;
   files: BackupFile[];
 }

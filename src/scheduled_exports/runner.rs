@@ -261,7 +261,32 @@ pub async fn run_once(
     // 3. Write to destination.
     match &sched.destination {
         DestinationKind::LocalPath { path } => {
-            write_local(path, &sched.id, &sched.format, &bytes)?;
+            let filename = write_local(path, &sched.id, &sched.format, &bytes)?;
+            // 4. Record the file in the replicated catalog, stamped with this
+            //    node's identity. Without this the file is only discoverable
+            //    by `read_dir` on this one node, so on a cluster — where the
+            //    node that wins a cron instant is the only one holding the
+            //    file — every other node reports the backup as missing and
+            //    cannot restore it. See `catalog.rs`.
+            let record = super::catalog::BackupRecord {
+                schedule_id: sched.id.clone(),
+                filename,
+                dir: path.clone(),
+                size_bytes: bytes.len() as u64,
+                format: sched.format,
+                sha256: super::catalog::sha256_hex(&bytes),
+                created_at: Utc::now().to_rfc3339(),
+                node: super::local_node(core),
+            };
+            // A catalog write failure must not fail an otherwise-good backup:
+            // the bytes are already durable on disk, and the local directory
+            // scan still finds them on this node.
+            if let Err(e) = super::catalog::BackupCatalog::new().put(storage, &record).await {
+                log::warn!(
+                    "scheduled-exports: backup written but catalog record failed ({e}); the file \
+                     will only be visible on this node"
+                );
+            }
         }
     }
 
@@ -290,7 +315,14 @@ async fn resolve_password(
     }
 }
 
-fn write_local(dir: &str, schedule_id: &str, format: &ExportFormat, bytes: &[u8]) -> Result<(), RvError> {
+/// Write one backup atomically (tmp file, fsync, rename) and return the bare
+/// file name it landed under, for the catalog record.
+fn write_local(
+    dir: &str,
+    schedule_id: &str,
+    format: &ExportFormat,
+    bytes: &[u8],
+) -> Result<String, RvError> {
     use std::fs;
     use std::io::Write;
 
@@ -302,8 +334,9 @@ fn write_local(dir: &str, schedule_id: &str, format: &ExportFormat, bytes: &[u8]
     let dir_path = std::path::Path::new(dir);
     fs::create_dir_all(dir_path)
         .map_err(|e| { log::warn!("create_dir_all({dir}) failed: {e}"); RvError::ErrUnknown })?;
-    let final_path = dir_path.join(format!("{schedule_id}-{timestamp}.{ext}"));
-    let tmp_path = dir_path.join(format!(".{schedule_id}-{timestamp}.{ext}.tmp"));
+    let filename = format!("{schedule_id}-{timestamp}.{ext}");
+    let final_path = dir_path.join(&filename);
+    let tmp_path = dir_path.join(format!(".{filename}.tmp"));
 
     {
         let mut f = fs::File::create(&tmp_path)
@@ -328,7 +361,7 @@ fn write_local(dir: &str, schedule_id: &str, format: &ExportFormat, bytes: &[u8]
         final_path.display(),
         bytes.len()
     );
-    Ok(())
+    Ok(filename)
 }
 
 #[cfg(test)]

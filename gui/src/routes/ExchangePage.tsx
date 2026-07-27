@@ -1200,6 +1200,19 @@ function formatBytes(n: number): string {
 }
 
 /**
+ * Which node holds a backup file, for the listing's Node column. "this node"
+ * covers the common single-node case, where naming a host adds noise.
+ */
+function nodeLabel(f: BackupFile): string {
+  if (f.local) return "this node";
+  const name = f.node_name?.trim();
+  if (name && f.node_id != null) return `${name} (node ${f.node_id})`;
+  if (name) return name;
+  if (f.node_id != null) return `node ${f.node_id}`;
+  return "unknown";
+}
+
+/**
  * Lists the backup files a schedule's runs have written to its local
  * destination directory, and lets the operator restore any one of them.
  *
@@ -1404,24 +1417,17 @@ function BackupsModal({
                 directory is empty.
               </p>
               <p className="text-[var(--color-text-muted)]">
-                Runs are recorded in the vault and replicated across the cluster;{" "}
-                <span className="font-mono">{dir}</span> is a plain directory on the single node
-                answering this request. Two things produce this mismatch:
+                Backups produced on any node are listed here from the replicated catalog, so an
+                empty list means the files are gone rather than elsewhere. The usual cause is a
+                destination that is not persistent: in a container, a path that is not a mounted
+                volume lives in the ephemeral writable layer and is discarded on every recreate.
+                The official image ships a volume at{" "}
+                <span className="font-mono">/var/lib/bvault/backups</span>.
               </p>
-              <ul className="text-[var(--color-text-muted)] list-disc pl-5 space-y-1">
-                <li>
-                  <strong>Another node holds the file.</strong> Every node runs the scheduler, but
-                  they share one set of run records, so a cron firing lands on whichever node gets
-                  there first — and only that node's filesystem has the file. Check the other nodes'
-                  destination directories, or connect this GUI to them.
-                </li>
-                <li>
-                  <strong>The destination is not persistent.</strong> In a container, a path that is
-                  not a mounted volume lives in the ephemeral writable layer and is discarded on
-                  every recreate. The official image ships a volume at{" "}
-                  <span className="font-mono">/var/lib/bvault/backups</span>.
-                </li>
-              </ul>
+              <p className="text-[var(--color-text-muted)]">
+                Runs recorded before this version predate the catalog — those files, if they still
+                exist, are only visible on the node that wrote them ({dir}).
+              </p>
             </div>
           ) : (
             <p className="text-sm text-[var(--color-text-muted)]">
@@ -1436,20 +1442,37 @@ function BackupsModal({
                 <th className="text-left px-2 py-1">Format</th>
                 <th className="text-left px-2 py-1">Size</th>
                 <th className="text-left px-2 py-1">Modified</th>
+                <th className="text-left px-2 py-1">Node</th>
                 <th className="px-2 py-1"></th>
               </tr>
             </thead>
             <tbody>
               {files.map((f) => (
                 <tr key={f.name} className="odd:bg-[var(--color-bg)]/40">
-                  <td className="px-2 py-1 font-mono truncate max-w-xs">{f.name}</td>
+                  <td className="px-2 py-1 font-mono truncate max-w-xs">
+                    {f.name}
+                    {f.present === false && (
+                      <span className="ml-2 text-amber-500 not-italic">file missing</span>
+                    )}
+                  </td>
                   <td className="px-2 py-1 uppercase">{f.format}</td>
                   <td className="px-2 py-1">{formatBytes(f.size_bytes)}</td>
                   <td className="px-2 py-1 font-mono text-[var(--color-text-muted)]">
                     {f.modified ? f.modified.replace("T", " ").replace(/\.\d+/, "").replace("+00:00", "Z") : "—"}
                   </td>
+                  <td className="px-2 py-1 min-w-0">
+                    {/* Where the bytes are. A file on another node is still
+                        restorable from here — the server fetches it — so this
+                        is information, not a blocker. */}
+                    <span className="truncate">{nodeLabel(f)}</span>
+                    {f.local === false && f.present !== false && (
+                      <span className="ml-1 text-[var(--color-text-muted)]">(fetched on restore)</span>
+                    )}
+                  </td>
                   <td className="px-2 py-1 text-right">
-                    <Button size="sm" onClick={() => startRestore(f)}>Restore</Button>
+                    <Button size="sm" onClick={() => startRestore(f)} disabled={f.present === false}>
+                      Restore
+                    </Button>
                   </td>
                 </tr>
               ))}

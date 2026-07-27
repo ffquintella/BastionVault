@@ -2927,17 +2927,119 @@ async fn sys_scheduled_exports_run_now_handler(
 // remote operator never has to pull the (potentially full-vault) backup down
 // to the client and post it back. The GUI's embedded mode does the same work
 // in-process; this is the HTTP surface for the remote path.
+//
+// On a cluster the file is only ever on the node that fired the run (every
+// node runs the scheduler, but they share one set of run records, so a cron
+// instant is claimed by whichever node reaches it first). Listing therefore
+// merges the Raft-replicated backup catalog with this node's directory scan,
+// and a restore of a file another node holds fetches the bytes from that node
+// — see `crate::scheduled_exports::catalog`.
 
 /// Map a backup file name's extension to a known export format, or `None` for
 /// files that are not backups we recognise.
 fn backup_format_of(name: &str) -> Option<&'static str> {
-    if name.ends_with(".bvx") {
-        Some("bvx")
-    } else if name.ends_with(".json") {
-        Some("json")
-    } else {
-        None
-    }
+    crate::scheduled_exports::catalog::format_of(name)
+}
+
+/// Pull a backup's bytes from the node that holds it.
+///
+/// Runs against the peer's own `/backups/{filename}/fetch` endpoint, carrying
+/// the caller's token — tokens live in replicated storage, so the operator's
+/// own authority is what authorises the read on the far side; this node never
+/// holds a standing cluster credential. The blocking `ureq` call is moved off
+/// the actix worker.
+async fn fetch_backup_from_node(
+    api_addr: &str,
+    schedule_id: &str,
+    filename: &str,
+    token: &str,
+    expected_sha256: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    let url = format!(
+        "{}/v1/sys/scheduled-exports/{}/backups/{}/fetch",
+        api_addr.trim_end_matches('/'),
+        schedule_id,
+        filename
+    );
+    let token = token.to_string();
+    let expected = expected_sha256.map(|s| s.to_string());
+    let url_for_err = url.clone();
+
+    let body = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let mut tls = ureq::tls::TlsConfig::builder();
+        // A private-CA / self-signed cluster pins the published certificate;
+        // everything else verifies against the platform trust store (which is
+        // what carries a corporate CA), never ureq's Mozilla-only default.
+        if let Some(ca_path) = crate::server_info::peer_ca_file() {
+            match std::fs::read(ca_path) {
+                Ok(pem) => {
+                    let roots: Vec<ureq::tls::Certificate<'static>> = ureq::tls::parse_pem(&pem)
+                        .filter_map(|item| match item {
+                            Ok(ureq::tls::PemItem::Certificate(cert)) => Some(cert),
+                            _ => None,
+                        })
+                        .collect();
+                    if !roots.is_empty() {
+                        tls = tls.root_certs(ureq::tls::RootCerts::new_with_certs(&roots));
+                    }
+                }
+                Err(e) => log::warn!("scheduled-exports: cannot read peer CA {ca_path}: {e}"),
+            }
+        } else {
+            tls = tls.root_certs(ureq::tls::RootCerts::PlatformVerifier);
+        }
+
+        let agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .tls_config(tls.build())
+            .build()
+            .new_agent();
+
+        let resp = agent
+            .get(&url)
+            .header(crate::http::VAULT_AUTH_HEADER_NAME, &token)
+            .call()
+            .map_err(|e| e.to_string())?;
+        let status = resp.status().as_u16();
+        let text = resp
+            .into_body()
+            .read_to_string()
+            .map_err(|e| format!("cannot read peer response: {e}"))?;
+        if !(200..300).contains(&status) {
+            return Err(format!("peer returned HTTP {status}: {text}"));
+        }
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("peer sent invalid JSON: {e}"))?;
+        // The peer answers with `response_json_ok`, so the fields are at the
+        // top level; tolerate a `data`-wrapped body too in case the request
+        // traversed something that re-wraps it.
+        let b64 = parsed
+            .get("file_b64")
+            .or_else(|| parsed.get("data").and_then(|d| d.get("file_b64")))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "peer response has no file_b64".to_string())?;
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| format!("peer sent undecodable base64: {e}"))?;
+
+        // The catalog's hash is replicated Raft state, so verifying against it
+        // means a tampered or truncated transfer cannot reach the importer.
+        if let Some(expected) = expected {
+            let got = crate::scheduled_exports::catalog::sha256_hex(&bytes);
+            if got != expected {
+                return Err(format!(
+                    "checksum mismatch on fetched backup (expected {expected}, got {got})"
+                ));
+            }
+        }
+        Ok(bytes)
+    })
+    .await
+    .map_err(|e| format!("peer fetch task failed: {e}"))?;
+
+    body.map_err(|e| format!("fetch from {url_for_err} failed: {e}"))
 }
 
 /// Reject anything that is not a bare file name within the destination
@@ -2947,9 +3049,14 @@ fn valid_backup_filename(name: &str) -> bool {
     !name.is_empty() && !name.contains('/') && !name.contains('\\') && !name.contains("..")
 }
 
-/// `GET /v1/sys/scheduled-exports/{id}/backups` — list the backup files a
-/// schedule's runs have written to its local destination directory, newest
-/// first. Files that are not `.bvx`/`.json` are ignored.
+/// `GET /v1/sys/scheduled-exports/{id}/backups` — every backup the schedule
+/// has produced **anywhere in the cluster**, newest first.
+///
+/// The Raft-replicated catalog is merged with a scan of this node's
+/// destination directory, so each entry carries the node that holds it plus
+/// `local` (restorable here without a fetch) and `present` (our own record
+/// whose file has since vanished). Files with no catalog record — pre-catalog
+/// runs, or an operator's manual copy — are still listed from the local scan.
 async fn sys_scheduled_exports_backups_list_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
@@ -2963,57 +3070,92 @@ async fn sys_scheduled_exports_backups_list_handler(
             Some(s) => s,
             None => return Ok(response_error(StatusCode::NOT_FOUND, "schedule not found")),
         };
-        let crate::scheduled_exports::DestinationKind::LocalPath { path: dir } = &sched.destination;
-        let dir = dir.clone();
 
-        let mut files: Vec<serde_json::Value> = Vec::new();
-        let read_dir = match std::fs::read_dir(&dir) {
-            Ok(rd) => rd,
-            // A directory that does not exist yet (no run has fired) is not an
-            // error — it just means there are no backups to list.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(response_json_ok(None, json!({ "dir": dir, "files": files })));
-            }
-            Err(e) => return Ok(response_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("cannot read {dir}: {e}"))),
-        };
+        let local_node = crate::scheduled_exports::local_node(core.get_ref());
+        let (dir, files) = crate::scheduled_exports::list_backups(
+            core.barrier.as_storage(),
+            &sched,
+            &local_node,
+        )
+        .await?;
 
-        for entry in read_dir.flatten() {
-            let meta = match entry.metadata() {
-                Ok(m) if m.is_file() => m,
-                _ => continue,
-            };
-            let name = entry.file_name().to_string_lossy().into_owned();
-            // Skip in-flight temp files written by the atomic-rename path.
-            if name.starts_with('.') {
-                continue;
-            }
-            let Some(format) = backup_format_of(&name) else { continue };
-            let modified = meta
-                .modified()
-                .ok()
-                .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
-            files.push(json!({
-                "name": name,
-                "size_bytes": meta.len(),
-                "modified": modified,
-                "format": format,
-            }));
-        }
-
-        // Newest first: by modified time when known, then file name descending
-        // so the timestamp-suffixed runner names fall in chronological order.
-        files.sort_by(|a, b| {
-            let am = a.get("modified").and_then(|v| v.as_str());
-            let bm = b.get("modified").and_then(|v| v.as_str());
-            let an = a.get("name").and_then(|v| v.as_str());
-            let bn = b.get("name").and_then(|v| v.as_str());
-            bm.cmp(&am).then_with(|| bn.cmp(&an))
-        });
-
-        Ok(response_json_ok(None, json!({ "dir": dir, "files": files })))
+        Ok(response_json_ok(
+            None,
+            json!({ "dir": dir, "files": files, "node": local_node }),
+        ))
     })
     .await;
     audit.finish(&result, &audit_path, Operation::List).await;
+    result
+}
+
+/// `GET /v1/sys/scheduled-exports/{id}/backups/{filename}/fetch` — return one
+/// backup file this node holds, base64-encoded.
+///
+/// This is the peer side of a cross-node restore: the node the operator is
+/// connected to calls it on the node that owns the file. It is deliberately
+/// local-only — it never forwards — so a stale catalog record cannot set up a
+/// fetch loop between nodes. Operators can call it directly too; it is
+/// ordinary authenticated `sys` surface, audited like the rest.
+async fn sys_scheduled_exports_backup_fetch_handler(
+    req: HttpRequest,
+    core: web::Data<Arc<Core>>,
+) -> Result<HttpResponse, RvError> {
+    let audit = SysAuditCtx::new_no_body(&req, &core);
+    let id = req.match_info().get("id").unwrap_or("").to_string();
+    let filename = req.match_info().get("filename").unwrap_or("").to_string();
+    let audit_path = format!("sys/scheduled-exports/{id}/backups/{filename}/fetch");
+    let result: Result<HttpResponse, RvError> = (async move {
+        if !valid_backup_filename(&filename) {
+            return Ok(response_error(StatusCode::BAD_REQUEST, "invalid backup file name"));
+        }
+        if backup_format_of(&filename).is_none() {
+            return Ok(response_error(
+                StatusCode::BAD_REQUEST,
+                "backup file must be a .bvx or .json file",
+            ));
+        }
+
+        let store = crate::scheduled_exports::ScheduleStore::new();
+        let sched = match store.get(core.barrier.as_storage(), &id).await? {
+            Some(s) => s,
+            None => return Ok(response_error(StatusCode::NOT_FOUND, "schedule not found")),
+        };
+        let crate::scheduled_exports::DestinationKind::LocalPath { path: dir } = &sched.destination;
+        let path = std::path::Path::new(dir).join(&filename);
+
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(response_error(
+                    StatusCode::NOT_FOUND,
+                    "backup file not found on this node",
+                ));
+            }
+            Err(e) => {
+                return Ok(response_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("cannot read backup file: {e}"),
+                ))
+            }
+        };
+
+        use base64::Engine;
+        let sha256 = crate::scheduled_exports::catalog::sha256_hex(&bytes);
+        let file_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok(response_json_ok(
+            None,
+            json!({
+                "filename": filename,
+                "size_bytes": bytes.len(),
+                "sha256": sha256,
+                "file_b64": file_b64,
+                "node": crate::scheduled_exports::local_node(core.get_ref()),
+            }),
+        ))
+    })
+    .await;
+    audit.finish(&result, &audit_path, Operation::Read).await;
     result
 }
 
@@ -3044,6 +3186,9 @@ async fn sys_scheduled_exports_restore_handler(
     let audit = SysAuditCtx::new(&req, &body, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
     let audit_path = format!("sys/scheduled-exports/{id}/restore");
+    // The caller's own token is what authorises a cross-node fetch on the far
+    // side, so capture it before the request is moved out of scope.
+    let caller_token = crate::http::get_token_from_req(&req).unwrap_or_default();
     let result: Result<HttpResponse, RvError> = (async move {
         let mut payload: ScheduledExportRestoreRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
@@ -3066,8 +3211,61 @@ async fn sys_scheduled_exports_restore_handler(
 
         let file_bytes = match std::fs::read(&path) {
             Ok(b) => b,
+            // Not on this node. On a cluster that is the normal case for a
+            // nightly backup — the run was claimed by whichever node reached
+            // the cron instant first — so consult the replicated catalog and
+            // pull the bytes from the node that recorded them instead of
+            // failing the restore.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(response_error(StatusCode::NOT_FOUND, "backup file not found"));
+                let record = crate::scheduled_exports::BackupCatalog::new()
+                    .get(core.barrier.as_storage(), &id, &payload.filename)
+                    .await?;
+                let Some(record) = record else {
+                    return Ok(response_error(
+                        StatusCode::NOT_FOUND,
+                        "backup file not found on this node and no catalog record says which node holds it",
+                    ));
+                };
+                let Some(api_addr) = record.node.api_addr.clone() else {
+                    return Ok(response_error(
+                        StatusCode::CONFLICT,
+                        &format!(
+                            "backup lives on {} ({}:{}), which does not advertise an api_addr — \
+                             set api_addr in that node's config, or run the restore against it",
+                            record.node.label(),
+                            record.dir,
+                            record.filename
+                        ),
+                    ));
+                };
+                match fetch_backup_from_node(
+                    &api_addr,
+                    &id,
+                    &payload.filename,
+                    &caller_token,
+                    Some(record.sha256.as_str()),
+                )
+                .await
+                {
+                    Ok(bytes) => {
+                        log::info!(
+                            "scheduled-exports: fetched {} ({} bytes) from {} for restore",
+                            payload.filename,
+                            bytes.len(),
+                            record.node.label()
+                        );
+                        bytes
+                    }
+                    Err(err) => {
+                        return Ok(response_error(
+                            StatusCode::BAD_GATEWAY,
+                            &format!(
+                                "backup lives on {} and could not be fetched: {err}",
+                                record.node.label()
+                            ),
+                        ))
+                    }
+                }
             }
             Err(e) => return Ok(response_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("cannot read backup file: {e}"))),
         };
@@ -3304,6 +3502,12 @@ fn configure_sys_routes(scope: actix_web::Scope) -> actix_web::Scope {
         .service(
             web::resource("/scheduled-exports/{id}/backups")
                 .route(web::get().to(sys_scheduled_exports_backups_list_handler)),
+        )
+        .service(
+            // Peer side of a cross-node restore: hands back one backup file
+            // this node holds. Local-only by design — it never forwards.
+            web::resource("/scheduled-exports/{id}/backups/{filename}/fetch")
+                .route(web::get().to(sys_scheduled_exports_backup_fetch_handler)),
         )
         .service(
             web::resource("/scheduled-exports/{id}/restore")

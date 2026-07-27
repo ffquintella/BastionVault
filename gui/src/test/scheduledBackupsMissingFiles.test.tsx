@@ -99,8 +99,7 @@ describe("Scheduled backups — missing backup files", () => {
     expect(
       await screen.findByText(/1 successful run on record, but this directory is empty/),
     ).toBeInTheDocument();
-    // Both causes are named, because nothing in the logs points at either.
-    expect(screen.getByText(/Another node holds the file/)).toBeInTheDocument();
+    // The cause is named, because nothing in the logs points at it.
     expect(screen.getByText(/ephemeral writable layer/)).toBeInTheDocument();
     expect(screen.getByText("/var/lib/bvault/backups")).toBeInTheDocument();
     expect(screen.queryByText(/No backup files found/)).not.toBeInTheDocument();
@@ -120,5 +119,107 @@ describe("Scheduled backups — missing backup files", () => {
 
     expect(await screen.findByText(/No backup files found/)).toBeInTheDocument();
     expect(screen.queryByText(/directory is empty/)).not.toBeInTheDocument();
+  });
+  it("shows which node holds a backup and still offers to restore it", async () => {
+    // The nightly run was claimed by node 2, so node 1 has the catalog record
+    // but not the bytes. The server fetches them on restore, so the row must
+    // stay actionable — only the location is different.
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "scheduled_exports_list") return Promise.resolve({ schedules: [SCHEDULE] });
+      if (cmd === "scheduled_exports_backups_list") {
+        return Promise.resolve({
+          dir: "/backups",
+          files: [
+            {
+              name: "sched-20260727T163407Z.bvx",
+              size_bytes: 43917,
+              modified: "2026-07-27T16:34:07Z",
+              format: "bvx",
+              node_id: 2,
+              node_name: "segdc1vhm0004",
+              api_addr: "https://segdc1vhm0004.fgv.br:5200",
+              local: false,
+              present: true,
+            },
+            {
+              name: "sched-20260727T173548Z.bvx",
+              size_bytes: 43917,
+              modified: "2026-07-27T17:35:48Z",
+              format: "bvx",
+              node_id: 1,
+              node_name: "segdc1vhm0003",
+              local: true,
+              present: true,
+            },
+          ],
+        });
+      }
+      if (cmd === "scheduled_exports_runs") return Promise.resolve({ runs: [SUCCESSFUL_RUN] });
+      if (cmd === "get_active_namespace") return Promise.resolve("");
+      if (cmd === "list_namespaces") return Promise.resolve({ namespaces: [] });
+      return Promise.resolve([]);
+    });
+
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/exchange"]}>
+        <ToastProvider>
+          <ExchangePage />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    await user.click(screen.getByRole("button", { name: "Scheduled backups" }));
+    await user.click(await screen.findByRole("button", { name: "Backups" }));
+
+    // Both nodes' backups appear, each labelled with where it lives.
+    expect(await screen.findByText("segdc1vhm0004 (node 2)")).toBeInTheDocument();
+    expect(screen.getByText("this node")).toBeInTheDocument();
+    expect(screen.getByText(/fetched on restore/)).toBeInTheDocument();
+
+    // A peer-held file is restorable from here — nothing is disabled.
+    const restoreButtons = screen.getAllByRole("button", { name: "Restore" });
+    expect(restoreButtons).toHaveLength(2);
+    restoreButtons.forEach((b) => expect(b).not.toBeDisabled());
+  });
+
+  it("blocks restore for a catalogued file that has gone missing", async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "scheduled_exports_list") return Promise.resolve({ schedules: [SCHEDULE] });
+      if (cmd === "scheduled_exports_backups_list") {
+        return Promise.resolve({
+          dir: "/backups",
+          files: [
+            {
+              name: "sched-20260727T163407Z.bvx",
+              size_bytes: 43917,
+              modified: "2026-07-27T16:34:07Z",
+              format: "bvx",
+              node_id: 1,
+              node_name: "segdc1vhm0003",
+              local: false,
+              present: false,
+            },
+          ],
+        });
+      }
+      if (cmd === "scheduled_exports_runs") return Promise.resolve({ runs: [SUCCESSFUL_RUN] });
+      if (cmd === "get_active_namespace") return Promise.resolve("");
+      if (cmd === "list_namespaces") return Promise.resolve({ namespaces: [] });
+      return Promise.resolve([]);
+    });
+
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/exchange"]}>
+        <ToastProvider>
+          <ExchangePage />
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+    await user.click(screen.getByRole("button", { name: "Scheduled backups" }));
+    await user.click(await screen.findByRole("button", { name: "Backups" }));
+
+    expect(await screen.findByText(/file missing/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restore" })).toBeDisabled();
   });
 });

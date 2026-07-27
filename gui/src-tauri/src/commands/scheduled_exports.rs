@@ -294,6 +294,25 @@ pub struct BackupFile {
     pub modified: Option<String>,
     /// "bvx" | "json", derived from the file extension.
     pub format: String,
+    /// Cluster node that holds the file. Populated from the replicated backup
+    /// catalog; `None`/empty for a single-node or embedded vault.
+    #[serde(default)]
+    pub node_id: Option<u64>,
+    #[serde(default)]
+    pub node_name: String,
+    #[serde(default)]
+    pub api_addr: Option<String>,
+    /// True when the file is on the filesystem of the node answering the
+    /// request — restorable without a cross-node fetch.
+    #[serde(default = "default_true")]
+    pub local: bool,
+    /// False for a catalog record whose file has vanished from its owning node.
+    #[serde(default = "default_true")]
+    pub present: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize)]
@@ -321,6 +340,24 @@ fn format_of(name: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// Label of the node the replicated catalog says holds a backup file, when it
+/// has a record for it. Used to turn "cannot read backup file" into something
+/// actionable.
+async fn catalogued_node_label(
+    state: &State<'_, AppState>,
+    schedule_id: &str,
+    filename: &str,
+) -> Option<String> {
+    let vault_guard = state.vault.lock().await;
+    let core = vault_guard.as_ref()?.core.load();
+    bastion_vault::scheduled_exports::BackupCatalog::new()
+        .get(core.barrier.as_storage(), schedule_id, filename)
+        .await
+        .ok()
+        .flatten()
+        .map(|rec| rec.node.label())
 }
 
 /// Load a schedule by id from the open embedded vault.
@@ -352,50 +389,33 @@ pub async fn scheduled_exports_backups_list(
         let files = parse_field(&data, "files")?;
         return Ok(BackupListResult { dir, files });
     }
+    // Embedded vaults are single-node, but they use the same merged listing as
+    // the server so a catalog record whose file has been deleted still shows
+    // up (as `present: false`) instead of silently disappearing.
     let sched = get_schedule(&state, &id).await?;
-    let dir = local_dir(&sched.destination)?.to_string();
+    let vault_guard = state.vault.lock().await;
+    let vault = vault_guard.as_ref().ok_or("Vault not open")?;
+    let core = vault.core.load();
+    let local_node = bastion_vault::scheduled_exports::local_node(&core);
+    let (dir, entries) =
+        bastion_vault::scheduled_exports::list_backups(core.barrier.as_storage(), &sched, &local_node)
+            .await
+            .map_err(CommandError::from)?;
 
-    let mut files: Vec<BackupFile> = Vec::new();
-    let read_dir = match std::fs::read_dir(&dir) {
-        Ok(rd) => rd,
-        // A directory that does not exist yet (no run has fired) is not an
-        // error — it just means there are no backups to list.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(BackupListResult { dir, files })
-        }
-        Err(e) => return Err(format!("cannot read {dir}: {e}").into()),
-    };
-
-    for entry in read_dir.flatten() {
-        let meta = match entry.metadata() {
-            Ok(m) if m.is_file() => m,
-            _ => continue,
-        };
-        let name = entry.file_name().to_string_lossy().into_owned();
-        // Skip in-flight temp files written by the atomic-rename path.
-        if name.starts_with('.') {
-            continue;
-        }
-        let Some(format) = format_of(&name) else { continue };
-        let modified = meta
-            .modified()
-            .ok()
-            .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
-        files.push(BackupFile {
-            name,
-            size_bytes: meta.len(),
-            modified,
-            format: format.to_string(),
-        });
-    }
-
-    // Newest first: by modified time when known, then file name descending so
-    // the timestamp-suffixed runner names fall in chronological order.
-    files.sort_by(|a, b| {
-        b.modified
-            .cmp(&a.modified)
-            .then_with(|| b.name.cmp(&a.name))
-    });
+    let files = entries
+        .into_iter()
+        .map(|e| BackupFile {
+            name: e.name,
+            size_bytes: e.size_bytes,
+            modified: e.modified,
+            format: e.format,
+            node_id: e.node.node_id,
+            node_name: e.node.node_name,
+            api_addr: e.node.api_addr,
+            local: e.local,
+            present: e.present,
+        })
+        .collect();
 
     Ok(BackupListResult { dir, files })
 }
@@ -484,8 +504,22 @@ pub async fn scheduled_exports_restore(
     let sched = get_schedule(&state, &id).await?;
     let dir = local_dir(&sched.destination)?;
     let path = std::path::Path::new(dir).join(&filename);
-    let file_bytes = std::fs::read(&path)
-        .map_err(|e| CommandError::from(format!("cannot read backup file: {e}")))?;
+    let file_bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        // An embedded vault has no peers to fetch from, but the catalog can
+        // still say where the file went — worth reporting instead of a bare
+        // "No such file or directory".
+        Err(e) => {
+            let hint = catalogued_node_label(&state, &id, &filename).await;
+            return Err(CommandError::from(match hint {
+                Some(node) => format!(
+                    "cannot read backup file: {e} — the catalog records it on {node}; \
+                     restore it from that node, or copy the file into {dir}"
+                ),
+                None => format!("cannot read backup file: {e}"),
+            }));
+        }
+    };
 
     let document_bytes = match format {
         "bvx" => {

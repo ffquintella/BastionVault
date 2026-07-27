@@ -45,6 +45,47 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.37.4] - 2026-07-27
+
+### Added
+- **Cluster-wide backup catalog + cross-node restore**
+  (`src/scheduled_exports/catalog.rs`, `src/http/sys.rs`, `src/server_info.rs`,
+  `gui/src-tauri/src/commands/scheduled_exports.rs`, `gui/src/routes/ExchangePage.tsx`) --
+  0.37.3 could only *tell* the operator that a backup was on another node, and the
+  interim advice was to put every destination on shared storage. The metadata is now
+  replicated instead, so no NFS/CSI dependency is needed:
+  - Every produced file is recorded at
+    `core/scheduled_exports/backups/<schedule_id>/<filename>` with its size, format,
+    SHA-256, write time, and the owning node's Raft id / host name / `api_addr`. The
+    record is barrier-encrypted, so it replicates like the schedules themselves; a
+    catalog write failure logs a warning and never fails an otherwise-good backup.
+  - `GET /v1/sys/scheduled-exports/{id}/backups` merges the catalog with the answering
+    node's directory scan: **every** node now lists **every** backup, each row carrying
+    `node_id` / `node_name` / `api_addr` plus `local` (restorable here without a fetch)
+    and `present` (false when our own record's file has vanished). Files with no record
+    -- pre-catalog runs, an operator's manual copy -- are still listed from the scan.
+  - `POST /v1/sys/scheduled-exports/{id}/restore` fetches a file it does not hold from
+    the node that does, via the new
+    `GET /v1/sys/scheduled-exports/{id}/backups/{filename}/fetch`, and verifies the
+    bytes against the catalog's SHA-256 before decrypting. The fetch carries **the
+    caller's own token** -- tokens are already cluster-wide, so no node holds a standing
+    peer credential -- and the endpoint is local-only, never forwarding, so a stale
+    record cannot set up a loop between nodes. Peer TLS verifies against the platform
+    trust store, or against the listener's `tls_publish_ca_path` when set (private-CA and
+    self-signed clusters).
+  - The GUI's Backups modal gains a **Node** column ("this node" / `<host> (node N)`,
+    with "fetched on restore" for a peer-held file), marks a catalogued file whose bytes
+    are gone as `file missing` and disables its Restore button.
+  - `api_addr` (already a config field) is now published at startup via
+    `server_info::record_api_addr` so peers know where to call; a node that does not set
+    it still appears in the listing, and a restore against it fails with a message
+    naming the node instead of a bare "backup file not found".
+  - Deleting a schedule purges its catalog records; it never deletes backup files.
+
+  9 new tests (4 Rust unit tests over the merge logic and node identity, 2 GUI tests for
+  the Node column and the missing-file row, plus 3 existing GUI tests updated).
+  (`features/scheduled-exports.md`)
+
 ## [0.37.3] - 2026-07-27
 
 ### Fixed

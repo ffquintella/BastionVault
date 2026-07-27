@@ -75,6 +75,11 @@ impl ScheduleStore {
                 let _ = storage.delete(&format!("{runs_prefix}{k}")).await;
             }
         }
+        // Backup catalog records point at a schedule id; leaving them behind
+        // would make deleted schedules' backups un-listable but still
+        // resident in replicated storage forever. The files themselves are
+        // left alone — dropping a schedule must not delete backups.
+        let _ = super::catalog::BackupCatalog::new().delete_schedule(storage, id).await;
         Ok(())
     }
 
