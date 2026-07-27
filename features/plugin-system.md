@@ -122,6 +122,17 @@ size   = 4_532_096
 
 The host **refuses to load** a plugin whose binary doesn't match `sha256`. The hash + capability declarations are the trust contract.
 
+Operator-settable knobs are declared as `[[config_schema]]` entries (`name`, `kind`, `label`, `description`, `required`, `default`, `options`). A field may also declare a **conditional requirement**, for plugins whose modes need disjoint field sets:
+
+```toml
+[[config_schema]]
+name        = "from_address"
+kind        = "string"
+required_if = { field = "mode", equals = ["smtp"] }
+```
+
+`required_if` is evaluated against the *effective* value of the referenced field — the saved value, or its schema `default` when unset — both in the GUI Configure modal (the `*` marker and the pre-flight check follow the form live) and authoritatively in `ConfigStore::put`, which rejects the save with `<label> is required when <target> is "<value>"`. The reference must name a sibling field in the same schema; a self-referential, dangling, or empty condition is a manifest validation error. Without it, a mode-specific omission can only be caught at run time, where the operator sees it as a failed operation rather than a bad config.
+
 ### Registration
 
 ```

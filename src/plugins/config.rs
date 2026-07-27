@@ -82,6 +82,12 @@ impl ConfigStore {
     ///
     /// - Refuses keys not declared in the schema.
     /// - Honours the `required` flag.
+    /// - Honours `required_if`: a field whose condition holds against
+    ///   the *effective* value of the referenced field (post-merge,
+    ///   schema defaults applied) must carry a value. This is how a
+    ///   multi-mode plugin — the email channel is either SMTP or
+    ///   Office 365 — gets its incomplete configs rejected here rather
+    ///   than at delivery time.
     /// - For `Select` kind, refuses values outside the declared options.
     /// - For `Bool` kind, accepts only `"true"` / `"false"`.
     /// - For `Int` kind, accepts only base-10 ASCII digits (with an
@@ -97,11 +103,19 @@ impl ConfigStore {
         new_values: BTreeMap<String, String>,
     ) -> Result<(), RvError> {
         let existing = self.get(storage, &manifest.name).await?;
-        let mut out: BTreeMap<String, String> = BTreeMap::new();
 
+        // Refuse any key the operator supplied that isn't declared.
+        for k in new_values.keys() {
+            if !manifest.config_schema.iter().any(|f| &f.name == k) {
+                return Err(RvError::ErrRequestInvalid);
+            }
+        }
+
+        // Pass 1 — merge supplied / existing values per field, so a
+        // partial PUT keeps whatever the operator didn't re-send.
+        let mut merged: BTreeMap<String, String> = BTreeMap::new();
         for field in &manifest.config_schema {
-            let supplied = new_values.get(&field.name);
-            let value = match supplied {
+            let value = match new_values.get(&field.name) {
                 Some(v) if matches!(field.kind, ConfigFieldKind::Secret) && v == SECRET_PLACEHOLDER => {
                     // GUI round-trip: keep existing value.
                     existing.get(&field.name).cloned().unwrap_or_default()
@@ -109,10 +123,48 @@ impl ConfigStore {
                 Some(v) => v.clone(),
                 None => existing.get(&field.name).cloned().unwrap_or_default(),
             };
+            merged.insert(field.name.clone(), value);
+        }
+
+        // Pass 2 — validate and build the record. `required_if` reads
+        // the *effective* value of its target (merged, else the schema
+        // default), because an unset field with a default still behaves
+        // as that default at run time.
+        let effective = |name: &str| -> String {
+            let v = merged.get(name).cloned().unwrap_or_default();
+            if !v.is_empty() {
+                return v;
+            }
+            manifest
+                .config_schema
+                .iter()
+                .find(|f| f.name == name)
+                .and_then(|f| f.default.clone())
+                .unwrap_or_default()
+        };
+
+        let mut out: BTreeMap<String, String> = BTreeMap::new();
+        for field in &manifest.config_schema {
+            let value = merged.get(&field.name).cloned().unwrap_or_default();
+            let label = field.label.as_deref().unwrap_or(&field.name);
 
             if value.is_empty() {
                 if field.required {
-                    return Err(RvError::ErrRequestInvalid);
+                    return Err(RvError::ErrResponse(format!("{label} is required")));
+                }
+                if let Some(cond) = &field.required_if {
+                    let target = effective(&cond.field);
+                    if cond.matches(&target) {
+                        let target_label = manifest
+                            .config_schema
+                            .iter()
+                            .find(|f| f.name == cond.field)
+                            .and_then(|f| f.label.as_deref())
+                            .unwrap_or(&cond.field);
+                        return Err(RvError::ErrResponse(format!(
+                            "{label} is required when {target_label} is \"{target}\""
+                        )));
+                    }
                 }
                 // Don't store empty values; let the plugin fall back to
                 // its declared default.
@@ -122,29 +174,27 @@ impl ConfigStore {
             match field.kind {
                 ConfigFieldKind::Bool => {
                     if !(value == "true" || value == "false") {
-                        return Err(RvError::ErrRequestInvalid);
+                        return Err(RvError::ErrResponse(format!(
+                            "{label} must be true or false"
+                        )));
                     }
                 }
                 ConfigFieldKind::Int => {
                     if value.parse::<i64>().is_err() {
-                        return Err(RvError::ErrRequestInvalid);
+                        return Err(RvError::ErrResponse(format!("{label} must be a number")));
                     }
                 }
                 ConfigFieldKind::Select => {
                     if !field.options.iter().any(|o| o == &value) {
-                        return Err(RvError::ErrRequestInvalid);
+                        return Err(RvError::ErrResponse(format!(
+                            "{label} must be one of: {}",
+                            field.options.join(", ")
+                        )));
                     }
                 }
                 ConfigFieldKind::String | ConfigFieldKind::Secret => {}
             }
             out.insert(field.name.clone(), value);
-        }
-
-        // Refuse any key the operator supplied that isn't declared.
-        for k in new_values.keys() {
-            if !manifest.config_schema.iter().any(|f| &f.name == k) {
-                return Err(RvError::ErrRequestInvalid);
-            }
         }
 
         let key = config_key(&manifest.name);
@@ -187,6 +237,7 @@ mod tests {
                     required: true,
                     default: None,
                     options: vec![],
+                    required_if: None,
                 },
                 ConfigField {
                     name: "timeout_ms".to_string(),
@@ -196,6 +247,7 @@ mod tests {
                     required: false,
                     default: Some("3000".to_string()),
                     options: vec![],
+                    required_if: None,
                 },
                 ConfigField {
                     name: "secure".to_string(),
@@ -205,6 +257,7 @@ mod tests {
                     required: false,
                     default: None,
                     options: vec![],
+                    required_if: None,
                 },
                 ConfigField {
                     name: "algo".to_string(),
@@ -214,6 +267,7 @@ mod tests {
                     required: false,
                     default: None,
                     options: vec!["sha1".to_string(), "sha256".to_string()],
+                    required_if: None,
                 },
                 ConfigField {
                     name: "api_key".to_string(),
@@ -223,6 +277,7 @@ mod tests {
                     required: false,
                     default: None,
                     options: vec![],
+                    required_if: None,
                 },
             ],
             signature: String::new(),
@@ -354,6 +409,103 @@ mod tests {
         input.insert("endpoint".to_string(), "x".to_string());
         input.insert("timeout_ms".to_string(), "not-a-number".to_string());
         assert!(store.put(&s, &m, input).await.is_err());
+    }
+
+    /// Mode-scoped manifest in the shape the email channel uses: a
+    /// `mode` select defaulting to `"smtp"`, one field required only in
+    /// that mode, one required only in the other. `mode` itself is left
+    /// optional here so the condition can be exercised against the
+    /// schema default as well as an explicit value.
+    fn mode_manifest() -> PluginManifest {
+        let mut m = manifest();
+        m.config_schema = vec![
+            ConfigField {
+                name: "mode".to_string(),
+                kind: ConfigFieldKind::Select,
+                label: Some("Mode".to_string()),
+                description: None,
+                required: false,
+                default: Some("smtp".to_string()),
+                options: vec!["smtp".to_string(), "office365".to_string()],
+                required_if: None,
+            },
+            ConfigField {
+                name: "from_address".to_string(),
+                kind: ConfigFieldKind::String,
+                label: Some("From address".to_string()),
+                description: None,
+                required: false,
+                default: None,
+                options: vec![],
+                required_if: Some(super::super::manifest::ConfigCondition {
+                    field: "mode".to_string(),
+                    equals: vec!["smtp".to_string()],
+                }),
+            },
+            ConfigField {
+                name: "o365_sender".to_string(),
+                kind: ConfigFieldKind::String,
+                label: Some("O365 sender address".to_string()),
+                description: None,
+                required: false,
+                default: None,
+                options: vec![],
+                required_if: Some(super::super::manifest::ConfigCondition {
+                    field: "mode".to_string(),
+                    equals: vec!["office365".to_string()],
+                }),
+            },
+        ];
+        m
+    }
+
+    /// The condition holds via the schema default: `mode` is unset, so
+    /// it is effectively `"smtp"` and `from_address` is mandatory.
+    #[tokio::test]
+    async fn required_if_matches_via_default() {
+        let s = MemStorage::default();
+        let store = ConfigStore::new();
+        let m = mode_manifest();
+        let err = store.put(&s, &m, BTreeMap::new()).await.unwrap_err();
+        assert!(
+            err.to_string().contains("From address is required when Mode is \"smtp\""),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn required_if_scopes_to_the_selected_mode() {
+        let s = MemStorage::default();
+        let store = ConfigStore::new();
+        let m = mode_manifest();
+
+        // office365 mode: from_address is irrelevant, o365_sender isn't.
+        let mut input = BTreeMap::new();
+        input.insert("mode".to_string(), "office365".to_string());
+        assert!(store.put(&s, &m, input.clone()).await.is_err());
+
+        input.insert("o365_sender".to_string(), "bv@example.com".to_string());
+        store.put(&s, &m, input).await.unwrap();
+
+        // Switching back to smtp now needs from_address, even though
+        // the stored o365_sender is still there.
+        let mut back = BTreeMap::new();
+        back.insert("mode".to_string(), "smtp".to_string());
+        assert!(store.put(&s, &m, back).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn required_if_satisfied_saves() {
+        let s = MemStorage::default();
+        let store = ConfigStore::new();
+        let m = mode_manifest();
+        let mut input = BTreeMap::new();
+        input.insert("mode".to_string(), "smtp".to_string());
+        input.insert("from_address".to_string(), "bv@example.com".to_string());
+        store.put(&s, &m, input).await.unwrap();
+        let got = store.get(&s, &m.name).await.unwrap();
+        assert_eq!(got.get("from_address").unwrap(), "bv@example.com");
+        assert!(got.get("o365_sender").is_none());
     }
 
     #[tokio::test]

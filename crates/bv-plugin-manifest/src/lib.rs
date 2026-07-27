@@ -65,6 +65,49 @@ pub struct ConfigField {
     /// For `Select` kind: the allowed options.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<String>,
+    /// Conditional requirement: the field must carry a value whenever
+    /// another field's effective value is one of the listed ones.
+    ///
+    /// Plugins with mutually-exclusive modes (an email channel that is
+    /// either SMTP *or* Office 365, say) cannot express their real
+    /// requirements with the flat `required` flag: half the schema is
+    /// mandatory in one mode and meaningless in the other. Declaring
+    /// `required_if` lets the host reject an incomplete config at save
+    /// time instead of letting the plugin fail at run time, where the
+    /// operator only sees it as a delivery failure.
+    ///
+    /// In `plugin.toml`:
+    ///
+    /// ```toml
+    /// [[config_schema]]
+    /// name        = "from_address"
+    /// kind        = "string"
+    /// required_if = { field = "mode", equals = ["smtp"] }
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_if: Option<ConfigCondition>,
+}
+
+/// A predicate over another config field's effective value — the saved
+/// value, or the schema `default` when nothing is saved yet.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConfigCondition {
+    /// Name of the field to test. Must be declared in the same
+    /// `config_schema` (and must not be the field carrying the
+    /// condition).
+    pub field: String,
+    /// The condition holds when the referenced field's effective value
+    /// equals any entry here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub equals: Vec<String>,
+}
+
+impl ConfigCondition {
+    /// Does this condition hold for `value`, the referenced field's
+    /// effective value?
+    pub fn matches(&self, value: &str) -> bool {
+        self.equals.iter().any(|v| v == value)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -497,6 +540,17 @@ impl PluginManifest {
             if matches!(field.kind, ConfigFieldKind::Select) && field.options.is_empty() {
                 return Err("config_schema field of kind=select must declare options");
             }
+            if let Some(cond) = &field.required_if {
+                if cond.equals.is_empty() {
+                    return Err("config_schema required_if must list at least one value in `equals`");
+                }
+                if cond.field == field.name {
+                    return Err("config_schema required_if cannot reference its own field");
+                }
+                if !self.config_schema.iter().any(|f| f.name == cond.field) {
+                    return Err("config_schema required_if references an undeclared field");
+                }
+            }
         }
         if let Some(s) = &self.surface {
             if s.sha256.len() != 64 || !s.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -822,6 +876,7 @@ mod tests {
             required: false,
             default: None,
             options: vec![],
+            required_if: None,
         });
         assert!(m.validate().is_err());
     }
@@ -837,6 +892,62 @@ mod tests {
             required: false,
             default: None,
             options: vec![],
+            required_if: None,
+        });
+        assert!(m.validate().is_err());
+    }
+
+    /// `required_if` must point at a sibling field — a typo'd or
+    /// self-referential condition can never be evaluated, so it is a
+    /// manifest error rather than a silently-ignored knob.
+    #[test]
+    fn validates_required_if_reference() {
+        let mut m = fixture();
+        m.config_schema.push(ConfigField {
+            name: "mode".to_string(),
+            kind: ConfigFieldKind::Select,
+            label: None,
+            description: None,
+            required: true,
+            default: Some("smtp".to_string()),
+            options: vec!["smtp".to_string(), "office365".to_string()],
+            required_if: None,
+        });
+        m.config_schema.push(ConfigField {
+            name: "from_address".to_string(),
+            kind: ConfigFieldKind::String,
+            label: None,
+            description: None,
+            required: false,
+            default: None,
+            options: vec![],
+            required_if: Some(ConfigCondition {
+                field: "mode".to_string(),
+                equals: vec!["smtp".to_string()],
+            }),
+        });
+        assert!(m.validate().is_ok(), "condition on a declared field is valid");
+
+        let last = m.config_schema.len() - 1;
+
+        // Unknown target field.
+        m.config_schema[last].required_if = Some(ConfigCondition {
+            field: "nope".to_string(),
+            equals: vec!["smtp".to_string()],
+        });
+        assert!(m.validate().is_err());
+
+        // Self-reference.
+        m.config_schema[last].required_if = Some(ConfigCondition {
+            field: "from_address".to_string(),
+            equals: vec!["smtp".to_string()],
+        });
+        assert!(m.validate().is_err());
+
+        // Empty `equals` can never match.
+        m.config_schema[last].required_if = Some(ConfigCondition {
+            field: "mode".to_string(),
+            equals: vec![],
         });
         assert!(m.validate().is_err());
     }
@@ -937,6 +1048,7 @@ mod tests {
             required: true,
             default: None,
             options: vec![],
+            required_if: None,
         });
         m.config_schema.push(ConfigField {
             name: "algorithm".to_string(),
@@ -946,6 +1058,7 @@ mod tests {
             required: false,
             default: Some("sha256".to_string()),
             options: vec!["sha1".to_string(), "sha256".to_string(), "sha512".to_string()],
+            required_if: None,
         });
         assert!(m.validate().is_ok());
     }

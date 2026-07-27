@@ -45,6 +45,38 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.36.4] - 2026-07-27
+
+### Added
+- **Conditional plugin config requirements (`required_if`).** A
+  `[[config_schema]]` field can now declare
+  `required_if = { field = "mode", equals = ["smtp"] }`, making it mandatory
+  only when another field carries one of the listed values. The condition is
+  evaluated against the *effective* value of the referenced field (the saved
+  value, or its schema `default` when unset) — authoritatively in
+  `ConfigStore::put` and, live as the operator edits, in the GUI Configure
+  modal, where the `*` marker follows the current form state. A manifest whose
+  condition is self-referential, points at an undeclared field, or lists no
+  values fails validation (`crates/bv-plugin-manifest`, `src/plugins/config.rs`,
+  `gui/src/routes/PluginsPage.tsx`, `features/plugin-system.md`).
+
+### Changed
+- **The email channel plugin declares its per-mode required fields.** `smtp_host`
+  and `from_address` are now required when `mode = smtp`; `o365_tenant_id`,
+  `o365_client_id`, `o365_client_secret`, and `o365_sender` when
+  `mode = office365`. An incomplete channel config is refused at save time with
+  the field named, instead of surfacing later as a delivery failure
+  (`Sent to 1 recipient(s); some channel deliveries failed: email:email
+  (from_address (or smtp_username) is required)`). Plugin version bumped to
+  **0.1.1**; re-pack (`make plugins-sign`) and re-register the bundle to pick up
+  the new schema
+  (`plugins-ext/bastion-plugin-email/plugin.toml`, `features/notifications.md`).
+- **Plugin config validation errors name the field.** `PUT
+  /v1/sys/plugins/<name>/config` returned a bare `Request is invalid.` for every
+  rejection; it now returns HTTP 400 with the specific reason — `From address is
+  required when Mode is "smtp"`, `SMTP port must be a number`, `Mode must be one
+  of: smtp, office365` (`src/plugins/config.rs`).
+
 ## [0.36.3] - 2026-07-27
 
 ### Fixed

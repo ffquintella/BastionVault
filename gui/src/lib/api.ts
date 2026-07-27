@@ -1760,6 +1760,18 @@ export const readLocalFileB64 = (path: string) =>
 
 export type PluginConfigFieldKind = "string" | "int" | "bool" | "secret" | "select";
 
+/**
+ * Conditional requirement declared by the plugin: the field is
+ * mandatory whenever `field`'s effective value (the current value, or
+ * the schema default when unset) is one of `equals`. Lets a multi-mode
+ * plugin — e.g. the email channel's smtp / office365 split — mark only
+ * the fields the selected mode actually needs.
+ */
+export interface PluginConfigCondition {
+  field: string;
+  equals: string[];
+}
+
 export interface PluginConfigField {
   name: string;
   kind: PluginConfigFieldKind;
@@ -1768,6 +1780,7 @@ export interface PluginConfigField {
   required?: boolean;
   default?: string | null;
   options?: string[];
+  required_if?: PluginConfigCondition | null;
 }
 
 export interface PluginConfigResult {

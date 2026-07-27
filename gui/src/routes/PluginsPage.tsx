@@ -957,13 +957,38 @@ function ConfigureModal({
     setValues((prev) => ({ ...prev, [name]: value }));
   }
 
+  /**
+   * Effective value of a field for `required_if` evaluation: what the
+   * operator typed, else the schema default — matching how the host
+   * resolves it, so the form and the server agree on what's missing.
+   */
+  function effective(name: string): string {
+    const v = values[name];
+    if (v) return v;
+    return loaded?.schema.find((f) => f.name === name)?.default ?? "";
+  }
+
+  /** True when the field is mandatory given the current form state. */
+  function isRequired(f: PluginConfigField): boolean {
+    if (f.required) return true;
+    const cond = f.required_if;
+    return !!cond && cond.equals.includes(effective(cond.field));
+  }
+
   async function handleSave() {
     if (!loaded) return;
     // Required-field check (the host validates too; this is a UX nicety
     // so the operator gets feedback before the round-trip).
     for (const f of loaded.schema) {
-      if (f.required && !values[f.name]) {
-        toast("error", `${f.label ?? f.name} is required`);
+      if (isRequired(f) && !values[f.name]) {
+        const cond = f.required_if;
+        const why =
+          !f.required && cond
+            ? ` when ${
+                loaded.schema.find((t) => t.name === cond.field)?.label ?? cond.field
+              } is "${effective(cond.field)}"`
+            : "";
+        toast("error", `${f.label ?? f.name} is required${why}`);
         return;
       }
     }
@@ -993,6 +1018,7 @@ function ConfigureModal({
             <ConfigInput
               key={f.name}
               field={f}
+              required={isRequired(f)}
               value={values[f.name] ?? ""}
               onChange={(v) => setField(f.name, v)}
             />
@@ -1011,18 +1037,25 @@ function ConfigureModal({
   );
 }
 
-/** One row in the ConfigureModal — picks the right input by `field.kind`. */
+/**
+ * One row in the ConfigureModal — picks the right input by
+ * `field.kind`. `required` comes from the modal rather than the field
+ * because it can depend on another field's current value
+ * (`required_if`), so the asterisk tracks the form as the operator
+ * flips modes.
+ */
 function ConfigInput({
   field,
+  required,
   value,
   onChange,
 }: {
   field: PluginConfigField;
+  required: boolean;
   value: string;
   onChange: (v: string) => void;
 }) {
-  const label =
-    (field.label ?? field.name) + (field.required ? " *" : "");
+  const label = (field.label ?? field.name) + (required ? " *" : "");
   const hint = field.description ?? undefined;
 
   switch (field.kind) {

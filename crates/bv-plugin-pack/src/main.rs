@@ -313,6 +313,28 @@ mod tests {
         assert!(!is_placeholder_sha("0"));
     }
 
+    /// The shipped email channel manifest is the only one using
+    /// `required_if`, and its inline-table TOML syntax is easy to get
+    /// wrong (a broken condition would only show up as a pack failure
+    /// during a release build). Parse and validate the real file.
+    #[test]
+    fn shipped_email_manifest_parses_with_required_if() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugins-ext/bastion-plugin-email/plugin.toml");
+        let text = fs::read_to_string(&path).expect("email plugin.toml is readable");
+        let m: PluginManifest = toml::from_str(&text).expect("email plugin.toml parses");
+        m.validate().expect("email plugin.toml validates");
+        let from = m
+            .config_schema
+            .iter()
+            .find(|f| f.name == "from_address")
+            .expect("from_address is declared");
+        let cond = from.required_if.as_ref().expect("from_address is mode-scoped");
+        assert_eq!(cond.field, "mode");
+        assert!(cond.matches("smtp"));
+        assert!(!cond.matches("office365"));
+    }
+
     #[test]
     fn round_trip_pack_then_parse() {
         let dir = tempdir();

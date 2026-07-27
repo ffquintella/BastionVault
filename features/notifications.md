@@ -142,8 +142,11 @@ channel. Config selects `mode = smtp | office365`; SMTP supports
 STARTTLS / implicit-TLS / none with optional SMTP AUTH (via `lettre`
 over rustls); Office 365 uses OAuth2 client-credentials + Microsoft
 Graph `sendMail` (via `reqwest`, rustls). Passwords / client secrets use
-the `secret` config kind (barrier-encrypted, never echoed back). See the
-plugin README.
+the `secret` config kind (barrier-encrypted, never echoed back). The
+mode-specific fields declare `required_if = { field = "mode", equals =
+[…] }`, so an SMTP config with no **From address** (or an Office 365
+config with no app registration) is refused when the operator saves it,
+instead of surfacing later as a delivery failure. See the plugin README.
 
 ## GUI
 
