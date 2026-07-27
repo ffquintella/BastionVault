@@ -9,7 +9,7 @@
     },
     {
       "name": "gui-frontend",
-      "runtimeExecutable": "npm.cmd",
+      "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev", "--prefix", "gui"],
       "port": 1420
     },

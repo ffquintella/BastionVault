@@ -1385,6 +1385,9 @@ export const ssoAdminCallbackHints = (mount: string, kind: "oidc" | "saml") =>
 // XChaCha20-Poly1305 password-encrypted .bvx envelope. Distinct from the
 // operator-level BVBK backup. See `features/import-export-module.md`.
 
+/** `full` = everything the caller can read; `selective` = the listed selectors. */
+export type ExchangeScopeKind = "selective" | "full";
+
 export interface ExchangeScopeSelector {
   type: "kv_path" | "resource" | "asset_group" | "resource_group";
   mount?: string;
@@ -1422,12 +1425,19 @@ export interface ExchangeApplyResult {
   renamed: number;
 }
 
+/**
+ * `scopeKind: "full"` exports everything the caller can read (every KV mount,
+ * resource, file blob, group, and non-KV engine subtree) and ignores the
+ * `include` list — no selectors needed. `"selective"` (default) exports only
+ * the listed selectors.
+ */
 export const exchangeExport = (
   include: ExchangeScopeSelector[],
   format: "bvx" | "json",
   password?: string,
   allowPlaintext: boolean = false,
   comment?: string,
+  scopeKind: ExchangeScopeKind = "selective",
 ) =>
   invoke<ExchangeExportResult>("exchange_export", {
     include,
@@ -1435,6 +1445,7 @@ export const exchangeExport = (
     password: password ?? null,
     allowPlaintext,
     comment: comment ?? null,
+    scopeKind,
   });
 
 export const exchangePreview = (

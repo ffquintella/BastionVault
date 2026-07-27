@@ -45,6 +45,22 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.36.6] - 2026-07-27
+
+### Added
+- **Full-vault export from the Import / Export page** (`gui/src/routes/ExchangePage.tsx`,
+  `gui/src-tauri/src/commands/exchange.rs`) -- the Export tab's new *What to export*
+  selector offers **Full vault** next to the existing per-scope list, sending
+  `scope.kind = "full"` so the export captures every KV mount, resource, file blob,
+  resource / asset group, and non-KV engine subtree (PKI, SSH, transit, TOTP, …).
+  The resolver already supported this and scheduled backups used it, but the
+  interactive page could not reach it: the `exchange_export` Tauri command hardcoded
+  `ScopeKind::Selective`. It now takes a `scopeKind` argument (`"selective"` default,
+  recorded in the export's audit entry). Full mode is always password-encrypted
+  `.bvx` -- the plaintext-JSON option stays available for selective exports only --
+  downloads as `vault-full-export.bvx`, and asks for confirmation first.
+  (`features/import-export-module.md`)
+
 ## [0.36.5] - 2026-07-27
 
 ### Fixed

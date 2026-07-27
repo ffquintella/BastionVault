@@ -3,6 +3,7 @@ import { Layout } from "../components/Layout";
 import { Button, Card, Tabs, Input, Select, ConfirmModal, useToast } from "../components/ui";
 import * as api from "../lib/api";
 import type {
+  ExchangeScopeKind,
   ExchangeScopeSelector,
   ExchangePreviewResult,
   ExchangePreviewItem,
@@ -61,6 +62,7 @@ export function ExchangePage() {
 type ToastFn = (kind: "success" | "error" | "info", message: string) => void;
 
 function ExportTab({ toast }: { toast: ToastFn }) {
+  const [scopeKind, setScopeKind] = useState<ExchangeScopeKind>("selective");
   const [scopes, setScopes] = useState<ExchangeScopeSelector[]>([
     { type: "kv_path", mount: "secret/", path: "" },
   ]);
@@ -69,6 +71,22 @@ function ExportTab({ toast }: { toast: ToastFn }) {
   const [allowPlaintext, setAllowPlaintext] = useState(false);
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState(false);
+  const [confirmFull, setConfirmFull] = useState(false);
+
+  const isFull = scopeKind === "full";
+
+  /**
+   * A full-vault export dumps every secret the caller can read into one
+   * file, so it is always password-encrypted `.bvx` — the plaintext-JSON
+   * escape hatch stays available for narrow, selective exports only.
+   */
+  function changeScopeKind(next: ExchangeScopeKind) {
+    setScopeKind(next);
+    if (next === "full") {
+      setFormat("bvx");
+      setAllowPlaintext(false);
+    }
+  }
 
   function updateScope(idx: number, patch: Partial<ExchangeScopeSelector>) {
     setScopes((prev) => prev.map((s, i) => (i === idx ? { ...s, ...patch } : s)));
@@ -86,14 +104,22 @@ function ExportTab({ toast }: { toast: ToastFn }) {
       toast("error", "Password must be at least 12 characters.");
       return;
     }
+    // Full exports go through a confirm step — the resulting file holds
+    // every secret the caller can read.
+    if (isFull && !confirmFull) {
+      setConfirmFull(true);
+      return;
+    }
+    setConfirmFull(false);
     setBusy(true);
     try {
       const result = await api.exchangeExport(
-        scopes,
+        isFull ? [] : scopes,
         format,
         format === "bvx" ? password : undefined,
         format === "json" ? allowPlaintext : false,
         comment || undefined,
+        scopeKind,
       );
       // Trigger a browser download.
       const bytes = atob(result.file_b64);
@@ -105,7 +131,8 @@ function ExportTab({ toast }: { toast: ToastFn }) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = format === "bvx" ? "exchange.bvx" : "exchange.json";
+      const stem = isFull ? "vault-full-export" : "exchange";
+      a.download = format === "bvx" ? `${stem}.bvx` : `${stem}.json`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -126,8 +153,37 @@ function ExportTab({ toast }: { toast: ToastFn }) {
       <div className="space-y-4">
         <div className="space-y-2">
           <p className="text-sm font-medium">Scope</p>
-          <ScopeTypeHelp />
-          {scopes.map((s, idx) => (
+          <Select
+            label="What to export"
+            value={scopeKind}
+            onChange={(e) => changeScopeKind(e.target.value as ExchangeScopeKind)}
+            options={[
+              { value: "selective", label: "Selected scopes" },
+              { value: "full", label: "Full vault (every secret in this namespace)" },
+            ]}
+          />
+          {isFull ? (
+            <div className="rounded border border-[var(--color-warning)] bg-[var(--color-warning)]/10 p-3 text-xs space-y-1">
+              <p className="font-medium text-[var(--color-warning)]">
+                Full export — the vault's entire data plane
+              </p>
+              <p className="text-[var(--color-text-muted)]">
+                Captures every KV mount, resource, file blob, resource / asset group,
+                and other secret engine (PKI, SSH, transit, TOTP…) in this namespace.
+                Contents are not filtered per-secret by policy, so treat the file as
+                holding everything. The control plane — mount table, seal config,
+                identities, and policies — is not included; use operator backup for
+                that.
+              </p>
+              <p className="text-[var(--color-text-muted)]">
+                Always written as a password-encrypted <code>.bvx</code> file. Store it
+                like you would the vault itself.
+              </p>
+            </div>
+          ) : (
+            <ScopeTypeHelp />
+          )}
+          {!isFull && scopes.map((s, idx) => (
             <div key={idx} className="grid grid-cols-12 gap-2 items-end">
               <div className="col-span-3">
                 <Select
@@ -184,20 +240,27 @@ function ExportTab({ toast }: { toast: ToastFn }) {
               </div>
             </div>
           ))}
-          <Button size="sm" variant="secondary" onClick={addScope}>
-            + Add scope
-          </Button>
+          {!isFull && (
+            <Button size="sm" variant="secondary" onClick={addScope}>
+              + Add scope
+            </Button>
+          )}
         </div>
 
         <div className="grid grid-cols-2 gap-3">
           <Select
             label="Format"
             value={format}
+            disabled={isFull}
             onChange={(e) => setFormat(e.target.value as "bvx" | "json")}
-            options={[
-              { value: "bvx", label: ".bvx (password-encrypted)" },
-              { value: "json", label: "JSON (plaintext)" },
-            ]}
+            options={
+              isFull
+                ? [{ value: "bvx", label: ".bvx (password-encrypted)" }]
+                : [
+                    { value: "bvx", label: ".bvx (password-encrypted)" },
+                    { value: "json", label: "JSON (plaintext)" },
+                  ]
+            }
           />
           {format === "bvx" ? (
             <Input
@@ -233,11 +296,25 @@ function ExportTab({ toast }: { toast: ToastFn }) {
         )}
 
         <div className="flex justify-end">
-          <Button onClick={handleExport} loading={busy} disabled={scopes.length === 0}>
-            Export & download
+          <Button
+            onClick={handleExport}
+            loading={busy}
+            disabled={!isFull && scopes.length === 0}
+          >
+            {isFull ? "Export full vault & download" : "Export & download"}
           </Button>
         </div>
       </div>
+
+      <ConfirmModal
+        open={confirmFull}
+        onClose={() => setConfirmFull(false)}
+        onConfirm={handleExport}
+        title="Export the entire vault?"
+        message="The downloaded .bvx file will contain every secret, resource, file, and engine key in this namespace, encrypted with the password you entered. Anyone with the file and the password has all of it."
+        confirmLabel="Export everything"
+        loading={busy}
+      />
     </Card>
   );
 }

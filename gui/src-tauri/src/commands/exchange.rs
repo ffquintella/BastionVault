@@ -70,7 +70,22 @@ pub struct ScopeSelectorInput {
     pub id: Option<String>,
 }
 
-fn parse_scope(include: &[ScopeSelectorInput]) -> Result<exchange::ScopeSpec, CommandError> {
+/// Build a `ScopeSpec` from the frontend's selector list.
+///
+/// `scope_kind` is `"selective"` (default) or `"full"`. A `full` scope tells
+/// `export_to_document` to enumerate everything the actor can read — every KV
+/// mount, resource, file blob, group, and non-KV engine subtree — so the
+/// caller need not hand-list selectors. Any selectors supplied alongside
+/// `full` are still honoured; the resolver's dedup pass collapses the overlap.
+fn parse_scope(
+    include: &[ScopeSelectorInput],
+    scope_kind: Option<&str>,
+) -> Result<exchange::ScopeSpec, CommandError> {
+    let kind = match scope_kind.unwrap_or("selective") {
+        "selective" => exchange::ScopeKind::Selective,
+        "full" => exchange::ScopeKind::Full,
+        _ => return Err("scopeKind must be \"selective\" or \"full\"".into()),
+    };
     let mut out = Vec::with_capacity(include.len());
     for s in include {
         let sel = match s.kind.as_str() {
@@ -91,10 +106,7 @@ fn parse_scope(include: &[ScopeSelectorInput]) -> Result<exchange::ScopeSpec, Co
         };
         out.push(sel);
     }
-    Ok(exchange::ScopeSpec {
-        kind: exchange::ScopeKind::Selective,
-        include: out,
-    })
+    Ok(exchange::ScopeSpec { kind, include: out })
 }
 
 #[derive(Debug, Serialize)]
@@ -116,8 +128,9 @@ pub async fn exchange_export(
     password: Option<String>,
     allow_plaintext: Option<bool>,
     comment: Option<String>,
+    scope_kind: Option<String>,
 ) -> CmdResult<ExchangeExportResult> {
-    let scope = parse_scope(&include)?;
+    let scope = parse_scope(&include, scope_kind.as_deref())?;
     let allow_plaintext_b = allow_plaintext.unwrap_or(false);
 
     // Remote mode: the embedded `Core` is `None`, so build the same request
@@ -166,6 +179,12 @@ pub async fn exchange_export(
     // comment + scope-shape (HMAC redaction handles values inside).
     let mut body = serde_json::Map::new();
     body.insert("format".into(), serde_json::Value::String(format));
+    body.insert(
+        "scope_kind".into(),
+        serde_json::Value::String(
+            scope_kind.unwrap_or_else(|| "selective".to_string()),
+        ),
+    );
     body.insert(
         "comment".into(),
         comment.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null),
