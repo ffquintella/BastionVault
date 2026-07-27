@@ -45,6 +45,44 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.36.5] - 2026-07-27
+
+### Fixed
+- **Background schedulers never started on HSM auto-unsealing servers.** With an
+  `hsm "…"` seal block, startup ran the auto-unseal on a throwaway bootstrap
+  runtime that was dropped immediately afterwards. Unsealing is what spawns
+  every process-lifetime background worker, and tasks spawned on a dropped
+  runtime are discarded before their first poll — so **scheduled exports, PKI
+  auto-tidy, LDAP auto-rotate, files sync, cert-lifecycle, and the Rustion
+  probes silently never ran**. Nothing failed and nothing was logged; the only
+  visible symptom was work that never happened (an enabled nightly backup
+  schedule whose destination directory stayed empty for weeks, with no run
+  history and no audit events). Auto-unseal now runs on the Actix system
+  runtime, which lives as long as the process. Servers unsealed with operator
+  shares over `/sys/unseal` were never affected. Restart any auto-unsealing
+  server after upgrading and confirm `scheduled-exports: scheduler started` is
+  in `operations.log` (`src/cli/command/server.rs`).
+- **Scheduled-export cron expressions are evaluated in server local time.** They
+  were resolved in UTC while the spec, the GUI editor, and the schedule docs all
+  state "server local time", so a `0 0 3 * * *` schedule fired at 03:00 UTC —
+  midnight in UTC−3. Existing schedules keep their expression and now fire at
+  the local wall-clock time they read as; on a non-UTC host, verify the shift
+  is what you want (`src/scheduled_exports/runner.rs`,
+  `features/scheduled-exports.md`).
+- **A restart no longer swallows a scheduled export's window.** The runner
+  tracked last-fired in memory only and resumed from "now" on start, so a
+  process that restarted between two cron instants skipped that instant
+  entirely — on a host restarted most days, a nightly schedule could go weeks
+  without producing anything. First sighting after start now resumes from the
+  schedule's most recent persisted run record and runs one missed instance
+  (catch-up is `single` — five missed nights produce one backup, not five; the
+  per-tick scan is bounded). A schedule that has never run still resumes from
+  "now" (`src/scheduled_exports/runner.rs`).
+- **Each scheduler firing is now logged.** `scheduled-exports: firing schedule
+  <id> (<name>) for cron instant <local time>` at info level, so an unattended
+  run leaves a trace in `operations.log` even before its run record lands
+  (`src/scheduled_exports/runner.rs`).
+
 ## [0.36.4] - 2026-07-27
 
 ### Added

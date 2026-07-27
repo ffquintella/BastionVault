@@ -225,59 +225,19 @@ impl Server {
         let bvault = BastionVault::new(backend, Some(&config))?;
         let core = bvault.core.load().clone();
 
-        // HSM seal: if the config declares an `hsm "..."` block, open the
-        // backend, install the auto-unseal seal provider, and attempt to
-        // unseal without operator shares. Fail-closed — any error leaves the
-        // vault sealed and is logged loudly; the process still starts so the
-        // condition is diagnosable (an invalid *config*, by contrast, aborts
-        // startup rather than silently falling back to Shamir).
-        match config.resolve_hsm() {
-            Ok(Some(hsm_cfg)) => {
-                let physical = core.physical.clone();
-                let hsm_core = core.clone();
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("tokio runtime for HSM bootstrap");
-                let result = rt.block_on(async {
-                    let backend = crate::hsm::new_backend(&hsm_cfg).await?;
-                    log::info!(
-                        target: "security",
-                        "HSM seal backend `{}` (serial {}) online",
-                        backend.backend_type(),
-                        backend.device_serial()
-                    );
-                    let provider = std::sync::Arc::new(crate::seal::hsm::HsmSealProvider::new(
-                        backend,
-                        physical,
-                        hsm_cfg.clone(),
-                    ));
-                    hsm_core.set_seal_provider(provider);
-                    if hsm_core.inited().await? {
-                        hsm_core.auto_unseal().await
-                    } else {
-                        log::info!(
-                            target: "security",
-                            "HSM seal configured; vault not initialized — `operator init` will wrap the KEK under the HSM"
-                        );
-                        Ok(false)
-                    }
-                });
-                match result {
-                    Ok(true) => log::info!(target: "security", "HSM auto-unseal succeeded"),
-                    Ok(false) => {}
-                    Err(e) => log::error!(
-                        target: "security",
-                        "HSM auto-unseal failed; vault remains sealed: {e}"
-                    ),
-                }
-            }
-            Ok(None) => {}
+        // HSM seal: if the config declares an `hsm "..."` block, resolve it now
+        // so an invalid *config* aborts startup rather than silently falling
+        // back to Shamir. Opening the device and unsealing happens later, on
+        // the Actix system runtime (see `server.block_on` below) — never on a
+        // throwaway bootstrap runtime.
+        let hsm_cfg = match config.resolve_hsm() {
+            Ok(cfg) => cfg,
             Err(e) => {
                 log::error!("invalid HSM seal configuration: {e}");
                 return Err(e);
             }
-        }
+        };
+        let hsm_bootstrap = hsm_cfg.map(|cfg| (cfg, core.physical.clone(), core.clone()));
 
         // Phase 1.5: parse BASTIONVAULT_TRUSTED_PROXIES once at start.
         // Bad CIDRs are logged at warn level but do not abort the
@@ -359,6 +319,55 @@ impl Server {
         log::info!("bastion_vault server starts, waiting for request...");
 
         server.block_on(async {
+            // HSM auto-unseal runs here, inside the Actix system runtime, and
+            // not on a short-lived bootstrap runtime: unsealing calls
+            // `Core::post_unseal`, which `tokio::task::spawn`s every
+            // process-lifetime background worker (scheduled exports, PKI
+            // auto-tidy, LDAP auto-rotate, files sync, cert lifecycle, Rustion
+            // probes). Tasks spawned on a runtime that is then dropped are
+            // discarded before their first poll, so those workers silently
+            // never ran on auto-unsealing deployments. Keep this on the runtime
+            // that lives as long as the process.
+            //
+            // Fail-closed — any error leaves the vault sealed and is logged
+            // loudly; the process still serves requests so the condition is
+            // diagnosable via `/sys/seal-status`.
+            if let Some((hsm_cfg, physical, hsm_core)) = hsm_bootstrap {
+                let result = async {
+                    let backend = crate::hsm::new_backend(&hsm_cfg).await?;
+                    log::info!(
+                        target: "security",
+                        "HSM seal backend `{}` (serial {}) online",
+                        backend.backend_type(),
+                        backend.device_serial()
+                    );
+                    let provider = std::sync::Arc::new(crate::seal::hsm::HsmSealProvider::new(
+                        backend,
+                        physical,
+                        hsm_cfg.clone(),
+                    ));
+                    hsm_core.set_seal_provider(provider);
+                    if hsm_core.inited().await? {
+                        hsm_core.auto_unseal().await
+                    } else {
+                        log::info!(
+                            target: "security",
+                            "HSM seal configured; vault not initialized — `operator init` will wrap the KEK under the HSM"
+                        );
+                        Ok(false)
+                    }
+                }
+                .await;
+                match result {
+                    Ok(true) => log::info!(target: "security", "HSM auto-unseal succeeded"),
+                    Ok(false) => {}
+                    Err(e) => log::error!(
+                        target: "security",
+                        "HSM auto-unseal failed; vault remains sealed: {e}"
+                    ),
+                }
+            }
+
             tokio::spawn(async {
                 system_metrics.start_collecting().await;
             });

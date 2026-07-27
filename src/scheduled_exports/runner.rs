@@ -1,22 +1,31 @@
 //! Single-process tick-loop scheduler.
 //!
-//! Spawned by `Core::post_unseal_init_scheduled_exports` once the barrier
-//! is open. Walks every schedule on a fixed cadence; when `next_after(prev)`
-//! is in the past relative to the last-known fire time, the schedule fires
-//! once and the new fire time is recorded.
+//! Spawned by `Core::post_unseal` once the barrier is open. Walks every
+//! schedule on a fixed cadence; when a cron instant has passed since the
+//! schedule last fired, the schedule fires once and the new fire time is
+//! recorded.
 //!
-//! The runner deliberately tracks last-fired in-memory only — losing it on
-//! restart simply means we re-evaluate from "now" and miss the brief
-//! window between previous-fire-and-restart. That's the right tradeoff for
-//! a single-process scheduler; HA + leader gating land in a follow-up
-//! per `features/scheduled-exports.md` Phase 1 (deferred).
+//! Cron expressions are evaluated in the **server's local timezone**, which
+//! is what the spec and the GUI editor promise the operator ("`0 0 3 * * *`
+//! — 03:00 daily, server local time").
+//!
+//! First sighting of a schedule after process start resumes from that
+//! schedule's most recent persisted run record, so a restart between two
+//! cron instants does not silently swallow the window: one missed instance
+//! is run (never a burst of every instance since the last run — catch-up is
+//! `single`, and the per-tick scan is bounded). A schedule that has never
+//! run resumes from "now".
+//!
+//! HA + leader gating land in a follow-up per
+//! `features/scheduled-exports.md` Phase 1 (deferred) — on a cluster every
+//! node runs its own copy of each schedule against its own destination.
 
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use cron::Schedule as CronSchedule;
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -34,6 +43,12 @@ use super::schedule::{
 use super::store::ScheduleStore;
 
 const TICK_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Upper bound on how many cron instants a single tick will walk when
+/// catching up. A frequent cron (`* * * * * *`) plus a stale resume point
+/// would otherwise make one tick enumerate unbounded history; the scan stops
+/// here and the next tick continues from where this one left off.
+const MAX_CATCHUP_SCAN: usize = 10_000;
 
 /// Spawn the scheduler tick loop. The returned task runs until the
 /// process exits or until the supplied `Core` is dropped.
@@ -80,21 +95,34 @@ async fn tick(
             }
         };
 
-        let mut last = last_fired.lock().await;
-        // First sighting of a schedule after process start: pretend the
-        // last fire is "right now" so we don't burst-fire every missed
-        // instance from history. (Catch-up policy is a Phase-2 knob.)
-        let prev = last.entry(sched.id.clone()).or_insert(now);
-        let next = match cron_expr.after(prev).next() {
+        let known = last_fired.lock().await.get(&sched.id).copied();
+        let prev = match known {
+            Some(p) => p,
+            // First sighting of this schedule after process start: resume from
+            // its most recent persisted run so a restart between two cron
+            // instants does not swallow the window. A schedule that has never
+            // run resumes from "now" — we do not reach back to its creation
+            // date.
+            None => {
+                let resume = resume_point(core, store, &sched.id).await.unwrap_or(now);
+                last_fired.lock().await.insert(sched.id.clone(), resume);
+                resume
+            }
+        };
+
+        let due = match latest_due(&cron_expr, prev, now) {
             Some(t) => t,
             None => continue,
         };
-        if next > now {
-            continue;
-        }
-        // Fire and remember.
-        *prev = next;
-        drop(last);
+        // Fire once and remember the instant we fired for, so the missed
+        // instants between `prev` and `due` are skipped rather than replayed.
+        last_fired.lock().await.insert(sched.id.clone(), due);
+        log::info!(
+            "scheduled-exports: firing schedule {} ({}) for cron instant {}",
+            sched.id,
+            sched.name,
+            due.with_timezone(&Local).to_rfc3339()
+        );
 
         let core_clone = Arc::clone(core);
         let store_clone = store.clone();
@@ -146,6 +174,47 @@ async fn tick(
         });
     }
     Ok(())
+}
+
+/// The most recent cron instant in `(prev, now]`, or `None` when the schedule
+/// is not due yet.
+///
+/// Cron is evaluated in the server's local timezone (the contract the GUI
+/// editor states); the returned instant is converted back to UTC because that
+/// is what the runner tracks. Returning only the *latest* due instant is what
+/// makes catch-up `single`: a schedule that missed five nights runs once, not
+/// five times.
+fn latest_due(
+    cron: &CronSchedule,
+    prev: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    let prev_local = prev.with_timezone(&Local);
+    let now_local = now.with_timezone(&Local);
+    let mut due = None;
+    for instant in cron.after(&prev_local).take(MAX_CATCHUP_SCAN) {
+        if instant > now_local {
+            break;
+        }
+        due = Some(instant);
+    }
+    due.map(|t| t.with_timezone(&Utc))
+}
+
+/// Timestamp of a schedule's most recent run record, used as the resume point
+/// on first sighting after process start. `None` when the schedule has never
+/// run or the record is unreadable.
+async fn resume_point(
+    core: &Arc<Core>,
+    store: &ScheduleStore,
+    schedule_id: &str,
+) -> Option<DateTime<Utc>> {
+    let runs = store.list_runs(core.barrier.as_storage(), schedule_id).await.ok()?;
+    // `list_runs` sorts newest-first.
+    let newest = runs.first()?;
+    DateTime::parse_from_rfc3339(&newest.run_at)
+        .ok()
+        .map(|t| t.with_timezone(&Utc))
 }
 
 /// Execute one schedule: build the export bytes, write to the destination,
@@ -241,4 +310,89 @@ fn write_local(dir: &str, schedule_id: &str, format: &ExportFormat, bytes: &[u8]
         RvError::ErrUnknown
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration as ChronoDuration, TimeZone, Timelike};
+
+    /// `0 0 3 * * *` — 03:00 daily, the GUI editor's default.
+    fn daily_at_3am() -> CronSchedule {
+        CronSchedule::from_str("0 0 3 * * *").expect("valid cron")
+    }
+
+    /// A UTC instant for a known local wall-clock time, so assertions hold in
+    /// any server timezone.
+    fn local(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
+        Local
+            .with_ymd_and_hms(y, m, d, h, min, 0)
+            .single()
+            .expect("unambiguous local time")
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn not_due_before_the_next_instant() {
+        // Fired at 03:00, asked again at 09:00 the same day: nothing due.
+        let prev = local(2026, 7, 20, 3, 0);
+        let now = local(2026, 7, 20, 9, 0);
+        assert_eq!(latest_due(&daily_at_3am(), prev, now), None);
+    }
+
+    #[test]
+    fn due_once_the_instant_has_passed() {
+        let prev = local(2026, 7, 20, 9, 0);
+        let now = local(2026, 7, 21, 3, 0) + ChronoDuration::seconds(20);
+        let due = latest_due(&daily_at_3am(), prev, now).expect("due");
+        assert_eq!(due, local(2026, 7, 21, 3, 0));
+    }
+
+    #[test]
+    fn cron_is_evaluated_in_server_local_time() {
+        // The schedule promises "03:00 server local time" — the instant it
+        // fires for must be 03:00 local, whatever the host's offset is.
+        let prev = local(2026, 7, 20, 9, 0);
+        let now = local(2026, 7, 22, 12, 0);
+        let due = latest_due(&daily_at_3am(), prev, now).expect("due");
+        let due_local = due.with_timezone(&Local);
+        assert_eq!(due_local.hour(), 3);
+        assert_eq!(due_local.minute(), 0);
+    }
+
+    #[test]
+    fn missed_windows_collapse_to_a_single_run() {
+        // The scheduler was down for five nights. Catch-up is `single`: the
+        // most recent missed instant is returned, not the oldest, so five
+        // nights of downtime produce one backup and not five.
+        let prev = local(2026, 7, 16, 3, 0);
+        let now = local(2026, 7, 21, 9, 0);
+        let due = latest_due(&daily_at_3am(), prev, now).expect("due");
+        assert_eq!(due, local(2026, 7, 21, 3, 0));
+    }
+
+    #[test]
+    fn firing_clears_the_backlog() {
+        // Advancing `prev` to the returned instant — what `tick` does — must
+        // leave nothing due, otherwise the next tick 30s later fires again.
+        let prev = local(2026, 7, 16, 3, 0);
+        let now = local(2026, 7, 21, 9, 0);
+        let due = latest_due(&daily_at_3am(), prev, now).expect("due");
+        assert_eq!(latest_due(&daily_at_3am(), due, now), None);
+    }
+
+    #[test]
+    fn catchup_scan_is_bounded_and_converges() {
+        // A per-second cron with a resume point far in the past must not walk
+        // unbounded history in one tick: the scan stops at MAX_CATCHUP_SCAN
+        // and the following tick continues from there.
+        let every_second = CronSchedule::from_str("* * * * * *").expect("valid cron");
+        let now = local(2026, 7, 21, 9, 0);
+        let prev = now - ChronoDuration::days(30);
+        let due = latest_due(&every_second, prev, now).expect("due");
+        assert!(due <= now);
+        assert_eq!(due, prev + ChronoDuration::seconds(MAX_CATCHUP_SCAN as i64));
+        // Still behind, so the next tick keeps making progress.
+        assert!(latest_due(&every_second, due, now).is_some());
+    }
 }
