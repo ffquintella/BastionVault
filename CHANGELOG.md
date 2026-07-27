@@ -45,6 +45,20 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.36.3] - 2026-07-27
+
+### Fixed
+- **Notification channel delivery failures now report the real reason.** When a
+  channel plugin (e.g. the email plugin) reported failures per-recipient via a
+  `failed: [{recipient, error}]` array rather than a top-level `error` string,
+  the host's `parse_delivery` counted the failures but discarded every reason —
+  so the send toast showed a meaningless `email:email (error)` and nothing was
+  logged. `parse_delivery` now aggregates and de-duplicates the per-recipient
+  reasons into the result's `error` when no top-level `error` is present, so the
+  actual cause (e.g. "no email address", "smtp_host is not configured") surfaces
+  in the GUI and the `log::warn!` in the notification service
+  (`src/modules/notifications/channel.rs`).
+
 ## [0.36.2] - 2026-07-22
 
 ### Fixed

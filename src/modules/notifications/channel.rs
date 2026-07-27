@@ -183,11 +183,16 @@ fn parse_delivery(channel_id: &str, total: u64, bytes: &[u8]) -> ChannelDelivery
         (None, None) => (total, 0),
     };
 
+    // Prefer a top-level `error` string. If the plugin instead reports
+    // failures per-recipient (as the email plugin does), aggregate those
+    // reasons so the actual cause isn't lost — otherwise the caller only
+    // sees a failure count with no explanation.
     let error = v
         .get("error")
         .and_then(|e| e.as_str())
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
+        .map(|s| s.to_string())
+        .or_else(|| aggregate_failure_reasons(v.get("failed")));
 
     ChannelDeliveryResult {
         channel: channel_id.to_string(),
@@ -202,5 +207,66 @@ fn count_field(v: Option<&Value>) -> Option<u64> {
         Some(Value::Array(a)) => Some(a.len() as u64),
         Some(Value::Number(n)) => n.as_u64(),
         _ => None,
+    }
+}
+
+/// Collect and de-duplicate the per-recipient `error` messages from a
+/// `failed` array (`[{"recipient": "...", "error": "..."}]`) into a single
+/// summary string. Returns `None` when the field isn't such an array or
+/// carries no error text.
+fn aggregate_failure_reasons(v: Option<&Value>) -> Option<String> {
+    let Some(Value::Array(items)) = v else {
+        return None;
+    };
+    let mut msgs: Vec<String> = Vec::new();
+    for item in items {
+        if let Some(msg) = item.get("error").and_then(|e| e.as_str()) {
+            let msg = msg.trim();
+            if !msg.is_empty() && !msgs.iter().any(|m| m == msg) {
+                msgs.push(msg.to_string());
+            }
+        }
+    }
+    (!msgs.is_empty()).then(|| msgs.join("; "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn surfaces_per_recipient_failure_reasons() {
+        let body = br#"{"delivered":0,"failed":[{"recipient":"felipe","error":"no email address"}]}"#;
+        let res = parse_delivery("email:email", 1, body);
+        assert_eq!(res.delivered, 0);
+        assert_eq!(res.failed, 1);
+        assert_eq!(res.error.as_deref(), Some("no email address"));
+    }
+
+    #[test]
+    fn dedupes_identical_reasons_across_recipients() {
+        let body = br#"{"delivered":0,"failed":[
+            {"recipient":"a","error":"smtp_host is not configured"},
+            {"recipient":"b","error":"smtp_host is not configured"}
+        ]}"#;
+        let res = parse_delivery("email:email", 2, body);
+        assert_eq!(res.failed, 2);
+        assert_eq!(res.error.as_deref(), Some("smtp_host is not configured"));
+    }
+
+    #[test]
+    fn top_level_error_wins_over_failed_array() {
+        let body = br#"{"delivered":0,"failed":[{"error":"ignored"}],"error":"top-level"}"#;
+        let res = parse_delivery("email:email", 1, body);
+        assert_eq!(res.error.as_deref(), Some("top-level"));
+    }
+
+    #[test]
+    fn all_delivered_has_no_error() {
+        let body = br#"{"delivered":3,"failed":[]}"#;
+        let res = parse_delivery("email:email", 3, body);
+        assert_eq!(res.delivered, 3);
+        assert_eq!(res.failed, 0);
+        assert!(res.error.is_none());
     }
 }
