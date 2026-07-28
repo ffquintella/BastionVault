@@ -45,6 +45,21 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.37.8] - 2026-07-28
+
+### Changed
+- **Masked secret values gained a copy button, and both controls are now icon
+  buttons** (`gui/src/components/ui/MaskedValue.tsx`) -- every blurred value
+  (Secrets, Resources, LDAP checkouts, TOTP keys, secret history) now offers
+  copy-to-clipboard next to the reveal toggle, so operators can hand a password
+  to a terminal or client without unblurring it and re-typing it. The text
+  `Show`/`Hide` link is replaced by an eye / eye-off icon button, with a
+  clipboard icon that flips to a green check for 1.5s on success; both carry
+  `title` + `aria-label` and the toggle exposes `aria-pressed`. A clipboard
+  denial surfaces an error toast. Copying does not require revealing first --
+  the plaintext is already in the renderer, so the blur is presentation only.
+  (`gui/src/test/maskedValue.test.tsx`, 4 tests)
+
 ## [0.37.7] - 2026-07-28
 
 ### Changed
