@@ -79,6 +79,32 @@ const POLICY_TESTS_SUB_PATH: &str = "policy-tests/";
 //   policy-ns/<b64url(ns_path)>/history/<name>/<seq>
 const POLICY_NS_SUB_PATH: &str = "policy-ns/";
 
+/// System-view-relative keyspace holding one namespace's ACL policy documents:
+/// `policy/` for the root namespace (`ns_path == ""`), and
+/// `policy-ns/<b64url(ns_path)>/acl/` for a tenant.
+///
+/// Public because subsystems that address the barrier directly rather than
+/// through a [`BarrierView`] — the exchange exporter / importer, which walks
+/// raw barrier keys — must resolve policies to exactly the keys this store
+/// reads and writes. Keep it the single source of truth for the layout.
+pub fn acl_keyspace(ns_path: &str) -> String {
+    if ns_path.is_empty() {
+        return POLICY_ACL_SUB_PATH.to_string();
+    }
+    let b64 = URL_SAFE_NO_PAD.encode(ns_path.as_bytes());
+    format!("{POLICY_NS_SUB_PATH}{b64}/acl/")
+}
+
+/// System-view-relative keyspace holding one namespace's saved policy
+/// effectivity test cases, one key per policy name. Companion to
+/// [`acl_keyspace`]; see that function for why this is public.
+pub fn policy_tests_keyspace(ns_path: &str) -> String {
+    if ns_path.is_empty() {
+        return POLICY_TESTS_SUB_PATH.to_string();
+    }
+    let b64 = URL_SAFE_NO_PAD.encode(ns_path.as_bytes());
+    format!("{POLICY_NS_SUB_PATH}{b64}/tests/")
+}
 
 // DEFAULT_POLICY_NAME is the name of the default policy
 const DEFAULT_POLICY_NAME: &str = "default";
@@ -1243,8 +1269,7 @@ impl PolicyStore {
             .system_view
             .as_ref()
             .ok_or_else(|| bv_error_string!("system view unavailable for namespace policy storage"))?;
-        let b64 = URL_SAFE_NO_PAD.encode(ns_path.as_bytes());
-        Ok(Arc::new(sv.new_sub_view(&format!("{POLICY_NS_SUB_PATH}{b64}/acl/"))))
+        Ok(Arc::new(sv.new_sub_view(&acl_keyspace(ns_path))))
     }
 
     /// Barrier sub-view holding a namespace's ACL policy history.
@@ -1878,8 +1903,7 @@ impl PolicyStore {
             .system_view
             .as_ref()
             .ok_or_else(|| bv_error_string!("system view unavailable for namespace policy storage"))?;
-        let b64 = URL_SAFE_NO_PAD.encode(ns_path.as_bytes());
-        Ok(Arc::new(sv.new_sub_view(&format!("{POLICY_NS_SUB_PATH}{b64}/tests/"))))
+        Ok(Arc::new(sv.new_sub_view(&policy_tests_keyspace(ns_path))))
     }
 
     /// Return the saved effectivity test cases for a policy (empty when

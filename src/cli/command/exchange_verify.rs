@@ -104,12 +104,14 @@ fn print_human(report: &VerifyReport, path: &str) {
     }
     println!("  items:       {} total", report.total_items);
     println!(
-        "                 kv={} resources={} files={} asset_groups={} resource_groups={}",
+        "                 kv={} resources={} files={} asset_groups={} resource_groups={} raw={} policies={}",
         report.counts.kv,
         report.counts.resources,
         report.counts.files,
         report.counts.asset_groups,
         report.counts.resource_groups,
+        report.counts.raw,
+        report.counts.policies,
     );
     println!("  files checked: {}", report.files_checked);
     if !report.file_issues.is_empty() {

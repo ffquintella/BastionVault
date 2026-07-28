@@ -45,6 +45,37 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.37.9] - 2026-07-28
+
+### Fixed
+- **A whole-vault export / backup now carries the ACL policies, and a restore
+  puts them back** (`src/exchange/{schema,scope,namespaces,verify}.rs`,
+  `src/modules/policy/policy_store.rs`) -- `kind: "full"` and
+  `kind: "all_namespaces"` exports captured the data plane only, so a restore
+  brought back every secret, engine, resource, and file but none of the policies
+  governing them: a recovered vault that nobody except a root token could use,
+  and a `.bvx` "backup" that quietly was not one. Full and all-namespaces
+  exports now include each namespace's ACL policy documents (`items.policies`)
+  together with their saved effectivity test cases, and the importer writes them
+  back into that namespace's own policy keyspace -- a tenant's policies travel in
+  that tenant's bundle, so they can no longer land in root's. Selective exports
+  are unchanged: "share these 12 secrets" must not ship authorization rules.
+  The keyspace layout now has one owner (`policy_store::acl_keyspace` /
+  `policy_tests_keyspace`), so exporter, importer, and the live store cannot
+  drift. Vault-owned policies (`root`, `response-wrapping`, `control-group`) are
+  left out of exports and refused on import, and a policy name that could escape
+  its keyspace (`../../core/mounts`) is refused with a warning rather than
+  written. After an import that touched policies, the policy store's LRU is
+  flushed -- otherwise an authorization decision could still be made against the
+  document the operator had just replaced. Backwards compatible in both
+  directions: the field is `skip_serializing_if = "Vec::is_empty"`, so older
+  documents import unchanged and older builds ignore the new field. The BVBK
+  operator backup (`bvault operator backup`, the GUI's *Export full backup*)
+  always carried policies -- it is a raw physical-backend sweep -- and is
+  unaffected. `bvault exchange verify` now also reports `raw=` and `policies=`
+  counts. (`features/import-export-module.md`; 3 new tests in
+  `src/exchange/{scope,namespaces}.rs`)
+
 ## [0.37.8] - 2026-07-28
 
 ### Changed

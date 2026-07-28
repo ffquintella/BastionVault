@@ -18,8 +18,8 @@ use crate::{
     core::Core,
     errors::RvError,
     exchange::schema::{
-        AssetGroupItem, ExchangeDocument, ExchangeItems, ExporterInfo, FileItem, KvItem, RawEntry,
-        ResourceGroupItem, ResourceItem, ScopeKind, ScopeSelector, ScopeSpec,
+        AssetGroupItem, ExchangeDocument, ExchangeItems, ExporterInfo, FileItem, KvItem, PolicyItem,
+        RawEntry, ResourceGroupItem, ResourceItem, ScopeKind, ScopeSelector, ScopeSpec,
     },
     mount::{LOGICAL_BARRIER_PREFIX, SYSTEM_BARRIER_PREFIX},
     storage::{Storage, StorageEntry},
@@ -42,6 +42,15 @@ pub struct MountIndex {
     by_type: HashMap<String, Vec<(String, String)>>,
     logical_prefix: String,
     system_prefix: String,
+    /// The **root tenant's** system prefix, which is where the policy store
+    /// keeps every namespace's ACL policies (a tenant's live under
+    /// `policy-ns/<b64url(path)>/…` inside the root system view, not inside the
+    /// tenant's own `sys/`). Equal to `system_prefix` for a root index.
+    root_system_prefix: String,
+    /// Canonical namespace path this index addresses; `""` for the root
+    /// namespace. Only the policy keyspace depends on it — mounts are already
+    /// addressed by uuid.
+    ns_path: String,
 }
 
 impl Default for MountIndex {
@@ -52,6 +61,8 @@ impl Default for MountIndex {
             by_type: HashMap::new(),
             logical_prefix: LOGICAL_BARRIER_PREFIX.to_string(),
             system_prefix: SYSTEM_BARRIER_PREFIX.to_string(),
+            root_system_prefix: SYSTEM_BARRIER_PREFIX.to_string(),
+            ns_path: String::new(),
         }
     }
 }
@@ -76,6 +87,8 @@ impl MountIndex {
             by_type,
             logical_prefix: core.root_logical_prefix(),
             system_prefix: core.root_system_prefix(),
+            root_system_prefix: core.root_system_prefix(),
+            ns_path: String::new(),
         })
     }
 
@@ -83,10 +96,16 @@ impl MountIndex {
     /// namespace's own [`MountsRouter`] (keyed by mount-relative path, e.g.
     /// `secret/`), and its storage lives under `namespaces/<ns_uuid>/…`.
     ///
+    /// `ns_path` is the canonical namespace path; it is what resolves the
+    /// tenant's policy keyspace, which lives in the **root** system view rather
+    /// than the tenant's own — hence `core` as well.
+    ///
     /// [`MountsRouter`]: crate::mount::MountsRouter
     pub fn from_namespace_router(
+        core: &Arc<Core>,
         router: &Arc<crate::mount::MountsRouter>,
         ns_uuid: &str,
+        ns_path: &str,
     ) -> Result<Self, RvError> {
         let entries = router.mounts.entries.read().map_err(|_| RvError::ErrUnknown)?;
         let mut by_type: HashMap<String, Vec<(String, String)>> = HashMap::new();
@@ -101,6 +120,8 @@ impl MountIndex {
             by_type,
             logical_prefix: crate::modules::namespace::router::namespace_logical_prefix(ns_uuid),
             system_prefix: crate::modules::namespace::router::namespace_system_prefix(ns_uuid),
+            root_system_prefix: core.root_system_prefix(),
+            ns_path: ns_path.to_string(),
         })
     }
 
@@ -132,6 +153,29 @@ impl MountIndex {
     /// `namespaces/<root_uuid>/sys/`.
     fn system_prefix(&self) -> &str {
         &self.system_prefix
+    }
+
+    /// Barrier-storage prefix holding this namespace's ACL policy documents,
+    /// e.g. `namespaces/<root_uuid>/sys/policy/` for the root namespace and
+    /// `namespaces/<root_uuid>/sys/policy-ns/<b64url(path)>/acl/` for a tenant.
+    /// Delegates the layout to the policy store so exporter, importer, and the
+    /// live vault can never drift apart.
+    pub fn policy_prefix(&self) -> String {
+        format!(
+            "{}{}",
+            self.root_system_prefix,
+            crate::modules::policy::policy_store::acl_keyspace(&self.ns_path)
+        )
+    }
+
+    /// Barrier-storage prefix holding this namespace's saved policy effectivity
+    /// test cases, one key per policy name. Companion to [`Self::policy_prefix`].
+    pub fn policy_tests_prefix(&self) -> String {
+        format!(
+            "{}{}",
+            self.root_system_prefix,
+            crate::modules::policy::policy_store::policy_tests_keyspace(&self.ns_path)
+        )
     }
 
     /// Find the uuid of a `kv` / `kv-v2` mount by its mount path
@@ -210,6 +254,8 @@ impl MountIndex {
             by_type,
             logical_prefix: logical_prefix.to_string(),
             system_prefix: system_prefix.to_string(),
+            root_system_prefix: system_prefix.to_string(),
+            ns_path: String::new(),
         }
     }
 }
@@ -377,11 +423,13 @@ fn sort_and_dedup(items: &mut ExchangeItems) {
     items.files.sort_by(|a, b| a.id.cmp(&b.id));
     items.asset_groups.sort_by(|a, b| a.id.cmp(&b.id));
     items.resource_groups.sort_by(|a, b| a.id.cmp(&b.id));
+    items.policies.sort_by(|a, b| a.name.cmp(&b.name));
     items.kv.dedup_by(|a, b| a.mount == b.mount && a.path == b.path);
     items.resources.dedup_by(|a, b| a.id == b.id);
     items.files.dedup_by(|a, b| a.id == b.id);
     items.asset_groups.dedup_by(|a, b| a.id == b.id);
     items.resource_groups.dedup_by(|a, b| a.id == b.id);
+    items.policies.dedup_by(|a, b| a.name == b.name);
 }
 
 #[derive(Copy, Clone)]
@@ -470,6 +518,14 @@ async fn resolve_full(
                 ));
             }
         }
+    }
+
+    // ACL policies. Secrets without the policies that grant access to them are
+    // half a vault: restoring the data but not the authorization leaves every
+    // non-root token locked out. A policy read failure is a warning, not a
+    // fatal error, for the same reason an unreadable mount is.
+    if let Err(e) = read_policies(storage, mounts, items).await {
+        warnings.push(format!("policy capture failed: {e:?}"));
     }
 
     Ok(())
@@ -824,6 +880,66 @@ async fn read_raw_mount(
     Ok(())
 }
 
+/// Capture the ACL policy documents of the namespace `mounts` addresses, plus
+/// each policy's saved effectivity test cases when it has any.
+///
+/// Policies the vault owns and refuses to update through `sys/policy/<name>`
+/// ([`IMMUTABLE_POLICIES`]: `root`, `response-wrapping`, `control-group`) are
+/// left out: an importer would have to refuse them anyway, and a document that
+/// carries them invites the illusion that a restore can rewrite the built-ins.
+///
+/// [`IMMUTABLE_POLICIES`]: crate::modules::policy::policy_store::IMMUTABLE_POLICIES
+async fn read_policies(
+    storage: &dyn Storage,
+    mounts: &MountIndex,
+    items: &mut ExchangeItems,
+) -> Result<(), RvError> {
+    let acl_prefix = mounts.policy_prefix();
+    let tests_prefix = mounts.policy_tests_prefix();
+
+    for full_key in list_recursive(storage, &acl_prefix).await? {
+        let name = full_key.strip_prefix(&acl_prefix).unwrap_or(&full_key).to_string();
+        if is_reserved_policy_name(&name) {
+            continue;
+        }
+        let Some(entry) = storage.get(&full_key).await? else {
+            continue;
+        };
+        // Tests live in a sibling keyspace keyed by the same policy name; a
+        // policy with none simply has no key there.
+        let tests = storage
+            .get(&format!("{tests_prefix}{name}"))
+            .await?
+            .map(|e| entry_value_to_json(&e));
+        items.policies.push(PolicyItem { name, value: entry_value_to_json(&entry), tests });
+    }
+    Ok(())
+}
+
+/// Is `name` a policy the vault owns, which neither an export nor an import may
+/// touch? Compared case-insensitively because the policy store lowercases every
+/// name on the way in ([`PolicyStore::sanitize_name`]).
+///
+/// [`PolicyStore::sanitize_name`]: crate::modules::policy::PolicyStore
+fn is_reserved_policy_name(name: &str) -> bool {
+    let lowered = name.to_lowercase();
+    crate::modules::policy::policy_store::IMMUTABLE_POLICIES.contains(&lowered.as_str())
+}
+
+/// Reject a policy name that would escape its keyspace once appended to the
+/// policy prefix. Import reads names out of an operator-supplied document, so a
+/// crafted `../../core/mounts` must not be able to overwrite unrelated barrier
+/// keys. Empty names and `.` / `..` segments are the whole attack surface —
+/// nested names (`team/dev`, which `sys/policy/(?P<name>.+)` accepts) stay
+/// legal.
+fn policy_name_is_safe(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('/')
+        && !name.ends_with('/')
+        && !name.contains('\\')
+        && name.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+}
+
 /// Does a kv-v2 / kv-v1 barrier-relative key fall under the logical secret
 /// path `lp`? Strips the kv-v2 `data/` or `metadata/` tree prefix before
 /// comparing; kv-v1 keys are compared directly.
@@ -858,6 +974,11 @@ fn parse_json_or_b64(bytes: &[u8]) -> Value {
 /// the single classify+write engine: KV items, opaque `raw` engine entries
 /// (pki / ssh / transit / …), and structured resource / file / group items all
 /// funnel through the same per-entry path.
+///
+/// This entry point takes storage rather than a `Core`, so it cannot invalidate
+/// the policy store's cache after writing policy items. Callers that hold a
+/// `Core` must use [`crate::exchange::namespaces::import_document`], which does
+/// — every production import path already does.
 pub async fn import_from_document(
     storage: &dyn Storage,
     mounts: &MountIndex,
@@ -1002,6 +1123,54 @@ pub(crate) async fn apply_items(
             &display_path, result,
         )
         .await?;
+    }
+
+    // ACL policies (plus each one's saved effectivity tests) — written into the
+    // namespace's own policy keyspace. The name is lowercased to match what the
+    // policy store writes, refused outright when it could escape the keyspace,
+    // and skipped for the built-ins the vault will not let anyone rewrite.
+    let acl_prefix = mounts.policy_prefix();
+    let tests_prefix = mounts.policy_tests_prefix();
+    for item in &items.policies {
+        let name = item.name.trim().to_lowercase();
+        if !policy_name_is_safe(&name) {
+            result
+                .warnings
+                .push(format!("policy {:?} skipped: unsafe policy name", item.name));
+            continue;
+        }
+        if is_reserved_policy_name(&name) {
+            result.warnings.push(format!(
+                "policy {name:?} skipped: reserved policy names are owned by the vault"
+            ));
+            continue;
+        }
+        let display_path = format!("policy/{name}");
+        apply_entry(
+            storage,
+            &format!("{acl_prefix}{name}"),
+            json_value_to_storage_bytes(&item.value)?,
+            policy,
+            dry_run,
+            &qualify("sys/"),
+            &display_path,
+            result,
+        )
+        .await?;
+        if let Some(tests) = &item.tests {
+            let display_path = format!("policy-tests/{name}");
+            apply_entry(
+                storage,
+                &format!("{tests_prefix}{name}"),
+                json_value_to_storage_bytes(tests)?,
+                policy,
+                dry_run,
+                &qualify("sys/"),
+                &display_path,
+                result,
+            )
+            .await?;
+        }
     }
 
     Ok(())
@@ -1668,5 +1837,101 @@ mod tests {
                 .is_none(),
             "dry run must not write"
         );
+    }
+
+    /// A full export must carry the vault's ACL policies — restoring secrets
+    /// without the policies that authorize them leaves a vault only root can
+    /// use — and the import must put them back in the policy store's own
+    /// keyspace, saved effectivity tests included.
+    #[tokio::test]
+    async fn policies_full_capture_and_restore() {
+        let src = MemStorage::default();
+        let admin = serde_json::json!({
+            "version": 2,
+            "raw": "path \"secret/*\" { capabilities = [\"read\"] }",
+            "templated": false,
+            "type": "acl",
+        });
+        let admin_tests = serde_json::json!([
+            {"path": "secret/data/x", "capability": "read", "expect": "allow"}
+        ]);
+        let nested = serde_json::json!({"version": 2, "raw": "", "templated": false, "type": "acl"});
+        populate(
+            &src,
+            &[
+                ("namespaces/root-uuid/sys/policy/admin", &admin),
+                ("namespaces/root-uuid/sys/policy-tests/admin", &admin_tests),
+                // Nested names are legal: `sys/policy/(?P<name>.+)` accepts them.
+                ("namespaces/root-uuid/sys/policy/team/dev", &nested),
+                // Vault-owned, refused by the policy API — must not be exported.
+                ("namespaces/root-uuid/sys/policy/response-wrapping", &nested),
+            ],
+        )
+        .await;
+
+        let mounts = reroot_index(&[("kv-v2", "secret/", "u-secret")]);
+        let scope = ScopeSpec { kind: ScopeKind::Full, include: vec![] };
+        let doc = export_to_document(&src, &mounts, ExporterInfo::default(), scope)
+            .await
+            .unwrap();
+
+        let names: Vec<&str> = doc.items.policies.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["admin", "team/dev"], "reserved names stay out");
+        let exported_admin = &doc.items.policies[0];
+        assert_eq!(exported_admin.value, admin);
+        assert_eq!(exported_admin.tests.as_ref(), Some(&admin_tests));
+        assert!(doc.items.policies[1].tests.is_none(), "no saved tests, no field");
+
+        // Restore into a fresh vault: same keys, same bytes.
+        let dst = MemStorage::default();
+        let result = import_from_document(&dst, &mounts, &doc, ConflictPolicy::Skip, false)
+            .await
+            .unwrap();
+        assert_eq!(result.written, 3, "two policies plus one test-case document");
+        assert_eq!(
+            dst.get("namespaces/root-uuid/sys/policy/admin").await.unwrap().unwrap().value,
+            serde_json::to_vec(&admin).unwrap()
+        );
+        assert_eq!(
+            dst.get("namespaces/root-uuid/sys/policy-tests/admin").await.unwrap().unwrap().value,
+            serde_json::to_vec(&admin_tests).unwrap()
+        );
+        assert!(dst.get("namespaces/root-uuid/sys/policy/team/dev").await.unwrap().is_some());
+    }
+
+    /// An import document is operator-supplied and may come from anywhere, so a
+    /// policy name must not be able to escape the policy keyspace or rewrite a
+    /// vault-owned policy. Both are reported, not silently dropped.
+    #[tokio::test]
+    async fn policy_import_refuses_unsafe_and_reserved_names() {
+        let dst = MemStorage::default();
+        let mounts = reroot_index(&[("kv-v2", "secret/", "u-secret")]);
+        let doc = ExchangeDocument::new(
+            ExporterInfo::default(),
+            ScopeSpec { kind: ScopeKind::Full, include: vec![] },
+            ExchangeItems {
+                policies: vec![
+                    PolicyItem {
+                        name: "../../core/mounts".to_string(),
+                        value: serde_json::json!({"raw": "x"}),
+                        tests: None,
+                    },
+                    PolicyItem {
+                        name: "ROOT".to_string(),
+                        value: serde_json::json!({"raw": "x"}),
+                        tests: None,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+
+        let result = import_from_document(&dst, &mounts, &doc, ConflictPolicy::Overwrite, false)
+            .await
+            .unwrap();
+        assert_eq!(result.written, 0);
+        assert_eq!(result.warnings.len(), 2, "{:?}", result.warnings);
+        assert!(dst.get("namespaces/root-uuid/core/mounts").await.unwrap().is_none());
+        assert!(dst.get("namespaces/root-uuid/sys/policy/root").await.unwrap().is_none());
     }
 }

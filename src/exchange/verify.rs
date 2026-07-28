@@ -36,11 +36,20 @@ pub struct ItemCounts {
     /// Opaque non-KV engine entries (pki, ssh, transit, …).
     #[serde(default)]
     pub raw: u64,
+    /// ACL policy documents.
+    #[serde(default)]
+    pub policies: u64,
 }
 
 impl ItemCounts {
     pub fn total(&self) -> u64 {
-        self.kv + self.resources + self.files + self.asset_groups + self.resource_groups + self.raw
+        self.kv
+            + self.resources
+            + self.files
+            + self.asset_groups
+            + self.resource_groups
+            + self.raw
+            + self.policies
     }
 }
 
@@ -132,6 +141,7 @@ pub fn verify_backup_bytes(bytes: &[u8], password: Option<&str>) -> Result<Verif
         asset_groups: document.items.asset_groups.len() as u64,
         resource_groups: document.items.resource_groups.len() as u64,
         raw: document.items.raw.len() as u64,
+        policies: document.items.policies.len() as u64,
     };
     for bundle in &document.items.namespaces {
         counts.kv += bundle.items.kv.len() as u64;
@@ -140,6 +150,7 @@ pub fn verify_backup_bytes(bytes: &[u8], password: Option<&str>) -> Result<Verif
         counts.asset_groups += bundle.items.asset_groups.len() as u64;
         counts.resource_groups += bundle.items.resource_groups.len() as u64;
         counts.raw += bundle.items.raw.len() as u64;
+        counts.policies += bundle.items.policies.len() as u64;
     }
     let counts = counts;
     let total_items = counts.total();

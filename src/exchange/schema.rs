@@ -118,6 +118,11 @@ pub struct ExchangeItems {
     /// `scope::read_raw_mount`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub raw: Vec<RawEntry>,
+    /// ACL policy documents belonging to the namespace this item set describes.
+    /// A vault's secrets are unusable without the policies that grant access to
+    /// them, so a full-vault export carries both. See `scope::read_policies`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policies: Vec<PolicyItem>,
     /// Per-namespace item sets, one bundle per **non-root** namespace, present
     /// only in an `all_namespaces` export. The root namespace's items stay in
     /// the fields above so a single-namespace document (every document written
@@ -137,6 +142,7 @@ impl ExchangeItems {
             + self.asset_groups.len()
             + self.resource_groups.len()
             + self.raw.len()
+            + self.policies.len()
     }
 }
 
@@ -191,6 +197,28 @@ pub struct RawEntry {
     pub mount: String,
     pub path: String,
     pub value: Value,
+}
+
+/// A single ACL policy. `name` is the policy name as the operator addresses it
+/// through `sys/policy/<name>`; `value` is the stored policy document (the
+/// `PolicyEntry` JSON carrying the raw HCL, `templated`, and `type`), or a
+/// `{"_base64": …}` wrapper when the stored bytes are not JSON — same encoding
+/// as [`KvItem`].
+///
+/// `tests` carries the policy's saved effectivity test cases (the graphical
+/// builder's regression gate, stored in its own keyspace) when the policy has
+/// any, so a restore brings back the policy *and* the assertions that guard it.
+/// Absent for policies with no saved tests.
+///
+/// Which namespace a policy belongs to is implied by where it sits in the
+/// document: top-level items are the root namespace's, and a
+/// [`NamespaceBundle`]'s items are that namespace's — exactly as for KV.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PolicyItem {
+    pub name: String,
+    pub value: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tests: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

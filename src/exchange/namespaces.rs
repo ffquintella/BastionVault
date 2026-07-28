@@ -22,10 +22,12 @@
 //! bundles are what keep them apart — collapsing everything into one flat item
 //! list would have one tenant's `secret/db` overwrite another's on import.
 //!
-//! Scope: like [`ScopeKind::Full`], this is the **data plane** only. The
-//! namespace registry, mount tables, policies, and identities are control
-//! plane; use the operator backup (`crate::backup`, a raw physical-backend
-//! sweep that already spans every namespace) to capture those.
+//! Scope: like [`ScopeKind::Full`], this is the data plane plus each
+//! namespace's **ACL policies** — data without the authorization that governs
+//! it restores a vault nobody but root can use. The namespace registry, mount
+//! tables, and identities remain out of scope; use the operator backup
+//! (`crate::backup`, a raw physical-backend sweep that already spans every
+//! namespace) to capture those.
 
 use std::sync::Arc;
 
@@ -78,7 +80,8 @@ pub async fn all_namespace_indexes(
             continue;
         }
         match module.registry.ensure_router(core, &ns.uuid, &ns.path).await {
-            Ok(router) => match MountIndex::from_namespace_router(&router, &ns.uuid) {
+            Ok(router) => match MountIndex::from_namespace_router(core, &router, &ns.uuid, &ns.path)
+            {
                 Ok(mounts) => out.push(NamespaceIndex { path: ns.path.clone(), mounts }),
                 Err(e) => warnings
                     .push(format!("namespace {:?} skipped: mount index failed: {e:?}", ns.path)),
@@ -181,7 +184,27 @@ pub async fn import_document(
         }
     }
 
+    // Imported policies were written straight to the barrier, behind the policy
+    // store's in-memory LRU. Without a flush, a token whose policy was just
+    // overwritten keeps being authorized against the pre-import document until
+    // the entry is evicted or the vault is sealed — an authorization decision
+    // made on data the operator has already replaced.
+    if !dry_run && document_carries_policies(document) {
+        if let Some(policy_module) =
+            core.module_manager.get_module::<crate::modules::policy::PolicyModule>("policy")
+        {
+            policy_module.policy_store.load().flush_caches();
+        }
+    }
+
     Ok(result)
+}
+
+/// Did this document ask for a policy write anywhere — root namespace or any
+/// bundle? Drives the post-import cache flush.
+fn document_carries_policies(document: &ExchangeDocument) -> bool {
+    !document.items.policies.is_empty()
+        || document.items.namespaces.iter().any(|b| !b.items.policies.is_empty())
 }
 
 #[cfg(test)]
@@ -361,6 +384,111 @@ mod tests {
         assert!(doc.items.namespaces.is_empty());
         let joined: String = doc.items.kv.iter().map(|k| k.value.to_string()).collect();
         assert!(!joined.contains("from-a"), "root full export leaked tenant data");
+    }
+
+    /// Policies belong in a backup: a vault whose secrets are restored but whose
+    /// ACL policies are not is a vault only root can use. Each namespace's
+    /// policies must travel in that namespace's own items, restore into that
+    /// namespace's own keyspace, and be served — post-import — from storage
+    /// rather than from the policy store's stale LRU entry.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn all_namespaces_export_round_trips_policies() {
+        let (_bvault, core, root) =
+            new_unseal_test_bastion_vault("test_exchange_ns_policies").await;
+        let store = store_of(&core);
+        store.create("tenant-a", NamespaceQuotas::default(), false).await.unwrap();
+        ns_req(
+            &core,
+            &root,
+            Operation::Write,
+            "sys/mounts/cubby/",
+            "tenant-a",
+            json!({ "type": "kv" }).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+
+        // One policy per namespace, each granting `read`.
+        let root_hcl = "path \"secret/*\" { capabilities = [\"read\"] }";
+        // A namespace policy must address its own namespace-prefixed paths.
+        let tenant_hcl = "path \"tenant-a/cubby/*\" { capabilities = [\"read\"] }";
+        for (ns, name, hcl) in
+            [("", "reader", root_hcl), ("tenant-a", "tenant-reader", tenant_hcl)]
+        {
+            ns_req(
+                &core,
+                &root,
+                Operation::Write,
+                &format!("sys/policy/{name}"),
+                ns,
+                json!({ "policy": hcl }).as_object().cloned(),
+            )
+            .await
+            .unwrap();
+        }
+
+        let doc = export_all_namespaces(
+            &core,
+            ExporterInfo::default(),
+            ScopeSpec { kind: ScopeKind::AllNamespaces, include: vec![] },
+        )
+        .await
+        .unwrap();
+
+        let root_names: Vec<&str> =
+            doc.items.policies.iter().map(|p| p.name.as_str()).collect();
+        assert!(root_names.contains(&"reader"), "root policies: {root_names:?}");
+        assert!(
+            !root_names.contains(&"tenant-reader"),
+            "a tenant's policy must not surface as the root namespace's: {root_names:?}"
+        );
+        let bundle = doc
+            .items
+            .namespaces
+            .iter()
+            .find(|b| b.path == "tenant-a")
+            .expect("tenant-a bundle");
+        let tenant_names: Vec<&str> =
+            bundle.items.policies.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(tenant_names, vec!["tenant-reader"], "tenant policies");
+
+        // Clobber both policies, then restore from the document. Reading back
+        // through the request path exercises the policy store's cache, which
+        // the import must have invalidated.
+        for (ns, name, clobbered) in [
+            ("", "reader", "path \"clobbered/*\" { capabilities = [\"list\"] }"),
+            (
+                "tenant-a",
+                "tenant-reader",
+                "path \"tenant-a/clobbered/*\" { capabilities = [\"list\"] }",
+            ),
+        ] {
+            ns_req(
+                &core,
+                &root,
+                Operation::Write,
+                &format!("sys/policy/{name}"),
+                ns,
+                json!({ "policy": clobbered }).as_object().cloned(),
+            )
+            .await
+            .unwrap();
+        }
+
+        let result =
+            import_document(&core, &doc, ConflictPolicy::Overwrite, false).await.unwrap();
+        assert!(result.written > 0);
+
+        for (ns, name, expected) in
+            [("", "reader", root_hcl), ("tenant-a", "tenant-reader", tenant_hcl)]
+        {
+            let resp = ns_req(&core, &root, Operation::Read, &format!("sys/policy/{name}"), ns, None)
+                .await
+                .unwrap()
+                .unwrap();
+            let rules = resp.data.unwrap()["rules"].as_str().unwrap().to_string();
+            assert_eq!(rules, expected, "policy {name:?} in namespace {ns:?}");
+        }
     }
 
     /// A bundle naming a namespace this vault does not have is reported, not

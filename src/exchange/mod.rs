@@ -30,8 +30,8 @@ pub use namespaces::{export_all_namespaces, import_document as import_all_namesp
 pub use preview::{PreviewClassificationItem, PreviewStore, PreviewSummary};
 pub use schema::{
     AssetGroupItem, ExchangeDocument, ExchangeItems, ExporterInfo, FileItem, KvItem,
-    NamespaceBundle, RawEntry, ResourceGroupItem, ResourceItem, ScopeKind, ScopeSelector,
-    ScopeSpec,
+    NamespaceBundle, PolicyItem, RawEntry, ResourceGroupItem, ResourceItem, ScopeKind,
+    ScopeSelector, ScopeSpec,
 };
 pub use scope::{
     export_to_document, import_from_document, ConflictPolicy, ImportAction, ImportClassification,
