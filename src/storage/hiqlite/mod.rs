@@ -85,6 +85,13 @@ pub struct HiqliteBackend {
     secret_api: String,
     /// This node's ID
     node_id: u64,
+    /// Every configured peer endpoint as `host:port` (both the Raft and the
+    /// management-API address of every entry in `nodes`, this node included).
+    /// Kept verbatim rather than pre-resolved because the documented config
+    /// form allows hostnames (`"1:bv-1:8210:bv-1:8220"` — compose/k8s DNS),
+    /// whose addresses change across peer restarts. Consumers resolve on
+    /// demand; see `crate::http::sys`'s cluster-local disclosure gate.
+    peer_addrs: Vec<String>,
     /// Whether TLS is enabled on the API channel (affects certificate verification for self-signed)
     tls_api_auto_certs: bool,
     /// Keeps the tokio runtime alive so hiqlite's background tasks (Raft, RPC servers) continue running.
@@ -501,6 +508,12 @@ impl HiqliteBackend {
             .append_new_random_with_id("bvault-default".to_string())
             .map_err(|e| RvError::ErrCluster(e.to_string()))?;
 
+        // Snapshot the peer endpoints before `nodes` is moved into NodeConfig.
+        let peer_addrs: Vec<String> = nodes
+            .iter()
+            .flat_map(|n| [n.addr_raft.clone(), n.addr_api.clone()])
+            .collect();
+
         let node_config = NodeConfig {
             node_id,
             nodes,
@@ -577,6 +590,7 @@ impl HiqliteBackend {
             api_addr,
             secret_api: secret_api.to_string(),
             node_id,
+            peer_addrs,
             tls_api_auto_certs,
             _runtime: None,
         })
@@ -633,6 +647,12 @@ impl HiqliteBackend {
     /// Returns this node's ID.
     pub fn node_id(&self) -> u64 {
         self.node_id
+    }
+
+    /// Every configured cluster endpoint as `host:port`, this node included.
+    /// Hostnames are returned unresolved — see [`HiqliteBackend::peer_addrs`].
+    pub fn peer_addrs(&self) -> &[String] {
+        &self.peer_addrs
     }
 
     /// Remove a node from the Raft cluster. Must be called on the leader.

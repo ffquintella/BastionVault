@@ -58,8 +58,15 @@ With hiqlite, a BastionVault cluster **is** the Raft cluster. Each vault node em
 **Phase 2 -- Health & Status Endpoints** (`src/http/sys.rs`):
 - `GET /v1/sys/health` -- returns initialized, sealed, standby, cluster_healthy; status codes 200/429/503/501.
 - `GET /v1/sys/cluster-status` -- returns storage_type, node_id, is_leader, cluster_healthy, raft_metrics.
-- `POST /v1/sys/cluster/remove-node` -- remove a node from the Raft topology.
-- `POST /v1/sys/cluster/leave` -- graceful cluster exit.
+  Gated: needs a live token, or a request from a cluster machine (loopback, or an IP in the
+  configured `nodes` list -- judged on the socket peer, never `X-Forwarded-For`). The second case
+  is what keeps `bvault status` working on the server itself with no token. Otherwise 403.
+  `HiqliteBackend::peer_addrs()` supplies the peer list, re-resolved on a 30s cache so a peer
+  that restarts on a new address keeps qualifying.
+- `POST /v1/sys/cluster/remove-node` -- remove a node from the Raft topology. ACL-gated on
+  `sys/cluster/remove-node`.
+- `POST /v1/sys/cluster/leave` -- graceful cluster exit. ACL-gated on `sys/cluster/leave`.
+- `POST /v1/sys/cluster/failover` -- force an election. ACL-gated on `sys/cluster/failover`.
 
 **Phase 2 -- Client SDK** (`src/api/sys.rs`):
 - `cluster_status()` method for SDK-based cluster queries.

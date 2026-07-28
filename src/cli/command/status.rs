@@ -40,6 +40,14 @@ impl CommandExecutor for Status {
 
         // `/sys/info` doubles as our reachability probe: a transport error here
         // means the daemon isn't listening, so report that and bail.
+        //
+        // The endpoint answers unauthenticated but redacts the build
+        // fingerprint for anonymous callers (see docs/api.md § Server Info),
+        // so `version` / `uptime_seconds` are absent unless a token is
+        // configured. Every field below is therefore inserted only if
+        // present — a token-less `bvault status` still reports
+        // daemon/initialized/sealed, which is what it needs to do before the
+        // vault has been initialized at all.
         match sys.info() {
             Ok(ret) if ret.response_status == 200 => {
                 status.insert("daemon".to_string(), Value::String("running".to_string()));

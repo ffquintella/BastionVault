@@ -1075,6 +1075,39 @@ impl PolicyStore {
         let name = self.sanitize_name(name);
         let index = self.cache_key(&name);
         let mut policy_type = policy_type;
+
+        // `policy_type_map` is per-node and in-memory: it is built once in
+        // `PolicyStore::new` from the ACL keyspace, and afterwards only by the
+        // writes this node itself served. A policy written against another
+        // cluster member replicates its bytes through Raft but never reaches
+        // this map, so a `Token` lookup could miss for a policy that plainly
+        // exists. That miss used to fall through to the `view.is_none()` guard
+        // below and fail the whole request with an opaque 500 — including for
+        // the much more common case of a token naming a policy that does not
+        // exist here at all (typically one created inside a child namespace
+        // while the token is root-bound).
+        //
+        // Resolve the real type from storage instead and memoize it. A name
+        // that exists in neither keyspace resolves to `Ok(None)` so
+        // `new_acl_inner` skips it and the request is denied on its merits,
+        // matching what `get_policy_ns` already does for namespaces.
+        if policy_type == PolicyType::Token && name != "root" && !self.policy_type_map.contains_key(&index) {
+            if self.get_acl_view()?.get(&name).await?.is_some() {
+                self.policy_type_map.insert(index.clone(), PolicyType::Acl);
+            } else if self.get_rgp_view()?.get(&name).await?.is_some() {
+                self.policy_type_map.insert(index.clone(), PolicyType::Rgp);
+            } else {
+                // Fail-closed, but say so: silently dropping a policy from a
+                // token's ACL is invisible in the 403 that follows, and it is
+                // the single hardest symptom to diagnose from the outside.
+                log::warn!(
+                    "token carries policy '{name}' which does not exist in this namespace; \
+                     dropping it from the request ACL"
+                );
+                return Ok(None);
+            }
+        }
+
         let (view, cache) = match policy_type {
             PolicyType::Acl => (Some(self.get_acl_view()?), &self.token_policies_lru),
             PolicyType::Rgp => (Some(self.get_rgp_view()?), &self.token_policies_lru),
@@ -1119,7 +1152,13 @@ impl PolicyStore {
         }
 
         if view.is_none() {
-            return Err(bv_error_string!(format!("unable to get the barrier subview for policy type {}", policy_type)));
+            // Reachable only for a genuinely unconfigured barrier view now that
+            // `Token` resolves through storage above. Name the policy: the old
+            // message reported only the type, which told an operator staring at
+            // a 500 nothing about which policy to go and look for.
+            return Err(bv_error_string!(format!(
+                "unable to get the barrier subview for policy '{name}' (type {policy_type})"
+            )));
         }
 
         let view = view.unwrap();
@@ -3553,6 +3592,84 @@ mod mod_policy_store_tests {
         assert_eq!(
             acl.exact_rules.get("secret/data/test2").unwrap().capabilities_bitmap,
             Capability::Create.to_bits() | Capability::Delete.to_bits()
+        );
+    }
+
+    /// `policy_type_map` is per-node and in-memory: built once in
+    /// `PolicyStore::new`, then only by the writes this node itself served. A
+    /// policy created against another cluster member replicates its bytes
+    /// through Raft but never reaches this node's map, so a `PolicyType::Token`
+    /// lookup misses for a policy that plainly exists. It must read through to
+    /// the replicated ACL keyspace rather than fail the request.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_token_policy_reads_through_a_cold_type_map() {
+        let (_bvault, core, _root_token) =
+            new_unseal_test_bastion_vault("test_policy_cold_type_map").await;
+        let policy_store = PolicyStore::new(&core).await.unwrap();
+
+        let mut peer = Policy::from_str(
+            r#"path "secret/data/peer/*" { capabilities = ["read"] }"#,
+        )
+        .unwrap();
+        peer.name = "peer-written".to_string();
+        policy_store.set_policy(peer).await.unwrap();
+
+        // Reproduce the peer-node write: the bytes sit in the replicated ACL
+        // keyspace, but this node never served the write, so neither its type
+        // map nor its policy LRU has ever heard of the name.
+        let index = policy_store.cache_key("peer-written");
+        policy_store.policy_type_map.remove(&index);
+        policy_store.remove_token_policy_cache(&index).unwrap();
+
+        let got = policy_store
+            .get_policy("peer-written", PolicyType::Token)
+            .await
+            .expect("a cold type map must not fail the lookup");
+        assert!(got.is_some(), "Token lookup must read through to the replicated ACL keyspace");
+        assert_eq!(got.unwrap().name, "peer-written");
+        assert_eq!(
+            policy_store.policy_type_map.get(&index).map(|v| *v),
+            Some(PolicyType::Acl),
+            "the resolved type must be memoized so later lookups take the fast path"
+        );
+    }
+
+    /// A root-bound token whose policy list names a policy that does not exist
+    /// in the root namespace must be denied, not error. This is the shape of a
+    /// common operator slip: the policy was created inside a child namespace
+    /// while the auth role handing out its name lives at the root, so the name
+    /// resolves nowhere on the request's path. `get_policy_ns` already skipped
+    /// unresolvable names for namespace-bound tokens; the root path used to
+    /// return `unable to get the barrier subview for policy type token`, which
+    /// reached the caller as an opaque HTTP 500.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_root_bound_token_with_unresolvable_policy_is_denied_not_error() {
+        use crate::logical::Auth;
+
+        let (_bvault, core, _root_token) =
+            new_unseal_test_bastion_vault("test_policy_unresolvable_root").await;
+        let policy_store = PolicyStore::new(&core).await.unwrap();
+
+        assert!(
+            policy_store
+                .get_policy("lives-in-a-child-namespace", PolicyType::Token)
+                .await
+                .expect("an unresolvable policy name must not be an error")
+                .is_none(),
+            "an unresolvable policy name must resolve to None so the caller can skip it"
+        );
+
+        let auth =
+            Auth { policies: vec!["lives-in-a-child-namespace".into()], ..Default::default() };
+        let acl = policy_store
+            .new_acl_for_request(&auth.policies, None, &auth)
+            .await
+            .expect("ACL construction must not fail because a named policy is unresolvable");
+
+        assert_eq!(
+            acl.capabilities("dti/esi/secret/data/github/nessus".to_string()),
+            vec!["deny".to_string()],
+            "the request must be denied on its merits, not fail with a server error"
         );
     }
 }

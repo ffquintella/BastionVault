@@ -1,4 +1,9 @@
-use std::sync::Arc;
+use std::{
+    collections::HashSet,
+    net::{IpAddr, ToSocketAddrs},
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use actix_web::{http::StatusCode, web, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
@@ -178,7 +183,15 @@ async fn sys_seal_status_request_handler(
     }
 }
 
+/// `POST /sys/seal` — drop the master key and go sealed.
+///
+/// `seal` is listed in the system backend's `root_paths`, so the gate below
+/// demands a sudo-capable token. It previously ran for any caller who could
+/// reach the listener, which made a one-line unauthenticated request a complete
+/// outage.
 async fn sys_seal_request_handler(_req: HttpRequest, core: web::Data<Arc<Core>>) -> Result<HttpResponse, RvError> {
+    authorize_sys_request(&core, &_req, "sys/seal", Operation::Write).await?;
+
     #[cfg(not(feature = "sync_handler"))]
     core.seal().await?;
     #[cfg(feature = "sync_handler")]
@@ -1185,24 +1198,205 @@ async fn sys_health_request_handler(
     Ok(HttpResponse::build(status).json(resp))
 }
 
+/// `GET /sys/info` response.
+///
+/// Deliberately split into two disclosure tiers. `initialized` and
+/// `sealed` are the liveness/bootstrap facts every caller needs before
+/// it can hold a token at all (`bvault status` against a fresh vault,
+/// the GUI's connect screen), so they stay anonymous. Everything else
+/// fingerprints the build — an exact version maps straight onto known
+/// CVEs, and `started_at`/`uptime_seconds` leak patch cadence — so it
+/// is emitted only for callers presenting a live token. The optional
+/// fields are omitted from the JSON entirely rather than nulled, so an
+/// unauthenticated body stays a strict subset of the authenticated one
+/// and existing clients that read fields defensively keep working.
 #[derive(Debug, Clone, Serialize)]
 struct ServerInfoResponse {
-    /// Crate version baked at compile time. Same source as the GUI's
-    /// "Server Info" dialog uses in embedded mode so the two never
-    /// disagree.
-    version: &'static str,
-    started_at: String,
-    uptime_seconds: i64,
     initialized: bool,
     sealed: bool,
+    /// Crate version baked at compile time. Same source as the GUI's
+    /// "Server Info" dialog uses in embedded mode so the two never
+    /// disagree. Authenticated callers only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uptime_seconds: Option<i64>,
     /// Best-effort storage kind label — mirrors the `cluster-status`
     /// endpoint so operators don't have to consult two routes to
-    /// learn whether they're on file / mysql / hiqlite.
-    storage_type: String,
+    /// learn whether they're on file / mysql / hiqlite. Authenticated
+    /// callers only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    storage_type: Option<String>,
+}
+
+/// Does the caller present a token the store still recognises?
+///
+/// Used purely as a disclosure gate for `sys/info` — it asks "is this
+/// somebody who already authenticated", not "may they read path X", so
+/// no ACL is consulted and no policy is required. Uses `lookup` rather
+/// than `check_token` on purpose: `check_token` runs `use_token`, which
+/// would burn a use off a `num_uses`-limited token just for reading an
+/// info page. Expired and revoked tokens no longer have a lookup entry,
+/// so a `Some` here means live.
+async fn caller_has_live_token(core: &Core, req: &HttpRequest) -> bool {
+    let token = request_auth(req).client_token;
+    if token.is_empty() {
+        return false;
+    }
+    let Some(auth_module) = core
+        .module_manager
+        .get_module::<crate::modules::auth::AuthModule>("auth")
+    else {
+        return false;
+    };
+    let Some(token_store) = auth_module.token_store.load_full() else {
+        return false;
+    };
+    matches!(token_store.lookup(&token).await, Ok(Some(_)))
+}
+
+/// Run the real authentication + ACL gate for `path` / `operation` without
+/// dispatching a logical request.
+///
+/// Nearly every `sys` handler reaches the policy engine through
+/// [`handle_request`], which crosses `TokenStore::pre_route` — the single
+/// chokepoint that validates the presented token and asks the ACL whether the
+/// operation is permitted. The handlers in this file that do their work inline
+/// (binary backup streams, plugin uploads, filesystem exports, cluster
+/// membership calls) never call it, so until this gate existed they executed
+/// for *any* caller who could reach the listener: `POST /v1/sys/backup`
+/// handed a full vault dump to an anonymous client and `POST /v1/sys/seal`
+/// sealed the vault. Calling this first makes them behave exactly like a
+/// logical path — same token validation, same policy evaluation, same
+/// `root_paths` sudo rules, same denial bookkeeping.
+///
+/// `path` must be the mount-relative logical path (`"sys/backup"`), matching
+/// what a policy author writes in `path "sys/backup" { ... }`.
+async fn authorize_sys_request(
+    core: &web::Data<Arc<Core>>,
+    req: &HttpRequest,
+    path: &str,
+    operation: Operation,
+) -> Result<(), RvError> {
+    let mut r = request_auth(req);
+    r.path = path.to_string();
+    r.operation = operation;
+    // Namespaced callers must be judged in their own namespace, exactly as the
+    // handle_request-backed siblings are.
+    copy_namespace_header(req, &mut r);
+
+    let auth_module = core
+        .module_manager
+        .get_module::<crate::modules::auth::AuthModule>("auth")
+        .ok_or(RvError::ErrPermissionDenied)?;
+    let token_store = auth_module
+        .token_store
+        .load_full()
+        .ok_or(RvError::ErrPermissionDenied)?;
+
+    // `pre_route` runs pre_auth → check_token → post_auth (the ACL check in
+    // `PolicyStore::post_auth`). `Ok(_)` means the caller is cleared.
+    match crate::handler::Handler::pre_route(token_store.as_ref(), &mut r).await {
+        Ok(_) => Ok(()),
+        // A privileged route reached with no token at all is a permission
+        // failure, not a malformed request: `ErrRequestClientTokenMissing`
+        // renders as 400, which tells a client to fix its body when what it
+        // actually needs to do is authenticate. Collapse it onto the 403 every
+        // other refusal on these routes returns.
+        Err(RvError::ErrRequestClientTokenMissing) => Err(RvError::ErrPermissionDenied),
+        Err(e) => Err(e),
+    }
+}
+
+/// Is the TCP peer one of this cluster's own machines?
+///
+/// `peer` is the *socket* address, deliberately not the
+/// `X-Forwarded-For`-derived one: this predicate waives authentication, so it
+/// must rest on something a client cannot set in a header.
+///
+/// Loopback counts because "the request came from this very host" is the case
+/// operators actually need — `bvault status` run on the server itself, with no
+/// token in the environment, is the standard way to check a node. Anything
+/// else must appear in the configured `nodes` list.
+fn ip_is_cluster_local(peer: IpAddr, cluster_peer_ips: &HashSet<IpAddr>) -> bool {
+    peer.is_loopback() || cluster_peer_ips.contains(&peer)
+}
+
+/// Resolved `nodes` addresses, refreshed at most every [`PEER_IP_CACHE_TTL`].
+///
+/// Peer hostnames are re-resolved rather than snapshotted at boot because the
+/// documented cluster config uses service names (`bv-1`, `bv-2`) whose
+/// addresses change whenever a peer container restarts; a boot-time snapshot
+/// would silently stop recognising a restarted peer.
+type PeerIpCache = std::sync::RwLock<Option<(Instant, Arc<HashSet<IpAddr>>)>>;
+
+static PEER_IP_CACHE: std::sync::OnceLock<PeerIpCache> = std::sync::OnceLock::new();
+
+const PEER_IP_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// The IPs of every configured cluster node. Empty for non-clustered backends,
+/// which leaves loopback as the only cluster-local caller.
+fn cluster_peer_ips(core: &Core) -> Arc<HashSet<IpAddr>> {
+    let cache = PEER_IP_CACHE.get_or_init(|| std::sync::RwLock::new(None));
+
+    if let Ok(guard) = cache.read() {
+        if let Some((at, ips)) = guard.as_ref() {
+            if at.elapsed() < PEER_IP_CACHE_TTL {
+                return Arc::clone(ips);
+            }
+        }
+    }
+
+    let mut addrs: Vec<String> = Vec::new();
+    #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
+    {
+        use crate::storage::hiqlite::HiqliteBackend;
+        let backend_any = core.physical.as_ref() as &dyn std::any::Any;
+        if let Some(hiqlite_backend) = backend_any.downcast_ref::<HiqliteBackend>() {
+            addrs = hiqlite_backend.peer_addrs().to_vec();
+        }
+    }
+    let _ = core;
+
+    let mut ips: HashSet<IpAddr> = HashSet::new();
+    for addr in &addrs {
+        // A name that does not resolve right now simply contributes nothing —
+        // that peer falls back to presenting a token, which fails closed.
+        if let Ok(resolved) = addr.to_socket_addrs() {
+            ips.extend(resolved.map(|sa| sa.ip()));
+        }
+    }
+
+    let ips = Arc::new(ips);
+    if let Ok(mut guard) = cache.write() {
+        *guard = Some((Instant::now(), Arc::clone(&ips)));
+    }
+    ips
+}
+
+/// May this caller see the privileged half of `sys/cluster-status`?
+///
+/// Either it holds a live token, or it is one of the cluster's own machines
+/// (see [`ip_is_cluster_local`]).
+async fn caller_may_see_cluster_topology(core: &Core, req: &HttpRequest) -> bool {
+    let socket_peer = req
+        .conn_data::<crate::http::Connection>()
+        .map(|c| c.peer)
+        .or_else(|| req.peer_addr());
+
+    if let Some(peer) = socket_peer {
+        if ip_is_cluster_local(peer.ip(), &cluster_peer_ips(core)) {
+            return true;
+        }
+    }
+
+    caller_has_live_token(core, req).await
 }
 
 async fn sys_info_request_handler(
-    _req: HttpRequest,
+    req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, RvError> {
     #[cfg(not(feature = "sync_handler"))]
@@ -1210,35 +1404,63 @@ async fn sys_info_request_handler(
     #[cfg(feature = "sync_handler")]
     let initialized = core.inited().unwrap_or(false);
 
-    #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
-    let storage_type = {
-        use crate::storage::hiqlite::HiqliteBackend;
-        let backend_any = core.physical.as_ref() as &dyn std::any::Any;
-        if backend_any.downcast_ref::<HiqliteBackend>().is_some() {
-            "hiqlite"
-        } else {
-            "unknown"
-        }
-    };
-    #[cfg(not(all(not(feature = "sync_handler"), feature = "storage_hiqlite")))]
-    let storage_type = "unknown";
-
-    let resp = ServerInfoResponse {
-        version: crate::server_info::version(),
-        started_at: crate::server_info::started_at().to_rfc3339(),
-        uptime_seconds: crate::server_info::uptime_seconds(),
+    let mut resp = ServerInfoResponse {
         initialized,
         sealed: core.sealed(),
-        storage_type: storage_type.to_string(),
+        version: None,
+        started_at: None,
+        uptime_seconds: None,
+        storage_type: None,
     };
+
+    if caller_has_live_token(&core, &req).await {
+        #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
+        let storage_type = {
+            use crate::storage::hiqlite::HiqliteBackend;
+            let backend_any = core.physical.as_ref() as &dyn std::any::Any;
+            if backend_any.downcast_ref::<HiqliteBackend>().is_some() {
+                "hiqlite"
+            } else {
+                "unknown"
+            }
+        };
+        #[cfg(not(all(not(feature = "sync_handler"), feature = "storage_hiqlite")))]
+        let storage_type = "unknown";
+
+        resp.version = Some(crate::server_info::version());
+        resp.started_at = Some(crate::server_info::started_at().to_rfc3339());
+        resp.uptime_seconds = Some(crate::server_info::uptime_seconds());
+        resp.storage_type = Some(storage_type.to_string());
+    }
+
     Ok(HttpResponse::Ok().json(resp))
 }
 
+/// `GET /sys/cluster-status` — storage backend and this node's Raft role.
+///
+/// Gated, because for a secrets manager the payload is cluster-topology
+/// reconnaissance: `is_leader` names the single highest-value node to attack or
+/// disrupt, and `raft_metrics` enumerates the full membership. It used to
+/// answer any caller who could reach the listener.
+///
+/// A caller qualifies one of two ways: it presents a live token, or it *is* one
+/// of the cluster's own machines (loopback, or an IP in the configured `nodes`
+/// list — see [`ip_is_cluster_local`]). The second case is what keeps `bvault
+/// status` working when an operator runs it on the server with no token in the
+/// environment. Everyone else gets 403 rather than a trimmed body: unlike
+/// `sys/info`, nothing here is a bootstrap fact a tokenless client needs, and
+/// even `storage_type` alone is the field `sys/info` deliberately withholds
+/// from anonymous callers — tiering it here would just reopen that hole.
 async fn sys_cluster_status_request_handler(
     req: HttpRequest,
     _core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, RvError> {
-    let _auth = request_auth(&req);
+    if !caller_may_see_cluster_topology(&_core, &req).await {
+        return Ok(response_error(
+            StatusCode::FORBIDDEN,
+            "cluster status requires a valid token, or a request from a cluster node",
+        ));
+    }
 
     let mut resp = ClusterStatusResponse {
         storage_type: "unknown".to_string(),
@@ -1275,7 +1497,7 @@ async fn sys_cluster_remove_node_request_handler(
     mut body: web::Bytes,
     _core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, RvError> {
-    let _auth = request_auth(&req);
+    authorize_sys_request(&_core, &req, "sys/cluster/remove-node", Operation::Write).await?;
 
     #[derive(Deserialize)]
     #[allow(dead_code)]
@@ -1306,7 +1528,7 @@ async fn sys_cluster_leave_request_handler(
     req: HttpRequest,
     _core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, RvError> {
-    let _auth = request_auth(&req);
+    authorize_sys_request(&_core, &req, "sys/cluster/leave", Operation::Write).await?;
 
     #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
     {
@@ -1325,7 +1547,7 @@ async fn sys_cluster_failover_request_handler(
     req: HttpRequest,
     _core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, RvError> {
-    let _auth = request_auth(&req);
+    authorize_sys_request(&_core, &req, "sys/cluster/failover", Operation::Write).await?;
 
     #[cfg(all(not(feature = "sync_handler"), feature = "storage_hiqlite"))]
     {
@@ -1344,7 +1566,7 @@ async fn sys_backup_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, RvError> {
-    let _auth = request_auth(&req);
+    authorize_sys_request(&core, &req, "sys/backup", Operation::Write).await?;
 
     let hmac_key = core.barrier.derive_hmac_key()?;
     let mut buf = Vec::new();
@@ -1368,7 +1590,7 @@ async fn sys_restore_request_handler(
     body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, RvError> {
-    let _auth = request_auth(&req);
+    authorize_sys_request(&core, &req, "sys/restore", Operation::Write).await?;
 
     let hmac_key = core.barrier.derive_hmac_key()?;
     let mut reader = std::io::Cursor::new(body.as_ref());
@@ -1387,9 +1609,9 @@ async fn sys_export_request_handler(
     req: HttpRequest,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, RvError> {
-    let _auth = request_auth(&req);
-
     let path = req.match_info().get("path").unwrap_or("");
+    authorize_sys_request(&core, &req, &format!("sys/export/{path}"), Operation::Read).await?;
+
     // Split path into mount and prefix at the first '/' after removing leading slash
     let (mount, prefix) = if let Some(idx) = path.find('/') {
         let (m, p) = path.split_at(idx + 1);
@@ -1477,16 +1699,50 @@ impl SysAuditCtx {
         path: &str,
         op: Operation,
     ) {
+        self.emit(result, path, op).await;
+    }
+
+    /// Borrowing form of [`Self::finish`], so a denial can be audited before
+    /// the handler body (which owns the ctx) ever runs.
+    async fn emit(
+        &self,
+        result: &Result<HttpResponse, RvError>,
+        path: &str,
+        op: Operation,
+    ) {
         let err_str = result.as_ref().err().map(|e| format!("{e}"));
         crate::audit::emit_sys_audit(
             &self.core,
             &self.token,
             path,
             op,
-            self.body_for_audit,
+            self.body_for_audit.clone(),
             err_str.as_deref(),
         )
         .await;
+    }
+
+    /// Authenticate and ACL-check the caller before the handler does any work.
+    ///
+    /// Delegates to [`authorize_sys_request`] and, on refusal, records the
+    /// attempt on the audit trail under the same path/operation the handler
+    /// would have audited — a rejected call against a privileged `sys` route is
+    /// precisely the event an operator needs to see — then propagates the 403.
+    async fn authorize(
+        &self,
+        core: &web::Data<Arc<Core>>,
+        req: &HttpRequest,
+        path: &str,
+        op: Operation,
+    ) -> Result<(), RvError> {
+        match authorize_sys_request(core, req, path, op).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let denied: Result<HttpResponse, RvError> = Err(e);
+                self.emit(&denied, path, op).await;
+                denied.map(|_| ())
+            }
+        }
     }
 }
 
@@ -1496,6 +1752,8 @@ async fn sys_exchange_export_request_handler(
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, RvError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
+
+    audit.authorize(&core, &req, "sys/exchange/export", Operation::Write).await?;
 
     let result: Result<HttpResponse, RvError> = (async move {
         // Surface the parse error instead of collapsing it to a generic
@@ -1660,6 +1918,8 @@ async fn sys_exchange_import_preview_handler(
         .unwrap_or("")
         .to_string();
 
+    audit.authorize(&core, &req, "sys/exchange/import/preview", Operation::Write).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let mut payload: ExchangeImportRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
@@ -1743,6 +2003,8 @@ async fn sys_exchange_import_apply_handler(
         .unwrap_or("")
         .to_string();
 
+    audit.authorize(&core, &req, "sys/exchange/import/apply", Operation::Write).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let payload: ExchangeApplyRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
@@ -1814,6 +2076,8 @@ async fn sys_plugins_list_handler(
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, RvError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
+    audit.authorize(&core, &req, "sys/plugins", Operation::List).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         let manifests = catalog.list(core.barrier.as_storage()).await?;
@@ -1830,6 +2094,8 @@ async fn sys_plugins_register_handler(
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, RvError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
+    audit.authorize(&core, &req, "sys/plugins/register", Operation::Write).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         use base64::Engine;
         let payload: PluginRegisterRequest =
@@ -1926,6 +2192,8 @@ async fn sys_plugins_get_handler(
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}");
+    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         match catalog.get_manifest(core.barrier.as_storage(), &name).await? {
@@ -1945,6 +2213,8 @@ async fn sys_plugins_delete_handler(
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}");
+    audit.authorize(&core, &req, &audit_path, Operation::Delete).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         catalog.delete(core.barrier.as_storage(), &name).await?;
@@ -1974,6 +2244,8 @@ async fn sys_plugins_versions_list_handler(
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}/versions");
+    audit.authorize(&core, &req, &audit_path, Operation::List).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         let versions = catalog.list_versions(core.barrier.as_storage(), &name).await?;
@@ -1998,6 +2270,8 @@ async fn sys_plugins_versions_activate_handler(
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let version = req.match_info().get("version").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}/versions/{version}/activate");
+    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         catalog
@@ -2026,6 +2300,8 @@ async fn sys_plugins_versions_delete_handler(
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let version = req.match_info().get("version").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}/versions/{version}");
+    audit.authorize(&core, &req, &audit_path, Operation::Delete).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         catalog
@@ -2045,6 +2321,8 @@ async fn sys_plugins_reload_handler(
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}/reload");
+    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         // Phase 5.6: drain-and-swap. Acquire the per-plugin reload
         // gate's *write* side, which blocks on every in-flight
@@ -2100,6 +2378,8 @@ async fn sys_plugins_config_get_handler(
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}/config");
+    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         let manifest = match catalog
@@ -2139,6 +2419,8 @@ async fn sys_plugins_config_put_handler(
     let audit = SysAuditCtx::new(&req, &body, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}/config");
+    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let payload: PluginConfigPutRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
@@ -2222,6 +2504,8 @@ async fn sys_plugins_grants_get_handler(
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}/grants");
+    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         let manifest = match catalog
@@ -2273,6 +2557,8 @@ async fn sys_plugins_grants_put_handler(
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let token = request_auth(&req).client_token;
     let audit_path = format!("sys/plugins/{name}/grants");
+    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let payload: GrantsPutRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
@@ -2323,6 +2609,8 @@ async fn sys_plugins_grants_delete_handler(
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}/grants");
+    audit.authorize(&core, &req, &audit_path, Operation::Delete).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         crate::plugins::grants::delete(core.barrier.as_storage(), &name).await?;
         Ok(response_ok(None, None))
@@ -2346,6 +2634,8 @@ async fn sys_plugins_publishers_get_handler(
 ) -> Result<HttpResponse, RvError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let audit_path = "sys/plugins/publishers".to_string();
+    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let allow =
             crate::plugins::verifier::PublisherAllowlist::load(core.barrier.as_storage()).await?;
@@ -2371,6 +2661,8 @@ async fn sys_plugins_publishers_put_handler(
 ) -> Result<HttpResponse, RvError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
     let audit_path = "sys/plugins/publishers".to_string();
+    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let payload: PublishersPutRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
@@ -2397,6 +2689,8 @@ async fn sys_plugins_accept_unsigned_put_handler(
 ) -> Result<HttpResponse, RvError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
     let audit_path = "sys/plugins/accept_unsigned".to_string();
+    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let payload: AcceptUnsignedPutRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
@@ -2434,6 +2728,8 @@ async fn sys_plugins_surface_get_handler(
         .get("If-None-Match")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.trim_matches('"').to_string());
+    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         match catalog.read_active_surface(core.barrier.as_storage(), &name).await? {
@@ -2496,6 +2792,8 @@ async fn sys_plugins_active_surfaces_handler(
     let watch_requested =
         query.split('&').any(|kv| matches!(kv, "watch=1" | "watch=true"));
 
+    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let catalog = crate::plugins::PluginCatalog::new();
         // Mount lookup is wired in Phase 1 with a placeholder (empty
@@ -2557,6 +2855,8 @@ async fn sys_plugins_asset_get_handler(
     // 64 here too.
     let valid_hash =
         sha256.len() == 64 && sha256.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase());
+    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         if !valid_hash {
             return Ok(response_error(StatusCode::BAD_REQUEST, "asset sha256 must be 64 lowercase hex chars"));
@@ -2587,6 +2887,8 @@ async fn sys_plugins_quarantine_list_handler(
 ) -> Result<HttpResponse, RvError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let audit_path = "sys/plugins/quarantine".to_string();
+    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let names = crate::plugins::quarantine::list(core.barrier.as_storage()).await?;
         let mut entries = serde_json::Map::new();
@@ -2612,6 +2914,8 @@ async fn sys_plugins_invoke_handler(
     let audit = SysAuditCtx::new(&req, &body, &core);
     let name = req.match_info().get("name").unwrap_or("").to_string();
     let audit_path = format!("sys/plugins/{name}/invoke");
+
+    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
 
     let result: Result<HttpResponse, RvError> = (async move {
     use base64::Engine;
@@ -2725,6 +3029,8 @@ async fn sys_scheduled_exports_list_handler(
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, RvError> {
     let audit = SysAuditCtx::new_no_body(&req, &core);
+    audit.authorize(&core, &req, "sys/scheduled-exports", Operation::List).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
         let list = store.list(core.barrier.as_storage()).await?;
@@ -2741,6 +3047,8 @@ async fn sys_scheduled_exports_create_handler(
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, RvError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
+    audit.authorize(&core, &req, "sys/scheduled-exports/create", Operation::Write).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let input: crate::scheduled_exports::ScheduleInput =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
@@ -2783,6 +3091,8 @@ async fn sys_scheduled_exports_get_handler(
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
     let audit_path = format!("sys/scheduled-exports/{id}");
+    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
         let sched = store.get(core.barrier.as_storage(), &id).await?;
@@ -2804,6 +3114,8 @@ async fn sys_scheduled_exports_update_handler(
     let audit = SysAuditCtx::new(&req, &body, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
     let audit_path = format!("sys/scheduled-exports/{id}");
+    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let input: crate::scheduled_exports::ScheduleInput =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
@@ -2849,6 +3161,8 @@ async fn sys_scheduled_exports_delete_handler(
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
     let audit_path = format!("sys/scheduled-exports/{id}");
+    audit.authorize(&core, &req, &audit_path, Operation::Delete).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
         store.delete(core.barrier.as_storage(), &id).await?;
@@ -2866,6 +3180,8 @@ async fn sys_scheduled_exports_runs_handler(
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
     let audit_path = format!("sys/scheduled-exports/{id}/runs");
+    audit.authorize(&core, &req, &audit_path, Operation::List).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
         let runs = store.list_runs(core.barrier.as_storage(), &id).await?;
@@ -2885,6 +3201,8 @@ async fn sys_scheduled_exports_run_now_handler(
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
     let audit_path = format!("sys/scheduled-exports/{id}/run-now");
+    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
         let sched = store.get(core.barrier.as_storage(), &id).await?
@@ -3064,6 +3382,8 @@ async fn sys_scheduled_exports_backups_list_handler(
     let audit = SysAuditCtx::new_no_body(&req, &core);
     let id = req.match_info().get("id").unwrap_or("").to_string();
     let audit_path = format!("sys/scheduled-exports/{id}/backups");
+    audit.authorize(&core, &req, &audit_path, Operation::List).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let store = crate::scheduled_exports::ScheduleStore::new();
         let sched = match store.get(core.barrier.as_storage(), &id).await? {
@@ -3105,6 +3425,8 @@ async fn sys_scheduled_exports_backup_fetch_handler(
     let id = req.match_info().get("id").unwrap_or("").to_string();
     let filename = req.match_info().get("filename").unwrap_or("").to_string();
     let audit_path = format!("sys/scheduled-exports/{id}/backups/{filename}/fetch");
+    audit.authorize(&core, &req, &audit_path, Operation::Read).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         if !valid_backup_filename(&filename) {
             return Ok(response_error(StatusCode::BAD_REQUEST, "invalid backup file name"));
@@ -3189,6 +3511,8 @@ async fn sys_scheduled_exports_restore_handler(
     // The caller's own token is what authorises a cross-node fetch on the far
     // side, so capture it before the request is moved out of scope.
     let caller_token = crate::http::get_token_from_req(&req).unwrap_or_default();
+    audit.authorize(&core, &req, &audit_path, Operation::Write).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let mut payload: ScheduledExportRestoreRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
@@ -3348,6 +3672,8 @@ async fn sys_exchange_import_request_handler(
 ) -> Result<HttpResponse, RvError> {
     let audit = SysAuditCtx::new(&req, &body, &core);
 
+    audit.authorize(&core, &req, "sys/exchange/import", Operation::Write).await?;
+
     let result: Result<HttpResponse, RvError> = (async move {
         let mut payload: ExchangeImportRequest =
             serde_json::from_slice(&body).map_err(|_| RvError::ErrRequestInvalid)?;
@@ -3411,9 +3737,8 @@ async fn sys_import_request_handler(
     mut body: web::Bytes,
     core: web::Data<Arc<Core>>,
 ) -> Result<HttpResponse, RvError> {
-    let _auth = request_auth(&req);
-
     let mount = req.match_info().get("mount").unwrap_or("").to_string();
+    authorize_sys_request(&core, &req, &format!("sys/import/{mount}"), Operation::Write).await?;
     let mount = if mount.ends_with('/') { mount } else { format!("{mount}/") };
 
     #[derive(serde::Deserialize)]
@@ -3836,6 +4161,232 @@ fn default_plugin_register_body_limit() -> usize {
 /// matches the register / logical / batch limits.
 fn default_plugin_invoke_body_limit() -> usize {
     32 * 1024 * 1024
+}
+
+#[cfg(test)]
+mod sys_info_disclosure_tests {
+    //! `GET /sys/info` must stay reachable without a token — `bvault status`
+    //! and the GUI connect screen probe it before any token can exist — but
+    //! it must not hand an anonymous caller the exact build version and
+    //! uptime, which is free reconnaissance for CVE matching and patch-cadence
+    //! profiling against a secrets manager.
+
+    use crate::test_utils::TestHttpServer;
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn anonymous_sys_info_hides_build_fingerprint() {
+        let mut server = TestHttpServer::new("test_sys_info_anonymous", true).await;
+        server.token = server.root_token.clone();
+
+        // `read(.., None)` falls back to the root token, so an explicit
+        // empty token is how we spell "no credential" here.
+        let (status, resp) = server.read("sys/info", Some("")).unwrap();
+
+        assert_eq!(status, 200, "sys/info must stay an anonymous liveness probe: {resp:?}");
+        assert_eq!(resp["initialized"].as_bool(), Some(true), "init state stays public: {resp:?}");
+        assert_eq!(resp["sealed"].as_bool(), Some(false), "seal state stays public: {resp:?}");
+        for leaky in ["version", "started_at", "uptime_seconds", "storage_type"] {
+            assert!(
+                resp.get(leaky).is_none(),
+                "`{leaky}` must not reach an unauthenticated caller: {resp:?}"
+            );
+        }
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn authenticated_sys_info_returns_full_payload() {
+        let mut server = TestHttpServer::new("test_sys_info_authenticated", true).await;
+        server.token = server.root_token.clone();
+        let token = server.root_token.clone();
+
+        let (status, resp) = server.read("sys/info", Some(&token)).unwrap();
+
+        assert_eq!(status, 200, "sys/info must answer an authenticated caller: {resp:?}");
+        assert_eq!(
+            resp["version"].as_str(),
+            Some(crate::server_info::version()),
+            "authenticated callers still get the build version: {resp:?}"
+        );
+        assert!(resp["started_at"].as_str().is_some_and(|s| !s.is_empty()), "{resp:?}");
+        assert!(resp["uptime_seconds"].as_i64().is_some(), "{resp:?}");
+        assert!(resp["storage_type"].as_str().is_some(), "{resp:?}");
+        assert_eq!(resp["initialized"].as_bool(), Some(true), "{resp:?}");
+        assert_eq!(resp["sealed"].as_bool(), Some(false), "{resp:?}");
+    }
+
+    /// A token the store has never seen must be treated as anonymous rather
+    /// than as a credential — otherwise the gate is bypassed by sending any
+    /// non-empty string in the header.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn bogus_token_gets_the_anonymous_payload() {
+        let mut server = TestHttpServer::new("test_sys_info_bogus_token", true).await;
+        server.token = server.root_token.clone();
+
+        let (status, resp) = server.read("sys/info", Some("not-a-real-token")).unwrap();
+
+        assert_eq!(status, 200, "{resp:?}");
+        assert!(
+            resp.get("version").is_none(),
+            "an unrecognised token must not unlock the build version: {resp:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod sys_privileged_route_auth_tests {
+    //! The `sys` handlers that do their work inline — binary backup streams,
+    //! filesystem exports, cluster membership calls, `seal` — never reach
+    //! `handle_request`, so they never crossed the ACL. Each one below used to
+    //! execute for any caller who could reach the listener: `sys/backup`
+    //! returned a full vault dump, `sys/export/...` returned decrypted
+    //! secrets, `sys/restore` and `sys/import/...` overwrote them, and
+    //! `sys/seal` was a one-request outage. These lock the gate in.
+
+    use crate::test_utils::TestHttpServer;
+
+    /// `read(.., None)` falls back to the root token, so `Some("")` is how an
+    /// anonymous caller is spelled here.
+    const ANON: Option<&str> = Some("");
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn anonymous_callers_are_refused_on_privileged_sys_routes() {
+        let mut server = TestHttpServer::new("test_sys_privileged_anon", true).await;
+        server.token = server.root_token.clone();
+
+        for (method, path) in [
+            ("GET", "sys/export/secret/"),
+            ("POST", "sys/backup"),
+            ("POST", "sys/restore"),
+            ("POST", "sys/import/secret/"),
+            ("POST", "sys/cluster/leave"),
+            ("POST", "sys/cluster/failover"),
+            ("POST", "sys/cluster/remove-node"),
+            ("PUT", "sys/seal"),
+            ("POST", "sys/exchange/export"),
+            ("GET", "sys/plugins"),
+            ("GET", "sys/scheduled-exports"),
+        ] {
+            let (status, resp) = server.request(method, path, None, ANON, None).unwrap();
+            assert_eq!(
+                status, 403,
+                "{method} {path} must refuse an unauthenticated caller, got {status}: {resp:?}"
+            );
+        }
+
+        // The refusals must have been refusals, not side effects: the vault is
+        // still unsealed and still serving.
+        let (status, resp) = server.read("sys/seal-status", ANON).unwrap();
+        assert_eq!(status, 200, "{resp:?}");
+        assert_eq!(resp["sealed"].as_bool(), Some(false), "no route may have sealed us: {resp:?}");
+    }
+
+    /// A string the token store has never issued must be treated as no
+    /// credential at all, not as one — otherwise the gate falls to any
+    /// non-empty header value.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn bogus_token_is_refused_on_privileged_sys_routes() {
+        let mut server = TestHttpServer::new("test_sys_privileged_bogus", true).await;
+        server.token = server.root_token.clone();
+
+        let (status, resp) = server.read("sys/export/secret/", Some("not-a-real-token")).unwrap();
+        assert_eq!(status, 403, "an unrecognised token must not export secrets: {resp:?}");
+    }
+
+    /// The gate must not have broken the operators it exists to serve.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn root_token_still_reaches_privileged_sys_routes() {
+        let mut server = TestHttpServer::new("test_sys_privileged_root", true).await;
+        server.token = server.root_token.clone();
+        let token = server.root_token.clone();
+
+        let (status, resp) = server.read("sys/export/secret/", Some(&token)).unwrap();
+        assert_eq!(status, 200, "a root token must still export: {resp:?}");
+        assert_eq!(resp["mount"].as_str(), Some("secret/"), "{resp:?}");
+
+        let (status, resp) = server.read("sys/scheduled-exports", Some(&token)).unwrap();
+        assert_eq!(status, 200, "a root token must still list schedules: {resp:?}");
+    }
+}
+
+#[cfg(test)]
+mod cluster_status_disclosure_tests {
+    //! `GET /sys/cluster-status` names the Raft leader and enumerates cluster
+    //! membership — for a secrets manager that is target selection, so it is no
+    //! longer an anonymous route. The exception is a request from one of the
+    //! cluster's own machines, which is what keeps `bvault status` working when
+    //! an operator runs it on the server with no token in the environment.
+
+    use std::{
+        collections::HashSet,
+        net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    };
+
+    use super::ip_is_cluster_local;
+    use crate::test_utils::TestHttpServer;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn loopback_is_always_cluster_local() {
+        let no_peers = HashSet::new();
+        assert!(ip_is_cluster_local(IpAddr::V4(Ipv4Addr::LOCALHOST), &no_peers));
+        assert!(ip_is_cluster_local(IpAddr::V6(Ipv6Addr::LOCALHOST), &no_peers));
+        // 127.0.0.0/8 in full, not just 127.0.0.1 — a node reached over any
+        // loopback address is still this same host.
+        assert!(ip_is_cluster_local(ip("127.0.0.53"), &no_peers));
+    }
+
+    #[test]
+    fn configured_peers_are_cluster_local_and_strangers_are_not() {
+        let peers: HashSet<IpAddr> = ["10.0.0.11", "10.0.0.12", "10.0.0.13"].iter().map(|s| ip(s)).collect();
+
+        assert!(ip_is_cluster_local(ip("10.0.0.12"), &peers), "a configured node is cluster-local");
+        assert!(
+            !ip_is_cluster_local(ip("10.0.0.14"), &peers),
+            "an address one octet off a peer must not be waved through"
+        );
+        assert!(!ip_is_cluster_local(ip("203.0.113.7"), &peers), "the internet is not cluster-local");
+    }
+
+    /// With no cluster configured (`nodes` absent, or a non-Raft backend) the
+    /// peer set is empty, so nothing but loopback qualifies. This is the case
+    /// that would silently grant the world access if the predicate ever
+    /// defaulted to "allow when we don't know".
+    #[test]
+    fn an_empty_peer_set_grants_nothing_beyond_loopback() {
+        let no_peers = HashSet::new();
+        assert!(!ip_is_cluster_local(ip("10.0.0.11"), &no_peers));
+        assert!(!ip_is_cluster_local(ip("192.168.1.5"), &no_peers));
+    }
+
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn authenticated_caller_gets_cluster_status() {
+        let mut server = TestHttpServer::new("test_cluster_status_authed", true).await;
+        server.token = server.root_token.clone();
+        let token = server.root_token.clone();
+
+        let (status, resp) = server.read("sys/cluster-status", Some(&token)).unwrap();
+        assert_eq!(status, 200, "a token holder must still get cluster status: {resp:?}");
+        assert!(resp["storage_type"].as_str().is_some(), "{resp:?}");
+    }
+
+    /// The test harness listens on loopback, so this exercises the
+    /// cluster-local exception end to end: no token, still answered. It is the
+    /// `bvault status`-on-the-server path.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn tokenless_caller_on_the_node_itself_gets_cluster_status() {
+        let mut server = TestHttpServer::new("test_cluster_status_local", true).await;
+        server.token = server.root_token.clone();
+
+        let (status, resp) = server.read("sys/cluster-status", Some("")).unwrap();
+        assert_eq!(
+            status, 200,
+            "a tokenless request from the node itself must still be answered: {resp:?}"
+        );
+        assert!(resp["storage_type"].as_str().is_some(), "{resp:?}");
+    }
 }
 
 #[cfg(test)]
@@ -4341,3 +4892,4 @@ mod exchange_export_route_tests {
         );
     }
 }
+

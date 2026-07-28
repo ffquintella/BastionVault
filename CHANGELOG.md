@@ -45,6 +45,125 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.37.6] - 2026-07-28
+
+### Security
+- **Every privileged `/v1/sys` route now authenticates and ACL-checks its caller**
+  (`src/http/sys.rs`, `src/cli/command/operator_seal.rs`, `docs/api.md`) -- most
+  `sys` handlers reach the policy engine through `handle_request`, which crosses
+  `TokenStore::pre_route`, the single chokepoint that validates the presented token
+  and consults the ACL. The handlers that do their work inline instead -- binary
+  backup streams, filesystem exports, plugin uploads, cluster membership calls,
+  `seal` -- never called it. Several opened with `let _auth = request_auth(&req);`,
+  which extracts the bearer token into a struct and then drops it on the floor; the
+  rest never looked at the request at all. There is no auth middleware on the
+  `/v1/sys` or `/v2/sys` actix scopes, so **44 routes executed for any caller who
+  could reach the listener**, with no token:
+  - `POST sys/backup` returned a full vault dump (BVBK), and `POST sys/restore`
+    overwrote storage from an attacker-supplied one.
+  - `GET sys/export/{path}` returned barrier-decrypted secrets as JSON, and
+    `POST sys/import/{mount}` wrote them. `sys/exchange/export` did the same at
+    whole-namespace scope, including its plaintext-JSON mode.
+  - `PUT sys/seal` dropped the master key -- a one-request outage.
+  - `POST sys/cluster/{remove-node,leave,failover}` rewrote Raft membership and
+    forced elections.
+  - The `sys/plugins…` family registered, configured, and invoked plugin binaries;
+    the `sys/scheduled-exports…` family created backup schedules and read the
+    resulting files off disk.
+
+  All of them now call a new `authorize_sys_request` helper first, which runs the
+  real chain (`pre_auth` → `check_token` → `PolicyStore::post_auth`) against the
+  mount-relative path a policy author writes, so these routes are gated exactly
+  like a logical path: same token validation, same policy evaluation, same
+  `root_paths` sudo rules (`seal` is a `root_paths` entry, so sealing now requires
+  sudo). Refusals on audited routes are recorded on the audit trail under the
+  path/operation the handler would have audited, since a rejected call against
+  `sys/backup` is precisely what an operator needs to see. A missing token yields
+  `403`, not the `400` that `ErrRequestClientTokenMissing` renders as -- the client
+  needs to authenticate, not fix its body. `docs/api.md` tabulates the policy path
+  for each route. Regression tests drive the real HTTP pipeline over eleven of the
+  routes for the anonymous, unrecognised-token, and root-token cases, and assert no
+  refused call had a side effect (the vault is still unsealed afterwards).
+- **`GET /sys/cluster-status` no longer hands cluster topology to anonymous callers**
+  (`src/http/sys.rs`, `src/storage/hiqlite/mod.rs`, `src/cli/command/status.rs`,
+  `docs/api.md`) -- same root cause as the `sys/info` entry below, but the payload is
+  worse than a fingerprint: `is_leader` names the single highest-value node to attack
+  or disrupt, and `raft_metrics` enumerates the full membership. Now gated, and
+  deliberately *not* tiered the way `sys/info` is -- `storage_type` is exactly the
+  field `sys/info` withholds from anonymous callers, so returning it here would
+  reopen that hole, and nothing in this payload is a bootstrap fact a tokenless
+  client needs.
+
+  A caller qualifies either by presenting a live token (any valid token, via the
+  side-effect-free `caller_has_live_token` lookup) or by connecting **from one of
+  the cluster's own machines** -- the TCP source address is loopback, or it appears
+  in the storage backend's configured `nodes` list. That exception keeps `bvault
+  status` working when an operator runs it on the server itself with no token in the
+  environment, which is the normal way to check a node. The predicate reads the
+  *socket* peer address and never an `X-Forwarded-For` value, since it waives
+  authentication and must not be claimable with a header; with no cluster configured
+  the peer set is empty, so loopback is the only exception. `HiqliteBackend` now
+  retains its configured peer endpoints (`peer_addrs()`) and they are re-resolved on
+  a 30s cache rather than snapshotted at boot, because the documented cluster config
+  uses service names (`bv-1`, `bv-2`) whose addresses change when a peer container
+  restarts. Everyone else gets `403`. Four unit tests pin the IP predicate (loopback
+  across `127.0.0.0/8` and `::1`, configured peers, an address one octet off a peer,
+  an empty peer set) plus two HTTP tests for the authenticated and on-the-node paths.
+- **`bvault operator seal` no longer reports success when the server refused**
+  (`src/cli/command/operator_seal.rs`) -- the API client returns `Ok(resp)` with the
+  HTTP status *on* the response, so matching `Ok(_) =>` printed
+  "Success! BastionVault is sealed." for any completed request, including the `403`
+  the route's new sudo gate returns. An operator would have walked away believing a
+  vault was sealed while it kept serving secrets. Now checks for 200/204 and prints
+  the server's error otherwise.
+- **`GET /sys/info` no longer hands its build fingerprint to anonymous callers**
+  (`src/http/sys.rs`, `src/cli/command/status.rs`, `gui/src/components/ServerInfoModal.tsx`,
+  `docs/api.md`, `docs/gui.md`) -- the handler never inspected the request, so any
+  unauthenticated caller who could reach the listener got the exact crate version,
+  process `started_at`, `uptime_seconds`, and storage backend kind. For a secrets
+  manager that is free reconnaissance: a precise version maps onto known CVEs, and
+  start time plus uptime leak patch cadence. The endpoint stays anonymous -- callers
+  need it before a token can exist (`bvault status` against a fresh vault, the GUI
+  connect screen) -- but the payload is now tiered: `initialized`/`sealed` for
+  everyone, and `version`/`started_at`/`uptime_seconds`/`storage_type` only for a
+  caller presenting a live token. Restricted fields are omitted rather than nulled,
+  so the anonymous body is a strict subset of the authenticated one. The disclosure
+  gate is a side-effect-free `TokenStore::lookup` (not `check_token`, which would
+  burn a use off a `num_uses`-limited token); any valid token unlocks the fields, no
+  policy required. `sys/health` remains the purpose-built unauthenticated probe for
+  load balancers. Three regression tests drive the real HTTP pipeline to cover the
+  anonymous, authenticated, and bogus-token cases.
+
+### Fixed
+- **A token naming a policy that cannot be resolved is denied instead of failing
+  the request with a 500** (`src/modules/policy/policy_store.rs`) -- `get_policy`
+  with `PolicyType::Token` resolved the real policy type through the in-memory
+  `policy_type_map` and treated a miss as "no barrier subview", returning
+  `unable to get the barrier subview for policy type token` to the caller as an
+  HTTP 500. Two ways to reach that miss, both seen in the field:
+  - **The policy exists nowhere on the request's path.** Typically it was created
+    inside a child namespace while the auth role handing out its name lives at the
+    root, so a root-bound token's `ns_path == ""` lookup finds nothing.
+    `get_policy_ns` already skipped unresolvable names for namespace-bound tokens,
+    so the identical operator slip was a clean 403 inside a namespace and an
+    opaque 500 at the root.
+  - **The policy exists but this node has never heard of it.** `policy_type_map`
+    is a per-node in-memory `DashMap`, built once in `PolicyStore::new` from the
+    ACL keyspace and afterwards only by the writes that node itself served. Under
+    Hiqlite a policy written against one member replicates its bytes through Raft
+    but never reaches another member's map, so one token succeeded on the node
+    that served the policy write and 500'd on its peers until they restarted.
+
+  `PolicyType::Token` now resolves the type by reading through to the replicated
+  ACL (then RGP) keyspace and memoizes what it finds; a name present in neither
+  resolves to `Ok(None)`, so `new_acl_inner` skips it and the request is denied on
+  its merits. Dropping a named policy from a request ACL now logs a warning --
+  still fail-closed, but no longer invisible. The surviving `view.is_none()` guard
+  names the policy it could not load instead of only its type, so a 500 from a
+  genuinely unconfigured view says which policy to go looking for. Two regression
+  tests cover the cold-type-map read-through and the unresolvable-name denial.
+  (`features/namespaces-multitenancy.md`)
+
 ## [0.37.5] - 2026-07-28
 
 ### Security

@@ -59,10 +59,18 @@ impl CommandExecutor for Seal {
             if multi {
                 print!("==> {url} ");
             }
+            // `Ok` only means the request completed — a 403 from the seal
+            // route's sudo gate arrives here as `Ok(resp)` with the status on
+            // the response, so reporting success on any `Ok` would tell an
+            // operator the vault is sealed when it is still serving secrets.
             match client.sys().seal() {
-                Ok(_) => {
+                Ok(resp) if resp.response_status == 200 || resp.response_status == 204 => {
                     println!("Success! BastionVault is sealed.");
                     ok += 1;
+                }
+                Ok(resp) => {
+                    eprintln!("Error sealing {url}:");
+                    resp.print_debug_info();
                 }
                 Err(e) => eprintln!("Error sealing {url}: {e}"),
             }
@@ -84,7 +92,7 @@ mod test {
 
     #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
     async fn test_cli_operator_seal() {
-        let test_http_server = TestHttpServer::new("test_cli_operator_seal", true).await;
+        let mut test_http_server = TestHttpServer::new("test_cli_operator_seal", true).await;
 
         // bvault status
         let ret = test_http_server.cli(&["status"], &["--format=raw"]);
@@ -92,7 +100,20 @@ mod test {
         let status_result = ret.as_object().unwrap();
         assert_eq!(status_result["sealed"], false);
 
-        // bvault operator seal
+        // Sealing is a sudo operation (`seal` is a `root_paths` entry), so a
+        // tokenless caller must not be able to take the vault down. `cli()`
+        // exports whatever is in `token` as VAULT_TOKEN; empty means anonymous.
+        let ret = test_http_server.cli(&["operator", "seal"], &[]);
+        assert!(
+            !ret.as_deref().unwrap_or_default().contains("Success"),
+            "an unauthenticated seal must be refused: {ret:?}"
+        );
+        let ret = test_http_server.cli(&["status"], &["--format=raw"]);
+        let ret = Value::from_str(ret.unwrap().as_str()).unwrap();
+        assert_eq!(ret.as_object().unwrap()["sealed"], false, "vault must still be unsealed");
+
+        // bvault operator seal, with the root token in the environment
+        test_http_server.token = test_http_server.root_token.clone();
         let ret = test_http_server.cli(&["operator", "seal"], &[]);
         assert_eq!(ret, Ok("Success! BastionVault is sealed.\n".into()));
 

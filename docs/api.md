@@ -326,18 +326,79 @@ endpoint covering version, uptime, and storage flavour.
 GET /v1/sys/info
 ~~~
 
-Response:
+The endpoint answers without a token, but the payload has two
+disclosure tiers. `initialized` and `sealed` are always returned —
+callers need them before a token can exist (`bvault status` against a
+fresh vault, the GUI connect screen). The build-fingerprinting fields
+are returned **only** to a caller presenting a live token, because an
+exact version maps straight onto known CVEs and `started_at` /
+`uptime_seconds` leak patch cadence. Any valid token unlocks them; no
+particular policy is required.
+
+Unauthenticated response:
 
 ~~~json
 {
+  "initialized": true,
+  "sealed": false
+}
+~~~
+
+Authenticated response:
+
+~~~json
+{
+  "initialized": true,
+  "sealed": false,
   "version": "0.5.20",
   "started_at": "2026-05-14T18:00:00Z",
   "uptime_seconds": 3712,
-  "initialized": true,
-  "sealed": false,
   "storage_type": "hiqlite"
 }
 ~~~
+
+The restricted fields are **omitted**, not nulled, so the anonymous
+body is a strict subset of the authenticated one. Clients should read
+them defensively. For unauthenticated liveness/seal probing (load
+balancers, readiness checks), `GET /v1/sys/health` remains the
+purpose-built endpoint.
+
+### Cluster Status
+
+~~~
+GET /v1/sys/cluster-status
+~~~
+
+~~~json
+{
+  "storage_type": "hiqlite",
+  "cluster": true,
+  "node_id": 2,
+  "is_leader": false,
+  "cluster_healthy": true,
+  "raft_metrics": { }
+}
+~~~
+
+Gated. The payload names the Raft leader and enumerates cluster
+membership, which for a secrets manager is target selection — it points
+at the single highest-value node to attack or disrupt — so it is not an
+anonymous route. A caller qualifies either by presenting a live token
+(any valid token; no particular policy required) or by connecting *from
+one of the cluster's own machines*: the request's TCP source address is
+loopback, or it appears in the storage backend's configured `nodes`
+list. That exception is what keeps `bvault status` working when an
+operator runs it on the server itself with no token in the environment.
+Everyone else gets `403`.
+
+The check uses the socket peer address, never an `X-Forwarded-For`
+value, so it cannot be claimed with a header. Peer hostnames from
+`nodes` are re-resolved periodically (30s), so a peer that restarts on a
+new address keeps qualifying.
+
+Note that unlike `sys/info`, no field here is tiered for anonymous
+callers — `storage_type` is precisely what `sys/info` withholds, so
+returning it here would reopen that disclosure.
 
 ### Identity Groups
 
@@ -806,7 +867,33 @@ Include a token with every request using one of:
 - **Header**: `X-Vault-Token: s.my-token`
 - **Cookie**: `Cookie: token=s.my-token`
 
-System endpoints like `/v1/sys/init`, `/v1/sys/seal-status`, and `/v1/sys/unseal` do not require authentication.
+A small, deliberate set of system endpoints answers without a token, because a
+caller needs them before a token can exist: `/v1/sys/init`,
+`/v1/sys/seal-status`, `/v1/sys/unseal`, `/v1/sys/health`, and the anonymous
+tier of `/v1/sys/info`. `/v1/sys/cluster-status` additionally accepts a request
+originating from a cluster machine — see [Cluster Status](#cluster-status).
+
+**Everything else under `/v1/sys` requires a token and is ACL-checked**, at the
+mount-relative path a policy author writes. The routes below do their work
+inline rather than through the logical router, so their policy paths are worth
+spelling out:
+
+| Route | Policy path | Capability |
+|-------|-------------|------------|
+| `POST /v1/sys/backup` | `sys/backup` | `create`/`update` |
+| `POST /v1/sys/restore` | `sys/restore` | `create`/`update` |
+| `GET /v1/sys/export/{path}` | `sys/export/{path}` | `read` |
+| `POST /v1/sys/import/{mount}` | `sys/import/{mount}` | `create`/`update` |
+| `POST /v1/sys/exchange/export` | `sys/exchange/export` | `create`/`update` |
+| `POST /v1/sys/exchange/import` | `sys/exchange/import` | `create`/`update` |
+| `POST /v1/sys/cluster/remove-node` | `sys/cluster/remove-node` | `create`/`update` |
+| `POST /v1/sys/cluster/leave` | `sys/cluster/leave` | `create`/`update` |
+| `POST /v1/sys/cluster/failover` | `sys/cluster/failover` | `create`/`update` |
+| `GET`/`POST` `/v1/sys/plugins…` | `sys/plugins…` | per method |
+| `GET`/`POST` `/v1/sys/scheduled-exports…` | `sys/scheduled-exports…` | per method |
+
+`PUT /v1/sys/seal` is sudo-gated: `seal` is a `root_paths` entry, so it needs a
+root token or a policy granting `sudo` on that path.
 
 ## Error Responses
 

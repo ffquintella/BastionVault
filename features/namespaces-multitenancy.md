@@ -70,6 +70,24 @@ The HTTP surface follows Vault Enterprise's: every endpoint accepts an `X-Bastio
 > data access, and is added only for non-root bindings (root is unchanged).
 > (`policy_store::NAMESPACE_SELF_POLICY`)
 >
+> **Unresolvable policy names are denied, not 500.** A root-bound token whose
+> policy list names a policy that exists only inside a child namespace resolves
+> nothing on its `ns_path == ""` path. `get_policy_ns` already skipped such names
+> for namespace-bound tokens, but the root path routed through `get_policy` with
+> `PolicyType::Token`, which treated a miss in the in-memory `policy_type_map` as
+> "no barrier subview" and failed the request with `unable to get the barrier
+> subview for policy type token` — so the identical operator slip (auth role at
+> the root, policy created in the tenant) was a clean 403 inside a namespace and
+> an opaque HTTP 500 at the root. `Token` lookups now read through to the
+> replicated ACL (then RGP) keyspace and memoize the resolved type; a name in
+> neither resolves to `Ok(None)` so `new_acl_inner` skips it and the request is
+> denied on its merits, with a warning logged so a silently-dropped policy is
+> visible. The same read-through closes an HA split unrelated to namespaces:
+> `policy_type_map` is per-node, built once in `PolicyStore::new` and afterwards
+> only by the writes that node served, so a policy written against one Hiqlite
+> member replicated its bytes but not its type entry — the same token worked on
+> that member and 500'd on its peers until they restarted.
+>
 > **Remaining follow-ups:**
 > - **`cert`-login** namespace binding, and broader **tenant self-service of
 >   `sys/*`** beyond the introspection/self endpoints above (e.g. tenant-scoped

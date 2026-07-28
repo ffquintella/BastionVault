@@ -122,6 +122,8 @@ Triggered from the title-bar hamburger menu (top-left of the window) regardless 
 
 The title-bar **Server → Server Info...** entry opens a modal that hits `GET /v1/sys/info` (proxied in remote mode, read in-process for the embedded vault). It shows the connection kind, endpoint, server version, sealed/initialized badges, storage backend, start time, and human-formatted uptime — useful when debugging "which build is running on that host?".
 
+The version/uptime/storage fields are only returned to an authenticated caller (see `docs/api.md` § Server Info), so the modal shows them once you are signed in and renders `-` for anything the server withheld. The embedded vault reads them in-process and is unaffected.
+
 ## Hardware-key auth (FIDO2 / YubiKey)
 
 The GUI ships native FIDO2 support — the **Register Security Key** button on the user-edit dialog drives a CTAP2 round-trip directly from the desktop, no browser required. Once a credential is enrolled, the caller can switch to passwordless login on the Connect screen.

@@ -78,7 +78,11 @@ export function ServerInfoModal() {
               </span>
             }
           />
-          <InfoRow label="Version" value={<code className="font-mono">{info.version}</code>} />
+          {/* The server withholds version/storage/uptime from unauthenticated
+              callers, so these can legitimately come back empty on a remote
+              connection that has not signed in yet. Render a dash rather than
+              an empty row. */}
+          <InfoRow label="Version" value={<code className="font-mono">{info.version || "-"}</code>} />
           <InfoRow
             label="Status"
             value={
@@ -108,7 +112,13 @@ export function ServerInfoModal() {
               </span>
             }
           />
-          <InfoRow label="Uptime" value={formatUptime(info.uptime_seconds)} />
+          {/* `started_at` and `uptime_seconds` are withheld together, and a
+              withheld uptime arrives as 0 — which would otherwise read as
+              "less than 1 second" and look like the server just restarted. */}
+          <InfoRow
+            label="Uptime"
+            value={info.started_at ? formatUptime(info.uptime_seconds) : "-"}
+          />
         </div>
       )}
     </Modal>
