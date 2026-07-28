@@ -876,6 +876,33 @@ impl RustionBackendInner {
         master.ok_or_else(|| bv_error_string!("rustion master store not initialized"))
     }
 
+    /// Append the master-identity explanation to a `bastion_rejected: …`
+    /// detail when the bastion's refusal was a signature failure.
+    ///
+    /// The bastion's own body says only `signature_invalid` / `Ed25519
+    /// signature half failed verification`, which reads like an
+    /// authentication problem with the *caller* — operators reasonably (and
+    /// wrongly) suspect their token or the namespace they switched into. It
+    /// is neither: see [`master::signature_rejection_hint`], which names the
+    /// serial + fingerprint this deployment actually signed with so the
+    /// mismatch against the bastion's pinned authority pubkey is visible
+    /// from the error alone.
+    ///
+    /// Best-effort — a store/read failure yields no hint rather than
+    /// masking the bastion's own error.
+    async fn bastion_rejection_detail(&self, detail: &str) -> String {
+        let Ok(store) = self.resolve_master_store() else {
+            return detail.to_string();
+        };
+        let (Ok(cfg), Ok(export)) = (store.get_or_default().await, store.export_pubkey().await) else {
+            return detail.to_string();
+        };
+        match master::signature_rejection_hint(detail, &cfg, &export) {
+            Some(hint) => format!("{detail} — {hint}"),
+            None => detail.to_string(),
+        }
+    }
+
     fn resolve_recordings_store(&self) -> Result<Arc<recordings::RecordingsStore>, RvError> {
         let module = self
             .core
@@ -1618,6 +1645,7 @@ impl RustionBackendInner {
                     .map(|a| format!("{}: {}", a.bastion_name, a.outcome))
                     .collect::<Vec<_>>()
                     .join("; ");
+                let detail = self.bastion_rejection_detail(&detail).await;
                 Err(bv_error_response_status!(
                     502,
                     &format!("bastion_rejected: {detail}")
@@ -2024,7 +2052,8 @@ impl RustionBackendInner {
                 Err(bv_error_response_status!(404, &format!("bastion_not_found: {id}")))
             }
             Err(session::SessionRenewError::Http { status, body }) => {
-                Err(bv_error_response_status!(status, &format!("bastion_rejected: {body}")))
+                let detail = self.bastion_rejection_detail(&body).await;
+                Err(bv_error_response_status!(status, &format!("bastion_rejected: {detail}")))
             }
             Err(e) => Err(bv_error_string!(&format!("{e}"))),
         }
@@ -2061,7 +2090,8 @@ impl RustionBackendInner {
                 Err(bv_error_response_status!(404, &format!("bastion_not_found: {id}")))
             }
             Err(session::SessionRenewError::Http { status, body }) => {
-                Err(bv_error_response_status!(status, &format!("bastion_rejected: {body}")))
+                let detail = self.bastion_rejection_detail(&body).await;
+                Err(bv_error_response_status!(status, &format!("bastion_rejected: {detail}")))
             }
             Err(e) => Err(bv_error_string!(&format!("{e}"))),
         }
@@ -2088,7 +2118,7 @@ impl RustionBackendInner {
         let bastion_id =
             req.get_data("bastion_id").ok().and_then(|v| v.as_str().map(|s| s.to_string())).filter(|s| !s.is_empty());
 
-        let outcomes = if let Some(id) = bastion_id {
+        let mut outcomes = if let Some(id) = bastion_id {
             match enrolment::attest_bastion(&store, &master, &operator, &id).await {
                 Ok(r) => {
                     log::info!("{}: bastion={} correlation={}", audit::MASTER_ATTEST, r.bastion_id, r.correlation_id);
@@ -2117,6 +2147,14 @@ impl RustionBackendInner {
             }
             r
         };
+        // `authority/attest` is the natural "does the fleet still accept my
+        // master?" probe, so a signature refusal here must not come back as
+        // an opaque `signature_invalid` either — name the key we signed with.
+        for o in &mut outcomes.results {
+            if let enrolment::AttestOutcome::Err { error, .. } = o {
+                *error = self.bastion_rejection_detail(error).await;
+            }
+        }
         let value = serde_json::to_value(&outcomes).map_err(|e| bv_error_string!(&format!("encode: {e}")))?;
         let data = match value {
             Value::Object(m) => m,

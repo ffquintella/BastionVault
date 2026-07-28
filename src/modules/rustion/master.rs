@@ -215,6 +215,73 @@ pub struct MasterPubKeyExport {
     pub issued: bool,
 }
 
+/// Turn a bastion's `signature_invalid` refusal into an operator-actionable
+/// sentence about **this deployment's** master signing identity.
+///
+/// A bastion answers `401 {"error":"signature_invalid"}` when the BVRG
+/// envelope's signature does not verify against the master pubkey it pinned
+/// when the `bastion-vault` authority was approved. The refusal is purely
+/// about key identity — it says nothing about the caller, their token, the
+/// resource, or the active namespace. That last point is the one operators
+/// most often misread: the master keypair lives in the root system view
+/// (`MasterStore::new` uses `core.state.system_view`) and every envelope —
+/// root or namespaced — is signed with it, so switching namespaces cannot
+/// change whether this error fires. See
+/// `RustionBackendInner::namespace_sub_request_prefix` for the full split.
+///
+/// Returns `None` when `detail` is not a signature refusal, so callers can
+/// append unconditionally.
+pub fn signature_rejection_hint(
+    detail: &str,
+    cfg: &MasterConfig,
+    export: &MasterPubKeyExport,
+) -> Option<String> {
+    if !detail.contains("signature_invalid") && !detail.contains("signature half failed verification") {
+        return None;
+    }
+    let mut out = String::from(
+        "this is a master-key identity mismatch, not a permission or namespace problem \
+         (the master signing keypair is deployment-global — the active namespace never changes it): ",
+    );
+    if !export.issued {
+        out.push_str(
+            "this deployment has NO master keypair on disk, so the envelope was signed by a \
+             keypair minted on the fly that no bastion has ever approved. Configure \
+             `POST rustion/master/config` (pki_mount + pki_role + pki_role_pqc) and run \
+             `POST rustion/master/issue`, then approve the exported pubkey on each bastion.",
+        );
+        return Some(out);
+    }
+    out.push_str(&format!(
+        "the envelope was signed with master serial={} fingerprint={}",
+        export.current_serial, export.fingerprint
+    ));
+    // `legacy-…` serials are minted by the on-the-fly / Phase-1-stub path in
+    // `get_or_init_signing_key`, never by the PKI engine — a bastion can only
+    // be pinning such a key if the operator exported and approved it by hand.
+    if export.current_serial.starts_with("legacy-") {
+        out.push_str(
+            ", which was never issued by the PKI engine (it was minted on the fly, or migrated \
+             from a Phase-1 stub record). Run `POST rustion/master/issue` and approve the \
+             exported pubkey on each bastion",
+        );
+    }
+    if let Some(prev) = cfg.previous_serial.as_deref().filter(|s| !s.is_empty()) {
+        out.push_str(&format!(
+            ". This master was rotated (previous serial={prev}), and a rotation is NOT pushed to \
+             the fleet in band — `attest` envelopes are signed with the current key too, so a \
+             bastion still pinning the previous pubkey refuses every envelope until the current \
+             pubkey is re-approved on it"
+        ));
+    }
+    out.push_str(
+        ". Compare `GET rustion/master/pubkey` with the pubkey the refusing bastion has approved \
+         for the `bastion-vault` authority; if they differ, re-approve the current pubkey there \
+         (or re-run enrolment for that bastion).",
+    );
+    Some(out)
+}
+
 /// Result of a successful `issue` or `rotate` call.
 #[derive(Debug, Clone, Serialize)]
 pub struct IssueOutcome {
@@ -1236,5 +1303,102 @@ mod tests {
         let err = store.rotate(&issuer).await.expect_err("must fail");
         let msg = format!("{err}");
         assert!(msg.contains("nothing to rotate"), "got: {msg}");
+    }
+
+    // ─── signature_rejection_hint ──────────────────────────────────
+
+    fn issued_export(serial: &str) -> MasterPubKeyExport {
+        MasterPubKeyExport {
+            algorithm: default_algorithm(),
+            fingerprint: "ab12cd34".into(),
+            current_serial: serial.into(),
+            issued: true,
+            ..Default::default()
+        }
+    }
+
+    fn empty_cfg() -> MasterConfig {
+        MasterConfig { updated_at: Utc::now(), ..Default::default() }
+    }
+
+    #[test]
+    fn hint_skips_non_signature_refusals() {
+        // Every other bastion refusal must pass through untouched — the
+        // hint talks about key identity and would be actively misleading
+        // on, say, a policy or attestation rejection.
+        for detail in [
+            "apldc1vhm0069: http 403: {\"error\":\"authority_revoked\"}",
+            "apldc1vhm0069: http 403: {\"error\":\"attestation_mismatch\"}",
+            "apldc1vhm0069: transport: tcp connect timeout",
+        ] {
+            assert!(
+                signature_rejection_hint(detail, &empty_cfg(), &issued_export("42:aa:bb")).is_none(),
+                "must not fire on: {detail}"
+            );
+        }
+    }
+
+    #[test]
+    fn hint_names_the_signing_key_and_denies_the_namespace_theory() {
+        // The reported symptom: a namespaced Connect surfaces the bastion's
+        // opaque `signature_invalid`, which reads as a caller/namespace auth
+        // failure. The hint must name the key actually used and say plainly
+        // that the namespace has nothing to do with it.
+        let detail = "apldc1vhm0069: http 401: {\"error\":\"signature_invalid\",\
+                      \"detail\":\"Ed25519 signature half failed verification\"}";
+        let hint = signature_rejection_hint(detail, &empty_cfg(), &issued_export("42:aa:bb"))
+            .expect("signature refusal must produce a hint");
+        assert!(hint.contains("serial=42:aa:bb"), "got: {hint}");
+        assert!(hint.contains("fingerprint=ab12cd34"), "got: {hint}");
+        assert!(hint.contains("namespace"), "must address the namespace red herring: {hint}");
+        assert!(hint.contains("rustion/master/pubkey"), "must name the comparison to run: {hint}");
+    }
+
+    #[test]
+    fn hint_fires_on_the_raw_verifier_message_too() {
+        // Older / differently-worded bastions return the bv_crypto error text
+        // without the `signature_invalid` code.
+        let detail = "apldc1vhm0069: http 401: ML-DSA-65 signature half failed verification";
+        assert!(signature_rejection_hint(detail, &empty_cfg(), &issued_export("42:aa:bb")).is_some());
+    }
+
+    #[test]
+    fn hint_calls_out_an_unissued_master() {
+        // No record on disk → `get_or_init_signing_key` mints one on the fly,
+        // so the envelope is signed by a key no bastion ever approved. That is
+        // the whole diagnosis and must be stated, not buried.
+        let export = MasterPubKeyExport { algorithm: default_algorithm(), ..Default::default() };
+        let hint = signature_rejection_hint("http 401: signature_invalid", &empty_cfg(), &export)
+            .expect("hint");
+        assert!(hint.contains("NO master keypair"), "got: {hint}");
+        assert!(hint.contains("rustion/master/issue"), "got: {hint}");
+    }
+
+    #[test]
+    fn hint_flags_a_legacy_serial_as_never_pki_issued() {
+        let hint = signature_rejection_hint(
+            "http 401: signature_invalid",
+            &empty_cfg(),
+            &issued_export(&legacy_serial(&Utc::now())),
+        )
+        .expect("hint");
+        assert!(hint.contains("never issued by the PKI engine"), "got: {hint}");
+    }
+
+    #[test]
+    fn hint_flags_an_unpropagated_rotation() {
+        // Rotation is a hard cutover: `attest` is signed with the *current*
+        // key, so there is no in-band way to refresh a bastion's pin. A
+        // populated `previous_serial` is the strongest available signal that
+        // this is what happened.
+        let cfg = MasterConfig {
+            previous_serial: Some("41:99:00".into()),
+            updated_at: Utc::now(),
+            ..Default::default()
+        };
+        let hint =
+            signature_rejection_hint("http 401: signature_invalid", &cfg, &issued_export("42:aa:bb")).expect("hint");
+        assert!(hint.contains("rotated"), "got: {hint}");
+        assert!(hint.contains("previous serial=41:99:00"), "got: {hint}");
     }
 }

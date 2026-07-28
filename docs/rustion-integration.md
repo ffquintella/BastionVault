@@ -259,6 +259,10 @@ rustion authority approve --name bv-prod --max-session-secs 28800 --replay-windo
 rustion reload
 ```
 
+**Step 3 is not optional, and it does not re-run itself.** Dropping (or config-managing) a fresh pending YAML does **not** update an already-approved record of the same name — approval snapshots the pubkey into the active record, and `approve` will not overwrite a live name. So after any `master issue` / `rotate`, or after rebuilding a BV cluster, the bastion keeps verifying against the **old** pubkey and every envelope fails `401 signature_invalid` while the new key sits unread in `authorities-pending/`. Re-approve explicitly: `rustion authority list` (compare the pubkey against `bvault rustion master export`), then `rustion authority deenrol --name bastion-vault` → `rustion authority untombstone --name bastion-vault` → `rustion authority approve --name bastion-vault` → `rustion reload`.
+
+Note also that BV presents a **fixed** authority name (`X-Rustion-Authority: bastion-vault`) and Rustion resolves the record by that name, so one bastion holds one BV slot. Two BV deployments (e.g. HML and DSV) enrolled against the same bastion overwrite each other's meaning of `bastion-vault`, and the loser gets `401 signature_invalid` — not `attestation_mismatch`, because the signature is checked before the envelope is opened and the `deployment_id` binding never gets read. Keep one BV deployment per bastion; tracked in `features/rustion-integration.md`.
+
 Until step 3 completes, every envelope from this BV deployment is refused with `403 authority_pending_approval`. The BV GUI's target row shows "Awaiting approval" so the operator can tell the difference from a transport failure.
 
 ### Rustion-side CLI cheatsheet
@@ -326,6 +330,7 @@ So a resource in `dti/esi` bound to `ssh/role=admins-esi` gets a certificate sig
 Two consequences worth knowing:
 
 - Reference the SSH mount **namespace-relative** in the connection profile (`ssh/`, not `dti/esi/ssh/`) — same convention as the direct-connect path.
+- A `401 signature_invalid` on a namespaced Connect is **not** a namespace bug. The master keypair lives in the root system view and `rustion/` is header-scoped (the request path is never rewritten into `<ns>/rustion/…`), so a namespaced session/open signs with exactly the same master key a root one does. If it fails from a namespace it fails from root too — see §7 for the real cause.
 - Brokering from a namespace currently requires a **root-bound** token (an admin using the namespace switcher). A token whose login namespace is non-root cannot be granted the root-owned `rustion/*` paths, because namespace policies may only reference their own namespace's paths. Letting namespace-bound tokens broker their own sessions is tracked as an open question in `features/rustion-integration.md`.
 
 ---
@@ -377,6 +382,7 @@ The Rustion-side rows are mirrored into BV's chain as `rustion.audit.witness` af
 | `403 authority_tombstoned` | Name was rejected/deenrolled before | `rustion authority untombstone --name <n>` → BV re-submits |
 | `403 attestation_mismatch` | BV's `deployment_id` ≠ pinned value | Re-approve with current deployment_id, or deenrol + re-submit |
 | `401 unknown_authority` | No record on this bastion | BV submits, admin approves |
+| `401 signature_invalid` (`Ed25519 signature half failed verification`) | The master pubkey this bastion pinned at approval time is **not** the one BV signs with today: the master was rotated or re-issued without re-approving it here, or BV never had a PKI-issued master and minted one on the fly (serial `legacy-…`) | Compare `bvault rustion master export` (or `GET rustion/master/pubkey`) with the pubkey on the bastion's authority record; re-approve the current pubkey there, or `rustion authority deenrol` + re-submit. BV's own error text names the serial + fingerprint it used. **Not** a namespace or token problem — the master keypair is deployment-global, so a namespaced session signs with exactly the same key a root session does |
 | `409 envelope_replay` | Same nonce seen twice within the replay window | Almost always benign retry under load; if it persists, check system clock skew |
 | `bastion_rejected_authority` (BV GUI) | All candidate bastions returned a 4xx | Read the underlying bastion error from the GUI panel; usually one of the above |
 | `policy_denied` | Bastion's `allowed_targets` doesn't match the resource's host | Widen `allowed_targets` on the authority YAML or re-route via a different bastion group |

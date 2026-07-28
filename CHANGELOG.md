@@ -45,6 +45,44 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.37.7] - 2026-07-28
+
+### Changed
+- **A bastion's `signature_invalid` refusal now names the master key BastionVault
+  signed with** (`src/modules/rustion/master.rs`, `src/modules/rustion/mod.rs`) --
+  a bastion answers `401 {"error":"signature_invalid","detail":"Ed25519 signature
+  half failed verification"}` when the BVRG envelope does not verify against the
+  master pubkey it pinned when the `bastion-vault` authority was approved. BV
+  forwarded that body verbatim (`HTTP 502: bastion_rejected: <host>: http 401: …`),
+  which reads like a *caller* authentication failure -- and when the session was
+  opened from inside a namespace, like a namespace-scoping bug. It is neither: the
+  master keypair lives in the root system view (`MasterStore::new` reads
+  `core.state.system_view`), `rustion/` is header-scoped rather than path-rewritten,
+  and every envelope -- root or namespaced -- is signed with that one key, so the
+  active namespace cannot change whether this fires. `master::signature_rejection_hint`
+  now appends the serial + fingerprint actually used, flags a master that was never
+  PKI-issued (absent record, or a `legacy-…` serial minted on the fly by
+  `get_or_init_signing_key`), flags a rotation the fleet was never told about
+  (rotation is a hard cutover -- `attest` envelopes are signed with the current key
+  too, so there is no in-band way to refresh a bastion's pin), and points at
+  `GET rustion/master/pubkey` for the comparison to run. Wired into session
+  open/renew/kill and `authority/attest`, the natural "is my authority still
+  approved?" probe. 6 new tests in `modules::rustion::master::tests`.
+
+### Documentation
+- **Re-approval after `master issue` / `rotate`, and the one-BV-per-bastion limit**
+  (`docs/rustion-integration.md`, `features/rustion-integration.md`) -- a fresh
+  pending YAML does not update an already-approved authority record of the same
+  name, so a re-issued master leaves the bastion verifying against the old pubkey
+  (`401 signature_invalid`) while the new key sits unread in `authorities-pending/`;
+  §3.2 now spells out the deenrol → untombstone → approve → reload cycle. Also
+  records that BV presents a fixed `X-Rustion-Authority: bastion-vault` and Rustion
+  resolves the record by that name, so two BV deployments enrolled against one
+  bastion collide on a single slot and the loser cannot fail more precisely than
+  `signature_invalid` (the signature is verified before the ciphertext is opened, so
+  the `deployment_id` binding is never read). Logged as an open question with three
+  candidate fixes.
+
 ## [0.37.6] - 2026-07-28
 
 ### Security
