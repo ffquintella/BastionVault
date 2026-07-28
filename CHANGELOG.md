@@ -45,6 +45,34 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.37.5] - 2026-07-28
+
+### Security
+- **Namespaced Rustion sessions resolve the endpoint credential in the caller's
+  namespace, not at root** (`src/modules/rustion/mod.rs`) -- `rustion/` is a
+  deployment-global mount, so the namespace router leaves its path untouched and
+  records the active namespace on the request instead. `rustion/v2/session/open`
+  then issued its two server-side credential lookups router-direct with
+  *root-relative* paths, so a session opened from a child namespace read
+  `resources/secrets/<resource>/<id>` and signed `<ssh-mount>/sign/<role>` in the
+  **root** namespace. Effects: a namespace whose resource shared a name with a
+  root resource received the root namespace's stored credential (a cross-tenant
+  read); a namespace-only SSH engine mount 404'd; and the connect-capability gate
+  probed the root path, so it consulted another tenant's ACL rule. All three now
+  qualify with the caller's namespace prefix (which also wires that namespace's
+  mount router, since the header-scoped path skips the pipeline's `ensure_router`).
+  (`features/rustion-integration.md`)
+
+### Changed
+- **Rustion namespace model documented and pinned in code** -- bastion
+  authentication is always root's (the enrolled fleet, the master signing keypair,
+  and the `<pki_mount>/issue/<role>` call that mints it stay root-relative -- a
+  child namespace never enrols its own Rustion, and the envelope must chain to the
+  one authority Rustion approved), while the endpoint credential sealed *inside*
+  the envelope always comes from the resource's namespace. `master::pki_issue_one`
+  carries an explicit "do not thread a namespace prefix through here" note so the
+  root half is not "fixed" to match the namespaced half.
+
 ## [0.37.4] - 2026-07-27
 
 ### Added

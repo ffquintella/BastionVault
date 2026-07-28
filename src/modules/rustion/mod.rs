@@ -1656,6 +1656,16 @@ impl RustionBackendInner {
             return Err(bv_error_response_status!(400, "v2 session/open requires `resource_name`"));
         }
 
+        // Namespace split for this request (see
+        // [`Self::namespace_sub_request_prefix`]): the bastion fleet, the
+        // master signing cert, and the PKI mount it is minted from are
+        // always the ROOT namespace's, but the endpoint credential sealed
+        // into the envelope belongs to the resource, which lives in the
+        // caller's namespace. Everything below that touches the resource —
+        // the connect gate and both credential resolvers — is qualified
+        // with this prefix; the master/PKI path deliberately is not.
+        let ns_prefix = self.namespace_sub_request_prefix(req).await?;
+
         // (1) Connect-capability gate on the resource's secret path. This
         // is a SECOND ACL check, distinct from the `Write` check post_auth
         // already ran on `rustion/v2/session/open` itself: that guards who
@@ -1669,7 +1679,14 @@ impl RustionBackendInner {
             .get_module::<crate::modules::policy::PolicyModule>("policy")
             .ok_or_else(|| bv_error_string!("policy module not registered"))?;
         let acl = policy_module.policy_store.load().new_acl_for_request(&auth.policies, None, &auth).await?;
-        let secret_prefix = format!("resources/secrets/{resource_name}/");
+        // Namespace-qualified: policies inside a namespace are authored with
+        // `<ns>/`-prefixed paths (`refuse_cross_namespace_paths` enforces
+        // that), and the request pipeline evaluates namespaced requests
+        // against the rewritten path. Probing the bare `resources/secrets/…`
+        // path would check the ROOT resource of the same name — denying the
+        // namespace's own owner while consulting a rule that belongs to a
+        // different tenant.
+        let secret_prefix = format!("{ns_prefix}resources/secrets/{resource_name}/");
         // Evaluate the connect/read grant with a non-LIST capability check.
         // `acl.capabilities()` probes with an `Operation::List`, and the ACL
         // matcher deliberately bypasses scope gates for LIST (deferring the
@@ -1713,7 +1730,7 @@ impl RustionBackendInner {
                         .ok_or_else(|| bv_error_response_status!(400, "credential_source.secret_id is required"))?
                         .to_string();
                     let (material_b64, username) =
-                        self.resolve_secret_credential(&resource_name, &secret_id, &auth).await?;
+                        self.resolve_secret_credential(&ns_prefix, &resource_name, &secret_id, &auth).await?;
                     let data = req.data.get_or_insert_with(Map::new);
                     data.insert("credential_material".into(), Value::String(material_b64));
                     if data.get("credential_kind").and_then(|v| v.as_str()).unwrap_or_default().is_empty() {
@@ -1753,8 +1770,9 @@ impl RustionBackendInner {
                                 .ok()
                                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                                 .filter(|s| !s.is_empty());
-                            let minted =
-                                self.mint_brokered_ssh_cert(&ssh_mount, &ssh_role, principal.as_deref()).await?;
+                            let minted = self
+                                .mint_brokered_ssh_cert(&ns_prefix, &ssh_mount, &ssh_role, principal.as_deref())
+                                .await?;
                             let data = req.data.get_or_insert_with(Map::new);
                             data.insert("credential_kind".into(), Value::String("ssh-cert".into()));
                             data.insert("credential_material".into(), Value::String(minted.private_key_b64));
@@ -1824,8 +1842,13 @@ impl RustionBackendInner {
     /// Only the ssh-password shape is brokered server-side today, matching
     /// the bastion proxy's current capability (private-key/cert flows are
     /// not yet wired through the proxy).
+    ///
+    /// `ns_prefix` is the caller's namespace prefix from
+    /// [`Self::namespace_sub_request_prefix`] — the resource (and therefore
+    /// its secret) belongs to the caller's namespace, not to root.
     async fn resolve_secret_credential(
         &self,
+        ns_prefix: &str,
         resource_name: &str,
         secret_id: &str,
         auth: &crate::logical::Auth,
@@ -1836,7 +1859,7 @@ impl RustionBackendInner {
         // server's authority, skipping the per-caller ACL gate. The
         // connect-capability check in `handle_session_open_v2` is the
         // authorization for this read.
-        let path = format!("resources/secrets/{resource_name}/{secret_id}");
+        let path = format!("{ns_prefix}resources/secrets/{resource_name}/{secret_id}");
         let mut sub = Request::new(&path);
         sub.operation = Operation::Read;
         let resp = self.core.router.handle_request(&mut sub).await?.ok_or_else(|| {
@@ -1882,8 +1905,19 @@ impl RustionBackendInner {
     /// (the connect-capability gate in `handle_session_open_v2` is the
     /// authorization), so a connect-only operator never needs `read` /
     /// `update` on the SSH engine mount.
+    ///
+    /// `ns_prefix` is the caller's namespace prefix from
+    /// [`Self::namespace_sub_request_prefix`]. The SSH engine that signs the
+    /// endpoint credential is the one mounted in the caller's namespace —
+    /// a namespace's `ssh/` CA is what its targets' `authorized_keys` /
+    /// `TrustedUserCAKeys` actually trust, so signing against the root
+    /// mount would produce a certificate no namespaced target accepts (or,
+    /// where a same-named root role exists, one signed by the wrong CA).
+    /// Only the *bastion authentication* — master cert + its PKI mount —
+    /// stays root-relative.
     async fn mint_brokered_ssh_cert(
         &self,
+        ns_prefix: &str,
         ssh_mount: &str,
         ssh_role: &str,
         principal: Option<&str>,
@@ -1912,7 +1946,7 @@ impl RustionBackendInner {
         if let Some(p) = principal.filter(|s| !s.is_empty()) {
             body.insert("valid_principals".into(), Value::String(p.to_string()));
         }
-        let path = format!("{ssh_mount}/sign/{ssh_role}");
+        let path = format!("{ns_prefix}{ssh_mount}/sign/{ssh_role}");
         let mut sub = Request::new_write_request(&path, Some(body));
         sub.operation = Operation::Write;
         let resp = self.core.router.handle_request(&mut sub).await?.ok_or_else(|| {
@@ -2134,6 +2168,75 @@ impl RustionBackendInner {
         data.insert("correlation_id".into(), Value::String(result.correlation_id));
         data.insert("reason".into(), Value::String(reason));
         Ok(Some(Response::data_response(Some(data))))
+    }
+
+    /// Path prefix to prepend to router-direct sub-requests this module issues
+    /// on behalf of the calling operator — `""` for root, `"<ns_path>/"` for a
+    /// namespaced caller.
+    ///
+    /// `rustion/` is a deployment-global mount: the namespace router leaves its
+    /// request path untouched and records the active namespace on
+    /// `req.namespace_path` instead (see `rewrite_request_for_namespace`). That
+    /// split is deliberate and is the whole namespace model for this feature:
+    ///
+    /// * **Bastion authentication stays at root.** The enrolled bastion fleet,
+    ///   the master signing keypair, and the PKI mount that mints it live only
+    ///   in the root mount table. A child namespace never enrols its own
+    ///   Rustion; selecting `rustion` transport inside a namespace uses the
+    ///   root-configured fleet and the root-issued master cert, so the envelope
+    ///   is signed by the one authority Rustion has approved. Those code paths
+    ///   (`MasterStore`, `<pki_mount>/issue/<role>`) are deliberately *not*
+    ///   prefixed — see [`master`].
+    /// * **The endpoint credential comes from the namespace.** The resource,
+    ///   its stored secrets, and the SSH/PKI engine that signs its login
+    ///   credential all live in the caller's namespace. Every sub-request that
+    ///   resolves that material must be re-qualified with this prefix,
+    ///   otherwise it silently resolves against the root namespace — 404-ing
+    ///   for a namespace-only mount, or worse, signing with the root CA /
+    ///   reading a same-named root secret.
+    ///
+    /// Because `rustion/` is header-scoped, the pipeline has *not* wired the
+    /// namespace's mounts into the shared router trie for us, so this also
+    /// ensures that router before handing back a prefix that depends on it.
+    ///
+    /// An unknown / unresolvable namespace yields `""` (root), matching the
+    /// best-effort behaviour of the header-scoped branch in the router.
+    async fn namespace_sub_request_prefix(&self, req: &Request) -> Result<String, RvError> {
+        use crate::modules::namespace::router::namespace_header_from_map;
+        use crate::modules::namespace::{NamespaceModule, NAMESPACE_MODULE_NAME};
+
+        // `namespace_path` is stamped by the header-scoped branch of
+        // `rewrite_request_for_namespace`; fall back to the raw header for
+        // callers that dispatch straight into the backend (tests, in-process
+        // embedded callers).
+        let raw = req
+            .namespace_path
+            .clone()
+            .or_else(|| namespace_header_from_map(req.headers.as_ref()))
+            .unwrap_or_default();
+        let raw = raw.trim().to_string();
+        if raw.is_empty() {
+            return Ok(String::new());
+        }
+
+        let Some(ns_module) = self.core.module_manager.get_module::<NamespaceModule>(NAMESPACE_MODULE_NAME) else {
+            return Ok(String::new());
+        };
+        let Some(store) = ns_module.store() else {
+            return Ok(String::new());
+        };
+        let Some(ns) = store.get_by_path(&raw).await? else {
+            return Ok(String::new());
+        };
+        if ns.is_root() {
+            return Ok(String::new());
+        }
+
+        // Header-scoped path: the namespace's mounts are not in the shared
+        // router trie yet unless some earlier request happened to wire them.
+        ns_module.registry.ensure_router(&self.core, &ns.uuid, &ns.path).await?;
+
+        Ok(format!("{}/", ns.path.trim_end_matches('/')))
     }
 
     pub async fn handle_recordings_list(
@@ -3495,6 +3598,171 @@ mod recordings_namespace_scope_tests {
         assert!(
             !ns_ids.contains(&"rec_other".to_string()),
             "namespace must not see a recording matching none of its resources"
+        );
+    }
+}
+
+#[cfg(test)]
+mod namespace_credential_scope_tests {
+    use std::collections::HashMap;
+
+    use serde_json::json;
+
+    use super::RustionBackendInner;
+    use crate::logical::{Operation, Request};
+    use crate::test_utils::new_unseal_test_bastion_vault;
+
+    /// The namespace split for a Rustion session: **bastion authentication is
+    /// root's, the endpoint credential is the namespace's.**
+    ///
+    /// `rustion/` is a deployment-global mount (header-scoped in the namespace
+    /// router), so a namespaced `v2/session/open` keeps using the root-enrolled
+    /// fleet and the root-issued master signing cert — a child namespace never
+    /// enrols its own Rustion. But the credential sealed *inside* the envelope
+    /// belongs to the resource, which lives in the caller's namespace. This
+    /// asserts both halves of that:
+    ///
+    ///   - a namespaced open resolves the namespace's own resource secret and
+    ///     gets all the way to dispatch (failing only on `bastion_unavailable`,
+    ///     since no bastion is enrolled in the test);
+    ///   - a namespace that owns no such resource does **not** fall through to
+    ///     a same-named ROOT secret — it fails closed with `not found`. Before
+    ///     the prefix fix, every namespaced open read the root namespace's
+    ///     `resources/secrets/<name>/<id>`, which is a cross-tenant read.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_v2_session_open_resolves_credential_in_caller_namespace() {
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_rustion_ns_cred_scope").await;
+
+        let call = |op: Operation, path: &str, ns: &str, body: Option<serde_json::Map<String, serde_json::Value>>| {
+            let core = core.clone();
+            let token = root.clone();
+            let path = path.to_string();
+            let ns = ns.to_string();
+            async move {
+                let mut req = Request::new(&path);
+                req.operation = op;
+                req.client_token = token;
+                req.body = body;
+                let mut h = HashMap::new();
+                if !ns.is_empty() {
+                    h.insert("x-bastionvault-namespace".to_string(), ns);
+                }
+                req.headers = Some(h);
+                core.handle_request(&mut req).await
+            }
+        };
+
+        // Decoy at ROOT: same resource name, same secret id. A namespaced open
+        // must never reach this.
+        call(
+            Operation::Write,
+            "resources/secrets/db/ssh",
+            "",
+            json!({ "password": "root-decoy", "username": "root-user" }).as_object().cloned(),
+        )
+        .await
+        .expect("write root decoy secret");
+
+        // Two child namespaces; only `team-alpha` owns the credential.
+        for ns in ["team-alpha", "team-beta"] {
+            call(Operation::Write, &format!("sys/namespaces/{ns}"), "", json!({}).as_object().cloned())
+                .await
+                .unwrap_or_else(|e| panic!("create namespace {ns}: {e:?}"));
+        }
+        call(
+            Operation::Write,
+            "resources/secrets/db/ssh",
+            "team-alpha",
+            json!({ "password": "alpha-secret", "username": "alpha-user" }).as_object().cloned(),
+        )
+        .await
+        .expect("write namespaced secret");
+
+        let open = |ns: &str| {
+            let call = &call;
+            let ns = ns.to_string();
+            async move {
+                let body = json!({
+                    "resource_name": "db",
+                    "credential_source": { "kind": "secret", "secret_id": "ssh" },
+                    "target_host": "10.1.2.3",
+                    "target_port": 22,
+                    "target_protocol": "ssh",
+                })
+                .as_object()
+                .cloned();
+                match call(Operation::Write, "rustion/v2/session/open", &ns, body).await {
+                    Ok(_) => "ok".to_string(),
+                    Err(e) => format!("{e:?}"),
+                }
+            }
+        };
+
+        // team-alpha: credential resolved from its own namespace, so the request
+        // reaches the dispatcher and fails only because no bastion is enrolled.
+        let alpha = open("team-alpha").await;
+        assert!(
+            alpha.contains("bastion_unavailable"),
+            "namespaced open must resolve the namespace's own secret and reach \
+             dispatch; got: {alpha}"
+        );
+
+        // team-beta: owns no such secret. Must fail closed rather than read the
+        // root decoy.
+        let beta = open("team-beta").await;
+        assert!(
+            !beta.contains("bastion_unavailable") && beta.contains("not found"),
+            "a namespace that owns no such resource secret must not fall back to \
+             the root namespace's same-named secret; got: {beta}"
+        );
+
+        // Root itself is unchanged: it resolves its own secret and reaches dispatch.
+        let at_root = open("").await;
+        assert!(at_root.contains("bastion_unavailable"), "root open must still resolve at root; got: {at_root}");
+    }
+
+    /// Unit cover for the prefix helper the resolvers share: root and an
+    /// unknown namespace resolve to the empty (root-relative) prefix; a real
+    /// namespace resolves to `<ns_path>/`. The master-cert / PKI path
+    /// deliberately does *not* consume this — see `master::pki_issue_one`.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_namespace_sub_request_prefix() {
+        let (_bvault, core, root) = new_unseal_test_bastion_vault("test_rustion_ns_prefix").await;
+
+        let mut create = Request::new("sys/namespaces/team-alpha");
+        create.operation = Operation::Write;
+        create.client_token = root.clone();
+        create.body = json!({}).as_object().cloned();
+        core.handle_request(&mut create).await.expect("create namespace");
+
+        let inner = RustionBackendInner { core: core.clone() };
+
+        let with_ns = |ns: Option<&str>| {
+            let mut req = Request::new("rustion/v2/session/open");
+            req.operation = Operation::Write;
+            if let Some(ns) = ns {
+                let mut h = HashMap::new();
+                h.insert("x-bastionvault-namespace".to_string(), ns.to_string());
+                req.headers = Some(h);
+            }
+            req
+        };
+
+        assert_eq!(inner.namespace_sub_request_prefix(&with_ns(None)).await.unwrap(), "", "no header → root-relative");
+        assert_eq!(
+            inner.namespace_sub_request_prefix(&with_ns(Some(""))).await.unwrap(),
+            "",
+            "empty header → root-relative"
+        );
+        assert_eq!(
+            inner.namespace_sub_request_prefix(&with_ns(Some("team-alpha"))).await.unwrap(),
+            "team-alpha/",
+            "namespaced caller → namespace-qualified sub-requests"
+        );
+        assert_eq!(
+            inner.namespace_sub_request_prefix(&with_ns(Some("no-such-ns"))).await.unwrap(),
+            "",
+            "unknown namespace → root-relative, matching the router's best-effort branch"
         );
     }
 }

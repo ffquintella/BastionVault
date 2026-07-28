@@ -323,6 +323,17 @@ enum PkiHalfKind {
     MlDsa65,
 }
 
+/// Issue one half of the master keypair from the configured PKI engine.
+///
+/// **Always root-relative, by design.** `path` carries no namespace prefix and
+/// the request carries no `X-BastionVault-Namespace` header, so it resolves
+/// against the root namespace's PKI mount even when the session that triggered
+/// the issuance came from a child namespace. Rustion is a deployment-global
+/// fleet that has approved exactly one BastionVault authority — the root's
+/// master identity — so the envelope signature must always chain to the root
+/// PKI. Only the *endpoint* credential sealed inside the envelope is
+/// namespace-scoped (see `RustionBackendInner::namespace_sub_request_prefix`).
+/// Do not thread a namespace prefix through here.
 #[maybe_async::maybe_async]
 async fn pki_issue_one(
     core: &Core,

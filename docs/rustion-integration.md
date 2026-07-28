@@ -310,6 +310,24 @@ Sometimes you want `rustion` to be the **only** transport for a class of resourc
 
 The resolver climbs the ladder bottom-up; the first explicit decision wins. A tier that's locked refuses overrides from below — handy when compliance says "PCI resources MUST go through the PCI bastion group" and you want the lock to survive resource-level edits.
 
+### Connecting from inside a namespace
+
+Rustion is a **root-namespace feature**. You enrol bastions, mint the master keypair, define bastion groups, and set the global policy tier once, at root — a child namespace never enrols its own Rustion. Selecting `rustion` transport on a resource inside a namespace therefore uses the **root-configured** fleet and the **root-issued** master cert, which is what makes it work at all: Rustion has approved exactly one BastionVault authority (pinned by pubkey + deployment id), so the envelope must be signed by root's master identity.
+
+What *is* namespace-scoped is the credential the bastion uses to log into the target:
+
+| | Comes from |
+|---|---|
+| Bastion fleet, bastion groups, global/type policy tiers, master signing cert + its PKI mount | **Root** |
+| The resource, its stored secrets, and the SSH engine (`ssh/sign/<role>`) or PKI engine that issues its login credential | **The resource's own namespace** |
+
+So a resource in `dti/esi` bound to `ssh/role=admins-esi` gets a certificate signed by `dti/esi`'s SSH CA — the CA its targets actually trust — sealed inside an envelope signed by root's master cert. Recordings follow the same split: the index is deployment-global, but a namespace only sees recordings whose target host matches one of its own resources.
+
+Two consequences worth knowing:
+
+- Reference the SSH mount **namespace-relative** in the connection profile (`ssh/`, not `dti/esi/ssh/`) — same convention as the direct-connect path.
+- Brokering from a namespace currently requires a **root-bound** token (an admin using the namespace switcher). A token whose login namespace is non-root cannot be granted the root-owned `rustion/*` paths, because namespace policies may only reference their own namespace's paths. Letting namespace-bound tokens broker their own sessions is tracked as an open question in `features/rustion-integration.md`.
+
 ---
 
 ## 5. Live sessions + recordings + audit

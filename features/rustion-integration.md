@@ -31,6 +31,7 @@ Net result: operators get the same one-click Connect UX as today, but every sess
 - Rustion (`/Users/felipe/Dev/Rustion`) is its own server with its own user / target / role YAML store, its own auth (password + Argon2id, certificate, SAML, FIDO2, TOTP), and its own admin TUI. It does **not** today expose a control-plane API for "create me a session for this credential, signed by an external trust anchor." That control plane is the new surface this feature adds — symmetric work in both repos.
 - There is no integration today; the two products are co-developed by the same author but ship independently.
 - **Namespace-scoped recordings.** The `rustion/` mount is a single deployment-global fleet (targets + recordings live only in the root mount table), so it is header-scoped in the namespace router — a namespaced request resolves against the global mount instead of 404-ing. The `rustion/recordings` list applies per-namespace scoping in the handler: in a non-root namespace it returns only recordings whose `target_host` matches a resource (hostname/IP) in that namespace's `resources/` mount; root sees all, and recordings matching no namespace resource stay visible only at root.
+- **Namespace model: root authenticates the bastion, the namespace supplies the endpoint credential.** See *Namespaces* under Design below. Implemented in `handle_session_open_v2` via `RustionBackendInner::namespace_sub_request_prefix`.
 
 ## Scope
 
@@ -138,6 +139,29 @@ The trust anchor is the **master cert**, not a TLS handshake or a shared secret.
 - **Stateless verification on Rustion** — Rustion does not need to talk to BastionVault to authorise a session; it just verifies a signature against a pubkey it already has.
 - **Air-gap friendly** — once enrolled, the control plane works over any path that can carry a single HTTP request, including a one-way diode.
 - **Cheap rotation** — rotating the master cert is one envelope (`rustion.master.rotate`) co-signed by the old key, accepted by Rustion if the new pubkey is presented before the old one expires.
+
+### Namespaces — root authenticates the bastion, the namespace supplies the endpoint credential
+
+Rustion is a **root-namespace feature**: the enrolled fleet, the bastion groups, the global policy tier, and the master signing keypair live only in the root mount table, and `rustion/` is header-scoped in the namespace router (a namespaced request resolves against the global mount rather than 404-ing, and the active namespace is recorded on the request instead of rewritten into its path). A child namespace never enrols its own Rustion — selecting `rustion` transport inside a namespace uses the **root-configured** fleet.
+
+That splits a namespaced session into two credential layers, which resolve in **different** namespaces:
+
+| Layer | What it is | Resolved in | Why |
+|---|---|---|---|
+| **Bastion authentication** | The BVRG-v1 envelope's signature: the master keypair and the `<pki_mount>/issue/<role>` call that mints it | **Root**, always | Rustion has approved exactly one BastionVault authority — the root deployment's master identity, pinned at enrolment with the deployment id. An envelope signed by anything else is refused (`403 attestation_mismatch` / unknown authority). There is no per-namespace authority record. |
+| **Endpoint credential** | What is sealed *inside* the envelope and used to authenticate to the target: a stored resource secret, an SSH-engine-signed certificate, an LDAP bind, a PKI smartcard cert | **The caller's namespace** | The resource lives there, and so does the engine that vouches for it. A namespace's `ssh/` CA is what its targets' `TrustedUserCAKeys` actually trust, so a certificate signed by the root CA is one no namespaced target accepts. |
+
+Concretely, on `rustion/v2/session/open` from namespace `N`:
+
+- the master signing key, the target registry, the dispatcher, health, and the policy tiers come from the root-global `rustion/` mount — unchanged from a root session;
+- the connect-capability gate probes `N/resources/secrets/<resource>/`, because namespace policies are authored with `N/`-prefixed paths (`refuse_cross_namespace_paths` enforces that) and the pipeline evaluates namespaced requests against the rewritten path;
+- `credential_source.kind = "secret"` reads `N/resources/secrets/<resource>/<id>`;
+- `credential_source.kind = "ssh-engine"` signs at `N/<ssh_mount>/sign/<ssh_role>` — the profile stores `ssh_mount` namespace-*relative* (`ssh/`), matching how the direct-connect path resolves it;
+- LDAP / PKI credential kinds are resolved client-side by the GUI, which already carries the namespace header on every call, so they arrive as material and need no server-side re-qualification.
+
+Because `rustion/` is header-scoped, the request pipeline has **not** wired namespace `N`'s mounts into the shared router trie, so the prefix helper (`RustionBackendInner::namespace_sub_request_prefix`) ensures that router before returning. An unknown or unresolvable namespace header yields the root-relative prefix, matching the router's own best-effort behaviour on header-scoped paths.
+
+Regression cover: `modules::rustion::namespace_credential_scope_tests` — a namespaced open resolves its own namespace's secret and reaches dispatch, while a namespace owning no such secret fails closed rather than falling through to a same-named root secret.
 
 ### Envelope format — BVRG-v1
 
@@ -1326,6 +1350,11 @@ Two strands land together: the BastionVault-side **multi-instance failover** sto
 
 ## Open questions
 
+- **How does a *namespace-bound* token reach the root `rustion/` endpoints? — Open.** The namespace credential split above (see *Namespaces* under Design) makes a namespaced session resolve the right credential, but it does not answer who may ask for one. A token whose login namespace is non-root resolves its named policies from that namespace's own keyspace, and `refuse_cross_namespace_paths` refuses a namespace policy that references `rustion/*` (root owns that path) — so today only a **root-bound** token (typically an admin using the GUI's namespace switcher) can call `rustion/v2/session/open` at all. Options, in rough order of preference:
+  1. Extend the implicit `namespace-self` policy (`src/modules/policy/policy_store.rs`) with the gated session endpoints — `rustion/v2/session/open` plus `session/renew` / `session/kill` and the read-only `policy/effective` / `dispatcher/preview` / `targets/health` the Connection tab needs. Safe in principle because v2 applies its **own** per-resource `connect` gate (now namespace-qualified), and renew/kill require the `correlation_id` handed only to the opener. Weakens defence-in-depth by one layer for every namespace token, and does **not** cover v1 `rustion/session/open` — which has no per-resource gate and is still the path the RDP flow uses.
+  2. Add an explicit per-namespace opt-in (e.g. `rustion.allow_namespace_tokens` on the global policy tier, or an `allowed_namespaces` list) so a root admin decides which tenants may broker their own sessions.
+  3. Give v1 `session/open` the same per-resource gate as v2 and treat both as namespace-grantable, so the RDP path is covered too.
+  Until one is chosen, brokered Connect inside a namespace works for root-bound operators only.
 - **Two-way mTLS on the control plane? — Resolved: not pursued.** Caller authenticity is already established cryptographically by the BVRG-v1 envelope signature (hybrid Ed25519 + ML-DSA-65) verified against the per-authority pinned pubkey, plus the deployment-id binding and (Phase 9.3) the re-attestation deadline. A client certificate would re-prove the same identity through a second, weaker channel (a TLS PKI) while adding a whole cert lifecycle to operate and rotate. TLS on the control plane stays — but purely for transport confidentiality/integrity, not authentication. (The `serve_tls` listener still *accepts* an optional client-CA bundle for operators who want belt-and-braces, but the integration does not require or rely on it.)
 - **Native Rustion auth bypass.** A session opened by BastionVault skips Rustion's own user store entirely — the *authority* is the trust anchor, the *user* is whatever BastionVault attests. Is that the right call for environments that already enrolled their humans in Rustion? Tentative answer: yes, because making humans authenticate twice is the workflow we're trying to remove. Authorities should be policy-scoped (`allowed_targets`, `allowed_actions`) tightly enough that a compromised BastionVault can't reach beyond what it already could.
 - **Recording redaction.** `input-redacted` mode is listed in the envelope but Rustion's current recorder either records keystrokes or doesn't. Deciding the policy default per resource type (probably "off" for SSH input, "always" for SSH output) is a Phase 6 sub-question.
