@@ -1,0 +1,334 @@
+name: macOS release (Apple Silicon)
+
+# Builds and publishes the macOS client artefacts for a release.
+#
+# A "release" in this repo is a tag under the `releases/` namespace — e.g.
+# `releases/0.38.0`. Pushing one triggers this workflow.
+#
+# Apple Silicon only, by design: the `macos-15` runners are arm64, so both the
+# CLI and the Tauri GUI build natively — no cross-compilation, no universal2
+# lipo step. Intel Macs are out of scope for the Homebrew tap.
+#
+# Published assets (the names are a contract with
+# github.com/ffquintella/homebrew-bvault — its scripts/update-tap.sh looks them
+# up verbatim, so do not rename them without updating the tap):
+#
+#   bvault-<version>-aarch64-apple-darwin.tar.gz        CLI  → brew formula
+#   BastionVault-<version>-aarch64-apple-darwin.tar.gz  GUI  → brew cask
+#   bvault-<version>-darwin-arm64.pkg                   CLI  → MDM / Installer
+#   BastionVault-<version>-arm64.pkg                    GUI  → MDM / Installer
+#   SHA256SUMS
+#
+# The two .pkg files come from the existing `make macos-cli-pkg` /
+# `make gui-macos-pkg` targets, so CI and a developer's Mac produce byte-for-byte
+# comparable installers. The tarballs exist because Homebrew wants an archive,
+# not an Installer package.
+#
+# Signing is optional and off until the secrets are set — see "Apple signing"
+# below. An unsigned release still installs; the cask just needs
+# `--no-quarantine` (it says so in its caveats).
+
+on:
+  push:
+    tags:
+      - "releases/*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing releases/* tag to (re)build, e.g. releases/0.37.5"
+        required: true
+
+permissions:
+  contents: write
+
+# Never cancel a release build half way through — a partially uploaded release
+# is worse than a slow one.
+concurrency:
+  group: macos-release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # A release build has no use for incremental artefacts and they cost cache
+  # space and upload time.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  macos-arm64:
+    name: Build + publish macOS arm64 clients
+    runs-on: macos-15
+    # Two full release builds of a tree this size (aws-lc-rs, russh, IronRDP,
+    # hiqlite, actix) plus the Vite frontend. Generous, but under the 6h cap.
+    timeout-minutes: 330
+
+    steps:
+      # Parsed before checkout so a malformed tag fails in seconds.
+      - name: Resolve release metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          case "$TAG" in
+            releases/*) ;;
+            *) echo "::error::expected a tag under releases/, got '$TAG'"; exit 1 ;;
+          esac
+          VERSION="${TAG#releases/}"
+          VERSION="${VERSION#v}"
+          case "$VERSION" in
+            [0-9]*.[0-9]*) ;;
+            *) echo "::error::'$TAG' does not carry an x.y.z version"; exit 1 ;;
+          esac
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "==> tag=$TAG version=$VERSION"
+
+      - name: Checkout ${{ steps.meta.outputs.tag }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.tag }}
+          # No submodules on purpose. plugins-ext, IronRDP and third_party/hiqlite
+          # are submodules for local editing only — the build consumes all three
+          # as *git* dependencies (see [patch.crates-io] in Cargo.toml and the
+          # ironrdp entries in gui/src-tauri/Cargo.toml), and
+          # third_party/ferrogate-sdk-rust is vendored in-tree. Cargo fetches what
+          # it needs; cloning the submodules would only cost minutes.
+          submodules: false
+
+      # Catches the "tagged a release but forgot `make bump-patch`" mistake
+      # before it produces artefacts labelled with the wrong version.
+      - name: Check the tag matches the tree
+        run: |
+          set -euo pipefail
+          WANT="${{ steps.meta.outputs.version }}"
+          CARGO_VERSION="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')"
+          GUI_VERSION="$(grep -m1 '"version"' gui/src-tauri/tauri.conf.json | sed 's/.*"\([0-9][^"]*\)".*/\1/')"
+          fail=0
+          [ "$CARGO_VERSION" = "$WANT" ] || { echo "::error::Cargo.toml says $CARGO_VERSION, tag says $WANT"; fail=1; }
+          [ "$GUI_VERSION"   = "$WANT" ] || { echo "::error::tauri.conf.json says $GUI_VERSION, tag says $WANT"; fail=1; }
+          if [ "$fail" -ne 0 ]; then
+            echo "Run 'make bump-patch' (or bump-minor/major), commit, then retag." >&2
+            exit 1
+          fi
+          echo "==> versions agree on $WANT"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Mirrors rust-toolchain.toml, so rustup has nothing left to fetch
+          # mid-build.
+          components: rustfmt
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-arm64-release
+          # gui/src-tauri is a workspace member, so its artefacts land in the
+          # root target/ — one cache covers both builds.
+          cache-on-failure: true
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+
+      # ── Apple signing (optional) ──────────────────────────────────────
+      #
+      # Every variable below may legitimately be absent. Tauri and the pkg
+      # scripts both branch on "is this set?", but a GitHub Actions `env:` entry
+      # backed by a missing secret is set-to-empty rather than unset, which some
+      # of that code reads as "yes, sign with the identity ''". So the empties
+      # are stripped here and re-exported through $GITHUB_ENV, where an absent
+      # secret genuinely means an absent variable.
+      #
+      # Secrets to set for a Gatekeeper-clean release:
+      #   APPLE_CERTIFICATE           base64 of a Developer ID Application .p12
+      #   APPLE_CERTIFICATE_PASSWORD  its password
+      #   APPLE_SIGNING_IDENTITY      "Developer ID Application: … (TEAMID)"
+      #   APPLE_ID / APPLE_PASSWORD   Apple ID + app-specific password (notarising)
+      #   APPLE_TEAM_ID               10-char team id
+      #   APPLE_INSTALLER_IDENTITY    "Developer ID Installer: … (TEAMID)" (.pkg)
+      - name: Configure Apple signing
+        env:
+          IN_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          IN_APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IN_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          IN_APPLE_ID: ${{ secrets.APPLE_ID }}
+          IN_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          IN_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          IN_INSTALLER_IDENTITY: ${{ secrets.APPLE_INSTALLER_IDENTITY }}
+        run: |
+          set -euo pipefail
+          promote() {
+            local name="$1" value="$2"
+            if [ -z "$value" ]; then
+              echo "  $name: not configured"
+              return
+            fi
+            # Heredoc form so multi-line values (the base64 .p12) survive.
+            {
+              echo "$name<<__BV_EOF__"
+              printf '%s\n' "$value"
+              echo "__BV_EOF__"
+            } >> "$GITHUB_ENV"
+            echo "  $name: set"
+          }
+          promote APPLE_CERTIFICATE          "$IN_APPLE_CERTIFICATE"
+          promote APPLE_CERTIFICATE_PASSWORD "$IN_APPLE_CERTIFICATE_PASSWORD"
+          promote APPLE_SIGNING_IDENTITY     "$IN_APPLE_SIGNING_IDENTITY"
+          promote APPLE_ID                   "$IN_APPLE_ID"
+          promote APPLE_PASSWORD             "$IN_APPLE_PASSWORD"
+          promote APPLE_TEAM_ID              "$IN_APPLE_TEAM_ID"
+          # Read by installers/cli/pkg/build-macos-pkg.sh and
+          # gui/src-tauri/installers/macos/build-gui-pkg.sh.
+          promote INSTALLER_IDENTITY         "$IN_INSTALLER_IDENTITY"
+
+      # ── CLI ───────────────────────────────────────────────────────────
+      - name: Build the CLI
+        run: cargo build --release --bin bvault --bin bv-ssh-helper
+
+      - name: Sign the CLI binaries
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            echo "==> no APPLE_SIGNING_IDENTITY — leaving the ad-hoc signature"
+            echo "    (the linker ad-hoc signs arm64 binaries, so they still run;"
+            echo "     they are just not attributable to a Developer ID)"
+            exit 0
+          fi
+          for bin in target/release/bvault target/release/bv-ssh-helper; do
+            codesign --force --timestamp --options runtime \
+                     --sign "$APPLE_SIGNING_IDENTITY" "$bin"
+            codesign --verify --strict --verbose=2 "$bin"
+          done
+
+      - name: Stage the CLI tarball
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.meta.outputs.version }}"
+          NAME="bvault-$VERSION-aarch64-apple-darwin"
+          STAGE="$RUNNER_TEMP/$NAME"
+
+          mkdir -p dist "$STAGE/bin" "$STAGE/share/man/man1" "$STAGE/share/completions"
+          install -m 0755 target/release/bvault        "$STAGE/bin/bvault"
+          install -m 0755 target/release/bv-ssh-helper "$STAGE/bin/bv-ssh-helper"
+          install -m 0644 installers/cli/manpage/bvault.1        "$STAGE/share/man/man1/bvault.1"
+          install -m 0644 installers/cli/completions/bvault.bash "$STAGE/share/completions/bvault.bash"
+          install -m 0644 installers/cli/completions/_bvault     "$STAGE/share/completions/_bvault"
+          install -m 0644 installers/cli/completions/bvault.fish "$STAGE/share/completions/bvault.fish"
+          install -m 0644 LICENSE   "$STAGE/LICENSE"
+          install -m 0644 README.md "$STAGE/README.md"
+
+          # COPYFILE_DISABLE keeps macOS tar from smuggling ._AppleDouble entries
+          # into the archive, which Homebrew would happily install.
+          COPYFILE_DISABLE=1 tar -C "$RUNNER_TEMP" -czf "dist/$NAME.tar.gz" "$NAME"
+          echo "==> dist/$NAME.tar.gz"
+          tar -tzf "dist/$NAME.tar.gz"
+
+      # Signed with INSTALLER_IDENTITY when it is set, never notarised: the .pkg
+      # is the MDM/Munki channel, and `installer -pkg` does not run a Gatekeeper
+      # assessment. Notarising it would mean wiring up a notarytool keychain
+      # profile for `make sign-packages` — see installers/sign/README.md.
+      - name: Build the CLI .pkg
+        run: |
+          set -euo pipefail
+          # Recompiles nothing — the cargo step above already produced the binary.
+          make macos-cli-pkg
+          cp target/pkg/bvault-*.pkg dist/
+
+      # ── GUI ───────────────────────────────────────────────────────────
+      #
+      # Tauri signs *and* notarises + staples the .app itself when
+      # APPLE_SIGNING_IDENTITY plus APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID are
+      # in the environment, which is the path the cask cares about.
+      - name: Build the GUI (.app + .pkg)
+        run: |
+          set -euo pipefail
+          # `npm ci` up front so the tree matches gui/package-lock.json exactly;
+          # the `npm install` that gui-deps then runs is a no-op revalidation.
+          (cd gui && npm ci)
+          make gui-macos-pkg
+          cp target/pkg/BastionVault-*.pkg dist/
+
+      - name: Stage the GUI tarball
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.meta.outputs.version }}"
+          APP="$(find target gui/src-tauri/target -type d -name 'BastionVault.app' \
+                   -path '*/bundle/macos/*' 2>/dev/null | head -1)"
+          [ -n "$APP" ] || { echo "::error::BastionVault.app not found after the Tauri build"; exit 1; }
+          echo "==> bundling $APP"
+
+          # Report what Gatekeeper will make of it, so an unsigned release shows
+          # up in the log rather than as a surprise on someone's Mac. An ad-hoc
+          # signature passes `codesign --verify`, so the verdict that matters is
+          # spctl's.
+          codesign --verify --deep --strict --verbose=2 "$APP" || \
+            echo "::warning::BastionVault.app has no valid code signature"
+          spctl --assess --type exec --verbose=4 "$APP" || \
+            echo "::warning::BastionVault.app is not notarised — cask users will need --no-quarantine"
+
+          # The cask's `app "BastionVault.app"` stanza expects the bundle at the
+          # archive root, so tar the bundle itself rather than its parent.
+          COPYFILE_DISABLE=1 tar -C "$(dirname "$APP")" \
+            -czf "dist/BastionVault-$VERSION-aarch64-apple-darwin.tar.gz" "BastionVault.app"
+
+      # ── Publish ───────────────────────────────────────────────────────
+      - name: Checksum
+        run: |
+          set -euo pipefail
+          cd dist
+          # Explicit prefixes rather than `*`, so SHA256SUMS can never end up
+          # hashing itself, and the paths stay bare filenames (the tap's
+          # scripts/update-tap.sh matches on those).
+          shasum -a 256 bvault-* BastionVault-* > "$RUNNER_TEMP/SHA256SUMS"
+          mv "$RUNNER_TEMP/SHA256SUMS" SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload the workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-${{ steps.meta.outputs.version }}
+          path: dist/
+          if-no-files-found: error
+
+      - name: Publish to the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "==> release $TAG exists — replacing its macOS assets"
+            gh release upload "$TAG" --clobber dist/*
+          else
+            echo "==> creating release $TAG"
+            gh release create "$TAG" \
+              --title "BastionVault $VERSION" \
+              --generate-notes \
+              dist/*
+          fi
+
+      # Set HOMEBREW_TAP_TOKEN to a PAT with `contents: write` on
+      # ffquintella/homebrew-bvault. Without it the release still publishes; the
+      # tap just has to be updated by hand (run its "Update tap" workflow).
+      - name: Notify the Homebrew tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          TAP_REPO: ffquintella/homebrew-bvault
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::notice::HOMEBREW_TAP_TOKEN not configured — skipping the tap bump."
+            echo "Update it manually: gh workflow run update-tap.yml -R $TAP_REPO -f version=$VERSION"
+            exit 0
+          fi
+          gh api "repos/$TAP_REPO/dispatches" \
+            -f event_type=bvault-release \
+            -f "client_payload[version]=$VERSION" \
+            -f "client_payload[tag]=$TAG"
+          echo "==> dispatched bvault-release $VERSION to $TAP_REPO"
