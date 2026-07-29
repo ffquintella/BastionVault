@@ -1,0 +1,36 @@
+# cargo-audit configuration.
+#
+# Every entry below must carry a justification and, where the exposure is
+# real-but-unfixable, the condition that would let us drop the ignore.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — "Marvin Attack: potential key recovery through
+    # timing sidechannels" in the `rsa` crate (both 0.9.x and 0.10.0-rc.x
+    # are in our tree).
+    #
+    # There is NO patched release: the advisory's `patched` list is empty and
+    # has been since 2023 — the fix requires constant-time modular
+    # exponentiation that RustCrypto has not shipped. No version bump can
+    # clear this, so it cannot be "fixed", only assessed.
+    #
+    # Assessment for BastionVault: the Marvin attack is a *decryption* oracle
+    # — the attacker submits chosen ciphertexts to an RSA private-key
+    # decrypt operation and measures response timing. BastionVault performs
+    # no RSA decryption anywhere. Our `rsa` usage is:
+    #   - src/modules/credential/saml/verify.rs — signature VERIFICATION with
+    #     a public key (`pkcs1v15::VerifyingKey`), not a private-key op.
+    #   - src/modules/pki/crypto.rs, src/modules/pki/keys.rs — key
+    #     generation (`RsaPrivateKey::new`) and PEM/DER encode/decode.
+    # None of these expose an attacker-driven decryption oracle.
+    #
+    # Transitive holders (openidconnect, yubikey, russh, picky/ironrdp/sspi)
+    # likewise use RSA for signature verification and key exchange rather
+    # than exposing a network-reachable decryption oracle in our paths.
+    #
+    # Re-evaluate when: RustCrypto publishes a constant-time `rsa` release,
+    # or if BastionVault ever adds an RSA decryption path (RSA key transport,
+    # PKCS#1 v1.5 unwrapping, JWE `RSA-OAEP`/`RSA1_5` decryption) — at which
+    # point this ignore must be removed and the exposure re-assessed.
+    "RUSTSEC-2023-0071",
+]

@@ -505,7 +505,7 @@ mod tests {
         store.put(&s, &m, input).await.unwrap();
         let got = store.get(&s, &m.name).await.unwrap();
         assert_eq!(got.get("from_address").unwrap(), "bv@example.com");
-        assert!(got.get("o365_sender").is_none());
+        assert!(!got.contains_key("o365_sender"));
     }
 
     #[tokio::test]

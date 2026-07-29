@@ -212,8 +212,8 @@ async fn resolve_remote_address(
         health,
     };
 
-    let mut health_cfg = HealthConfig::default();
-    health_cfg.use_system_proxy = profile.use_system_proxy;
+    let mut health_cfg =
+        HealthConfig { use_system_proxy: profile.use_system_proxy, ..Default::default() };
     if let Some(ms) = profile.health_probe_timeout_ms {
         if ms > 0 {
             health_cfg.probe_timeout = Duration::from_millis(ms.into());
@@ -396,8 +396,8 @@ pub(crate) async fn cluster_node_health(
         )));
     }
 
-    let mut health_cfg = HealthConfig::default();
-    health_cfg.use_system_proxy = profile.use_system_proxy;
+    let mut health_cfg =
+        HealthConfig { use_system_proxy: profile.use_system_proxy, ..Default::default() };
     if let Some(ms) = profile.health_probe_timeout_ms {
         if ms > 0 {
             health_cfg.probe_timeout = Duration::from_millis(ms.into());
@@ -649,8 +649,8 @@ pub async fn cluster_discover(profile: RemoteProfile) -> CmdResult<ClusterDiagno
     if let Some(svc) = profile.discovery_srv_service.as_deref().filter(|s| !s.is_empty()) {
         discovery_cfg.srv_service = svc.to_string();
     }
-    let mut health_cfg = HealthConfig::default();
-    health_cfg.use_system_proxy = profile.use_system_proxy;
+    let mut health_cfg =
+        HealthConfig { use_system_proxy: profile.use_system_proxy, ..Default::default() };
     if let Some(ms) = profile.health_probe_timeout_ms.filter(|m| *m > 0) {
         health_cfg.probe_timeout = Duration::from_millis(ms.into());
     }

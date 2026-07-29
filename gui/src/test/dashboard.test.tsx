@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { bucketByHour } from "../components/dashboard/SessionActivityChart";
 import { KpiTile } from "../components/dashboard/KpiTile";
 import { AttentionPanel } from "../components/dashboard/AttentionPanel";

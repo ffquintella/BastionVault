@@ -1,4 +1,4 @@
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import type { AuditEvent } from "../../lib/types";
 
 function relTime(ts: string, nowMs: number): string {

@@ -8,7 +8,7 @@
 // the main app's sidebar in the way.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router";
 
 import { Badge, Button } from "../components/ui";
 import { RdpReplayCanvas } from "../components/RdpReplayCanvas";

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import * as api from "../../lib/api";
 import type { SharePointer } from "../../lib/types";
 import { extractError } from "../../lib/error";

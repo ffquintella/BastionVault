@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef, useCallback, type MouseEvent as ReactMouseEvent } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import { Layout } from "../components/Layout";
 import {
   Button,

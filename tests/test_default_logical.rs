@@ -489,8 +489,8 @@ async fn test_sys_mount_feature(core: &Core, token: &str) {
     let data = resp.unwrap().data;
     assert!(data.is_some());
     // Default core mounts: secret/, resources/, files/, identity/,
-    // resource-group/, sys/, rustion/, ssh-broker/.
-    assert_eq!(data.as_ref().unwrap().len(), 8);
+    // resource-group/, notifications/, sys/, rustion/, ssh-broker/.
+    assert_eq!(data.as_ref().unwrap().len(), 9);
 
     // test api: "mounts/kv" with valid type
     let mount_data = json!({
@@ -566,8 +566,11 @@ async fn test_sys_mount_feature(core: &Core, token: &str) {
 
 #[maybe_async::maybe_async]
 async fn test_sys_raw_api_feature(core: &Core, token: &str) {
-    // test raw read
-    let mut req = Request::new("sys/raw/core/mounts");
+    // test raw read. The root tenant's mount table lives under the active
+    // root storage prefix — `namespaces/<root_uuid>/core/mounts` once
+    // re-root activation is in effect, which is the unconditional default —
+    // so ask Core for the live key instead of hardcoding `core/mounts`.
+    let mut req = Request::new(format!("sys/raw/{}", core.root_mount_config_path()));
     req.operation = Operation::Read;
     req.client_token = token.to_string();
     let resp = core.handle_request(&mut req).await;
@@ -747,7 +750,7 @@ async fn test_kv_v2_environments(core: &Core, token: &str) {
     let d = read_env(core, token, "kvenv/data/svc", Some("prod")).await.unwrap();
     assert_eq!(d["data"]["host"].as_str().unwrap(), "db.prod");
     assert_eq!(d["data"]["port"].as_u64().unwrap(), 5432); // inherited from base
-    assert_eq!(d["data"]["tls"].as_bool().unwrap(), true);
+    assert!(d["data"]["tls"].as_bool().unwrap());
     assert_eq!(d["metadata"]["resolved_env"].as_str().unwrap(), "prod");
 
     // --- Read env=staging -> staging override over base ---

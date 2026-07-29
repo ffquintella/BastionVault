@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
+import { HashRouter, Routes, Route, Navigate } from "react-router";
 import { ConnectPage } from "./routes/ConnectPage";
 import { InitPage } from "./routes/InitPage";
 import { LoginPage } from "./routes/LoginPage";

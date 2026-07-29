@@ -499,14 +499,10 @@ impl HiqliteBackend {
         let tls_api_auto_certs =
             matches!(tls_api, Some(ServerTlsConfig::TlsAutoCertificates)) || tls_api_no_verify;
 
-        // hiqlite requires encryption keys for backup/cookie encryption
-        let mut enc_keys = cryptr::EncKeys {
-            enc_key_active: String::new(),
-            enc_keys: Vec::new(),
-        };
-        enc_keys
-            .append_new_random_with_id("bvault-default".to_string())
-            .map_err(|e| RvError::ErrCluster(e.to_string()))?;
+        // `NodeConfig::enc_keys` only exists under hiqlite's `s3`/`dashboard`
+        // features, which we build without — the ephemeral key we used to
+        // generate here only ever encrypted hiqlite's own S3 backups and
+        // dashboard cookies, neither of which BastionVault uses.
 
         // Snapshot the peer endpoints before `nodes` is moved into NodeConfig.
         let peer_addrs: Vec<String> = nodes
@@ -522,7 +518,6 @@ impl HiqliteBackend {
             listen_addr_raft: Cow::Owned(listen_addr_raft.to_string()),
             secret_raft: secret_raft.to_string(),
             secret_api: secret_api.to_string(),
-            enc_keys,
             tls_raft,
             tls_api,
             // Hiqlite's WAL panics (not errors) if any single Raft log entry

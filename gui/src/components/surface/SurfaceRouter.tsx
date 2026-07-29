@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useLocation, useSearchParams } from "react-router-dom";
+import { useLocation, useSearchParams } from "react-router";
 import { usePluginSurfacesStore } from "../../stores/pluginSurfacesStore";
 import { Layout } from "../Layout";
 import { Card, EmptyState } from "../ui";

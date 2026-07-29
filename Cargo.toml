@@ -1,6 +1,6 @@
 [package]
 name = "bastion_vault"
-version = "0.38.0"
+version = "0.38.1"
 edition = "2021"
 license = "Apache-2.0"
 description = """
@@ -92,8 +92,21 @@ r2d2 = { version = "0.8.10", optional = true }
 # `main-local`): upstream v0.14.0 stable plus the raft-client
 # socket-leak fix (AbortOnDrop), which is still not upstreamed as of
 # 2026-07. See the `[patch.crates-io]` entry below.
-hiqlite = { version = "=0.14.0", optional = true, features = ["sqlite", "dlock"] }
-cryptr = { version = "0.10", optional = true, default-features = false }
+# `default-features = false` drops hiqlite's `backup` feature, which is
+# what pulled `cryptr/s3` -> `s3-simple` -> `quick-xml 0.39` into the tree
+# (RUSTSEC-2026-0194 / RUSTSEC-2026-0195, both DoS in XML parsing, no
+# 0.39 patch release). We never call hiqlite's backup API — vault backups
+# use our own BVBK format in `crate::backup` — so the feature was dead
+# weight. The rest of hiqlite's defaults (`auto-heal`, `sqlite`, `toml`)
+# are re-listed explicitly so behaviour is unchanged.
+hiqlite = { version = "=0.14.0", optional = true, default-features = false, features = [
+    "auto-heal",
+    "sqlite",
+    "toml",
+    "dlock",
+] }
+# cryptr was only ever used to build `NodeConfig::enc_keys` for hiqlite's
+# S3-backup/dashboard features, both of which we now build without.
 # Cloud Storage Targets — Phase 2b: S3 via rusty-s3 (URL signing +
 # XML parsing only, ~15 transitive deps). HTTP is handled by the
 # existing `ureq` dep, so enabling `cloud_s3` does not pull in
@@ -397,7 +410,7 @@ bastion-plugin-testkit = { path = "crates/bastion-plugin-testkit" }
 # --features storage_hiqlite` at their own workspace level.
 default = ["storage_hiqlite", "ssh_pqc"]
 storage_mysql = ["diesel", "r2d2"]
-storage_hiqlite = ["hiqlite", "cryptr"]
+storage_hiqlite = ["hiqlite"]
 sync_handler = ["maybe-async/is_sync"]
 # Cloud Storage Targets for the Encrypted File backend.
 # See `features/cloud-storage-backend.md`. Default build stays lean —

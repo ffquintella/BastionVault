@@ -711,7 +711,7 @@ mod notifications_tests {
         token: &str,
         id: &str,
     ) -> Result<Option<crate::logical::Response>, crate::errors::RvError> {
-        let mut req = crate::logical::Request::new(&format!("notifications/inbox/{id}"));
+        let mut req = crate::logical::Request::new(format!("notifications/inbox/{id}"));
         req.operation = crate::logical::Operation::Delete;
         req.client_token = token.to_string();
         core.handle_request(&mut req).await

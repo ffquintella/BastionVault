@@ -1,4 +1,4 @@
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation } from "react-router";
 import { useAuthStore } from "../stores/authStore";
 import { usePluginSurfacesStore } from "../stores/pluginSurfacesStore";
 import type { SurfaceSection } from "../lib/api";

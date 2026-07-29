@@ -186,7 +186,7 @@ async fn test_ssh_phase1_end_to_end() {
         .filter_map(|v| v.as_str())
         .collect();
     assert!(
-        fields.iter().any(|f| *f == "principals=bob"),
+        fields.contains(&"principals=bob"),
         "principal not in audit fields: {fields:?}"
     );
     assert!(
@@ -194,7 +194,7 @@ async fn test_ssh_phase1_end_to_end() {
         "serial not in audit fields: {fields:?}"
     );
     assert!(
-        fields.iter().any(|f| *f == "algorithm=ssh-ed25519"),
+        fields.contains(&"algorithm=ssh-ed25519"),
         "algorithm not in audit fields: {fields:?}"
     );
 

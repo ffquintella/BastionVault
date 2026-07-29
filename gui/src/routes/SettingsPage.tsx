@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { Layout } from "../components/Layout";
 import { Button, Card, Badge, Input, Select, Modal, ConfirmModal, Tabs, useToast, ResourceTypeIcon, RESOURCE_TYPE_ICON_CATALOG } from "../components/ui";
 import { useVaultStore } from "../stores/vaultStore";

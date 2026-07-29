@@ -45,6 +45,73 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.38.1] - 2026-07-29
+
+### Security
+- **Clear the three high-severity npm advisories in the GUI frontend**
+  (`gui/package.json`) -- `npm audit` now reports 0 vulnerabilities.
+  - `postcss` bumped past 8.5.17 (GHSA-r28c-9q8g-f849, CVSS 7.5): a path
+    traversal in `sourceMappingURL` auto-loading let a crafted stylesheet
+    disclose arbitrary `.map` files. Transitive via `vite`; a lockfile bump
+    was enough.
+  - `react-router` 7.18.1 -> 8.3.0 (GHSA-qwww-vcr4-c8h2): RSC-mode CSRF
+    bypass allowing action execution before the 400 response. Not reachable
+    from our `HashRouter` desktop SPA (no server, no RSC, no actions), but
+    8.3.0 is the only patched line.
+- **Drop `quick-xml` 0.39 out of the server dependency tree**
+  (`Cargo.toml`, `src/storage/hiqlite/mod.rs`, `third_party/hiqlite`) --
+  removes RUSTSEC-2026-0194 and RUSTSEC-2026-0195, two XML-parsing
+  denial-of-service advisories (quadratic duplicate-attribute checking and
+  unbounded namespace-declaration allocation) with no patch on the 0.39 line.
+  - Root cause was a dependency declaration, not code: our hiqlite fork
+    requested `cryptr`'s `s3` feature unconditionally, so every build pulled
+    `s3-simple` -> `quick-xml 0.39` even with hiqlite's own `s3` feature off.
+    The fork now requests `cryptr` with `default-features = false` and lets
+    `s3 = ["backup", "cryptr/s3"]` pull it, matching how the code was already
+    cfg-gated.
+  - BastionVault now builds hiqlite with `default-features = false` plus an
+    explicit `auto-heal`/`sqlite`/`toml`/`dlock` set, dropping the unused
+    `backup` feature. Vault backups use our own BVBK format in
+    `crate::backup`, never hiqlite's S3 backup.
+
+### Removed
+- **`cryptr` dependency** (`Cargo.toml`) -- its only use was building
+  `NodeConfig::enc_keys`, a field that exists solely under hiqlite's
+  `s3`/`dashboard` features. The ephemeral key generated there encrypted
+  hiqlite's own S3 backups and dashboard cookies, neither of which
+  BastionVault uses.
+- **`react-router-dom` dependency** (`gui/package.json`) -- React Router 8
+  consolidated into the `react-router` package; the 31 affected imports were
+  repointed with no API changes.
+
+### Fixed
+- **`test_default_logical` was failing on two assertions stale since earlier
+  releases** (`tests/test_default_logical.rs`) -- unrelated to any recent
+  change, but it made the integration suite red.
+  - The default-mount count still asserted 8; `notifications/` became a ninth
+    core mount in v0.35.0.
+  - The raw-API test read a hardcoded `sys/raw/core/mounts`, which returns
+    `None` now that re-root activation is the unconditional default and the
+    root mount table lives at `namespaces/<root_uuid>/core/mounts`. It now
+    asks `Core::root_mount_config_path()` for the live key.
+- **Clear all `cargo clippy --workspace --all-targets` warnings** -- seven
+  sites, all style lints with no behaviour change: `manual_contains` in
+  `tests/test_ssh_engine.rs`, `bool_assert_comparison` in
+  `tests/test_default_logical.rs`, `unnecessary_get_then_check` in
+  `src/plugins/config.rs`, `needless_borrows_for_generic_args` in
+  `src/modules/notifications/mod.rs`, and three
+  `field_reassign_with_default` on `HealthConfig` in
+  `gui/src-tauri/src/commands/connection.rs`.
+
+### Changed
+- **Document RUSTSEC-2023-0071 as assessed-not-applicable**
+  (`.cargo/audit.toml`) -- the `rsa` crate's Marvin timing sidechannel has no
+  patched release and never has, so it cannot be cleared by a bump. It is a
+  *decryption* oracle; BastionVault performs no RSA decryption, only
+  public-key signature verification (SAML), key generation, and PEM/DER
+  encoding (PKI). The ignore records the reasoning and the conditions that
+  would invalidate it.
+
 ## [0.38.0] - 2026-07-29
 
 ### Added

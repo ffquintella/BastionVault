@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { AuthLayout } from "../components/AuthLayout";
 import { Button, Input, Modal, useToast } from "../components/ui";
 import { useAuthStore } from "../stores/authStore";

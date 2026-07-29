@@ -1,4 +1,4 @@
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import type { RustionTelemetryTarget } from "../../lib/rustion";
 
 function duration(openedAt: string, nowMs: number): string {
