@@ -2261,7 +2261,12 @@ impl SystemBackend {
                     if !e.operation.is_empty() {
                         fields.push(format!("op={}", e.operation));
                     }
-                    fields.push(if e.authenticated {
+                    // `reason` is authoritative when present. Entries written
+                    // before the field existed fall back to the coarse
+                    // authenticated flag.
+                    fields.push(if !e.reason.is_empty() {
+                        format!("reason={}", e.reason)
+                    } else if e.authenticated {
                         "reason=policy".to_string()
                     } else {
                         "reason=invalid-token".to_string()
@@ -5946,6 +5951,7 @@ mod mod_system_tests {
                     operation: "read".into(),
                     authenticated: true,
                     remote_addr: String::new(),
+                    reason: "policy".into(),
                 })
                 .await
                 .expect("append denial");

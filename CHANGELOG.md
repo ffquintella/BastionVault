@@ -45,6 +45,62 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.38.4] - 2026-07-29
+
+### Fixed
+- **A refused login no longer blames the token** (`src/router.rs`,
+  `src/modules/system/denial_audit_store.rs`, `src/modules/system/mod.rs`) -- two
+  defects made a namespace-assignment refusal unreadable on the Audit page, and
+  together they cost real diagnosis time on exactly the failure 0.38.2 fixed.
+  (1) `Router::handle_request` restored `req.path` with `let response =
+  backend.handle_request(req).await?` -- the `?` skipped the restore, so on the
+  error path every downstream consumer saw the mount-relative path. A refused
+  userpass login was audited as `login/<user>` instead of
+  `auth/userpass/login/<user>`, which does not match anything an operator can
+  grep for. The restore now runs on both paths. (2) The denial audit derived its
+  reason from `req.auth.is_some()` alone, so any denial without a token read
+  `reason=invalid-token` -- including denials on `…/login/…`, `sys/unseal` and the
+  SSO callbacks, which are reached *without* a token by design. Entries now carry
+  an explicit `reason`: `policy` (valid token, insufficient capability),
+  `credential-refused` (an unauth path refused by the backend that handled the
+  credential -- wrong namespace assignment, disabled account, binding check), or
+  `invalid-token` (a genuine missing/bad token on an authenticated path). The
+  field defaults to empty, and the renderer falls back to the old
+  authenticated-flag verdict for rows written before it existed. Covered by
+  `http::sys::namespace_route_tests::test_nested_tenant_login_over_http`, which
+  asserts the full path *and* the `credential-refused` label on a refused tenant
+  login.
+
+- **RDP connect failures now say what actually went wrong**
+  (`gui/src-tauri/src/session/rdp.rs`) -- `ironrdp`'s `Display` prints only
+  `[context @ file:line] kind`; the real cause hangs off the error's `source`
+  chain, which a plain `{e}` drops. A Rustion-routed dial whose bastion closed
+  the socket therefore surfaced as the unactionable
+  `rdp: connect_finalize: [read frame by hint @ ironrdp-connector/src/lib.rs:416]
+  custom error`. `connect_begin` and `connect_finalize` now render `e.report()`,
+  which walks the chain to the underlying `io::Error`. On a ticketed (bastion)
+  dial that bottoms out in a closed connection, the message additionally names
+  the bastion and points at the bastion-side log line to read -- the Rustion RDP
+  gateway drops the socket without an RDP-level error PDU on every post-TLS
+  failure, so EOF is all the client can ever observe. (`features/rustion-integration.md`
+  Phase 7.4)
+
+### Added
+- **Regression test: an unscoped login into a *nested* tenant**
+  (`http::sys::namespace_route_tests::test_nested_tenant_login_over_http`) -- the
+  0.38.2 coverage used a single-segment tenant (`tenant-a`) on a custom mount
+  (`auth/pass/`). This drives the shape the GUI actually produces: userpass at
+  `auth/userpass/`, a two-segment tenant (`dti/esi`), an account carrying ordinary
+  policies, and no `X-BastionVault-Namespace` header. It also pins the
+  fail-closed half that remains by design -- a namespace named *explicitly* that
+  the assignment does not cover (here the assignment's own parent) is still a 403.
+
+  Field-validated against the production cluster, which still runs 0.38.1: a
+  `dti/esi`-restricted account's sign-in logged `login denied: principal
+  'userpass/felipe2' is not assigned to namespace ""` -- the login had resolved to
+  **root**, so the redirection this test covers is exactly what was missing.
+  Deployments on ≤0.38.1 must upgrade; no per-account change works around it.
+
 ## [0.38.3] - 2026-07-29
 
 ### Fixed

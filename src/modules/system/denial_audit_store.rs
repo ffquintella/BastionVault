@@ -54,6 +54,32 @@ pub struct DenialAuditEntry {
     /// when the connection info is absent).
     #[serde(default)]
     pub remote_addr: String,
+    /// Why the request was refused — see [`denial_reason`]. Empty on
+    /// entries written before this field existed; readers fall back to
+    /// [`Self::authenticated`] for those.
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// Classify a 403 for the audit trail.
+///
+/// A denial on an *unauth* path (every `…/login/…` route, `sys/unseal`, the SSO
+/// callbacks) can never be a token problem: those paths are reached without one
+/// by design, so the refusal came from the backend that handled the credential
+/// — a wrong namespace assignment, a disabled account, a machine-identity or
+/// binding check. Labelling those `invalid-token` sent operators hunting for a
+/// bad token when the credential was fine and the *namespace* was the problem.
+fn denial_reason(core: &Core, req: &Request) -> &'static str {
+    if req.auth.is_some() {
+        return "policy";
+    }
+    // `is_unauth_path` needs the full, mount-qualified path — which the router
+    // restores before this runs. A lookup failure (sealed router) falls back to
+    // the conservative token verdict rather than guessing.
+    match core.router.is_unauth_path(&req.path) {
+        Ok(true) => "credential-refused",
+        _ => "invalid-token",
+    }
 }
 
 pub struct DenialAuditStore {
@@ -128,6 +154,7 @@ pub async fn record_denial(core: &Core, req: &Request) {
         operation: req.operation.to_string(),
         authenticated: req.auth.is_some(),
         remote_addr: req.connection.as_ref().map(|c| c.peer_addr.clone()).unwrap_or_default(),
+        reason: denial_reason(core, req).to_string(),
     };
     if let Err(e) = store.append(entry).await {
         log::warn!(target: "security", "denial audit append failed: {e}");

@@ -352,6 +352,26 @@ This cannot widen access: the chosen path always comes from the principal's own
 assignment, so `enforce_login_assignment` still holds on it, and the redirection
 is logged to the `security` target.
 
+##### Diagnosing a 403 on a tenant login
+
+The explicit-header branch is the only remaining way a correct password 403s, so
+the first question is always *which namespace did the login resolve to*. Two
+`security`-target log lines answer it outright:
+
+- `login for '<mount><name>' defaulted to assigned namespace "…" (no namespace
+  requested; root is not assigned)` — the unscoped redirection fired.
+- `login denied: principal '<mount><name>' is not assigned to namespace "…"` —
+  the refusal, naming the namespace the login actually bound to. A `""` there on
+  an unscoped login means the resolver never redirected, i.e. the server predates
+  this fix.
+
+On the Audit page the refusal is a `denied` row carrying
+`reason=credential-refused` at the full `auth/<mount>/login/<name>` path.
+Earlier builds recorded it as `reason=invalid-token` at the mount-relative
+`login/<name>`, which reads as a token problem and points at the wrong
+subsystem — see the [CHANGELOG](../CHANGELOG.md) entry "A refused login no longer
+blames the token".
+
 #### `sys/namespaces-self` — which namespaces may I use?
 
 The `sys/namespaces` CRUD surface is a **root-protected (sudo)** path, so a

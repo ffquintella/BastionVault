@@ -4756,6 +4756,91 @@ mod namespace_route_tests {
         );
     }
 
+    /// Same as above but with the deployment shape the GUI actually produces:
+    /// the mount is `userpass/` (not a custom path), the tenant is *nested*
+    /// (`dti/esi`), and the account carries ordinary policies. Locks in that an
+    /// unscoped login lands in the nested tenant rather than 403'ing.
+    #[maybe_async::test(feature = "sync_handler", async(all(not(feature = "sync_handler")), tokio::test))]
+    async fn test_nested_tenant_login_over_http() {
+        let mut server = TestHttpServer::new("test_nested_tenant_login_http", true).await;
+        server.token = server.root_token.clone();
+        let root = server.root_token.clone();
+
+        for path in ["sys/namespaces/dti", "sys/namespaces/dti/esi"] {
+            let (status, resp) = server
+                .request("POST", path, json!({}).as_object().cloned(), Some(&root), None)
+                .unwrap();
+            assert!(status == 200 || status == 204, "create {path} failed: {status} {resp:?}");
+        }
+        assert!(server.mount_auth("userpass", "userpass").is_ok());
+        let (status, resp) = server
+            .write(
+                "auth/userpass/users/felipe2",
+                json!({ "password": "tenant-pw-felipe2", "policies": "default,standard-user" })
+                    .as_object()
+                    .cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert!(status == 200 || status == 204, "create user failed: {status} {resp:?}");
+        let (status, resp) = server
+            .write(
+                "sys/identity/ns-assignment/userpass/felipe2",
+                json!({ "namespaces": ["dti/esi"] }).as_object().cloned(),
+                Some(&root),
+            )
+            .unwrap();
+        assert!(status == 200 || status == 204, "assignment failed: {status} {resp:?}");
+
+        let (status, resp) = server
+            .login(
+                "auth/userpass/login/felipe2",
+                json!({ "password": "tenant-pw-felipe2" }).as_object().cloned(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(status, 200, "an unscoped nested-tenant login must succeed: {resp:?}");
+
+        // A namespace named *explicitly* still fails closed — `dti` is the
+        // parent of the assignment, not a descendant of it, so it is refused.
+        // This is the one remaining way a tenant login 403s, and it is what a
+        // client that carries a stale namespace selector would produce.
+        let (status, _resp) = server
+            .request_with_headers(
+                "POST",
+                "auth/userpass/login/felipe2",
+                json!({ "password": "tenant-pw-felipe2" }).as_object().cloned(),
+                None,
+                None,
+                &[("X-BastionVault-Namespace", "dti")],
+            )
+            .unwrap();
+        assert_eq!(status, 403, "an explicitly-named unassigned namespace must be refused");
+
+        // The audit row for that refusal must name the *full* path and must not
+        // blame the token: this login carried no token by design, so the old
+        // `reason=invalid-token` label sent operators hunting for a token
+        // problem when the namespace assignment was the actual cause.
+        let ret = server.read("sys/audit/events", Some(&root)).unwrap().1;
+        let events = ret.get("events").and_then(|v| v.as_array()).expect("events array");
+        let denial = events
+            .iter()
+            .filter(|e| e.get("op").and_then(|v| v.as_str()) == Some("denied"))
+            .find(|e| {
+                e.get("target").and_then(|v| v.as_str()) == Some("auth/userpass/login/felipe2")
+            })
+            .unwrap_or_else(|| panic!("login denial missing (or path truncated): {events:?}"));
+        let fields = denial
+            .get("changed_fields")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|f| f.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert!(
+            fields.contains(&"reason=credential-refused"),
+            "a refused login is not a token problem: {fields:?}"
+        );
+    }
+
     /// The root namespace (empty path) is configurable over HTTP through the
     /// self-config route — GET/POST `/v1/sys/namespaces/` with no path. The GUI
     /// addresses it exactly this way (`format!("sys/namespaces/{{path}}")` with

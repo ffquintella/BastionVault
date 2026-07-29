@@ -289,14 +289,20 @@ impl Router {
             me.backend.clone()
         };
 
-        let response = backend.handle_request(req).await?;
+        // Restore the caller's view of the request whether the backend
+        // succeeded or not. An early `?` here used to leave `req.path` in its
+        // mount-relative form on the error path, so every downstream consumer
+        // of a failed request saw a truncated path — most visibly the denial
+        // audit trail, which recorded a refused userpass login as
+        // `login/<user>` instead of `auth/userpass/login/<user>`.
+        let response = backend.handle_request(req).await;
 
         req.path = original;
         req.connection = original_conn;
         req.storage = None;
         req.client_token = client_token;
 
-        Ok(response)
+        response
     }
 }
 

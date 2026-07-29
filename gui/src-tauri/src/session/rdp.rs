@@ -233,7 +233,7 @@ pub async fn open_rdp_session(
     let mut connector = ClientConnector::new(cfg, local).with_static_channel(drdynvc);
     let should_upgrade = ironrdp_async::connect_begin(&mut framed, &mut connector)
         .await
-        .map_err(|e| format!("rdp: connect_begin: {e}"))?;
+        .map_err(|e| format!("rdp: connect_begin: {}", e.report()))?;
 
     // Stage 3: TLS upgrade. ironrdp-tls returns the server cert
     // as `x509_cert::Certificate`; extract the SubjectPublicKeyInfo
@@ -274,7 +274,7 @@ pub async fn open_rdp_session(
         None,
     )
     .await
-    .map_err(|e| format!("rdp: connect_finalize: {e}"))?;
+    .map_err(|e| describe_finalize_error(&args, &e))?;
 
     // Stage 5: spawn the active-stage pump.
     let (tx, rx) = mpsc::channel::<RdpControl>(64);
@@ -907,6 +907,59 @@ fn cert_der_sha256(der: &[u8]) -> String {
         let _ = write!(&mut out, "{b:02x}");
     }
     out
+}
+
+/// Render a `connect_finalize` failure with its full cause chain, plus
+/// a bastion-specific hint when the peer hung up.
+///
+/// ironrdp's `Display` prints only `[context @ file:line] kind` — the
+/// real cause (an `io::Error`, a decode failure) hangs off the `source`
+/// chain and is dropped by a plain `{e}`. That's why a bastion that
+/// closed the socket surfaced as the uninformative
+/// `[read frame by hint @ ironrdp-connector/src/lib.rs:416] custom
+/// error`. `report()` walks the chain.
+///
+/// The extra hint matters because of how the Rustion RDP gateway
+/// fails: every error path in `handle_rdp_connection` after the TLS
+/// accept returns `Err` and drops the socket without writing an
+/// RDP-level error PDU, so the operator's client can only ever observe
+/// EOF. When we're on a ticketed dial and the chain bottoms out in a
+/// closed connection, say so and point at the hop that actually broke.
+fn describe_finalize_error(args: &RdpOpenArgs, e: &ironrdp::connector::ConnectorError) -> String {
+    let report = format!("rdp: connect_finalize: {}", e.report());
+    if args.routing_token.is_some() && peer_hung_up(e) {
+        format!(
+            "{report} — the Rustion bastion at {}:{} accepted the session ticket and \
+             completed the TLS handshake, then closed the connection without answering \
+             the RDP exchange. The break is on the bastion→target hop, not on this \
+             client. Check the bastion's log for the `RDP BV-ticket consumed at X.224 \
+             stage` line and the error logged after it.",
+            args.host, args.port
+        )
+    } else {
+        report
+    }
+}
+
+/// Walk an error's source chain looking for an `io::Error` that means
+/// the remote end went away.
+fn peer_hung_up(e: &ironrdp::connector::ConnectorError) -> bool {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(err) = cur {
+        if let Some(io) = err.downcast_ref::<std::io::Error>() {
+            if matches!(
+                io.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+            ) {
+                return true;
+            }
+        }
+        cur = err.source();
+    }
+    false
 }
 
 /// Compare the observed TLS leaf certificate against a pinned
