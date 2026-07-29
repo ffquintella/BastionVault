@@ -97,7 +97,7 @@ $(FAST_BUILD_TARGETS): export RUSTFLAGS := $(strip $(RUSTFLAGS) -Z threads=$(RUS
 endif
 endif
 
-.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi gui-macos-pkg gui-packages macos-client-install sign-packages
+.PHONY: help build run-dev run-dev-gui gui-deps gui-build gui-test gui-check docs bump-minor bump-major bump-patch _bump-write bootstrap win-bootstrap clean gui-clean docs-clean deep-clean prune prune-stale target-size plugins-init plugins-target plugins-process-target plugins-wasm plugins-process plugins plugins-clean plugins-pack plugins-pack-build plugins-keygen plugins-sign plugins-test plugin-bump container-image container-image-run container-image-test container-repo-setup container-repo-show container-image-push linux-cli-deb linux-cli-rpm linux-cli-packages windows-cli-msi windows-cli-nupkg windows-cli-packages macos-cli-pkg cli-packages cli-packages-all gui-linux-packages gui-windows-msi windows-gui-nupkg gui-macos-pkg gui-packages macos-client-install sign-packages
 
 # Number of rustc incremental sessions to keep per crate. Anything
 # older than the Nth most recent is reaped by `prune-stale`. Override
@@ -723,6 +723,60 @@ else
 	@echo "ERROR: off-Windows GUI .msi builds use Tart (Apple Virtualization), which is macOS-only."; \
 	 echo "       Build on a Windows host, or use the macOS Tart path."; exit 1
 endif
+
+# ── Windows GUI Chocolatey package ─────────────────────────────────────
+#
+# Wraps the Tauri .msi in a Chocolatey/NuGet .nupkg so the desktop app can
+# be deployed from a private feed the same way `bastionvault-cli` is. The
+# CLI package needs no install script (Chocolatey auto-shims tools\*.exe);
+# the GUI is a windowed app with Start-menu and uninstall entries, so its
+# package hands the bundled .msi to msiexec — see
+# gui/src-tauri/installers/windows/nupkg/tools/chocolateyInstall.ps1.
+#
+# The .nupkg itself is assembled by installers/cli/nupkg/build-nupkg.py
+# (host-independent, no Chocolatey required), the same packer the CLI uses.
+#
+# On a Windows host this builds the .msi first. Off Windows, point it at an
+# .msi produced by the Tart VM path:
+#
+#   make windows-gui-nupkg GUI_MSI=out/BastionVault_0.38.3_x64_en-US.msi
+GUI_NUPKG_DIR := gui/src-tauri/installers/windows/nupkg
+GUI_MSI       ?=
+PYTHON        ?= $(if $(filter Windows_NT,$(OS)),python,python3)
+
+windows-gui-nupkg: ## Build the GUI Chocolatey .nupkg wrapping the Tauri .msi (GUI_MSI=... to pack an existing one)
+ifeq ($(OS),Windows_NT)
+	@if [ -z "$(GUI_MSI)" ]; then $(MAKE) gui-windows-msi; fi
+endif
+	@command -v $(PYTHON) >/dev/null 2>&1 || { \
+		echo "ERROR: $(PYTHON) not found — needed to assemble the .nupkg."; \
+		echo "       Override the interpreter with PYTHON=<path> if it is named differently."; \
+		exit 1; \
+	}
+	@mkdir -p target/nupkg
+	@MSI="$(GUI_MSI)"; \
+	 if [ -z "$$MSI" ]; then \
+		MSI=$$(ls -1t gui/src-tauri/target/release/bundle/msi/*.msi \
+		               target/release/bundle/msi/*.msi 2>/dev/null | head -1); \
+	 fi; \
+	 if [ -z "$$MSI" ]; then \
+		echo "ERROR: no GUI .msi found under */release/bundle/msi/."; \
+		echo "       Build it first ('make gui-windows-msi'), or pass GUI_MSI=<path>."; \
+		exit 1; \
+	 fi; \
+	 echo "==> packing $$MSI"; \
+	 $(PYTHON) installers/cli/nupkg/build-nupkg.py \
+		--nuspec $(GUI_NUPKG_DIR)/bastionvault-gui.nuspec \
+		--version $(VERSION) \
+		--tools "$$MSI" \
+		--tools $(GUI_NUPKG_DIR)/tools/chocolateyInstall.ps1 \
+		--tools $(GUI_NUPKG_DIR)/tools/chocolateyUninstall.ps1 \
+		--tools $(GUI_NUPKG_DIR)/tools/LICENSE.txt \
+		--tools $(GUI_NUPKG_DIR)/tools/VERIFICATION.txt \
+		--out target/nupkg
+	@echo ""
+	@echo "==> .nupkg under target/nupkg/:"
+	@ls -lh target/nupkg/*.nupkg 2>/dev/null || true
 
 gui-macos-pkg: gui-deps prune-stale ## Build the GUI .pkg (macOS only; Tauri .app wrapped by productbuild)
 ifneq ($(shell uname -s),Darwin)

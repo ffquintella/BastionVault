@@ -1,0 +1,19 @@
+VERIFICATION
+
+The .msi in this package is Tauri's WiX bundle, built from the BastionVault
+sources at https://github.com/ffquintella/BastionVault (tag v<version>) via
+`make gui-windows-msi` (`tauri build --bundles msi -- --features
+storage_hiqlite,ssh_pqc`) and packed by `make windows-gui-nupkg`.
+
+To verify, build the same tag from source and compare checksums:
+
+    git checkout v<version>
+    make gui-windows-msi
+    Get-FileHash gui\src-tauri\target\release\bundle\msi\*.msi -Algorithm SHA256
+
+Note that a Tauri/WiX .msi is not bit-for-bit reproducible across hosts (the
+bundle embeds a build-time package GUID and compressed cab), so compare the
+installed BastionVault.exe rather than the .msi itself when reproducing.
+
+Release artefacts and their checksums are published on the GitHub
+Releases page of the repository.

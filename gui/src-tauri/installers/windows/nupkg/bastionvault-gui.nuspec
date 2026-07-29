@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Chocolatey package for the BastionVault desktop GUI. Built by
+  `make windows-gui-nupkg`, which builds the Tauri .msi (gui-windows-msi),
+  then stages this nuspec + tools/ + that .msi and assembles the .nupkg with
+  installers/cli/nupkg/build-nupkg.py (the <version> below is a placeholder
+  the build overrides).
+
+  Unlike the CLI package -- where Chocolatey auto-shims tools\bvault.exe and no
+  install script is needed -- the GUI is a windowed application with a Start
+  menu entry and an uninstall entry, so the package wraps the .msi and
+  tools\chocolateyInstall.ps1 hands it to msiexec.
+-->
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>bastionvault-gui</id>
+    <version>0.0.0</version>
+    <title>BastionVault GUI</title>
+    <authors>BastionVault Contributors</authors>
+    <projectUrl>https://github.com/ffquintella/BastionVault</projectUrl>
+    <licenseUrl>https://github.com/ffquintella/BastionVault/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <tags>bastionvault vault secrets gui desktop security admin</tags>
+    <summary>BastionVault desktop application</summary>
+    <description>
+BastionVault is an identity-based secrets management server with a
+Vault-compatible API. This package installs the BastionVault desktop
+application: a Tauri front end for managing secrets, PKI, policies and
+plugins, either against a remote BastionVault server or an embedded local
+vault.
+    </description>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

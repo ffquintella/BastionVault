@@ -18,10 +18,38 @@ gui/src-tauri/installers/windows/
 ├── build-in-vm.sh     # orchestrator: clone → build → copy .msi out → destroy
 ├── provision.ps1      # bakes the toolchain into the base image (once)
 ├── build.ps1          # per-build: cross-compile x64 + bundle the .msi
+├── nupkg/             # Chocolatey package wrapping the .msi
+│   ├── bastionvault-gui.nuspec   # package metadata (version injected at pack time)
+│   └── tools/
+│       ├── chocolateyInstall.ps1    # msiexec /i on the bundled .msi
+│       ├── chocolateyUninstall.ps1  # msiexec /x via the Add/Remove entry
+│       ├── LICENSE.txt
+│       └── VERIFICATION.txt      # the .msi is staged into tools/ at build time
 └── packer/
     ├── windows11-arm64.pkr.hcl  # builds the base image from a Win11 ARM64 ISO
     └── autounattend.xml         # zero-touch Windows install answer file
 ```
+
+## Chocolatey package (`bastionvault-gui`)
+
+`make windows-gui-nupkg` wraps the `.msi` in a Chocolatey/NuGet package so the
+desktop app can be deployed from a private feed exactly like
+`bastionvault-cli`. It reuses `installers/cli/nupkg/build-nupkg.py`, so packing
+needs only Python 3 — no Chocolatey, no Windows host:
+
+```sh
+# Windows host: builds the .msi first, then packs
+make windows-gui-nupkg
+
+# Anywhere: pack an .msi the Tart path already produced
+make windows-gui-nupkg GUI_MSI=out/BastionVault_0.38.3_x64_en-US.msi
+```
+
+The result is `target/nupkg/bastionvault-gui.<version>.nupkg`. The CLI package
+needs no install script (Chocolatey auto-shims `tools\*.exe`); the GUI is a
+windowed app with Start-menu and uninstall entries, so `chocolateyInstall.ps1`
+hands the bundled `.msi` to `msiexec` and `chocolateyUninstall.ps1` removes it
+through its Add/Remove Programs entry.
 
 ## One-time setup
 
