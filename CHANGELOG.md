@@ -45,6 +45,28 @@ EXAMPLE ENTRY:
 
 ## [Unreleased]
 
+## [0.38.3] - 2026-07-29
+
+### Fixed
+- **The namespace switcher came back for admins** (`gui/src/stores/namespaceStore.ts`)
+  -- 0.38.2 re-sourced the sidebar picker from `sys/namespaces-self`, which
+  reports only the namespaces a token may *operate* in. That silenced the picker
+  in two cases an operator hits daily: a desktop app talking to a server without
+  the (brand-new) route 404s and got an empty list for the rest of the session,
+  and a root-bound token that is not child-visible and carries no explicit
+  namespace *assignment* is operable only at root, so the answer collapsed to one
+  entry and the switcher hid itself -- for an admin who lists `dti` / `dti/esi`
+  fine on the Namespaces and Users pages, and who signed in at root precisely to
+  switch out of it. A missing or single-entry answer now falls back to the
+  namespace tree walk (`sys/namespaces`, the same source those pages use) and
+  unions the two. The walk is sudo-gated, so a tenant principal is 403'd there
+  and its list stays exactly what its own token reported -- the fallback can only
+  add options for a caller that already administers namespaces, and switching
+  into a namespace the token cannot operate in still surfaces the honest
+  `NamespaceGuardBanner` read-only strip. Covered by four new `namespaceStore`
+  cases in `gui/src/test/stores.test.ts` (root-only answer widened, absent route
+  widened, tenant answer left alone, same on `landSession`).
+
 ## [0.38.2] - 2026-07-29
 
 ### Added

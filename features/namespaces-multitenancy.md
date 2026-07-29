@@ -66,7 +66,9 @@ The HTTP surface follows Vault Enterprise's: every endpoint accepts an `X-Bastio
 > session there via the new caller-introspecting
 > `GET /v2/sys/namespaces-self`, which also drives the namespace switcher, so it
 > only ever offers namespaces the session can operate in and hides itself when
-> there is only one.
+> there is only one. An admin is never left without a picker: a missing or
+> single-entry answer falls back to the sudo-gated namespace tree walk
+> (`widenWithAdminWalk`), which a tenant principal is 403'd on.
 >
 > **Namespace self-service.** Every authenticated token bound to a non-root
 > namespace now implicitly carries a `namespace-self` ACL policy so it can reach
@@ -521,6 +523,7 @@ decisions and rationale.
 | `src/modules/system/mod.rs::handle_namespaces_self` + `src/http/sys.rs` + `policy_store.rs` | **`GET /v2/sys/namespaces-self`** — the namespaces the *calling token* may operate in (`token_operable_resolved`-filtered, root as `""`) plus its `token_namespace`. Granted by `default` + `namespace-self`, since the `sys/namespaces` CRUD surface is sudo-gated and left a tenant principal unable to discover its own namespace. | ✅ Done |
 | `gui/src/stores/namespaceStore.ts` (`landSession`) + `gui/src/routes/LoginPage.tsx` + `gui/src/stores/authStore.ts` | Every login (and a session restored after a vault switch) lands on `token_namespace`, so a tenant token's first fetch carries the matching namespace header instead of 403ing at root. Falls back to root when discovery is unavailable. | ✅ Done |
 | `gui/src/components/NamespaceSwitcher.tsx` | Options come from `namespaces-self`, so the picker only offers namespaces the session can actually operate in (root included only when reachable) and hides itself when there is just one. | ✅ Done |
+| `gui/src/stores/namespaceStore.ts::widenWithAdminWalk` | **Admin fallback, so the picker cannot go dark.** `namespaces-self` is silent in two operator-visible cases: a server without the route (404 ⇒ empty list for the whole session), and a root-bound, non-child-visible token with no assignment record — operable only at root, so the answer collapses to one entry and the switcher hides itself even for an admin who lists `dti` / `dti/esi` on the Namespaces and Users pages. A missing or single-entry answer now unions in the `sys/namespaces` tree walk. Cannot widen a tenant: that walk is sudo-gated (403 ⇒ the list stays exactly what the token reported), and browsing a non-operable namespace still shows the `NamespaceGuardBanner` read-only strip. | ✅ Done |
 | `cert` / standalone `fido2/` backends | **Not gated yet, by necessity.** The legacy `cert` auth method is disabled in the OpenSSL-free default build (produces no `Auth`), and the standalone `fido2/` backend is not namespace-aware (it never resolves a login namespace). Assignment enforcement for these is contingent on the separate "`cert`-login namespace binding" follow-up; the assignment **store and endpoints already accept any mount**, so records can be authored ahead of that work. | ⏳ Deferred (prereq: namespace binding) |
 | `src/modules/system/mod.rs` + `src/http/sys.rs` | `v2/sys/identity/ns-assignment/<mount>/<name>` Read/Write/Delete + `v2/sys/identity/ns-assignment` List, registered in `configure_sys_routes` so they serve over HTTP (not embedded-only). The mount segment is normalized to the trailing-slash form (`userpass/`) so API-written records match what the login paths key on. | ✅ Done |
 | `gui/src-tauri/src/commands/namespaces.rs` + `gui/src/lib/api.ts` | `get/set/delete_ns_assignment` Tauri commands (root-scoped via `make_request_root`) + api wrappers. | ✅ Done |

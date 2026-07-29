@@ -46,6 +46,51 @@ function persist(namespaces: string[] | null, active: string | null) {
   }
 }
 
+/**
+ * Widen a caller-filtered namespace list with the admin namespace walk.
+ *
+ * `sys/namespaces-self` is the honest source — it reports exactly the
+ * namespaces the session token may *operate* in — but it goes silent in two
+ * ways that leave an operator with no picker at all:
+ *
+ * 1. **The route may be absent.** It shipped with the per-principal namespace
+ *    work, so a desktop app talking to an older server 404s on it.
+ * 2. **The answer can be degenerate.** Operability is the token's binding plus
+ *    any explicit namespace *assignment*: a root-bound token that is not
+ *    child-visible and carries no assignment record is operable only at root,
+ *    so the list collapses to one entry and the switcher hides itself — even
+ *    for an admin who can plainly see `dti` / `dti/esi` on the Namespaces and
+ *    Users pages, and who logged in at root precisely to switch out of it.
+ *
+ * So when the caller-filtered answer is missing or has fewer than two entries
+ * we fall back to walking the namespace tree (`sys/namespaces`, the same source
+ * the Namespaces and Users pages use) and union the two. That walk is
+ * sudo-gated: a tenant principal is 403'd there, so the list stays exactly what
+ * its own token reported and this can only add options for a caller that
+ * already administers namespaces. Switching into a namespace the token cannot
+ * operate in is a supported and *visible* state — `NamespaceGuardBanner`
+ * explains the resulting read-only session instead of letting requests 403
+ * unexplained.
+ *
+ * Returns `null` only when there was nothing to add and nothing was fetched, so
+ * a caller can still tell "no answer" from "genuinely empty".
+ */
+async function widenWithAdminWalk(
+  fromSelf: string[] | null,
+  active: string,
+): Promise<string[] | null> {
+  if (fromSelf && fromSelf.length > 1) return fromSelf;
+  const walked = await api
+    .listNamespaces()
+    .then((r) => r.namespaces)
+    .catch(() => null);
+  if (!walked || walked.length === 0) return fromSelf;
+  // The walk returns child paths only — root participates as the empty string.
+  // The session's own namespace is included unconditionally so the `<select>`
+  // always has an option matching its current value.
+  return [...new Set(["", active, ...(fromSelf ?? []), ...walked])].sort();
+}
+
 interface NamespaceState {
   /**
    * Namespaces the session token may operate in, sorted. The root namespace is
@@ -108,16 +153,20 @@ export const useNamespaceStore = create<NamespaceState>((set, get) => ({
     // namespaces" answer we cache, the former would wrongly wipe a good
     // cached list and hide the switcher until the next app restart.
     //
-    // `namespaces-self` rather than `list_namespaces`: the latter walks the
-    // sudo-gated `sys/namespaces` CRUD surface, so it 403s for every non-admin
-    // and would leave a tenant user with no switcher at all. This one is
-    // filtered server-side to what the caller can actually reach, so admins
-    // still see the whole tree.
-    const list = await api
+    // `namespaces-self` first rather than `list_namespaces`: the latter walks
+    // the sudo-gated `sys/namespaces` CRUD surface, so it 403s for every
+    // non-admin and would leave a tenant user with no switcher at all. This one
+    // is filtered server-side to what the caller can actually reach. The walk
+    // stays as a fallback for the admins that filter comes back empty-handed
+    // for (see `widenWithAdminWalk`).
+    const self = await api
       .namespacesSelf()
       .then((r) => r.namespaces)
       .catch(() => null);
     const current = await api.getActiveNamespace().catch(() => null);
+    // A missing or single-entry answer falls back to the admin namespace walk,
+    // so an operator never loses the switcher (see `widenWithAdminWalk`).
+    const list = await widenWithAdminWalk(self, current ?? get().active);
 
     set((s) => ({
       namespaces: list ?? s.namespaces,
@@ -137,9 +186,12 @@ export const useNamespaceStore = create<NamespaceState>((set, get) => ({
     const self = await api.namespacesSelf().catch(() => null);
     if (!self) {
       // No answer (older server, transient failure): keep the pre-existing
-      // behaviour of starting at root rather than guessing a namespace.
-      set({ namespaces: [], active: "", loaded: true });
-      persist([], "");
+      // behaviour of starting at root rather than guessing a namespace — but
+      // still offer the admin walk, so a session against a server without the
+      // route keeps a working switcher instead of a hidden one.
+      const list = await widenWithAdminWalk(null, "");
+      set({ namespaces: list ?? [], active: "", loaded: true });
+      persist(list ?? [], "");
       return;
     }
     const active = self.token_namespace;
@@ -150,8 +202,9 @@ export const useNamespaceStore = create<NamespaceState>((set, get) => ({
     } catch {
       /* the header stays at root; the switcher still shows what's reachable */
     }
-    set({ namespaces: self.namespaces, active, loaded: true });
-    persist(self.namespaces, active);
+    const list = (await widenWithAdminWalk(self.namespaces, active)) ?? self.namespaces;
+    set({ namespaces: list, active, loaded: true });
+    persist(list, active);
   },
 
   setActive: async (path: string) => {

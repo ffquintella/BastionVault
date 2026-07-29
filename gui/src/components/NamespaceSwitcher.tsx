@@ -9,7 +9,10 @@ import { useNamespaceStore } from "../stores/namespaceStore";
  *
  * The list is the session token's *operable* namespaces (`sys/namespaces-self`),
  * so it never offers a tenant the caller would just be 403'd in, and it hides
- * entirely when there is only one to choose from.
+ * entirely when there is only one to choose from. An admin whose token reports a
+ * single operable namespace (or a server without that route) falls back to the
+ * namespace tree walk — see `widenWithAdminWalk` in the store, which is what
+ * keeps a root-bound operator from losing the picker outright.
  *
  * State lives in `useNamespaceStore`, a module-level cache seeded from
  * `localStorage`. Because each page mounts its own `<Layout>`, an in-component

@@ -155,6 +155,83 @@ describe("namespaceStore", () => {
     expect(s.namespaces).toEqual(["", "dti", "dti/esi"]);
   });
 
+  it("refresh widens a root-only answer with the admin namespace walk", async () => {
+    // The concrete bug: a root-bound admin token that is not child-visible and
+    // has no explicit namespace assignment is "operable" only at root, so
+    // `namespaces-self` returns a single entry and the switcher hid itself —
+    // even though the same session lists `dti` / `dti/esi` fine on the
+    // Namespaces and Users pages, and logged in at root precisely to switch.
+    vi.spyOn(api, "namespacesSelf").mockResolvedValue({
+      namespaces: [""],
+      token_namespace: "",
+      root: false,
+    });
+    vi.spyOn(api, "getActiveNamespace").mockResolvedValue("");
+    vi.spyOn(api, "listNamespaces").mockResolvedValue({
+      namespaces: ["dti", "dti/esi"],
+    });
+
+    await useNamespaceStore.getState().refresh();
+
+    expect(useNamespaceStore.getState().namespaces).toEqual([
+      "",
+      "dti",
+      "dti/esi",
+    ]);
+  });
+
+  it("refresh widens with the walk when namespaces-self is unavailable", async () => {
+    // An older server has no `sys/namespaces-self` route at all. The walk still
+    // answers for an admin, so the switcher must not go dark.
+    vi.spyOn(api, "namespacesSelf").mockRejectedValue(new Error("404"));
+    vi.spyOn(api, "getActiveNamespace").mockResolvedValue("");
+    vi.spyOn(api, "listNamespaces").mockResolvedValue({
+      namespaces: ["dti", "dti/esi"],
+    });
+
+    await useNamespaceStore.getState().refresh();
+
+    expect(useNamespaceStore.getState().namespaces).toEqual([
+      "",
+      "dti",
+      "dti/esi",
+    ]);
+  });
+
+  it("refresh leaves a tenant's single-namespace answer alone", async () => {
+    // The walk is sudo-gated, so a tenant principal is 403'd there and the
+    // fallback can never invent options its token cannot reach.
+    vi.spyOn(api, "namespacesSelf").mockResolvedValue({
+      namespaces: ["dti/esi"],
+      token_namespace: "dti/esi",
+      root: false,
+    });
+    vi.spyOn(api, "getActiveNamespace").mockResolvedValue("dti/esi");
+    vi.spyOn(api, "listNamespaces").mockRejectedValue(new Error("403"));
+
+    await useNamespaceStore.getState().refresh();
+
+    expect(useNamespaceStore.getState().namespaces).toEqual(["dti/esi"]);
+  });
+
+  it("landSession widens a root-only answer with the admin walk", async () => {
+    vi.spyOn(api, "namespacesSelf").mockResolvedValue({
+      namespaces: [""],
+      token_namespace: "",
+      root: false,
+    });
+    vi.spyOn(api, "setActiveNamespace").mockResolvedValue(undefined);
+    vi.spyOn(api, "listNamespaces").mockResolvedValue({
+      namespaces: ["dti", "dti/esi"],
+    });
+
+    await useNamespaceStore.getState().landSession();
+
+    const s = useNamespaceStore.getState();
+    expect(s.active).toBe("");
+    expect(s.namespaces).toEqual(["", "dti", "dti/esi"]);
+  });
+
   it("landSession falls back to root when discovery is unavailable", async () => {
     vi.spyOn(api, "namespacesSelf").mockRejectedValue(new Error("boom"));
     const setActive = vi
